@@ -1,0 +1,491 @@
+{
+  "name": "Provision Proxmox SDN Subnet",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "const map = { '0':'a','1':'b','2':'c','3':'d','4':'e','5':'f','6':'g','7':'h','8':'i','9':'j' };\n\nreturn items.map((item) => {\n  const raw = item.json.vni ?? item.json.vxlan_id ?? item.json.tag;\n\n  // If this item doesn't have a VXLAN ID, just pass it through unchanged\n  if (raw === undefined || raw === null || raw === '') {\n    return item;\n  }\n\n  const vni = String(raw);\n\n  if (!/^\\d{8}$/.test(vni)) {\n    throw new Error(`VXLAN ID must be exactly 8 digits, got: ${vni}`);\n  }\n\n  item.json.vni = Number(vni); // normalize\n  item.json.vnet_id = vni.split('').map(d => map[d]).join('');\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -432,
+        160
+      ],
+      "id": "6ee76c59-cc1c-401a-86f4-efe4eb8a4421",
+      "name": "Transform VXLAN ID to uniqie ID"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -656,
+        160
+      ],
+      "id": "96730fe8-9b55-4505-a71c-fb863add6f86",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/vnets/{{ $json.vnet_id }}/subnets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "subnet",
+              "value": "={{ $json.subnet }}"
+            },
+            {
+              "name": "type",
+              "value": "subnet"
+            },
+            {
+              "name": "gateway",
+              "value": "={{ $json.gateway }}"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1456,
+        176
+      ],
+      "id": "cc0908f7-e560-4aee-a951-da017ac4dc9d",
+      "name": "Create subnet",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "150b11f3-39e8-406c-bf03-3b87e1a30251",
+              "leftValue": "={{ $json.subnet_exists }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1104,
+        128
+      ],
+      "id": "17045307-0f96-4681-8357-1fc2f621d0c8",
+      "name": "If subnet exists"
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/vnets/{{ $json.vnet_id }}/subnets/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1456,
+        32
+      ],
+      "id": "911870b6-0fe9-4c37-ae3e-d8a959870d08",
+      "name": "Get subnet again",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/vnets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        -208,
+        16
+      ],
+      "id": "43bb4b81-f71e-41c6-b16a-fcc2e17e532c",
+      "name": "Get VNets",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/vnets/{{ $json.vnet_id }}/subnets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        464,
+        16
+      ],
+      "id": "9bdce7ad-5ed5-4560-aec9-db85effb1b87",
+      "name": "Get subnets",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        16,
+        160
+      ],
+      "id": "37970245-3d94-48bd-85cc-014d750c5cae",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "b3b74881-6bfa-43fd-a3dd-1e156342bf09",
+              "leftValue": "={{ ($json.data ?? []).some(v => String(v.vnet) === String($json.vnet_id)) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        240,
+        160
+      ],
+      "id": "6056959d-a263-4d37-aa5d-0f6cca9af67a",
+      "name": "If VNet exists"
+    },
+    {
+      "parameters": {
+        "errorMessage": "VNet does not exist!"
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        464,
+        304
+      ],
+      "id": "107ee404-537d-48f9-8d53-424769007c95",
+      "name": "Stop and Error"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        688,
+        128
+      ],
+      "id": "f6ba5f2d-d7e6-4b51-8f60-07577020c772",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node (JavaScript)\n// Detect whether the subnet record exists in lane.data for lane.vnet_id\n\nreturn items.map((item) => {\n  const lane = item.json;\n  const rows = Array.isArray(lane.data) ? lane.data : [];\n  const vnetId = lane.vnet_id ?? null;\n\n  // A \"subnet record\" in your feed is the one that actually includes subnet details\n  const subnetRow = vnetId\n    ? rows.find((r) =>\n        r &&\n        r.type === \"vnet\" &&\n        r.vnet === vnetId &&\n        (\n          r.subnet != null ||\n          r.cidr != null ||\n          r.network != null ||\n          r.mask != null ||\n          r.gateway != null ||\n          (Array.isArray(r[\"dhcp-range\"]) && r[\"dhcp-range\"].length > 0)\n        )\n      )\n    : undefined;\n\n  const subnet_exists = !!subnetRow;\n  const current_subnet_name = subnet_exists ? (subnetRow.subnet ?? subnetRow.cidr ?? null) : null;\n\n  // Add results at bottom\n  lane.subnet_exists = subnet_exists;\n  lane.current_subnet_name = current_subnet_name;\n\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        128
+      ],
+      "id": "5d41891b-5185-43f9-852b-cf7d241ebe1b",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {
+    "When Executed by Another Workflow": [
+      {
+        "json": {
+          "data": [
+            {
+              "alias": "lane-metasploitable2-basic-14141649",
+              "digest": "cf6e7bcfcc0a9278bd648b1c23eeea0f2c2636ea",
+              "tag": 14141649,
+              "type": "vnet",
+              "vnet": "bebebgej",
+              "zone": "crucible"
+            },
+            {
+              "type": "vnet",
+              "vnet": "vnet",
+              "digest": "cf6e7bcfcc0a9278bd648b1c23eeea0f2c2636ea",
+              "alias": "Cyberhub Test VNet",
+              "tag": 10001,
+              "zone": "test"
+            }
+          ],
+          "best_node": "cyberhub-node-5",
+          "best_node_score": 0.005377114244887155,
+          "lane_id": "35eee7b6-7230-497a-bce9-6fb5f78bf875",
+          "event_id": null,
+          "user_id": "7d0d81db-1fca-4641-b65f-181bb9d7c8d1",
+          "name": "Metasploitable 2",
+          "status": "deploying",
+          "vxlan_id": 14141649,
+          "config": {},
+          "created_at": "2025-12-10T23:12:01.432Z",
+          "updated_at": "2025-12-10T23:12:01.432Z",
+          "team_id": null,
+          "lane_group_id": null,
+          "challenge_id": "564f82a3-f2db-486c-8d5f-1620fe253ab3",
+          "challenge_key": "metasploitable2-basic",
+          "spec": {
+            "vms": [
+              {
+                "role": "primary",
+                "tags": [
+                  "single_vm",
+                  "metasploitable2-template"
+                ],
+                "hostname": "metasploitable2-basic.local",
+                "template_key": "metasploitable2-template"
+              }
+            ],
+            "flags": [],
+            "limits": {
+              "max_runtime_minutes": 180,
+              "max_concurrent_lanes": 100
+            }
+          },
+          "difficulty": 2,
+          "module": "crucible",
+          "subnet": "100.102.0.0/28",
+          "gateway": "100.102.0.1"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Transform VXLAN ID to uniqie ID": {
+      "main": [
+        [
+          {
+            "node": "Get VNets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Transform VXLAN ID to uniqie ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If subnet exists": {
+      "main": [
+        [
+          {
+            "node": "Get subnet again",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create subnet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create subnet": {
+      "main": [
+        []
+      ]
+    },
+    "Get VNets": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get subnets": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "If VNet exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If VNet exists": {
+      "main": [
+        [
+          {
+            "node": "Get subnets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Stop and Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "If subnet exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get subnet again": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "01a79f34-f85c-4b9e-8078-9f331cfc97c6",
+  "meta": {
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "5fv7EhGFTnKPYLSM",
+  "tags": [
+    {
+      "updatedAt": "2026-01-07T10:14:03.837Z",
+      "createdAt": "2026-01-07T10:14:03.837Z",
+      "id": "yCB505xTB8gNFQEC",
+      "name": "Proxmox SDN"
+    },
+    {
+      "name": "CyberCore",
+      "id": "SqxAywq1R3kw8S7M",
+      "updatedAt": "2026-01-07T10:54:17.889Z",
+      "createdAt": "2026-01-07T10:54:17.889Z"
+    }
+  ]
+}

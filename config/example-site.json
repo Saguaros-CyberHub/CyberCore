@@ -1,0 +1,37 @@
+{
+  "site": {
+    "name": "cyberhub-prod",
+    "timezone": "America/Phoenix",
+    "domain": "cyberhub.example.com"
+  },
+  "cluster": {
+    "target_subnet": "100.100.10.0/24",
+    "physical_cluster_ips": {
+      "cyberhub-node-0": "100.100.10.10",
+      "cyberhub-node-1": "100.100.10.11",
+      "cyberhub-node-2": "100.100.10.12",
+      "cyberhub-node-3": "100.100.10.13",
+      "cyberhub-node-4": "100.100.10.14",
+      "cyberhub-node-5": "100.100.10.15"
+    },
+    "physical_hardware_allocation_per_node": {
+      "ram_gb": 256,
+      "cpu_cores": 64
+    }
+  },
+  "cyberhub": {
+    "installed_modules": [
+      "Cyberlabs",
+      "Forge",
+      "Crucible"
+    ],
+    "admin_username": "${PVE_USER}",
+    "admin_password": "${PVE_PASSWORD}",
+    "admin_ssh_public_key": [
+      "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC3..."
+    ],
+    "user_database_options": {
+      "type": "none"
+    }
+  }
+}

@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS app_user (
   email          TEXT NOT NULL,
   first_name     TEXT,
   last_name      TEXT,
-  auth_provider  TEXT NOT NULL DEFAULT 'keycloak' CHECK (auth_provider IN ('local','keycloak')),
+  auth_provider  TEXT NOT NULL DEFAULT 'local' CHECK (auth_provider IN ('local','keycloak')),
   password_hash  TEXT,
   password_alg   TEXT,
   status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended','banned','deleted')),
@@ -95,6 +95,49 @@ CREATE TABLE IF NOT EXISTS user_badge (
 );
 CREATE INDEX IF NOT EXISTS idx_user_badge_user  ON user_badge(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_badge_badge ON user_badge(badge_id);
+
+-- === VM Templates (shared) ===
+CREATE TABLE IF NOT EXISTS vm_template (
+  template_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  module_key           TEXT REFERENCES module(key),
+  name                 TEXT NOT NULL,
+  role                 TEXT,
+  default_runtime_min  INTEGER,
+  metadata             JSONB NOT NULL DEFAULT '{}'::jsonb,
+  active               BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (module_key, name)
+);
+
+-- === VM Instances (shared) ===
+CREATE TABLE IF NOT EXISTS vm_instance (
+  vm_instance_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  resource_id        UUID NOT NULL UNIQUE REFERENCES resource(resource_id) ON DELETE CASCADE,
+  template_id        UUID REFERENCES vm_template(template_id) ON DELETE SET NULL,
+
+  power_state        TEXT,
+  provider           TEXT,
+  provider_node      TEXT,
+  provider_vmid      TEXT,
+
+  hostname           TEXT,
+  ip_address         INET,
+  mac_address        TEXT,
+  vlan_id            INTEGER,
+
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  started_at         TIMESTAMPTZ,
+  last_seen_at       TIMESTAMPTZ,
+  last_state_change  TIMESTAMPTZ,
+  auto_sleep_at      TIMESTAMPTZ,
+  destroyed_at       TIMESTAMPTZ,
+
+  metadata           JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_vm_instance_template ON vm_instance(template_id);
+CREATE INDEX IF NOT EXISTS idx_vm_instance_provider ON vm_instance(provider, provider_node);
 
 -- === Core seeds (modules, groups, global badges) ===
 BEGIN;

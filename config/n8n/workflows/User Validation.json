@@ -1,0 +1,296 @@
+{
+  "name": "User Validation",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "user_id"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        16
+      ],
+      "id": "a97045ab-fec7-4a81-968c-55a6e71a3532",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT EXISTS (\n  SELECT 1\n  FROM public.app_user\n  WHERE user_id = '{{ $json.user_id }}'\n);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        448,
+        -128
+      ],
+      "id": "6ae7f27b-a245-4590-8b78-a2e44d18398f",
+      "name": "Check user existence",
+      "credentials": {
+        "postgres": {
+          "id": "VFnVW5xU3IWaGUyr",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM public.app_user\nWHERE user_id = CAST('{{ $json.user_id }}' AS uuid);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        112
+      ],
+      "id": "08811d03-9d55-4b32-a391-03be6373320b",
+      "name": "Query user details",
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "VFnVW5xU3IWaGUyr",
+          "name": "Postgres account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "74afbe51-fe54-4bf2-a35e-39bbbca1dc41",
+              "leftValue": "={{ $json.exists }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "eb97326e-65ed-4179-a545-614478535ec8",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "active",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        896,
+        -80
+      ],
+      "id": "c93797d5-8b7a-4b42-98d1-2fab2fa19c2c",
+      "name": "If user is active"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        672,
+        -80
+      ],
+      "id": "ae85e28c-468a-4f9e-a6ab-adbbd962e593",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "errorMessage": "User not active."
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        -80
+      ],
+      "id": "3700ccbc-2627-4d86-8909-cf9e42043c2c",
+      "name": "User not active"
+    },
+    {
+      "parameters": {
+        "errorMessage": "User not valid."
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        672,
+        160
+      ],
+      "id": "da2779e8-f2fa-4d72-800e-b4489d437e2d",
+      "name": "User not valid"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "46f629c3-8160-420d-b2ee-57c5bc3ea044",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        448,
+        112
+      ],
+      "id": "03ded203-aeef-4479-8bf8-54da52e24c9c",
+      "name": "If"
+    }
+  ],
+  "pinData": {
+    "When Executed by Another Workflow": [
+      {
+        "json": {
+          "user_id": "7d0d81db-1fca-4641-b65f-181bb9d7c8d1"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Query user details",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check user existence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check user existence": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query user details": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "If user is active",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If user is active": {
+      "main": [
+        [],
+        [
+          {
+            "node": "User not active",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "User not valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "1d4833e7-02c1-43d2-b34e-2fe506c29845",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "N6XNdWnEX4Ot9YPW",
+  "tags": [
+    {
+      "name": "CyberCore",
+      "id": "SqxAywq1R3kw8S7M",
+      "updatedAt": "2026-01-07T10:54:17.889Z",
+      "createdAt": "2026-01-07T10:54:17.889Z"
+    }
+  ]
+}

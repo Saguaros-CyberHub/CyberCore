@@ -1,0 +1,469 @@
+{
+  "name": "Deploy Lane Gateway",
+  "nodes": [
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        592,
+        256
+      ],
+      "id": "4c4a4cae-455e-47d0-8731-69ffcb751aae",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/config/nodes",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        816,
+        464
+      ],
+      "id": "209c4c8d-3d4e-4184-940e-3991288d0cac",
+      "name": "Request available nodes",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1040,
+        464
+      ],
+      "id": "fab5cb82-7e82-4cff-84db-246e28748e43",
+      "name": "Split Out"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "856ad757-bab1-4dbd-8ebf-500999c0a166",
+              "name": "node_name",
+              "value": "={{ $json.node || $json.name }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1264,
+        464
+      ],
+      "id": "020b8cd6-0ccb-4807-b070-a47109a9f678",
+      "name": "Edit Fields1"
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/nodes/{{ $json.node_name }}/qemu",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1712,
+        512
+      ],
+      "id": "f2cee4cd-85a1-4601-94c6-1694c2c36c97",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1488,
+        464
+      ],
+      "id": "3a7405f3-271e-4926-a379-5a6d8cdea8d7",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "{}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        2160,
+        688
+      ],
+      "id": "75c38dcf-035c-49c0-929c-cbf831b6fd7e",
+      "name": "Edit Fields2"
+    },
+    {
+      "parameters": {
+        "errorMessage": "Unexpected error – Loop failure."
+      },
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1712,
+        304
+      ],
+      "id": "a63bc1e4-0950-4aec-875a-7aafb681ff9a",
+      "name": "Loop error"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3448f80b-d3ff-4cdc-919e-88dee8ab720e",
+              "leftValue": "={{ $json.data }}",
+              "rightValue": "\"Alpine-Gateway-Template\"",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1936,
+        512
+      ],
+      "id": "4ba5440a-9073-4540-ad8c-6eaba11517a6",
+      "name": "If template_vmid is found",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        448
+      ],
+      "id": "33fe11dc-53a3-4201-86b8-dd06b300b5f2",
+      "name": "Split Out1"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "292ce95b-e20e-4e94-998c-090f5ecdf0ae",
+              "leftValue": "={{ $json.name }}",
+              "rightValue": "={{ $item(\"0\").$node[\"Query challenge\"].json[\"spec\"][\"vms\"][\"0\"][\"template_key\"] }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.3,
+      "position": [
+        2384,
+        448
+      ],
+      "id": "a208424c-56d6-4c2d-a991-d41e080c06be",
+      "name": "Filter"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://100.100.10.10:8006/api2/json/nodes/{{ $json.best_node }}/lxc/{{ Number(`6${$json.vxlan_id}`) }}/config",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "net0",
+              "value": "=name=wan0,bridge=vmbr0,ip=dhcp,tag=60"
+            },
+            {
+              "name": "net1",
+              "value": "=name=mgmt0,bridge=vmbr0,ip=dhcp,tag="
+            },
+            {
+              "name": "net2",
+              "value": "=name=lan0,bridge={{ $item(\"0\").$node[\"When Executed by Another Workflow\"].json[\"vnet_id\"] }},ip=dhcp"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        2112,
+        176
+      ],
+      "id": "99cbcc5d-dfda-43b3-bc2b-5c2cce414bd7",
+      "name": "Attach network ports",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    }
+  ],
+  "pinData": {
+    "When Executed by Another Workflow": [
+      {
+        "json": {
+          "best_node": "cyberhub-node-3",
+          "best_node_score": 0.0055616823296030645,
+          "lane_id": "5d3dee30-fdf1-4ea4-8e41-3b33db5c2ade",
+          "event_id": null,
+          "user_id": "7d0d81db-1fca-4641-b65f-181bb9d7c8d1",
+          "name": "Metasploitable-2-Template",
+          "status": "stopped",
+          "vxlan_id": 14141649,
+          "config": {},
+          "created_at": "2025-12-26T17:20:39.238Z",
+          "updated_at": "2025-12-26T17:20:39.238Z",
+          "team_id": null,
+          "lane_group_id": null,
+          "challenge_id": "564f82a3-f2db-486c-8d5f-1620fe253ab3",
+          "challenge_key": "metasploitable2-basic",
+          "spec": {
+            "vms": [
+              {
+                "role": "primary",
+                "tags": [
+                  "single_vm",
+                  "Metasploitable-2-Template"
+                ],
+                "hostname": "metasploitable2-basic.local",
+                "template_key": "Metasploitable-2-Template"
+              }
+            ],
+            "flags": [],
+            "limits": {
+              "max_runtime_minutes": 180,
+              "max_concurrent_lanes": 100
+            }
+          },
+          "difficulty": 2,
+          "module": "crucible",
+          "subnet": "100.102.0.0/28",
+          "gateway": "100.102.0.1",
+          "uptime": 0,
+          "maxdisk": 8589934592,
+          "cpu": 0,
+          "mem": 0,
+          "template": 1,
+          "vmid": 1600,
+          "maxmem": 2147483648,
+          "netin": 0,
+          "cpus": 1,
+          "disk": 0,
+          "netout": 0,
+          "vni": 14141649,
+          "vnet_id": "bebebgej"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Request available nodes": {
+      "main": [
+        [
+          {
+            "node": "Split Out",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields1": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "If template_vmid is found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Over Items": {
+      "main": [
+        [
+          {
+            "node": "Loop error",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Edit Fields2": {
+      "main": [
+        [
+          {
+            "node": "Loop Over Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If template_vmid is found": {
+      "main": [
+        [
+          {
+            "node": "Split Out1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Edit Fields2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Out1": {
+      "main": [
+        [
+          {
+            "node": "Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter": {
+      "main": [
+        []
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Request available nodes",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Attach network ports",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "40f21dd3-5fd0-4f33-893e-583c7f85f437",
+  "meta": {
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "xWTMkPAgKUVqIT9X",
+  "tags": [
+    {
+      "name": "Crucible",
+      "id": "yefXO66Do6YJeH8v",
+      "updatedAt": "2026-01-07T10:54:21.942Z",
+      "createdAt": "2026-01-07T10:54:21.942Z"
+    }
+  ]
+}

@@ -15,7 +15,7 @@ CYBERCORE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$CYBERCORE_ROOT"
 
 # Default values
-COMPOSE_FILE="$CYBERCORE_ROOT/automation/docker/cybercore-compose.yml"
+COMPOSE_FILE="$CYBERCORE_ROOT/cybercore-compose.yml"
 REMOVE_VOLUMES=false
 REMOVE_NETWORK=false
 
@@ -57,8 +57,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --tls)
-            COMPOSE_FILE="$CYBERCORE_ROOT/automation/docker/cybercore-compose-tls.yml"
-            shift
+            echo -e "${RED}TLS option not currently supported${NC}"
+            exit 1
             ;;
         --help)
             show_help

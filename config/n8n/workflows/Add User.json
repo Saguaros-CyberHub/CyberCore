@@ -2,15 +2,91 @@
   "name": "Add User",
   "nodes": [
     {
-      "parameters": {},
-      "type": "n8n-nodes-base.manualTrigger",
-      "typeVersion": 1,
+      "parameters": {
+        "formTitle": "Register Account",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "First Name:",
+              "placeholder": "joe",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Last Name:",
+              "placeholder": "dirt",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "University Email (arizona.edu):",
+              "fieldType": "email",
+              "placeholder": "joedirt@arizona.edu",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Create a Username:",
+              "placeholder": "jdirt0",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Create a Password:",
+              "fieldType": "password",
+              "placeholder": "password",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Re-enter Password:",
+              "fieldType": "password",
+              "placeholder": "password",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
       "position": [
         0,
-        0
+        176
       ],
-      "id": "40824fb0-e2cd-4584-aab4-45952b9f6e50",
-      "name": "When clicking ‘Execute workflow’"
+      "id": "3f867cce-2728-4b61-848a-2b11e7cb67d7",
+      "name": "On form submission",
+      "webhookId": "0b35090c-aa86-474c-a127-c2b542f3b3b3"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Your Account was Successfully Registered!",
+        "completionMessage": "You can now login at https://PLACEHOLDER.org",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.3,
+      "position": [
+        896,
+        80
+      ],
+      "id": "48c30919-3a98-4724-820a-50f60294a59c",
+      "name": "Success Message",
+      "webhookId": "0233c966-3837-40b7-9685-4a2fec3f57d4"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Error",
+        "completionMessage": "Your account was not registered due to an internal error. Skill issue on our part.\n\nPlease contact your system administrator.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.3,
+      "position": [
+        896,
+        272
+      ],
+      "id": "ba0710ff-4a63-4a83-b427-9b133e707cbc",
+      "name": "Failure Message",
+      "webhookId": "0233c966-3837-40b7-9685-4a2fec3f57d4"
     },
     {
       "parameters": {
@@ -29,16 +105,17 @@
           "mappingMode": "defineBelow",
           "value": {
             "active": true,
-            "user_id": "550e8400-e29b-41d4-a716-446655440000",
-            "username": "echumley",
-            "email": "echumley@arizona.edu",
-            "first_name": "ethan",
-            "last_name": "chumley",
-            "status": "active",
-            "auth_provider": "local",
-            "created_at": "2025-09-18T17:30:03",
-            "updated_at": "2025-09-18T17:30:05",
-            "last_auth_at": "2025-09-18T17:30:06"
+            "username": "={{ $json.username }}",
+            "first_name": "={{ $json.first_name }}",
+            "email": "={{ $json.email }}",
+            "last_name": "={{ $json.last_name }}",
+            "auth_provider": "={{ $json.auth_provider }}",
+            "password_hash": "={{ $json.password_hash }}",
+            "password_alg": "={{ $json.password_alg }}",
+            "status": "={{ $json.status }}",
+            "created_at": "={{ $json.submittedAt }}",
+            "updated_at": "={{ $json.submittedAt }}",
+            "last_auth_at": "={{ $json.submittedAt }}"
           },
           "matchingColumns": [],
           "schema": [
@@ -168,84 +245,123 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        208,
-        0
+        448,
+        176
       ],
-      "id": "b923e525-670e-4607-b9d3-923056ae8ef4",
-      "name": "Insert rows in a table",
+      "id": "7bb4aaba-61f5-432e-b7db-6385e8fb285c",
+      "name": "Add user to DB",
       "credentials": {
         "postgres": {
-          "id": "CPbaBN98AxMCYGXJ",
+          "id": "VFnVW5xU3IWaGUyr",
           "name": "Postgres account"
         }
       }
     },
     {
       "parameters": {
-        "amount": 15
+        "jsCode": "// --- SHA-256 implementation in pure JS (no imports) ---\n// Source: compact public-domain style implementation\nfunction sha256(ascii) {\n  const rightRotate = (value, amount) =>\n    (value >>> amount) | (value << (32 - amount));\n\n  const mathPow = Math.pow;\n  const maxWord = mathPow(2, 32);\n  let result = '';\n\n  let words = [];\n  const asciiBitLength = ascii.length * 8;\n\n  // Initial hash values\n  let hash = [], k = [];\n  let primeCounter = 0;\n\n  const isPrime = (n) => {\n    const sqrtN = Math.sqrt(n);\n    for (let i = 2; i <= sqrtN; i++) {\n      if (n % i === 0) return false;\n    }\n    return true;\n  };\n\n  const getFractionalBits = (n) =>\n    ((n - (n | 0)) * maxWord) | 0;\n\n  for (let candidate = 2; primeCounter < 64; candidate++) {\n    if (!isPrime(candidate)) continue;\n\n    if (primeCounter < 8) {\n      hash[primeCounter] = getFractionalBits(Math.pow(candidate, 1 / 2));\n    }\n    k[primeCounter] = getFractionalBits(Math.pow(candidate, 1 / 3));\n    primeCounter++;\n  }\n\n  ascii += '\\x80'; // Append '1' bit (plus zero padding)\n  while (ascii.length % 64 - 56) ascii += '\\x00'; // More zero padding\n  for (let i = 0; i < ascii.length; i++) {\n    const j = ascii.charCodeAt(i);\n    if (j >> 8) throw new Error('Only ASCII supported');\n    words[i >> 2] |= j << ((3 - i) % 4) * 8;\n  }\n  words[words.length] = (asciiBitLength / maxWord) | 0;\n  words[words.length] = asciiBitLength;\n\n  for (let i = 0; i < words.length;) {\n    const w = words.slice(i, i += 16);\n    const oldHash = hash.slice(0);\n\n    for (let j = 0; j < 64; j++) {\n      const w15 = w[j - 15], w2 = w[j - 2];\n\n      const a = hash[0], e = hash[4];\n      const temp1 = hash[7]\n        + (rightRotate(e, 6) ^ rightRotate(e, 11) ^ rightRotate(e, 25))\n        + ((e & hash[5]) ^ ((~e) & hash[6]))\n        + k[j]\n        + (w[j] = (j < 16) ? w[j] : (\n          w[j - 16]\n          + (rightRotate(w15, 7) ^ rightRotate(w15, 18) ^ (w15 >>> 3))\n          + w[j - 7]\n          + (rightRotate(w2, 17) ^ rightRotate(w2, 19) ^ (w2 >>> 10))\n        ) | 0);\n\n      const temp2 =\n        (rightRotate(a, 2) ^ rightRotate(a, 13) ^ rightRotate(a, 22)) +\n        ((a & hash[1]) ^ (a & hash[2]) ^ (hash[1] & hash[2]));\n\n      hash = [\n        (temp1 + temp2) | 0,\n        hash[0],\n        hash[1],\n        hash[2],\n        (hash[3] + temp1) | 0,\n        hash[4],\n        hash[5],\n        hash[6],\n      ];\n    }\n\n    for (let j = 0; j < 8; j++) {\n      hash[j] = (hash[j] + oldHash[j]) | 0;\n    }\n  }\n\n  for (let i = 0; i < 8; i++) {\n    for (let j = 3; j + 1; j--) {\n      const b = (hash[i] >> (j * 8)) & 255;\n      result += ((b < 16 ? '0' : '') + b.toString(16));\n    }\n  }\n\n  return result;\n}\n\n// --- Name cleaning helper ---\nfunction cleanName(raw) {\n  if (!raw) return \"\";\n  // Remove anything that's not A-Z or space\n  let s = raw.replace(/[^A-Za-z\\s]/g, \" \");\n  // Collapse multiple spaces\n  s = s.replace(/\\s+/g, \" \").trim();\n  if (!s) return \"\";\n  // Title Case each word\n  return s\n    .split(\" \")\n    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())\n    .join(\" \");\n}\n\nreturn items.map(item => {\n  const data = item.json;\n\n  const firstRaw    = data[\"First Name:\"] || \"\";\n  const lastRaw     = data[\"Last Name:\"] || \"\";\n  const emailRaw    = data[\"University Email (arizona.edu):\"] || \"\";\n  const usernameRaw = data[\"Create a Username:\"] || \"\";\n\n  const pw  = data[\"Create a Password:\"] || \"\";\n  const pw2 = data[\"Re-enter Password:\"] || \"\";\n\n  if (!emailRaw) {\n    throw new Error(\"Email is required\");\n  }\n  if (pw !== pw2) {\n    throw new Error(\"Passwords do not match\");\n  }\n\n  const email = emailRaw.trim().toLowerCase();\n\n  let username = usernameRaw.trim();\n  if (!username) {\n    username = email.split(\"@\", 1)[0];\n  }\n\n  const first_name = cleanName(firstRaw);\n  const last_name  = cleanName(lastRaw);\n\n  // Do the actual SHA-256 hash here\n  const password_hash = sha256(pw);\n  const password_alg  = \"sha256\";\n\n  return {\n    json: {\n      username,\n      email,\n      first_name,\n      last_name,\n      password_hash,\n      password_alg,\n      auth_provider: \"local\",\n      status: \"active\",\n      active: true,\n      submittedAt: data.submittedAt,\n      formMode: data.formMode,\n    },\n  };\n});"
       },
-      "type": "n8n-nodes-base.wait",
-      "typeVersion": 1.1,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
-        416,
-        0
+        224,
+        176
       ],
-      "id": "e267faca-9f85-4c41-9a73-34d88d751600",
-      "name": "Wait",
-      "webhookId": "a40d47fb-1030-4d9a-8933-0542a740b48f"
+      "id": "68223117-392b-43ad-8d52-39c5f338a164",
+      "name": "Input validation & hashing"
     },
     {
       "parameters": {
-        "operation": "executeQuery",
-        "query": "SELECT \n  user_id,\n  username,\n  email,\n  first_name,\n  last_name,\n  auth_provider,\n  status,\n  active,\n  created_at,\n  last_auth_at\nFROM app_user\nORDER BY created_at DESC;",
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "f4ed31d2-cb5c-488a-8319-ea7620aac058",
+              "leftValue": "={{ $json.user_id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "2184f498-cad9-4270-adf5-a91c84aeb551",
+              "leftValue": "={{ $json.password_hash }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
         "options": {}
       },
-      "type": "n8n-nodes-base.postgres",
-      "typeVersion": 2.6,
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
       "position": [
-        624,
-        0
+        672,
+        176
       ],
-      "id": "02b5bb11-1b30-4e17-9da1-9ca66f707834",
-      "name": "Execute a SQL query",
-      "alwaysOutputData": true,
-      "credentials": {
-        "postgres": {
-          "id": "CPbaBN98AxMCYGXJ",
-          "name": "Postgres account"
-        }
-      }
+      "id": "c606215b-75ff-4c20-aa71-70c02c422a07",
+      "name": "If user is created successfully"
     }
   ],
   "pinData": {},
   "connections": {
-    "When clicking ‘Execute workflow’": {
+    "On form submission": {
       "main": [
         [
           {
-            "node": "Insert rows in a table",
+            "node": "Input validation & hashing",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Insert rows in a table": {
+    "Add user to DB": {
       "main": [
         [
           {
-            "node": "Wait",
+            "node": "If user is created successfully",
             "type": "main",
             "index": 0
           }
         ]
       ]
     },
-    "Wait": {
+    "Input validation & hashing": {
       "main": [
         [
           {
-            "node": "Execute a SQL query",
+            "node": "Add user to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If user is created successfully": {
+      "main": [
+        [
+          {
+            "node": "Success Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Failure Message",
             "type": "main",
             "index": 0
           }
@@ -253,15 +369,22 @@
       ]
     }
   },
-  "active": false,
+  "active": true,
   "settings": {
     "executionOrder": "v1"
   },
-  "versionId": "69508355-ef10-4d6f-aec1-fd34d9c6fc73",
+  "versionId": "f7b1ea68-e2db-4472-894a-b9998018fee3",
   "meta": {
     "templateCredsSetupCompleted": true,
-    "instanceId": "8a31494d94107c7ea941b2e76b2d6b51552da8ff6b7538154ef1508dc72d615d"
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
   },
-  "id": "0fAslfVh4rAKq15I",
-  "tags": []
+  "id": "Iwlgq8kw7xugcjBl",
+  "tags": [
+    {
+      "name": "CyberCore",
+      "id": "SqxAywq1R3kw8S7M",
+      "updatedAt": "2026-01-07T10:54:17.889Z",
+      "createdAt": "2026-01-07T10:54:17.889Z"
+    }
+  ]
 }

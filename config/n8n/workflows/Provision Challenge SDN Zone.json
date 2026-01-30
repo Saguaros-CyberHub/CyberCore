@@ -1,0 +1,378 @@
+{
+  "name": "Provision Challenge SDN Zone",
+  "nodes": [
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/vnets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "vnet",
+              "value": "={{ $json.vnet_id }}"
+            },
+            {
+              "name": "zone",
+              "value": "={{ $json.module }}"
+            },
+            {
+              "name": "tag",
+              "value": "={{ $json.vni }}"
+            },
+            {
+              "name": "alias",
+              "value": "=lane-{{ $json.challenge_key }}-{{ $json.vni }}"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1072,
+        32
+      ],
+      "id": "26e1c068-659b-4e7e-8697-87236a2c3ce0",
+      "name": "Create VNet",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -208,
+        368
+      ],
+      "id": "664f3729-8da8-4ac2-a7ac-9ab8d91ba667",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/vnets/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1296,
+        -48
+      ],
+      "id": "d99cc059-0ccc-4fa6-9586-da856f4f4570",
+      "name": "Get VNet again",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        560,
+        480
+      ],
+      "id": "89db6cc2-42a8-496e-ae40-7b65aba149b6",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map((item) => {\n  const list = item.json.data ?? [];          // array from Proxmox\n  const wanted = String(item.json.vnet_id);   // your desired vnet id (bebebgej)\n\n  const match = Array.isArray(list)\n    ? list.find(v => String(v.vnet) === wanted)\n    : null;\n\n  item.json.vnet_current = match ?? null;\n  item.json.vnet_exists = Boolean(match);\n\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        624,
+        -48
+      ],
+      "id": "85f041ad-e162-4196-ad6d-ac4cc9ac46b0",
+      "name": "Extract desired VNet"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2eea80cf-0a4d-44a7-80bd-eefe63d427ae",
+              "leftValue": "={{ $json.vnet_exists }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        848,
+        -48
+      ],
+      "id": "56738645-4b03-447e-ad14-033565e370d8",
+      "name": "If VNet exists"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT *\nFROM crucible_challenge\nWHERE challenge_key = '{{$json[\"challenge_key\"]}}'\nLIMIT 1;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        96,
+        368
+      ],
+      "id": "7a8327d5-38fa-4bc8-8c09-a8ec4ad9592d",
+      "name": "Query lane details",
+      "credentials": {
+        "postgres": {
+          "id": "VFnVW5xU3IWaGUyr",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/zones",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        304,
+        544
+      ],
+      "id": "3ae8e126-af51-4c24-840a-74d5d59832f8",
+      "name": "Get Zones",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const map = { '0':'a','1':'b','2':'c','3':'d','4':'e','5':'f','6':'g','7':'h','8':'i','9':'j' };\n\nfunction fnv1a32(str) {\n  let h = 0x811c9dc5;\n  for (let i = 0; i < str.length; i++) {\n    h ^= str.charCodeAt(i);\n    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;\n  }\n  return h >>> 0;\n}\n\nreturn items.map((item) => {\n  const raw = item.json.challenge_id;\n  if (!raw) return item;\n\n  const s = String(raw).toLowerCase().replace(/[^a-z0-9]/g, '');\n  const h = fnv1a32(s);\n\n  // Make exactly 8 digits from the hash by zero-padding\n  const digits = String(h).padStart(8, '0').slice(-8);\n\n  item.json.challenge_id_8 = digits.split('').map(d => map[d]).join('');\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        304,
+        240
+      ],
+      "id": "54111ce7-3fbc-4dc0-99f0-78b4dab264e5",
+      "name": "Transform challenge_key to unique ID"
+    }
+  ],
+  "pinData": {
+    "When Executed by Another Workflow": [
+      {
+        "json": {
+          "best_node": "cyberhub-node-5",
+          "best_node_score": 0.005322838320981665,
+          "lane_id": "35eee7b6-7230-497a-bce9-6fb5f78bf875",
+          "event_id": null,
+          "user_id": "7d0d81db-1fca-4641-b65f-181bb9d7c8d1",
+          "name": "Metasploitable 2",
+          "status": "deploying",
+          "vxlan_id": 14141649,
+          "config": {},
+          "created_at": "2025-12-10T23:12:01.432Z",
+          "updated_at": "2025-12-10T23:12:01.432Z",
+          "team_id": null,
+          "lane_group_id": null,
+          "challenge_id": "564f82a3-f2db-486c-8d5f-1620fe253ab3",
+          "challenge_key": "metasploitable2-basic",
+          "spec": {
+            "vms": [
+              {
+                "role": "primary",
+                "tags": [
+                  "single_vm",
+                  "metasploitable2-template"
+                ],
+                "hostname": "metasploitable2-basic.local",
+                "template_key": "metasploitable2-template"
+              }
+            ],
+            "flags": [],
+            "limits": {
+              "max_runtime_minutes": 180,
+              "max_concurrent_lanes": 100
+            }
+          },
+          "difficulty": 2,
+          "module": "crucible",
+          "subnet": "100.102.0.0/28",
+          "gateway": "100.102.0.1"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Create VNet": {
+      "main": [
+        [
+          {
+            "node": "Get VNet again",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Query lane details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get VNet again": {
+      "main": [
+        []
+      ]
+    },
+    "Merge1": {
+      "main": [
+        []
+      ]
+    },
+    "Extract desired VNet": {
+      "main": [
+        [
+          {
+            "node": "If VNet exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If VNet exists": {
+      "main": [
+        [
+          {
+            "node": "Get VNet again",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create VNet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query lane details": {
+      "main": [
+        [
+          {
+            "node": "Get Zones",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Transform challenge_key to unique ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Zones": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Transform challenge_key to unique ID": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "6cf00e7f-c1b7-4a83-90cf-509df87f0e42",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "qp8UlmoNuat04KL3",
+  "tags": [
+    {
+      "updatedAt": "2026-01-07T10:14:03.837Z",
+      "createdAt": "2026-01-07T10:14:03.837Z",
+      "id": "yCB505xTB8gNFQEC",
+      "name": "Proxmox SDN"
+    },
+    {
+      "name": "CyberCore",
+      "id": "SqxAywq1R3kw8S7M",
+      "updatedAt": "2026-01-07T10:54:17.889Z",
+      "createdAt": "2026-01-07T10:54:17.889Z"
+    }
+  ]
+}

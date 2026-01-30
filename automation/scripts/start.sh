@@ -15,7 +15,7 @@ CYBERCORE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$CYBERCORE_ROOT"
 
 # Default values
-COMPOSE_FILE="$CYBERCORE_ROOT/automation/docker/cybercore-compose.yml"
+COMPOSE_FILE="$CYBERCORE_ROOT/cybercore-compose.yml"
 NO_DETACH=false
 FORCE_RECREATE=false
 ENABLE_TLS=false
@@ -62,9 +62,8 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --tls)
-            ENABLE_TLS=true
-            COMPOSE_FILE="$CYBERCORE_ROOT/automation/docker/cybercore-compose-tls.yml"
-            shift
+            echo -e "${RED}TLS option not currently supported${NC}"
+            exit 1
             ;;
         --help)
             show_help
@@ -151,15 +150,15 @@ if [ $? -eq 0 ]; then
     echo "Service URLs:"
     echo "  - n8n UI:        http://localhost:5678"
     echo "  - Adminer:       http://localhost:8080"
-    echo "  - PostgreSQL:    localhost:5432"
-    echo "  - Redis:         localhost:6379"
+    echo "  - PostgreSQL:    127.0.0.1:5432"
+    echo "  - Redis:         internal only (no exposed port)"
 
     # Show logs command
     echo ""
     echo "To view logs:"
     echo "  docker compose -f $COMPOSE_FILE logs -f [service_name]"
     echo ""
-    echo "Service names: postgres, redis, n8n-webhook, n8n-worker, adminer"
+    echo "Service names: postgres, redis, n8n, adminer"
 
 else
     echo -e "${RED}Failed to start services${NC}"

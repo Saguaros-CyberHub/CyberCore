@@ -1,0 +1,160 @@
+networks:
+  cybercore-net:
+    driver: bridge
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: cybercore-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CORE_DB_USER}
+      POSTGRES_PASSWORD: ${CORE_DB_PASSWORD}
+      POSTGRES_DB: ${CORE_DB_NAME}
+      ENABLED_MODULES: ${CORE_ENABLED_MODULES}
+      N8N_DB_USER: ${N8N_DB_USER}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
+      N8N_DB_NAME: ${N8N_DB_NAME}
+    ports:
+      - "0.0.0.0:5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data:rw,z
+      - ./config/postgres/001_init_db.sql:/docker-entrypoint-initdb.d/001_init_db.sql:ro,z
+      - ./config/postgres/002_init_db.sh:/docker-entrypoint-initdb.d/002_init_db.sh:ro,z
+      - ./config/postgres/050_apply_modules.sh:/docker-entrypoint-initdb.d/050_apply_modules.sh:ro,z
+      - ./config/postgres/modules:/docker-entrypoint-initdb.d/modules:ro,z
+    shm_size: 256mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${CORE_DB_USER} -d ${CORE_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cybercore-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: cybercore-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - ./data/redis:/data:rw,z
+    healthcheck:
+      test: ["CMD", "redis-cli", "PING"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - cybercore-net
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.1.2
+    container_name: cybercore-n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    user: 0:0 # run as root to be able to bind to low ports if needed (CHANGEME)
+    environment:
+      N8N_USER_FOLDER: /home/node
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${TZ}
+      NODE_ENV: production
+      N8N_HOST: 100.100.20.50
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      # WEBHOOK_URL: http://100.100.20.50:5678/
+      WEBHOOK_URL: http://0.0.0.0:5678/
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+    entrypoint: ["/bin/sh","-lc"]
+    command: "/docker-entrypoint-initn8n.sh"
+    ports:
+      - "0.0.0.0:5678:5678"
+    env_file:
+      - ./config/secrets.env
+    volumes:
+      - ./data/n8n:/home/node:rw,z
+      - ./config/n8n/init.sh:/docker-entrypoint-initn8n.sh:ro,z
+      - ./config/n8n/workflows:/home/node/.n8n/config/workflows:ro,z
+      - ./config/n8n/credentials:/home/node/.n8n/config/credentials:ro,z
+      - ./config/site.json:/home/node/.n8n/config/site.json:ro,z
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://0.0.0.0:5678/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks:
+      - cybercore-net
+
+  n8n-worker:
+    image: docker.n8n.io/n8nio/n8n:2.1.2
+    container_name: cybercore-n8n-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # n8n:
+       #  condition: service_healthy
+    user: 0:0
+    environment:
+      N8N_USER_FOLDER: /home/node
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${TZ}
+      NODE_ENV: production
+      N8N_HOST: 100.100.20.50
+      N8N_PORT: 5678
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      # WEBHOOK_URL: http://100.100.20.50:5678/
+      WEBHOOK_URL: http://0.0.0.0:5678/
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+      DB_POSTGRESDB_USER: ${N8N_DB_USER}
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+      EXECUTIONS_MODE: queue
+      QUEUE_BULL_REDIS_HOST: redis
+      QUEUE_BULL_REDIS_PORT: 6379
+      QUEUE_HEALTH_CHECK_ACTIVE: "true"
+      N8N_SKIP_DB_MIGRATIONS: "true"
+    command: ["worker"]
+    env_file:
+      - ./config/secrets.env
+    volumes:
+      - ./data/n8n:/home/node:z
+      - ./config/n8n/workflows:/home/node/.n8n/config/workflows:ro,z
+      - ./config/n8n/credentials:/home/node/.n8n/config/credentials:ro,z
+      - ./config/site.json:/home/node/.n8n/config/site.json:ro,z
+    networks:
+      - cybercore-net
+
+  adminer:
+    image: adminer:latest
+    container_name: cybercore-adminer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    ports:
+      - "0.0.0.0:8080:8080"
+    networks:
+      - cybercore-net

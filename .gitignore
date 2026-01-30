@@ -1,7 +1,5 @@
 .DS_Store
-ansible/
 proxmox-automated-install/
-cyberlabs/
 **/data/*
 !**/data/.gitkeep
 __pycache__/
@@ -16,6 +14,11 @@ tempCodeRunnerFile.sh
 *.backup
 cyberprobe/
 .cybercore-backup/
+**/certs/**
+secrets.env
+site.yml
+site.json
+*.code-workspace
 
 # Added for install.sh
 /secrets/
@@ -43,6 +46,14 @@ rocky-cis-vault.yml
 *.vault
 .vault_pass
 .vault_password
+
+# Terraform variable files
+runs/
+*.tfstate
+*.tfstate.backup
+.crash
+.terraform/
+.terraform.lock.hcl
 
 # But keep the example/template
 !rocky-cis-vars.yml

@@ -1,0 +1,173 @@
+{
+  "name": "Proxmox Cluster Detail Request",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        32
+      ],
+      "id": "11ac23d7-8c76-4a34-8eb5-bb05473d0d62",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "jsCode": "// items[0].json comes from the HTTP node\nconst resources = items[0].json.data || [];\n\n// Only online nodes\nconst candidates = resources.filter(\n  (n) => n.type === 'node' && n.status === 'online'\n);\n\nif (candidates.length === 0) {\n  throw new Error('No online Proxmox nodes available');\n}\n\n// Score each node based on CPU + memory usage\n// cpu is already 0–1; mem/maxmem is 0–1\nconst scored = candidates.map((n) => {\n  const cpuRatio = n.cpu ?? 0;\n  const memRatio = n.maxmem ? n.mem / n.maxmem : 0;\n\n  // Weight CPU a bit higher than RAM, tweak as you like\n  const score = 0.6 * cpuRatio + 0.4 * memRatio;\n\n  return {\n    node: n.node,\n    cpu: cpuRatio,\n    mem_ratio: memRatio,\n    score,\n  };\n});\n\n// Lower score = less loaded\nscored.sort((a, b) => a.score - b.score);\nconst best = scored[0];\n\nreturn [\n  {\n    json: {\n      best_node: best.node,\n      best_node_score: best.score,\n      all_nodes: scored,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -64
+      ],
+      "id": "542e3fc2-48cb-4fea-803d-ddd7b9e11b59",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "inputSource": "passthrough"
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        0,
+        -160
+      ],
+      "id": "d0bd6295-04ee-4995-bec7-52f9027d86a0",
+      "name": "When Executed by Another Workflow"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "d356e2aa-72f5-4a97-88c9-bfee65334cb4",
+              "name": "best_node",
+              "value": "={{ $json.best_node }}",
+              "type": "string"
+            },
+            {
+              "id": "44742347-d009-4a3b-b984-c05dec402325",
+              "name": "best_node_score",
+              "value": "={{ $json.best_node_score }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        672,
+        -64
+      ],
+      "id": "6438de3d-c677-4bcb-a4ba-77e320116961",
+      "name": "Edit Fields"
+    },
+    {
+      "parameters": {
+        "url": "https://100.100.10.10:8006/api2/json/cluster/resources",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "type",
+              "value": "node"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        224,
+        -64
+      ],
+      "id": "1547bdbb-9b93-4b64-98ed-2a2071ce942c",
+      "name": "GET cluster details",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "ztaa2qlrowtsjLhs",
+          "name": "Proxmox API Token"
+        },
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "GET cluster details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Edit Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "GET cluster details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET cluster details": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "892c6bee-b666-42e7-8454-51d4a46e7a30",
+  "meta": {
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "pMEnvE2s18s5WntT",
+  "tags": [
+    {
+      "name": "CyberCore",
+      "id": "SqxAywq1R3kw8S7M",
+      "updatedAt": "2026-01-07T10:54:17.889Z",
+      "createdAt": "2026-01-07T10:54:17.889Z"
+    }
+  ]
+}

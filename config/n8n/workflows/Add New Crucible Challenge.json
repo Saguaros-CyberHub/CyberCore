@@ -1,0 +1,745 @@
+{
+  "name": "Add New Crucible Challenge",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Create New Crucible Challenge",
+        "formDescription": "Insert the necessary information below to create a new Crucible challenge.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Challenge Name",
+              "placeholder": "Metasploitable 2",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Challenge Key",
+              "placeholder": "metasploitable2-basic",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Challenge Zone Abbreviation (must be 8 alphanumeric characters)",
+              "placeholder": "metaspt2",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Challenge Description",
+              "fieldType": "textarea",
+              "placeholder": "Vulnerable Linux VM…",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Challenge Type",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "single_vm"
+                  },
+                  {
+                    "option": "multi_vm"
+                  },
+                  {
+                    "option": "koth"
+                  },
+                  {
+                    "option": "red_vs_blue"
+                  },
+                  {
+                    "option": "other"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Challenge Difficulty",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Easy"
+                  },
+                  {
+                    "option": "Medium"
+                  },
+                  {
+                    "option": "Hard"
+                  },
+                  {
+                    "option": "Expert"
+                  },
+                  {
+                    "option": "Impossible"
+                  }
+                ]
+              },
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Primary VM Template Key",
+              "placeholder": " metasploitable2-template",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Max Runtime (in minutes)",
+              "fieldType": "number",
+              "placeholder": "180",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Max Concurrent Lanes",
+              "fieldType": "number",
+              "placeholder": "100",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Include User-Level Flag",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  },
+                  {
+                    "option": "No"
+                  }
+                ]
+              },
+              "limitSelection": "exact",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "Include Root-Level Flag",
+              "fieldType": "checkbox",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Yes"
+                  },
+                  {
+                    "option": "No"
+                  }
+                ]
+              },
+              "limitSelection": "exact",
+              "requiredField": true
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
+      "position": [
+        -64,
+        -128
+      ],
+      "id": "9582eee5-2898-4f26-9993-ceb2d3b749e8",
+      "name": "On form submission",
+      "webhookId": "b76bc7a5-b37d-4551-999b-d0edaf5e6869"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map human difficulty strings → numeric difficulty\nconst difficultyMap = {\n  easy: 1,\n  medium: 2,\n  hard: 3,\n  expert: 4,\n  impossible: 5,\n};\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const data = item.json;\n\n  // --- Difficulty mapping ---\n  const difficultyStr = (data[\"Challenge Difficulty\"] || \"\").toLowerCase();\n  const difficulty = difficultyMap[difficultyStr] ?? null;\n\n  // --- Checkboxes come in as arrays like [\"Yes\"] or [\"No\"] ---\n  const includeUserFlag =\n    Array.isArray(data[\"Include User-Level Flag\"]) &&\n    data[\"Include User-Level Flag\"][0] === \"Yes\";\n\n  const includeRootFlag =\n    Array.isArray(data[\"Include Root-Level Flag\"]) &&\n    data[\"Include Root-Level Flag\"][0] === \"Yes\";\n\n  // --- Build flags array (no actual flag *values* yet, just scoring model) ---\n  const flags = [];\n  if (includeUserFlag) {\n    flags.push({\n      key: \"user_flag\",\n      description: \"Obtain user-level flag on target\",\n      points: 50,\n    });\n  }\n  if (includeRootFlag) {\n    flags.push({\n      key: \"root_flag\",\n      description: \"Obtain root-level / SYSTEM flag on target\",\n      points: 100,\n    });\n  }\n\n  // --- Zone info from form + validation result ---\n  const zoneAbbrev = data[\"Challenge Zone Abbreviation (must be 8 alphanumeric characters)\"] ?? null;\n  const zoneIsValid = data[\"is_valid_8char_alnum\"] === true;\n\n  // --- Minimal spec: VMs + flags + limits (no network) ---\n  const spec = {\n    // added block\n    zone: {\n      abbrev: zoneAbbrev,\n      is_valid: zoneIsValid,\n    },\n    vms: [\n      {\n        template_key: data[\"Primary VM Template Key\"],\n        role: \"primary\",\n        hostname: data[\"Challenge Key\"] + \".local\",\n        tags: [data[\"Challenge Type\"], data[\"Primary VM Template Key\"]],\n      },\n    ],\n    flags,\n    limits: {\n      max_runtime_minutes: Number(data[\"Max Runtime (in minutes)\"] ?? 0),\n      max_concurrent_lanes: Number(data[\"Max Concurrent Lanes\"] ?? 0),\n    },\n  };\n\n  // --- Metadata: free-form, safe for future UI/filtering ---\n  const metadata = {\n    tags: [data[\"Challenge Type\"]],\n    form_submitted_at: data[\"submittedAt\"] || null,\n    form_mode: data[\"formMode\"] || null,\n    source: \"n8n_admin_form\",\n  };\n\n  out.push({\n    json: {\n      challenge_key: data[\"Challenge Key\"],\n      name: data[\"Challenge Name\"],\n      description: data[\"Challenge Description\"],\n      challenge_type: data[\"Challenge Type\"], // must match your enum\n      difficulty,\n      module_key: \"crucible\",\n      status: \"active\",\n      // Stringify here if your Postgres node does `$7::jsonb`\n      spec: JSON.stringify(spec),\n      metadata: JSON.stringify(metadata),\n    },\n  });\n}\n\nreturn out;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        384,
+        -128
+      ],
+      "id": "86c9bfa4-0560-4543-98cc-1cf3c1bf8d13",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "schema": {
+          "__rl": true,
+          "mode": "list",
+          "value": "public"
+        },
+        "table": {
+          "__rl": true,
+          "value": "crucible_challenge",
+          "mode": "list",
+          "cachedResultName": "crucible_challenge"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "difficulty": "={{ $json.difficulty }}",
+            "challenge_key": "={{ $json.challenge_key }}",
+            "name": "={{ $json.name }}",
+            "description": "={{ $json.description }}",
+            "challenge_type": "={{ $json.challenge_type }}",
+            "module_key": "={{ $json.module_key }}",
+            "spec": "={{ $json.spec }}",
+            "metadata": "={{ $json.metadata }}",
+            "status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "challenge_id",
+              "displayName": "challenge_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "challenge_key",
+              "displayName": "challenge_key",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": true,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "description",
+              "displayName": "description",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "challenge_type",
+              "displayName": "challenge_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "other",
+                  "value": "other"
+                },
+                {
+                  "name": "red_vs_blue",
+                  "value": "red_vs_blue"
+                },
+                {
+                  "name": "koth",
+                  "value": "koth"
+                },
+                {
+                  "name": "multi_vm",
+                  "value": "multi_vm"
+                },
+                {
+                  "name": "single_vm",
+                  "value": "single_vm"
+                }
+              ]
+            },
+            {
+              "id": "difficulty",
+              "displayName": "difficulty",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "module_key",
+              "displayName": "module_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "spec",
+              "displayName": "spec",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "metadata",
+              "displayName": "metadata",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "object",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "options",
+              "canBeUsedToMatch": true,
+              "options": [
+                {
+                  "name": "archived",
+                  "value": "archived"
+                },
+                {
+                  "name": "retired",
+                  "value": "retired"
+                },
+                {
+                  "name": "active",
+                  "value": "active"
+                },
+                {
+                  "name": "draft",
+                  "value": "draft"
+                }
+              ]
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "updated_at",
+              "displayName": "updated_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "dateTime",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        608,
+        -128
+      ],
+      "id": "56b7e0df-c81e-4b7a-8880-bb1914bedb1b",
+      "name": "Insert rows in a table",
+      "credentials": {
+        "postgres": {
+          "id": "VFnVW5xU3IWaGUyr",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return items.map((item) => {\n  const value =\n    item.json[\"Challenge Zone Abbreviation (must be 8 alphanumeric characters)\"];\n\n  item.json.is_valid_8char_alnum =\n    typeof value === 'string' &&\n    /^[A-Za-z1-9][A-Za-z0-9]{7}$/.test(value);\n\n  return item;\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        -128
+      ],
+      "id": "282ef8fd-49ab-4525-b9b8-849981356d1e",
+      "name": "Check if challenge zone is valid"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1184,
+        -128
+      ],
+      "id": "c2468c8b-30ed-49a8-b51a-1b5c6696d3e3",
+      "name": "Merge1"
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/cluster/sdn/zones",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        896,
+        48
+      ],
+      "id": "d02d9c91-2213-4656-a06b-fc9bfed4ed61",
+      "name": "Get Zones",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3c1fecff-26c5-4464-b8bd-f0d397f7e7a8",
+              "leftValue": "={{ $json.data.some(z => z.zone === $json.spec.zone.abbrev) }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1392,
+        -128
+      ],
+      "id": "6bd89d3b-82cc-48d7-a454-820043d816f6",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://100.100.10.10:8006/api2/json/cluster/sdn/zones",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "zone",
+              "value": "={{ $item(\"0\").$node[\"Insert rows in a table\"].json[\"spec\"][\"zone\"][\"abbrev\"] }}"
+            },
+            {
+              "name": "type",
+              "value": "vxlan"
+            }
+          ]
+        },
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1968,
+        -112
+      ],
+      "id": "5abd01b0-af38-4f5c-afa6-1114009dad1d",
+      "name": "Create SDN zone",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "ztaa2qlrowtsjLhs",
+          "name": "Proxmox API Token"
+        },
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://100.100.10.10:8006/api2/json/nodes",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1280,
+        176
+      ],
+      "id": "16ca6aed-669f-4c3d-b651-8ef369195032",
+      "name": "GET node details",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "ztaa2qlrowtsjLhs",
+          "name": "Proxmox API Token"
+        },
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://100.100.10.10:8006/api2/json/nodes/{{$json.node}}/network",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1952,
+        176
+      ],
+      "id": "eee27a6f-2ecb-44c0-b047-324856067866",
+      "name": "GET node networking details",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "ztaa2qlrowtsjLhs",
+          "name": "Proxmox API Token"
+        },
+        "httpHeaderAuth": {
+          "id": "ZLI3QRgLUidNH8Sw",
+          "name": "Proxmox API Header Token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "data",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1488,
+        176
+      ],
+      "id": "f8089ac1-40c9-4889-aa84-e5f685d47bf5",
+      "name": "Split nodes"
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "node",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitOut",
+      "typeVersion": 1,
+      "position": [
+        1696,
+        176
+      ],
+      "id": "c71de31b-b9ef-447f-9ffd-f199023ffc93",
+      "name": "Split node names"
+    },
+    {
+      "parameters": {
+        "jsCode": "const UNDERLAY_IFACE = 'vmbr0.10'; // <-- choose the underlay interface name\n\nconst pairs = [];\n\nfor (const item of items) {\n  const node = item.json.node || item.json.nodeName || item.json.name; // adjust if your node name key differs\n  const ifaces = item.json.data || [];\n\n  if (!node) throw new Error('Missing node name on item (need item.json.node)');\n\n  const underlay = ifaces.find(i => i.iface === UNDERLAY_IFACE && typeof i.address === 'string');\n\n  if (!underlay) {\n    throw new Error(`No underlay IP found for ${node} on iface ${UNDERLAY_IFACE}`);\n  }\n\n  pairs.push({ name: node, ip: underlay.address });\n}\n\n// stable ordering\npairs.sort((a, b) => a.name.localeCompare(b.name));\n\nreturn [{\n  json: {\n    cluster_nodes: pairs,\n    nodes: pairs.map(p => p.name).join(','),\n    peers: pairs.map(p => p.ip).join(','),\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        176
+      ],
+      "id": "b0c70322-a7e2-4fe0-ad46-56373f616c59",
+      "name": "Code in JavaScript1"
+    }
+  ],
+  "pinData": {
+    "On form submission": [
+      {
+        "json": {
+          "Challenge Name": "Metasploitable 2",
+          "Challenge Key": "metasploitable2-basic",
+          "Challenge Zone Abbreviation (must be 8 alphanumeric characters)": "metaspl2",
+          "Challenge Description": "A test environment provides a secure space for performing penetration testing and conducting security research.",
+          "Challenge Type": "single_vm",
+          "Challenge Difficulty": "Medium",
+          "Primary VM Template Key": "metasploitable2-template",
+          "Max Runtime (in minutes)": 180,
+          "Max Concurrent Lanes": 100,
+          "Include User-Level Flag": [
+            "No"
+          ],
+          "Include Root-Level Flag": [
+            "No"
+          ],
+          "submittedAt": "2026-01-07T03:47:12.559-07:00",
+          "formMode": "test"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Check if challenge zone is valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Insert rows in a table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if challenge zone is valid": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Zones": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Insert rows in a table": {
+      "main": [
+        [
+          {
+            "node": "Merge1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Zones",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge1": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [],
+        []
+      ]
+    },
+    "GET node details": {
+      "main": [
+        [
+          {
+            "node": "Split nodes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split nodes": {
+      "main": [
+        [
+          {
+            "node": "Split node names",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split node names": {
+      "main": [
+        [
+          {
+            "node": "GET node networking details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GET node networking details": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "301646f7-c29b-4215-9d66-f732e0b6d681",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "uErpEy3g4ABvvg18",
+  "tags": [
+    {
+      "name": "Crucible",
+      "id": "yefXO66Do6YJeH8v",
+      "updatedAt": "2026-01-07T10:54:21.942Z",
+      "createdAt": "2026-01-07T10:54:21.942Z"
+    }
+  ]
+}

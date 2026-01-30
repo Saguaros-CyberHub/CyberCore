@@ -1,0 +1,372 @@
+{
+  "name": "Deploy Metasploitable 2",
+  "nodes": [
+    {
+      "parameters": {
+        "formTitle": "Launch Vulnerable VM",
+        "formDescription": "After choosing your VM, please wait until this page redirects to view your connection details.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "VM Options",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Metasploitable 2"
+                  },
+                  {
+                    "option": "OWASP Juice Shop"
+                  },
+                  {
+                    "option": "G.O.A.D"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.3,
+      "position": [
+        0,
+        96
+      ],
+      "id": "9e198a1d-81c9-4245-98c2-cf77726a7036",
+      "name": "On form submission",
+      "webhookId": "f59aa75b-9549-490a-99ef-285447af86a5"
+    },
+    {
+      "parameters": {
+        "command": "VMID=$(pvesh get /cluster/nextid) && qm clone 10000 \"$VMID\" --name \"student-vm-$VMID\" --full 1 && echo \"$VMID\""
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        448,
+        96
+      ],
+      "id": "d6ce35d8-42a8-4360-972c-0ba547cc1a53",
+      "name": "Execute a command",
+      "credentials": {
+        "sshPassword": {
+          "id": "vRj4Sx0xHFOJOBR8",
+          "name": "SSH Password account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const choice = $json.range;  // \"metasploitable2\" | \"juiceshop\" | \"goad\"\nconst items = [];\n\n// Example template IDs – replace with your actual Proxmox template IDs\nconst TEMPLATES = {\n  metasploitable2: 10000,\n  juiceshop: 10001,\n  goad_dc: 20000,\n  goad_member: 20001,\n  goad_client: 20002,\n};\n\nif (choice === '$input.first().json[\"VM Options\"]') {\n  // Loop for Metasploitable 2 (e.g. 3 copies)\n  for (let i = 1; i <= 3; i++) {\n    items.push({\n      json: {\n        type: 'metasploitable2',\n        index: i,\n        templateId: TEMPLATES.metasploitable2,\n        name: `meta2-${i}`,\n      },\n    });\n  }\n\n} else if (choice === 'juiceshop') {\n  // Loop for OWASP Juice Shop (e.g. 1 copy)\n  for (let i = 1; i <= 1; i++) {\n    items.push({\n      json: {\n        type: 'juiceshop',\n        index: i,\n        templateId: TEMPLATES.juiceshop,\n        name: `juice-${i}`,\n      },\n    });\n  }\n\n} else if (choice === 'goad') {\n  // GOAD = different VMs/roles instead of simple count\n  const goadVms = [\n    { role: 'dc',      templateId: TEMPLATES.goad_dc,     name: 'goad-dc' },\n    { role: 'member',  templateId: TEMPLATES.goad_member, name: 'goad-member' },\n    { role: 'client',  templateId: TEMPLATES.goad_client, name: 'goad-client' },\n  ];\n\n  for (const vm of goadVms) {\n    items.push({\n      json: {\n        type: 'goad',\n        role: vm.role,\n        templateId: vm.templateId,\n        name: vm.name,\n      },\n    });\n  }\n\n} else {\n  // Fallback if somehow nothing matched\n  items.push({\n    json: {\n      type: 'unknown',\n      range: choice,\n    },\n  });\n}\n\nreturn items;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        96
+      ],
+      "id": "5fb5930b-5ed4-4d88-8261-dfc6368040a7",
+      "name": "Normalize form input"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine all possible stdout fields\nconst output = $json.stdout || $json.data || \"\";\n\n// Match ALL integers in the output\nconst matches = output.match(/\\b\\d+\\b/g);\n\nif (!matches || matches.length === 0) {\n  return [{\n    json: {\n      error: \"No numbers found in output\",\n      raw: output,\n    },\n  }];\n}\n\n// Get the LAST number — this is the VMID\nconst vmid = parseInt(matches[matches.length - 1], 10);\n\nreturn [{\n  json: {\n    vmid,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        96
+      ],
+      "id": "5e32c6c0-0184-41d6-a683-f005b76707c3",
+      "name": "Extract VM ID"
+    },
+    {
+      "parameters": {
+        "amount": 15
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        1120,
+        0
+      ],
+      "id": "f2235851-7267-46e0-8265-ddb64712e13f",
+      "name": "Wait",
+      "webhookId": "9b988e10-f3d8-48dc-8fc3-564d938d8d9d"
+    },
+    {
+      "parameters": {
+        "command": "=qm start {{ $json.vmid }}"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        896,
+        0
+      ],
+      "id": "a3b4d349-05fc-42c4-9116-e88f6591f502",
+      "name": "Start VM",
+      "credentials": {
+        "sshPassword": {
+          "id": "vRj4Sx0xHFOJOBR8",
+          "name": "SSH Password account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "=qm config {{ $json.vmid }} | grep net0",
+        "cwd": "/home"
+      },
+      "type": "n8n-nodes-base.ssh",
+      "typeVersion": 1,
+      "position": [
+        1120,
+        192
+      ],
+      "id": "3d674b67-4ac8-4ae7-977b-ef391bd65f3a",
+      "name": "Extract MAC Address",
+      "credentials": {
+        "sshPassword": {
+          "id": "vRj4Sx0xHFOJOBR8",
+          "name": "SSH Password account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get SSH output (stdout) from previous node\nconst output = $json.stdout || \"\";\n\n// Regex to capture MAC address after '=' and before ','\nconst macMatch = output.match(/=([A-Fa-f0-9:]{17})/);\n\nif (!macMatch) {\n  return [\n    {\n      json: {\n        error: \"MAC address not found in qm config output\",\n        raw: output,\n      },\n    },\n  ];\n}\n\nconst mac = macMatch[1].toUpperCase();\n\n// Return MAC formatted for next node\nreturn [\n  {\n    json: {\n      mac,\n    },\n  },\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        192
+      ],
+      "id": "ce983917-476c-46ac-9139-68ceb94ff230",
+      "name": "Santitize Output"
+    },
+    {
+      "parameters": {
+        "url": "https://100.100.0.1/api/dhcpv4/leases/search_lease",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "options": {
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [
+        1344,
+        0
+      ],
+      "id": "9d91f322-6665-419a-ab1e-34dd5e9aca85",
+      "name": "HTTP Request",
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "hQRrmFaLdeI43jyF",
+          "name": "OPNsense API Key"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1568,
+        96
+      ],
+      "id": "984f8f78-c8e2-474e-b4e9-96fce5405c4a",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Congratulations, your VM is ready!",
+        "completionMessage": "=Your VM has been created and is now accessible at {{ $json.address }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.3,
+      "position": [
+        2016,
+        96
+      ],
+      "id": "8421f997-60b7-43bd-868c-6e7992d86843",
+      "name": "Return form",
+      "webhookId": "5842faa7-124d-4988-9030-38af7d2c74c6"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get all incoming items\nconst items = $input.all();\n\nlet targetMac = null;\nlet leases = null;\n\n// Find the MAC and the DHCP rows in the inputs\nfor (const item of items) {\n  if (item.json.mac && !targetMac) {\n    targetMac = String(item.json.mac).trim().toLowerCase();\n  }\n  if (Array.isArray(item.json.rows) && !leases) {\n    leases = item.json.rows;\n  }\n}\n\nif (!targetMac || !leases) {\n  return [{\n    json: {\n      error: 'Missing MAC or DHCP rows in input',\n      input: items.map(i => i.json),\n    },\n  }];\n}\n\n// Find the lease whose mac matches targetMac\nconst lease = leases.find(l => String(l.mac || '').toLowerCase() === targetMac);\n\nif (!lease) {\n  return [{\n    json: {\n      error: `No lease found for MAC ${targetMac}`,\n      leasesChecked: leases.length,\n    },\n  }];\n}\n\n// Return the whole lease object as json\nreturn [{\n  json: lease,\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        96
+      ],
+      "id": "07e8cd5f-a806-40fb-9530-2216f3c64be5",
+      "name": "Extract IP Address"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "On form submission": {
+      "main": [
+        [
+          {
+            "node": "Normalize form input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize form input": {
+      "main": [
+        [
+          {
+            "node": "Execute a command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a command": {
+      "main": [
+        [
+          {
+            "node": "Extract VM ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract VM ID": {
+      "main": [
+        [
+          {
+            "node": "Start VM",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract MAC Address",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start VM": {
+      "main": [
+        [
+          {
+            "node": "Wait",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract MAC Address": {
+      "main": [
+        [
+          {
+            "node": "Santitize Output",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Santitize Output": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Extract IP Address",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract IP Address": {
+      "main": [
+        [
+          {
+            "node": "Return form",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "393a57e6-1a60-45da-aded-f1224b67ed10",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "Or9wKBQW3rNghLDk",
+  "tags": [
+    {
+      "name": "Archive",
+      "id": "Rj7cBD75qDdnVcw4",
+      "updatedAt": "2026-01-07T10:54:12.332Z",
+      "createdAt": "2026-01-07T10:54:12.332Z"
+    },
+    {
+      "name": "Crucible",
+      "id": "yefXO66Do6YJeH8v",
+      "updatedAt": "2026-01-07T10:54:21.942Z",
+      "createdAt": "2026-01-07T10:54:21.942Z"
+    }
+  ]
+}

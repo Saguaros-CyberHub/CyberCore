@@ -1,0 +1,138 @@
+{
+  "name": "UUID to VXLAN",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -224
+      ],
+      "id": "02dcea00-2724-4b2b-8e49-7c1f34af4880",
+      "name": "When clicking ‘Execute workflow’",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Derive a deterministic VXLAN VNI from a UUID\nfunction vxlanFromUuid(uuid) {\n  // Remove dashes\n  const hex = uuid.replace(/-/g, '');\n  // Take the last 6 hex chars = 24 bits (VXLAN space)\n  const slice = hex.slice(-6);\n  let vni = parseInt(slice, 16); // 0..16777215\n\n  if (Number.isNaN(vni)) {\n    throw new Error(`Invalid UUID for VXLAN derivation: ${uuid}`);\n  }\n\n  // Avoid 0\n  if (vni === 0) vni = 1;\n  // Keep in a safe upper bound just in case\n  if (vni > 16000000) vni = vni % 16000000 || 1;\n\n  return vni;\n}\n\n// n8n requires an array of { json: {...} }\nreturn items.map(item => {\n  const j = item.json;\n  const uuid = j.user_id;\n\n  const vxlan_id = vxlanFromUuid(uuid);\n\n  return {\n    json: {\n      ...j,\n      vxlan_id,\n    },\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -128
+      ],
+      "id": "e114599a-0002-48bc-97d3-3a21aec94f7c",
+      "name": "Transorm UUID to VXLAN"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT user_id\nFROM app_user\nWHERE username = '{{$json.username}}'\n  AND active = true\n  AND status = 'active';",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        224,
+        -224
+      ],
+      "id": "503c81b8-9256-4024-870a-1c0f9a4f475e",
+      "name": "Execute a SQL query",
+      "credentials": {
+        "postgres": {
+          "id": "VFnVW5xU3IWaGUyr",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {
+              "name": "user_id"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        -32
+      ],
+      "id": "de05a149-b48f-41e8-9ef4-d6aca1a6bb7f",
+      "name": "When Executed by Another Workflow"
+    }
+  ],
+  "pinData": {
+    "When clicking ‘Execute workflow’": [
+      {
+        "json": {
+          "username": "jdirt0"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Execute a SQL query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute a SQL query": {
+      "main": [
+        [
+          {
+            "node": "Transorm UUID to VXLAN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When Executed by Another Workflow": {
+      "main": [
+        [
+          {
+            "node": "Transorm UUID to VXLAN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "8e1c96c4-3e60-4aa4-996c-95f19e6a0b88",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+  },
+  "id": "zLwgaMQVwnH1y8MJ",
+  "tags": [
+    {
+      "updatedAt": "2026-01-07T10:14:03.837Z",
+      "createdAt": "2026-01-07T10:14:03.837Z",
+      "id": "yCB505xTB8gNFQEC",
+      "name": "Proxmox SDN"
+    },
+    {
+      "name": "CyberCore",
+      "id": "SqxAywq1R3kw8S7M",
+      "updatedAt": "2026-01-07T10:54:17.889Z",
+      "createdAt": "2026-01-07T10:54:17.889Z"
+    }
+  ]
+}
