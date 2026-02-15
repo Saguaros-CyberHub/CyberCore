@@ -1,11 +1,16 @@
 # 🧠 CyberCore: The Central Brain of CyberHub
 
-## 🔗 Responsibilities:
-* User provisioning & identity mapping
-* Profile DB (badges, VMs, progress, achievements)
-* Inter-module orchestration via webhooks or API calls
-* Audit logs & activity tracking
-* Triggering and monitoring workflows across modules via n8n
+CyberCore is the CyberHub control plane. It provides the system of record, orchestration glue, and lifecycle tracking that allows CyberHub modules to function as a coordinated platform rather than standalone services.
+
+This repository contains CyberCore service configuration, database schema, orchestration patterns, and local development tooling.
+
+## Responsibilities
+
+- User provisioning and identity mapping
+- Profile database (badges, allocations, progress, achievements)
+- Inter-module orchestration via webhooks and API calls
+- Audit logs and activity tracking
+- Triggering and monitoring workflows across modules via n8n
 
 ## Flowchart
 
@@ -47,7 +52,14 @@ flowchart LR
   GRAF --- PRM
 ```
 
-## Database Schema Overview
+## Architecture Notes
+
+CyberCore follows a simple control-plane pattern:
+
+- PostgreSQL is the system of record for users, modules, resources, allocations, and audit history.
+- Redis is an ephemeral fast path for workflow idempotency, counters, TTL caches, and queue coordination.
+- n8n executes workflows that implement provisioning, teardown, synchronization, and module-specific operations.
+- External systems such as Proxmox, OPNsense, Ceph, and Moodle are treated as providers. CyberCore stores references and state, then drives changes through workflows.
 
 ## Database Schema Overview
 
@@ -130,7 +142,7 @@ flowchart LR
 - metadata (JSONB; e.g., evidence, score)
 - PK: (user_id, badge_id)
 
-# Quick Start
+## Quick Start
 
 ### Run Docker Compose
 
@@ -139,16 +151,17 @@ docker compose -f cybercore-compose.yml up -d
 ```
 
 ### Web Interfaces
-- **Adminer (Database)**: http://localhost:8080
-- **n8n (Workflows)**: http://localhost:5678
+
+- Adminer (Database): http://localhost:8080
+- n8n (Workflows): http://localhost:5678
 
 ## Service Overview
 
 | Service | Port | Description |
 |---------|------|-------------|
-| PostgreSQL | 5432 | Main database (cybercore) |
-| Redis | 6379 | Cache and session storage |
-| n8n | 5678 | Workflow automation |
+| PostgreSQL | 5432 | Main database (CyberCore system of record) |
+| Redis | 6379 | Ephemeral cache, counters, idempotency, queues |
+| n8n | 5678 | Workflow automation and orchestration |
 | Adminer | 8080 | Database web interface |
 
 Run `./cybercore.sh` to access the interactive management interface.
@@ -157,29 +170,30 @@ Run `./cybercore.sh` to access the interactive management interface.
 
 When you start services through the CLI or scripts, the following are launched:
 
-1. **PostgreSQL Database** (`cybercore-postgres`)
+1. PostgreSQL Database (`cybercore-postgres`)
    - Port: 5432
    - Database: cyberhub_core
    - Username: cyberhub
    - Password: cyberpass
 
-2. **Adminer Web Interface**
+2. Adminer Web Interface
    - URL: http://localhost:8080
    - Use database credentials above to connect
-
 
 ## Environment Variables
 
 ### Database Settings
+
 ```bash
 DB_HOST=your-postgres-host                   # Default: localhost
-DB_PORT=5432                                  # Default: 5432
+DB_PORT=5432                                 # Default: 5432
 DB_NAME=your_database_name                   # Required
-DB_USER=your_username                         # Required
-DB_PASSWORD=your_password                     # Required
+DB_USER=your_username                        # Required
+DB_PASSWORD=your_password                    # Required
 ```
 
 ### n8n Settings
+
 ```bash
 N8N_ENCRYPTION_KEY=your-32-char-key          # Required (generated if not set)
 N8N_WEBHOOK_URL=http://localhost:5678        # Default webhook URL
@@ -188,44 +202,55 @@ N8N_WEBHOOK_URL=http://localhost:5678        # Default webhook URL
 ## Database Schema
 
 The PostgreSQL database includes tables for:
+
 - User profiles and authentication
+- Module registration and module awareness
+- Resources and provider references
+- Allocations and lifetime tracking
 - Badges and achievements
-- VM assignments and progress tracking
 - Activity and audit logs
 - Session management
 
-## Monitoring & Logs
+## Monitoring and Logs
 
-The service logs all operations:
-- **INFO**: Successful operations
-- **WARNING**: Non-critical issues
-- **ERROR**: Operation failures
-- **DEBUG**: Detailed debugging information
+CyberCore should be operated with basic observability in place. The system should capture:
+
+- Workflow execution history and failures (n8n)
+- Database health and slow queries (PostgreSQL)
+- Queue and cache health (Redis)
+- Provider health checks for Proxmox, OPNsense, and module APIs where applicable
+
+Log levels are typically:
+
+- INFO: Successful operations
+- WARNING: Non-critical issues
+- ERROR: Operation failures
+- DEBUG: Detailed debugging information
 
 ## Troubleshooting
 
 ### Common Issues
 
-1. **Database connection errors**:
+1. Database connection errors:
    - Verify PostgreSQL is running: `docker ps | grep postgres`
-   - Check credentials in `.env` file
-   - Ensure database exists
+   - Check credentials in `.env`
+   - Ensure the database exists
 
-2. **n8n workflow issues**:
+2. n8n workflow issues:
    - Check n8n logs: `docker logs cybercore-n8n-webhook`
-   - Verify encryption key is set
-   - Ensure Redis is running for queue mode
+   - Verify the encryption key is set
+   - Ensure Redis is running if using queue mode
 
-3. **Container startup failures**:
-   - Check Docker daemon is running
+3. Container startup failures:
+   - Check Docker is running
    - Verify port availability
-   - Review logs with `docker-compose logs`
+   - Review logs: `docker compose -f cybercore-compose.yml logs`
 
-4. **Permission errors**:
+4. Permission errors:
    - Ensure proper file permissions on data directories
    - Check Docker socket permissions
-   - Verify user is in docker group
+   - Verify the user is in the docker group
 
 ## Support
 
-For issues or questions about CyberCore, please refer to the main CyberHub documentation or contact the system administrators.
+For CyberCore issues, refer to the main CyberHub documentation in the Saguaros-CyberHub repository and open an issue in this repository for module-specific problems.

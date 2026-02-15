@@ -19,6 +19,8 @@ secrets.env
 site.yml
 site.json
 *.code-workspace
+**/credentials/*
+cybercore-postgres.jsn
 
 # Added for install.sh
 /secrets/
