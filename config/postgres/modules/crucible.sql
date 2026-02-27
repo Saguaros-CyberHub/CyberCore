@@ -5,90 +5,19 @@ VALUES ('crucible', 'The Crucible', TRUE)
 ON CONFLICT (key) DO NOTHING;
 
 -- Module tables (enabled)
-CREATE TABLE IF NOT EXISTS crucible_event (
-  event_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name       TEXT NOT NULL,
-  starts_at  TIMESTAMPTZ,
-  ends_at    TIMESTAMPTZ,
-  metadata   JSONB NOT NULL DEFAULT '{}'::jsonb
-);
 
 CREATE TABLE IF NOT EXISTS crucible_score (
   score_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  event_id   UUID NOT NULL REFERENCES crucible_event(event_id) ON DELETE CASCADE,
-  user_id    UUID NOT NULL REFERENCES app_user(user_id) ON DELETE CASCADE,
+  event_id   UUID NOT NULL REFERENCES cybercore_event(event_id) ON DELETE CASCADE,
+  user_id    UUID NOT NULL REFERENCES cybercore_user(user_id) ON DELETE CASCADE,
   points     INT NOT NULL DEFAULT 0,
   submitted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (event_id, user_id)
 );
 
 
-COMMENT ON TABLE crucible_event IS
-  'Crucible CTF events with start/end times and metadata.';
-
 COMMENT ON TABLE crucible_score IS
   'User scores for Crucible events.';
-
--- Per-user / per-event Crucible lanes (range instances)
-
--- Lane status enum (idempotent)
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_type WHERE typname = 'crucible_lane_status'
-  ) THEN
-    CREATE TYPE crucible_lane_status AS ENUM (
-      'pending',     -- created, not yet provisioning
-      'deploying',   -- provisioning in progress
-      'active',      -- ready for use
-      'suspended',   -- temporarily disabled
-      'error',       -- failed deployment
-      'deleted'      -- torn down / archived
-    );
-  END IF;
-END$$;
-
--- Main lane table
-CREATE TABLE IF NOT EXISTS crucible_lane (
-  lane_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-  event_id   UUID
-    REFERENCES crucible_event(event_id)
-    ON DELETE CASCADE,
-
-  user_id    UUID NOT NULL
-    REFERENCES app_user(user_id)
-    ON DELETE CASCADE,
-
-  name       TEXT, -- optional human label
-
-  status     crucible_lane_status NOT NULL DEFAULT 'pending',
-
-  -- Deterministic VXLAN VNI for this lane
-  vxlan_id   INTEGER,
-
-  -- Flexible config for networking, VMs, access, flags, etc.
-  config     JSONB NOT NULL DEFAULT '{}'::jsonb,
-
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Helpful indexes
-CREATE INDEX IF NOT EXISTS crucible_lane_event_idx
-  ON crucible_lane (event_id);
-
-CREATE INDEX IF NOT EXISTS crucible_lane_user_idx
-  ON crucible_lane (user_id);
-
--- One lane per (event, user) (optional)
-CREATE UNIQUE INDEX IF NOT EXISTS crucible_lane_event_user_uniq
-  ON crucible_lane (event_id, user_id);
-
--- Enforce globally unique VXLANs (optional; remove if you don't want this)
-CREATE UNIQUE INDEX IF NOT EXISTS crucible_lane_vxlan_unique_idx
-  ON crucible_lane (vxlan_id)
-  WHERE vxlan_id IS NOT NULL;
 
 -- =====================================================================
 -- Crucible challenge catalog
@@ -222,7 +151,7 @@ CREATE INDEX IF NOT EXISTS crucible_challenge_metadata_gin_idx
 -- Team that plays in an event
 CREATE TABLE IF NOT EXISTS crucible_team (
   team_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  event_id   UUID NOT NULL REFERENCES crucible_event(event_id) ON DELETE CASCADE,
+  event_id   UUID NOT NULL REFERENCES cybercore_event(event_id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
   metadata   JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -231,7 +160,7 @@ CREATE TABLE IF NOT EXISTS crucible_team (
 -- Users belonging to a team
 CREATE TABLE IF NOT EXISTS crucible_team_member (
   team_id    UUID NOT NULL REFERENCES crucible_team(team_id) ON DELETE CASCADE,
-  user_id    UUID NOT NULL REFERENCES app_user(user_id)      ON DELETE CASCADE,
+  user_id    UUID NOT NULL REFERENCES cybercore_user(user_id)      ON DELETE CASCADE,
   role       TEXT, -- "captain", "member", etc.
   joined_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (team_id, user_id)
@@ -239,23 +168,23 @@ CREATE TABLE IF NOT EXISTS crucible_team_member (
 
 CREATE TABLE IF NOT EXISTS crucible_lane_group (
   lane_group_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  event_id      UUID NOT NULL REFERENCES crucible_event(event_id) ON DELETE CASCADE,
+  event_id      UUID NOT NULL REFERENCES cybercore_event(event_id) ON DELETE CASCADE,
   name          TEXT,
   metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-ALTER TABLE crucible_lane
+ALTER TABLE cybercore_lane
   ADD COLUMN IF NOT EXISTS team_id UUID
     REFERENCES crucible_team(team_id)
     ON DELETE SET NULL;
 
-ALTER TABLE crucible_lane
+ALTER TABLE cybercore_lane
   ADD COLUMN IF NOT EXISTS lane_group_id UUID
     REFERENCES crucible_lane_group(lane_group_id)
     ON DELETE SET NULL;
 
-ALTER TABLE crucible_lane
+ALTER TABLE cybercore_lane
   ADD COLUMN IF NOT EXISTS challenge_id UUID
     REFERENCES crucible_challenge(challenge_id)
     ON DELETE SET NULL;
@@ -269,7 +198,7 @@ COMMENT ON TABLE crucible_team_member IS
 COMMENT ON TABLE crucible_lane_group IS
   'Groups of lanes within a Crucible event for organizational purposes.';
 
-COMMENT ON TABLE crucible_lane IS
+COMMENT ON TABLE cybercore_lane IS
   'Crucible lanes (range instances) with optional team, group, and challenge associations.';
 
 ----------------------------------------------------------------------------
