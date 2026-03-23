@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS cybercore_user (
   email          TEXT NOT NULL,
   first_name     TEXT,
   last_name      TEXT,
+  organization   TEXT NOT NULL DEFAULT 'Independent',
+  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
   auth_provider  TEXT NOT NULL DEFAULT 'local' CHECK (auth_provider IN ('local','keycloak')),
   password_hash  TEXT,
   password_alg   TEXT,
@@ -168,25 +170,13 @@ CREATE TABLE IF NOT EXISTS cybercore_event (
 
 CREATE TABLE IF NOT EXISTS cybercore_lane (
   lane_id    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-  event_id   UUID
-    REFERENCES cybercore_event(event_id)
-    ON DELETE CASCADE,
-
-  user_id    UUID NOT NULL
-    REFERENCES cybercore_user(user_id)
-    ON DELETE CASCADE,
-
-  name       TEXT, -- optional human label
-
+  event_id   UUID REFERENCES cybercore_event(event_id) ON DELETE CASCADE,
+  user_id    UUID NOT NULL REFERENCES cybercore_user(user_id) ON DELETE CASCADE,
+  module_key TEXT REFERENCES cybercore_module(key) ON DELETE RESTRICT,
+  name       TEXT,
   status     cybercore_lane_status NOT NULL DEFAULT 'pending',
-
-  -- Deterministic VXLAN VNI for this lane
   vxlan_id   INTEGER,
-
-  -- Flexible config for networking, VMs, access, flags, etc.
   config     JSONB NOT NULL DEFAULT '{}'::jsonb,
-
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
