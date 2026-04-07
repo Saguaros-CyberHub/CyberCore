@@ -1,0 +1,3422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberHub Admin | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    /* Admin Dashboard Styles */
+    .admin-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    .stat-card {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 1.25rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    .stat-icon {
+      width: 48px; height: 48px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.3rem;
+    }
+    .stat-icon.guac { background: linear-gradient(135deg, #38a169, #2f855a); }
+    .stat-icon.conn { background: linear-gradient(135deg, #4299e1, #3182ce); }
+    .stat-icon.users { background: linear-gradient(135deg, #9f7aea, #805ad5); }
+    .stat-icon.active { background: linear-gradient(135deg, #ed8936, #dd6b20); }
+    .stat-content h3 { font-size: 1.6rem; font-weight: 700; color: var(--gray-900); margin: 0; }
+    .stat-content p { font-size: 0.85rem; color: var(--gray-500); margin: 0.2rem 0 0; }
+
+    /* Tabs */
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0; }
+    .tab-btn {
+      padding: 0.6rem 1.2rem; border: none; background: none;
+      font-size: 0.9rem; font-weight: 500; color: var(--gray-500);
+      cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover { color: var(--gray-700); }
+    .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Tables */
+    .admin-table {
+      width: 100%; border-collapse: collapse; background: var(--bg-card, white);
+      border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    .admin-table th {
+      text-align: left; padding: 0.75rem 1rem; font-size: 0.8rem;
+      text-transform: uppercase; color: var(--gray-500); background: #f7fafc;
+      font-weight: 600; letter-spacing: 0.03em;
+    }
+    .admin-table td { padding: 0.75rem 1rem; font-size: 0.9rem; border-top: 1px solid #edf2f7; }
+    .admin-table tr:hover td { background: #f7fafc; }
+
+    /* Status badges */
+    .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+    .badge-green { background: #c6f6d5; color: #22543d; }
+    .badge-red { background: #fed7d7; color: #9b2c2c; }
+    .badge-blue { background: #bee3f8; color: #2a4365; }
+    .badge-yellow { background: #fefcbf; color: #744210; }
+    .badge-gray { background: #edf2f7; color: #4a5568; }
+
+    /* Connection tree */
+    .tree-group { margin-left: 1.5rem; border-left: 2px solid #e2e8f0; padding-left: 1rem; }
+    .tree-item { padding: 0.5rem 0; display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
+    .tree-item .icon { font-size: 1rem; }
+    .tree-item .name { font-weight: 500; }
+    .tree-item .meta { color: var(--gray-500); font-size: 0.8rem; }
+
+    /* Action bar */
+    .action-bar { display: flex; gap: 0.75rem; margin-bottom: 1.25rem; flex-wrap: wrap; align-items: center; }
+    .action-bar .btn { font-size: 0.85rem; }
+
+    /* Modal */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      display: none; z-index: 1000; align-items: center; justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-content {
+      background: var(--bg-card, white); border-radius: 12px; width: 90%; max-width: 560px;
+      max-height: 80vh; overflow-y: auto; padding: 1.5rem;
+    }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
+    .modal-header h3 { margin: 0; font-size: 1.1rem; }
+    .modal-close { background: none; border: none; font-size: 1.5rem; cursor: pointer; color: var(--gray-500); }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 0.3rem; color: var(--gray-700); }
+    .form-group input, .form-group select {
+      width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #e2e8f0;
+      border-radius: 8px; font-size: 0.9rem;
+    }
+
+    /* Status indicator */
+    .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 0.4rem; }
+    .status-dot.online { background: #48bb78; }
+    .status-dot.offline { background: #fc8181; }
+
+    /* Protocol badge colors */
+    .proto-rdp { background: #bee3f8; color: #2a4365; }
+    .proto-ssh { background: #c6f6d5; color: #22543d; }
+    .proto-vnc { background: #fefcbf; color: #744210; }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .stat-card {
+      background: #111527;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .tabs {
+      border-bottom-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .tab-btn {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .tab-btn:hover {
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .tab-btn.active {
+      color: #5b8cff;
+      border-bottom-color: #5b8cff;
+    }
+    [data-theme="dark"] .admin-table {
+      background: #111527;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .admin-table th {
+      background: #0a0d1a;
+      color: #8890b0;
+    }
+    [data-theme="dark"] .admin-table td {
+      border-top-color: rgba(99,130,255,0.1);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .admin-table tr:hover td {
+      background: #161b33;
+    }
+    [data-theme="dark"] .badge-green {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .badge-red {
+      background: rgba(255,92,114,0.15);
+      color: #ff5c72;
+    }
+    [data-theme="dark"] .badge-blue {
+      background: rgba(91,140,255,0.15);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .badge-yellow {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] .badge-gray {
+      background: #1a2040;
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .tree-group {
+      border-left-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .tree-item .name {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .modal-overlay.active {
+      background: rgba(0,0,0,0.7);
+    }
+    [data-theme="dark"] .modal-content {
+      background: #111527;
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .form-group input,
+    [data-theme="dark"] .form-group select {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .proto-rdp {
+      background: rgba(91,140,255,0.15);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .proto-ssh {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .proto-vnc {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] #tab-deploy > div > div[style*="background: white"] {
+      background: #111527 !important;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
+    }
+    [data-theme="dark"] #tab-deploy div[style*="background: #f7fafc"] {
+      background: #0a0d1a !important;
+    }
+    [data-theme="dark"] #tab-deploy div[style*="border: 1px solid #e2e8f0"] {
+      border-color: rgba(99,130,255,0.12) !important;
+    }
+    [data-theme="dark"] #tab-deploy input,
+    [data-theme="dark"] #tab-deploy select {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] #laneCapacityInfo {
+      background: rgba(91,140,255,0.1) !important;
+      color: #7ba6ff !important;
+    }
+    [data-theme="dark"] #lanesFilter {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <h2 style="margin: 0; font-size: 1.1rem;">CyberHub Administration</h2>
+        </div>
+        <div class="header-right">
+          <button class="header-btn" onclick="startWalkthrough()" title="Help / Tour" style="font-size: 1.1rem;">?</button>
+          <button class="header-btn" onclick="refreshAll()" title="Refresh">🔄</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <!-- Status Bar -->
+        <div class="admin-grid" id="statsBar">
+          <div class="stat-card">
+            <div class="stat-icon guac"><span id="guacStatusIcon">⏳</span></div>
+            <div class="stat-content">
+              <h3 id="guacStatusText" style="font-size: 1rem;">Checking...</h3>
+              <p>Guacamole API</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon conn">🔗</div>
+            <div class="stat-content">
+              <h3 id="connCount">-</h3>
+              <p>Connections</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon users">👤</div>
+            <div class="stat-content">
+              <h3 id="userCount">-</h3>
+              <p>Guac Users</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon active">⚡</div>
+            <div class="stat-content">
+              <h3 id="activeCount">-</h3>
+              <p>Active Sessions</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cluster Health Bar -->
+        <div id="clusterHealthBar" style="background: var(--bg-card, white); border-radius: 12px; padding: 1rem 1.25rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem; display: none;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+            <h4 style="margin: 0; font-size: 0.9rem; display: flex; align-items: center; gap: 0.5rem;">
+              <span>Cluster Resources</span>
+              <span id="clusterHealthStatus" class="badge badge-gray" style="font-size: 0.7rem;">Loading</span>
+            </h4>
+            <span style="font-size: 0.8rem; color: var(--gray-500);">
+              VMs: <strong id="clusterVMCount">-</strong>
+            </span>
+          </div>
+          <div id="clusterNodeGauges" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem;"></div>
+          <div id="clusterWarnings" style="margin-top: 0.5rem; display: none;"></div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+          <button class="tab-btn active" onclick="switchTab('connections', this)">Connections</button>
+          <button class="tab-btn" onclick="switchTab('sessions', this)">Active Sessions</button>
+          <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lane</button>
+          <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
+          <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
+          <button class="tab-btn" onclick="switchTab('actlog', this)">Activity Log</button>
+          <button class="tab-btn" onclick="switchTab('challenges', this)">Challenge Templates</button>
+          <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Vuln Scripts</button>
+        </div>
+
+        <!-- TAB: Connections -->
+        <div class="tab-content active" id="tab-connections">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateConnectionModal()">+ New Connection</button>
+            <button class="btn btn-outline" onclick="showCreateGroupModal()">+ New Group</button>
+            <button class="btn btn-outline" onclick="loadConnections()">Refresh</button>
+          </div>
+          <div id="connectionTree"></div>
+        </div>
+
+        <!-- TAB: Users (merged Guac + Clinic) -->
+        <div class="tab-content" id="tab-users">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateUserModal()">+ New Guac User</button>
+            <button class="btn btn-outline" onclick="loadMergedUsers()">Refresh</button>
+          </div>
+
+          <!-- Group Controls -->
+          <div id="groupControlsList" style="margin-bottom: 1.5rem;"></div>
+
+          <!-- All Users Table -->
+          <div id="mergedUsersTable"></div>
+        </div>
+
+        <!-- TAB: Active Sessions -->
+        <div class="tab-content" id="tab-sessions">
+          <div class="action-bar">
+            <button class="btn btn-outline" onclick="loadActiveSessions()">Refresh</button>
+          </div>
+          <div id="sessionsTable"></div>
+        </div>
+
+        <!-- TAB: Deploy Lane -->
+        <div class="tab-content" id="tab-deploy">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start;">
+
+            <!-- Group Deployment Form -->
+            <div style="background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Deploy Group Environment</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
+                Create a batch of instructor + student accounts with a Guacamole connection group. Optionally deploy CyberHub lanes per student.
+              </p>
+              <div class="form-group">
+                <label>Group Name</label>
+                <input type="text" id="deployGroupName" placeholder="e.g., Spring-2026-Lab1">
+              </div>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+                <div class="form-group">
+                  <label># of Instructors</label>
+                  <input type="number" id="deployNumInstructors" value="1" min="0" max="10">
+                </div>
+                <div class="form-group">
+                  <label># of Students</label>
+                  <input type="number" id="deployNumStudents" value="10" min="1" max="100">
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Module</label>
+                <select id="deployGroupModule" onchange="loadChallengesForSelect('deployGroupModule', 'deployGroupChallenge')">
+                  <option value="">Loading modules...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Challenge Key (optional for accounts only)</label>
+                <select id="deployGroupChallenge" onchange="onGroupChallengeSelected()">
+                  <option value="">Select a module first...</option>
+                </select>
+              </div>
+              <div class="form-group" style="display: flex; align-items: center; gap: 0.75rem;">
+                <input type="checkbox" id="deployAttackBoxes" style="width: auto;">
+                <label for="deployAttackBoxes" style="margin: 0;">Create Attack Boxes</label>
+              </div>
+              <!-- Vuln Script Selector for Group Deploy -->
+              <div id="groupDeployVulnScriptPanel" style="display: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; max-height: 400px; overflow-y: auto;"></div>
+              <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: #f7fafc;">
+                <div class="form-group" style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
+                  <input type="checkbox" id="deployLanes" style="width: auto;" onchange="toggleLaneDeployInfo()">
+                  <label for="deployLanes" style="margin: 0; font-weight: 600;">Deploy CyberHub Lanes</label>
+                </div>
+                <p style="color: var(--gray-500); font-size: 0.8rem; margin: 0;">
+                  When enabled, each student gets an isolated VXLAN lane with a challenge VM + gateway.
+                  Requires a challenge key and module above. Leave unchecked to only create user accounts.
+                </p>
+                <div id="laneDeployOptions" style="display: none; margin-top: 0.75rem;">
+                  <div id="laneCapacityInfo" style="padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.8rem; background: #ebf8ff; color: #2b6cb0; margin-bottom: 0.5rem;">
+                    Checking capacity...
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <input type="checkbox" id="deployGroupUseWebhook" style="width: auto;">
+                    <label for="deployGroupUseWebhook" style="margin: 0; font-size: 0.8rem;">Use N8N Webhook (testing/development)</label>
+                  </div>
+                </div>
+              </div>
+              <button class="btn btn-primary" id="deployGroupBtn" onclick="deployGroup()" style="width: 100%;">Deploy Group</button>
+              <div id="deployGroupStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+
+            <!-- Single Lane Deployment -->
+            <div style="background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Deploy Single Lane</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
+                Deploy a CyberHub challenge lane for a single user (clones VMs, allocates VXLAN, starts environment).
+              </p>
+              <div class="form-group">
+                <label>Module</label>
+                <select id="deployModule" onchange="loadChallengesForSelect('deployModule', 'deployChallengeKey')">
+                  <option value="">Loading modules...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Challenge Key</label>
+                <select id="deployChallengeKey" onchange="onChallengeSelected()">
+                  <option value="">Select a module first...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Event ID (optional)</label>
+                <input type="text" id="deployEventId" placeholder="Leave blank for standalone">
+              </div>
+              <div style="display: flex; gap: 0.75rem; margin-bottom: 0.75rem;">
+                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f7fafc;">
+                  <input type="checkbox" id="deploySingleAttackBox" style="width: auto;">
+                  <label for="deploySingleAttackBox" style="margin: 0; font-size: 0.85rem;">Include Attack Box (Kali)</label>
+                </div>
+                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f7fafc;">
+                  <input type="checkbox" id="deployUseWebhook" style="width: auto;">
+                  <label for="deployUseWebhook" style="margin: 0; font-size: 0.85rem;">Use N8N Webhook</label>
+                </div>
+              </div>
+              <!-- Vuln Script Selector (loads when challenge selected) -->
+              <div id="deployVulnScriptPanel" style="display: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; max-height: 400px; overflow-y: auto;"></div>
+              <button class="btn btn-primary" id="deployBtn" onclick="deployLane()" style="width: 100%;">Deploy Lane</button>
+              <div id="deployStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+          </div>
+
+          <!-- Deployed Groups List -->
+          <div style="margin-top: 1.5rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+              <h3 style="margin: 0;">Deployed Groups</h3>
+              <button class="btn btn-outline btn-sm" onclick="loadDeployedGroups()" style="font-size: 0.8rem;">Refresh</button>
+            </div>
+            <div id="deployedGroupsList"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Active Lanes -->
+        <div class="tab-content" id="tab-lanes">
+          <div class="action-bar">
+            <button class="btn btn-outline" onclick="loadLanes()">Refresh</button>
+            <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+              <option value="">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="deploying">Deploying</option>
+              <option value="error">Error</option>
+              <option value="deleted">Deleted</option>
+              <option value="suspended">Suspended</option>
+            </select>
+          </div>
+          <div id="lanesTable"></div>
+
+          <!-- Persistent script execution panel (stays visible when modal closes) -->
+          <div id="scriptExecPanel" style="display: none; margin-top: 1rem; background: var(--bg-card, white); border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden;">
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; background: #1a202c; color: #e2e8f0;">
+              <strong style="font-size: 0.9rem;">Script Execution</strong>
+              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                <span id="scriptExecSummary" style="font-size: 0.75rem; color: #a0aec0;"></span>
+                <button onclick="clearScriptExecPanel()" style="background: none; border: 1px solid #4a5568; color: #a0aec0; border-radius: 4px; padding: 0.1rem 0.4rem; font-size: 0.7rem; cursor: pointer;">Clear</button>
+              </div>
+            </div>
+            <div id="scriptExecOutputs" style="padding: 0.75rem; max-height: 500px; overflow-y: auto;"></div>
+          </div>
+        </div>
+
+        <!-- TAB: Activity Log -->
+        <div class="tab-content" id="tab-actlog">
+          <div class="action-bar">
+            <input type="text" id="actlogSearch" placeholder="Search actions, users..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem; width: 200px;">
+            <select id="actlogAction" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+              <option value="">All Actions</option>
+              <option value="login">Login</option>
+              <option value="logout">Logout</option>
+              <option value="register">Register</option>
+              <option value="deploy_lane">Deploy Lane</option>
+              <option value="deploy_group">Deploy Group</option>
+              <option value="delete_lane">Delete Lane</option>
+              <option value="delete_group">Delete Group</option>
+              <option value="toggle_accounts">Toggle Accounts</option>
+              <option value="submission">Submission</option>
+              <option value="review">Review</option>
+              <option value="profile_generation">Profile Generation</option>
+            </select>
+            <button class="btn btn-outline" onclick="loadActivityLog()">Search</button>
+            <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; margin-left: auto;">
+              <input type="checkbox" id="actlogAutoRefresh" style="width: auto;"> Auto-refresh
+            </label>
+          </div>
+          <div id="actlogTable"></div>
+          <div id="actlogPagination" style="display: flex; gap: 0.5rem; justify-content: center; margin-top: 0.75rem;"></div>
+        </div>
+
+        <!-- TAB: Challenges -->
+        <div class="tab-content" id="tab-challenges">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateChallengeForm()">+ New Challenge</button>
+            <button class="btn btn-outline" onclick="loadChallengeTemplates()">Refresh</button>
+          </div>
+
+          <!-- Create Challenge Form (hidden by default) -->
+          <div id="createChallengeForm" style="display: none; background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
+              <h3 style="margin: 0;">Create New Challenge</h3>
+              <button class="btn btn-sm btn-outline" onclick="document.getElementById('createChallengeForm').style.display='none'">&times; Close</button>
+            </div>
+
+            <!-- Basic Info -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+              <div class="form-group">
+                <label>Challenge Name</label>
+                <input type="text" id="newChalName" placeholder="e.g., DunderCorp Network">
+              </div>
+              <div class="form-group">
+                <label>Challenge Key</label>
+                <input type="text" id="newChalKey" placeholder="e.g., dundercorp-lab">
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Description</label>
+              <textarea id="newChalDesc" rows="2" placeholder="What this challenge environment contains..."></textarea>
+            </div>
+
+            <!-- Settings Row -->
+            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 1rem;">
+              <div class="form-group">
+                <label>Zone Abbrev (8 chars)</label>
+                <input type="text" id="newChalZone" maxlength="8" placeholder="auto" style="font-family: monospace;">
+              </div>
+              <div class="form-group">
+                <label>Max Lanes</label>
+                <input type="number" id="newChalMaxLanes" value="10" min="1" max="200">
+              </div>
+              <div class="form-group">
+                <label>Difficulty</label>
+                <select id="newChalDiff">
+                  <option value="beginner">Beginner</option>
+                  <option value="intermediate" selected>Intermediate</option>
+                  <option value="advanced">Advanced</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Module</label>
+                <select id="newChalModule">
+                  <option value="crucible">Crucible</option>
+                  <option value="cyberlabs">CyberLabs</option>
+                  <option value="forge">Forge</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- VM Builder -->
+            <div style="border: 1px solid #e2e8f0; border-radius: 10px; padding: 1rem; margin-top: 0.5rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+                <h4 style="margin: 0; font-size: 0.95rem;">Virtual Machines</h4>
+                <button class="btn btn-sm btn-outline" onclick="addChallengeVM()">+ Add VM</button>
+              </div>
+              <div id="challengeVmList"></div>
+            </div>
+
+            <button class="btn btn-primary" onclick="createChallenge()" style="width: 100%; margin-top: 1rem;">Create Challenge (DB + SDN Zone + VNets)</button>
+            <div id="createChallengeStatus" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>
+          </div>
+
+          <!-- Challenge List -->
+          <div id="challengeTemplatesList"></div>
+        </div>
+
+        <!-- TAB: Vuln Scripts -->
+        <div class="tab-content" id="tab-vulnscripts">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateScriptModal()">+ New Script</button>
+            <button class="btn btn-outline" onclick="loadVulnScripts()">Refresh</button>
+            <select id="vulnScriptCategoryFilter" onchange="loadVulnScripts()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+              <option value="">All Categories</option>
+            </select>
+          </div>
+          <div id="vulnScriptsList"></div>
+        </div>
+
+        <!-- (User Management merged into Users tab above) -->
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Create Connection Modal -->
+  <div class="modal-overlay" id="createConnModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Connection</h3>
+        <button class="modal-close" onclick="closeModal('createConnModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="connName" placeholder="e.g., student1-kali">
+      </div>
+      <div class="form-group">
+        <label>Protocol</label>
+        <select id="connProtocol">
+          <option value="rdp">RDP</option>
+          <option value="ssh">SSH</option>
+          <option value="vnc">VNC</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Hostname</label>
+        <input type="text" id="connHostname" placeholder="e.g., 192.168.1.10">
+      </div>
+      <div class="form-group">
+        <label>Port</label>
+        <input type="text" id="connPort" placeholder="e.g., 3389, 22, or 5900">
+      </div>
+      <div class="form-group">
+        <label>Parent Group</label>
+        <select id="connParentGroup"><option value="ROOT">ROOT</option></select>
+      </div>
+      <div class="form-group">
+        <label>Username (optional)</label>
+        <input type="text" id="connUsername" placeholder="Auto-login username">
+      </div>
+      <div class="form-group">
+        <label>Password (optional)</label>
+        <input type="password" id="connPassword" placeholder="Auto-login password">
+      </div>
+      <button class="btn btn-primary" onclick="createConnection()">Create Connection</button>
+    </div>
+  </div>
+
+  <!-- Create Group Modal -->
+  <div class="modal-overlay" id="createGroupModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Connection Group</h3>
+        <button class="modal-close" onclick="closeModal('createGroupModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Group Name</label>
+        <input type="text" id="groupName" placeholder="e.g., Lane-001">
+      </div>
+      <div class="form-group">
+        <label>Type</label>
+        <select id="groupType">
+          <option value="ORGANIZATIONAL">Organizational</option>
+          <option value="BALANCING">Load Balancing</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Parent Group</label>
+        <select id="groupParent"><option value="ROOT">ROOT</option></select>
+      </div>
+      <button class="btn btn-primary" onclick="createGroup()">Create Group</button>
+    </div>
+  </div>
+
+  <!-- Create User Modal -->
+  <div class="modal-overlay" id="createUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>New Guacamole User</h3>
+        <button class="modal-close" onclick="closeModal('createUserModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="newUsername" placeholder="e.g., student1">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="newPassword" placeholder="Initial password">
+      </div>
+      <button class="btn btn-primary" onclick="createUser()">Create User</button>
+    </div>
+  </div>
+
+  <!-- User Permissions Modal -->
+  <div class="modal-overlay" id="permissionsModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Permissions — <span id="permUsername"></span></h3>
+        <button class="modal-close" onclick="closeModal('permissionsModal')">&times;</button>
+      </div>
+      <div id="permissionsBody" style="font-size: 0.9rem;"></div>
+    </div>
+  </div>
+
+  <!-- Vuln Script Editor Modal -->
+  <div class="modal-overlay" id="scriptEditorModal">
+    <div class="modal-content" style="max-width: 700px; max-height: 90vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 id="scriptEditorTitle">New Vulnerability Script</h3>
+        <button class="modal-close" onclick="closeModal('scriptEditorModal')">&times;</button>
+      </div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="form-group"><label>Slug</label><input type="text" id="scriptSlug" placeholder="e.g., smb-null-session"></div>
+        <div class="form-group"><label>Name</label><input type="text" id="scriptName" placeholder="e.g., SMB Null Session"></div>
+      </div>
+      <div class="form-group"><label>Description</label><textarea id="scriptDesc" rows="2" placeholder="What this script does..."></textarea></div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+        <div class="form-group">
+          <label>Category</label>
+          <select id="scriptCategory">
+            <option>Initial Setup</option><option>Compile Tools</option><option>Network Services</option>
+            <option>Web Applications</option><option>Web Server</option><option>User Simulation</option>
+            <option>Privilege Escalation</option><option>Persistence</option><option>Defense Evasion</option>
+            <option>Data Exfiltration</option><option>Custom</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>OS Target</label>
+          <select id="scriptOS"><option value="windows">Windows</option><option value="linux">Linux</option><option value="any">Any</option></select>
+        </div>
+        <div class="form-group">
+          <label>Difficulty</label>
+          <select id="scriptDifficulty"><option value="beginner">Beginner</option><option value="intermediate" selected>Intermediate</option><option value="advanced">Advanced</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>Services Exposed (comma-separated)</label><input type="text" id="scriptServices" placeholder="e.g., 445/SMB, 22/SSH"></div>
+      <div class="form-group"><label>Depends On (comma-separated slugs)</label><input type="text" id="scriptDependsOn" placeholder="e.g., init-setup, life-artifacts"></div>
+      <div class="form-group"><label>Script Arguments (flags passed to the script)</label><input type="text" id="scriptArgs" placeholder="e.g., -Setup -Start"></div>
+      <div class="form-group">
+        <label>Script Content</label>
+        <textarea id="scriptContent" rows="15" style="font-family: monospace; font-size: 0.8rem; white-space: pre; tab-size: 2;" placeholder="Paste your PowerShell or Bash script here..."></textarea>
+      </div>
+      <input type="hidden" id="scriptEditId" value="">
+      <button class="btn btn-primary" onclick="saveVulnScript()" style="width: 100%;">Save Script</button>
+    </div>
+  </div>
+
+  <!-- Challenge Template Editor Modal -->
+  <div class="modal-overlay" id="templateEditorModal">
+    <div class="modal-content" style="max-width: 800px; max-height: 90vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3 id="templateEditorTitle">New Challenge Template</h3>
+        <button class="modal-close" onclick="closeModal('templateEditorModal')">&times;</button>
+      </div>
+      <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1rem;">
+        <div class="form-group"><label>Template Name</label><input type="text" id="tplName" placeholder="e.g., DunderCorp Network"></div>
+        <div class="form-group">
+          <label>Difficulty</label>
+          <select id="tplDifficulty"><option value="beginner">Beginner</option><option value="intermediate" selected>Intermediate</option><option value="advanced">Advanced</option></select>
+        </div>
+      </div>
+      <div class="form-group"><label>Description</label><textarea id="tplDesc" rows="2" placeholder="What this challenge network simulates..."></textarea></div>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="form-group">
+          <label>Module</label>
+          <select id="tplModule"><option value="crucible">Crucible</option><option value="cyberlabs">CyberLabs</option><option value="forge">Forge</option></select>
+        </div>
+        <div class="form-group">
+          <label>Challenge Key (for VXLAN block)</label>
+          <input type="text" id="tplChallengeKey" placeholder="e.g., metasploitable2-basic (created in N8N)">
+          <span style="font-size: 0.7rem; color: var(--gray-400);">Must match a challenge created via the "Add New Crucible Challenge" N8N workflow</span>
+        </div>
+      </div>
+
+      <h4 style="margin: 1rem 0 0.5rem;">Virtual Machines</h4>
+      <div id="tplVmList"></div>
+      <button class="btn btn-sm btn-outline" onclick="addTemplateVM()" style="margin-top: 0.5rem;">+ Add VM</button>
+
+      <h4 style="margin: 1.5rem 0 0.5rem;">Phantom Assets (appear in profile only)</h4>
+      <div id="tplPhantomList"></div>
+      <button class="btn btn-sm btn-outline" onclick="addTemplatePhantom()" style="margin-top: 0.5rem;">+ Add Phantom Host</button>
+
+      <input type="hidden" id="tplEditId" value="">
+      <button class="btn btn-primary" onclick="saveTemplate()" style="width: 100%; margin-top: 1.5rem;">Save Template</button>
+    </div>
+  </div>
+
+  <!-- Deploy Confirmation Modal -->
+  <div class="modal-overlay" id="deployConfirmModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Confirm Deployment</h3>
+        <button class="modal-close" onclick="closeModal('deployConfirmModal')">&times;</button>
+      </div>
+      <div id="deployConfirmBody" style="font-size: 0.9rem;"></div>
+      <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem;">
+        <button class="btn btn-outline" onclick="closeModal('deployConfirmModal')" style="flex: 1;">Cancel</button>
+        <button class="btn btn-primary" id="deployConfirmBtn" style="flex: 1;">Confirm Deploy</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/js/walkthrough.js"></script>
+  <script>
+    // ============================================================================
+    // HELPERS
+    // ============================================================================
+    const TOKEN = () => localStorage.getItem('token');
+    const headers = () => ({ 'Authorization': `Bearer ${TOKEN()}`, 'Content-Type': 'application/json' });
+
+    async function api(method, path, body = null) {
+      const opts = { method, headers: headers() };
+      if (body) opts.body = JSON.stringify(body);
+      const resp = await fetch(`/api/admin${path}`, opts);
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `Request failed (${resp.status})`);
+      return data;
+    }
+
+    function switchTab(tabId, btn) {
+      document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(`tab-${tabId}`).classList.add('active');
+      btn.classList.add('active');
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('active');
+      // Reset permissions modal size if it was expanded
+      if (id === 'permissionsModal') {
+        const mc = document.querySelector('#permissionsModal .modal-content');
+        mc.style.maxWidth = '';
+        mc.style.width = '';
+      }
+    }
+
+    // ============================================================================
+    // STATUS CHECK
+    // ============================================================================
+
+    async function checkGuacStatus() {
+      try {
+        const data = await api('GET', '/guac/status');
+        document.getElementById('guacStatusIcon').textContent = '✅';
+        document.getElementById('guacStatusText').textContent = 'Connected';
+        document.getElementById('guacStatusText').style.color = '#38a169';
+        return true;
+      } catch (e) {
+        document.getElementById('guacStatusIcon').textContent = '❌';
+        document.getElementById('guacStatusText').textContent = 'Offline';
+        document.getElementById('guacStatusText').style.color = '#e53e3e';
+        Toast.error('Guacamole Unreachable', e.message);
+        return false;
+      }
+    }
+
+    // ============================================================================
+    // CLUSTER HEALTH
+    // ============================================================================
+
+    async function loadClusterHealth() {
+      const bar = document.getElementById('clusterHealthBar');
+      try {
+        const health = await api('GET', '/cluster/health');
+        bar.style.display = 'block';
+
+        // VM counts
+        document.getElementById('clusterVMCount').textContent = health.totalVMs;
+
+        // Status badge
+        const statusEl = document.getElementById('clusterHealthStatus');
+        if (health.warnings.length > 0) {
+          statusEl.textContent = `${health.warnings.length} warning(s)`;
+          statusEl.className = 'badge badge-yellow';
+        } else {
+          statusEl.textContent = 'Healthy';
+          statusEl.className = 'badge badge-green';
+        }
+
+        // Node gauges
+        const gauges = document.getElementById('clusterNodeGauges');
+        gauges.innerHTML = health.nodes.map(n => `
+          <div style="background: #f7fafc; border-radius: 8px; padding: 0.6rem 0.75rem;">
+            <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.4rem;">${escHtml(n.node)} <span style="font-weight: 400; color: var(--gray-500);">(${n.vm_count} VMs)</span></div>
+            <div style="display: flex; gap: 0.5rem; font-size: 0.75rem;">
+              <div style="flex: 1;">
+                <div style="display: flex; justify-content: space-between;"><span>CPU</span><span>${n.cpu_pct}%</span></div>
+                <div style="background: #e2e8f0; border-radius: 4px; height: 6px; margin-top: 2px;">
+                  <div style="background: ${gaugeColor(n.cpu_pct)}; height: 100%; border-radius: 4px; width: ${n.cpu_pct}%;"></div>
+                </div>
+              </div>
+              <div style="flex: 1;">
+                <div style="display: flex; justify-content: space-between;"><span>MEM</span><span>${n.mem_pct}%</span></div>
+                <div style="background: #e2e8f0; border-radius: 4px; height: 6px; margin-top: 2px;">
+                  <div style="background: ${gaugeColor(n.mem_pct)}; height: 100%; border-radius: 4px; width: ${n.mem_pct}%;"></div>
+                </div>
+              </div>
+              <div style="flex: 1;">
+                <div style="display: flex; justify-content: space-between;"><span>DISK</span><span>${n.disk_pct}%</span></div>
+                <div style="background: #e2e8f0; border-radius: 4px; height: 6px; margin-top: 2px;">
+                  <div style="background: ${gaugeColor(n.disk_pct)}; height: 100%; border-radius: 4px; width: ${n.disk_pct}%;"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        `).join('');
+
+        // Warnings
+        const warnEl = document.getElementById('clusterWarnings');
+        if (health.warnings.length > 0) {
+          warnEl.style.display = 'block';
+          warnEl.innerHTML = health.warnings.map(w =>
+            `<div style="font-size: 0.8rem; color: #b7791f; padding: 0.25rem 0;">⚠ ${escHtml(w)}</div>`
+          ).join('');
+        } else {
+          warnEl.style.display = 'none';
+        }
+      } catch (e) {
+        // Proxmox may be unreachable — show bar with error
+        bar.style.display = 'block';
+        document.getElementById('clusterHealthStatus').textContent = 'Unreachable';
+        document.getElementById('clusterHealthStatus').className = 'badge badge-red';
+        document.getElementById('clusterNodeGauges').innerHTML =
+          `<p style="color: var(--gray-500); font-size: 0.8rem;">Could not reach Proxmox: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    function gaugeColor(pct) {
+      if (pct >= 90) return '#e53e3e';
+      if (pct >= 75) return '#d69e2e';
+      return '#38a169';
+    }
+
+    // ============================================================================
+    // DEPLOY CONFIRMATION FLOW
+    // ============================================================================
+
+    let pendingDeployAction = null;
+
+    function showDeployConfirmation(preview, onConfirm) {
+      const body = document.getElementById('deployConfirmBody');
+
+      const s = preview.summary;
+      let html = `
+        <div style="margin-bottom: 1rem;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
+            <div style="padding: 0.5rem 0.75rem; background: #f7fafc; border-radius: 6px;">
+              <span style="color: var(--gray-500);">New VMs</span><br>
+              <strong>${s.new_vms}</strong> <span style="color: var(--gray-500); font-size: 0.8rem;">(${s.num_lanes} lane${s.num_lanes > 1 ? 's' : ''} x ${s.vms_per_lane} VMs)</span>
+            </div>
+            <div style="padding: 0.5rem 0.75rem; background: #f7fafc; border-radius: 6px;">
+              <span style="color: var(--gray-500);">Total After</span><br>
+              <strong>${s.projected_vms}</strong> / ${s.max_vms}
+            </div>
+            <div style="padding: 0.5rem 0.75rem; background: #f7fafc; border-radius: 6px;">
+              <span style="color: var(--gray-500);">Currently Deploying</span><br>
+              <strong>${s.currently_deploying}</strong> / ${s.max_concurrent}
+            </div>
+            <div style="padding: 0.5rem 0.75rem; background: #f7fafc; border-radius: 6px;">
+              <span style="color: var(--gray-500);">Existing VMs</span><br>
+              <strong>${s.current_vms}</strong>
+            </div>
+          </div>
+        </div>`;
+
+      if (preview.errors.length > 0) {
+        html += `<div style="background: #fed7d7; color: #9b2c2c; padding: 0.75rem; border-radius: 8px; margin-bottom: 0.75rem;">
+          <strong>Cannot proceed:</strong>
+          ${preview.errors.map(e => `<div style="margin-top: 0.25rem;">• ${escHtml(e)}</div>`).join('')}
+        </div>`;
+      }
+
+      if (preview.warnings.length > 0) {
+        html += `<div style="background: #fffbeb; color: #b7791f; padding: 0.75rem; border-radius: 8px; margin-bottom: 0.75rem;">
+          <strong>Warnings:</strong>
+          ${preview.warnings.map(w => `<div style="margin-top: 0.25rem;">⚠ ${escHtml(w)}</div>`).join('')}
+        </div>`;
+      }
+
+      body.innerHTML = html;
+
+      const confirmBtn = document.getElementById('deployConfirmBtn');
+      if (preview.errors.length > 0) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Blocked';
+        confirmBtn.style.opacity = '0.5';
+      } else {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Confirm Deploy';
+        confirmBtn.style.opacity = '1';
+      }
+
+      pendingDeployAction = onConfirm;
+      confirmBtn.onclick = () => {
+        closeModal('deployConfirmModal');
+        if (pendingDeployAction) pendingDeployAction();
+        pendingDeployAction = null;
+      };
+
+      document.getElementById('deployConfirmModal').classList.add('active');
+    }
+
+    // ============================================================================
+    // CONNECTIONS
+    // ============================================================================
+
+    let cachedGroups = []; // for populating parent group selects
+
+    async function loadConnections() {
+      const container = document.getElementById('connectionTree');
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+
+      try {
+        const tree = await api('GET', '/guac/tree');
+        cachedGroups = [];
+        collectGroups(tree, 'ROOT');
+        container.innerHTML = renderTree(tree);
+        updateGroupSelects();
+
+        // Count connections
+        const conns = await api('GET', '/guac/connections');
+        document.getElementById('connCount').textContent = Object.keys(conns).length;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    function collectGroups(node, parentId) {
+      if (node.identifier) {
+        cachedGroups.push({ id: node.identifier, name: node.name || node.identifier });
+      }
+      if (node.childConnectionGroups) {
+        node.childConnectionGroups.forEach(g => collectGroups(g, node.identifier));
+      }
+    }
+
+    function updateGroupSelects() {
+      ['connParentGroup', 'groupParent'].forEach(selId => {
+        const sel = document.getElementById(selId);
+        if (!sel) return;
+        sel.innerHTML = cachedGroups.map(g =>
+          `<option value="${g.id}">${g.name}</option>`
+        ).join('');
+      });
+    }
+
+    function renderTree(node, depth = 0) {
+      let html = '';
+
+      // Render child connections
+      if (node.childConnections) {
+        node.childConnections.forEach(c => {
+          const proto = c.protocol || 'unknown';
+          html += `
+            <div class="tree-item" style="margin-left: ${depth * 1.5}rem;">
+              <span class="icon">${proto === 'rdp' ? '🖥️' : proto === 'ssh' ? '💻' : '📺'}</span>
+              <span class="name">${escHtml(c.name)}</span>
+              <span class="badge proto-${proto}" style="margin-left: 0.5rem;">${proto.toUpperCase()}</span>
+              <span class="meta" style="margin-left: auto;">
+                ${c.activeConnections > 0 ? `<span class="badge badge-green">${c.activeConnections} active</span>` : ''}
+              </span>
+              <button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteConnection('${c.identifier}', '${escHtml(c.name)}')">Delete</button>
+            </div>`;
+        });
+      }
+
+      // Render child groups recursively
+      if (node.childConnectionGroups) {
+        node.childConnectionGroups.forEach(g => {
+          const connCount = (g.childConnections || []).length;
+          const groupCount = (g.childConnectionGroups || []).length;
+          html += `
+            <div class="tree-item" style="margin-left: ${depth * 1.5}rem; font-weight: 600;">
+              <span class="icon">📁</span>
+              <span class="name">${escHtml(g.name)}</span>
+              <span class="meta" style="margin-left: 0.5rem;">${connCount} conn, ${groupCount} groups</span>
+              <button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent; margin-left: auto;" onclick="deleteGroup('${g.identifier}', '${escHtml(g.name)}')">Delete</button>
+            </div>`;
+          html += renderTree(g, depth + 1);
+        });
+      }
+
+      return html || '<p style="color: var(--gray-500); padding: 1rem;">No connections found.</p>';
+    }
+
+    async function deleteConnection(id, name) {
+      if (!confirm(`Delete connection "${name}"?`)) return;
+      try {
+        await api('DELETE', `/guac/connections/${id}`);
+        Toast.success('Deleted', `Connection "${name}" removed`);
+        loadConnections();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function deleteGroup(id, name) {
+      if (!confirm(`Delete group "${name}" and all its connections?`)) return;
+      try {
+        await api('DELETE', `/guac/groups/${id}`);
+        Toast.success('Deleted', `Group "${name}" removed`);
+        loadConnections();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    function showCreateConnectionModal() {
+      updateGroupSelects();
+      // Set default port based on protocol
+      document.getElementById('connProtocol').onchange = function() {
+        const portMap = { rdp: '3389', ssh: '22', vnc: '5900' };
+        document.getElementById('connPort').value = portMap[this.value] || '';
+      };
+      document.getElementById('connPort').value = '3389';
+      document.getElementById('createConnModal').classList.add('active');
+    }
+
+    function showCreateGroupModal() {
+      updateGroupSelects();
+      document.getElementById('createGroupModal').classList.add('active');
+    }
+
+    async function createConnection() {
+      const name = document.getElementById('connName').value.trim();
+      const protocol = document.getElementById('connProtocol').value;
+      const hostname = document.getElementById('connHostname').value.trim();
+      const port = document.getElementById('connPort').value.trim();
+      const parentIdentifier = document.getElementById('connParentGroup').value;
+      const username = document.getElementById('connUsername').value.trim();
+      const password = document.getElementById('connPassword').value;
+
+      if (!name || !hostname) {
+        Toast.warning('Missing Fields', 'Name and hostname are required');
+        return;
+      }
+
+      const parameters = { hostname, port: port || undefined };
+      if (username) parameters.username = username;
+      if (password) parameters.password = password;
+
+      // RDP-specific defaults
+      if (protocol === 'rdp') {
+        parameters['security'] = 'any';
+        parameters['ignore-cert'] = 'true';
+      }
+
+      try {
+        await api('POST', '/guac/connections', { name, protocol, parentIdentifier, parameters });
+        Toast.success('Created', `Connection "${name}" created`);
+        closeModal('createConnModal');
+        loadConnections();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function createGroup() {
+      const name = document.getElementById('groupName').value.trim();
+      const type = document.getElementById('groupType').value;
+      const parentIdentifier = document.getElementById('groupParent').value;
+
+      if (!name) { Toast.warning('Missing', 'Group name is required'); return; }
+
+      try {
+        await api('POST', '/guac/groups', { name, type, parentIdentifier });
+        Toast.success('Created', `Group "${name}" created`);
+        closeModal('createGroupModal');
+        loadConnections();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // ============================================================================
+    // USERS
+    // ============================================================================
+
+    async function loadMergedUsers() {
+      const container = document.getElementById('mergedUsersTable');
+      const groupContainer = document.getElementById('groupControlsList');
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading users...</p>';
+
+      try {
+        // Fetch clinic users, Guac users, and groups in parallel
+        const [clinicUsers, guacUsersRaw, groups] = await Promise.all([
+          api('GET', '/users'),
+          api('GET', '/guac/users').catch(() => ({})),
+          api('GET', '/groups')
+        ]);
+
+        const guacUsers = Object.values(guacUsersRaw);
+        const guacMap = {};
+        guacUsers.forEach(u => { guacMap[u.username] = u; });
+
+        // Update stat counts
+        document.getElementById('userCount').textContent = guacUsers.length;
+
+        // ── Group Controls ──
+        if (groups.length > 0) {
+          groupContainer.innerHTML = `
+            <h3 style="margin: 0 0 0.75rem;">Group Controls</h3>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem;">
+              ${await Promise.all(groups.map(async g => {
+                const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
+                const numStudents = (cfg.students || []).length;
+                let scheduleHtml = '';
+                try {
+                  const sched = await api('GET', `/groups/${g.id}/schedule`);
+                  if (sched.schedule !== null && sched.active_days) {
+                    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+                    const days = sched.active_days.map(d => dayNames[d]).join(', ');
+                    const overrideLabel = sched.override_active === true ? '<span class="badge badge-green">Override: ON</span>' :
+                                          sched.override_active === false ? '<span class="badge badge-red">Override: OFF</span>' :
+                                          '<span class="badge badge-gray">Using Schedule</span>';
+                    scheduleHtml = `
+                      <div style="font-size: 0.8rem; margin-top: 0.5rem; padding: 0.5rem; background: #f7fafc; border-radius: 6px;">
+                        <strong>Schedule:</strong> ${days} ${sched.active_start}–${sched.active_end} (${sched.timezone}) ${overrideLabel}
+                      </div>`;
+                  } else {
+                    scheduleHtml = `<div style="font-size: 0.8rem; margin-top: 0.5rem; color: var(--gray-500);">No schedule set</div>`;
+                  }
+                } catch (e) { scheduleHtml = ''; }
+
+                return `
+                <div style="background: var(--bg-card, white); border-radius: 10px; padding: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+                  <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                    <strong>${escHtml(g.group_name)}</strong>
+                    <span class="badge badge-gray">${numStudents} students</span>
+                  </div>
+                  <div style="display: flex; gap: 0.4rem; flex-wrap: wrap;">
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem;" onclick="toggleGroupActive('${g.id}', true)">Enable All</button>
+                    <button class="btn btn-sm" style="font-size: 0.75rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="toggleGroupActive('${g.id}', false)">Disable All</button>
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem;" onclick="showScheduleModal('${g.id}', '${escHtml(g.group_name)}')">Set Schedule</button>
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; color: #38a169; border-color: #38a169;" onclick="overrideSchedule('${g.id}', true)">Override: ON</button>
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; color: #e53e3e; border-color: #e53e3e;" onclick="overrideSchedule('${g.id}', false)">Override: OFF</button>
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem;" onclick="overrideSchedule('${g.id}', null)">Clear Override</button>
+                  </div>
+                  ${scheduleHtml}
+                </div>`;
+              })).then(cards => cards.join(''))}
+            </div>`;
+        } else {
+          groupContainer.innerHTML = '';
+        }
+
+        // ── Merged Users Table ──
+        // Build rows from clinic users, enriched with Guac status
+        const clinicRows = clinicUsers.map(u => {
+          const guac = guacMap[u.email];
+          return { ...u, guac_exists: !!guac, guac_disabled: guac?.attributes?.disabled === 'true', guac_last_active: guac?.lastActive };
+        });
+
+        // Find Guac-only users (not in clinic DB — e.g., cactus-admin)
+        const clinicEmails = new Set(clinicUsers.map(u => u.email));
+        const guacOnlyRows = guacUsers
+          .filter(u => !clinicEmails.has(u.username))
+          .map(u => ({
+            email: u.username, first_name: '', last_name: '', role: 'guac-only',
+            group_name: null, is_active: !u.attributes?.disabled, last_login: u.lastActive,
+            guac_exists: true, guac_disabled: u.attributes?.disabled === 'true', guac_last_active: u.lastActive,
+            is_guac_only: true
+          }));
+
+        const allRows = [...clinicRows, ...guacOnlyRows];
+
+        if (allRows.length === 0) {
+          container.innerHTML = '<p style="color: var(--gray-500);">No users found.</p>';
+          return;
+        }
+
+        container.innerHTML = `
+          <h3 style="margin: 1.5rem 0 0.75rem;">All Users (${clinicRows.length} clinic, ${guacUsers.length} Guacamole)</h3>
+          <table class="admin-table">
+            <thead><tr>
+              <th>Email / Username</th>
+              <th>Name</th>
+              <th>Role</th>
+              <th>Group</th>
+              <th>Clinic Status</th>
+              <th>Guac Status</th>
+              <th>Last Login</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>
+              ${allRows.map(u => {
+                const isProtected = u.email === 'cactus-admin' || u.email === 'guacadmin';
+                return `
+                <tr>
+                  <td><code style="font-size: 0.8rem;">${escHtml(u.email)}</code></td>
+                  <td>${escHtml(((u.first_name || '') + ' ' + (u.last_name || '')).trim() || '—')}</td>
+                  <td><span class="badge ${u.role === 'admin' ? 'badge-red' : u.role === 'instructor' ? 'badge-blue' : u.role === 'guac-only' ? 'badge-yellow' : 'badge-gray'}">${u.role}</span></td>
+                  <td style="font-size: 0.8rem;">${u.group_name ? escHtml(u.group_name) : '<span style="color: var(--gray-400);">—</span>'}</td>
+                  <td>${u.is_guac_only ? '<span style="color: var(--gray-400);">—</span>' : (u.is_active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Disabled</span>')}</td>
+                  <td>${u.guac_exists ? (u.guac_disabled ? '<span class="badge badge-red">Disabled</span>' : '<span class="badge badge-green">Active</span>') : '<span style="color: var(--gray-400);">No account</span>'}</td>
+                  <td style="font-size: 0.8rem;">${u.last_login ? new Date(u.last_login).toLocaleString() : (u.guac_last_active ? new Date(u.guac_last_active).toLocaleString() : '<span style="color: var(--gray-400);">Never</span>')}</td>
+                  <td style="display: flex; gap: 0.3rem; flex-wrap: wrap;">
+                    ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="viewPermissions('${escHtml(u.email)}')">Perms</button>` : ''}
+                    ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="resetPassword('${escHtml(u.email)}')">Reset PW</button>` : ''}
+                    ${u.guac_exists && !isProtected ? `<button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteUser('${escHtml(u.email)}')">Delete Guac</button>` : ''}
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    // Keep old name as alias for any remaining references
+    async function loadUsers() { await loadMergedUsers(); }
+
+    function showCreateUserModal() {
+      document.getElementById('newUsername').value = '';
+      document.getElementById('newPassword').value = '';
+      document.getElementById('createUserModal').classList.add('active');
+    }
+
+    async function createUser() {
+      const username = document.getElementById('newUsername').value.trim();
+      const password = document.getElementById('newPassword').value;
+      if (!username || !password) { Toast.warning('Missing', 'Username and password required'); return; }
+
+      try {
+        await api('POST', '/guac/users', { username, password });
+        Toast.success('Created', `User "${username}" created`);
+        closeModal('createUserModal');
+        loadUsers();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function deleteUser(username) {
+      if (!confirm(`Delete Guacamole user "${username}"?`)) return;
+      try {
+        await api('DELETE', `/guac/users/${encodeURIComponent(username)}`);
+        Toast.success('Deleted', `User "${username}" removed`);
+        loadUsers();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function resetPassword(username) {
+      const newPw = prompt(`Enter new password for "${username}":`);
+      if (!newPw) return;
+      try {
+        await api('PUT', `/guac/users/${encodeURIComponent(username)}/password`, { password: newPw });
+        Toast.success('Password Reset', `Password updated for "${username}"`);
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function viewPermissions(username) {
+      document.getElementById('permUsername').textContent = username;
+      const body = document.getElementById('permissionsBody');
+      body.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+      document.getElementById('permissionsModal').classList.add('active');
+
+      try {
+        const perms = await api('GET', `/guac/users/${encodeURIComponent(username)}/permissions`);
+
+        let html = '';
+
+        // System permissions
+        const sysPerms = Object.keys(perms.systemPermissions || {});
+        if (sysPerms.length) {
+          html += `<h4 style="margin: 0.5rem 0;">System Permissions</h4>`;
+          html += sysPerms.map(p => `<span class="badge badge-blue" style="margin: 0.2rem;">${p}</span>`).join(' ');
+        }
+
+        // Connection permissions
+        const connPerms = perms.connectionPermissions || {};
+        const connIds = Object.keys(connPerms);
+        if (connIds.length) {
+          html += `<h4 style="margin: 1rem 0 0.5rem;">Connection Permissions (${connIds.length})</h4>`;
+          html += `<table class="admin-table" style="font-size: 0.85rem;">
+            <thead><tr><th>Connection ID</th><th>Permissions</th></tr></thead>
+            <tbody>${connIds.map(id =>
+              `<tr><td>${id}</td><td>${connPerms[id].map(p => `<span class="badge badge-gray">${p}</span>`).join(' ')}</td></tr>`
+            ).join('')}</tbody></table>`;
+        }
+
+        // Connection group permissions
+        const groupPerms = perms.connectionGroupPermissions || {};
+        const groupIds = Object.keys(groupPerms);
+        if (groupIds.length) {
+          html += `<h4 style="margin: 1rem 0 0.5rem;">Group Permissions (${groupIds.length})</h4>`;
+          html += `<table class="admin-table" style="font-size: 0.85rem;">
+            <thead><tr><th>Group ID</th><th>Permissions</th></tr></thead>
+            <tbody>${groupIds.map(id =>
+              `<tr><td>${id}</td><td>${groupPerms[id].map(p => `<span class="badge badge-gray">${p}</span>`).join(' ')}</td></tr>`
+            ).join('')}</tbody></table>`;
+        }
+
+        if (!html) html = '<p style="color: var(--gray-500);">No permissions assigned.</p>';
+        body.innerHTML = html;
+      } catch (e) {
+        body.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    // ============================================================================
+    // ACTIVE SESSIONS
+    // ============================================================================
+
+    async function loadActiveSessions() {
+      const container = document.getElementById('sessionsTable');
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+
+      try {
+        const sessions = await api('GET', '/guac/active');
+        const sessionList = Object.values(sessions);
+        document.getElementById('activeCount').textContent = sessionList.length;
+
+        if (sessionList.length === 0) {
+          container.innerHTML = `
+            <div style="text-align: center; padding: 3rem; color: var(--gray-500);">
+              <div style="font-size: 2rem; margin-bottom: 0.5rem;">😴</div>
+              <p>No active sessions</p>
+            </div>`;
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr>
+              <th>User</th>
+              <th>Connection</th>
+              <th>Started</th>
+              <th>Remote Host</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>
+              ${sessionList.map(s => `
+                <tr>
+                  <td><strong>${escHtml(s.username || 'Unknown')}</strong></td>
+                  <td>${escHtml(s.connectionIdentifier || '-')}</td>
+                  <td>${s.startDate ? new Date(s.startDate).toLocaleString() : '-'}</td>
+                  <td>${escHtml(s.remoteHost || '-')}</td>
+                  <td>
+                    <button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="killSession('${s.identifier}', '${escHtml(s.username || '')}')">Kill</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    async function killSession(id, username) {
+      if (!confirm(`Kill session for "${username}"?`)) return;
+      try {
+        await api('DELETE', `/guac/active/${id}`);
+        Toast.success('Session Killed', `Disconnected ${username}`);
+        loadActiveSessions();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // ============================================================================
+    // DEPLOY LANE
+    // ============================================================================
+
+    async function deployLane() {
+      const challenge_key = document.getElementById('deployChallengeKey').value.trim();
+      const module = document.getElementById('deployModule').value;
+      const event_id = document.getElementById('deployEventId').value.trim() || null;
+      const useWebhook = document.getElementById('deployUseWebhook').checked;
+      const attack_boxes = document.getElementById('deploySingleAttackBox').checked;
+      const status = document.getElementById('deployStatus');
+      const btn = document.getElementById('deployBtn');
+
+      if (!challenge_key) {
+        Toast.warning('Missing Fields', 'Challenge Key is required');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Checking resources...';
+      status.textContent = 'Running pre-flight resource check...';
+      status.style.color = 'var(--gray-500)';
+
+      try {
+        // Step 1: Get preview (no confirm flag)
+        const preview = await api('POST', '/deploy-lane', { challenge_key, module, event_id, use_webhook: useWebhook, attack_boxes });
+
+        if (preview.preview) {
+          // Show confirmation modal
+          btn.disabled = false;
+          btn.textContent = 'Deploy Lane';
+          status.textContent = '';
+          const vulnScripts = getSelectedScripts('deploy-script');
+          showDeployConfirmation(preview, () => deployLaneConfirmed(challenge_key, module, event_id, useWebhook, attack_boxes, vulnScripts));
+          return;
+        }
+
+        // If no preview came back (health check failed gracefully), treat as confirmed
+        handleDeployLaneSuccess(preview, challenge_key, status);
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = '#e53e3e';
+        Toast.error('Deploy Failed', e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Deploy Lane';
+      }
+    }
+
+    async function deployLaneConfirmed(challenge_key, module, event_id, useWebhook, attack_boxes, vulnScripts = []) {
+      const status = document.getElementById('deployStatus');
+      const btn = document.getElementById('deployBtn');
+
+      btn.disabled = true;
+      btn.textContent = 'Deploying...';
+      const method = useWebhook ? 'N8N Webhook' : 'Native';
+      const extras = attack_boxes ? ' + Kali Attack Box' : '';
+      status.textContent = `Deploying lane${extras} via ${method} (cloning VMs, allocating VXLAN)...`;
+      status.style.color = 'var(--gray-500)';
+
+      try {
+        const data = await api('POST', '/deploy-lane', { challenge_key, module, event_id, use_webhook: useWebhook, attack_boxes, vuln_scripts: vulnScripts, confirm: true });
+        handleDeployLaneSuccess(data, challenge_key, status);
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = '#e53e3e';
+        Toast.error('Deploy Failed', e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Deploy Lane';
+      }
+    }
+
+    function handleDeployLaneSuccess(data, challenge_key, status) {
+      const via = data.method === 'webhook' ? ' (via N8N)' : '';
+      status.innerHTML = `
+        <strong style="color: #38a169;">Lane deployment started${via}!</strong><br>
+        Lane ID: <code style="background: #edf2f7; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">${data.lane_id}</code><br>
+        VXLAN: ${data.vxlan_id || 'N/A'} | VNet: ${data.vnet || 'N/A'} | Challenge: ${data.challenge || challenge_key}<br>
+        <span style="font-size: 0.8rem; color: var(--gray-500);">VMs cloning in background — check Active Lanes tab for status.</span>
+      `;
+      Toast.success('Lane Deploying', `${data.challenge || challenge_key}${via}. VMs will be ready in ~60 seconds.`);
+      loadClusterHealth();
+    }
+
+    // ============================================================================
+    // ACTIVE LANES
+    // ============================================================================
+
+    async function loadLanes() {
+      const container = document.getElementById('lanesTable');
+      if (!container) return;
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading lanes from CyberCore DB...</p>';
+
+      try {
+        const filter = document.getElementById('lanesFilter')?.value || '';
+        const url = filter ? `/lanes?status=${filter}` : '/lanes';
+        const lanes = await api('GET', url);
+
+        if (lanes.length === 0) {
+          container.innerHTML = '<div style="background: white; border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No lanes found.</div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr>
+              <th>Name</th>
+              <th>User ID</th>
+              <th>VXLAN</th>
+              <th>Status</th>
+              <th>Internet</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>
+              ${lanes.map(l => {
+                const statusColor = {
+                  active: '#38a169', deploying: '#d69e2e', error: '#e53e3e',
+                  deleted: '#a0aec0', suspended: '#9f7aea', pending: '#4299e1'
+                }[l.status] || '#718096';
+                const cfg = typeof l.config === 'string' ? JSON.parse(l.config || '{}') : (l.config || {});
+                const inet = cfg.internet_enabled;
+                return `
+                  <tr>
+                    <td><strong>${escHtml(l.name || 'unnamed')}</strong></td>
+                    <td><code style="font-size: 0.75rem;">${escHtml((l.user_id || '').substring(0, 8))}...</code></td>
+                    <td>${l.vxlan_id || '—'}</td>
+                    <td><span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; color: white; background: ${statusColor};">${l.status}</span></td>
+                    <td>
+                      ${l.status === 'active' ? `
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+                          <input type="checkbox" ${inet ? 'checked' : ''} onchange="toggleAdminInternet('${l.lane_id}', this.checked)" style="width: auto;">
+                          <span style="font-size: 0.8rem;">${inet ? 'On' : 'Off'}</span>
+                        </label>
+                      ` : '<span style="font-size: 0.8rem; color: var(--gray-400);">—</span>'}
+                    </td>
+                    <td>${new Date(l.created_at).toLocaleDateString()}</td>
+                    <td>
+                      ${l.status === 'active' ? `
+                        <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" onclick="showRunScriptModal('${l.lane_id}', '${escHtml(l.name || '')}')">Run Script</button>
+                        <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #805ad5; border-color: #805ad5;" onclick="showGenerateChallengeProfileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Generate Profile</button>
+                      ` : ''}
+                      ${l.status !== 'deleted' ? `<button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" data-lane-id="${l.lane_id}" data-lane-name="${escHtml(l.name || '')}" onclick="deleteLane(this.dataset.laneId, this.dataset.laneName)">Delete</button>` : '—'}
+                    </td>
+                  </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error loading lanes: ${e.message}</p>`;
+      }
+    }
+
+    // ============================================================================
+    // VULN SCRIPT SELECTOR (reusable component)
+    // ============================================================================
+
+    /**
+     * Render a script selector panel: VM tabs on left, scripts for selected VM on right
+     * Scales to 10+ VMs and 50+ scripts without clutter
+     */
+    // Store selections per selectorId → { vmName: Set(slugs) }
+    const scriptSelections = {};
+
+    async function renderScriptSelector(container, vms, selectorId, preselected = []) {
+      const scripts = cachedVulnScripts.length > 0 ? cachedVulnScripts : await api('GET', '/vuln-scripts');
+      cachedVulnScripts = scripts;
+
+      // Initialize selections from defaults + preselected
+      if (!scriptSelections[selectorId]) scriptSelections[selectorId] = {};
+      for (const vm of vms) {
+        if (!scriptSelections[selectorId][vm.name]) {
+          scriptSelections[selectorId][vm.name] = new Set(vm.default_scripts || []);
+        }
+      }
+      for (const p of preselected) {
+        if (scriptSelections[selectorId][p.vm_name]) {
+          scriptSelections[selectorId][p.vm_name].add(p.script_slug);
+        }
+      }
+
+      const firstVm = vms[0]?.name || '';
+
+      container.innerHTML = `
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+          <strong style="font-size: 0.9rem;">Vulnerability Scripts</strong>
+          <span id="${selectorId}-total" style="font-size: 0.75rem; color: var(--gray-500);">0 scripts selected</span>
+        </div>
+        <div style="display: flex; gap: 0; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; min-height: 250px;">
+          <!-- VM List (left sidebar) -->
+          <div id="${selectorId}-vmlist" style="width: 180px; min-width: 180px; background: #f7fafc; border-right: 1px solid #e2e8f0; overflow-y: auto; max-height: 350px;">
+            ${vms.map((vm, i) => {
+              const count = (scriptSelections[selectorId][vm.name] || new Set()).size;
+              return `
+              <div class="${selectorId}-vm-tab" data-vm="${escHtml(vm.name)}"
+                onclick="selectScriptVM('${selectorId}', '${escHtml(vm.name)}')"
+                style="padding: 0.6rem 0.75rem; cursor: pointer; border-bottom: 1px solid #e2e8f0; font-size: 0.8rem;
+                       ${i === 0 ? 'background: white; border-left: 3px solid #4299e1;' : 'border-left: 3px solid transparent;'}">
+                <div style="font-weight: 600;">${escHtml(vm.name)}</div>
+                <div style="font-size: 0.7rem; color: var(--gray-500);">${escHtml(vm.role || '')}${vm.os ? ' · ' + escHtml(vm.os) : ''}</div>
+                <div style="font-size: 0.65rem; color: #4299e1; margin-top: 0.15rem;" id="${selectorId}-vmcount-${escHtml(vm.name)}">${count} script${count !== 1 ? 's' : ''}</div>
+              </div>`;
+            }).join('')}
+          </div>
+          <!-- Script panel (right) -->
+          <div id="${selectorId}-scriptpanel" style="flex: 1; padding: 0.75rem; overflow-y: auto; max-height: 350px;"></div>
+        </div>`;
+
+      container.style.display = 'block';
+
+      // Store VM and script data for rendering
+      container._vms = vms;
+      container._scripts = scripts;
+      container._selectorId = selectorId;
+
+      // Show first VM's scripts
+      renderScriptPanelForVM(selectorId, firstVm, container);
+      updateScriptTotalCount(selectorId);
+    }
+
+    function selectScriptVM(selectorId, vmName) {
+      // Update tab styles
+      document.querySelectorAll(`.${selectorId}-vm-tab`).forEach(tab => {
+        const isActive = tab.dataset.vm === vmName;
+        tab.style.background = isActive ? 'white' : '';
+        tab.style.borderLeftColor = isActive ? '#4299e1' : 'transparent';
+      });
+
+      // Find the container
+      const panel = document.getElementById(`${selectorId}-scriptpanel`);
+      const container = panel?.closest('[id$="VulnScriptPanel"]') || panel?.parentElement?.parentElement;
+      renderScriptPanelForVM(selectorId, vmName, container);
+    }
+
+    function renderScriptPanelForVM(selectorId, vmName, container) {
+      const panel = document.getElementById(`${selectorId}-scriptpanel`);
+      if (!panel || !container) return;
+
+      const vms = container._vms || [];
+      const scripts = container._scripts || cachedVulnScripts;
+      const vm = vms.find(v => v.name === vmName);
+      if (!vm) return;
+
+      const vmOs = (vm.os || '').toLowerCase().includes('linux') ? 'linux' : 'windows';
+      const compatScripts = scripts.filter(s => s.os_target === 'any' || s.os_target === vmOs);
+      const selected = scriptSelections[selectorId]?.[vmName] || new Set();
+
+      // Group by category
+      const categories = {};
+      compatScripts.forEach(s => {
+        if (!categories[s.category]) categories[s.category] = [];
+        categories[s.category].push(s);
+      });
+
+      let html = `
+        <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
+          <input type="text" id="${selectorId}-search" placeholder="Search scripts..." oninput="filterScriptPanel('${selectorId}')" style="flex: 1; padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+          <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #4299e1; color: #4299e1; background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'all')">All</button>
+          <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #cbd5e0; color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'none')">None</button>
+          <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #38a169; color: #38a169; background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'defaults')">Defaults</button>
+        </div>`;
+
+      for (const [cat, catScripts] of Object.entries(categories).sort((a, b) => a[0].localeCompare(b[0]))) {
+        html += `
+          <div class="script-cat-group" data-cat="${escHtml(cat)}" style="margin-bottom: 0.75rem;">
+            <div style="font-size: 0.7rem; color: var(--gray-500); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.3rem; padding-bottom: 0.2rem; border-bottom: 1px solid #edf2f7;">${escHtml(cat)}</div>
+            ${catScripts.map(s => {
+              const isChecked = selected.has(s.slug);
+              const isDefault = (vm.default_scripts || []).includes(s.slug);
+              const deps = (s.depends_on || []).join(', ');
+              const services = (s.services_exposed || []).join(', ');
+              return `
+              <label class="script-row" data-slug="${escHtml(s.slug)}" style="display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; transition: background 0.1s; margin-bottom: 1px;" onmouseenter="this.style.background='#f7fafc'" onmouseleave="this.style.background=''">
+                <input type="checkbox" ${isChecked ? 'checked' : ''}
+                  onchange="toggleScript('${selectorId}', '${escHtml(vmName)}', '${escHtml(s.slug)}', this.checked)"
+                  style="width: auto; margin-top: 0.15rem;">
+                <div style="flex: 1; min-width: 0;">
+                  <div style="font-size: 0.8rem; font-weight: 500; display: flex; align-items: center; gap: 0.3rem;">
+                    ${escHtml(s.name)}
+                    ${isDefault ? '<span style="font-size: 0.6rem; background: #c6f6d5; color: #22543d; padding: 0 0.3rem; border-radius: 3px;">default</span>' : ''}
+                  </div>
+                  ${s.description ? `<div style="font-size: 0.7rem; color: var(--gray-500); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escHtml(s.description)}</div>` : ''}
+                  <div style="display: flex; gap: 0.5rem; margin-top: 0.1rem;">
+                    ${services ? `<span style="font-size: 0.6rem; color: #4299e1;">${escHtml(services)}</span>` : ''}
+                    ${deps ? `<span style="font-size: 0.6rem; color: var(--gray-400);">deps: ${escHtml(deps)}</span>` : ''}
+                  </div>
+                </div>
+              </label>`;
+            }).join('')}
+          </div>`;
+      }
+
+      if (compatScripts.length === 0) {
+        html += '<p style="color: var(--gray-400); font-size: 0.85rem; text-align: center; padding: 2rem;">No compatible scripts for this OS type.</p>';
+      }
+
+      panel.innerHTML = html;
+    }
+
+    function toggleScript(selectorId, vmName, slug, checked) {
+      if (!scriptSelections[selectorId]) scriptSelections[selectorId] = {};
+      if (!scriptSelections[selectorId][vmName]) scriptSelections[selectorId][vmName] = new Set();
+
+      if (checked) {
+        scriptSelections[selectorId][vmName].add(slug);
+      } else {
+        scriptSelections[selectorId][vmName].delete(slug);
+      }
+
+      // Update VM tab count
+      const count = scriptSelections[selectorId][vmName].size;
+      const countEl = document.getElementById(`${selectorId}-vmcount-${vmName}`);
+      if (countEl) countEl.textContent = `${count} script${count !== 1 ? 's' : ''}`;
+
+      updateScriptTotalCount(selectorId);
+    }
+
+    function bulkSelectScripts(selectorId, vmName, mode) {
+      const panel = document.getElementById(`${selectorId}-scriptpanel`);
+      if (!panel) return;
+
+      const container = panel.closest('[id$="VulnScriptPanel"]') || panel.parentElement?.parentElement;
+      const vm = (container?._vms || []).find(v => v.name === vmName);
+      const defaults = vm?.default_scripts || [];
+
+      if (!scriptSelections[selectorId]) scriptSelections[selectorId] = {};
+
+      if (mode === 'all') {
+        const allSlugs = new Set();
+        panel.querySelectorAll('.script-row input[type="checkbox"]').forEach(cb => {
+          cb.checked = true;
+          allSlugs.add(cb.closest('.script-row').dataset.slug);
+        });
+        scriptSelections[selectorId][vmName] = allSlugs;
+      } else if (mode === 'none') {
+        panel.querySelectorAll('.script-row input[type="checkbox"]').forEach(cb => { cb.checked = false; });
+        scriptSelections[selectorId][vmName] = new Set();
+      } else if (mode === 'defaults') {
+        panel.querySelectorAll('.script-row input[type="checkbox"]').forEach(cb => {
+          const slug = cb.closest('.script-row').dataset.slug;
+          cb.checked = defaults.includes(slug);
+        });
+        scriptSelections[selectorId][vmName] = new Set(defaults);
+      }
+
+      const count = (scriptSelections[selectorId][vmName] || new Set()).size;
+      const countEl = document.getElementById(`${selectorId}-vmcount-${vmName}`);
+      if (countEl) countEl.textContent = `${count} script${count !== 1 ? 's' : ''}`;
+      updateScriptTotalCount(selectorId);
+    }
+
+    function filterScriptPanel(selectorId) {
+      const search = (document.getElementById(`${selectorId}-search`)?.value || '').toLowerCase();
+      const panel = document.getElementById(`${selectorId}-scriptpanel`);
+      if (!panel) return;
+
+      panel.querySelectorAll('.script-row').forEach(row => {
+        const text = row.textContent.toLowerCase();
+        const slug = (row.dataset.slug || '').toLowerCase();
+        row.style.display = (!search || text.includes(search) || slug.includes(search)) ? '' : 'none';
+      });
+
+      // Also hide empty category headers
+      panel.querySelectorAll('.script-cat-group').forEach(group => {
+        const visibleRows = group.querySelectorAll('.script-row:not([style*="display: none"])');
+        group.style.display = visibleRows.length > 0 ? '' : 'none';
+      });
+    }
+
+    function updateScriptTotalCount(selectorId) {
+      let total = 0;
+      for (const vm of Object.values(scriptSelections[selectorId] || {})) {
+        total += vm.size;
+      }
+      const el = document.getElementById(`${selectorId}-total`);
+      if (el) el.textContent = `${total} script${total !== 1 ? 's' : ''} selected`;
+    }
+
+    function getSelectedScripts(selectorId) {
+      const selected = [];
+      for (const [vmName, slugs] of Object.entries(scriptSelections[selectorId] || {})) {
+        for (const slug of slugs) {
+          selected.push({ vm_name: vmName, script_slug: slug });
+        }
+      }
+      return selected;
+    }
+
+    // ============================================================================
+    // CHALLENGE SELECTION → LOAD SCRIPT SELECTOR
+    // ============================================================================
+
+    async function onGroupChallengeSelected() {
+      const panel = document.getElementById('groupDeployVulnScriptPanel');
+      const challengeKey = document.getElementById('deployGroupChallenge').value;
+      const module = document.getElementById('deployGroupModule').value;
+
+      if (!challengeKey) {
+        panel.style.display = 'none';
+        return;
+      }
+
+      panel.innerHTML = '<p style="color: var(--gray-500); font-size: 0.85rem;">Loading challenge VMs...</p>';
+      panel.style.display = 'block';
+
+      try {
+        const challenges = cachedChallenges[module] || [];
+        const challenge = challenges.find(c => c.challenge_key === challengeKey);
+
+        if (!challenge || !challenge.challenge_id) {
+          await renderScriptSelector(panel, [{ name: challengeKey, role: 'Primary', os: 'Windows' }], 'group-deploy-script', []);
+          return;
+        }
+
+        const fullChallenge = await api('GET', `/challenge-templates/${challenge.challenge_id}`);
+        const spec = typeof fullChallenge.spec === 'string' ? JSON.parse(fullChallenge.spec) : (fullChallenge.spec || {});
+        const vms = (spec.vms || []).length > 0
+          ? spec.vms
+          : [{ name: challengeKey, role: 'Primary', os: 'Unknown', default_scripts: [] }];
+
+        await renderScriptSelector(panel, vms, 'group-deploy-script', []);
+      } catch (e) {
+        panel.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error: ${e.message}</p>`;
+      }
+    }
+
+    async function onChallengeSelected() {
+      const panel = document.getElementById('deployVulnScriptPanel');
+      const challengeKey = document.getElementById('deployChallengeKey').value;
+      const module = document.getElementById('deployModule').value;
+
+      if (!challengeKey) {
+        panel.style.display = 'none';
+        return;
+      }
+
+      panel.innerHTML = '<p style="color: var(--gray-500); font-size: 0.85rem;">Loading challenge VMs...</p>';
+      panel.style.display = 'block';
+
+      try {
+        // Look up challenge_id from cached challenges
+        const challenges = cachedChallenges[module] || [];
+        const challenge = challenges.find(c => c.challenge_key === challengeKey);
+
+        if (!challenge || !challenge.challenge_id) {
+          // Fallback: show a basic single-VM selector
+          await renderScriptSelector(panel, [{ name: challengeKey, role: 'Primary', os: 'Windows' }], 'deploy-script', []);
+          return;
+        }
+
+        // Get full challenge details with spec
+        const fullChallenge = await api('GET', `/challenge-templates/${challenge.challenge_id}`);
+        const rawSpec = fullChallenge.spec;
+        const spec = typeof rawSpec === 'string' ? JSON.parse(rawSpec) : (rawSpec || {});
+        const vms = (spec.vms || []).length > 0
+          ? spec.vms
+          : [{ name: challengeKey, role: 'Primary', os: 'Unknown', default_scripts: [] }];
+
+        await renderScriptSelector(panel, vms, 'deploy-script', []);
+      } catch (e) {
+        panel.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error: ${e.message}</p>`;
+      }
+    }
+
+    // ============================================================================
+    // GENERATE CHALLENGE PROFILE
+    // ============================================================================
+
+    async function showGenerateChallengeProfileModal(laneId, laneName) {
+      const body = document.getElementById('permissionsBody');
+      document.getElementById('permUsername').textContent = `Generate Challenge Profile — ${laneName}`;
+
+      body.innerHTML = `
+        <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+          Generate an AI client profile based on this lane's deployed VMs and vulnerability scripts.
+          Real VM IPs will be embedded in the profile's network diagrams and asset inventory.
+        </p>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>Client Type</label>
+            <select id="chalProfileClientType">
+              <option value="SMB">Small-Medium Business</option>
+              <option value="NonProfit">Non-Profit Organization</option>
+              <option value="Utility_IT_OT">Utility Company (IT/OT)</option>
+              <option value="K12">K-12 School District</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Industry</label>
+            <input type="text" id="chalProfileIndustry" value="Technology" placeholder="e.g., Healthcare, Finance">
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>Difficulty</label>
+            <select id="chalProfileDifficulty">
+              <option value="beginner">Beginner</option>
+              <option value="intermediate" selected>Intermediate</option>
+              <option value="advanced">Advanced</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Company Name (optional)</label>
+            <input type="text" id="chalProfileCompany" placeholder="Leave blank for AI-generated">
+          </div>
+        </div>
+        <button class="btn btn-primary" onclick="generateChallengeProfileFromModal('${laneId}')" style="width: 100%; margin-top: 0.5rem;">Generate Challenge Profile</button>
+        <div id="chalProfileStatus" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>`;
+
+      const mc = document.querySelector('#permissionsModal .modal-content');
+      mc.style.maxWidth = '600px';
+      document.getElementById('permissionsModal').classList.add('active');
+    }
+
+    async function generateChallengeProfileFromModal(laneId) {
+      const client_type = document.getElementById('chalProfileClientType').value;
+      const industry = document.getElementById('chalProfileIndustry').value.trim();
+      const difficulty = document.getElementById('chalProfileDifficulty').value;
+      const company_name = document.getElementById('chalProfileCompany').value.trim() || null;
+      const status = document.getElementById('chalProfileStatus');
+
+      status.innerHTML = '<strong style="color: var(--gray-500);">Sending to N8N for AI generation... This may take 1-3 minutes.</strong>';
+
+      try {
+        const data = await api('POST', `/challenge-networks/${laneId}/generate-profile`, {
+          client_type, industry, difficulty, company_name
+        });
+
+        status.innerHTML = `
+          <strong style="color: #38a169;">Profile generation triggered!</strong><br>
+          <span style="font-size: 0.8rem;">
+            Assets included: ${data.assets_included} (${data.real_vms} real VMs + ${data.phantom_hosts} phantom hosts)<br>
+            ${data.profile_id ? `Profile ID: <code>${data.profile_id}</code>` : 'Profile ID will be assigned when N8N completes.'}
+          </span>`;
+
+        Toast.success('Profile Generating', `${data.assets_included} assets sent to AI`);
+      } catch (e) {
+        status.innerHTML = `<strong style="color: #e53e3e;">Error:</strong> ${escHtml(e.message)}`;
+        Toast.error('Failed', e.message);
+      }
+    }
+
+    async function showRunScriptModal(laneId, laneName) {
+      const lane = await api('GET', `/lanes/${laneId}`);
+      const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+
+      // Build VM list
+      let vms = cfg.vms || [];
+      if (vms.length === 0 && cfg.challenge_vm_id) {
+        vms = [{ name: cfg.challenge_key || 'challenge', type: 'qemu', vm_id: cfg.challenge_vm_id, role: 'Primary', os: 'Windows' }];
+      }
+
+      const body = document.getElementById('permissionsBody');
+      document.getElementById('permUsername').textContent = `Run Scripts — ${laneName}`;
+
+      // Clear previous selections for this modal
+      delete scriptSelections['run-script'];
+
+      body.innerHTML = `
+        <div id="runScriptSelectorPanel"></div>
+        <button class="btn btn-primary" onclick="runSelectedScriptsOnLane('${laneId}')" style="width: 100%; margin-top: 0.75rem;">Run Selected Scripts</button>
+        <div id="runScriptStatus" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>
+        <div id="runScriptOutputs" style="margin-top: 0.5rem; max-height: 300px; overflow-y: auto;"></div>`;
+
+      // Make modal wider for script selector
+      const modalContent = document.querySelector('#permissionsModal .modal-content');
+      modalContent.style.maxWidth = '850px';
+      modalContent.style.width = '90%';
+
+      document.getElementById('permissionsModal').classList.add('active');
+
+      await renderScriptSelector(
+        document.getElementById('runScriptSelectorPanel'),
+        vms, 'run-script', []
+      );
+    }
+
+    async function runSelectedScriptsOnLane(laneId) {
+      const selected = getSelectedScripts('run-script');
+      const modalStatus = document.getElementById('runScriptStatus');
+
+      if (selected.length === 0) {
+        Toast.warning('No Scripts', 'Select at least one script to run');
+        return;
+      }
+
+      // Show the persistent panel
+      const panel = document.getElementById('scriptExecPanel');
+      const outputs = document.getElementById('scriptExecOutputs');
+      panel.style.display = 'block';
+
+      // Add output sections for each script
+      selected.forEach(s => {
+        const id = `exec-${laneId}-${s.vm_name}-${s.script_slug}`.replace(/[^a-z0-9-]/gi, '-');
+        // Remove existing entry if re-running
+        const existing = document.getElementById(id);
+        if (existing) existing.remove();
+
+        outputs.innerHTML += `
+          <div id="${id}" style="margin-bottom: 0.75rem; border-bottom: 1px solid #edf2f7; padding-bottom: 0.75rem;">
+            <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
+              <span class="badge badge-blue" style="font-size: 0.65rem;">${escHtml(s.vm_name)}</span>
+              <strong style="font-size: 0.8rem;">${escHtml(s.script_slug)}</strong>
+              <span class="exec-status" data-key="${escHtml(s.vm_name)}:${escHtml(s.script_slug)}" style="font-size: 0.7rem; color: var(--gray-500);">sending...</span>
+            </div>
+            <pre class="exec-output" data-key="${escHtml(s.vm_name)}:${escHtml(s.script_slug)}" style="background: #1a202c; color: #e2e8f0; padding: 0.5rem; border-radius: 6px; font-size: 0.7rem; max-height: 400px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin: 0;">Waiting...</pre>
+          </div>`;
+      });
+
+      // Update modal status
+      if (modalStatus) modalStatus.innerHTML = `<strong style="color: var(--gray-500);">Sending ${selected.length} script(s)... You can close this modal.</strong>`;
+
+      // Send each script
+      let sentCount = 0;
+      for (const s of selected) {
+        try {
+          await api('POST', `/challenge-networks/${laneId}/run-script`, { vm_name: s.vm_name, script_slug: s.script_slug });
+          sentCount++;
+          updateExecStatus(s.vm_name, s.script_slug, 'sent', '#4299e1');
+        } catch (e) {
+          updateExecStatus(s.vm_name, s.script_slug, `error: ${e.message}`, '#e53e3e');
+        }
+      }
+
+      if (modalStatus) modalStatus.innerHTML = `<strong style="color: #38a169;">${sentCount}/${selected.length} sent. You can close this modal — output appears in the panel below the lanes table.</strong>`;
+      Toast.success('Scripts Sent', `${sentCount} script(s) running. Track progress below the lanes table.`);
+
+      updateExecSummary();
+
+      // Poll in background (not tied to modal)
+      pollScriptExecution(laneId, selected);
+    }
+
+    function updateExecStatus(vmName, slug, text, color) {
+      const key = `${vmName}:${slug}`;
+      document.querySelectorAll(`.exec-status[data-key="${key}"]`).forEach(el => {
+        el.textContent = text;
+        el.style.color = color || 'var(--gray-500)';
+      });
+    }
+
+    function updateExecOutput(vmName, slug, text, borderColor) {
+      const key = `${vmName}:${slug}`;
+      document.querySelectorAll(`.exec-output[data-key="${key}"]`).forEach(el => {
+        el.textContent = text;
+        if (borderColor) el.style.borderLeft = `3px solid ${borderColor}`;
+      });
+    }
+
+    function updateExecSummary() {
+      const all = document.querySelectorAll('.exec-status');
+      let running = 0, completed = 0, failed = 0;
+      all.forEach(el => {
+        const t = el.textContent;
+        if (t === 'running...' || t === 'sent') running++;
+        else if (t === 'completed') completed++;
+        else if (t.startsWith('error') || t === 'failed') failed++;
+      });
+      const summary = document.getElementById('scriptExecSummary');
+      if (summary) {
+        const parts = [];
+        if (running > 0) parts.push(`${running} running`);
+        if (completed > 0) parts.push(`${completed} done`);
+        if (failed > 0) parts.push(`${failed} failed`);
+        summary.textContent = parts.join(' · ') || 'idle';
+      }
+    }
+
+    function clearScriptExecPanel() {
+      document.getElementById('scriptExecOutputs').innerHTML = '';
+      document.getElementById('scriptExecPanel').style.display = 'none';
+    }
+
+    async function pollScriptExecution(laneId, scripts) {
+      const remaining = new Set(scripts.map(s => `${s.vm_name}:${s.script_slug}`));
+
+      for (let i = 0; i < 200 && remaining.size > 0; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          const data = await api('GET', `/challenge-networks/${laneId}/status`);
+          const entries = data.selected_scripts || [];
+
+          for (const s of scripts) {
+            const key = `${s.vm_name}:${s.script_slug}`;
+            if (!remaining.has(key)) continue;
+
+            const entry = entries.find(e => e.script_slug === s.script_slug && e.vm_name === s.vm_name);
+            if (!entry) continue;
+
+            if (entry.status === 'completed') {
+              updateExecStatus(s.vm_name, s.script_slug, 'completed', '#38a169');
+              updateExecOutput(s.vm_name, s.script_slug, entry.output || '(no output)', '#38a169');
+              remaining.delete(key);
+              Toast.success('Script Done', `${s.script_slug} completed`);
+            } else if (entry.status === 'failed') {
+              updateExecStatus(s.vm_name, s.script_slug, 'failed', '#e53e3e');
+              updateExecOutput(s.vm_name, s.script_slug, `ERROR: ${entry.error || 'Unknown'}\n\n${entry.output || ''}`, '#e53e3e');
+              remaining.delete(key);
+              Toast.error('Script Failed', `${s.script_slug} failed`);
+            } else if (entry.status === 'running') {
+              updateExecStatus(s.vm_name, s.script_slug, 'running...', '#d69e2e');
+              if (entry.output) updateExecOutput(s.vm_name, s.script_slug, entry.output);
+            }
+          }
+
+          updateExecSummary();
+        } catch (_) {}
+      }
+    }
+
+    async function toggleAdminInternet(laneId, enabled) {
+      try {
+        await api('PATCH', `/lanes/${laneId}/internet`, { enabled });
+        Toast.success('Internet ' + (enabled ? 'Enabled' : 'Disabled'), 'Lane updated');
+      } catch (e) {
+        Toast.error('Error', e.message);
+        loadLanes(); // Revert checkbox state
+      }
+    }
+
+    async function deleteLane(laneId, laneName) {
+      if (!confirm(`DELETE lane "${laneName}"?\n\nThis will STOP and DESTROY the challenge VM and gateway container, then mark the lane as deleted.\n\nThis cannot be undone.`)) return;
+
+      try {
+        const data = await api('DELETE', `/lanes/${laneId}`);
+        Toast.success('Lane Deleted', `Lane ${laneName} torn down (VXLAN ${data.vxlan_id})`);
+        if (data.errors) {
+          console.warn('Lane delete partial errors:', data.errors);
+          Toast.warning('Partial Errors', `${data.errors.length} non-critical error(s) during cleanup`);
+        }
+        loadLanes();
+      } catch (e) {
+        Toast.error('Delete Failed', e.message);
+      }
+    }
+
+    // ============================================================================
+    // UTILITIES
+    // ============================================================================
+
+    function escHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str || '';
+      return div.innerHTML;
+    }
+
+    // ============================================================================
+    // GROUP DEPLOYMENT
+    // ============================================================================
+
+    function toggleLaneDeployInfo() {
+      const checked = document.getElementById('deployLanes').checked;
+      const options = document.getElementById('laneDeployOptions');
+      const info = document.getElementById('laneCapacityInfo');
+      options.style.display = checked ? 'block' : 'none';
+      if (checked) {
+        const numStudents = parseInt(document.getElementById('deployNumStudents').value) || 1;
+        const challenge = document.getElementById('deployGroupChallenge').value.trim();
+        if (!challenge) {
+          info.style.background = '#fffbeb'; info.style.color = '#b7791f';
+          info.textContent = 'Select a challenge above to check lane capacity.';
+          return;
+        }
+        info.style.background = '#ebf8ff'; info.style.color = '#2b6cb0';
+        info.textContent = `Will deploy ${numStudents} lanes (1 per student). Capacity checked on submit.`;
+      }
+    }
+
+    function getGroupDeployParams() {
+      return {
+        group_name: document.getElementById('deployGroupName').value.trim(),
+        num_instructors: document.getElementById('deployNumInstructors').value,
+        num_students: document.getElementById('deployNumStudents').value,
+        attack_boxes: document.getElementById('deployAttackBoxes').checked,
+        challenge_key: document.getElementById('deployGroupChallenge').value.trim() || null,
+        module: document.getElementById('deployGroupModule').value,
+        deploy_lanes: document.getElementById('deployLanes').checked,
+        use_webhook: document.getElementById('deployGroupUseWebhook').checked,
+        vuln_scripts: getSelectedScripts('group-deploy-script')
+      };
+    }
+
+    async function deployGroup() {
+      const params = getGroupDeployParams();
+      const status = document.getElementById('deployGroupStatus');
+      const btn = document.getElementById('deployGroupBtn');
+
+      if (!params.group_name) { Toast.warning('Missing', 'Group name is required'); return; }
+      if (parseInt(params.num_students) < 1) { Toast.warning('Missing', 'At least 1 student required'); return; }
+      if (params.deploy_lanes && !params.challenge_key) {
+        Toast.warning('Missing', 'Challenge key is required when deploying lanes'); return;
+      }
+
+      // If deploying lanes, do pre-flight check first
+      if (params.deploy_lanes) {
+        btn.disabled = true;
+        btn.textContent = 'Checking resources...';
+        status.textContent = 'Running pre-flight resource check...';
+        status.style.color = 'var(--gray-500)';
+
+        try {
+          const preview = await api('POST', '/deploy-group', params);
+          if (preview.preview) {
+            btn.disabled = false;
+            btn.textContent = 'Deploy Group';
+            status.textContent = '';
+            showDeployConfirmation(preview, () => deployGroupConfirmed(params));
+            return;
+          }
+          // If no preview (health check failed gracefully), treat as success
+          handleDeployGroupSuccess(preview, status);
+        } catch (e) {
+          status.textContent = `Error: ${e.message}`;
+          status.style.color = '#e53e3e';
+          Toast.error('Deploy Failed', e.message);
+          btn.disabled = false;
+          btn.textContent = 'Deploy Group';
+        }
+        return;
+      }
+
+      // No lanes — deploy directly (no resource check needed for account-only)
+      await deployGroupConfirmed(params);
+    }
+
+    async function deployGroupConfirmed(params) {
+      const status = document.getElementById('deployGroupStatus');
+      const btn = document.getElementById('deployGroupBtn');
+
+      btn.disabled = true;
+      btn.textContent = 'Deploying...';
+      status.textContent = params.deploy_lanes
+        ? 'Creating users, Guacamole resources, and deploying lanes...'
+        : 'Creating users and Guacamole resources...';
+      status.style.color = 'var(--gray-500)';
+
+      try {
+        const data = await api('POST', '/deploy-group', { ...params, confirm: true });
+        handleDeployGroupSuccess(data, status);
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = '#e53e3e';
+        Toast.error('Deploy Failed', e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Deploy Group';
+      }
+    }
+
+    function handleDeployGroupSuccess(data, status) {
+      let lanesHtml = '';
+      if (data.lanes_deploying > 0) {
+        lanesHtml = `<br>Lanes deploying: ${data.lanes_deploying} (check Active Lanes tab for status)`;
+      }
+
+      // Build credentials table
+      let credsHtml = '';
+      if (data.credentials && data.credentials.length > 0) {
+        credsHtml = `
+          <div style="margin-top: 0.75rem; background: #fffbeb; border: 1px solid #f6e05e; border-radius: 8px; padding: 0.75rem;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+              <strong style="font-size: 0.85rem; color: #b7791f;">Account Credentials (save these now!)</strong>
+              <div style="display: flex; gap: 0.4rem;">
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="copyCredentials()">Copy All</button>
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="downloadCredentialsCSV()">Download CSV</button>
+              </div>
+            </div>
+            <table class="admin-table" style="font-size: 0.8rem;">
+              <thead><tr><th>Role</th><th>Email</th><th>Password</th></tr></thead>
+              <tbody>
+                ${data.credentials.map(c => `
+                  <tr>
+                    <td><span class="badge ${c.role === 'instructor' ? 'badge-blue' : 'badge-gray'}">${c.role}</span></td>
+                    <td><code>${escHtml(c.email)}</code></td>
+                    <td><code>${escHtml(c.password)}</code></td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>`;
+        // Store for copy/download
+        window._lastCredentials = data.credentials;
+      }
+
+      status.innerHTML = `
+        <strong style="color: #38a169;">Group deployed!</strong><br>
+        ${data.instructors_created} instructors + ${data.students_created} students created<br>
+        Guac users: ${data.guac_users_created} | Guac group: ${data.guac_group}${lanesHtml}
+        ${credsHtml}
+      `;
+      const laneMsg = data.lanes_deploying > 0 ? `, ${data.lanes_deploying} lanes deploying` : '';
+      Toast.success('Group Deployed', `${data.students_created} students + ${data.instructors_created} instructors${laneMsg}`);
+      loadDeployedGroups();
+      loadUsers();
+      loadClusterHealth();
+      if (data.lanes_deploying > 0) loadLanes();
+    }
+
+    function copyCredentials() {
+      const creds = window._lastCredentials;
+      if (!creds) return;
+      const text = creds.map(c => `${c.role}\t${c.email}\t${c.password}`).join('\n');
+      navigator.clipboard.writeText(`Role\tEmail\tPassword\n${text}`).then(() => {
+        Toast.success('Copied', 'Credentials copied to clipboard');
+      });
+    }
+
+    function downloadCredentialsCSV() {
+      const creds = window._lastCredentials;
+      if (!creds) return;
+      const csv = 'Role,Email,Password\n' + creds.map(c =>
+        `${c.role},"${c.email}","${c.password}"`
+      ).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `credentials-${Date.now()}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function downloadGroupCredCSV(groupId) {
+      api('GET', '/groups').then(groups => {
+        const g = groups.find(x => x.id === groupId);
+        if (!g) return;
+        const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
+        if (!cfg.credentials?.length) { Toast.warning('No Credentials', 'No stored credentials for this group'); return; }
+        const csv = 'Role,Email,Password\n' + cfg.credentials.map(c =>
+          `${c.role},"${c.email}","${c.password}"`
+        ).join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${g.group_name}-credentials.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    }
+
+    async function loadDeployedGroups() {
+      const container = document.getElementById('deployedGroupsList');
+      if (!container) return;
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+
+      try {
+        const groups = await api('GET', '/groups');
+
+        if (groups.length === 0) {
+          container.innerHTML = '<div style="background: white; border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No deployed groups yet.</div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr>
+              <th>Group Name</th>
+              <th>Instructors</th>
+              <th>Students</th>
+              <th>Guac Users</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>
+              ${groups.map(g => {
+                const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
+                return `
+                  <tr>
+                    <td><strong>${escHtml(g.group_name)}</strong></td>
+                    <td>${(cfg.instructors || []).length}</td>
+                    <td>${(cfg.students || []).length}</td>
+                    <td>${(cfg.guac_users || []).length}</td>
+                    <td>${new Date(g.created_at).toLocaleDateString()}</td>
+                    <td style="display: flex; gap: 0.4rem;">
+                      <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" onclick="viewGroupDetails('${g.id}')">Details</button>
+                      <button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" data-group-id="${g.id}" data-group-name="${escHtml(g.group_name)}" onclick="teardownGroup(this.dataset.groupId, this.dataset.groupName)">Teardown</button>
+                    </td>
+                  </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    async function teardownGroup(groupId, groupName) {
+      if (!confirm(`TEARDOWN "${groupName}"?\n\nThis will DELETE all student/instructor accounts (both clinic DB and Guacamole) and the Guac connection group.\n\nThis cannot be undone.`)) return;
+
+      try {
+        const data = await api('DELETE', `/groups/${groupId}`);
+        Toast.success('Group Torn Down', `${data.users_deleted} users deleted`);
+        if (data.errors) {
+          console.warn('Teardown partial errors:', data.errors);
+        }
+        loadDeployedGroups();
+        loadUsers();
+      } catch (e) {
+        Toast.error('Teardown Failed', e.message);
+      }
+    }
+
+    function viewGroupDetails(groupId) {
+      // Fetch from the loaded groups list
+      api('GET', '/groups').then(groups => {
+        const g = groups.find(x => x.id === groupId);
+        if (!g) return;
+        const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
+
+        const body = document.getElementById('permissionsBody');
+        document.getElementById('permUsername').textContent = g.group_name;
+
+        html += `<p style="margin: 0 0 1rem; font-size: 0.85rem; color: var(--gray-500);">Created: ${new Date(g.created_at).toLocaleString()}</p>`;
+
+        // Build a credential lookup map
+        const credMap = {};
+        if (cfg.credentials) {
+          cfg.credentials.forEach(c => { credMap[c.email] = c.password; });
+        }
+
+        if (cfg.instructors?.length) {
+          html += `<h4 style="margin: 0 0 0.5rem;">Instructors (${cfg.instructors.length})</h4>`;
+          html += `<table class="admin-table" style="font-size: 0.85rem; margin-bottom: 1rem;">
+            <thead><tr><th>Name</th><th>Email / Login</th><th>Password</th></tr></thead>
+            <tbody>${cfg.instructors.map(u =>
+              `<tr><td>${escHtml(u.name)}</td><td><code style="font-size: 0.8rem;">${escHtml(u.email)}</code></td><td><code style="font-size: 0.8rem;">${escHtml(credMap[u.email] || 'N/A')}</code></td></tr>`
+            ).join('')}</tbody></table>`;
+        }
+
+        if (cfg.students?.length) {
+          html += `<h4 style="margin: 0 0 0.5rem;">Students (${cfg.students.length})</h4>`;
+          html += `<table class="admin-table" style="font-size: 0.85rem;">
+            <thead><tr><th>Name</th><th>Email / Login</th><th>Password</th></tr></thead>
+            <tbody>${cfg.students.map(u =>
+              `<tr><td>${escHtml(u.name)}</td><td><code style="font-size: 0.8rem;">${escHtml(u.email)}</code></td><td><code style="font-size: 0.8rem;">${escHtml(credMap[u.email] || 'N/A')}</code></td></tr>`
+            ).join('')}</tbody></table>`;
+        }
+
+        if (cfg.credentials?.length) {
+          html += `<div style="margin-top: 0.75rem;"><button class="btn btn-sm btn-outline" onclick="downloadGroupCredCSV('${g.id}')">Download Credentials CSV</button></div>`;
+        }
+
+        body.innerHTML = html;
+        document.getElementById('permissionsModal').classList.add('active');
+      });
+    }
+
+    // ============================================================================
+    // ACTIVITY LOG
+    // ============================================================================
+
+    let actlogOffset = 0;
+    let actlogAutoRefreshTimer = null;
+
+    async function loadActivityLog(offset = 0) {
+      actlogOffset = offset;
+      const container = document.getElementById('actlogTable');
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+
+      const search = document.getElementById('actlogSearch')?.value || '';
+      const action_type = document.getElementById('actlogAction')?.value || '';
+
+      try {
+        const params = new URLSearchParams({ limit: 50, offset });
+        if (search) params.set('search', search);
+        if (action_type) params.set('action_type', action_type);
+
+        const data = await api('GET', `/activity-log?${params}`);
+
+        if (data.logs.length === 0) {
+          container.innerHTML = '<div style="background: white; border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No activity found.</div>';
+          document.getElementById('actlogPagination').innerHTML = '';
+          return;
+        }
+
+        const actionColors = {
+          login: 'badge-green', logout: 'badge-gray', register: 'badge-blue',
+          deploy_lane: 'badge-blue', deploy_group: 'badge-blue',
+          delete_lane: 'badge-red', delete_group: 'badge-red',
+          toggle_accounts: 'badge-yellow', submission: 'badge-green',
+          review: 'badge-green', profile_generation: 'badge-blue'
+        };
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr>
+              <th>Time</th>
+              <th>User</th>
+              <th>Action</th>
+              <th>Entity</th>
+              <th>IP</th>
+              <th>Details</th>
+            </tr></thead>
+            <tbody>
+              ${data.logs.map(l => `
+                <tr>
+                  <td style="font-size: 0.8rem; white-space: nowrap;">${new Date(l.created_at).toLocaleString()}</td>
+                  <td><code style="font-size: 0.75rem;">${escHtml(l.email || 'system')}</code></td>
+                  <td><span class="badge ${actionColors[l.action_type] || 'badge-gray'}">${escHtml(l.action_type)}</span></td>
+                  <td style="font-size: 0.8rem;">${escHtml(l.entity_type || '')} ${l.entity_id ? `<code style="font-size: 0.7rem;">${l.entity_id.substring(0, 8)}...</code>` : ''}</td>
+                  <td style="font-size: 0.8rem;">${escHtml(l.ip_address || '—')}</td>
+                  <td style="font-size: 0.75rem; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escHtml(JSON.stringify(l.metadata || ''))}">${l.metadata ? escHtml(JSON.stringify(l.metadata)).substring(0, 60) : '—'}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+
+        // Pagination
+        const pag = document.getElementById('actlogPagination');
+        const totalPages = Math.ceil(data.total / 50);
+        const currentPage = Math.floor(offset / 50) + 1;
+        let pagHtml = `<span style="font-size: 0.8rem; color: var(--gray-500);">${data.total} total</span>`;
+        if (currentPage > 1) pagHtml += `<button class="btn btn-sm btn-outline" onclick="loadActivityLog(${offset - 50})">Prev</button>`;
+        pagHtml += `<span style="font-size: 0.8rem;">Page ${currentPage}/${totalPages}</span>`;
+        if (currentPage < totalPages) pagHtml += `<button class="btn btn-sm btn-outline" onclick="loadActivityLog(${offset + 50})">Next</button>`;
+        pag.innerHTML = pagHtml;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    // Auto-refresh toggle
+    document.addEventListener('change', (e) => {
+      if (e.target.id === 'actlogAutoRefresh') {
+        if (e.target.checked) {
+          actlogAutoRefreshTimer = setInterval(() => loadActivityLog(actlogOffset), 30000);
+        } else {
+          clearInterval(actlogAutoRefreshTimer);
+        }
+      }
+    });
+
+    // ============================================================================
+    // USER MANAGEMENT & SCHEDULES
+    // ============================================================================
+
+    // loadClinicUsers merged into loadMergedUsers above
+    async function loadClinicUsers() { await loadMergedUsers(); }
+
+    async function toggleGroupActive(groupId, active) {
+      const action = active ? 'enable' : 'disable';
+      if (!confirm(`${active ? 'Enable' : 'Disable'} all student accounts in this group?`)) return;
+      try {
+        const data = await api('PATCH', `/groups/${groupId}/toggle-active`, { active });
+        Toast.success('Updated', `${data.students_updated} students ${action}d`);
+        loadMergedUsers();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function overrideSchedule(groupId, value) {
+      try {
+        await api('PATCH', `/groups/${groupId}/schedule/override`, { override_active: value });
+        const label = value === true ? 'Override ON (access forced)' : value === false ? 'Override OFF (access blocked)' : 'Override cleared (using schedule)';
+        Toast.success('Schedule Override', label);
+        loadMergedUsers();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    function showScheduleModal(groupId, groupName) {
+      // Reuse permissions modal for schedule form
+      const body = document.getElementById('permissionsBody');
+      document.getElementById('permUsername').textContent = `Schedule — ${groupName}`;
+
+      body.innerHTML = `
+        <div class="form-group">
+          <label>Active Days</label>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => `
+              <label style="display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem;">
+                <input type="checkbox" class="sched-day" value="${i}" ${[1,2,3,4,5].includes(i) ? 'checked' : ''} style="width: auto;">
+                ${d}
+              </label>
+            `).join('')}
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>Start Time</label>
+            <input type="time" id="schedStart" value="08:00">
+          </div>
+          <div class="form-group">
+            <label>End Time</label>
+            <input type="time" id="schedEnd" value="17:00">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Timezone</label>
+          <select id="schedTimezone">
+            <option value="America/Chicago">Central (America/Chicago)</option>
+            <option value="America/New_York">Eastern (America/New_York)</option>
+            <option value="America/Denver">Mountain (America/Denver)</option>
+            <option value="America/Los_Angeles">Pacific (America/Los_Angeles)</option>
+            <option value="America/Phoenix">Arizona (America/Phoenix)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="saveSchedule('${groupId}')" style="width: 100%;">Save Schedule</button>
+      `;
+
+      // Load existing schedule
+      api('GET', `/groups/${groupId}/schedule`).then(sched => {
+        if (sched.active_days) {
+          document.querySelectorAll('.sched-day').forEach(cb => {
+            cb.checked = sched.active_days.includes(parseInt(cb.value));
+          });
+          document.getElementById('schedStart').value = sched.active_start || '08:00';
+          document.getElementById('schedEnd').value = sched.active_end || '17:00';
+          if (sched.timezone) document.getElementById('schedTimezone').value = sched.timezone;
+        }
+      }).catch(() => {});
+
+      document.getElementById('permissionsModal').classList.add('active');
+    }
+
+    async function saveSchedule(groupId) {
+      const active_days = Array.from(document.querySelectorAll('.sched-day:checked')).map(cb => parseInt(cb.value));
+      const active_start = document.getElementById('schedStart').value;
+      const active_end = document.getElementById('schedEnd').value;
+      const timezone = document.getElementById('schedTimezone').value;
+
+      if (active_days.length === 0) { Toast.warning('Missing', 'Select at least one day'); return; }
+
+      try {
+        await api('PUT', `/groups/${groupId}/schedule`, { active_days, active_start, active_end, timezone });
+        Toast.success('Schedule Saved', `${active_start}–${active_end}`);
+        closeModal('permissionsModal');
+        loadMergedUsers();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // ============================================================================
+    // VULN SCRIPTS
+    // ============================================================================
+
+    let cachedVulnScripts = [];
+
+    async function loadVulnScripts() {
+      const container = document.getElementById('vulnScriptsList');
+      const catFilter = document.getElementById('vulnScriptCategoryFilter')?.value || '';
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+
+      try {
+        const params = catFilter ? `?category=${encodeURIComponent(catFilter)}` : '';
+        const scripts = await api('GET', `/vuln-scripts${params}`);
+        cachedVulnScripts = scripts;
+
+        // Populate category filter
+        const categories = [...new Set(scripts.map(s => s.category))].sort();
+        const catSel = document.getElementById('vulnScriptCategoryFilter');
+        const currentVal = catSel.value;
+        catSel.innerHTML = '<option value="">All Categories</option>' +
+          categories.map(c => `<option value="${c}" ${c === currentVal ? 'selected' : ''}>${c}</option>`).join('');
+
+        if (scripts.length === 0) {
+          container.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--gray-500);">No scripts found. Click "+ New Script" to create one.</div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr><th>Slug</th><th>Name</th><th>Category</th><th>OS</th><th>Difficulty</th><th>Services</th><th>Deps</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${scripts.map(s => `
+                <tr>
+                  <td><code style="font-size: 0.75rem;">${escHtml(s.slug)}</code></td>
+                  <td><strong>${escHtml(s.name)}</strong><br><span style="font-size: 0.75rem; color: var(--gray-500);">${escHtml((s.description || '').substring(0, 60))}</span></td>
+                  <td><span class="badge badge-blue" style="font-size: 0.7rem;">${escHtml(s.category)}</span></td>
+                  <td style="font-size: 0.8rem;">${s.os_target}</td>
+                  <td style="font-size: 0.8rem;">${s.difficulty}</td>
+                  <td style="font-size: 0.75rem;">${(s.services_exposed || []).join(', ') || '—'}</td>
+                  <td style="font-size: 0.75rem;">${(s.depends_on || []).join(', ') || '—'}</td>
+                  <td style="display: flex; gap: 0.3rem;">
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="editVulnScript('${s.id}')">Edit</button>
+                    <button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteVulnScript('${s.id}', '${escHtml(s.name)}')">Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    function showCreateScriptModal() {
+      document.getElementById('scriptEditorTitle').textContent = 'New Vulnerability Script';
+      document.getElementById('scriptEditId').value = '';
+      ['scriptSlug','scriptName','scriptDesc','scriptServices','scriptDependsOn','scriptContent','scriptArgs'].forEach(id => document.getElementById(id).value = '');
+      document.getElementById('scriptCategory').value = 'Network Services';
+      document.getElementById('scriptOS').value = 'windows';
+      document.getElementById('scriptDifficulty').value = 'intermediate';
+      document.getElementById('scriptEditorModal').classList.add('active');
+    }
+
+    async function editVulnScript(id) {
+      try {
+        const script = await api('GET', `/vuln-scripts/${id}`);
+        document.getElementById('scriptEditorTitle').textContent = `Edit: ${script.name}`;
+        document.getElementById('scriptEditId').value = id;
+        document.getElementById('scriptSlug').value = script.slug;
+        document.getElementById('scriptName').value = script.name;
+        document.getElementById('scriptDesc').value = script.description || '';
+        document.getElementById('scriptCategory').value = script.category;
+        document.getElementById('scriptOS').value = script.os_target;
+        document.getElementById('scriptDifficulty').value = script.difficulty;
+        document.getElementById('scriptServices').value = (script.services_exposed || []).join(', ');
+        document.getElementById('scriptDependsOn').value = (script.depends_on || []).join(', ');
+        document.getElementById('scriptContent').value = script.script_content || '';
+        document.getElementById('scriptArgs').value = script.script_args || '';
+        document.getElementById('scriptEditorModal').classList.add('active');
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function saveVulnScript() {
+      const editId = document.getElementById('scriptEditId').value;
+      const body = {
+        slug: document.getElementById('scriptSlug').value.trim(),
+        name: document.getElementById('scriptName').value.trim(),
+        description: document.getElementById('scriptDesc').value.trim(),
+        category: document.getElementById('scriptCategory').value,
+        os_target: document.getElementById('scriptOS').value,
+        difficulty: document.getElementById('scriptDifficulty').value,
+        script_content: document.getElementById('scriptContent').value,
+        services_exposed: document.getElementById('scriptServices').value.split(',').map(s => s.trim()).filter(Boolean),
+        depends_on: document.getElementById('scriptDependsOn').value.split(',').map(s => s.trim()).filter(Boolean),
+        script_args: document.getElementById('scriptArgs').value.trim()
+      };
+
+      if (!body.slug || !body.name || !body.script_content) {
+        Toast.warning('Missing', 'Slug, name, and script content are required');
+        return;
+      }
+
+      try {
+        if (editId) {
+          await api('PUT', `/vuln-scripts/${editId}`, body);
+          Toast.success('Updated', `Script "${body.name}" updated`);
+        } else {
+          await api('POST', '/vuln-scripts', body);
+          Toast.success('Created', `Script "${body.name}" created`);
+        }
+        closeModal('scriptEditorModal');
+        loadVulnScripts();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function deleteVulnScript(id, name) {
+      if (!confirm(`Deactivate script "${name}"?`)) return;
+      try {
+        await api('DELETE', `/vuln-scripts/${id}`);
+        Toast.success('Deleted', `Script "${name}" deactivated`);
+        loadVulnScripts();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // ============================================================================
+    // CHALLENGE TEMPLATES
+    // ============================================================================
+
+    let cachedTemplates = [];
+
+    let challengeVMs = [];
+
+    function showCreateChallengeForm() {
+      const form = document.getElementById('createChallengeForm');
+      form.style.display = form.style.display === 'none' ? 'block' : 'none';
+
+      // Auto-generate zone abbrev from challenge key
+      document.getElementById('newChalKey').oninput = function() {
+        const key = this.value.replace(/[^a-z0-9]/gi, '').substring(0, 8).toLowerCase();
+        document.getElementById('newChalZone').value = key;
+      };
+
+      // Start with one VM if empty
+      if (challengeVMs.length === 0) {
+        challengeVMs = [{ name: '', role: 'Primary Target', os: 'Windows 11 25H2', template_vmid: '', services: '', default_scripts: '' }];
+        renderChallengeVMs();
+      }
+    }
+
+    function addChallengeVM() {
+      challengeVMs.push({ name: '', role: '', os: '', template_vmid: '', services: '', default_scripts: '' });
+      renderChallengeVMs();
+    }
+
+    function removeChallengeVM(idx) {
+      challengeVMs.splice(idx, 1);
+      renderChallengeVMs();
+    }
+
+    function renderChallengeVMs() {
+      const container = document.getElementById('challengeVmList');
+      if (challengeVMs.length === 0) {
+        container.innerHTML = '<p style="color: var(--gray-400); font-size: 0.85rem;">No VMs added. Click "+ Add VM" to add a target machine.</p>';
+        return;
+      }
+
+      container.innerHTML = challengeVMs.map((vm, i) => `
+        <div style="background: #f7fafc; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem; border: 1px solid #e2e8f0;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <strong style="font-size: 0.85rem;">VM ${i + 1}${vm.name ? ': ' + vm.name : ''}</strong>
+            ${challengeVMs.length > 1 ? `<button style="font-size: 0.7rem; padding: 0.1rem 0.3rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent; border-radius: 4px; cursor: pointer;" onclick="removeChallengeVM(${i})">Remove</button>` : ''}
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
+            <div>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">VM Name</label>
+              <input type="text" value="${escHtml(vm.name)}" placeholder="e.g., web01" onchange="challengeVMs[${i}].name=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+            <div>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">Role</label>
+              <input type="text" value="${escHtml(vm.role)}" placeholder="e.g., Web Server" onchange="challengeVMs[${i}].role=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+            <div>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">OS</label>
+              <input type="text" value="${escHtml(vm.os)}" placeholder="e.g., Windows 11" onchange="challengeVMs[${i}].os=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+            <div>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">Template VMID</label>
+              <input type="number" value="${vm.template_vmid || ''}" placeholder="e.g., 1002" onchange="challengeVMs[${i}].template_vmid=parseInt(this.value)||null" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; margin-top: 0.5rem; font-size: 0.85rem;">
+            <div>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">Services (comma-sep)</label>
+              <input type="text" value="${escHtml(vm.services)}" placeholder="22/SSH, 445/SMB, 80/HTTP" onchange="challengeVMs[${i}].services=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+            <div>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">Default Vuln Scripts (comma-sep slugs)</label>
+              <input type="text" value="${escHtml(vm.default_scripts)}" placeholder="smb-config, ssh-config, life-artifacts" onchange="challengeVMs[${i}].default_scripts=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function createChallenge() {
+      const name = document.getElementById('newChalName').value.trim();
+      const challenge_key = document.getElementById('newChalKey').value.trim();
+      const description = document.getElementById('newChalDesc').value.trim();
+      const zone_abbrev = document.getElementById('newChalZone').value.trim() ||
+        challenge_key.replace(/[^a-z0-9]/gi, '').substring(0, 8).toLowerCase();
+      const max_lanes = document.getElementById('newChalMaxLanes').value;
+      const difficulty = document.getElementById('newChalDiff').value;
+      const module = document.getElementById('newChalModule').value;
+      const status = document.getElementById('createChallengeStatus');
+
+      if (!name || !challenge_key) {
+        Toast.warning('Missing', 'Name and Challenge Key are required');
+        return;
+      }
+
+      // Validate VMs
+      const validVMs = challengeVMs.filter(vm => vm.template_vmid);
+      if (validVMs.length === 0) {
+        Toast.warning('Missing', 'Add at least one VM with a Template VMID');
+        return;
+      }
+
+      // Build VM specs array — auto-assign offsets (600000, 610000, 620000, ...)
+      const vms = validVMs.map((vm, idx) => ({
+        name: vm.name || `vm-${vm.template_vmid}`,
+        role: vm.role || 'Server',
+        os: vm.os || 'Unknown',
+        template_vmid: vm.template_vmid,
+        type: 'qemu',
+        vm_offset: 600000 + (idx * 10000),
+        services: vm.services ? vm.services.split(',').map(s => s.trim()).filter(Boolean) : [],
+        default_scripts: vm.default_scripts ? vm.default_scripts.split(',').map(s => s.trim()).filter(Boolean) : []
+      }));
+
+      status.textContent = 'Creating challenge + SDN infrastructure...';
+      status.style.color = 'var(--gray-500)';
+
+      try {
+        const data = await api('POST', '/create-challenge', {
+          name, challenge_key, description, zone_abbrev,
+          vms, max_lanes, difficulty, module,
+          challenge_type: vms.length > 1 ? 'multi_vm' : 'single_vm'
+        });
+
+        status.innerHTML = `
+          <strong style="color: #38a169;">Challenge created!</strong><br>
+          <span style="font-size: 0.8rem;">
+            Key: <code>${escHtml(data.challenge_key)}</code> |
+            Zone: <code>${escHtml(data.zone_abbrev)}</code> |
+            VXLAN: ${data.vxlan_block.start}–${data.vxlan_block.end} |
+            VNets: ${data.vnets_created} |
+            VMs: ${vms.length}
+          </span>
+          <details style="margin-top: 0.5rem; font-size: 0.75rem;">
+            <summary style="cursor: pointer; color: var(--gray-500);">Creation log</summary>
+            <div style="background: #f7fafc; padding: 0.5rem; border-radius: 4px; margin-top: 0.25rem; white-space: pre-wrap;">${data.steps.join('\n')}</div>
+          </details>`;
+
+        Toast.success('Challenge Created', `${vms.length} VM(s), ${data.vnets_created} VNets`);
+        document.getElementById('createChallengeForm').style.display = 'none';
+        challengeVMs = [];
+        loadChallengeTemplates();
+        loadModulesAndChallenges();
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = '#e53e3e';
+        Toast.error('Failed', e.message);
+      }
+    }
+
+    async function deleteChallenge(id, name) {
+      if (!confirm(`Delete challenge "${name}"?\n\nThis will also remove the SDN zone and VNets from Proxmox.\n\nActive lanes using this challenge will NOT be affected.`)) return;
+      try {
+        const data = await api('DELETE', `/challenge-templates/${id}`);
+        Toast.success('Deleted', `Challenge "${name}" deleted${data.vnets_removed ? ` (${data.vnets_removed} VNets removed)` : ''}`);
+        loadChallengeTemplates();
+        loadModulesAndChallenges();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function loadChallengeTemplates() {
+      const container = document.getElementById('challengeTemplatesList');
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
+
+      try {
+        const templates = await api('GET', '/challenge-templates');
+        cachedTemplates = templates;
+
+        if (templates.length === 0) {
+          container.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--gray-500);">No challenges found. Click "+ New Challenge" to create one.</div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr><th>Challenge</th><th>Key</th><th>Difficulty</th><th>VXLAN Block</th><th>VMs</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+            <tbody>
+              ${templates.map(t => `
+                <tr>
+                  <td><strong>${escHtml(t.name)}</strong><br><span style="font-size: 0.75rem; color: var(--gray-500);">${escHtml((t.description || '').substring(0, 60))}</span></td>
+                  <td><code style="font-size: 0.75rem;">${escHtml(t.challenge_key)}</code></td>
+                  <td><span class="badge ${t.difficulty === 'advanced' ? 'badge-red' : t.difficulty === 'beginner' ? 'badge-green' : 'badge-yellow'}">${escHtml(t.difficulty || 'intermediate')}</span></td>
+                  <td style="font-size: 0.8rem;">${t.vxlan_block ? `${t.vxlan_block.start}–${t.vxlan_block.end}` : '—'}</td>
+                  <td>${t.vm_count}</td>
+                  <td><span class="badge ${t.status === 'active' ? 'badge-green' : 'badge-gray'}">${escHtml(t.status)}</span></td>
+                  <td style="font-size: 0.8rem;">${new Date(t.created_at).toLocaleDateString()}</td>
+                  <td>
+                    <button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteChallenge('${t.id}', '${escHtml(t.name)}')">Delete</button>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    let templateVMs = [];
+    let templatePhantoms = [];
+
+    function showCreateTemplateModal() {
+      document.getElementById('templateEditorTitle').textContent = 'New Challenge Template';
+      document.getElementById('tplEditId').value = '';
+      document.getElementById('tplName').value = '';
+      document.getElementById('tplDesc').value = '';
+      document.getElementById('tplDifficulty').value = 'intermediate';
+      templateVMs = [{ name: '', role: '', os: 'Windows 11 25H2', template_vmid: '', type: 'qemu', vm_offset: 600000, default_scripts: [], services: [] }];
+      templatePhantoms = [];
+      renderTemplateVMs();
+      renderTemplatePhantoms();
+      document.getElementById('templateEditorModal').classList.add('active');
+    }
+
+    async function editTemplate(id) {
+      try {
+        const t = await api('GET', `/challenge-templates/${id}`);
+        document.getElementById('templateEditorTitle').textContent = `Edit: ${t.name}`;
+        document.getElementById('tplEditId').value = id;
+        document.getElementById('tplName').value = t.name;
+        document.getElementById('tplDesc').value = t.description || '';
+        document.getElementById('tplDifficulty').value = t.difficulty;
+        document.getElementById('tplModule').value = t.module || 'crucible';
+        document.getElementById('tplChallengeKey').value = t.challenge_key || '';
+        templateVMs = typeof t.vm_specs === 'string' ? JSON.parse(t.vm_specs) : (t.vm_specs || []);
+        templatePhantoms = typeof t.phantom_assets === 'string' ? JSON.parse(t.phantom_assets) : (t.phantom_assets || []);
+        renderTemplateVMs();
+        renderTemplatePhantoms();
+        document.getElementById('templateEditorModal').classList.add('active');
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    function addTemplateVM() {
+      const nextOffset = 600000 + (templateVMs.length * 10000);
+      templateVMs.push({ name: '', role: '', os: 'Windows 11 25H2', template_vmid: '', type: 'qemu', vm_offset: nextOffset, default_scripts: [], services: [] });
+      renderTemplateVMs();
+    }
+
+    function removeTemplateVM(idx) { templateVMs.splice(idx, 1); renderTemplateVMs(); }
+
+    function renderTemplateVMs() {
+      document.getElementById('tplVmList').innerHTML = templateVMs.map((vm, i) => `
+        <div style="background: #f7fafc; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem; border: 1px solid #e2e8f0;">
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <strong style="font-size: 0.85rem;">VM ${i + 1}</strong>
+            <button class="btn btn-sm" style="font-size: 0.65rem; padding: 0.1rem 0.3rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="removeTemplateVM(${i})">Remove</button>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
+            <div><label style="font-size: 0.75rem;">Name</label><input type="text" value="${escHtml(vm.name)}" onchange="templateVMs[${i}].name=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+            <div><label style="font-size: 0.75rem;">Role</label><input type="text" value="${escHtml(vm.role)}" onchange="templateVMs[${i}].role=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+            <div><label style="font-size: 0.75rem;">OS</label><input type="text" value="${escHtml(vm.os)}" onchange="templateVMs[${i}].os=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+          </div>
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; margin-top: 0.5rem; font-size: 0.85rem;">
+            <div><label style="font-size: 0.75rem;">Template VMID</label><input type="number" value="${vm.template_vmid || ''}" onchange="templateVMs[${i}].template_vmid=parseInt(this.value)||null" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+            <div><label style="font-size: 0.75rem;">VM Offset</label><input type="number" value="${vm.vm_offset}" onchange="templateVMs[${i}].vm_offset=parseInt(this.value)" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+            <div><label style="font-size: 0.75rem;">Services (comma-sep)</label><input type="text" value="${(vm.services || []).join(', ')}" onchange="templateVMs[${i}].services=this.value.split(',').map(s=>s.trim()).filter(Boolean)" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+          </div>
+          <div style="margin-top: 0.5rem;"><label style="font-size: 0.75rem;">Default Scripts (comma-sep slugs)</label><input type="text" value="${(vm.default_scripts || []).join(', ')}" onchange="templateVMs[${i}].default_scripts=this.value.split(',').map(s=>s.trim()).filter(Boolean)" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+        </div>
+      `).join('');
+    }
+
+    function addTemplatePhantom() {
+      templatePhantoms.push({ hostname: '', ip: '', role: '', os: '', notes: '' });
+      renderTemplatePhantoms();
+    }
+
+    function removeTemplatePhantom(idx) { templatePhantoms.splice(idx, 1); renderTemplatePhantoms(); }
+
+    function renderTemplatePhantoms() {
+      document.getElementById('tplPhantomList').innerHTML = templatePhantoms.map((p, i) => `
+        <div style="display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.4rem; font-size: 0.8rem;">
+          <input type="text" value="${escHtml(p.hostname)}" placeholder="Hostname" onchange="templatePhantoms[${i}].hostname=this.value" style="flex: 1; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0;">
+          <input type="text" value="${escHtml(p.ip)}" placeholder="IP" onchange="templatePhantoms[${i}].ip=this.value" style="width: 120px; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0;">
+          <input type="text" value="${escHtml(p.role)}" placeholder="Role" onchange="templatePhantoms[${i}].role=this.value" style="flex: 1; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0;">
+          <input type="text" value="${escHtml(p.os)}" placeholder="OS" onchange="templatePhantoms[${i}].os=this.value" style="width: 120px; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0;">
+          <button style="font-size: 0.7rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent; border-radius: 4px; padding: 0.15rem 0.3rem; cursor: pointer;" onclick="removeTemplatePhantom(${i})">X</button>
+        </div>
+      `).join('') || '<p style="color: var(--gray-400); font-size: 0.8rem;">No phantom assets. Click "+ Add Phantom Host" to add fake hosts for profile realism.</p>';
+    }
+
+    async function saveTemplate() {
+      const editId = document.getElementById('tplEditId').value;
+      const body = {
+        name: document.getElementById('tplName').value.trim(),
+        description: document.getElementById('tplDesc').value.trim(),
+        difficulty: document.getElementById('tplDifficulty').value,
+        module: document.getElementById('tplModule').value,
+        challenge_key: document.getElementById('tplChallengeKey').value.trim() || null,
+        vm_specs: templateVMs,
+        phantom_assets: templatePhantoms
+      };
+
+      if (!body.name || templateVMs.length === 0) {
+        Toast.warning('Missing', 'Name and at least one VM are required');
+        return;
+      }
+
+      try {
+        if (editId) {
+          await api('PUT', `/challenge-templates/${editId}`, body);
+          Toast.success('Updated', `Template "${body.name}" updated`);
+        } else {
+          await api('POST', '/challenge-templates', body);
+          Toast.success('Created', `Template "${body.name}" created`);
+        }
+        closeModal('templateEditorModal');
+        loadChallengeTemplates();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function deleteTemplate(id, name) {
+      if (!confirm(`Deactivate template "${name}"?`)) return;
+      try {
+        await api('DELETE', `/challenge-templates/${id}`);
+        Toast.success('Deleted', `Template "${name}" deactivated`);
+        loadChallengeTemplates();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // ============================================================================
+    // DEPLOY CHALLENGE NETWORK
+    // ============================================================================
+
+    async function onTemplateSelected() {
+      const tplId = document.getElementById('challengeTemplateSel').value;
+      const selector = document.getElementById('templateVulnSelector');
+      const btn = document.getElementById('deployChallengeBtn');
+
+      if (!tplId) {
+        selector.style.display = 'none';
+        btn.disabled = true;
+        return;
+      }
+
+      try {
+        const template = await api('GET', `/challenge-templates/${tplId}`);
+        const vmSpecs = typeof template.vm_specs === 'string' ? JSON.parse(template.vm_specs) : template.vm_specs;
+        const allScripts = cachedVulnScripts.length > 0 ? cachedVulnScripts : await api('GET', '/vuln-scripts');
+
+        let html = '<h4 style="margin: 0 0 0.75rem; font-size: 0.9rem;">Select Vulnerability Scripts per VM</h4>';
+        html += vmSpecs.map((vm, i) => {
+          const compatScripts = allScripts.filter(s => s.os_target === 'any' || s.os_target === (vm.os?.toLowerCase().includes('linux') ? 'linux' : 'windows'));
+          const defaults = vm.default_scripts || [];
+          return `
+            <div style="background: #f7fafc; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem;">
+              <strong style="font-size: 0.85rem;">${escHtml(vm.name)} — ${escHtml(vm.role)}</strong>
+              <span style="font-size: 0.75rem; color: var(--gray-500); margin-left: 0.5rem;">${escHtml(vm.os)}</span>
+              <div style="display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.5rem;">
+                ${compatScripts.map(s => `
+                  <label style="display: flex; align-items: center; gap: 0.2rem; font-size: 0.75rem; padding: 0.2rem 0.4rem; background: white; border: 1px solid #e2e8f0; border-radius: 4px;">
+                    <input type="checkbox" class="challenge-script-cb" data-vm="${escHtml(vm.name)}" data-slug="${escHtml(s.slug)}" ${defaults.includes(s.slug) ? 'checked' : ''} style="width: auto;">
+                    ${escHtml(s.name)}
+                  </label>
+                `).join('')}
+              </div>
+            </div>`;
+        }).join('');
+
+        selector.innerHTML = html;
+        selector.style.display = 'block';
+        btn.disabled = false;
+      } catch (e) {
+        selector.innerHTML = `<p style="color: #e53e3e;">Error loading template: ${e.message}</p>`;
+        selector.style.display = 'block';
+      }
+    }
+
+    async function deployChallengeNetwork() {
+      const tplId = document.getElementById('challengeTemplateSel').value;
+      const userInput = document.getElementById('challengeUserId').value.trim();
+      const status = document.getElementById('challengeDeployStatus');
+      const btn = document.getElementById('deployChallengeBtn');
+
+      if (!tplId) { Toast.warning('Missing', 'Select a template'); return; }
+
+      // Collect selected scripts
+      const selected = [];
+      document.querySelectorAll('.challenge-script-cb:checked').forEach(cb => {
+        selected.push({ vm_name: cb.dataset.vm, script_slug: cb.dataset.slug });
+      });
+
+      btn.disabled = true;
+      btn.textContent = 'Checking resources...';
+      status.textContent = 'Running pre-flight check...';
+      status.style.color = 'var(--gray-500)';
+
+      try {
+        // Step 1: preview
+        const preview = await api('POST', '/deploy-challenge-network', {
+          template_id: tplId, selected_scripts: selected
+        });
+
+        if (preview.preview) {
+          showDeployConfirmation(preview, () => deployChallengeNetworkConfirmed(tplId, userInput, selected));
+          btn.disabled = false;
+          btn.textContent = 'Deploy Challenge Network';
+          status.textContent = '';
+          return;
+        }
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = '#e53e3e';
+        btn.disabled = false;
+        btn.textContent = 'Deploy Challenge Network';
+        return;
+      }
+
+      btn.disabled = false;
+      btn.textContent = 'Deploy Challenge Network';
+    }
+
+    async function deployChallengeNetworkConfirmed(tplId, userInput, selected) {
+      const status = document.getElementById('challengeDeployStatus');
+      const btn = document.getElementById('deployChallengeBtn');
+
+      btn.disabled = true;
+      btn.textContent = 'Deploying...';
+      status.textContent = 'Deploying challenge network (cloning VMs, running scripts)...';
+      status.style.color = 'var(--gray-500)';
+
+      try {
+        const body = {
+          template_id: tplId,
+          selected_scripts: selected,
+          confirm: true
+        };
+        if (userInput) body.user_id = userInput;
+
+        const data = await api('POST', '/deploy-challenge-network', body);
+        status.innerHTML = `
+          <strong style="color: #38a169;">Challenge network deploying!</strong><br>
+          Lane: <code>${data.lane_id}</code> | VXLAN: ${data.vxlan_id} | VMs: ${data.vm_count} | Scripts: ${data.scripts_count}<br>
+          <span style="font-size: 0.8rem; color: var(--gray-500);">Deployment ID: ${data.deployment_id} — poll status for progress.</span><br>
+          <button class="btn btn-sm btn-outline" style="margin-top: 0.5rem;" onclick="pollChallengeStatus('${data.lane_id}')">Check Status</button>
+          <button class="btn btn-sm btn-primary" style="margin-top: 0.5rem; display: none;" id="genProfileBtn-${data.lane_id}" onclick="generateChallengeProfile('${data.lane_id}')">Generate Profile</button>
+        `;
+        Toast.success('Deploying', `${data.vm_count} VMs + ${data.scripts_count} scripts`);
+        loadClusterHealth();
+      } catch (e) {
+        status.textContent = `Error: ${e.message}`;
+        status.style.color = '#e53e3e';
+        Toast.error('Deploy Failed', e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Deploy Challenge Network';
+      }
+    }
+
+    async function pollChallengeStatus(laneId) {
+      try {
+        const data = await api('GET', `/challenge-networks/${laneId}/status`);
+        const s = data.script_summary;
+        let statusHtml = `<strong>Status: ${data.status}</strong> | Scripts: ${s.completed}/${s.total} complete`;
+        if (s.running > 0) statusHtml += ` | ${s.running} running`;
+        if (s.failed > 0) statusHtml += ` | <span style="color: #e53e3e;">${s.failed} failed</span>`;
+
+        if (data.all_complete) {
+          statusHtml += `<br><span style="color: #38a169; font-weight: 600;">All scripts complete! Ready to generate profile.</span>`;
+          const genBtn = document.getElementById(`genProfileBtn-${laneId}`);
+          if (genBtn) genBtn.style.display = 'inline-block';
+        }
+
+        Toast.info('Status', statusHtml);
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function generateChallengeProfile(laneId) {
+      const industry = prompt('Industry for the profile (e.g., Technology, Healthcare, Finance):') || 'Technology';
+      const difficulty = prompt('Difficulty (beginner/intermediate/advanced):') || 'intermediate';
+
+      try {
+        Toast.info('Generating', 'Creating challenge network profile...');
+        const data = await api('POST', `/challenge-networks/${laneId}/generate-profile`, {
+          industry, difficulty, client_type: 'SMB'
+        });
+        Toast.success('Profile Generated', `${data.assets_included} assets (${data.real_vms} real VMs + ${data.phantom_hosts} phantom)`);
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function refreshAll() {
+      const online = await checkGuacStatus();
+      if (online) {
+        loadConnections();
+        loadActiveSessions();
+      }
+      loadDeployedGroups();
+      loadLanes();
+      loadModulesAndChallenges();
+      loadClusterHealth();
+      loadMergedUsers();
+      loadChallengeTemplates();
+      loadVulnScripts();
+    }
+
+    // ── Module & Challenge Dropdowns ──
+    let cachedChallenges = {}; // { module_key: [challenge, ...] }
+
+    async function loadModulesAndChallenges() {
+      try {
+        const modules = await api('GET', '/modules');
+        const selects = ['deployModule', 'deployGroupModule'];
+        selects.forEach(selId => {
+          const sel = document.getElementById(selId);
+          if (!sel) return;
+          sel.innerHTML = '';
+          if (modules.length === 0) {
+            sel.innerHTML = '<option value="">No modules installed</option>';
+            return;
+          }
+          modules.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m.key;
+            opt.textContent = m.name || m.key;
+            sel.appendChild(opt);
+          });
+          // Auto-load challenges for the first module
+          const challengeSelId = selId === 'deployModule' ? 'deployChallengeKey' : 'deployGroupChallenge';
+          loadChallengesForSelect(selId, challengeSelId);
+        });
+      } catch (e) {
+        console.error('Failed to load modules:', e);
+        ['deployModule', 'deployGroupModule'].forEach(id => {
+          const sel = document.getElementById(id);
+          if (sel) sel.innerHTML = '<option value="crucible">Crucible (default)</option>';
+        });
+      }
+    }
+
+    async function loadChallengesForSelect(moduleSelId, challengeSelId) {
+      const moduleSel = document.getElementById(moduleSelId);
+      const challengeSel = document.getElementById(challengeSelId);
+      if (!moduleSel || !challengeSel) return;
+
+      const moduleKey = moduleSel.value;
+      if (!moduleKey) {
+        challengeSel.innerHTML = '<option value="">Select a module first...</option>';
+        return;
+      }
+
+      // Check cache first
+      if (cachedChallenges[moduleKey]) {
+        populateChallengeSelect(challengeSel, cachedChallenges[moduleKey], challengeSelId === 'deployGroupChallenge');
+        return;
+      }
+
+      challengeSel.innerHTML = '<option value="">Loading challenges...</option>';
+
+      try {
+        const challenges = await api('GET', `/challenges/${moduleKey}`);
+        cachedChallenges[moduleKey] = challenges;
+        populateChallengeSelect(challengeSel, challenges, challengeSelId === 'deployGroupChallenge');
+      } catch (e) {
+        console.error('Failed to load challenges:', e);
+        challengeSel.innerHTML = '<option value="">Failed to load challenges</option>';
+      }
+    }
+
+    function populateChallengeSelect(sel, challenges, allowEmpty) {
+      sel.innerHTML = '';
+      if (allowEmpty) {
+        const emptyOpt = document.createElement('option');
+        emptyOpt.value = '';
+        emptyOpt.textContent = '— None (accounts only) —';
+        sel.appendChild(emptyOpt);
+      }
+      if (challenges.length === 0) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = 'No active challenges found';
+        sel.appendChild(opt);
+        return;
+      }
+      challenges.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.challenge_key;
+        opt.textContent = `${c.name} (${c.challenge_key})${c.difficulty ? ' — Difficulty ' + c.difficulty : ''}`;
+        sel.appendChild(opt);
+      });
+    }
+
+    // ============================================================================
+    // INIT
+    // ============================================================================
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      // Wait for Auth.check() to populate user from /api/auth/me
+      const loggedIn = await Auth.requireAuth();
+      if (!loggedIn) return;
+
+      const user = Auth.getUser();
+      if (!user || user.role !== 'admin') {
+        document.querySelector('.page-content').innerHTML = `
+          <div style="text-align: center; padding: 4rem;">
+            <div style="font-size: 3rem; margin-bottom: 1rem;">🔒</div>
+            <h2>Access Denied</h2>
+            <p style="color: var(--gray-500);">This page is restricted to administrators.</p>
+            <a href="/dashboard" class="btn btn-primary" style="margin-top: 1rem;">Back to Dashboard</a>
+          </div>`;
+        return;
+      }
+
+      refreshAll();
+
+      // Show walkthrough on first visit
+      if (!localStorage.getItem('admin_walkthrough_seen')) {
+        setTimeout(() => startWalkthrough(), 2000);
+      }
+    });
+
+    function startWalkthrough() {
+      if (typeof Walkthrough === 'undefined' || typeof adminWalkthroughSteps === 'undefined') return;
+      const wt = new Walkthrough(adminWalkthroughSteps);
+      wt.start();
+    }
+  </script>
+</body>
+</html>

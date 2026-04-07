@@ -1,0 +1,1077 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stakeholder Interviews | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    /* Interview-specific styles */
+    .interview-layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 1.5rem;
+      height: calc(100vh - var(--header-height) - 3rem);
+    }
+
+    /* Stakeholder Selection Panel */
+    .stakeholder-panel {
+      background: var(--bg-card, white);
+      border-radius: var(--border-radius);
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 1.25rem;
+      border-bottom: 1px solid var(--gray-200);
+    }
+
+    .panel-header h3 {
+      font-size: 1rem;
+      color: var(--gray-800);
+      margin-bottom: 0.25rem;
+    }
+
+    .panel-header p {
+      font-size: 0.8rem;
+      color: var(--gray-500);
+      margin: 0;
+    }
+
+    .stakeholder-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 0.5rem;
+    }
+
+    .stakeholder-card {
+      padding: 1rem;
+      border-radius: var(--border-radius);
+      cursor: pointer;
+      transition: var(--transition);
+      margin-bottom: 0.5rem;
+      border: 2px solid transparent;
+    }
+
+    .stakeholder-card:hover {
+      background: var(--gray-50);
+    }
+
+    .stakeholder-card.active {
+      background: #eff6ff;
+      border-color: var(--primary);
+    }
+
+    .stakeholder-card.completed {
+      border-color: var(--success);
+    }
+
+    .stakeholder-avatar {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary), var(--primary-light));
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .stakeholder-name {
+      font-weight: 600;
+      color: var(--gray-800);
+      margin-bottom: 0.125rem;
+    }
+
+    .stakeholder-role {
+      font-size: 0.8rem;
+      color: var(--gray-500);
+      margin-bottom: 0.5rem;
+    }
+
+    .stakeholder-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+    }
+
+    .stakeholder-tag {
+      font-size: 0.7rem;
+      padding: 0.125rem 0.5rem;
+      background: var(--gray-100);
+      color: var(--gray-600);
+      border-radius: 1rem;
+    }
+
+    .interview-status {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      font-size: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    .status-indicator {
+      width: 0.5rem;
+      height: 0.5rem;
+      border-radius: 50%;
+    }
+
+    .status-indicator.not-started {
+      background: var(--gray-400);
+    }
+
+    .status-indicator.in-progress {
+      background: var(--warning);
+    }
+
+    .status-indicator.completed {
+      background: var(--success);
+    }
+
+    /* Interview Chat Area */
+    .interview-chat {
+      background: var(--bg-card, white);
+      border-radius: var(--border-radius);
+      box-shadow: var(--shadow);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .interview-header {
+      padding: 1.25rem;
+      border-bottom: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .interview-info {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .interview-avatar {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--primary), var(--primary-light));
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+    }
+
+    .interview-details h3 {
+      font-size: 1rem;
+      color: var(--gray-800);
+      margin-bottom: 0.125rem;
+    }
+
+    .interview-details p {
+      font-size: 0.85rem;
+      color: var(--gray-500);
+      margin: 0;
+    }
+
+    .interview-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+
+    .interview-messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+      background: var(--gray-50);
+    }
+
+    .message-group {
+      margin-bottom: 1.5rem;
+    }
+
+    .message {
+      max-width: 80%;
+      margin-bottom: 0.5rem;
+    }
+
+    .message.stakeholder {
+      margin-right: auto;
+    }
+
+    .message.user {
+      margin-left: auto;
+    }
+
+    .message-content {
+      padding: 1rem 1.25rem;
+      border-radius: 1rem;
+      line-height: 1.5;
+    }
+
+    .message.stakeholder .message-content {
+      background: var(--bg-card, white);
+      border: 1px solid var(--gray-200);
+      border-bottom-left-radius: 0.25rem;
+    }
+
+    .message.user .message-content {
+      background: var(--primary);
+      color: white;
+      border-bottom-right-radius: 0.25rem;
+    }
+
+    .message-time {
+      font-size: 0.7rem;
+      color: var(--gray-400);
+      margin-top: 0.25rem;
+      padding: 0 0.5rem;
+    }
+
+    .message.user .message-time {
+      text-align: right;
+    }
+
+    /* Suggested Questions */
+    .suggested-questions {
+      padding: 1rem 1.5rem;
+      border-top: 1px solid var(--gray-200);
+      background: var(--bg-card, white);
+    }
+
+    .suggested-label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--gray-500);
+      margin-bottom: 0.75rem;
+    }
+
+    .question-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .question-chip {
+      padding: 0.5rem 1rem;
+      background: var(--gray-100);
+      border: 1px solid var(--gray-200);
+      border-radius: 2rem;
+      font-size: 0.85rem;
+      color: var(--gray-700);
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .question-chip:hover {
+      background: #eff6ff;
+      border-color: var(--primary-light);
+      color: var(--primary);
+    }
+
+    /* Interview Input */
+    .interview-input {
+      padding: 1rem 1.5rem;
+      border-top: 1px solid var(--gray-200);
+      display: flex;
+      gap: 1rem;
+      align-items: flex-end;
+    }
+
+    .input-wrapper {
+      flex: 1;
+      position: relative;
+    }
+
+    .interview-textarea {
+      width: 100%;
+      min-height: 50px;
+      max-height: 150px;
+      padding: 0.875rem 1rem;
+      border: 1px solid var(--gray-300);
+      border-radius: 1.5rem;
+      font-family: inherit;
+      font-size: 0.95rem;
+      resize: none;
+      outline: none;
+      transition: var(--transition);
+    }
+
+    .interview-textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+
+    .send-btn {
+      width: 3rem;
+      height: 3rem;
+      border-radius: 50%;
+      background: var(--primary);
+      color: white;
+      border: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      transition: var(--transition);
+      flex-shrink: 0;
+    }
+
+    .send-btn:hover {
+      background: var(--primary-dark);
+      transform: scale(1.05);
+    }
+
+    .send-btn:disabled {
+      background: var(--gray-300);
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    /* Typing indicator */
+    .typing-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 1rem;
+      color: var(--gray-500);
+      font-size: 0.85rem;
+    }
+
+    .typing-dots {
+      display: flex;
+      gap: 4px;
+    }
+
+    .typing-dots span {
+      width: 8px;
+      height: 8px;
+      background: var(--gray-400);
+      border-radius: 50%;
+      animation: bounce 1.4s ease-in-out infinite;
+    }
+
+    .typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes bounce {
+      0%, 60%, 100% { transform: translateY(0); }
+      30% { transform: translateY(-6px); }
+    }
+
+    /* Empty state */
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      text-align: center;
+      padding: 2rem;
+    }
+
+    .empty-state-icon {
+      font-size: 4rem;
+      margin-bottom: 1rem;
+    }
+
+    .empty-state h3 {
+      color: var(--gray-800);
+      margin-bottom: 0.5rem;
+    }
+
+    .empty-state p {
+      color: var(--gray-500);
+      max-width: 300px;
+    }
+
+    /* Interview notes modal */
+    .notes-sidebar {
+      position: fixed;
+      right: 0;
+      top: 0;
+      width: 400px;
+      height: 100vh;
+      background: var(--bg-card, white);
+      box-shadow: var(--shadow-lg);
+      z-index: 300;
+      transform: translateX(100%);
+      transition: transform 0.3s ease;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .notes-sidebar.open {
+      transform: translateX(0);
+    }
+
+    .notes-header {
+      padding: 1.25rem;
+      border-bottom: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .notes-content {
+      flex: 1;
+      padding: 1.25rem;
+      overflow-y: auto;
+    }
+
+    .notes-content textarea {
+      width: 100%;
+      height: 100%;
+      min-height: 300px;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--border-radius);
+      padding: 1rem;
+      font-family: inherit;
+      font-size: 0.9rem;
+      resize: none;
+    }
+
+    .notes-footer {
+      padding: 1rem 1.25rem;
+      border-top: 1px solid var(--gray-200);
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.75rem;
+    }
+
+    .notes-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      z-index: 299;
+      display: none;
+    }
+
+    .notes-overlay.active {
+      display: block;
+    }
+
+    /* Responsive */
+    @media (max-width: 1024px) {
+      .interview-layout {
+        grid-template-columns: 1fr;
+        height: auto;
+      }
+
+      .stakeholder-panel {
+        max-height: 300px;
+      }
+
+      .interview-chat {
+        min-height: 500px;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .notes-sidebar {
+        width: 100%;
+      }
+
+      .suggested-questions {
+        display: none;
+      }
+    }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .stakeholder-panel {
+      background: #111527;
+    }
+    [data-theme="dark"] .panel-header {
+      border-bottom-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .panel-header h3 {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .panel-header p {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .stakeholder-card:hover {
+      background: #161b33;
+    }
+    [data-theme="dark"] .stakeholder-card.active {
+      background: rgba(91,140,255,0.1);
+      border-color: #5b8cff;
+    }
+    [data-theme="dark"] .stakeholder-card.completed {
+      border-color: #00e68a;
+    }
+    [data-theme="dark"] .stakeholder-name {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .stakeholder-role {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .stakeholder-tag {
+      background: #1a2040;
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .interview-chat {
+      background: #111527;
+    }
+    [data-theme="dark"] .interview-header {
+      border-bottom-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .interview-details h3 {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .interview-details p {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .interview-messages {
+      background: #0a0d1a;
+    }
+    [data-theme="dark"] .message.stakeholder .message-content {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .suggested-questions {
+      background: #111527;
+      border-top-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .suggested-label {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .question-chip {
+      background: #1a2040;
+      border-color: rgba(99,130,255,0.12);
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .question-chip:hover {
+      background: rgba(91,140,255,0.1);
+      border-color: #5b8cff;
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .interview-input {
+      border-top-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .interview-textarea {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .interview-textarea:focus {
+      border-color: #5b8cff;
+      box-shadow: 0 0 0 3px rgba(91,140,255,0.15);
+    }
+    [data-theme="dark"] .notes-sidebar {
+      background: #111527;
+    }
+    [data-theme="dark"] .notes-header {
+      border-bottom-color: rgba(99,130,255,0.1);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .notes-content textarea {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .notes-footer {
+      border-top-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .empty-state h3 {
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .empty-state p {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .typing-indicator {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .typing-dots span {
+      background: #5c6585;
+    }
+    [data-theme="dark"] .message-time {
+      color: #5c6fa0;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar (populated by layout.js) -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Content injected by Layout.init() -->
+    </aside>
+
+    <!-- Sidebar overlay for mobile -->
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <div>
+            <h1 style="font-size: 1.125rem; font-weight: 600; color: var(--gray-800);">Stakeholder Interviews</h1>
+            <p style="font-size: 0.8rem; color: var(--gray-500); margin: 0;">Practice interviewing key organizational stakeholders</p>
+          </div>
+        </div>
+        <div class="header-right">
+          <select id="profileSelect" class="form-select" style="width: 200px; padding: 0.5rem;">
+            <option value="">Select Profile...</option>
+          </select>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="interview-layout">
+          <!-- Stakeholder Selection Panel -->
+          <div class="stakeholder-panel">
+            <div class="panel-header">
+              <h3>👥 Stakeholders</h3>
+              <p>Select a person to interview</p>
+            </div>
+            <div class="stakeholder-list" id="stakeholderList">
+              <!-- Stakeholders rendered here -->
+            </div>
+          </div>
+
+          <!-- Interview Chat Area -->
+          <div class="interview-chat">
+            <div class="interview-header" id="interviewHeader" style="display: none;">
+              <div class="interview-info">
+                <div class="interview-avatar" id="currentAvatar">👤</div>
+                <div class="interview-details">
+                  <h3 id="currentName">-</h3>
+                  <p id="currentRole">-</p>
+                </div>
+              </div>
+              <div class="interview-actions">
+                <button class="btn btn-outline btn-sm" onclick="openNotes()">📝 Notes</button>
+                <button class="btn btn-outline btn-sm" onclick="endInterview()">End Interview</button>
+              </div>
+            </div>
+
+            <div class="interview-messages" id="interviewMessages">
+              <div class="empty-state" id="emptyState">
+                <div class="empty-state-icon">🎤</div>
+                <h3>Select a Stakeholder</h3>
+                <p>Choose someone from the list to begin your interview simulation</p>
+              </div>
+            </div>
+
+            <div class="suggested-questions" id="suggestedQuestions" style="display: none;">
+              <div class="suggested-label">Suggested Questions</div>
+              <div class="question-chips" id="questionChips">
+                <!-- Dynamic question chips -->
+              </div>
+            </div>
+
+            <div class="interview-input" id="interviewInput" style="display: none;">
+              <div class="input-wrapper">
+                <textarea class="interview-textarea" id="messageInput" placeholder="Type your question..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+              </div>
+              <button class="send-btn" id="sendBtn" onclick="sendMessage()">
+                ➤
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Notes Sidebar -->
+  <div class="notes-overlay" id="notesOverlay" onclick="closeNotes()"></div>
+  <div class="notes-sidebar" id="notesSidebar">
+    <div class="notes-header">
+      <h3>📝 Interview Notes</h3>
+      <button class="btn btn-ghost btn-sm" onclick="closeNotes()">✕</button>
+    </div>
+    <div class="notes-content">
+      <textarea id="interviewNotes" placeholder="Take notes during the interview..."></textarea>
+    </div>
+    <div class="notes-footer">
+      <button class="btn btn-outline" onclick="closeNotes()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveNotes()">Save Notes</button>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    let currentUser = null;
+    let selectedStakeholder = null;
+    let conversationHistory = [];
+    let isProcessing = false;
+
+    // Stakeholder personas
+    const stakeholders = [
+      {
+        id: 'ceo',
+        name: 'Sarah Mitchell',
+        role: 'CEO / Executive Director',
+        avatar: '👩‍💼',
+        tags: ['Strategy', 'Budget', 'Risk Tolerance'],
+        expertise: ['Business strategy', 'Organizational goals', 'Budget priorities'],
+        personality: 'Results-focused, time-conscious, wants high-level summaries',
+        status: 'not-started'
+      },
+      {
+        id: 'ciso',
+        name: 'James Chen',
+        role: 'Chief Information Security Officer',
+        avatar: '👨‍💻',
+        tags: ['Security', 'Compliance', 'Technical'],
+        expertise: ['Security architecture', 'Threat landscape', 'Compliance requirements'],
+        personality: 'Technical, detail-oriented, security-focused',
+        status: 'not-started'
+      },
+      {
+        id: 'cfo',
+        name: 'Maria Rodriguez',
+        role: 'Chief Financial Officer',
+        avatar: '👩‍💼',
+        tags: ['Budget', 'ROI', 'Risk'],
+        expertise: ['Budget allocation', 'Financial risk', 'Cost-benefit analysis'],
+        personality: 'Analytical, cost-conscious, needs business justification',
+        status: 'not-started'
+      },
+      {
+        id: 'it-manager',
+        name: 'David Park',
+        role: 'IT Manager',
+        avatar: '👨‍🔧',
+        tags: ['Infrastructure', 'Operations', 'Technical'],
+        expertise: ['IT infrastructure', 'Daily operations', 'Technical challenges'],
+        personality: 'Practical, hands-on, resource-constrained',
+        status: 'not-started'
+      },
+      {
+        id: 'hr-director',
+        name: 'Lisa Thompson',
+        role: 'HR Director',
+        avatar: '👩‍💼',
+        tags: ['Training', 'Policies', 'Culture'],
+        expertise: ['Employee training', 'Security policies', 'Organizational culture'],
+        personality: 'People-focused, compliance-aware, training-oriented',
+        status: 'not-started'
+      },
+      {
+        id: 'dept-manager',
+        name: 'Robert Johnson',
+        role: 'Department Manager',
+        avatar: '👨‍💼',
+        tags: ['Operations', 'Users', 'Processes'],
+        expertise: ['Day-to-day operations', 'User workflows', 'Business processes'],
+        personality: 'Pragmatic, user-focused, productivity-concerned',
+        status: 'not-started'
+      }
+    ];
+
+    // Suggested questions by stakeholder type
+    const suggestedQuestionsByRole = {
+      'ceo': [
+        "What are your top business priorities this year?",
+        "How do you view cybersecurity investment?",
+        "What risks keep you up at night?",
+        "How would a security incident impact the business?"
+      ],
+      'ciso': [
+        "What's your current security architecture?",
+        "What threats concern you most?",
+        "What compliance requirements apply?",
+        "What are your biggest security gaps?"
+      ],
+      'cfo': [
+        "What's the security budget allocation?",
+        "How do you measure security ROI?",
+        "What financial risks worry you?",
+        "What would a breach cost us?"
+      ],
+      'it-manager': [
+        "What systems are most critical?",
+        "What are your main technical challenges?",
+        "How do you handle patch management?",
+        "What tools do you currently use?"
+      ],
+      'hr-director': [
+        "How is security training handled?",
+        "What are the security policies?",
+        "How is policy compliance enforced?",
+        "What's the security culture like?"
+      ],
+      'dept-manager': [
+        "What systems does your team use daily?",
+        "What are your security pain points?",
+        "How do security controls affect productivity?",
+        "What access does your team need?"
+      ]
+    };
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', async () => {
+      const isLoggedIn = await Auth.requireAuth();
+      if (!isLoggedIn) return;
+
+      currentUser = Auth.getUser();
+      updateUserUI();
+      renderStakeholders();
+      loadProfiles();
+
+      if (Auth.isInstructor()) {
+        document.getElementById('instructorLink').style.display = 'flex';
+      }
+    });
+
+    function updateUserUI() {
+      if (!currentUser) return;
+      document.getElementById('userName').textContent = `${currentUser.firstName} ${currentUser.lastName}`;
+      document.getElementById('userRole').textContent = currentUser.role;
+      document.getElementById('userAvatar').textContent = Utils.getInitials(currentUser.firstName, currentUser.lastName);
+    }
+
+    function renderStakeholders() {
+      const list = document.getElementById('stakeholderList');
+      list.innerHTML = stakeholders.map(s => `
+        <div class="stakeholder-card ${s.id === selectedStakeholder?.id ? 'active' : ''} ${s.status === 'completed' ? 'completed' : ''}" 
+             data-id="${s.id}" onclick="selectStakeholder('${s.id}')">
+          <div class="stakeholder-avatar">${s.avatar}</div>
+          <div class="stakeholder-name">${s.name}</div>
+          <div class="stakeholder-role">${s.role}</div>
+          <div class="stakeholder-tags">
+            ${s.tags.map(t => `<span class="stakeholder-tag">${t}</span>`).join('')}
+          </div>
+          <div class="interview-status">
+            <span class="status-indicator ${s.status}"></span>
+            <span>${s.status === 'not-started' ? 'Not Started' : s.status === 'in-progress' ? 'In Progress' : 'Completed'}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function selectStakeholder(id) {
+      selectedStakeholder = stakeholders.find(s => s.id === id);
+      if (!selectedStakeholder) return;
+
+      // Update UI
+      document.getElementById('emptyState').style.display = 'none';
+      document.getElementById('interviewHeader').style.display = 'flex';
+      document.getElementById('interviewInput').style.display = 'flex';
+      document.getElementById('suggestedQuestions').style.display = 'block';
+
+      // Update header
+      document.getElementById('currentAvatar').textContent = selectedStakeholder.avatar;
+      document.getElementById('currentName').textContent = selectedStakeholder.name;
+      document.getElementById('currentRole').textContent = selectedStakeholder.role;
+
+      // Update suggested questions
+      updateSuggestedQuestions();
+
+      // Clear and start conversation
+      conversationHistory = [];
+      const messagesDiv = document.getElementById('interviewMessages');
+      messagesDiv.innerHTML = '';
+
+      // Initial greeting from stakeholder
+      const greeting = getInitialGreeting();
+      addMessage('stakeholder', greeting);
+
+      // Update stakeholder status
+      selectedStakeholder.status = 'in-progress';
+      renderStakeholders();
+    }
+
+    function getInitialGreeting() {
+      const greetings = {
+        'ceo': `Hello! I'm ${selectedStakeholder.name}, the CEO. I have about 20 minutes before my next meeting. What would you like to discuss about our security posture?`,
+        'ciso': `Hi there. ${selectedStakeholder.name} here, your CISO. I'm happy to discuss our security program in detail. What aspects would you like to cover?`,
+        'cfo': `Good to meet you. I'm ${selectedStakeholder.name}, the CFO. I'm always interested in discussions about security investment and ROI. How can I help?`,
+        'it-manager': `Hey! ${selectedStakeholder.name}, IT Manager. I manage the day-to-day tech operations here. What do you need to know?`,
+        'hr-director': `Hello! I'm ${selectedStakeholder.name} from HR. I handle our security training and policy programs. What would you like to discuss?`,
+        'dept-manager': `Hi, I'm ${selectedStakeholder.name}. I manage the operations department. I can tell you how security affects our daily work.`
+      };
+      return greetings[selectedStakeholder.id] || `Hello, I'm ${selectedStakeholder.name}. How can I help you?`;
+    }
+
+    function updateSuggestedQuestions() {
+      const chips = document.getElementById('questionChips');
+      const questions = suggestedQuestionsByRole[selectedStakeholder.id] || [];
+      chips.innerHTML = questions.map(q => `
+        <span class="question-chip" onclick="askSuggestedQuestion('${Utils.escapeHtml(q)}')">${q}</span>
+      `).join('');
+    }
+
+    function askSuggestedQuestion(question) {
+      document.getElementById('messageInput').value = question;
+      sendMessage();
+    }
+
+    function addMessage(type, content) {
+      const messagesDiv = document.getElementById('interviewMessages');
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      
+      const messageHtml = `
+        <div class="message ${type}">
+          <div class="message-content">${Utils.escapeHtml(content)}</div>
+          <div class="message-time">${time}</div>
+        </div>
+      `;
+      
+      messagesDiv.innerHTML += messageHtml;
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+
+      conversationHistory.push({ role: type, content });
+    }
+
+    function showTypingIndicator() {
+      const messagesDiv = document.getElementById('interviewMessages');
+      messagesDiv.innerHTML += `
+        <div class="typing-indicator" id="typingIndicator">
+          <div class="typing-dots">
+            <span></span><span></span><span></span>
+          </div>
+          <span>${selectedStakeholder.name} is typing...</span>
+        </div>
+      `;
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function hideTypingIndicator() {
+      const indicator = document.getElementById('typingIndicator');
+      if (indicator) indicator.remove();
+    }
+
+    async function sendMessage() {
+      if (isProcessing || !selectedStakeholder) return;
+
+      const input = document.getElementById('messageInput');
+      const message = input.value.trim();
+      if (!message) return;
+
+      // Add user message
+      addMessage('user', message);
+      input.value = '';
+
+      // Show typing indicator
+      isProcessing = true;
+      document.getElementById('sendBtn').disabled = true;
+      showTypingIndicator();
+
+      try {
+        // Build context for AI
+        const context = `You are roleplaying as ${selectedStakeholder.name}, the ${selectedStakeholder.role} of an organization being assessed for cybersecurity risks.
+
+Personality: ${selectedStakeholder.personality}
+Areas of expertise: ${selectedStakeholder.expertise.join(', ')}
+
+Respond in character as this stakeholder would. Be realistic and provide information that would be typical for someone in this role. If asked about technical details outside your expertise, deflect to the appropriate person. Keep responses conversational and realistic, 2-4 sentences typically.
+
+Previous conversation:
+${conversationHistory.map(m => `${m.role === 'user' ? 'Interviewer' : selectedStakeholder.name}: ${m.content}`).join('\n')}
+
+Respond to this question as ${selectedStakeholder.name}:`;
+
+        const data = await API.chat(`${context}\n\nInterviewer: ${message}`, currentUser?.id);
+        
+        hideTypingIndicator();
+        addMessage('stakeholder', data.response);
+      } catch (error) {
+        hideTypingIndicator();
+        addMessage('stakeholder', "I'm sorry, I got distracted for a moment. Could you repeat that?");
+      } finally {
+        isProcessing = false;
+        document.getElementById('sendBtn').disabled = false;
+        document.getElementById('messageInput').focus();
+      }
+    }
+
+    function handleKeyDown(event) {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
+    }
+
+    function endInterview() {
+      if (selectedStakeholder) {
+        selectedStakeholder.status = 'completed';
+        renderStakeholders();
+        Toast.success('Interview Complete', `Finished interview with ${selectedStakeholder.name}`);
+      }
+      
+      // Reset UI
+      selectedStakeholder = null;
+      conversationHistory = [];
+      document.getElementById('interviewMessages').innerHTML = `
+        <div class="empty-state" id="emptyState">
+          <div class="empty-state-icon">🎤</div>
+          <h3>Select a Stakeholder</h3>
+          <p>Choose someone from the list to begin your interview simulation</p>
+        </div>
+      `;
+      document.getElementById('interviewHeader').style.display = 'none';
+      document.getElementById('interviewInput').style.display = 'none';
+      document.getElementById('suggestedQuestions').style.display = 'none';
+    }
+
+    function openNotes() {
+      document.getElementById('notesOverlay').classList.add('active');
+      document.getElementById('notesSidebar').classList.add('open');
+    }
+
+    function closeNotes() {
+      document.getElementById('notesOverlay').classList.remove('active');
+      document.getElementById('notesSidebar').classList.remove('open');
+    }
+
+    function saveNotes() {
+      const notes = document.getElementById('interviewNotes').value;
+      // Save notes to localStorage or API
+      localStorage.setItem(`interview-notes-${selectedStakeholder?.id}`, notes);
+      Toast.success('Notes Saved', 'Your interview notes have been saved');
+      closeNotes();
+    }
+
+    async function loadProfiles() {
+      try {
+        const data = await API.profiles.list();
+        const select = document.getElementById('profileSelect');
+        data.profiles.forEach(profile => {
+          const option = document.createElement('option');
+          option.value = profile.id;
+          option.textContent = profile.companyName || 'Unnamed Profile';
+          select.appendChild(option);
+        });
+      } catch (error) {
+        console.error('Failed to load profiles:', error);
+      }
+    }
+
+    // Sidebar toggle
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('open');
+      document.getElementById('sidebarOverlay').classList.toggle('active');
+    }
+
+    function closeSidebar() {
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebarOverlay').classList.remove('active');
+    }
+  </script>
+</body>
+</html>

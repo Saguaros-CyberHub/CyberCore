@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Register | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-logo">🏥</div>
+        <h1>Create Account</h1>
+        <p>Join the Cyber Risk Assessment Platform</p>
+      </div>
+      
+      <div class="auth-body">
+        <div id="errorAlert" class="alert alert-danger" style="display: none;"></div>
+        
+        <form id="registerForm">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="firstName">First Name</label>
+              <input type="text" class="form-input" id="firstName" name="firstName" placeholder="John" required>
+              <div class="form-error" id="firstNameError"></div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="lastName">Last Name</label>
+              <input type="text" class="form-input" id="lastName" name="lastName" placeholder="Doe" required>
+              <div class="form-error" id="lastNameError"></div>
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label" for="email">Email Address</label>
+            <input type="email" class="form-input" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+            <div class="form-error" id="emailError"></div>
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label" for="organization">Organization (Optional)</label>
+            <input type="text" class="form-input" id="organization" name="organization" placeholder="University of Arizona">
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label" for="password">Password</label>
+            <input type="password" class="form-input" id="password" name="password" placeholder="••••••••" required autocomplete="new-password">
+            <div class="form-hint">At least 8 characters with uppercase, lowercase, and number</div>
+            <div class="form-error" id="passwordError"></div>
+          </div>
+          
+          <div class="form-group">
+            <label class="form-label" for="confirmPassword">Confirm Password</label>
+            <input type="password" class="form-input" id="confirmPassword" name="confirmPassword" placeholder="••••••••" required>
+            <div class="form-error" id="confirmPasswordError"></div>
+          </div>
+          
+          <button type="submit" class="btn btn-primary btn-block btn-lg" id="submitBtn">
+            Create Account
+          </button>
+        </form>
+        
+        <div class="auth-footer">
+          <p>Already have an account? <a href="/login">Sign in</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      const form = document.getElementById('registerForm');
+      const submitBtn = document.getElementById('submitBtn');
+      const errorAlert = document.getElementById('errorAlert');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        
+        const firstName = document.getElementById('firstName').value.trim();
+        const lastName = document.getElementById('lastName').value.trim();
+        const email = document.getElementById('email').value.trim();
+        const organization = document.getElementById('organization').value.trim();
+        const password = document.getElementById('password').value;
+        const confirmPassword = document.getElementById('confirmPassword').value;
+
+        // Clear errors
+        errorAlert.style.display = 'none';
+        document.querySelectorAll('.form-error').forEach(el => el.textContent = '');
+
+        // Validate
+        let hasError = false;
+        
+        if (!Validator.minLength(firstName, 2)) {
+          document.getElementById('firstNameError').textContent = 'First name must be at least 2 characters';
+          hasError = true;
+        }
+        
+        if (!Validator.minLength(lastName, 2)) {
+          document.getElementById('lastNameError').textContent = 'Last name must be at least 2 characters';
+          hasError = true;
+        }
+        
+        if (!Validator.email(email)) {
+          document.getElementById('emailError').textContent = 'Please enter a valid email address';
+          hasError = true;
+        }
+        
+        if (!Validator.password(password)) {
+          document.getElementById('passwordError').textContent = 'Password must be at least 8 characters with uppercase, lowercase, and number';
+          hasError = true;
+        }
+        
+        if (password !== confirmPassword) {
+          document.getElementById('confirmPasswordError').textContent = 'Passwords do not match';
+          hasError = true;
+        }
+
+        if (hasError) return;
+
+        // Submit
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creating account...';
+
+        try {
+          const result = await API.auth.register({
+            firstName,
+            lastName,
+            email,
+            organization: organization || undefined,
+            password
+          });
+          
+          Toast.success('Welcome!', 'Account created successfully');
+          setTimeout(() => {
+            window.location.href = '/dashboard';
+          }, 500);
+          
+        } catch (error) {
+          errorAlert.textContent = error.message || 'Registration failed. Please try again.';
+          errorAlert.style.display = 'block';
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Create Account';
+        }
+      });
+    });
+  </script>
+</body>
+</html>

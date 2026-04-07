@@ -1,0 +1,2648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Client Profile: Midwest Cargo Solutions</title>
+  <style>
+    /* ═══════════════════════════════════════════════════════════════════════
+       CSS RESET & BASE STYLES
+       ═══════════════════════════════════════════════════════════════════════ */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --primary: #1a365d;
+      --primary-light: #2c5282;
+      --primary-lighter: #3182ce;
+      --accent: #ed8936;
+      --accent-dark: #c05621;
+      --success: #38a169;
+      --warning: #d69e2e;
+      --danger: #e53e3e;
+      --gray-50: #f8fafc;
+      --gray-100: #f1f5f9;
+      --gray-200: #e2e8f0;
+      --gray-300: #cbd5e0;
+      --gray-400: #a0aec0;
+      --gray-500: #718096;
+      --gray-600: #4a5568;
+      --gray-700: #2d3748;
+      --gray-800: #1a202c;
+      --radius: 8px;
+      --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    }
+
+    body {
+      font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, 'Helvetica Neue', sans-serif;
+      line-height: 1.6;
+      color: var(--gray-700);
+      background: var(--gray-100);
+    }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       COVER PAGE
+       ═══════════════════════════════════════════════════════════════════════ */
+    .cover-page {
+      min-height: 100vh;
+      display: flex; flex-direction: column; justify-content: center; align-items: center;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 50%, var(--primary-lighter) 100%);
+      color: white; text-align: center; padding: 60px 40px;
+      position: relative; overflow: hidden;
+    }
+    .cover-page::before {
+      content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+      opacity: 0.3;
+    }
+    .cover-content { position: relative; z-index: 1; max-width: 800px; }
+    .cover-badge { display: inline-block; padding: 8px 24px; background: rgba(255,255,255,0.15); border-radius: 30px; font-size: 0.9em; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 30px; backdrop-filter: blur(4px); }
+    .cover-title { font-size: 1.5em; font-weight: 300; letter-spacing: 4px; text-transform: uppercase; margin-bottom: 15px; opacity: 0.9; }
+    .cover-company { font-size: 3.5em; font-weight: 700; margin: 20px 0; text-shadow: 0 4px 20px rgba(0,0,0,0.3); }
+    .cover-industry { font-size: 1.5em; font-weight: 300; opacity: 0.9; margin-bottom: 10px; }
+    .cover-location { font-size: 1.2em; opacity: 0.7; margin-bottom: 40px; }
+    .cover-difficulty { display: inline-block; padding: 12px 30px; background: var(--accent); border-radius: 30px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 50px; box-shadow: 0 4px 15px rgba(237, 137, 54, 0.4); }
+    .cover-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; margin-top: 40px; padding-top: 40px; border-top: 1px solid rgba(255,255,255,0.2); }
+    .cover-meta-item { text-align: center; }
+    .cover-meta-label { font-size: 0.8em; opacity: 0.7; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 5px; }
+    .cover-meta-value { font-size: 1.1em; font-weight: 600; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       NAVIGATION & TABS
+       ═══════════════════════════════════════════════════════════════════════ */
+    .nav-wrapper { position: sticky; top: 0; z-index: 100; background: white; box-shadow: var(--shadow); }
+    .nav-container { max-width: 1400px; margin: 0 auto; padding: 0 20px; }
+    .nav-tabs { display: flex; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; }
+    .nav-tabs::-webkit-scrollbar { display: none; }
+    .nav-tab { flex-shrink: 0; padding: 16px 24px; font-size: 0.95em; font-weight: 500; color: var(--gray-500); background: none; border: none; border-bottom: 3px solid transparent; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+    .nav-tab:hover { color: var(--primary); background: var(--gray-50); }
+    .nav-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       MAIN CONTENT
+       ═══════════════════════════════════════════════════════════════════════ */
+    .main-container { max-width: 1400px; margin: 0 auto; padding: 30px 20px; }
+    .tab-panel { display: none; animation: fadeIn 0.3s ease; }
+    .tab-panel.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       CARDS & SECTIONS
+       ═══════════════════════════════════════════════════════════════════════ */
+    .section { margin-bottom: 30px; }
+    .section-header { display: flex; align-items: center; gap: 12px; padding: 16px 24px; background: linear-gradient(90deg, var(--primary), var(--primary-light)); color: white; border-radius: var(--radius) var(--radius) 0 0; font-size: 1.2em; font-weight: 600; }
+    .section-header-icon { font-size: 1.3em; }
+    .section-content { background: white; border: 1px solid var(--gray-200); border-top: none; border-radius: 0 0 var(--radius) var(--radius); padding: 24px; }
+    .card { background: white; border: 1px solid var(--gray-200); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+    .card-header { padding: 16px 20px; background: var(--gray-50); border-bottom: 1px solid var(--gray-200); font-weight: 600; color: var(--gray-700); }
+    .card-body { padding: 20px; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       INFO GRID
+       ═══════════════════════════════════════════════════════════════════════ */
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+    .info-item.wide { grid-column: span 2; }
+    .info-grid-4 { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .info-item { background: var(--gray-50); padding: 16px 20px; border-radius: var(--radius); border-left: 4px solid var(--primary); }
+    .info-item.accent { border-left-color: var(--accent); }
+    .info-item.success { border-left-color: var(--success); }
+    .info-item.danger { border-left-color: var(--danger); }
+    .info-label { font-size: 0.8em; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+    .info-value { font-size: 1.1em; font-weight: 600; color: var(--primary); }
+    .info-value.mono { font-family: 'Consolas', 'Monaco', 'Courier New', monospace; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       TABLES
+       ═══════════════════════════════════════════════════════════════════════ */
+    .table-wrapper { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.95em; }
+    th { background: var(--primary); color: white; padding: 14px 16px; text-align: left; font-weight: 600; white-space: nowrap; }
+    td { padding: 12px 16px; border-bottom: 1px solid var(--gray-200); vertical-align: top; }
+    tr:nth-child(even) td { background: var(--gray-50); }
+    tr:hover td { background: #edf2f7; }
+    .table-mono td:nth-child(2) { font-family: 'Consolas', 'Monaco', monospace; color: var(--primary-lighter); }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       TAGS & BADGES
+       ═══════════════════════════════════════════════════════════════════════ */
+    .tag { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.85em; font-weight: 500; margin: 2px; }
+    .tag-default { background: var(--gray-200); color: var(--gray-700); }
+    .tag-primary { background: #dbeafe; color: var(--primary); }
+    .tag-success { background: #d1fae5; color: #065f46; }
+    .tag-warning { background: #fef3c7; color: #92400e; }
+    .tag-danger { background: #fee2e2; color: #991b1b; }
+    .tag-purple { background: #ede9fe; color: #5b21b6; }
+    .badge { display: inline-block; padding: 4px 10px; border-radius: 4px; font-size: 0.8em; font-weight: 600; text-transform: uppercase; }
+    .badge-trust-high { background: #d1fae5; color: #065f46; }
+    .badge-trust-medium { background: #fef3c7; color: #92400e; }
+    .badge-trust-low { background: #fee2e2; color: #991b1b; }
+    .badge-allow { background: #d1fae5; color: #065f46; }
+    .badge-deny { background: #fee2e2; color: #991b1b; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       STAKEHOLDER CARDS
+       ═══════════════════════════════════════════════════════════════════════ */
+    .stakeholder-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 24px; }
+    .stakeholder-card { background: white; border-radius: var(--radius); border: 1px solid var(--gray-200); overflow: hidden; box-shadow: var(--shadow); transition: box-shadow 0.2s, transform 0.2s; }
+    .stakeholder-card:hover { box-shadow: var(--shadow-lg); transform: translateY(-2px); }
+    .stakeholder-header { padding: 20px; background: linear-gradient(135deg, var(--primary), var(--primary-light)); color: white; }
+    .stakeholder-name { font-size: 1.3em; font-weight: 700; margin-bottom: 4px; }
+    .stakeholder-role { color: var(--accent); font-weight: 600; font-size: 0.95em; }
+    .stakeholder-dept { opacity: 0.8; font-size: 0.85em; margin-top: 4px; }
+    .stakeholder-body { padding: 20px; }
+    .stakeholder-detail { margin-bottom: 16px; }
+    .stakeholder-detail-label { font-size: 0.8em; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .stakeholder-quote { font-style: italic; color: var(--gray-600); padding: 12px 16px; background: var(--gray-50); border-left: 3px solid var(--accent); margin-top: 16px; border-radius: 0 var(--radius) var(--radius) 0; }
+    .stakeholder-quote::before { content: '"'; font-size: 1.5em; color: var(--accent); margin-right: 4px; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       THREAT & SCENARIO CARDS
+       ═══════════════════════════════════════════════════════════════════════ */
+    .threat-card { background: white; border-radius: var(--radius); border: 1px solid var(--gray-200); border-left: 4px solid var(--danger); padding: 20px; margin-bottom: 20px; box-shadow: var(--shadow); }
+    .threat-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px; }
+    .threat-id { display: inline-block; padding: 4px 12px; background: var(--danger); color: white; border-radius: 4px; font-size: 0.85em; font-weight: 600; }
+    .threat-type { font-weight: 600; color: var(--gray-700); text-transform: capitalize; }
+    .threat-title { font-size: 1.15em; font-weight: 600; color: var(--gray-800); margin-bottom: 12px; }
+    .threat-detail { margin-bottom: 12px; }
+    .threat-detail strong { color: var(--gray-600); font-size: 0.9em; }
+
+    /* Legacy string-based attack path (horizontal arrows) */
+    .attack-path { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+    .attack-path-step { padding: 4px 10px; background: var(--gray-100); border-radius: 4px; font-family: monospace; font-size: 0.85em; }
+    .attack-path-arrow { color: var(--danger); font-weight: bold; }
+
+    /* ─── NEW: Structured kill-chain attack path (vertical steps) ─── */
+    .kill-chain { margin-top: 12px; }
+    .kill-chain-step { display: flex; gap: 12px; margin-bottom: 4px; }
+    .kill-chain-num { width: 28px; height: 28px; border-radius: 50%; background: var(--danger); color: white; display: flex; align-items: center; justify-content: center; font-size: 0.8em; font-weight: 700; flex-shrink: 0; margin-top: 2px; }
+    .kill-chain-body { flex: 1; }
+    .kill-chain-action { font-weight: 500; color: var(--gray-700); margin-bottom: 4px; }
+    .kill-chain-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 2px; }
+    .kill-chain-meta code { font-size: 0.85em; }
+    .kill-chain-detection { font-size: 0.85em; color: var(--gray-500); font-style: italic; }
+    .kill-chain-connector { text-align: center; color: var(--danger); font-size: 1.2em; margin: 2px 0 2px 8px; }
+
+    /* ─── NEW: Incident cards ─── */
+    .incident-card { background: var(--gray-50); padding: 14px 18px; border-left: 4px solid var(--accent); border-radius: 0 var(--radius) var(--radius) 0; margin-bottom: 10px; }
+    .incident-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .incident-type { font-weight: 600; color: var(--gray-700); text-transform: capitalize; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       ARTIFACT CARDS
+       ═══════════════════════════════════════════════════════════════════════ */
+    .artifact-card { background: var(--gray-800); border-radius: var(--radius); overflow: hidden; margin-bottom: 16px; }
+    .artifact-header { padding: 12px 16px; background: var(--gray-700); display: flex; justify-content: space-between; align-items: center; }
+    .artifact-id { color: var(--accent); font-weight: 600; font-size: 0.9em; }
+    .artifact-type { color: var(--gray-400); font-size: 0.85em; }
+    .artifact-desc { padding: 12px 16px; color: var(--gray-400); font-size: 0.9em; border-bottom: 1px solid var(--gray-700); }
+    .artifact-data { padding: 16px; color: #68d391; font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; white-space: pre-wrap; word-break: break-all; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       NETWORK DIAGRAM
+       ═══════════════════════════════════════════════════════════════════════ */
+    .diagram-box { background: var(--gray-800); color: #68d391; padding: 24px; border-radius: var(--radius); font-family: 'Consolas', 'Monaco', monospace; font-size: 0.9em; white-space: pre-wrap; overflow-x: auto; line-height: 1.4; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       LEARNING OBJECTIVES
+       ═══════════════════════════════════════════════════════════════════════ */
+    .nice-tag { display: inline-block; padding: 4px 10px; background: #7c3aed; color: white; border-radius: 4px; font-size: 0.8em; font-weight: 600; margin: 2px; }
+    .learning-part { background: var(--gray-50); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+    .learning-part-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+    .learning-part-title { font-weight: 600; color: var(--primary); }
+    .learning-part-badge { padding: 4px 12px; background: var(--primary); color: white; border-radius: 4px; font-size: 0.8em; font-weight: 600; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       SUMMARY STATS
+       ═══════════════════════════════════════════════════════════════════════ */
+    .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 16px; }
+    .stat-card { background: white; border-radius: var(--radius); padding: 20px; text-align: center; border: 1px solid var(--gray-200); box-shadow: var(--shadow); }
+    .stat-value { font-size: 2em; font-weight: 700; color: var(--primary); margin-bottom: 4px; }
+    .stat-label { font-size: 0.85em; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.5px; }
+
+    /* ─── Interactive filter cards ─── */
+    .filter-card { cursor: pointer; transition: all 0.2s ease; user-select: none; position: relative; }
+    .filter-card:hover { border-color: var(--primary-lighter); transform: translateY(-2px); box-shadow: var(--shadow-lg); }
+    .filter-card.active { border-color: var(--primary); background: linear-gradient(135deg, #ebf4ff, #dbeafe); }
+    .filter-card.active .stat-value { color: var(--primary); }
+    .filter-card.active .stat-label { color: var(--primary-light); font-weight: 600; }
+    .filter-card.active::after { content: ''; position: absolute; bottom: 0; left: 20%; right: 20%; height: 3px; background: var(--primary); border-radius: 3px 3px 0 0; }
+
+    /* ─── Sortable table headers ─── */
+    .sortable-th { cursor: pointer; user-select: none; transition: background 0.15s; white-space: nowrap; }
+    .sortable-th:hover { background: var(--primary-light); }
+    .sortable-th .sort-icon { display: inline-block; margin-left: 6px; font-size: 0.75em; opacity: 0.4; transition: opacity 0.15s; }
+    .sortable-th.sort-asc .sort-icon, .sortable-th.sort-desc .sort-icon { opacity: 1; }
+    .ws-row { transition: opacity 0.2s ease; }
+    .ws-row.hidden { display: none; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       FOOTER & MISC
+       ═══════════════════════════════════════════════════════════════════════ */
+    .footer { text-align: center; padding: 40px 20px; background: var(--gray-800); color: var(--gray-400); margin-top: 40px; }
+    .footer-title { color: white; font-size: 1.2em; font-weight: 600; margin-bottom: 10px; }
+    .footer p { margin: 8px 0; font-size: 0.9em; }
+    .confidential-banner { background: var(--danger); color: white; text-align: center; padding: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; font-size: 0.85em; }
+
+    /* ═══════════════════════════════════════════════════════════════════════
+       PRINT & RESPONSIVE
+       ═══════════════════════════════════════════════════════════════════════ */
+    @media print {
+      .nav-wrapper { display: none; }
+      .cover-page { min-height: auto; page-break-after: always; }
+      .tab-panel { display: block !important; page-break-before: always; }
+      .tab-panel:first-of-type { page-break-before: avoid; }
+      .section { page-break-inside: avoid; }
+      body { background: white; }
+    }
+    @media (max-width: 768px) {
+      .cover-company { font-size: 2em; }
+      .cover-meta { grid-template-columns: 1fr; gap: 20px; }
+      .stakeholder-grid { grid-template-columns: 1fr; }
+      .info-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="confidential-banner">
+    CONFIDENTIAL - FOR EDUCATIONAL PURPOSES ONLY - SIMULATED CLIENT PROFILE
+  </div>
+
+  <!-- ═════════════════════════════════════════════════════════════════════
+       COVER PAGE
+       ═════════════════════════════════════════════════════════════════════ -->
+  <div class="cover-page">
+    <div class="cover-content">
+      <div class="cover-badge">Small-Medium Business</div>
+      <div class="cover-title">Client Profile Packet</div>
+      <div class="cover-company">Midwest Cargo Solutions</div>
+      <div class="cover-industry">Regional Logistics &amp; Warehousing</div>
+      <div class="cover-location">Kansas City, MO</div>
+      <div class="cover-difficulty" style="background: #dd6b20">
+        intermediate Difficulty
+      </div>
+      <div class="cover-meta">
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Profile ID</div>
+          <div class="cover-meta-value">RUN_1774030768647_L3PUVE</div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Generated</div>
+          <div class="cover-meta-value">March 20, 2026</div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Est. Time</div>
+          <div class="cover-meta-value">10 Hours</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═════════════════════════════════════════════════════════════════════
+       NAVIGATION
+       ═════════════════════════════════════════════════════════════════════ -->
+  <div class="nav-wrapper">
+    <div class="nav-container">
+      <div class="nav-tabs">
+        <button class="nav-tab active" data-tab="overview">Overview</button>
+        <button class="nav-tab" data-tab="governance">Governance</button>
+        <button class="nav-tab" data-tab="policies">Policies</button>
+        <button class="nav-tab" data-tab="stakeholders">Stakeholders</button>
+        <button class="nav-tab" data-tab="it">IT Environment</button>
+        <button class="nav-tab" data-tab="network">Network</button>
+        <button class="nav-tab" data-tab="assets">Assets</button>
+        <button class="nav-tab" data-tab="threats">Threats</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="main-container">
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: OVERVIEW
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel active" id="tab-overview">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128202;</span>
+          Executive Summary
+        </div>
+        <div class="section-content">
+          <div class="stats-grid" style="margin-bottom: 30px;">
+            <div class="stat-card">
+              <div class="stat-value">42</div>
+              <div class="stat-label">Employees</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">8</div>
+              <div class="stat-label">Stakeholders</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">48</div>
+              <div class="stat-label">Network Assets</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">4</div>
+              <div class="stat-label">Subnets</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">3</div>
+              <div class="stat-label">Threat Scenarios</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">10h</div>
+              <div class="stat-label">Est. Time</div>
+            </div>
+          </div>
+
+          <div class="info-grid" style="margin-bottom: 24px;">
+            <div class="info-item">
+              <div class="info-label">Company Name</div>
+              <div class="info-value">Midwest Cargo Solutions</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Industry</div>
+              <div class="info-value">Regional Logistics &amp; Warehousing</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">NAICS Code</div>
+              <div class="info-value">488510</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Headquarters</div>
+              <div class="info-value">Kansas City, MO</div>
+            </div>
+            <div class="info-item wide">
+              <div class="info-label">Public Domain</div>
+              <div class="info-value mono">midwestcargosolutions.com</div>
+            </div>
+            <div class="info-item accent">
+              <div class="info-label">Public IP</div>
+              <div class="info-value mono">136.110.110.171</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">IT Delivery Model</div>
+              <div class="info-value">On-Prem Heavy</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Security Framework</div>
+              <div class="info-value">Partial</div>
+            </div>
+            
+            <div class="info-item accent">
+              <div class="info-label">Annual Revenue</div>
+              <div class="info-value">$5M-25M</div>
+            </div>
+            
+            <div class="info-item">
+              <div class="info-label">Growth Trajectory</div>
+              <div class="info-value">Stable - &lt;1 sentence context&gt;</div>
+            </div>
+          </div>
+
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Business Model</h4>
+          <p style="color: var(--gray-600); line-height: 1.7;">Midwest Cargo Solutions provides regional freight transportation and warehousing services for manufacturers and retailers across the Midwest. The company operates 3 distribution centers and 150+ trucks, specializing in time-sensitive LTL shipments.</p>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 24px;">
+            <div>
+              <h4 style="margin-bottom: 12px; color: var(--primary);">Critical Services</h4>
+              <div><span class="tag tag-danger">Inventory Management</span><span class="tag tag-danger">Route Optimization</span><span class="tag tag-danger">Third-Party Logistics</span></div>
+            </div>
+            <div>
+              <h4 style="margin-bottom: 12px; color: var(--primary);">Key System Dependencies</h4>
+              <div><span class="tag tag-primary">WMS</span><span class="tag tag-primary">ERP</span><span class="tag tag-primary">Fleet Management</span></div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Business Continuity</h4>
+          <div class="info-grid info-grid-4">
+            <div class="info-item danger">
+              <div class="info-label">Recovery Point Objective</div>
+              <div class="info-value">24 hours</div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Recovery Time Objective</div>
+              <div class="info-value">48 hours</div>
+            </div>
+            <div class="info-item accent">
+              <div class="info-label">Est. Downtime Cost</div>
+              <div class="info-value">$5,000/hr</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Department Breakdown</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr><th>Department</th><th>Headcount</th><th>% of Total</th></tr>
+              </thead>
+              <tbody>
+                
+                  <tr>
+                    <td>IT</td>
+                    <td><strong>3</strong></td>
+                    <td>7.1%</td>
+                  </tr>
+                
+                  <tr>
+                    <td>Operations</td>
+                    <td><strong>15</strong></td>
+                    <td>35.7%</td>
+                  </tr>
+                
+                  <tr>
+                    <td>Administration</td>
+                    <td><strong>5</strong></td>
+                    <td>11.9%</td>
+                  </tr>
+                
+                  <tr>
+                    <td>Sales/Marketing</td>
+                    <td><strong>10</strong></td>
+                    <td>23.8%</td>
+                  </tr>
+                
+                  <tr>
+                    <td>Other</td>
+                    <td><strong>9</strong></td>
+                    <td>21.4%</td>
+                  </tr>
+                
+                <tr style="background: var(--gray-200); font-weight: 600;">
+                  <td>Total</td>
+                  <td>42</td>
+                  <td>100%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--accent);">Past Security Incidents</h4>
+          
+            <div class="incident-card">
+              <div class="incident-header">
+                <span class="incident-type">phishing (2022)</span>
+                <span class="tag tag-warning">Medium</span>
+              </div>
+              <p style="font-size: 0.9em; color: var(--gray-600);">A phishing attack compromised 3 employee credentials, leading to a 2-day system lockdown after detection by a third-party vendor.</p>
+            </div>
+          
+            <div class="incident-card">
+              <div class="incident-header">
+                <span class="incident-type">ransomware (2023)</span>
+                <span class="tag tag-danger">High</span>
+              </div>
+              <p style="font-size: 0.9em; color: var(--gray-600);">Ransomware infected the ERP system during a software update; data was restored from outdated backups with 2 weeks of data loss.</p>
+            </div>
+          
+
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Known Industry Risks</h4>
+          <div><span class="tag tag-warning">ransomware</span><span class="tag tag-warning">phishing</span><span class="tag tag-warning">vendor portal compromise</span></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: GOVERNANCE
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-governance">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128220;</span>
+          Governance &amp; Compliance
+        </div>
+        <div class="section-content">
+          <div class="info-grid" style="margin-bottom: 24px;">
+            <div class="info-item">
+              <div class="info-label">Security Framework</div>
+              <div class="info-value">Partial</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Policy Enforcement</div>
+              <div class="info-value">Inconsistent</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Risk Tolerance</div>
+              <div class="info-value">Moderate</div>
+            </div>
+          </div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px;">
+            <div class="card">
+              <div class="card-header" style="background: #d1fae5; color: #065f46;">Policies Present</div>
+              <div class="card-body">
+                <div style="padding: 8px 0; border-bottom: 1px solid var(--gray-100);">Password Policy</div><div style="padding: 8px 0; border-bottom: 1px solid var(--gray-100);">Access Control Policy</div><div style="padding: 8px 0; border-bottom: 1px solid var(--gray-100);">Vendor Management Policy</div>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-header" style="background: #fee2e2; color: #991b1b;">Missing Policies</div>
+              <div class="card-body">
+                <div style="padding: 8px 0; border-bottom: 1px solid var(--gray-100);">Incident Response Plan</div><div style="padding: 8px 0; border-bottom: 1px solid var(--gray-100);">Data Classification Policy</div><div style="padding: 8px 0; border-bottom: 1px solid var(--gray-100);">Remote Work Policy</div>
+              </div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--accent);">Regulatory Timeline</h4>
+          <div class="info-item accent" style="margin-bottom: 16px;">
+            <div class="info-label">Upcoming Compliance Deadlines</div>
+            <div class="info-value" style="font-size: 1em; font-weight: 500;">SOC 2 Type II audit scheduled Q4 2025; California Privacy Law compliance deadline Q1 2026</div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Compliance Focus Areas</h4>
+          <div><span class="tag tag-purple">SOC 2</span><span class="tag tag-purple">State Privacy Laws</span></div>
+          
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: POLICY DOCUMENTS
+         ═════════════════════════════════════════════════════════════════════ -->
+    
+    <div class="tab-panel" id="tab-policies">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128220;</span>
+          Policy Documents (3)
+        </div>
+        <div class="section-content">
+          <p style="margin-bottom: 20px; color: var(--gray-600);">
+            The following policy documents are currently in place at Midwest Cargo Solutions.
+            Each policy can be viewed on the student dashboard via the "View Policies" button.
+          </p>
+          <div style="display: grid; gap: 12px;">
+            
+              <div style="border: 1px solid var(--gray-200); border-radius: 10px; overflow: hidden;">
+                <div style="padding: 14px 18px; background: var(--gray-50); display: flex; align-items: center; gap: 12px;">
+                  <span style="font-size: 1.2em;">📋</span>
+                  <div style="flex: 1;">
+                    <div style="font-weight: 600; color: var(--primary-darker);">Password Policy</div>
+                    <div style="font-size: 0.82em; color: var(--gray-500);">Version 1.0 &middot; Effective: 2026-03-20 &middot; Classification: Internal</div>
+                  </div>
+                  <span class="tag tag-blue">Active</span>
+                </div>
+              </div>
+            
+              <div style="border: 1px solid var(--gray-200); border-radius: 10px; overflow: hidden;">
+                <div style="padding: 14px 18px; background: var(--gray-50); display: flex; align-items: center; gap: 12px;">
+                  <span style="font-size: 1.2em;">📋</span>
+                  <div style="flex: 1;">
+                    <div style="font-weight: 600; color: var(--primary-darker);">Access Control Policy</div>
+                    <div style="font-size: 0.82em; color: var(--gray-500);">Version 1.0 &middot; Effective: 2026-03-20 &middot; Classification: Internal</div>
+                  </div>
+                  <span class="tag tag-blue">Active</span>
+                </div>
+              </div>
+            
+              <div style="border: 1px solid var(--gray-200); border-radius: 10px; overflow: hidden;">
+                <div style="padding: 14px 18px; background: var(--gray-50); display: flex; align-items: center; gap: 12px;">
+                  <span style="font-size: 1.2em;">📋</span>
+                  <div style="flex: 1;">
+                    <div style="font-weight: 600; color: var(--primary-darker);">Vendor Management Policy</div>
+                    <div style="font-size: 0.82em; color: var(--gray-500);">Version 1.0 &middot; Effective: 2026-03-20 &middot; Classification: Internal</div>
+                  </div>
+                  <span class="tag tag-blue">Active</span>
+                </div>
+              </div>
+            
+          </div>
+
+          
+          <h4 style="margin: 28px 0 12px; color: var(--danger);">Missing Policies</h4>
+          <div style="display: grid; gap: 8px;">
+            
+              <div style="padding: 10px 16px; background: #fff5f5; border: 1px solid #fed7d7; border-radius: 8px; display: flex; align-items: center; gap: 10px;">
+                <span style="color: var(--danger);">⚠️</span>
+                <span style="color: #742a2a; font-weight: 500;">Incident Response Plan</span>
+                <span class="tag tag-red" style="margin-left: auto;">Not Found</span>
+              </div>
+            
+              <div style="padding: 10px 16px; background: #fff5f5; border: 1px solid #fed7d7; border-radius: 8px; display: flex; align-items: center; gap: 10px;">
+                <span style="color: var(--danger);">⚠️</span>
+                <span style="color: #742a2a; font-weight: 500;">Data Classification Policy</span>
+                <span class="tag tag-red" style="margin-left: auto;">Not Found</span>
+              </div>
+            
+              <div style="padding: 10px 16px; background: #fff5f5; border: 1px solid #fed7d7; border-radius: 8px; display: flex; align-items: center; gap: 10px;">
+                <span style="color: var(--danger);">⚠️</span>
+                <span style="color: #742a2a; font-weight: 500;">Remote Work Policy</span>
+                <span class="tag tag-red" style="margin-left: auto;">Not Found</span>
+              </div>
+            
+          </div>
+          
+        </div>
+      </div>
+    </div>
+    
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: STAKEHOLDERS
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-stakeholders">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128101;</span>
+          Key Stakeholders (8 contacts)
+        </div>
+        <div class="section-content">
+          <p style="margin-bottom: 24px; color: var(--gray-600);">
+            The following individuals may be available for interviews during the assessment.
+            Understanding their roles, concerns, and communication styles will help you gather
+            relevant information and build rapport.
+          </p>
+
+          
+          <div class="stakeholder-grid">
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">James Whitaker</div>
+                  <div class="stakeholder-role">CEO</div>
+                  <div class="stakeholder-dept">Executive Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">james.whitaker@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Low</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Final Approval</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Direct and results-oriented</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Cost of compliance</span><span class="tag tag-warning">Operational continuity</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Increased costs for security upgrades</span><span class="tag tag-danger">Disruption during implementation</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Budget constraints</span><span class="tag tag-success">Strategic priorities</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Technical details of systems</span><span class="tag tag-default">Security incident timelines</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">We need to move faster than the competition, even if it means taking calculated risks.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">Linda Chen</div>
+                  <div class="stakeholder-role">IT Manager</div>
+                  <div class="stakeholder-dept">IT Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">linda.chen@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">High</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Operational</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Analytical and detail-focused</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Resource limitations</span><span class="tag tag-warning">Legacy system constraints</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Need for more budget</span><span class="tag tag-danger">Resistance to cloud migration</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Current system architecture</span><span class="tag tag-success">Known vulnerabilities</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Executive-level risk tolerance</span><span class="tag tag-default">Compliance deadlines</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">We're doing the best we can with what we have.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">Michael Torres</div>
+                  <div class="stakeholder-role">Operations Manager</div>
+                  <div class="stakeholder-dept">Operations Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">michael.torres@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Low</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Operational</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Pragmatic and hands-on</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Delivery SLAs</span><span class="tag tag-warning">Warehouse efficiency</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Security measures slowing operations</span><span class="tag tag-danger">Training requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Operational KPIs</span><span class="tag tag-success">Warehouse layout details</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Cybersecurity risk metrics</span><span class="tag tag-default">Compliance timelines</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">Security is important, but only if it doesn't break our delivery promises.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">Sarah Nguyen</div>
+                  <div class="stakeholder-role">Sales Director</div>
+                  <div class="stakeholder-dept">Sales/Marketing Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">sarah.nguyen@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Medium</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Operational</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Collaborative and persuasive</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Client data privacy</span><span class="tag tag-warning">Sales tool reliability</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Restrictions on client data sharing</span><span class="tag tag-danger">Training requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Client contact lists</span><span class="tag tag-success">Sales process details</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Data classification policies</span><span class="tag tag-default">Incident response procedures</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">Our clients trust us with their data, and we need to protect that trust.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">David Kim</div>
+                  <div class="stakeholder-role">Head of Administration</div>
+                  <div class="stakeholder-dept">Administration Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">david.kim@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Low</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Operational</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Organized and procedural</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">HR compliance</span><span class="tag tag-warning">Employee onboarding</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Cost of new security tools</span><span class="tag tag-danger">Training requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Employee records</span><span class="tag tag-success">HR policies</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Cybersecurity incident details</span><span class="tag tag-default">Compliance timelines</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">We need to balance security with employee productivity.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">Emily Davis</div>
+                  <div class="stakeholder-role">Compliance Officer</div>
+                  <div class="stakeholder-dept">Administration Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">emily.davis@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Medium</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Advisory</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Detail-oriented and cautious</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Regulatory compliance</span><span class="tag tag-warning">Data privacy risks</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Cost of compliance measures</span><span class="tag tag-danger">Training requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Compliance timelines</span><span class="tag tag-success">Regulatory requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Technical system details</span><span class="tag tag-default">Incident response procedures</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">Compliance is non-negotiable, even if it means extra work.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">Robert Evans</div>
+                  <div class="stakeholder-role">Warehouse Supervisor</div>
+                  <div class="stakeholder-dept">Operations Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">robert.evans@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Low</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Operational</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Practical and results-focused</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Warehouse safety</span><span class="tag tag-warning">Inventory accuracy</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Security measures slowing operations</span><span class="tag tag-danger">Training requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Warehouse KPIs</span><span class="tag tag-success">Inventory management details</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Cybersecurity risk metrics</span><span class="tag tag-default">Compliance timelines</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">We need to keep the warehouse running smoothly, even if it means taking shortcuts.</div>
+                </div>
+              </div>
+            
+              <div class="stakeholder-card">
+                <div class="stakeholder-header">
+                  <div class="stakeholder-name">Karen Lee</div>
+                  <div class="stakeholder-role">Vendor Manager</div>
+                  <div class="stakeholder-dept">Operations Department</div>
+                </div>
+                <div class="stakeholder-body">
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Email</div>
+                    <div style="font-family: monospace; color: var(--primary-lighter);">karen.lee@midwestcargosolutions.com</div>
+                  </div>
+
+                  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px;">
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Technical Fluency</div>
+                      <div><span class="tag tag-primary">Low</span></div>
+                    </div>
+                    
+                    <div class="stakeholder-detail">
+                      <div class="stakeholder-detail-label">Decision Power</div>
+                      <div><span class="tag tag-default">Operational</span></div>
+                    </div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Communication Style</div>
+                    <div style="color: var(--gray-600); font-size: 0.95em;">Collaborative and relationship-focused</div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Key Concerns</div>
+                    <div><span class="tag tag-warning">Vendor compliance</span><span class="tag tag-warning">Supply chain reliability</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Likely Pushback</div>
+                    <div><span class="tag tag-danger">Security requirements for vendors</span><span class="tag tag-danger">Training requirements</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Can Provide</div>
+                    <div><span class="tag tag-success">Vendor contracts</span><span class="tag tag-success">Supply chain details</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-detail">
+                    <div class="stakeholder-detail-label">Information They Lack</div>
+                    <div><span class="tag tag-default">Cybersecurity incident details</span><span class="tag tag-default">Compliance timelines</span></div>
+                  </div>
+
+                  
+                  <div class="stakeholder-quote">Our vendors are partners, not obstacles.</div>
+                </div>
+              </div>
+            
+          </div>
+          
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: IT ENVIRONMENT
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-it">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128187;</span>
+          IT Environment
+        </div>
+        <div class="section-content">
+          <div class="info-grid" style="margin-bottom: 24px;">
+            <div class="info-item">
+              <div class="info-label">Delivery Model</div>
+              <div class="info-value">On-Prem Heavy</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Endpoint Inventory</h4>
+          <div class="info-grid info-grid-4">
+            
+              <div class="info-item">
+                <div class="info-label">windows laptops</div>
+                <div class="info-value">25</div>
+              </div>
+            
+              <div class="info-item">
+                <div class="info-label">windows desktops</div>
+                <div class="info-value">12</div>
+              </div>
+            
+              <div class="info-item">
+                <div class="info-label">mobile</div>
+                <div class="info-value">5</div>
+              </div>
+            
+            <div class="info-item" style="border-left: 3px solid var(--primary);">
+              <div class="info-label">Total Endpoints</div>
+              <div class="info-value" style="font-weight:700;">42</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Servers</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead><tr><th>Hostname</th><th>Make / Model</th><th>Operating System</th><th>Role</th></tr></thead>
+              <tbody>
+                
+                  <tr>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">dc-01</code></td>
+                    <td>HPE ProLiant DL380 Gen10 Plus</td>
+                    <td>Windows Server 2019 Standard 10.0.17763</td>
+                    <td>Domain Controller</td>
+                  </tr>
+                  <tr>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">fs-01</code></td>
+                    <td><span style="color:var(--gray-400);">N/A</span></td>
+                    <td>Windows Server 2016 Standard 10.0.14393</td>
+                    <td>File Server</td>
+                  </tr>
+                  <tr>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">app-erp-01</code></td>
+                    <td><span style="color:var(--gray-400);">N/A</span></td>
+                    <td>CentOS 7.9.2009</td>
+                    <td>ERP Application Server</td>
+                  </tr>
+              </tbody>
+            </table>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">SaaS Applications</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Application</th>
+                  <th>Category</th>
+                  <th>SSO</th>
+                  <th>MFA</th>
+                  <th>Data Sensitivity</th>
+                </tr>
+              </thead>
+              <tbody>
+                
+                    <tr>
+                      <td><strong>NetSuite</strong></td>
+                      <td>ERP</td>
+                      <td><span class="tag tag-success">Yes</span></td>
+                      <td><span class="tag tag-success">Yes</span></td>
+                      <td><span class="tag tag-danger">High</span></td>
+                    </tr>
+                    <tr>
+                      <td><strong>Fleetio</strong></td>
+                      <td>Fleet Management</td>
+                      <td><span class="tag tag-success">Yes</span></td>
+                      <td><span class="tag tag-danger">No</span></td>
+                      <td><span class="tag tag-warning">Medium</span></td>
+                    </tr>
+                    <tr>
+                      <td><strong>HighJump WMS</strong></td>
+                      <td>WMS</td>
+                      <td><span class="tag tag-danger">No</span></td>
+                      <td><span class="tag tag-danger">No</span></td>
+                      <td><span class="tag tag-warning">Medium</span></td>
+                    </tr>
+              </tbody>
+            </table>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Endpoint Protection</h4>
+          <div style="margin-bottom: 8px; font-size: 0.8em; color: var(--gray-500);">
+            <span style="display: inline-block; width: 10px; height: 10px; background: var(--success); border-radius: 2px; margin-right: 4px; vertical-align: middle;"></span> Secure
+            &nbsp;&nbsp;
+            <span style="display: inline-block; width: 10px; height: 10px; background: var(--danger); border-radius: 2px; margin-right: 4px; vertical-align: middle;"></span> Needs attention
+          </div>
+          <div class="info-grid info-grid-4">
+            <div class="info-item">
+              <div class="info-label">Product</div>
+              <div class="info-value">Malwarebytes Endpoint</div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Managed</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">EDR Enabled</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Coverage</div>
+              <div class="info-value">70%</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Patch Management</h4>
+          <div class="info-grid">
+            <div class="info-item">
+              <div class="info-label">Method</div>
+              <div class="info-value">Third-party</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Frequency</div>
+              <div class="info-value">Monthly</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Compliance Rate</div>
+              <div class="info-value">60%</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Remote Access</h4>
+          <div style="margin-bottom: 8px; font-size: 0.8em; color: var(--gray-500);">
+            <span style="display: inline-block; width: 10px; height: 10px; background: var(--success); border-radius: 2px; margin-right: 4px; vertical-align: middle;"></span> Secure configuration
+            &nbsp;&nbsp;
+            <span style="display: inline-block; width: 10px; height: 10px; background: var(--danger); border-radius: 2px; margin-right: 4px; vertical-align: middle;"></span> Needs attention
+          </div>
+          <div class="info-grid">
+            <div class="info-item">
+              <div class="info-label">VPN Solution</div>
+              <div class="info-value">Cisco AnyConnect</div>
+            </div>
+            <div class="info-item success">
+              <div class="info-label">MFA</div>
+              <div class="info-value">ExecOnly</div>
+            </div>
+            <div class="info-item success">
+              <div class="info-label">Split Tunnel</div>
+              <div class="info-value">No</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Backup Strategy</h4>
+          <div class="info-grid info-grid-4">
+            <div class="info-item">
+              <div class="info-label">Method</div>
+              <div class="info-value">On-Prem</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Frequency</div>
+              <div class="info-value">Daily</div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Immutable</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Offsite</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Restore Tests</div>
+              <div class="info-value">Never</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Physical Security</h4>
+          <div class="info-grid info-grid-4">
+            <div class="info-item danger">
+              <div class="info-label">Badge Access</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Cameras</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Server Room Locked</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item ">
+              <div class="info-label">Clean Desk Policy</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">Visitor Logging</div>
+              <div class="info-value"><span style="color:#c53030;font-weight:600;">No</span></div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Third-Party Vendor Risk</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead><tr><th>Vendor</th><th>Access Type</th><th>Data Shared</th><th>Last Assessment</th></tr></thead>
+              <tbody>
+                
+                  <tr>
+                    <td><strong>NetSuite</strong></td>
+                    <td>Cloud Portal</td>
+                    <td>Financial and operational data</td>
+                    <td><span class="tag tag-danger">Never</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>Fleetio</strong></td>
+                    <td>API</td>
+                    <td>Vehicle telemetry and routing data</td>
+                    <td>2023-03-15</td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>ABC Maintenance Co.</strong></td>
+                    <td>On-site</td>
+                    <td>Server room access for hardware support</td>
+                    <td><span class="tag tag-danger">Never</span></td>
+                  </tr>
+                
+              </tbody>
+            </table>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Vendor Dependencies</h4>
+          <div><span class="tag tag-default">NetSuite</span><span class="tag tag-default">Fleetio</span><span class="tag tag-default">ABC Maintenance Co.</span></div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--accent);">Known Unknowns (Ask About These)</h4>
+          <div style="background: #fffbeb; border-left: 4px solid var(--accent); padding: 16px; border-radius: 0 var(--radius) var(--radius) 0;">
+            <ul style="margin: 0; padding-left: 20px;">
+              <li style="margin-bottom: 8px;">No documented disaster recovery plan</li><li style="margin-bottom: 8px;">Unclear SLAs with third-party vendors</li><li style="margin-bottom: 8px;">No formal incident response process</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: NETWORK
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-network">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#127760;</span>
+          Network Architecture
+        </div>
+        <div class="section-content">
+          <div class="info-grid" style="margin-bottom: 24px;">
+            <div class="info-item accent">
+              <div class="info-label">Public IP Address</div>
+              <div class="info-value mono">136.110.110.171</div>
+            </div>
+            
+            <div class="info-item">
+              <div class="info-label">Firewall Vendor</div>
+              <div class="info-value">Palo Alto</div>
+            </div>
+            
+            <div class="info-item success">
+              <div class="info-label">VPN Enabled</div>
+              <div class="info-value"><span style="color:#276749;font-weight:600;">Yes</span></div>
+            </div>
+            <div class="info-item danger">
+              <div class="info-label">VPN MFA</div>
+              <div class="info-value">None</div>
+            </div>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Network Subnets</h4>
+          <div class="table-wrapper">
+            <table>
+              <thead><tr><th>Subnet Name</th><th>CIDR</th><th>VLAN ID</th><th>Purpose</th><th>Trust Level</th></tr></thead>
+              <tbody>
+                
+                  <tr>
+                    <td><strong>Management</strong></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">10.0.0.0/24</code></td>
+                    <td>10</td>
+                    <td>Network infrastructure and management</td>
+                    <td><span class="badge badge-trust-high">High</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>Servers</strong></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">172.16.0.0/24</code></td>
+                    <td>20</td>
+                    <td>Critical business systems and data storage</td>
+                    <td><span class="badge badge-trust-medium">Medium</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>Workstations</strong></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">192.168.1.0/24</code></td>
+                    <td>30</td>
+                    <td>Employee workstations and endpoints</td>
+                    <td><span class="badge badge-trust-medium">Medium</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>Guest</strong></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 8px; border-radius: 4px;">192.168.2.0/24</code></td>
+                    <td>40</td>
+                    <td>Visitor and contractor access</td>
+                    <td><span class="badge badge-trust-low">Low</span></td>
+                  </tr>
+                
+              </tbody>
+            </table>
+          </div>
+
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Network Diagram</h4>
+          <div style="background: white; border: 1px solid var(--gray-200); border-radius: var(--radius); padding: 20px; overflow-x: auto;">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 929" style="width:100%;max-width:960px;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;"><defs>
+    <marker id="nd-arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#475569"/></marker>
+    <marker id="nd-arrow-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#dc2626"/></marker>
+    <linearGradient id="nd-header-bg" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#0f172a"/><stop offset="100%" stop-color="#1e3a5f"/></linearGradient>
+    <linearGradient id="nd-inet-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#eff6ff"/><stop offset="100%" stop-color="#dbeafe"/></linearGradient>
+    <linearGradient id="nd-fw-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fef2f2"/><stop offset="100%" stop-color="#fee2e2"/></linearGradient>
+    <linearGradient id="nd-core-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f8fafc"/><stop offset="100%" stop-color="#f1f5f9"/></linearGradient>
+    <linearGradient id="nd-high-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f0fdf4"/><stop offset="100%" stop-color="#dcfce7"/></linearGradient>
+    <linearGradient id="nd-med-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fffbeb"/><stop offset="100%" stop-color="#fef3c7"/></linearGradient>
+    <linearGradient id="nd-low-bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fef2f2"/><stop offset="100%" stop-color="#fecaca"/></linearGradient>
+    <filter id="nd-shadow"><feDropShadow dx="0" dy="1" stdDeviation="2" flood-opacity="0.1"/></filter>
+    <filter id="nd-shadow-lg"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-opacity="0.15"/></filter>
+  </defs><rect x="0" y="0" width="960" height="50" fill="url(#nd-header-bg)"/><text x="20" y="30" font-size="16" font-weight="700" fill="white">Network Architecture Diagram</text><text x="940" y="20" text-anchor="end" font-size="9" fill="#94a3b8">Midwest Cargo Solutions</text><text x="940" y="34" text-anchor="end" font-size="9" fill="#94a3b8">Public IP: 136.110.110.171</text><rect x="0" y="50" width="960" height="65" fill="url(#nd-inet-bg)" stroke="#bfdbfe" stroke-width="0.5"/><text x="20" y="64" font-size="8" font-weight="600" fill="#3b82f6" letter-spacing="1.5">EXTERNAL / WAN</text><g transform="translate(467,66)"><ellipse cx="10" cy="10" rx="10" ry="7" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/><ellipse cx="16" cy="8" rx="7" ry="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/><ellipse cx="13" cy="12" rx="9" ry="5" fill="#dbeafe" stroke="#3b82f6" stroke-width="1"/></g><text x="498" y="80" font-size="11" font-weight="600" fill="#1e40af">Internet</text><text x="940" y="68" text-anchor="end" font-size="8" fill="#6b7280" font-weight="600">CLOUD SERVICES</text><text x="940" y="80" text-anchor="end" font-size="8" fill="#6b7280">☁ NetSuite</text><text x="940" y="90" text-anchor="end" font-size="8" fill="#6b7280">☁ Fleetio</text><text x="940" y="100" text-anchor="end" font-size="8" fill="#6b7280">☁ HighJump WMS</text><g transform="translate(25,68)"><rect x="2" y="7" width="10" height="8" rx="1.5" fill="#fbbf24" stroke="#92400e" stroke-width="1"/><path d="M4,7 L4,5 C4,2.5 10,2.5 10,5 L10,7" fill="none" stroke="#92400e" stroke-width="1.2"/></g><text x="42" y="80" font-size="9" fill="#6b7280">VPN: Cisco AnyConnect</text><text x="42" y="90" font-size="8" fill="#16a34a">MFA: ExecOnly</text><rect x="0" y="115" width="960" height="80" fill="url(#nd-fw-bg)" stroke="#fca5a5" stroke-width="0.5"/><text x="20" y="129" font-size="8" font-weight="600" fill="#dc2626" letter-spacing="1.5">PERIMETER SECURITY</text><rect x="380" y="135" width="200" height="48" rx="6" fill="white" stroke="#dc2626" stroke-width="2" filter="url(#nd-shadow-lg)"/><g transform="translate(390,149)"><path d="M8,1 L15,4 L15,9 C15,13 8,16 8,16 C8,16 1,13 1,9 L1,4 Z" fill="#fef2f2" stroke="#dc2626" stroke-width="1.2"/><path d="M5,8 L7,10 L11,6" fill="none" stroke="#dc2626" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></g><text x="410" y="157" font-size="12" font-weight="700" fill="#991b1b">Palo Alto</text><text x="410" y="171" font-size="8" fill="#b91c1c">14 ACL rules + implicit deny</text><line x1="480" y1="115" x2="480" y2="135" stroke="#dc2626" stroke-width="2" marker-end="url(#nd-arrow-red)"/><rect x="0" y="195" width="960" height="50" fill="url(#nd-core-bg)" stroke="#e2e8f0" stroke-width="0.5"/><text x="20" y="209" font-size="8" font-weight="600" fill="#475569" letter-spacing="1.5">CORE / DISTRIBUTION</text><rect x="410" y="215" width="140" height="22" rx="4" fill="white" stroke="#475569" stroke-width="1.5" filter="url(#nd-shadow)"/><g transform="translate(418,221)"><rect width="20" height="10" rx="2" fill="#f1f5f9" stroke="#475569" stroke-width="1"/><circle cx="4" cy="5" r="1.5" fill="#22c55e"/><circle cx="8" cy="5" r="1.5" fill="#22c55e"/><circle cx="12" cy="5" r="1.5" fill="#f59e0b"/><circle cx="16" cy="5" r="1.5" fill="#22c55e"/></g><text x="444" y="230" font-size="10" font-weight="600" fill="#334155">Core Switch</text><line x1="480" y1="195" x2="480" y2="215" stroke="#475569" stroke-width="2" marker-end="url(#nd-arrow)"/><rect x="780" y="217" width="150" height="18" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="0.8"/><text x="855" y="229" text-anchor="middle" font-size="8" fill="#1d4ed8">🛡️ Malwarebytes Endpoint</text><rect x="30" y="217" width="140" height="18" rx="9" fill="#f0fdf4" stroke="#16a34a" stroke-width="0.8"/><text x="100" y="229" text-anchor="middle" font-size="8" fill="#166534">💾 On-Prem (Daily)</text><rect x="0" y="245" width="960" height="168" fill="url(#nd-high-bg)" stroke="#16a34a" stroke-width="0.5"/><text x="20" y="259" font-size="8" font-weight="600" fill="#15803d" letter-spacing="1.5">HIGH TRUST ZONE — INTERNAL / SERVERS</text><rect x="20" y="269" width="920" height="108" rx="8" fill="white" stroke="#16a34a" stroke-width="1.5" filter="url(#nd-shadow)"/><rect x="20" y="269" width="920" height="36" rx="8" fill="#16a34a" opacity="0.12"/><rect x="20" y="301" width="920" height="4" fill="#16a34a" opacity="0.12"/><text x="30" y="284" font-size="10" font-weight="700" fill="#1e293b">Management</text><text x="932" y="284" text-anchor="end" font-size="8" fill="#64748b" font-family="'Consolas','Monaco',monospace">10.0.0.0/24</text><text x="30" y="297" font-size="7" fill="#94a3b8">GW: 10.0.0.1</text><text x="932" y="297" text-anchor="end" font-size="7" fill="#94a3b8">2 hosts</text><line x1="480" y1="245" x2="480" y2="269" stroke="#16a34a" stroke-width="1" stroke-dasharray="3,3" opacity="0.6"/><rect x="28" y="309" width="904" height="28" rx="4" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/><text x="34" y="321" font-size="9" fill="#334155">🔌 <tspan font-weight="600">fw-01</tspan></text><text x="34" y="332" font-size="7.5" fill="#94a3b8">Network perimeter firewall • 10.0.0.1</text><rect x="28" y="341" width="904" height="28" rx="4" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/><text x="34" y="353" font-size="9" fill="#334155">🔌 <tspan font-weight="600">sw-core-01</tspan></text><text x="34" y="364" font-size="7.5" fill="#94a3b8">Core network switching • 10.0.0.2</text><rect x="0" y="413" width="960" height="200" fill="url(#nd-med-bg)" stroke="#d97706" stroke-width="0.5"/><text x="20" y="427" font-size="8" font-weight="600" fill="#b45309" letter-spacing="1.5">MEDIUM TRUST ZONE — STANDARD ACCESS</text><rect x="20" y="437" width="454" height="140" rx="8" fill="white" stroke="#d97706" stroke-width="1.5" filter="url(#nd-shadow)"/><rect x="20" y="437" width="454" height="36" rx="8" fill="#d97706" opacity="0.12"/><rect x="20" y="469" width="454" height="4" fill="#d97706" opacity="0.12"/><text x="30" y="452" font-size="10" font-weight="700" fill="#1e293b">Servers</text><text x="466" y="452" text-anchor="end" font-size="8" fill="#64748b" font-family="'Consolas','Monaco',monospace">172.16.0.0/24</text><text x="30" y="465" font-size="7" fill="#94a3b8">GW: 172.16.0.1</text><text x="466" y="465" text-anchor="end" font-size="7" fill="#94a3b8">3 hosts</text><line x1="247" y1="413" x2="247" y2="437" stroke="#d97706" stroke-width="1" stroke-dasharray="3,3" opacity="0.6"/><rect x="28" y="477" width="438" height="28" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/><text x="34" y="489" font-size="9" fill="#334155">🔐 <tspan font-weight="600">dc-01</tspan></text><text x="34" y="500" font-size="7.5" fill="#94a3b8">Windows Server 2019 Standard 10.0.17763 • 172.16.0.10</text><rect x="28" y="509" width="438" height="28" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/><text x="34" y="521" font-size="9" fill="#334155">📁 <tspan font-weight="600">fs-01</tspan></text><text x="34" y="532" font-size="7.5" fill="#94a3b8">Windows Server 2016 Standard 10.0.14393</text><rect x="28" y="541" width="438" height="28" rx="4" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/><text x="34" y="553" font-size="9" fill="#334155">⚙️ <tspan font-weight="600">app-erp-01</tspan></text><text x="34" y="564" font-size="7.5" fill="#94a3b8">CentOS 7.9.2009</text><rect x="486" y="437" width="454" height="108" rx="8" fill="white" stroke="#d97706" stroke-width="1.5" filter="url(#nd-shadow)"/><rect x="486" y="437" width="454" height="36" rx="8" fill="#d97706" opacity="0.12"/><rect x="486" y="469" width="454" height="4" fill="#d97706" opacity="0.12"/><text x="496" y="452" font-size="10" font-weight="700" fill="#1e293b">Workstations</text><text x="932" y="452" text-anchor="end" font-size="8" fill="#64748b" font-family="'Consolas','Monaco',monospace">192.168.1.0/24</text><text x="496" y="465" font-size="7" fill="#94a3b8">GW: 192.168.1.1</text><text x="932" y="465" text-anchor="end" font-size="7" fill="#94a3b8">37 hosts</text><line x1="713" y1="413" x2="713" y2="437" stroke="#d97706" stroke-width="1" stroke-dasharray="3,3" opacity="0.6"/><rect x="494" y="477" width="438" height="28" rx="4" fill="#fefce8" stroke="#fde68a" stroke-width="1"/><text x="500" y="489" font-size="9" fill="#334155">💻 <tspan font-weight="600">25× Laptop</tspan></text><text x="500" y="500" font-size="7.5" fill="#94a3b8">Endpoints</text><rect x="494" y="509" width="438" height="28" rx="4" fill="#fefce8" stroke="#fde68a" stroke-width="1"/><text x="500" y="521" font-size="9" fill="#334155">🖥️ <tspan font-weight="600">12× Desktop</tspan></text><text x="500" y="532" font-size="7.5" fill="#94a3b8">Endpoints</text><rect x="0" y="613" width="960" height="136" fill="url(#nd-low-bg)" stroke="#dc2626" stroke-width="0.5"/><text x="20" y="627" font-size="8" font-weight="600" fill="#b91c1c" letter-spacing="1.5">LOW TRUST ZONE — RESTRICTED / GUEST</text><rect x="20" y="637" width="920" height="76" rx="8" fill="white" stroke="#dc2626" stroke-width="1.5" filter="url(#nd-shadow)"/><rect x="20" y="637" width="920" height="36" rx="8" fill="#dc2626" opacity="0.12"/><rect x="20" y="669" width="920" height="4" fill="#dc2626" opacity="0.12"/><text x="30" y="652" font-size="10" font-weight="700" fill="#1e293b">Guest</text><text x="932" y="652" text-anchor="end" font-size="8" fill="#64748b" font-family="'Consolas','Monaco',monospace">192.168.2.0/24</text><text x="30" y="665" font-size="7" fill="#94a3b8">GW: 192.168.2.1</text><text x="932" y="665" text-anchor="end" font-size="7" fill="#94a3b8">5 hosts</text><line x1="480" y1="613" x2="480" y2="637" stroke="#dc2626" stroke-width="1" stroke-dasharray="3,3" opacity="0.6"/><rect x="28" y="677" width="904" height="28" rx="4" fill="#fefce8" stroke="#fde68a" stroke-width="1"/><text x="34" y="689" font-size="9" fill="#334155">📱 <tspan font-weight="600">5× Mobile</tspan></text><text x="34" y="700" font-size="7.5" fill="#94a3b8">Endpoints</text><rect x="0" y="749" width="960" height="70" fill="#f8fafc" stroke="#e2e8f0" stroke-width="0.5"/><text x="20" y="765" font-size="8" font-weight="600" fill="#475569" letter-spacing="1.5">LEGEND</text><rect x="20" y="777" width="12" height="12" rx="3" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/><text x="38" y="787" font-size="9" fill="#475569">High Trust</text><rect x="110" y="777" width="12" height="12" rx="3" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/><text x="128" y="787" font-size="9" fill="#475569">Medium Trust</text><rect x="220" y="777" width="12" height="12" rx="3" fill="#fecaca" stroke="#dc2626" stroke-width="1.5"/><text x="238" y="787" font-size="9" fill="#475569">Low Trust / DMZ</text><text x="360" y="787" font-size="9" fill="#475569">🖥️ Server</text><text x="420" y="787" font-size="9" fill="#475569">🔐 Domain Controller</text><text x="530" y="787" font-size="9" fill="#475569">📁 File Server</text><text x="610" y="787" font-size="9" fill="#475569">🗄️ Database</text><text x="680" y="787" font-size="9" fill="#475569">🌐 Web Server</text><text x="20" y="807" font-size="8" fill="#94a3b8">4 subnets · 3 servers · 14 firewall rules</text><text x="940" y="807" text-anchor="end" font-size="8" fill="#94a3b8">Generated 2026-03-20 · Clinic-in-a-Box</text></svg>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: ASSETS
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-assets">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128421;</span>
+          Asset Inventory (48 assets)
+        </div>
+        <div class="section-content">
+          
+          <div class="stats-grid" style="margin-bottom: 24px;">
+            <div class="stat-card">
+              <div class="stat-value">4</div>
+              <div class="stat-label">Servers</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">2</div>
+              <div class="stat-label">Network Devices</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">42</div>
+              <div class="stat-label">Workstations</div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-value">6</div>
+              <div class="stat-label">Critical Assets</div>
+            </div>
+          </div>
+
+          <div class="table-wrapper">
+            <table class="table-mono">
+              <thead><tr><th>Hostname</th><th>IP Address</th><th>Subnet</th><th>Role</th><th>Make / Model</th><th>OS</th><th>Function</th><th>Serial</th><th>Critical</th></tr></thead>
+              <tbody>
+                
+                  <tr>
+                    <td><strong>app-server-01</strong></td>
+                    <td><code style="font-size:0.85em;">172.16.0.30</code></td>
+                    <td>Servers</td>
+                    <td><span class="tag tag-primary">server</span></td>
+                    <td>Dell PowerEdge R740</td>
+                    <td>Ubuntu 20.04</td>
+                    <td>Business application hosting</td>
+                    <td><code style="font-size:0.8em;">EY40WE2</code></td>
+                    <td><span class="tag tag-danger">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>backup-server-01</strong></td>
+                    <td><code style="font-size:0.85em;">172.16.0.40</code></td>
+                    <td>Servers</td>
+                    <td><span class="tag tag-primary">server</span></td>
+                    <td>HPE ProLiant DL380 Gen10 Plus</td>
+                    <td>Windows Server 2019</td>
+                    <td>Data backup and disaster recovery</td>
+                    <td><code style="font-size:0.8em;">CND4868468</code></td>
+                    <td><span class="tag tag-danger">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>dc-01</strong></td>
+                    <td><code style="font-size:0.85em;">172.16.0.10</code></td>
+                    <td>Servers</td>
+                    <td><span class="tag tag-primary">server</span></td>
+                    <td>HPE ProLiant DL380 Gen10 Plus</td>
+                    <td>Windows Server 2019</td>
+                    <td>Active Directory and domain services</td>
+                    <td><code style="font-size:0.8em;">CND6446062</code></td>
+                    <td><span class="tag tag-danger">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>file-server-01</strong></td>
+                    <td><code style="font-size:0.85em;">172.16.0.20</code></td>
+                    <td>Servers</td>
+                    <td><span class="tag tag-primary">server</span></td>
+                    <td>HPE ProLiant DL380 Gen10 Plus</td>
+                    <td>Windows Server 2019</td>
+                    <td>Central file storage and sharing</td>
+                    <td><code style="font-size:0.8em;">CND6800882</code></td>
+                    <td><span class="tag tag-danger">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>fw-01</strong></td>
+                    <td><code style="font-size:0.85em;">10.0.0.1</code></td>
+                    <td>Management</td>
+                    <td><span class="tag tag-purple">network</span></td>
+                    <td>Palo Alto PA-220</td>
+                    <td>Palo Alto PA-220</td>
+                    <td>Network perimeter firewall</td>
+                    <td><code style="font-size:0.8em;">480424422460</code></td>
+                    <td><span class="tag tag-danger">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td><strong>sw-core-01</strong></td>
+                    <td><code style="font-size:0.85em;">10.0.0.2</code></td>
+                    <td>Management</td>
+                    <td><span class="tag tag-purple">network</span></td>
+                    <td>HPE Aruba 6300M</td>
+                    <td>Cisco Catalyst 9500</td>
+                    <td>Core network switching</td>
+                    <td><code style="font-size:0.8em;">CND0262244</code></td>
+                    <td><span class="tag tag-danger">Yes</span></td>
+                  </tr>
+                
+              </tbody>
+            </table>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Workstations (<span id="ws-visible-count">42</span> devices)</h4>
+
+          <div class="stats-grid" style="margin-bottom: 16px;">
+            <div class="stat-card filter-card active" data-filter="all" onclick="filterWorkstations('all', this)">
+              <div class="stat-value">42</div>
+              <div class="stat-label">All</div>
+            </div>
+            
+              <div class="stat-card filter-card" data-filter="windows_laptops" onclick="filterWorkstations('windows_laptops', this)">
+                <div class="stat-value">25</div>
+                <div class="stat-label">windows laptops</div>
+              </div>
+            
+              <div class="stat-card filter-card" data-filter="windows_desktops" onclick="filterWorkstations('windows_desktops', this)">
+                <div class="stat-value">12</div>
+                <div class="stat-label">windows desktops</div>
+              </div>
+            
+              <div class="stat-card filter-card" data-filter="mobile" onclick="filterWorkstations('mobile', this)">
+                <div class="stat-value">5</div>
+                <div class="stat-label">mobile</div>
+              </div>
+            
+          </div>
+
+          <div class="table-wrapper">
+            <table class="table-mono" id="ws-table">
+              <thead><tr>
+                <th class="sortable-th" data-col="0" onclick="sortWsTable(0)">Hostname <span class="sort-icon">&#8597;</span></th>
+                <th class="sortable-th" data-col="1" onclick="sortWsTable(1)">IP Address <span class="sort-icon">&#8597;</span></th>
+                <th class="sortable-th" data-col="2" onclick="sortWsTable(2)">Make / Model <span class="sort-icon">&#8597;</span></th>
+                <th class="sortable-th" data-col="3" onclick="sortWsTable(3)">OS <span class="sort-icon">&#8597;</span></th>
+                <th class="sortable-th" data-col="4" onclick="sortWsTable(4)">Type <span class="sort-icon">&#8597;</span></th>
+                <th>Serial</th>
+              </tr></thead>
+              <tbody id="ws-tbody">
+                
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-001</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.50</code></td>
+                    <td>Dell Latitude 5550</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">2QUNJ0L</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-002</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.51</code></td>
+                    <td>HP EliteBook 860 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND8682668</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-003</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.52</code></td>
+                    <td>HP EliteBook 840 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND0806862</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-004</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.53</code></td>
+                    <td>Lenovo ThinkPad T16 Gen 2</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-JLQSW6Y</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-005</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.54</code></td>
+                    <td>Lenovo ThinkPad T14 Gen 4</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-QSJA6C0</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-006</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.55</code></td>
+                    <td>Dell Latitude 5540</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">46WLUC2</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-007</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.56</code></td>
+                    <td>Dell Latitude 5550</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">JL8W0Y0</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-008</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.57</code></td>
+                    <td>HP EliteBook 860 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND0224842</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-009</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.58</code></td>
+                    <td>HP EliteBook 840 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND4260884</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-010</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.59</code></td>
+                    <td>Dell Latitude 5550</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">20E662N</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-011</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.60</code></td>
+                    <td>HP EliteBook 860 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND0028620</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-012</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.61</code></td>
+                    <td>HP EliteBook 840 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND6268042</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-013</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.62</code></td>
+                    <td>Lenovo ThinkPad T16 Gen 2</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-L08GU6J</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-014</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.63</code></td>
+                    <td>Lenovo ThinkPad T14 Gen 4</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-6LW6E82</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-015</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.64</code></td>
+                    <td>Dell Latitude 5540</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">S6N2AA0</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-016</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.65</code></td>
+                    <td>Dell Latitude 5550</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CN8NAUQ</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-017</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.66</code></td>
+                    <td>HP EliteBook 860 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND4224266</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-018</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.67</code></td>
+                    <td>HP EliteBook 840 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND6408488</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-019</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.68</code></td>
+                    <td>Lenovo ThinkPad T16 Gen 2</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-4NQJ6LN</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-020</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.69</code></td>
+                    <td>HP EliteBook 860 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND0204084</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-021</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.70</code></td>
+                    <td>HP EliteBook 840 G10</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">CND4428428</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-022</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.71</code></td>
+                    <td>Lenovo ThinkPad T16 Gen 2</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-EJJL8JU</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-023</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.72</code></td>
+                    <td>Lenovo ThinkPad T14 Gen 4</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">PF-UYWNJ0E</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-024</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.73</code></td>
+                    <td>Dell Latitude 5540</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">84LW8AE</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_laptops">
+                    <td><strong>ws-025</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.74</code></td>
+                    <td>Dell Latitude 5550</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-primary">Laptop</span></td>
+                    <td><code style="font-size:0.8em;">WEWL2G4</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-026</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.75</code></td>
+                    <td>Dell OptiPlex 7020</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">AYA8USL</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-027</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.76</code></td>
+                    <td>HP EliteDesk 800 G9</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">CND6606084</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-028</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.77</code></td>
+                    <td>HP ProDesk 400 G9</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">CND8288486</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-029</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.78</code></td>
+                    <td>Lenovo ThinkCentre M70q Gen 4</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">PF-J6C0W6C</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-030</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.79</code></td>
+                    <td>Dell OptiPlex 7020</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">W80J6WS</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-031</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.80</code></td>
+                    <td>HP EliteDesk 800 G9</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">CND2602206</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-032</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.81</code></td>
+                    <td>HP ProDesk 400 G9</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">CND0442846</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-033</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.82</code></td>
+                    <td>Lenovo ThinkCentre M70q Gen 4</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">PF-EGNSE6A</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-034</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.83</code></td>
+                    <td>Dell OptiPlex 7010</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">0LLQGQ2</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-035</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.84</code></td>
+                    <td>Dell OptiPlex 7020</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">24WS6GL</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-036</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.85</code></td>
+                    <td>HP EliteDesk 800 G9</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">CND4400440</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="windows_desktops">
+                    <td><strong>ws-037</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.1.86</code></td>
+                    <td>HP ProDesk 400 G9</td>
+                    <td>Windows 11 Pro</td>
+                    <td><span class="tag tag-default">Desktop</span></td>
+                    <td><code style="font-size:0.8em;">CND2246888</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="mobile">
+                    <td><strong>ws-038</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.2.50</code></td>
+                    <td>Apple iPad 10th Gen</td>
+                    <td>iOS 17 / Android 14</td>
+                    <td><span class="tag tag-purple">Mobile</span></td>
+                    <td><code style="font-size:0.8em;">C02LWU4YAAU8</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="mobile">
+                    <td><strong>ws-039</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.2.51</code></td>
+                    <td>Apple iPhone 14</td>
+                    <td>iOS 17 / Android 14</td>
+                    <td><span class="tag tag-purple">Mobile</span></td>
+                    <td><code style="font-size:0.8em;">C026GG2NU88Y</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="mobile">
+                    <td><strong>ws-040</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.2.52</code></td>
+                    <td>Samsung Galaxy Tab S9</td>
+                    <td>iOS 17 / Android 14</td>
+                    <td><span class="tag tag-purple">Mobile</span></td>
+                    <td><code style="font-size:0.8em;">JGCQNG8NJU</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="mobile">
+                    <td><strong>ws-041</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.2.53</code></td>
+                    <td>Samsung Galaxy S24</td>
+                    <td>iOS 17 / Android 14</td>
+                    <td><span class="tag tag-purple">Mobile</span></td>
+                    <td><code style="font-size:0.8em;">UCNJA8NNW0</code></td>
+                  </tr>
+                  <tr class="ws-row" data-ws-type="mobile">
+                    <td><strong>ws-042</strong></td>
+                    <td><code style="font-size:0.85em;">192.168.2.54</code></td>
+                    <td>Apple iPad 10th Gen</td>
+                    <td>iOS 17 / Android 14</td>
+                    <td><span class="tag tag-purple">Mobile</span></td>
+                    <td><code style="font-size:0.8em;">C02G0LJE06GU</code></td>
+                  </tr>
+              </tbody>
+            </table>
+          </div>
+          
+          
+        </div>
+      </div>
+
+      
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#128293;</span>
+          Firewall Rules (15 rules, implicit deny)
+        </div>
+        <div class="section-content">
+          <div class="table-wrapper">
+            <table>
+              <thead><tr><th>ID</th><th>Name</th><th>Source</th><th>Destination</th><th>Port</th><th>Protocol</th><th>Action</th><th>Logging</th></tr></thead>
+              <tbody>
+                
+                  <tr>
+                    <td>1</td>
+                    <td>Allow-Internal-Management</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-danger">No</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>2</td>
+                    <td>Allow-Server-Access</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.0/24</code></td>
+                    <td>389,445,3389</td>
+                    <td>TCP</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>3</td>
+                    <td>Allow-Workstation-File-Server</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">192.168.1.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.20</code></td>
+                    <td>445</td>
+                    <td>TCP</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>4</td>
+                    <td>Allow-App-Server-Web</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.30</code></td>
+                    <td>80,443</td>
+                    <td>TCP</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>5</td>
+                    <td>Allow-Backup-Server-SSH</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.40</code></td>
+                    <td>22</td>
+                    <td>TCP</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>6</td>
+                    <td>Allow-Guest-Internet</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">192.168.2.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-danger">No</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>7</td>
+                    <td>Allow-Workstation-DC</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">192.168.1.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.10</code></td>
+                    <td>53,88,464,135,389,445,494,636,3268,3269</td>
+                    <td>TCP</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>8</td>
+                    <td>Allow-Internal-All</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.0/24</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-danger">No</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>9</td>
+                    <td>Allow-Workstation-Guest</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">192.168.1.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">192.168.2.0/24</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-danger">No</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>10</td>
+                    <td>Allow-SSH-Management</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.1</code></td>
+                    <td>22</td>
+                    <td>TCP</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>11</td>
+                    <td>Allow-VPN-Access</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>12</td>
+                    <td>Allow-Internal-All-2</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">172.16.0.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">10.0.0.0/24</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-danger">No</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>13</td>
+                    <td>Allow-Workstation-All</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">192.168.1.0/24</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-allow">Allow</span></td>
+                    <td><span class="tag tag-danger">No</span></td>
+                  </tr>
+                
+                  <tr>
+                    <td>15</td>
+                    <td>Deny-All</td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">any</code></td>
+                    <td>any</td>
+                    <td>ANY</td>
+                    <td><span class="badge badge-deny">Deny</span></td>
+                    <td><span class="tag tag-success">Yes</span></td>
+                  </tr>
+                
+                <tr style="background: #fee2e2;">
+                  <td>15</td>
+                  <td><strong>Implicit Deny All</strong></td>
+                  <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">Any</code></td>
+                  <td><code style="background: var(--gray-100); padding: 2px 6px; border-radius: 3px; font-size: 0.85em;">Any</code></td>
+                  <td>Any</td>
+                  <td>Any</td>
+                  <td><span class="badge badge-deny">Deny</span></td>
+                  <td><span class="tag tag-success">Yes</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═════════════════════════════════════════════════════════════════════
+         TAB: THREATS (with upgraded attack path rendering)
+         ═════════════════════════════════════════════════════════════════════ -->
+    <div class="tab-panel" id="tab-threats">
+      <div class="section">
+        <div class="section-header">
+          <span class="section-header-icon">&#9888;</span>
+          Threat Profile
+        </div>
+        <div class="section-content">
+          <h4 style="margin-bottom: 12px; color: var(--danger);">Top Threats for This Sector</h4>
+          <div style="margin-bottom: 24px;">
+            <span class="tag tag-danger">ransomware</span><span class="tag tag-danger">phishing</span><span class="tag tag-danger">vendor portal compromise</span>
+          </div>
+
+          
+          <h4 style="margin: 24px 0 12px; color: var(--primary);">Attack Scenarios</h4>
+          
+            <div class="threat-card">
+              <div class="threat-card-header">
+                <span class="threat-id">TS-001</span>
+                <span class="threat-type">ransomware</span>
+              </div>
+              <div class="threat-title">Ransomware via Phishing Email</div>
+
+              <div class="threat-detail">
+                <strong>Threat Actor:</strong> Cybercriminal Group
+              </div>
+
+              <div class="threat-detail">
+                <strong>Initial Vector:</strong> Phishing email with malicious attachment
+              </div>
+
+              
+              <div class="threat-detail">
+                <strong>Attack Path:</strong>
+                
+                <div class="kill-chain">
+                  
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">1</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Spearphishing email delivered to user workstation</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>admin-ws-01</code></span>
+            <span class="tag tag-purple">T1566.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Email gateway scanning for malicious attachments</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">2</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">User executes malicious macro, PowerShell payload runs</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>admin-ws-01</code></span>
+            <span class="tag tag-purple">T1059.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: EDR detecting PowerShell execution from Office process</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">3</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Attacker establishes persistence via scheduled task</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>admin-ws-01</code></span>
+            <span class="tag tag-purple">T1053.005</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Monitor for new scheduled task creation</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">4</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Lateral movement to domain controller via RDP</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>dc-01</code></span>
+            <span class="tag tag-purple">T1021.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Unusual RDP connections from workstation to DC</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">5</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Credential dumping from LSASS memory</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>dc-01</code></span>
+            <span class="tag tag-purple">T1003.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: LSASS access monitoring, credential dumping alerts</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">6</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Data encryption on backup-server-01 using ransomware payload</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>backup-server-01</code></span>
+            <span class="tag tag-purple">T1486</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Unusual file encryption activity on backup server</div>
+        </div>
+      </div>
+      
+                </div>
+                
+              </div>
+
+              
+
+              <div class="threat-detail">
+                <strong>Potential Impact:</strong> Business disruption
+              </div>
+
+              <div style="display: flex; gap: 16px; margin-top: 12px;">
+                
+                
+              </div>
+            </div>
+            <div class="threat-card">
+              <div class="threat-card-header">
+                <span class="threat-id">TS-002</span>
+                <span class="threat-type">phishing</span>
+              </div>
+              <div class="threat-title">Phishing Email Leading to Data Exfiltration</div>
+
+              <div class="threat-detail">
+                <strong>Threat Actor:</strong> Cybercriminal Group
+              </div>
+
+              <div class="threat-detail">
+                <strong>Initial Vector:</strong> Phishing email with malicious link
+              </div>
+
+              
+              <div class="threat-detail">
+                <strong>Attack Path:</strong>
+                
+                <div class="kill-chain">
+                  
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">1</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Phishing email delivered to front-desk-01</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>front-desk-01</code></span>
+            <span class="tag tag-purple">T1566.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Email gateway detecting suspicious URLs</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">2</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">User clicks link, leading to credential phishing site</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>front-desk-01</code></span>
+            <span class="tag tag-purple">T1078</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Web traffic monitoring detecting phishing site</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">3</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Credentials stolen, attacker uses them to access network via RDP to dc-01</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>dc-01</code></span>
+            <span class="tag tag-purple">T1021.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Failed login attempts on domain controller</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">4</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Lateral movement to file-server-01 via RDP</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>file-server-01</code></span>
+            <span class="tag tag-purple">T1021.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Unusual RDP sessions on file server</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">5</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Exfiltrate data using web protocols from file-server-01</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>file-server-01</code></span>
+            <span class="tag tag-purple">T1041</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Large data transfers via HTTP/HTTPS</div>
+        </div>
+      </div>
+      
+                </div>
+                
+              </div>
+
+              
+
+              <div class="threat-detail">
+                <strong>Potential Impact:</strong> Business disruption
+              </div>
+
+              <div style="display: flex; gap: 16px; margin-top: 12px;">
+                
+                
+              </div>
+            </div>
+            <div class="threat-card">
+              <div class="threat-card-header">
+                <span class="threat-id">TS-003</span>
+                <span class="threat-type">vendor portal compromise</span>
+              </div>
+              <div class="threat-title">Vendor Portal Compromise Leading to Backup Server Access</div>
+
+              <div class="threat-detail">
+                <strong>Threat Actor:</strong> Cybercriminal Group
+              </div>
+
+              <div class="threat-detail">
+                <strong>Initial Vector:</strong> Compromised vendor account with weak password
+              </div>
+
+              
+              <div class="threat-detail">
+                <strong>Attack Path:</strong>
+                
+                <div class="kill-chain">
+                  
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">1</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Attacker gains access to vendor portal with weak password (no MFA)</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>vendor-portal</code></span>
+            <span class="tag tag-purple">T1078</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Failed login attempts on vendor portal</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">2</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Exploits misconfigured API on vendor portal to access internal network</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>vendor-portal</code></span>
+            <span class="tag tag-purple">T1212</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Unusual API calls from vendor portal</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">3</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Lateral movement to a workstation (acct-ws-01) via RDP</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>acct-ws-01</code></span>
+            <span class="tag tag-purple">T1021.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Unusual RDP sessions on workstation</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">4</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Escalates privileges using stolen credentials</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>acct-ws-01</code></span>
+            <span class="tag tag-purple">T1055</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Privilege escalation attempts on workstation</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">5</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Accesses backup-server-01 via RDP</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>backup-server-01</code></span>
+            <span class="tag tag-purple">T1021.001</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Unusual RDP sessions on backup server</div>
+        </div>
+      </div>
+      <div class="kill-chain-connector">&#8595;</div>
+      <div class="kill-chain-step">
+        <div class="kill-chain-num">6</div>
+        <div class="kill-chain-body">
+          <div class="kill-chain-action">Exfiltrate data from backup-server-01 using web protocols</div>
+          <div class="kill-chain-meta">
+            <span class="tag tag-default"><code>backup-server-01</code></span>
+            <span class="tag tag-purple">T1041</span>
+          </div>
+          <div class="kill-chain-detection">Detection: Large data transfers via HTTP/HTTPS</div>
+        </div>
+      </div>
+      
+                </div>
+                
+              </div>
+
+              
+
+              <div class="threat-detail">
+                <strong>Potential Impact:</strong> Business disruption
+              </div>
+
+              <div style="display: flex; gap: 16px; margin-top: 12px;">
+                
+                
+              </div>
+            </div>
+          
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ═════════════════════════════════════════════════════════════════════
+       FOOTER
+       ═════════════════════════════════════════════════════════════════════ -->
+  <div class="footer">
+    <div class="footer-title">Clinic-in-a-Box</div>
+    <p><strong>Profile ID:</strong> RUN_1774030768647_L3PUVE</p>
+    <p><strong>Generated:</strong> March 20, 2026</p>
+    <p style="margin-top: 20px; opacity: 0.7;">
+      This is a simulated organization profile generated for educational purposes.<br/>
+      Part of the Clinic-in-a-Box Cyber Risk Assessment Training Program.
+    </p>
+  </div>
+
+  <!-- ═════════════════════════════════════════════════════════════════════
+       JAVASCRIPT - TAB NAVIGATION
+       ═════════════════════════════════════════════════════════════════════ -->
+  <script>
+    document.addEventListener('DOMContentLoaded', function() {
+      // ─── Tab Navigation ───
+      const tabs = document.querySelectorAll('.nav-tab');
+      const panels = document.querySelectorAll('.tab-panel');
+
+      tabs.forEach(tab => {
+        tab.addEventListener('click', function() {
+          tabs.forEach(t => t.classList.remove('active'));
+          panels.forEach(p => p.classList.remove('active'));
+
+          this.classList.add('active');
+          const panelId = 'tab-' + this.dataset.tab;
+          const panel = document.getElementById(panelId);
+          if (panel) {
+            panel.classList.add('active');
+          }
+        });
+      });
+    });
+
+    // ─── Workstation Filter ───
+    function filterWorkstations(type, el) {
+      const cards = document.querySelectorAll('.filter-card');
+      cards.forEach(c => c.classList.remove('active'));
+      el.classList.add('active');
+
+      const rows = document.querySelectorAll('.ws-row');
+      let visible = 0;
+      rows.forEach(row => {
+        if (type === 'all' || row.dataset.wsType === type) {
+          row.classList.remove('hidden');
+          visible++;
+        } else {
+          row.classList.add('hidden');
+        }
+      });
+
+      const counter = document.getElementById('ws-visible-count');
+      if (counter) counter.textContent = visible;
+    }
+
+    // ─── Workstation Table Sort ───
+    let currentSortCol = -1;
+    let sortAsc = true;
+
+    function sortWsTable(colIndex) {
+      const tbody = document.getElementById('ws-tbody');
+      if (!tbody) return;
+
+      // Toggle direction if same column, otherwise default ascending
+      if (currentSortCol === colIndex) {
+        sortAsc = !sortAsc;
+      } else {
+        sortAsc = true;
+        currentSortCol = colIndex;
+      }
+
+      // Update header icons
+      document.querySelectorAll('.sortable-th').forEach(th => {
+        th.classList.remove('sort-asc', 'sort-desc');
+        th.querySelector('.sort-icon').innerHTML = '&#8597;';
+      });
+      const activeHeader = document.querySelector('.sortable-th[data-col="' + colIndex + '"]');
+      if (activeHeader) {
+        activeHeader.classList.add(sortAsc ? 'sort-asc' : 'sort-desc');
+        activeHeader.querySelector('.sort-icon').innerHTML = sortAsc ? '&#9650;' : '&#9660;';
+      }
+
+      // Sort rows
+      const rows = Array.from(tbody.querySelectorAll('.ws-row'));
+      rows.sort((a, b) => {
+        const aText = (a.cells[colIndex]?.textContent || '').trim().toLowerCase();
+        const bText = (b.cells[colIndex]?.textContent || '').trim().toLowerCase();
+
+        // IP address sorting: compare octets numerically
+        if (colIndex === 1) {
+          const aParts = aText.split('.').map(Number);
+          const bParts = bText.split('.').map(Number);
+          for (let i = 0; i < 4; i++) {
+            if ((aParts[i] || 0) !== (bParts[i] || 0)) {
+              return sortAsc ? (aParts[i] || 0) - (bParts[i] || 0) : (bParts[i] || 0) - (aParts[i] || 0);
+            }
+          }
+          return 0;
+        }
+
+        // Default: alphabetical
+        if (aText < bText) return sortAsc ? -1 : 1;
+        if (aText > bText) return sortAsc ? 1 : -1;
+        return 0;
+      });
+
+      rows.forEach(row => tbody.appendChild(row));
+    }
+  </script>
+</body>
+</html>

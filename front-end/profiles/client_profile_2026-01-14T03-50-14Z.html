@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Client Profile: FutureReady Charter Network</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; background: #fff; }
+    .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+    
+    .cover-page {
+      min-height: 100vh; display: flex; flex-direction: column; justify-content: center; align-items: center;
+      background: linear-gradient(135deg, #1a365d 0%, #2c5282 50%, #2b6cb0 100%);
+      color: white; text-align: center; padding: 60px 40px; page-break-after: always;
+    }
+    .cover-page h1 { font-size: 3.5em; font-weight: 300; margin-bottom: 20px; text-transform: uppercase; letter-spacing: 3px; }
+    .cover-page .company-name { font-size: 2.5em; font-weight: 600; margin: 30px 0; padding: 20px 40px; border: 3px solid rgba(255,255,255,0.3); border-radius: 10px; background: rgba(255,255,255,0.1); }
+    .cover-page .subtitle { font-size: 1.4em; opacity: 0.9; margin: 20px 0; }
+    .cover-page .meta-info { margin-top: 60px; font-size: 1em; opacity: 0.8; }
+    .cover-page .meta-info p { margin: 8px 0; }
+    .cover-page .badge { display: inline-block; padding: 8px 20px; background: #ed8936; border-radius: 20px; font-weight: 600; text-transform: uppercase; font-size: 0.9em; margin-top: 20px; }
+    
+    .section { margin: 40px 0; page-break-inside: avoid; }
+    .section-header { background: linear-gradient(90deg, #1a365d, #2c5282); color: white; padding: 15px 25px; font-size: 1.5em; font-weight: 600; border-radius: 8px 8px 0 0; }
+    .section-content { background: #f8fafc; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 8px 8px; padding: 25px; }
+    
+    .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; }
+    .info-item { background: white; padding: 15px 20px; border-radius: 8px; border-left: 4px solid #2c5282; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .info-item label { display: block; font-size: 0.85em; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 5px; }
+    .info-item .value { font-size: 1.1em; font-weight: 600; color: #1a365d; }
+    
+    table { width: 100%; border-collapse: collapse; margin: 15px 0; font-size: 0.95em; }
+    th { background: #2c5282; color: white; padding: 12px 15px; text-align: left; font-weight: 600; }
+    td { padding: 12px 15px; border-bottom: 1px solid #e2e8f0; background: white; }
+    tr:nth-child(even) td { background: #f8fafc; }
+    tr:hover td { background: #edf2f7; }
+    
+    .stakeholder-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+    .stakeholder-card { background: white; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.07); border-top: 4px solid #ed8936; }
+    .stakeholder-card .name { font-size: 1.2em; font-weight: 700; color: #1a365d; margin-bottom: 5px; }
+    .stakeholder-card .role { color: #ed8936; font-weight: 600; font-size: 0.95em; margin-bottom: 15px; }
+    .stakeholder-card .detail { margin: 10px 0; font-size: 0.9em; }
+    .stakeholder-card .detail strong { color: #2c5282; }
+    .stakeholder-card .quote { font-style: italic; color: #64748b; padding: 10px 15px; background: #f8fafc; border-left: 3px solid #ed8936; margin-top: 15px; font-size: 0.9em; }
+    
+    .threat-card { background: white; border-radius: 8px; padding: 20px; margin: 15px 0; border-left: 4px solid #e53e3e; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .threat-card .scenario-id { background: #e53e3e; color: white; padding: 3px 10px; border-radius: 4px; font-size: 0.85em; font-weight: 600; }
+    
+    .diagram-box { background: #1a202c; color: #68d391; padding: 20px; border-radius: 8px; font-family: 'Courier New', monospace; font-size: 0.85em; white-space: pre-wrap; overflow-x: auto; }
+    
+    .tag { display: inline-block; padding: 4px 12px; background: #e2e8f0; color: #2c5282; border-radius: 15px; font-size: 0.85em; margin: 3px; }
+    .tag.warning { background: #fed7d7; color: #c53030; }
+    .tag.success { background: #c6f6d5; color: #276749; }
+    
+    .risk-indicator { display: inline-block; padding: 5px 15px; border-radius: 4px; font-weight: 600; font-size: 0.9em; }
+    .risk-low { background: #c6f6d5; color: #276749; }
+    .risk-moderate { background: #fefcbf; color: #975a16; }
+    .risk-high { background: #fed7d7; color: #c53030; }
+    
+    .weakness-list { list-style: none; }
+    .weakness-list li { padding: 12px 15px; margin: 8px 0; background: #fff5f5; border-left: 4px solid #e53e3e; border-radius: 0 6px 6px 0; }
+    
+    .confidential-banner { background: #e53e3e; color: white; text-align: center; padding: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 2px; font-size: 0.85em; }
+    
+    .toc { background: white; padding: 30px; border-radius: 8px; margin: 30px 0; }
+    .toc h2 { color: #1a365d; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 2px solid #e2e8f0; }
+    .toc ul { list-style: none; }
+    .toc li { padding: 10px 0; border-bottom: 1px dashed #e2e8f0; }
+    .toc a { color: #2c5282; text-decoration: none; font-weight: 500; }
+    
+    @media print {
+      .cover-page { min-height: 100vh; }
+      .section { page-break-inside: avoid; }
+      .page-break { page-break-before: always; }
+    }
+  </style>
+</head>
+<body>
+  <div class="confidential-banner">⚠️ CONFIDENTIAL - FOR EDUCATIONAL PURPOSES ONLY - FICTIONAL CLIENT ⚠️</div>
+
+  <div class="cover-page">
+    <h1>Client Profile Packet</h1>
+    <div class="company-name">FutureReady Charter Network</div>
+    <p class="subtitle">Charter School Network</p>
+    <p class="subtitle">Austin</p>
+    <div class="badge">Difficulty: intermediate</div>
+    <div class="meta-info">
+      <p>Profile ID: 2026-01-14T03-50-14Z</p>
+      <p>Generated: January 14, 2026</p>
+      <p>Estimated Assessment Time: 8 hours</p>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="toc">
+      <h2>📋 Table of Contents</h2>
+      <ul>
+        <li><a href="#executive-summary">1. Executive Summary</a></li>
+        <li><a href="#organization">2. Organization Overview</a></li>
+        <li><a href="#governance">3. Governance & Risk Profile</a></li>
+        <li><a href="#stakeholders">4. Key Stakeholders</a></li>
+        <li><a href="#it-environment">5. IT Environment</a></li>
+        <li><a href="#network">6. Network Architecture</a></li>
+        <li><a href="#assets">7. Asset Inventory</a></li>
+        <li><a href="#firewall">8. Firewall Configuration</a></li>
+        <li><a href="#threats">9. Threat Profile</a></li>
+        <li><a href="#findings">10. Known Issues & Weaknesses</a></li>
+        <li><a href="#learning">11. Learning Objectives</a></li>
+      </ul>
+    </div>
+
+    <div class="section" id="executive-summary">
+      <div class="section-header">📊 1. Executive Summary</div>
+      <div class="section-content">
+        <div class="info-grid">
+          <div class="info-item"><label>Company</label><div class="value">FutureReady Charter Network</div></div>
+          <div class="info-item"><label>Industry</label><div class="value">Charter School Network</div></div>
+          <div class="info-item"><label>NAICS Code</label><div class="value">611110</div></div>
+          <div class="info-item"><label>Headquarters</label><div class="value">Austin</div></div>
+          <div class="info-item"><label>Total Employees</label><div class="value">896</div></div>
+          <div class="info-item"><label>Public Domain</label><div class="value">futureready.edu</div></div>
+          <div class="info-item"><label>IT Delivery Model</label><div class="value">Google Workspace + On-Prem</div></div>
+          <div class="info-item"><label>Public IP</label><div class="value">203.0.113.205</div></div>
+        </div>
+        <div style="margin-top: 25px;"><h4 style="color: #1a365d; margin-bottom: 10px;">Business Model</h4><p>Operates 24 charter schools across Texas, providing K-12 education with a focus on STEM and digital literacy.</p></div>
+        <div style="margin-top: 20px;"><h4 style="color: #1a365d; margin-bottom: 10px;">Critical Services</h4><div><span class="tag">Student enrollment management</span><span class="tag">Curriculum delivery platform</span><span class="tag">Charter compliance reporting</span></div></div>
+        <div style="margin-top: 20px;"><h4 style="color: #1a365d; margin-bottom: 10px;">Key System Dependencies</h4><div><span class="tag">Google Workspace</span><span class="tag">On-premises file servers</span><span class="tag">Custom-built LMS (Learning Management System)</span></div></div>
+      </div>
+    </div>
+
+    <div class="section" id="organization">
+      <div class="section-header">🏢 2. Organization Overview</div>
+      <div class="section-content">
+        <h4 style="color: #1a365d; margin-bottom: 15px;">Department Breakdown</h4>
+        <table>
+          <thead><tr><th>Department</th><th>Headcount</th><th>% of Total</th></tr></thead>
+          <tbody>
+            <tr><td>Executive</td><td>10</td><td>1.1%</td></tr><tr><td>IT</td><td>60</td><td>6.7%</td></tr><tr><td>Operations</td><td>600</td><td>67.0%</td></tr><tr><td>Sales</td><td>50</td><td>5.6%</td></tr><tr><td>Finance</td><td>100</td><td>11.2%</td></tr><tr><td>HR / Admin</td><td>76</td><td>8.5%</td></tr>
+            <tr style="font-weight: bold; background: #e2e8f0;"><td>Total</td><td>896</td><td>100%</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section" id="governance">
+      <div class="section-header">📜 3. Governance & Risk Profile</div>
+      <div class="section-content">
+        <div class="info-grid">
+          <div class="info-item"><label>Security Framework</label><div class="value">NIST-lite</div></div>
+          <div class="info-item"><label>Policy Enforcement</label><div class="value">Ad-hoc enforcement with inconsistent documentation; relies heavily on IT Manager's discretion.</div></div>
+        </div>
+        <div style="margin-top: 25px; display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+          <div><h4 style="color: #276749; margin-bottom: 10px;">✅ Policies Present</h4><div><span class="tag success">FERPA compliance procedures</span><span class="tag success">Data backup protocols</span><span class="tag success">Password complexity rules</span></div></div>
+          <div><h4 style="color: #c53030; margin-bottom: 10px;">❌ Policies Missing</h4><div><span class="tag warning">COPPA-specific safeguards</span><span class="tag warning">Incident response plan</span><span class="tag warning">Third-party vendor security requirements</span></div></div>
+        </div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Risk Tolerance Assessment</h4>
+        <div class="info-grid">
+          <div class="info-item"><label>Overall Risk Tolerance</label><div class="value"><span class="risk-indicator risk-moderate">Moderate</span></div></div>
+          <div class="info-item"><label>Downtime Tolerance</label><div class="value"><span class="risk-indicator risk-moderate">Moderate</span></div></div>
+          <div class="info-item"><label>Data Exposure Tolerance</label><div class="value"><span class="risk-indicator risk-low">Low</span></div></div>
+          <div class="info-item"><label>Budget Sensitivity</label><div class="value"><span class="risk-indicator risk-high">High</span></div></div>
+        </div>
+        <div style="margin-top: 25px;"><h4 style="color: #1a365d; margin-bottom: 10px;">Compliance Focus Areas</h4><div><span class="tag">FERPA</span><span class="tag">COPPA</span><span class="tag">Charter Authorization Requirements</span></div></div>
+      </div>
+    </div>
+
+    <div class="section page-break" id="stakeholders">
+      <div class="section-header">👥 4. Key Stakeholders (8 contacts)</div>
+      <div class="section-content">
+        <div class="stakeholder-grid">
+          <div class="stakeholder-card"><div class="name">Linda Martinez</div><div class="role">CEO</div><div class="detail"><strong>Decision Power:</strong> Final Approval</div><div class="detail"><strong>Technical Fluency:</strong> Low</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">Budget constraints</span><span class="tag">Charter authorization renewals</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Cost of advanced security measures</span><span class="tag warning">Disruption during implementation</span></div><div class="quote">"We need to balance compliance with the reality of our funding limits."</div></div><div class="stakeholder-card"><div class="name">James Carter</div><div class="role">CIO</div><div class="detail"><strong>Decision Power:</strong> Budget Authority</div><div class="detail"><strong>Technical Fluency:</strong> High</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">Legacy system vulnerabilities</span><span class="tag">FERPA audit readiness</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Need for phased implementation</span><span class="tag warning">Resistance to cloud migration</span></div><div class="quote">"Our on-prem infrastructure is a double-edged sword—it's stable, but hard to secure."</div></div><div class="stakeholder-card"><div class="name">Maria Gonzalez</div><div class="role">COO</div><div class="detail"><strong>Decision Power:</strong> Advisory</div><div class="detail"><strong>Technical Fluency:</strong> Medium</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">Operational continuity</span><span class="tag">Parental data privacy</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Complexity of new tools</span><span class="tag warning">Training resource allocation</span></div><div class="quote">"I worry that security upgrades will slow down our day-to-day operations."</div></div><div class="stakeholder-card"><div class="name">David Kim</div><div class="role">CFO</div><div class="detail"><strong>Decision Power:</strong> Budget Authority</div><div class="detail"><strong>Technical Fluency:</strong> Low</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">ROI of security investments</span><span class="tag">Charter funding compliance</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Preference for cost-effective solutions</span><span class="tag warning">Skepticism of external consultants</span></div><div class="quote">"Every dollar spent on security is a dollar not invested in classroom resources."</div></div><div class="stakeholder-card"><div class="name">Sarah Lee</div><div class="role">IT Manager</div><div class="detail"><strong>Decision Power:</strong> Advisory</div><div class="detail"><strong>Technical Fluency:</strong> High</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">Insufficient endpoint protection</span><span class="tag">Outdated firewall rules</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Need for more staff</span><span class="tag warning">Lack of executive support for upgrades</span></div><div class="quote">"We're fighting a losing battle with outdated systems and limited resources."</div></div><div class="stakeholder-card"><div class="name">Robert Chen</div><div class="role">HR Director</div><div class="detail"><strong>Decision Power:</strong> Advisory</div><div class="detail"><strong>Technical Fluency:</strong> Low</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">Employee data breaches</span><span class="tag">Compliance with COPPA</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Focus on internal policies over technical solutions</span><span class="tag warning">Lack of HR-IT collaboration</span></div><div class="quote">"I trust the IT team, but I need clearer guidelines on handling student data."</div></div><div class="stakeholder-card"><div class="name">Emily White</div><div class="role">Compliance Officer</div><div class="detail"><strong>Decision Power:</strong> Advisory</div><div class="detail"><strong>Technical Fluency:</strong> Medium</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">FERPA audit risks</span><span class="tag">Charter authorization documentation</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Need for better IT compliance reporting</span><span class="tag warning">Resistance to policy changes</span></div><div class="quote">"Without proper documentation, we risk losing our charter authorizations."</div></div><div class="stakeholder-card"><div class="name">Michael Brown</div><div class="role">Sales Lead</div><div class="detail"><strong>Decision Power:</strong> Advisory</div><div class="detail"><strong>Technical Fluency:</strong> Low</div><div class="detail"><strong>Risk Perception:</strong> </div><div class="detail"><strong>Key Concerns:</strong><br/><span class="tag">Client data exposure</span><span class="tag">Sales tool security</span></div><div class="detail"><strong>Likely Pushback:</strong><br/><span class="tag warning">Preference for simple solutions</span><span class="tag warning">Lack of sales-IT alignment</span></div><div class="quote">"I don't want security measures to complicate our enrollment processes."</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section page-break" id="it-environment">
+      <div class="section-header">💻 5. IT Environment</div>
+      <div class="section-content">
+        <h4 style="color: #1a365d; margin-bottom: 15px;">Endpoint Inventory</h4>
+        <div class="info-grid">
+          <div class="info-item"><label>windows laptops</label><div class="value">800</div></div><div class="info-item"><label>windows desktops</label><div class="value">100</div></div><div class="info-item"><label>shared kiosks</label><div class="value">50</div></div><div class="info-item"><label>macos</label><div class="value">50</div></div><div class="info-item"><label>mobile</label><div class="value">200</div></div>
+        </div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Servers</h4>
+        <table>
+          <thead><tr><th>Hostname</th><th>Operating System</th><th>Role</th></tr></thead>
+          <tbody><tr><td><code>srv-sis-01</code></td><td>Windows Server 2016</td><td>Student Information System</td></tr><tr><td><code>srv-lms-01</code></td><td>Ubuntu 20.04</td><td>Learning Management System</td></tr><tr><td><code>srv-file-01</code></td><td>Windows Server 2019</td><td>File and Print Services</td></tr><tr><td><code>srv-dc-01</code></td><td>Windows Server 2019</td><td>Active Directory Domain Controller</td></tr><tr><td><code>srv-print-01</code></td><td>CentOS 7</td><td>Print Services</td></tr></tbody>
+        </table>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">SaaS Applications</h4>
+        <div><span class="tag">Google Workspace</span><span class="tag">PowerSchool SIS</span><span class="tag">Canvas LMS</span><span class="tag">Microsoft 365</span><span class="tag">Zoom</span></div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Remote Access</h4>
+        <div class="info-grid">
+          <div class="info-item"><label>VPN Solution</label><div class="value">Cisco AnyConnect</div></div>
+          <div class="info-item"><label>MFA Coverage</label><div class="value">ExecOnly</div></div>
+          <div class="info-item"><label>Split Tunnel</label><div class="value">Yes ⚠️</div></div>
+        </div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Backup Strategy</h4>
+        <div class="info-grid">
+          <div class="info-item"><label>Method</label><div class="value">On-Prem Veeam Backup</div></div>
+          <div class="info-item"><label>Frequency</label><div class="value">Daily</div></div>
+          <div class="info-item"><label>Immutable</label><div class="value">No ⚠️</div></div>
+          <div class="info-item"><label>Restore Tests</label><div class="value">Quarterly</div></div>
+        </div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Vendor Dependencies</h4>
+        <div><span class="tag">Cisco</span><span class="tag">Veeam</span><span class="tag">PowerSchool</span><span class="tag">Canvas</span><span class="tag">Microsoft</span></div>
+        <h4 style="color: #ed8936; margin: 25px 0 15px;">❓ Known Unknowns (Ask About These)</h4>
+        <ul class="weakness-list"><li style="background: #fffbeb; border-left-color: #ed8936;">Unpatched endpoints</li><li style="background: #fffbeb; border-left-color: #ed8936;">No endpoint detection/response</li><li style="background: #fffbeb; border-left-color: #ed8936;">Unsecured IoT devices in classrooms</li></ul>
+      </div>
+    </div>
+
+    <div class="section page-break" id="network">
+      <div class="section-header">🌐 6. Network Architecture</div>
+      <div class="section-content">
+        <div class="info-grid">
+          <div class="info-item"><label>Public IP Address</label><div class="value">203.0.113.205</div></div>
+          <div class="info-item"><label>Firewall Vendor</label><div class="value">Unknown</div></div>
+          <div class="info-item"><label>VPN Enabled</label><div class="value">No</div></div>
+          <div class="info-item"><label>VPN MFA</label><div class="value">None</div></div>
+        </div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Network Subnets</h4>
+        <table>
+          <thead><tr><th>Subnet Name</th><th>CIDR</th><th>Purpose</th><th>Trust Level</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Network Diagram (Text Representation)</h4><div class="diagram-box">Parse failed - regenerate network</div>
+      </div>
+    </div>
+
+    <div class="section" id="assets">
+      <div class="section-header">🖥️ 7. Asset Inventory (0 assets)</div>
+      <div class="section-content">
+        <table>
+          <thead><tr><th>Hostname</th><th>IP Address</th><th>Role</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section page-break" id="firewall">
+      <div class="section-header">🔥 8. Firewall Configuration (0 rules)</div>
+      <div class="section-content">
+        <table>
+          <thead><tr><th>ID</th><th>Source</th><th>Destination</th><th>Port</th><th>Proto</th><th>Action</th><th>Comment</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="section page-break" id="threats">
+      <div class="section-header">⚠️ 9. Threat Profile</div>
+      <div class="section-content">
+        <h4 style="color: #c53030; margin-bottom: 15px;">Top Threats</h4>
+        <div></div>
+        <h4 style="color: #1a365d; margin: 25px 0 15px;">Attack Scenarios</h4>
+        
+      </div>
+    </div>
+
+    <div class="section" id="findings">
+      <div class="section-header">🔍 10. Known Issues & Weaknesses</div>
+      <div class="section-content">
+        <p style="margin-bottom: 20px; color: #64748b; font-style: italic;">These are intentional weaknesses embedded in this client profile for training purposes.</p>
+        <ul class="weakness-list"><li><strong>W-001:</strong> No MFA for non-exec staff</li><li><strong>W-002:</strong> No network segmentation</li><li><strong>W-003:</strong> Legacy OS on servers</li><li><strong>W-004:</strong> Weak password policies</li><li><strong>W-005:</strong> No security awareness training</li></ul>
+      </div>
+    </div>
+
+    <div class="section" id="learning">
+      <div class="section-header">🎯 11. Learning Objectives</div>
+      <div class="section-content">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+          <div><h4 style="color: #1a365d; margin-bottom: 10px;">Primary Objectives</h4><ul><li>Risk Assessment</li><li>Stakeholder Interviews</li><li>Technical Documentation Review</li></ul></div>
+          <div><h4 style="color: #1a365d; margin-bottom: 10px;">Secondary Objectives</h4><ul><li>Network Segmentation Analysis</li><li>Policy Gap Identification</li></ul></div>
+        </div>
+        <h4 style="color: #1a365d; margin: 20px 0 10px;">Skills Practiced</h4>
+        <div><span class="tag">Client Communication</span><span class="tag">Technical Writing</span><span class="tag">Risk Prioritization</span></div>
+        <div class="info-item" style="margin-top: 20px;"><label>Estimated Assessment Time</label><div class="value">8 hours</div></div>
+      </div>
+    </div>
+
+    <div style="text-align: center; margin: 40px 0; padding: 20px; border-top: 2px solid #e2e8f0; color: #64748b; font-size: 0.9em;">
+      <p><strong>Profile ID:</strong> 2026-01-14T03-50-14Z</p>
+      <p><strong>Generated:</strong> January 14, 2026</p>
+      <p style="margin-top: 15px;">This is a fictional client profile generated for educational purposes.<br/>Part of the Clinic-in-a-Box Cyber Risk Assessment Training Program.</p>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Progress | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    /* ============================================================================
+       PROGRESS OVERVIEW
+       ============================================================================ */
+    .progress-hero {
+      background: linear-gradient(135deg, #1e3a5f 0%, #2c5282 50%, #2b6cb0 100%);
+      color: white;
+      border-radius: 16px;
+      padding: 2rem;
+      margin-bottom: 1.5rem;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 2rem;
+      align-items: center;
+    }
+    @media (max-width: 768px) {
+      .progress-hero { grid-template-columns: 1fr; }
+    }
+    .progress-hero h2 { margin: 0 0 0.25rem; font-size: 1.3rem; }
+    .progress-hero .subtitle { opacity: 0.8; font-size: 0.9rem; margin-bottom: 1.25rem; }
+
+    .hero-bar-track {
+      height: 12px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 6px;
+      overflow: hidden;
+      margin-bottom: 0.4rem;
+    }
+    .hero-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #48bb78, #38a169);
+      border-radius: 6px;
+      transition: width 0.6s ease;
+    }
+    .hero-bar-label { font-size: 0.82rem; opacity: 0.85; }
+
+    .hero-stats {
+      display: flex;
+      gap: 1.5rem;
+    }
+    .hero-stat {
+      text-align: center;
+      min-width: 70px;
+    }
+    .hero-stat-value {
+      font-size: 1.8rem;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .hero-stat-label {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      opacity: 0.75;
+      margin-top: 0.25rem;
+    }
+
+    /* ============================================================================
+       PROFILE SELECTOR
+       ============================================================================ */
+    .profile-selector-bar {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .profile-selector-bar label {
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: var(--text-primary, #334155);
+      white-space: nowrap;
+    }
+    .profile-selector-bar select {
+      flex: 1;
+      min-width: 200px;
+      max-width: 400px;
+      padding: 0.5rem 0.75rem;
+      border: 1.5px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      background: var(--bg-card, white);
+    }
+
+    /* ============================================================================
+       PART CARDS
+       ============================================================================ */
+    .parts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    @media (max-width: 720px) { .parts-grid { grid-template-columns: 1fr; } }
+
+    .part-card {
+      background: var(--bg-card, white);
+      border: 1.5px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 1.25rem;
+      transition: all 0.15s ease;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+    .part-card:hover {
+      border-color: #93c5fd;
+      box-shadow: 0 2px 12px rgba(59,130,246,0.08);
+      transform: translateY(-1px);
+    }
+    .part-card.status-submitted { border-left: 4px solid #f59e0b; }
+    .part-card.status-reviewed { border-left: 4px solid #10b981; }
+    .part-card.status-in_progress, .part-card.status-in-progress { border-left: 4px solid #3b82f6; }
+    .part-card.status-revision_requested, .part-card.status-revision-requested { border-left: 4px solid #ef4444; }
+
+    .part-card-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.75rem;
+    }
+    .part-card-number {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 0.85rem;
+    }
+    .part-card-number.not-started { background: var(--gray-100, #f1f5f9); color: var(--text-muted, #94a3b8); }
+    .part-card-number.in-progress, .part-card-number.in_progress { background: #dbeafe; color: #1d4ed8; }
+    .part-card-number.submitted { background: #fef3c7; color: #92400e; }
+    .part-card-number.reviewed { background: #d1fae5; color: #065f46; }
+    .part-card-number.revision_requested, .part-card-number.revision-requested { background: #fee2e2; color: #991b1b; }
+
+    .part-status-pill {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .pill-not-started { background: var(--gray-100, #f1f5f9); color: var(--text-muted, #94a3b8); }
+    .pill-in-progress, .pill-in_progress { background: #dbeafe; color: #1d4ed8; }
+    .pill-submitted { background: #fef3c7; color: #92400e; }
+    .pill-reviewed { background: #d1fae5; color: #065f46; }
+    .pill-revision_requested, .pill-revision-requested { background: #fee2e2; color: #991b1b; }
+
+    .part-card-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-primary, #1e293b);
+      margin-bottom: 0.3rem;
+    }
+    .part-card-desc {
+      font-size: 0.82rem;
+      color: var(--text-muted, #64748b);
+      line-height: 1.5;
+      margin-bottom: 0.75rem;
+    }
+
+    .part-card-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      color: var(--text-muted, #94a3b8);
+    }
+    .part-card-score {
+      font-weight: 700;
+      color: #10b981;
+    }
+    .part-card-options {
+      display: flex;
+      gap: 0.3rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.5rem;
+    }
+    .option-mini-tag {
+      font-size: 0.7rem;
+      background: #eff6ff;
+      color: #3b82f6;
+      padding: 0.1rem 0.4rem;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+
+    /* ============================================================================
+       FEEDBACK PANEL
+       ============================================================================ */
+    .feedback-panel {
+      background: var(--bg-card, white);
+      border: 1.5px solid #e2e8f0;
+      border-radius: 12px;
+      margin-bottom: 1.5rem;
+    }
+    .feedback-panel-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid #f1f5f9;
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-primary, #1e293b);
+    }
+    .feedback-item {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid #f8fafc;
+      display: flex;
+      gap: 1rem;
+      align-items: flex-start;
+    }
+    .feedback-item:last-child { border-bottom: none; }
+    .feedback-part-badge {
+      width: 28px; height: 28px; border-radius: 6px;
+      background: #d1fae5; color: #065f46;
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.8rem; flex-shrink: 0;
+    }
+    .feedback-body { flex: 1; min-width: 0; }
+    .feedback-body strong { font-size: 0.88rem; color: var(--text-primary, #1e293b); }
+    .feedback-body p { font-size: 0.82rem; color: var(--text-muted, #64748b); margin: 0.25rem 0 0; line-height: 1.5; }
+    .feedback-score { font-weight: 700; color: #10b981; font-size: 0.9rem; white-space: nowrap; }
+
+    .empty-state-box {
+      text-align: center;
+      padding: 3rem 1.5rem;
+      color: var(--text-muted, #94a3b8);
+    }
+    .empty-state-box .icon { font-size: 2.5rem; margin-bottom: 0.75rem; opacity: 0.4; }
+    .empty-state-box h3 { color: var(--text-muted, #64748b); margin: 0 0 0.5rem; font-size: 1rem; }
+    .empty-state-box p { font-size: 0.88rem; max-width: 360px; margin: 0 auto; }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .profile-selector-bar label {
+      color: #c8cee0;
+    }
+    [data-theme="dark"] .profile-selector-bar select {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #e4e8f7;
+    }
+    [data-theme="dark"] .part-card {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .part-card:hover {
+      background: #161b33;
+      border-color: #5b8cff;
+      box-shadow: 0 2px 12px rgba(91,140,255,0.1);
+    }
+    [data-theme="dark"] .part-card-number.not-started {
+      background: #1a2040;
+      color: #8890b0;
+    }
+    [data-theme="dark"] .part-card-number.in-progress,
+    [data-theme="dark"] .part-card-number.in_progress {
+      background: rgba(91,140,255,0.15);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .part-card-number.submitted {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] .part-card-number.reviewed {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .part-card-number.revision_requested,
+    [data-theme="dark"] .part-card-number.revision-requested {
+      background: rgba(255,92,114,0.15);
+      color: #ff5c72;
+    }
+    [data-theme="dark"] .pill-not-started {
+      background: #1a2040;
+      color: #8890b0;
+    }
+    [data-theme="dark"] .pill-in-progress,
+    [data-theme="dark"] .pill-in_progress {
+      background: rgba(91,140,255,0.15);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .pill-submitted {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] .pill-reviewed {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .pill-revision_requested,
+    [data-theme="dark"] .pill-revision-requested {
+      background: rgba(255,92,114,0.15);
+      color: #ff5c72;
+    }
+    [data-theme="dark"] .part-card-title {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .part-card-desc {
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .part-card-meta {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .part-card-score {
+      color: #00e68a;
+    }
+    [data-theme="dark"] .option-mini-tag {
+      background: rgba(91,140,255,0.12);
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .feedback-panel {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .feedback-panel-header {
+      border-bottom-color: rgba(99,130,255,0.1);
+      color: #e4e8f7;
+    }
+    [data-theme="dark"] .feedback-item {
+      border-bottom-color: rgba(99,130,255,0.06);
+    }
+    [data-theme="dark"] .feedback-part-badge {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .feedback-body strong {
+      color: #e4e8f7;
+    }
+    [data-theme="dark"] .feedback-body p {
+      color: #a8b1cc;
+    }
+    [data-theme="dark"] .feedback-score {
+      color: #00e68a;
+    }
+    [data-theme="dark"] .empty-state-box {
+      color: #5c6585;
+    }
+    [data-theme="dark"] .empty-state-box h3 {
+      color: #a8b1cc;
+    }
+    [data-theme="dark"] .empty-state-box p {
+      color: #7882a4;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
+        </div>
+        <div class="header-right">
+          <a href="/generator" class="btn btn-primary">Generate New Profile</a>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">My Progress</h1>
+            <p class="page-subtitle">Track your 8-part risk assessment across all profiles.</p>
+          </div>
+        </div>
+
+        <!-- Profile selector -->
+        <div class="profile-selector-bar">
+          <label for="profileSelect">Profile:</label>
+          <select id="profileSelect" onchange="loadProgressForProfile(this.value)">
+            <option value="">Loading profiles...</option>
+          </select>
+        </div>
+
+        <!-- Loading state -->
+        <div id="loadingState" style="display:none; text-align:center; padding:3rem; color:#94a3b8;">Loading...</div>
+
+        <!-- No profiles state -->
+        <div id="noProfileState" style="display:none;">
+          <div class="empty-state-box">
+            <div class="icon">&#128203;</div>
+            <h3>No Profiles Yet</h3>
+            <p>Generate a client profile to begin your risk assessment.</p>
+            <a href="/generator" class="btn btn-primary" style="margin-top:1rem;">Generate Profile</a>
+          </div>
+        </div>
+
+        <!-- Main progress content (hidden until profile loaded) -->
+        <div id="progressContent" style="display:none;">
+
+          <!-- Hero overview bar -->
+          <div class="progress-hero">
+            <div>
+              <h2 id="heroCompany">--</h2>
+              <div class="subtitle" id="heroMeta">--</div>
+              <div class="hero-bar-track">
+                <div class="hero-bar-fill" id="heroBarFill" style="width:0%"></div>
+              </div>
+              <div class="hero-bar-label" id="heroBarLabel">0 of 8 parts completed</div>
+            </div>
+            <div class="hero-stats">
+              <div class="hero-stat">
+                <div class="hero-stat-value" id="statCompleted">0</div>
+                <div class="hero-stat-label">Completed</div>
+              </div>
+              <div class="hero-stat">
+                <div class="hero-stat-value" id="statSubmitted">0</div>
+                <div class="hero-stat-label">Submitted</div>
+              </div>
+              <div class="hero-stat">
+                <div class="hero-stat-value" id="statAvgScore">--</div>
+                <div class="hero-stat-label">Avg Score</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 8 part cards -->
+          <div class="parts-grid" id="partsGrid"></div>
+
+          <!-- Instructor feedback section -->
+          <div id="feedbackSection" style="display:none;">
+            <div class="feedback-panel">
+              <div class="feedback-panel-header">Instructor Feedback</div>
+              <div id="feedbackList"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const PARTS = [
+      { number: 1, name: 'Orientation', title: 'Orientation and Context Setting', desc: 'Introduction to the clinic model and risk assessment expectations.' },
+      { number: 2, name: 'Scoping', title: 'Client / Organization Scoping', desc: 'Define assessment scope and organizational context.' },
+      { number: 3, name: 'Threats', title: 'Threat Identification', desc: 'Identify and analyze relevant threats.' },
+      { number: 4, name: 'Vulnerabilities', title: 'Vulnerability Identification', desc: 'Discover security weaknesses and gaps.' },
+      { number: 5, name: 'Risk Analysis', title: 'Risk Analysis and Prioritization', desc: 'Evaluate and prioritize risks systematically.' },
+      { number: 6, name: 'Controls', title: 'Control and Mitigation', desc: 'Recommend security controls and mitigations.' },
+      { number: 7, name: 'Reporting', title: 'Reporting and Communication', desc: 'Create professional reports and presentations.' },
+      { number: 8, name: 'Reflection', title: 'Reflection and Workforce Alignment', desc: 'Reflect on learning and career alignment.' }
+    ];
+
+    let profiles = [];
+    let currentProgress = [];
+    let currentProfileId = null;
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!await Auth.requireAuth()) return;
+      await loadProfiles();
+    });
+
+    async function loadProfiles() {
+      try {
+        const data = await API.profiles.list();
+        profiles = data.profiles || [];
+
+        const select = document.getElementById('profileSelect');
+        if (profiles.length === 0) {
+          document.getElementById('noProfileState').style.display = 'block';
+          select.innerHTML = '<option value="">No profiles available</option>';
+          return;
+        }
+
+        select.innerHTML = profiles.map(p =>
+          `<option value="${p.id}">${p.company_name} (${p.industry} - ${p.difficulty})</option>`
+        ).join('');
+
+        // Auto-select first or last active
+        const lastActive = localStorage.getItem('activeProfileId');
+        const startId = profiles.find(p => p.id === lastActive) ? lastActive : profiles[0].id;
+        select.value = startId;
+        await loadProgressForProfile(startId);
+      } catch (error) {
+        console.error('Failed to load profiles:', error);
+      }
+    }
+
+    async function loadProgressForProfile(profileId) {
+      if (!profileId) return;
+      currentProfileId = profileId;
+
+      document.getElementById('loadingState').style.display = 'block';
+      document.getElementById('progressContent').style.display = 'none';
+
+      try {
+        const data = await API.progress.get(profileId);
+        currentProgress = data.progress || [];
+        const summary = data.summary || {};
+
+        // Find profile info
+        const profile = profiles.find(p => p.id === profileId);
+
+        // Update hero
+        document.getElementById('heroCompany').textContent = profile?.company_name || 'Unknown';
+        document.getElementById('heroMeta').textContent =
+          `${profile?.industry || '--'} | ${profile?.difficulty || '--'} difficulty`;
+
+        const reviewed = summary.reviewed || 0;
+        const submitted = summary.submitted || 0;
+        const pct = Math.round((reviewed / 8) * 100);
+
+        document.getElementById('heroBarFill').style.width = pct + '%';
+        document.getElementById('heroBarLabel').textContent = `${reviewed} of 8 parts reviewed`;
+        document.getElementById('statCompleted').textContent = reviewed;
+        document.getElementById('statSubmitted').textContent = submitted;
+        document.getElementById('statAvgScore').textContent =
+          summary.avg_score !== null && summary.avg_score !== undefined
+            ? Math.round(summary.avg_score)
+            : '--';
+
+        // Render part cards
+        renderPartCards();
+
+        // Render feedback
+        renderFeedback();
+
+        document.getElementById('loadingState').style.display = 'none';
+        document.getElementById('progressContent').style.display = 'block';
+      } catch (error) {
+        console.error('Failed to load progress:', error);
+        document.getElementById('loadingState').style.display = 'none';
+      }
+    }
+
+    function renderPartCards() {
+      const grid = document.getElementById('partsGrid');
+      grid.innerHTML = PARTS.map(part => {
+        const prog = currentProgress.find(p => p.part_number === part.number) || {};
+        const status = prog.status || 'not_started';
+        const statusLabel = {
+          not_started: 'Not Started',
+          in_progress: 'In Progress',
+          submitted: 'Awaiting Review',
+          reviewed: 'Reviewed',
+          revision_requested: 'Revision Needed'
+        }[status] || status;
+
+        // Parse selected options
+        let optionTags = '';
+        if (prog.output_option) {
+          try {
+            const opts = typeof prog.output_option === 'string' ? JSON.parse(prog.output_option) : prog.output_option;
+            if (Array.isArray(opts) && opts.length > 0) {
+              optionTags = `<div class="part-card-options">
+                ${opts.slice(0, 3).map(o => `<span class="option-mini-tag">${formatOptionKey(o)}</span>`).join('')}
+                ${opts.length > 3 ? `<span class="option-mini-tag">+${opts.length - 3} more</span>` : ''}
+              </div>`;
+            }
+          } catch (e) {}
+        }
+
+        const scoreHtml = prog.score ? `<span class="part-card-score">${prog.score}/100</span>` : '';
+        const updatedHtml = prog.updated_at
+          ? `<span>Updated ${timeAgo(prog.updated_at)}</span>` : '';
+
+        return `
+          <div class="part-card status-${status.replace('_', '-')}" onclick="goToWorkspace(${part.number})">
+            <div class="part-card-top">
+              <div class="part-card-number ${status}">${part.number}</div>
+              <span class="part-status-pill pill-${status.replace('_', '-')}">${statusLabel}</span>
+            </div>
+            <div class="part-card-title">${part.title}</div>
+            <div class="part-card-desc">${part.desc}</div>
+            ${optionTags}
+            <div class="part-card-meta">
+              ${updatedHtml}
+              ${scoreHtml}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderFeedback() {
+      const reviewed = currentProgress.filter(p => p.status === 'reviewed' && p.feedback);
+      const section = document.getElementById('feedbackSection');
+      const list = document.getElementById('feedbackList');
+
+      if (reviewed.length === 0) {
+        section.style.display = 'none';
+        return;
+      }
+
+      section.style.display = 'block';
+      list.innerHTML = reviewed.map(p => {
+        const part = PARTS.find(pt => pt.number === p.part_number);
+        return `
+          <div class="feedback-item">
+            <div class="feedback-part-badge">${p.part_number}</div>
+            <div class="feedback-body">
+              <strong>${part?.title || 'Part ' + p.part_number}</strong>
+              <p>${truncate(p.feedback, 200)}</p>
+            </div>
+            ${p.score ? `<div class="feedback-score">${p.score}/100</div>` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function goToWorkspace(partNumber) {
+      if (currentProfileId) {
+        localStorage.setItem('activeProfileId', currentProfileId);
+        window.location.href = `/workspace?profile=${currentProfileId}&part=${partNumber}`;
+      }
+    }
+
+    function formatOptionKey(key) {
+      // Convert "p2_org_brief" to "Org Brief"
+      return key.replace(/^p\d+_/, '').replace(/_/g, ' ')
+        .replace(/\b\w/g, c => c.toUpperCase());
+    }
+
+    function timeAgo(dateStr) {
+      const diff = Date.now() - new Date(dateStr).getTime();
+      const mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      const days = Math.floor(hrs / 24);
+      if (days < 7) return days + 'd ago';
+      return new Date(dateStr).toLocaleDateString();
+    }
+
+    function truncate(str, len) {
+      if (!str) return '';
+      return str.length > len ? str.substring(0, len) + '...' : str;
+    }
+
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('open');
+      document.getElementById('sidebarOverlay').classList.toggle('active');
+    }
+    function closeSidebar() {
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebarOverlay').classList.remove('active');
+    }
+  </script>
+</body>
+</html>

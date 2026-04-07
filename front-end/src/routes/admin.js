@@ -1,0 +1,2801 @@
+/*
+ * ============================================================================
+ * Admin Routes - CyberHub / Guacamole Management
+ * ============================================================================
+ */
+
+const express = require('express');
+const router = express.Router();
+const bcrypt = require('bcryptjs');
+const { v4: uuidv4 } = require('uuid');
+const { query } = require('../utils/db');
+const { cybercoreQuery } = require('../utils/cybercore-db');
+const { authenticateToken, requireRole } = require('../middleware/auth');
+const { getClusterHealth, buildDeployPreview } = require('../middleware/deployment-guards');
+const { generatePassword } = require('../utils/password-generator');
+const { logActivity } = require('../middleware/activity-logger');
+const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../utils/script-executor');
+const { selectBestNode } = require('../utils/node-selector');
+
+const adminOnly = requireRole('admin');
+
+// ============================================================================
+// GUACAMOLE API HELPER
+// ============================================================================
+
+const GUAC_URL = process.env.GUAC_API_URL || 'http://100.100.70.10:8080/guacamole';
+const GUAC_DS = process.env.GUAC_DATASOURCE || 'postgresql';
+
+// Cache the Guac auth token (they last ~60 min)
+let guacTokenCache = { token: null, expires: 0 };
+
+async function getGuacToken() {
+  // Return cached token if still valid (with 5-min buffer)
+  if (guacTokenCache.token && Date.now() < guacTokenCache.expires - 300000) {
+    return guacTokenCache.token;
+  }
+
+  const username = process.env.GUAC_ADMIN_USER || 'cactus-admin';
+  const password = process.env.GUAC_ADMIN_PASSWORD;
+  if (!password) throw new Error('GUAC_ADMIN_PASSWORD not set in .env');
+
+  const resp = await fetch(`${GUAC_URL}/api/tokens`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Guacamole auth failed (${resp.status}): ${text}`);
+  }
+
+  const data = await resp.json();
+  guacTokenCache = {
+    token: data.authToken,
+    expires: Date.now() + 55 * 60 * 1000 // ~55 min
+  };
+  return data.authToken;
+}
+
+// Generic Guac API call helper
+async function guacAPI(method, path, body = null) {
+  const token = await getGuacToken();
+  const url = `${GUAC_URL}/api/session/data/${GUAC_DS}${path}?token=${token}`;
+
+  const opts = {
+    method,
+    headers: { 'Content-Type': 'application/json' }
+  };
+  if (body) opts.body = JSON.stringify(body);
+
+  const resp = await fetch(url, opts);
+
+  // Some DELETE calls return 204 with no body
+  if (resp.status === 204) return null;
+
+  const text = await resp.text();
+  if (!resp.ok) {
+    throw new Error(`Guac API ${method} ${path} failed (${resp.status}): ${text}`);
+  }
+
+  try { return JSON.parse(text); } catch { return text; }
+}
+
+
+// ============================================================================
+// GUACAMOLE STATUS / CONNECTION TREE
+// ============================================================================
+
+// GET /api/admin/guac/status — test connectivity & return basic info
+router.get('/guac/status', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const token = await getGuacToken();
+    res.json({ connected: true, datasource: GUAC_DS, guac_url: GUAC_URL });
+  } catch (error) {
+    res.status(502).json({ connected: false, error: error.message });
+  }
+});
+
+// GET /api/admin/guac/tree — full connection tree from ROOT
+router.get('/guac/tree', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const tree = await guacAPI('GET', '/connectionGroups/ROOT/tree');
+    res.json(tree);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// CONNECTIONS
+// ============================================================================
+
+// GET /api/admin/guac/connections — list all connections
+router.get('/guac/connections', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const connections = await guacAPI('GET', '/connections');
+    res.json(connections);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/guac/connections/:id — single connection details
+router.get('/guac/connections/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const conn = await guacAPI('GET', `/connections/${req.params.id}`);
+    const params = await guacAPI('GET', `/connections/${req.params.id}/parameters`);
+    res.json({ ...conn, parameters: params });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/guac/connections — create a connection
+router.post('/guac/connections', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { name, protocol, parentIdentifier, parameters, attributes } = req.body;
+    if (!name || !protocol) return res.status(400).json({ error: 'name and protocol required' });
+
+    const conn = await guacAPI('POST', '/connections', {
+      name,
+      protocol,
+      parentIdentifier: parentIdentifier || 'ROOT',
+      parameters: parameters || {},
+      attributes: attributes || {}
+    });
+    res.json(conn);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/guac/connections/:id — delete a connection
+router.delete('/guac/connections/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    await guacAPI('DELETE', `/connections/${req.params.id}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// CONNECTION GROUPS
+// ============================================================================
+
+// GET /api/admin/guac/groups — list connection groups
+router.get('/guac/groups', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const groups = await guacAPI('GET', '/connectionGroups');
+    res.json(groups);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/guac/groups — create a connection group
+router.post('/guac/groups', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { name, type, parentIdentifier } = req.body;
+    if (!name) return res.status(400).json({ error: 'name required' });
+
+    const group = await guacAPI('POST', '/connectionGroups', {
+      name,
+      type: type || 'ORGANIZATIONAL',
+      parentIdentifier: parentIdentifier || 'ROOT',
+      attributes: {}
+    });
+    res.json(group);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/guac/groups/:id — delete a connection group
+router.delete('/guac/groups/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    await guacAPI('DELETE', `/connectionGroups/${req.params.id}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// USERS
+// ============================================================================
+
+// GET /api/admin/guac/users — list all Guac users
+router.get('/guac/users', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const users = await guacAPI('GET', '/users');
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/guac/users/:username — user details
+router.get('/guac/users/:username', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const user = await guacAPI('GET', `/users/${encodeURIComponent(req.params.username)}`);
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/guac/users — create a Guac user
+router.post('/guac/users', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { username, password, disabled } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'username and password required' });
+
+    const user = await guacAPI('POST', '/users', {
+      username,
+      password,
+      attributes: {
+        disabled: disabled ? '' : null,
+        expired: null,
+        timezone: 'America/Phoenix'
+      }
+    });
+    res.json(user);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/guac/users/:username/password — reset password
+router.put('/guac/users/:username/password', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ error: 'password required' });
+
+    await guacAPI('PUT', `/users/${encodeURIComponent(req.params.username)}`, {
+      username: req.params.username,
+      password,
+      attributes: {}
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/guac/users/:username — delete a Guac user
+router.delete('/guac/users/:username', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    await guacAPI('DELETE', `/users/${encodeURIComponent(req.params.username)}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/guac/users/:username/permissions — user permissions
+router.get('/guac/users/:username/permissions', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const perms = await guacAPI('GET', `/users/${encodeURIComponent(req.params.username)}/permissions`);
+    res.json(perms);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PATCH /api/admin/guac/users/:username/permissions — update user permissions
+router.patch('/guac/users/:username/permissions', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    // body = array of permission patch operations
+    // e.g. [{"op":"add","path":"/connectionPermissions/1","value":"READ"}]
+    await guacAPI('PATCH', `/users/${encodeURIComponent(req.params.username)}/permissions`, req.body);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// ACTIVE SESSIONS
+// ============================================================================
+
+// GET /api/admin/guac/active — list active connections/sessions
+router.get('/guac/active', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const active = await guacAPI('GET', '/activeConnections');
+    res.json(active);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/guac/active/:id — kill an active session
+router.delete('/guac/active/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const token = await getGuacToken();
+    // Killing sessions uses a PATCH with an array
+    const url = `${GUAC_URL}/api/session/data/${GUAC_DS}/activeConnections?token=${token}`;
+    const resp = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify([{
+        op: 'remove',
+        path: `/${req.params.id}`
+      }])
+    });
+    if (!resp.ok) throw new Error(`Kill session failed: ${resp.status}`);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// PROXMOX API HELPER
+// ============================================================================
+
+const PROXMOX_URL = process.env.PROXMOX_API_URL || 'https://100.100.10.10:8006';
+const PROXMOX_TOKEN_ID = process.env.PROXMOX_TOKEN_ID || 'root@pam!clinic-app-token';
+const PROXMOX_TOKEN_SECRET = process.env.PROXMOX_TOKEN_SECRET || '';
+
+async function proxmoxAPI(method, path, body = null) {
+  const https = require('https');
+  const url = new URL(`${PROXMOX_URL}${path}`);
+
+  let bodyStr = null;
+  if (body) {
+    if (typeof body === 'string') {
+      bodyStr = body;
+    } else {
+      bodyStr = Object.entries(body).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
+    }
+  }
+
+  return new Promise((resolve, reject) => {
+    const reqOpts = {
+      hostname: url.hostname,
+      port: url.port || 8006,
+      path: url.pathname + url.search,
+      method,
+      headers: {
+        'Authorization': `PVEAPIToken=${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}`,
+        ...(bodyStr && { 'Content-Type': 'application/x-www-form-urlencoded', 'Content-Length': Buffer.byteLength(bodyStr) })
+      },
+      rejectUnauthorized: false  // Proxmox uses self-signed certs
+    };
+
+    const req = https.request(reqOpts, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 400) {
+          return reject(new Error(`Proxmox ${method} ${url.pathname} failed (${res.statusCode}): ${data}`));
+        }
+        try {
+          const json = JSON.parse(data);
+          resolve(json.data !== undefined ? json.data : json);
+        } catch {
+          resolve(data);
+        }
+      });
+    });
+
+    req.on('error', reject);
+    if (bodyStr) req.write(bodyStr);
+    req.end();
+  });
+}
+
+// Helper: wait for a Proxmox task to complete
+async function waitForTask(node, upid, timeoutMs = 120000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const status = await proxmoxAPI('GET', `/api2/json/nodes/${node}/tasks/${encodeURIComponent(upid)}/status`);
+    if (status.status === 'stopped') {
+      if (status.exitstatus === 'OK') return status;
+      throw new Error(`Proxmox task failed: ${status.exitstatus}`);
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  throw new Error('Proxmox task timed out');
+}
+
+
+// ============================================================================
+// CLUSTER HEALTH & DEPLOYMENT GUARDS
+// ============================================================================
+
+// GET /api/admin/cluster/health — current Proxmox resource usage
+router.get('/cluster/health', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const health = await getClusterHealth(proxmoxAPI);
+    res.json(health);
+  } catch (error) {
+    res.status(502).json({ error: `Failed to fetch cluster health: ${error.message}` });
+  }
+});
+
+// POST /api/admin/deploy-preview — preview resource impact before deployment
+router.post('/deploy-preview', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { num_lanes = 1, attack_boxes = false, challenge_vm_count = 1 } = req.body;
+    const preview = await buildDeployPreview({
+      numLanes: parseInt(num_lanes) || 1,
+      attackBoxes: !!attack_boxes,
+      challengeVmCount: parseInt(challenge_vm_count) || 1,
+      proxmoxAPI,
+      cybercoreQuery
+    });
+    res.json(preview);
+  } catch (error) {
+    res.status(502).json({ error: `Failed to build deploy preview: ${error.message}` });
+  }
+});
+
+// ============================================================================
+// LANE DEPLOYMENT (Native — replaces N8N webhook)
+// ============================================================================
+
+// N8N Webhook URLs for lane deployment/teardown
+const N8N_DEPLOY_WEBHOOK = process.env.N8N_DEPLOY_LANE_WEBHOOK || 'http://100.100.20.50:5678/webhook-test/6bcb6b80-01d9-41a4-86e5-c0747fef50db';
+const N8N_TEARDOWN_WEBHOOK = process.env.N8N_TEARDOWN_LANE_WEBHOOK || 'http://100.100.20.50:5678/webhook-test/60949de5-d0f9-40bc-8441-5cf4f9b08048';
+
+// Attack box (Kali) template
+const KALI_TEMPLATE_VMID = 1699;
+// VM ID scheme: Challenge=600000+vxlan, Gateway=100000+vxlan, AttackBox=700000+vxlan
+const ATTACK_BOX_VMID_OFFSET = 700000;
+
+// POST /api/admin/deploy-lane — deploy a CyberHub lane
+router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
+  const { challenge_key, module, event_id, use_webhook, attack_boxes, confirm, vuln_scripts: selectedVulnScripts } = req.body;
+  const user_id = req.body.user_id || req.user.userId;
+  if (!challenge_key || !module) {
+    return res.status(400).json({ error: 'challenge_key and module required' });
+  }
+
+  // ── Pre-flight resource check (skip if confirm: true) ──
+  // Moved after challenge lookup below so we know the VM count
+
+  // ── Webhook mode: forward to N8N instead of native deployment ──
+  if (use_webhook) {
+    try {
+      console.log(`[Deploy] Using N8N webhook for ${challenge_key} (user: ${user_id})`);
+      const webhookRes = await fetch(N8N_DEPLOY_WEBHOOK, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id,
+          challenge_key,
+          module,
+          event_id: event_id || null
+        })
+      });
+      if (!webhookRes.ok) {
+        const errText = await webhookRes.text();
+        throw new Error(`N8N webhook failed (${webhookRes.status}): ${errText}`);
+      }
+      const webhookData = await webhookRes.json();
+      console.log(`[Deploy] N8N webhook response:`, webhookData);
+      return res.json({
+        success: true,
+        method: 'webhook',
+        lane_id: webhookData.lane_id || webhookData.laneId || 'pending',
+        vxlan_id: webhookData.vxlan_id || webhookData.vxlanId || null,
+        vnet: webhookData.vnet || null,
+        challenge: challenge_key,
+        message: 'Lane deployment triggered via N8N webhook.',
+        webhook_response: webhookData
+      });
+    } catch (error) {
+      console.error('[Deploy] N8N webhook error:', error.message);
+      return res.status(502).json({ error: `Webhook failed: ${error.message}` });
+    }
+  }
+
+  try {
+    // 1. Validate module is installed
+    const modResult = await cybercoreQuery(
+      `SELECT EXISTS (SELECT 1 FROM cybercore_module WHERE key = $1) AS is_installed`,
+      [module]
+    );
+    if (!modResult.rows[0].is_installed) {
+      return res.status(400).json({ error: `Module '${module}' is not installed` });
+    }
+
+    // 2. Ensure user exists in CyberCore cybercore_user table (maintains FK integrity)
+    //    Syncs user from clinic_db → cybercore_db (upsert by username to handle re-deploys)
+    const clinicUser = await query(
+      `SELECT id, email, first_name, last_name, role, organization, password_hash FROM users WHERE id = $1`, [user_id]
+    );
+    if (clinicUser.rows.length === 0) {
+      return res.status(400).json({ error: 'User not found in clinic database' });
+    }
+    const u = clinicUser.rows[0];
+    await cybercoreQuery(
+      `INSERT INTO cybercore_user (user_id, username, email, first_name, last_name, role, auth_provider, organization, password_hash, password_alg)
+       VALUES ($1, $2, $3, $4, $5, $6, 'local', $7, $8, $9)
+       ON CONFLICT (username) DO UPDATE SET user_id = $1, email = $3, organization = $7, password_hash = $8, password_alg = $9`,
+      [u.id, u.email, u.email, u.first_name || '', u.last_name || '', u.role || 'user', u.organization || '', u.password_hash || null, u.password_hash ? 'bcrypt' : null]
+    );
+
+    // 3. Check user doesn't already have an active lane
+    const laneCheck = await cybercoreQuery(
+      `SELECT lane_id FROM cybercore_lane WHERE user_id = $1 AND status IN ('active', 'deploying', 'pending') LIMIT 1`,
+      [user_id]
+    );
+    if (laneCheck.rows.length > 0) {
+      return res.status(409).json({ error: 'User already has an active lane', lane_id: laneCheck.rows[0].lane_id });
+    }
+
+    // 3. Query challenge details
+    const challengeResult = await cybercoreQuery(
+      `SELECT challenge_id, challenge_key, name, spec, difficulty
+       FROM ${module}_challenge
+       WHERE challenge_key = $1 AND status = 'active'`,
+      [challenge_key]
+    );
+    if (challengeResult.rows.length === 0) {
+      return res.status(404).json({ error: `Challenge '${challenge_key}' not found or not active` });
+    }
+    const challenge = challengeResult.rows[0];
+    const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec;
+
+    // Pre-flight resource check (now that we know the VM count from spec)
+    const specVmCount = (spec.vms || []).length || 1;
+    if (!confirm) {
+      try {
+        const preview = await buildDeployPreview({
+          numLanes: 1,
+          attackBoxes: !!attack_boxes,
+          challengeVmCount: specVmCount,
+          proxmoxAPI,
+          cybercoreQuery
+        });
+        return res.json({ preview: true, ...preview });
+      } catch (err) {
+        console.error('[Deploy] Pre-flight check failed:', err.message);
+      }
+    }
+
+    // 4. Find next available VXLAN ID
+    const vxlanBlock = {
+      start: spec.vxlan_block?.start ?? 10000,
+      end: spec.vxlan_block?.end ?? 10009
+    };
+    const vxlanResult = await cybercoreQuery(
+      `WITH used AS (
+        SELECT DISTINCT vxlan_id FROM cybercore_lane
+        WHERE vxlan_id IS NOT NULL
+          AND vxlan_id BETWEEN $1 AND $2
+          AND status NOT IN ('error')
+      )
+      SELECT gs AS vxlan_id
+      FROM generate_series($1::int, $2::int) AS gs
+      LEFT JOIN used u ON u.vxlan_id = gs
+      WHERE u.vxlan_id IS NULL
+      ORDER BY gs LIMIT 1`,
+      [vxlanBlock.start, vxlanBlock.end]
+    );
+    if (vxlanResult.rows.length === 0) {
+      return res.status(503).json({ error: 'No available VXLAN IDs in this challenge block' });
+    }
+    const vxlanId = vxlanResult.rows[0].vxlan_id;
+
+    // 5. Find the VNet matching this VXLAN tag from Proxmox SDN
+    const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+    const vnet = vnets.find(v => v.tag === vxlanId);
+    if (!vnet) {
+      return res.status(503).json({ error: `No VNet found with tag ${vxlanId} in Proxmox SDN` });
+    }
+
+    // 6. Determine template location and best node
+    const templateVmid = spec.template_vmid || 1600;
+    // Gateway template per module (matches N8N workflow mapping)
+    // Module mapping takes priority — spec.gateway_vmid is legacy and may be stale (e.g., old 1699)
+    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+    const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
+    const templateNode = spec.template_node || 'cyberhub-node-5';
+    // Select least-loaded node for deployment
+    const bestNodeInfo = await selectBestNode();
+    const bestNode = bestNodeInfo.node;
+    console.log(`[Deploy] Selected node ${bestNode} for lane deployment (score: ${bestNodeInfo.score})`);
+
+    // 7. Insert lane record with status 'deploying'
+    const laneName = `${vnet.zone}-${vxlanId}`;
+    const laneConfig = JSON.stringify({
+      challenge_id: challenge.challenge_id,
+      challenge_key: challenge.challenge_key,
+      challenge_name: challenge.name,
+      module
+    });
+    const laneInsert = await cybercoreQuery(
+      `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
+       RETURNING lane_id, user_id, vxlan_id, name, status, created_at`,
+      [user_id, vxlanId, laneName, laneConfig, module]
+    );
+    const lane = laneInsert.rows[0];
+
+    // Respond immediately — deployment continues in background
+    res.json({
+      success: true,
+      lane_id: lane.lane_id,
+      status: 'deploying',
+      vxlan_id: vxlanId,
+      vnet: vnet.vnet,
+      challenge: challenge.name,
+      message: 'Lane deployment started. Use GET /api/admin/lanes/:id to check status.'
+    });
+
+    logActivity(req, 'deploy_lane', 'lane', lane.lane_id, { challenge_key, module, vxlan_id: vxlanId, user_id });
+
+    // ---- Background deployment (non-blocking) ----
+    (async () => {
+      try {
+        // Multi-VM support: if spec.vms exists, deploy each VM; otherwise fall back to single VM
+        const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
+        const deployedVMs = [];
+
+        for (const vmSpec of vmSpecs) {
+          const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
+          const vmType = vmSpec.type || 'qemu';
+          const vmTemplate = vmSpec.template_vmid || templateVmid;
+          const vmName = vmSpec.name || challenge_key;
+
+          console.log(`[Deploy] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
+
+          if (vmType === 'lxc') {
+            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
+              newid: vmId, hostname: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+              description: `Challenge: ${challenge_key}\nVM: ${vmName}\nLane: ${lane.lane_id}`,
+              pool: `${module}-pool`
+            });
+            if (cloneResult) await waitForTask(templateNode, cloneResult);
+            await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
+              net1: `name=lan0,bridge=${vnet.vnet}`
+            });
+          } else {
+            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
+              newid: vmId, name: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+              description: `Challenge: ${challenge_key}\nVM: ${vmName}\nLane: ${lane.lane_id}`,
+              pool: `${module}-pool`
+            });
+            if (cloneResult) await waitForTask(templateNode, cloneResult);
+            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+              net0: `virtio,bridge=${vnet.vnet}`
+            });
+          }
+
+          deployedVMs.push({ vm_id: vmId, name: vmName, type: vmType, node: bestNode });
+        }
+
+        // Clone gateway LXC container
+        const gatewayVmId = 100000 + vxlanId;
+        const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+          newid: gatewayVmId,
+          hostname: `${laneName}-gateway`,
+          full: 1,
+          target: bestNode,
+          description: `Challenge: ${challenge_key}\nUser ID: ${user_id}\nLane ID: ${lane.lane_id}\nModule: ${module}`,
+          pool: `${module}-pool`
+        });
+
+        if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
+
+        // Attach VNet to gateway (net1)
+        await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+        });
+
+        // Start gateway first, then all challenge VMs
+        await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
+        await new Promise(r => setTimeout(r, 5000));
+
+        for (const vm of deployedVMs) {
+          const startPath = vm.type === 'lxc'
+            ? `/api2/json/nodes/${vm.node}/lxc/${vm.vm_id}/status/start`
+            : `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`;
+          await proxmoxAPI('POST', startPath);
+        }
+
+        // Run vulnerability scripts if any were selected
+        if (selectedVulnScripts && selectedVulnScripts.length > 0) {
+          console.log(`[Deploy] Running ${selectedVulnScripts.length} vuln scripts on lane ${lane.lane_id}...`);
+
+          // Create deployment tracking record
+          const scriptEntries = selectedVulnScripts.map(s => ({
+            script_slug: s.script_slug,
+            vm_name: s.vm_name || deployedVMs[0]?.name || 'default',
+            status: 'pending',
+            error: null
+          }));
+
+          const dvsResult = await query(
+            `INSERT INTO deployment_vuln_selections (lane_id, challenge_key, selected_scripts, status)
+             VALUES ($1, $2, $3, 'running_scripts')
+             RETURNING id`,
+            [lane.lane_id, challenge_key, JSON.stringify(scriptEntries)]
+          );
+          const deploymentId = dvsResult.rows[0].id;
+
+          // Wait for guest agent on each QEMU VM, then run scripts
+          for (const vm of deployedVMs) {
+            if (vm.type !== 'qemu') continue;
+
+            console.log(`[Deploy] Waiting for guest agent on ${vm.name} (${vm.vm_id})...`);
+            const agentReady = await waitForGuestAgent(vm.node, vm.vm_id, 180000);
+            if (!agentReady) {
+              console.error(`[Deploy] Guest agent not responding on ${vm.name} — skipping scripts`);
+              continue;
+            }
+
+            // Get scripts assigned to this VM
+            const vmScriptSlugs = selectedVulnScripts
+              .filter(s => (s.vm_name || deployedVMs[0]?.name) === vm.name)
+              .map(s => s.script_slug);
+
+            if (vmScriptSlugs.length > 0) {
+              const scriptRows = await query(
+                `SELECT slug, script_content, os_target, depends_on, script_args FROM vuln_scripts WHERE slug = ANY($1) AND is_active = true`,
+                [vmScriptSlugs]
+              );
+              if (scriptRows.rows.length > 0) {
+                await executeScriptsOnVM(vm.node, vm.vm_id, vm.name, scriptRows.rows, deploymentId);
+              }
+            }
+          }
+
+          // Collect IPs after scripts run
+          const networkInfo = { vms: [] };
+          for (const vm of deployedVMs) {
+            const ips = vm.type === 'qemu' ? await getVMIPs(vm.node, vm.vm_id) : [];
+            networkInfo.vms.push({ ...vm, ips, ip: ips[0] || null });
+          }
+
+          await query(
+            `UPDATE deployment_vuln_selections SET deployed_network = $1, status = 'complete', updated_at = NOW() WHERE id = $2`,
+            [JSON.stringify(networkInfo), deploymentId]
+          );
+          console.log(`[Deploy] Vuln scripts completed for lane ${lane.lane_id}`);
+        }
+
+        // Mark lane as active with deployment details in config
+        const primaryVm = deployedVMs[0];
+        const activeConfig = JSON.stringify({
+          challenge_vm_id: primaryVm?.vm_id,
+          gateway_vm_id: gatewayVmId,
+          node: bestNode,
+          challenge_key: challenge_key,
+          module,
+          vms: deployedVMs
+        });
+        await cybercoreQuery(
+          `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+          [lane.lane_id, activeConfig]
+        );
+        console.log(`Lane ${lane.lane_id} deployed successfully (VXLAN ${vxlanId}, ${deployedVMs.length} VMs)`);
+      } catch (err) {
+        console.error(`Lane ${lane.lane_id} deployment failed:`, err.message);
+        await cybercoreQuery(
+          `UPDATE cybercore_lane SET status = 'error', config = $2, updated_at = NOW() WHERE lane_id = $1`,
+          [lane.lane_id, JSON.stringify({ error: err.message })]
+        ).catch(() => {});
+      }
+    })();
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
+// LANE DELETION — Stop & destroy VMs, update lane status
+// ============================================================================
+
+// DELETE /api/admin/lanes/:id — tear down a deployed lane
+router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
+  const useWebhook = req.query.webhook === 'true';
+
+  try {
+    const laneResult = await cybercoreQuery(
+      `SELECT lane_id, user_id, vxlan_id, name, status, config FROM cybercore_lane WHERE lane_id = $1`,
+      [req.params.id]
+    );
+    if (laneResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Lane not found' });
+    }
+
+    // ── Webhook mode: forward teardown to N8N ──
+    if (useWebhook) {
+      const lane = laneResult.rows[0];
+      try {
+        console.log(`[Teardown] Using N8N webhook for lane ${lane.lane_id} (VXLAN ${lane.vxlan_id})`);
+        const webhookRes = await fetch(N8N_TEARDOWN_WEBHOOK, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            lane_id: lane.lane_id,
+            user_id: lane.user_id,
+            vxlan_id: lane.vxlan_id,
+            name: lane.name,
+            config: typeof lane.config === 'string' ? JSON.parse(lane.config) : lane.config
+          })
+        });
+        if (!webhookRes.ok) {
+          const errText = await webhookRes.text();
+          throw new Error(`N8N teardown webhook failed (${webhookRes.status}): ${errText}`);
+        }
+        const webhookData = await webhookRes.json();
+        console.log(`[Teardown] N8N webhook response:`, webhookData);
+        // Delete lane record after webhook succeeds
+        await cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = $1`, [lane.lane_id]);
+        return res.json({
+          success: true,
+          method: 'webhook',
+          lane_id: lane.lane_id,
+          vxlan_id: lane.vxlan_id,
+          webhook_response: webhookData
+        });
+      } catch (error) {
+        console.error('[Teardown] N8N webhook error:', error.message);
+        return res.status(502).json({ error: `Teardown webhook failed: ${error.message}` });
+      }
+    }
+
+    const lane = laneResult.rows[0];
+    if (lane.status === 'deleted') {
+      return res.status(400).json({ error: 'Lane already deleted' });
+    }
+
+    const vxlanId = lane.vxlan_id;
+    const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+
+    // Build list of all VM IDs to destroy (multi-VM aware)
+    const vmIdsToDestroy = [];
+
+    // Multi-VM: iterate config.vms array if present
+    if (Array.isArray(laneConfig.vms) && laneConfig.vms.length > 0) {
+      for (const vm of laneConfig.vms) {
+        vmIdsToDestroy.push({ vmid: vm.vm_id, type: vm.type || 'qemu', label: vm.name || `VM-${vm.vm_id}` });
+      }
+    } else {
+      // Legacy single-VM: use the standard offset
+      const challengeVmId = laneConfig.challenge_vm_id || (600000 + vxlanId);
+      vmIdsToDestroy.push({ vmid: challengeVmId, type: 'qemu', label: 'challenge' });
+    }
+
+    // Always include gateway and attack box
+    const gatewayVmId = laneConfig.gateway_vm_id || (100000 + vxlanId);
+    vmIdsToDestroy.push({ vmid: gatewayVmId, type: 'lxc', label: 'gateway' });
+
+    const attackBoxVmId = laneConfig.attack_box_vm_id || (ATTACK_BOX_VMID_OFFSET + vxlanId);
+    vmIdsToDestroy.push({ vmid: attackBoxVmId, type: 'qemu', label: 'attack-box' });
+
+    const errors = [];
+
+    // Find which node(s) the VMs are on
+    const vmNodes = {}; // { vmid: node }
+    const allVmIds = vmIdsToDestroy.map(v => v.vmid);
+    try {
+      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      for (const r of resources) {
+        if (allVmIds.includes(r.vmid)) {
+          vmNodes[r.vmid] = r.node;
+        }
+      }
+    } catch (e) {
+      errors.push(`Could not query cluster resources: ${e.message}`);
+    }
+
+    // Helper: forcefully destroy a VM/LXC — removes protection, stops, purges
+    async function forceDestroyVM(vmid, type, knownNode) {
+      // type: 'qemu' or 'lxc'
+      const nodes = knownNode ? [knownNode] : [];
+      // If not found in resources, try all nodes (handles ghost configs from failed clones)
+      if (nodes.length === 0) {
+        try {
+          const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+          for (const n of nodeList) nodes.push(n.node);
+        } catch (e) {
+          nodes.push('cyberhub-node-5'); // fallback
+        }
+      }
+
+      for (const node of nodes) {
+        try {
+          // Step 1: Remove protection (PUT for both qemu and lxc)
+          try {
+            await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { protection: 0 });
+            console.log(`[Teardown] Removed protection from ${type} ${vmid} on ${node}`);
+          } catch (_) {}
+
+          // Step 2: Unlock if locked
+          try {
+            await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { lock: '' });
+          } catch (_) {}
+
+          // Step 3: Stop (ignore errors — may already be stopped or not running)
+          try {
+            await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`);
+            await new Promise(r => setTimeout(r, 4000));
+          } catch (_) {}
+
+          // Step 4: Destroy — try with params, then without
+          try {
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1&skiplock=1&force=1`);
+          } catch (deleteErr) {
+            // Some Proxmox versions don't accept query params on DELETE — retry with just purge
+            console.log(`[Teardown] Retry destroy ${type} ${vmid} with purge only...`);
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1`);
+          }
+
+          console.log(`[Teardown] Destroyed ${type} ${vmid} on ${node}`);
+          return true;
+        } catch (e) {
+          console.log(`[Teardown] ${type} ${vmid} not destroyable on ${node}: ${e.message}`);
+          continue;
+        }
+      }
+      return false;
+    }
+
+    // Destroy all VMs in the lane (multi-VM aware)
+    for (const vm of vmIdsToDestroy) {
+      const destroyed = await forceDestroyVM(vm.vmid, vm.type, vmNodes[vm.vmid]);
+      if (!destroyed && vmNodes[vm.vmid]) {
+        errors.push(`${vm.label} (${vm.type} ${vm.vmid}): could not be destroyed`);
+      }
+    }
+
+    // Delete the lane row so the VXLAN ID is freed for reuse
+    await cybercoreQuery(
+      `DELETE FROM cybercore_lane WHERE lane_id = $1`,
+      [lane.lane_id]
+    );
+
+    logActivity(req, 'delete_lane', 'lane', lane.lane_id, { vxlan_id: vxlanId, errors: errors.length });
+
+    res.json({
+      success: true,
+      lane_id: lane.lane_id,
+      vxlan_id: vxlanId,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
+// LANE MANAGEMENT ENDPOINTS
+// ============================================================================
+
+// GET /api/admin/lanes — list all lanes
+router.get('/lanes', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { status } = req.query;
+    let sql = `SELECT lane_id, user_id, vxlan_id, name, status, config, created_at, updated_at
+               FROM cybercore_lane ORDER BY created_at DESC`;
+    const params = [];
+    if (status) {
+      sql = `SELECT lane_id, user_id, vxlan_id, name, status, config, created_at, updated_at
+             FROM cybercore_lane WHERE status = $1 ORDER BY created_at DESC`;
+      params.push(status);
+    }
+    const result = await cybercoreQuery(sql, params);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/lanes/:id — single lane details
+router.get('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await cybercoreQuery(
+      `SELECT lane_id, user_id, vxlan_id, name, status, config, created_at, updated_at
+       FROM cybercore_lane WHERE lane_id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PATCH /api/admin/lanes/:id/internet — toggle internet access on a lane (admin version)
+router.patch('/lanes/:id/internet', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({ error: 'enabled (boolean) required' });
+    }
+
+    const laneResult = await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, config, status FROM cybercore_lane WHERE lane_id = $1`,
+      [req.params.id]
+    );
+    if (laneResult.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+
+    const lane = laneResult.rows[0];
+    if (lane.status !== 'active') {
+      return res.status(400).json({ error: `Lane must be active (current: ${lane.status})` });
+    }
+
+    const config = typeof lane.config === 'string' ? JSON.parse(lane.config) : lane.config;
+    const node = config?.node;
+    const gatewayVmId = config?.gateway_vm_id || (100000 + lane.vxlan_id);
+
+    if (!node) return res.status(400).json({ error: 'Lane config missing node info' });
+
+    const cmd = enabled
+      ? 'iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -C FORWARD -i net1 -o eth0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i net1 -o eth0 -j ACCEPT; echo 1 > /proc/sys/net/ipv4/ip_forward'
+      : 'iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null; iptables -D FORWARD -i net1 -o eth0 -j ACCEPT 2>/dev/null; echo 0 > /proc/sys/net/ipv4/ip_forward';
+
+    try {
+      await proxmoxAPI('POST', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/exec`, {
+        command: JSON.stringify(['sh', '-c', cmd])
+      });
+    } catch (execErr) {
+      return res.status(502).json({
+        error: `Could not execute command on gateway: ${execErr.message}`,
+        hint: 'The Proxmox exec API may not be available.'
+      });
+    }
+
+    const updatedConfig = { ...config, internet_enabled: enabled };
+    await cybercoreQuery(
+      `UPDATE cybercore_lane SET config = $1, updated_at = NOW() WHERE lane_id = $2`,
+      [JSON.stringify(updatedConfig), lane.lane_id]
+    );
+
+    logActivity(req, 'toggle_internet', 'lane', lane.lane_id, { enabled, vxlan_id: lane.vxlan_id });
+
+    res.json({ success: true, lane_id: lane.lane_id, internet_enabled: enabled });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/modules — list installed modules
+router.get('/modules', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await cybercoreQuery(`SELECT * FROM cybercore_module ORDER BY key`);
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/challenges/:module — list challenges for a module
+router.get('/challenges/:module', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const mod = req.params.module.replace(/[^a-z0-9_]/gi, '');
+    const result = await cybercoreQuery(
+      `SELECT challenge_id, challenge_key, name, difficulty, status FROM ${mod}_challenge WHERE status = 'active' ORDER BY name`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// GROUP DEPLOYMENT — Batch create users + Guac group
+// ============================================================================
+
+// Legacy fallback — replaced by per-user random passwords via generatePassword()
+const GROUP_PASSWORD_FALLBACK = 'ClinicP@ssw0rd123!!';
+
+// POST /api/admin/deploy-group — create a group with instructor + student users
+// Optional: deploy_lanes=true to also deploy CyberHub lanes per student
+router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { group_name, num_instructors, num_students, attack_boxes, challenge_key, module, deploy_lanes, use_webhook, confirm, vuln_scripts: groupVulnScripts } = req.body;
+    if (!group_name || !num_students) {
+      return res.status(400).json({ error: 'group_name and num_students required' });
+    }
+
+    const numInst = parseInt(num_instructors) || 0;
+    const numStud = parseInt(num_students) || 1;
+    const shouldDeployLanes = !!deploy_lanes && !!challenge_key && !!module;
+
+    // ── Pre-flight resource check (skip if confirm: true) — moved after spec lookup ──
+    if (!confirm && shouldDeployLanes) {
+      try {
+        // Quick lookup to get VM count from challenge spec
+        let preflightVmCount = 1;
+        try {
+          const pfResult = await cybercoreQuery(
+            `SELECT spec FROM ${module}_challenge WHERE challenge_key = $1 AND status = 'active'`, [challenge_key]
+          );
+          if (pfResult.rows.length > 0) {
+            const pfSpec = typeof pfResult.rows[0].spec === 'string' ? JSON.parse(pfResult.rows[0].spec) : pfResult.rows[0].spec;
+            preflightVmCount = (pfSpec.vms || []).length || 1;
+          }
+        } catch (_) {}
+
+        const preview = await buildDeployPreview({
+          numLanes: numStud,
+          attackBoxes: !!attack_boxes,
+          challengeVmCount: preflightVmCount,
+          proxmoxAPI,
+          cybercoreQuery
+        });
+        return res.json({ preview: true, ...preview });
+      } catch (err) {
+        console.error('[Group Deploy] Pre-flight check failed:', err.message);
+        // Non-blocking: allow deployment if health check fails
+      }
+    }
+
+    // If deploying lanes, validate capacity before creating any accounts
+    let spec = null;
+    let vxlanBlock = null;
+    let availableVxlans = [];
+    if (shouldDeployLanes) {
+      // Validate module
+      const modResult = await cybercoreQuery(
+        `SELECT EXISTS (SELECT 1 FROM cybercore_module WHERE key = $1) AS is_installed`,
+        [module]
+      );
+      if (!modResult.rows[0].is_installed) {
+        return res.status(400).json({ error: `Module '${module}' is not installed` });
+      }
+
+      // Get challenge spec
+      const challengeResult = await cybercoreQuery(
+        `SELECT challenge_id, challenge_key, name, spec
+         FROM ${module}_challenge
+         WHERE challenge_key = $1 AND status = 'active'`,
+        [challenge_key]
+      );
+      if (challengeResult.rows.length === 0) {
+        return res.status(404).json({ error: `Challenge '${challenge_key}' not found or not active` });
+      }
+      spec = typeof challengeResult.rows[0].spec === 'string'
+        ? JSON.parse(challengeResult.rows[0].spec) : challengeResult.rows[0].spec;
+
+      // Check VXLAN capacity
+      vxlanBlock = {
+        start: spec.vxlan_block?.start ?? 10000,
+        end: spec.vxlan_block?.end ?? 10009
+      };
+      const vxlanResult = await cybercoreQuery(
+        `WITH used AS (
+          SELECT DISTINCT vxlan_id FROM cybercore_lane
+          WHERE vxlan_id IS NOT NULL
+            AND vxlan_id BETWEEN $1 AND $2
+            AND status NOT IN ('error')
+        )
+        SELECT gs AS vxlan_id
+        FROM generate_series($1::int, $2::int) AS gs
+        LEFT JOIN used u ON u.vxlan_id = gs
+        WHERE u.vxlan_id IS NULL
+        ORDER BY gs`,
+        [vxlanBlock.start, vxlanBlock.end]
+      );
+      availableVxlans = vxlanResult.rows.map(r => r.vxlan_id);
+
+      if (availableVxlans.length < numStud) {
+        return res.status(400).json({
+          error: `Not enough VXLAN capacity. Need ${numStud} lanes but only ${availableVxlans.length} available (range ${vxlanBlock.start}-${vxlanBlock.end}).`
+        });
+      }
+    }
+
+    const groupId = uuidv4();
+    const created = { instructors: [], students: [], guac_group: null, guac_users: [], lanes: [], credentials: [] };
+
+    // 1. Create Guacamole connection group
+    try {
+      const guacGroup = await guacAPI('POST', '/connectionGroups', {
+        name: group_name,
+        type: 'ORGANIZATIONAL',
+        parentIdentifier: 'ROOT',
+        attributes: {}
+      });
+      created.guac_group = guacGroup;
+    } catch (e) {
+      created.guac_group_error = e.message;
+    }
+
+    // 2. Create instructor accounts (each with unique password)
+    for (let i = 1; i <= numInst; i++) {
+      const userId = uuidv4();
+      const email = `${group_name.toLowerCase().replace(/[^a-z0-9]/g, '')}-instructor${i}@clinic.local`;
+      const firstName = `Instructor`;
+      const lastName = `${i}`;
+      const password = generatePassword();
+      const passwordHash = await bcrypt.hash(password, 12);
+
+      await query(
+        `INSERT INTO users (id, email, password_hash, first_name, last_name, organization, role, email_verified, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
+         RETURNING id, email, first_name, last_name, role`,
+        [userId, email, passwordHash, firstName, lastName, group_name, 'instructor']
+      );
+      created.instructors.push({ id: userId, email, name: `${firstName} ${lastName}` });
+      created.credentials.push({ email, password, role: 'instructor' });
+
+      try {
+        await guacAPI('POST', '/users', {
+          username: email,
+          password: password,
+          attributes: { disabled: null, timezone: 'America/Phoenix' }
+        });
+        created.guac_users.push(email);
+      } catch (e) { /* skip if Guac unreachable */ }
+    }
+
+    // 3. Create student accounts (each with unique password)
+    for (let i = 1; i <= numStud; i++) {
+      const userId = uuidv4();
+      const email = `${group_name.toLowerCase().replace(/[^a-z0-9]/g, '')}-student${i}@clinic.local`;
+      const firstName = `Student`;
+      const lastName = `${i}`;
+      const password = generatePassword();
+      const passwordHash = await bcrypt.hash(password, 12);
+
+      await query(
+        `INSERT INTO users (id, email, password_hash, first_name, last_name, organization, role, email_verified, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
+         RETURNING id, email, first_name, last_name, role`,
+        [userId, email, passwordHash, firstName, lastName, group_name, 'student']
+      );
+      created.students.push({ id: userId, email, name: `${firstName} ${lastName}` });
+      created.credentials.push({ email, password, role: 'student' });
+
+      try {
+        await guacAPI('POST', '/users', {
+          username: email,
+          password: password,
+          attributes: { disabled: null, timezone: 'America/Phoenix' }
+        });
+        created.guac_users.push(email);
+      } catch (e) { /* skip if Guac unreachable */ }
+    }
+
+    // 3b. Grant all Guac users permission to see the connection group
+    if (created.guac_group?.identifier) {
+      const groupId_guac = created.guac_group.identifier;
+      for (const guacUser of created.guac_users) {
+        try {
+          await guacAPI('PATCH', `/users/${encodeURIComponent(guacUser)}/permissions`, [
+            { op: 'add', path: `/connectionGroupPermissions/${groupId_guac}`, value: 'READ' }
+          ]);
+        } catch (_) {} // Non-blocking
+      }
+      console.log(`[Group ${group_name}] Granted ${created.guac_users.length} users access to Guac group ${groupId_guac}`);
+    }
+
+    // 4. Store the group record
+    await query(
+      `INSERT INTO deployed_groups (id, group_name, config, created_by, created_at)
+       VALUES ($1, $2, $3, $4, NOW())`,
+      [groupId, group_name, JSON.stringify({
+        instructors: created.instructors,
+        students: created.students,
+        credentials: created.credentials,
+        guac_group: created.guac_group,
+        guac_users: created.guac_users,
+        attack_boxes: !!attack_boxes,
+        challenge_key: challenge_key || null,
+        module: module || null,
+        deploy_lanes: shouldDeployLanes
+      }), req.user.userId]
+    );
+
+    // 5. Deploy lanes per student (if enabled)
+    if (shouldDeployLanes) {
+      const templateVmid = spec.template_vmid || 1600;
+      const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+      const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
+      const templateNode = spec.template_node || 'cyberhub-node-5';
+      const bestNodeInfo = await selectBestNode();
+      const bestNode = bestNodeInfo.node;
+      console.log(`[Group Deploy] Selected node ${bestNode} for lane deployment (score: ${bestNodeInfo.score})`);
+
+      // Find VNets once
+      let vnets = [];
+      try {
+        vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+      } catch (e) {
+        console.error('Could not fetch VNets for group deploy:', e.message);
+      }
+
+      // Pre-create lane records and sync users (synchronous, before response)
+      const laneJobs = [];
+      for (let i = 0; i < created.students.length; i++) {
+        const student = created.students[i];
+        const vxlanId = availableVxlans[i];
+        const vnet = vnets.find(v => v.tag === vxlanId);
+
+        if (!vnet) {
+          console.warn(`No VNet for VXLAN ${vxlanId}, skipping lane for ${student.email}`);
+          continue;
+        }
+
+        try {
+          // Sync student to cybercore_user (upsert by username to handle re-deploys)
+          const studentCred = created.credentials.find(c => c.email === student.email);
+          const studentPwHash = studentCred ? await bcrypt.hash(studentCred.password, 12) : null;
+          await cybercoreQuery(
+            `INSERT INTO cybercore_user (user_id, username, email, first_name, last_name, role, auth_provider, organization, password_hash, password_alg)
+             VALUES ($1, $2, $3, $4, $5, 'student', 'local', $6, $7, 'bcrypt')
+             ON CONFLICT (username) DO UPDATE SET user_id = $1, email = $3, organization = $6, password_hash = $7, password_alg = 'bcrypt'`,
+            [student.id, student.email, student.email, `Student`, `${i + 1}`, group_name, studentPwHash]
+          );
+
+          // Insert lane record
+          const laneName = `${vnet.zone}-${vxlanId}`;
+          const laneConfig = JSON.stringify({
+            challenge_key,
+            module,
+            group_id: groupId,
+            group_name
+          });
+          const laneInsert = await cybercoreQuery(
+            `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
+             VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
+             RETURNING lane_id`,
+            [student.id, vxlanId, laneName, laneConfig, module]
+          );
+          const laneId = laneInsert.rows[0].lane_id;
+          created.lanes.push({ lane_id: laneId, student_email: student.email, vxlan_id: vxlanId });
+          laneJobs.push({ laneId, student, vxlanId, vnet, laneName });
+        } catch (err) {
+          console.error(`Failed to create lane record for ${student.email}:`, err.message);
+        }
+      }
+
+      // Background: deploy lanes SEQUENTIALLY
+      (async () => {
+        for (const job of laneJobs) {
+          const { laneId, student, vxlanId, vnet } = job;
+          try {
+            console.log(`[Group ${group_name}] Deploying lane ${laneId} for ${student.email} (VXLAN ${vxlanId})${use_webhook ? ' via webhook' : ''}...`);
+
+            if (use_webhook) {
+              // ── Webhook mode: forward each lane to N8N ──
+              const webhookRes = await fetch(N8N_DEPLOY_WEBHOOK, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  user_id: student.id,
+                  challenge_key,
+                  module,
+                  event_id: null
+                })
+              });
+              if (!webhookRes.ok) {
+                const errText = await webhookRes.text();
+                throw new Error(`N8N webhook failed (${webhookRes.status}): ${errText}`);
+              }
+              const webhookData = await webhookRes.json();
+              // Update lane with webhook response data if available
+              if (webhookData.lane_id || webhookData.laneId) {
+                console.log(`[Group ${group_name}] Webhook deployed lane for ${student.email}:`, webhookData);
+              }
+              // Mark active (webhook handles VM deployment, we trust it succeeded)
+              await cybercoreQuery(
+                `UPDATE cybercore_lane SET status = 'active', updated_at = NOW() WHERE lane_id = $1`,
+                [laneId]
+              );
+            } else {
+              // ── Native mode: direct Proxmox API calls (multi-VM aware) ──
+              const gatewayVmId = 100000 + vxlanId;
+              const deployedVMs = [];
+
+              // Clone all challenge VMs from spec.vms[] (or single fallback)
+              const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
+              for (const vmSpec of vmSpecs) {
+                const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
+                const vmTemplate = vmSpec.template_vmid || templateVmid;
+                const vmName = vmSpec.name || challenge_key;
+                const vmType = vmSpec.type || 'qemu';
+
+                console.log(`[Group ${group_name}] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${student.email}`);
+
+                if (vmType === 'lxc') {
+                  const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
+                    newid: vmId, hostname: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+                    description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
+                    pool: `${module}-pool`
+                  });
+                  if (result) await waitForTask(templateNode, result);
+                  await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
+                    net1: `name=lan0,bridge=${vnet.vnet}`
+                  });
+                } else {
+                  const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
+                    newid: vmId, name: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+                    description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
+                    pool: `${module}-pool`
+                  });
+                  if (result) await waitForTask(templateNode, result);
+                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                    net0: `virtio,bridge=${vnet.vnet}`
+                  });
+                }
+
+                deployedVMs.push({ vm_id: vmId, name: vmName, type: vmType, node: bestNode });
+              }
+
+              // Clone gateway LXC
+              const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+                newid: gatewayVmId,
+                hostname: `${job.laneName}-gateway`,
+                full: 1,
+                target: bestNode,
+                description: `Group: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
+                pool: `${module}-pool`
+              });
+              if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
+
+              // Attach VNet to gateway
+              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+                net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+              });
+
+              // Clone attack box (Kali) if requested
+              const shouldDeployAttackBox = !!attack_boxes;
+              let attackBoxVmId = shouldDeployAttackBox ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null;
+              const studentUsername = student.email.split('@')[0].replace(/[^a-z0-9_-]/gi, '-');
+              const studentCred = created.credentials.find(c => c.email === student.email);
+              const studentPassword = studentCred ? studentCred.password : GROUP_PASSWORD_FALLBACK;
+              if (shouldDeployAttackBox) {
+
+                console.log(`[Group ${group_name}] Cloning Kali attack box → ${attackBoxVmId} for ${student.email}...`);
+                const kaliClone = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${KALI_TEMPLATE_VMID}/clone`, {
+                  newid: attackBoxVmId,
+                  name: `kali-${studentUsername}`,
+                  full: 1,
+                  target: bestNode,
+                  description: `Attack Box (Kali)\nGroup: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
+                  pool: `${module}-pool`
+                });
+                if (kaliClone) await waitForTask(templateNode, kaliClone);
+
+                // Override net0 to put attack box on the lane's VNet (behind lane gateway)
+                // Set cloud-init user/password for the student
+                console.log(`[Group ${group_name}] Configuring cloud-init for ${attackBoxVmId} (user: ${studentUsername})...`);
+                await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/config`, {
+                  net0: `virtio,bridge=${vnet.vnet}`,
+                  ciuser: studentUsername,
+                  cipassword: studentPassword
+                });
+
+                // Regenerate cloud-init image so changes take effect on boot
+                console.log(`[Group ${group_name}] Regenerating cloud-init image for ${attackBoxVmId}...`);
+                await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/cloudinit`);
+              }
+
+              // Start gateway first, then all challenge VMs
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
+              await new Promise(r => setTimeout(r, 5000));
+              for (const dvm of deployedVMs) {
+                const startPath = dvm.type === 'lxc'
+                  ? `/api2/json/nodes/${dvm.node}/lxc/${dvm.vm_id}/status/start`
+                  : `/api2/json/nodes/${dvm.node}/qemu/${dvm.vm_id}/status/start`;
+                await proxmoxAPI('POST', startPath);
+              }
+
+              // Start attack box and create Guacamole connection
+              if (attackBoxVmId) {
+                await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/status/start`);
+                console.log(`[Group ${group_name}] Kali attack box ${attackBoxVmId} started for ${student.email}`);
+
+                // Wait for Kali to boot and guest agent to come online
+                console.log(`[Group ${group_name}] Waiting for Kali guest agent...`);
+                await new Promise(r => setTimeout(r, 30000));
+
+                // Query QEMU guest agent for the Kali VM's IP address
+                let kaliIp = null;
+                for (let attempt = 0; attempt < 10 && !kaliIp; attempt++) {
+                  try {
+                    const agentData = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/agent/network-get-interfaces`);
+                    const interfaces = agentData.result || agentData || [];
+                    for (const iface of interfaces) {
+                      if (iface.name === 'lo') continue;
+                      const ipAddrs = iface['ip-addresses'] || [];
+                      for (const addr of ipAddrs) {
+                        if (addr['ip-address-type'] === 'ipv4' && !addr['ip-address'].startsWith('127.')) {
+                          kaliIp = addr['ip-address'];
+                          console.log(`[Group ${group_name}] Kali IP via guest agent: ${kaliIp} (${iface.name})`);
+                          break;
+                        }
+                      }
+                      if (kaliIp) break;
+                    }
+                  } catch (agentErr) {
+                    console.log(`[Group ${group_name}] Guest agent attempt ${attempt + 1}/10: ${agentErr.message}`);
+                  }
+                  if (!kaliIp && attempt < 9) {
+                    await new Promise(r => setTimeout(r, 5000));
+                  }
+                }
+
+                if (!kaliIp) {
+                  console.warn(`[Group ${group_name}] Could not get Kali IP via guest agent — using fallback`);
+                  kaliIp = '192.18.0.100';
+                }
+                console.log(`[Group ${group_name}] Kali IP: ${kaliIp}`);
+
+                // The gateway's startup script auto-discovers the Kali box and adds a DNAT rule.
+                // It waits 60s after boot then scans DHCP leases for port 3389.
+                // Since the gateway started ~90s ago and the Kali box just booted,
+                // the auto-discovery may still be running. We'll verify the DNAT is active
+                // by checking if the gateway's transit IP responds on 3389 (meaning DNAT is forwarding).
+                // This runs in parallel with getting the gateway's transit IP below.
+
+                // Get the lane gateway's wan0 (transit zone) IP for Guacamole connection
+                let gatewayTransitIp = null;
+                try {
+                  const gwConfig = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`);
+                  // Parse wan0 IP from net0 config: "name=wan0,...,ip=100.102.x.x/16,..."
+                  const net0 = gwConfig.net0 || '';
+                  const ipMatch = net0.match(/ip=([\d.]+)/);
+                  if (ipMatch) {
+                    gatewayTransitIp = ipMatch[1];
+                  }
+                } catch (_) {}
+
+                // If we couldn't get it from config (DHCP), try exec ip addr
+                if (!gatewayTransitIp) {
+                  try {
+                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/exec`, {
+                      command: JSON.stringify(['sh', '-c', "ip -4 addr show wan0 | grep inet | awk '{print $2}' | cut -d/ -f1"])
+                    });
+                  } catch (_) {}
+                }
+
+                // Fallback: query interfaces via Proxmox API
+                if (!gatewayTransitIp) {
+                  try {
+                    const gwInterfaces = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/interfaces`);
+                    for (const iface of (gwInterfaces || [])) {
+                      if (iface.name === 'wan0' && iface.inet) {
+                        gatewayTransitIp = iface.inet.split('/')[0];
+                        break;
+                      }
+                    }
+                  } catch (_) {}
+                }
+
+                const guacTargetIp = gatewayTransitIp || kaliIp;
+                console.log(`[Group ${group_name}] Guac RDP target: ${guacTargetIp} (${gatewayTransitIp ? 'via gateway DNAT' : 'direct to Kali'})`);
+
+                // Create Guacamole RDP connection pointing to lane gateway's transit IP
+                try {
+                  const guacParent = created.guac_group?.identifier || 'ROOT';
+                  const kaliConn = await guacAPI('POST', '/connections', {
+                    name: `${group_name} - ${student.email.split('@')[0]} - Kali`,
+                    protocol: 'rdp',
+                    parentIdentifier: guacParent,
+                    parameters: {
+                      hostname: guacTargetIp,
+                      port: '3389',
+                      username: studentUsername,
+                      password: studentPassword,
+                      security: 'any',
+                      'ignore-cert': 'true',
+                      'enable-wallpaper': 'true',
+                      'enable-theming': 'true',
+                      'enable-font-smoothing': 'true',
+                      'enable-full-window-drag': 'true',
+                      'color-depth': '24',
+                      'resize-method': 'display-update'
+                    },
+                    attributes: {
+                      'max-connections': '2',
+                      'max-connections-per-user': '1'
+                    }
+                  });
+
+                  // Grant permissions to access this connection
+                  if (kaliConn?.identifier) {
+                    const connId = kaliConn.identifier;
+
+                    // Grant the student READ permission
+                    try {
+                      await guacAPI('PATCH', `/users/${encodeURIComponent(student.email)}/permissions`, [
+                        { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' }
+                      ]);
+                      console.log(`[Group ${group_name}] Guac connection ${connId} → ${student.email}`);
+                    } catch (permErr) {
+                      console.warn(`[Group ${group_name}] Student perm failed for ${student.email}: ${permErr.message}`);
+                    }
+
+                    // Also grant all instructors in this group READ permission
+                    for (const inst of created.instructors) {
+                      try {
+                        await guacAPI('PATCH', `/users/${encodeURIComponent(inst.email)}/permissions`, [
+                          { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' }
+                        ]);
+                      } catch (_) {} // Non-blocking
+                    }
+                  }
+                } catch (guacErr) {
+                  console.warn(`[Group ${group_name}] Could not create Guac connection for ${student.email}: ${guacErr.message}`);
+                }
+              }
+
+              // Run vuln scripts if any were selected
+              if (groupVulnScripts && groupVulnScripts.length > 0) {
+                console.log(`[Group ${group_name}] Running ${groupVulnScripts.length} vuln scripts for ${student.email}...`);
+                const scriptEntries = groupVulnScripts.map(s => ({
+                  script_slug: s.script_slug,
+                  vm_name: s.vm_name || deployedVMs[0]?.name || 'default',
+                  status: 'pending', error: null
+                }));
+
+                const dvsResult = await query(
+                  `INSERT INTO deployment_vuln_selections (lane_id, selected_scripts, status)
+                   VALUES ($1, $2, 'running_scripts') RETURNING id`,
+                  [laneId, JSON.stringify(scriptEntries)]
+                );
+                const deploymentId = dvsResult.rows[0].id;
+
+                for (const vm of deployedVMs) {
+                  if (vm.type !== 'qemu') continue;
+                  const agentReady = await waitForGuestAgent(vm.node, vm.vm_id, 180000);
+                  if (!agentReady) { console.error(`[Group ${group_name}] Guest agent not responding on ${vm.name}`); continue; }
+
+                  const vmScriptSlugs = groupVulnScripts.filter(s => (s.vm_name || deployedVMs[0]?.name) === vm.name).map(s => s.script_slug);
+                  if (vmScriptSlugs.length > 0) {
+                    const scriptRows = await query(`SELECT slug, script_content, os_target, depends_on, script_args FROM vuln_scripts WHERE slug = ANY($1) AND is_active = true`, [vmScriptSlugs]);
+                    if (scriptRows.rows.length > 0) {
+                      await executeScriptsOnVM(vm.node, vm.vm_id, vm.name, scriptRows.rows, deploymentId);
+                    }
+                  }
+                }
+
+                await query(`UPDATE deployment_vuln_selections SET status = 'complete', updated_at = NOW() WHERE id = $1`, [deploymentId]);
+                console.log(`[Group ${group_name}] Vuln scripts completed for ${student.email}`);
+              }
+
+              // Mark active with full config (multi-VM aware)
+              const activeConfig = {
+                challenge_vm_id: deployedVMs[0]?.vm_id,  // backward compat
+                gateway_vm_id: gatewayVmId,
+                attack_box_vm_id: attackBoxVmId || null,
+                node: bestNode,
+                challenge_key,
+                module,
+                group_id: groupId,
+                group_name,
+                vms: deployedVMs
+              };
+              await cybercoreQuery(
+                `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+                [laneId, JSON.stringify(activeConfig)]
+              );
+            }
+
+            console.log(`[Group ${group_name}] Lane ${laneId} deployed (VXLAN ${vxlanId}, student ${student.email}${attack_boxes ? ' + Kali' : ''})`);
+          } catch (err) {
+            console.error(`[Group ${group_name}] Lane ${laneId} failed:`, err.message);
+            await cybercoreQuery(
+              `UPDATE cybercore_lane SET status = 'error', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+              [laneId, JSON.stringify({ error: err.message })]
+            ).catch(() => {});
+          }
+        }
+        console.log(`[Group ${group_name}] All ${laneJobs.length} lane deployments complete.`);
+      })();
+    }
+
+    logActivity(req, 'deploy_group', 'group', groupId, {
+      group_name, instructors: created.instructors.length, students: created.students.length,
+      lanes: created.lanes.length, deploy_lanes: shouldDeployLanes
+    });
+
+    res.json({
+      success: true,
+      group_id: groupId,
+      group_name,
+      instructors_created: created.instructors.length,
+      students_created: created.students.length,
+      guac_users_created: created.guac_users.length,
+      guac_group: created.guac_group ? 'created' : 'failed',
+      lanes_deploying: created.lanes.length,
+      lanes: created.lanes,
+      credentials: created.credentials
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/groups — list all deployed groups
+router.get('/groups', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT id, group_name, config, created_by, created_at FROM deployed_groups ORDER BY created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/groups/:id — tear down a deployed group (delete all users + Guac resources)
+router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(`SELECT * FROM deployed_groups WHERE id = $1`, [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
+
+    const group = result.rows[0];
+    const config = typeof group.config === 'string' ? JSON.parse(group.config) : group.config;
+    const allUsers = [...(config.instructors || []), ...(config.students || [])];
+    const errors = [];
+
+    // 1. Tear down lanes for all students in this group
+    let lanesDeleted = 0;
+    const students = config.students || [];
+    for (const student of students) {
+      try {
+        // Find all lanes belonging to this student
+        const lanesResult = await cybercoreQuery(
+          `SELECT lane_id, vxlan_id, status, config FROM cybercore_lane WHERE user_id = $1`,
+          [student.id]
+        );
+        for (const lane of lanesResult.rows) {
+          const vxlanId = lane.vxlan_id;
+          if (vxlanId && lane.status !== 'deleted') {
+            const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+
+            // Build list of all VMs to destroy (multi-VM aware — same logic as single lane delete)
+            const vmIdsToDestroy = [];
+
+            if (Array.isArray(laneConfig.vms) && laneConfig.vms.length > 0) {
+              for (const vm of laneConfig.vms) {
+                vmIdsToDestroy.push({ vmid: vm.vm_id, type: vm.type || 'qemu', label: vm.name || `VM-${vm.vm_id}` });
+              }
+            } else {
+              const challengeVmId = laneConfig.challenge_vm_id || (600000 + vxlanId);
+              vmIdsToDestroy.push({ vmid: challengeVmId, type: 'qemu', label: 'challenge' });
+            }
+
+            const gatewayVmId = laneConfig.gateway_vm_id || (100000 + vxlanId);
+            vmIdsToDestroy.push({ vmid: gatewayVmId, type: 'lxc', label: 'gateway' });
+
+            const attackBoxVmId = laneConfig.attack_box_vm_id || (ATTACK_BOX_VMID_OFFSET + vxlanId);
+            vmIdsToDestroy.push({ vmid: attackBoxVmId, type: 'qemu', label: 'attack-box' });
+
+            // Locate all VMs across the cluster
+            const vmNodes = {};
+            const allVmIds = vmIdsToDestroy.map(v => v.vmid);
+            try {
+              const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+              for (const r of resources) {
+                if (allVmIds.includes(r.vmid)) vmNodes[r.vmid] = r.node;
+              }
+            } catch (e) { errors.push(`Locate VMs for VXLAN ${vxlanId}: ${e.message}`); }
+
+            // Get all node names for brute-force cleanup
+            let allNodes = [];
+            try {
+              const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+              allNodes = nodeList.map(n => n.node);
+            } catch (_) { allNodes = ['cyberhub-node-5']; }
+
+            // Force destroy ALL VMs in this lane
+            for (const vm of vmIdsToDestroy) {
+              const knownNode = vmNodes[vm.vmid];
+              const nodesToTry = knownNode ? [knownNode] : allNodes;
+              for (const node of nodesToTry) {
+                try {
+                  try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
+                  try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { lock: '' }); } catch (_) {}
+                  try { await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`); await new Promise(r => setTimeout(r, 4000)); } catch (_) {}
+                  try {
+                    await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
+                  } catch (_) {
+                    await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1`);
+                  }
+                  console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
+                  break;
+                } catch (e) {
+                  console.log(`[Group Teardown] ${vm.type} ${vm.vmid} (${vm.label}) not on ${node}: ${e.message}`);
+                  continue;
+                }
+              }
+            }
+          }
+
+          // Delete the lane row
+          await cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = $1`, [lane.lane_id]);
+          lanesDeleted++;
+        }
+
+        // Delete the cybercore_user record (by user_id or username)
+        try {
+          await cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = $1 OR username = $2`, [student.id, student.email]);
+        } catch (e) { /* may not exist */ }
+      } catch (e) {
+        errors.push(`Lane teardown for ${student.email}: ${e.message}`);
+      }
+    }
+
+    // Also clean up instructor cybercore_user records
+    for (const inst of (config.instructors || [])) {
+      try {
+        await cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = $1 OR username = $2`, [inst.id, inst.email]);
+      } catch (e) { /* may not exist */ }
+    }
+
+    // 2. Delete users from clinic_db
+    for (const u of allUsers) {
+      try {
+        await query(`DELETE FROM users WHERE id = $1`, [u.id]);
+      } catch (e) { errors.push(`DB delete ${u.email}: ${e.message}`); }
+    }
+
+    // 3. Delete Guac users
+    for (const username of (config.guac_users || [])) {
+      try {
+        await guacAPI('DELETE', `/users/${encodeURIComponent(username)}`);
+      } catch (e) { errors.push(`Guac delete ${username}: ${e.message}`); }
+    }
+
+    // 4. Delete Guac connection group
+    if (config.guac_group?.identifier) {
+      try {
+        await guacAPI('DELETE', `/connectionGroups/${config.guac_group.identifier}`);
+      } catch (e) { errors.push(`Guac group delete: ${e.message}`); }
+    }
+
+    // 5. Remove group record
+    await query(`DELETE FROM deployed_groups WHERE id = $1`, [req.params.id]);
+
+    logActivity(req, 'delete_group', 'group', req.params.id, {
+      group_name: group.group_name, users_deleted: allUsers.length, lanes_deleted: lanesDeleted
+    });
+
+    res.json({
+      success: true,
+      users_deleted: allUsers.length,
+      lanes_deleted: lanesDeleted,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// ACTIVITY LOG
+// ============================================================================
+
+// GET /api/admin/activity-log — paginated, filterable activity log
+router.get('/activity-log', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { action_type, user_id: filterUserId, from, to, limit: lim, offset: off, search } = req.query;
+    const limit = Math.min(parseInt(lim) || 50, 200);
+    const offset = parseInt(off) || 0;
+
+    let where = [];
+    let params = [];
+    let paramIdx = 1;
+
+    if (action_type) {
+      where.push(`a.action_type = $${paramIdx++}`);
+      params.push(action_type);
+    }
+    if (filterUserId) {
+      where.push(`a.user_id = $${paramIdx++}`);
+      params.push(filterUserId);
+    }
+    if (from) {
+      where.push(`a.created_at >= $${paramIdx++}`);
+      params.push(from);
+    }
+    if (to) {
+      where.push(`a.created_at <= $${paramIdx++}`);
+      params.push(to);
+    }
+    if (search) {
+      where.push(`(u.email ILIKE $${paramIdx} OR a.action_type ILIKE $${paramIdx} OR a.entity_type ILIKE $${paramIdx})`);
+      params.push(`%${search}%`);
+      paramIdx++;
+    }
+
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const [logs, countResult] = await Promise.all([
+      query(
+        `SELECT a.*, u.email, u.first_name, u.last_name
+         FROM activity_log a
+         LEFT JOIN users u ON u.id = a.user_id
+         ${whereClause}
+         ORDER BY a.created_at DESC
+         LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
+        [...params, limit, offset]
+      ),
+      query(
+        `SELECT COUNT(*) AS total FROM activity_log a LEFT JOIN users u ON u.id = a.user_id ${whereClause}`,
+        params
+      )
+    ]);
+
+    res.json({
+      logs: logs.rows,
+      total: parseInt(countResult.rows[0].total),
+      limit,
+      offset
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// USER MANAGEMENT
+// ============================================================================
+
+// GET /api/admin/users — list all clinic_db users
+router.get('/users', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT u.id, u.email, u.first_name, u.last_name, u.role, u.organization,
+              u.is_active, u.last_login, u.created_at,
+              dg.group_name, dg.id AS group_id
+       FROM users u
+       LEFT JOIN deployed_groups dg ON (
+         dg.config::jsonb->'students' @> jsonb_build_array(jsonb_build_object('id', u.id::text))
+         OR dg.config::jsonb->'instructors' @> jsonb_build_array(jsonb_build_object('id', u.id::text))
+       )
+       ORDER BY u.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PATCH /api/admin/groups/:id/toggle-active — bulk toggle is_active for all students in a group
+router.patch('/groups/:id/toggle-active', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { active } = req.body; // true or false
+    if (typeof active !== 'boolean') {
+      return res.status(400).json({ error: 'active (boolean) required' });
+    }
+
+    const result = await query(`SELECT * FROM deployed_groups WHERE id = $1`, [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
+
+    const config = typeof result.rows[0].config === 'string'
+      ? JSON.parse(result.rows[0].config) : result.rows[0].config;
+    const students = config.students || [];
+
+    if (students.length === 0) {
+      return res.status(400).json({ error: 'No students in this group' });
+    }
+
+    const studentIds = students.map(s => s.id);
+    const updated = await query(
+      `UPDATE users SET is_active = $1, updated_at = NOW()
+       WHERE id = ANY($2) AND role = 'student'
+       RETURNING id, email, is_active`,
+      [active, studentIds]
+    );
+
+    // Stop or start VMs for all student lanes
+    let lanesToggled = 0;
+    const vmErrors = [];
+
+    for (const student of students) {
+      try {
+        const lanesResult = await cybercoreQuery(
+          `SELECT lane_id, vxlan_id, config, status FROM cybercore_lane
+           WHERE user_id = $1 AND status IN ('active', 'suspended')`,
+          [student.id]
+        );
+
+        for (const lane of lanesResult.rows) {
+          const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config) : (lane.config || {});
+          const node = laneConfig.node;
+          if (!node) continue;
+
+          // Collect all VM IDs for this lane
+          const vmsToToggle = [];
+          if (Array.isArray(laneConfig.vms)) {
+            for (const vm of laneConfig.vms) {
+              vmsToToggle.push({ vmid: vm.vm_id, type: vm.type || 'qemu' });
+            }
+          } else if (laneConfig.challenge_vm_id) {
+            vmsToToggle.push({ vmid: laneConfig.challenge_vm_id, type: 'qemu' });
+          }
+          const gatewayVmId = laneConfig.gateway_vm_id || laneConfig.lane_gateway_vm_id;
+          if (gatewayVmId) vmsToToggle.push({ vmid: gatewayVmId, type: 'lxc' });
+          if (laneConfig.attack_box_vm_id) vmsToToggle.push({ vmid: laneConfig.attack_box_vm_id, type: 'qemu' });
+
+          if (!active) {
+            // DISABLING: stop all VMs and mark lane as suspended
+            for (const vm of vmsToToggle) {
+              try {
+                await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`);
+                console.log(`[Toggle] Stopped ${vm.type} ${vm.vmid} on ${node}`);
+              } catch (e) {
+                vmErrors.push(`Stop ${vm.type} ${vm.vmid}: ${e.message}`);
+              }
+            }
+            await cybercoreQuery(
+              `UPDATE cybercore_lane SET status = 'suspended', updated_at = NOW() WHERE lane_id = $1`,
+              [lane.lane_id]
+            );
+          } else {
+            // ENABLING: start all VMs and mark lane as active
+            // Start gateway first, then challenge VMs
+            const gateway = vmsToToggle.find(v => v.type === 'lxc');
+            const others = vmsToToggle.filter(v => v !== gateway);
+
+            if (gateway) {
+              try {
+                await proxmoxAPI('POST', `/api2/json/nodes/${node}/${gateway.type}/${gateway.vmid}/status/start`);
+                console.log(`[Toggle] Started gateway ${gateway.vmid} on ${node}`);
+              } catch (e) { vmErrors.push(`Start gateway ${gateway.vmid}: ${e.message}`); }
+              await new Promise(r => setTimeout(r, 3000));
+            }
+
+            for (const vm of others) {
+              try {
+                await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/start`);
+                console.log(`[Toggle] Started ${vm.type} ${vm.vmid} on ${node}`);
+              } catch (e) { vmErrors.push(`Start ${vm.type} ${vm.vmid}: ${e.message}`); }
+            }
+
+            await cybercoreQuery(
+              `UPDATE cybercore_lane SET status = 'active', updated_at = NOW() WHERE lane_id = $1`,
+              [lane.lane_id]
+            );
+          }
+          lanesToggled++;
+        }
+      } catch (e) {
+        vmErrors.push(`Lane lookup for ${student.email}: ${e.message}`);
+      }
+    }
+
+    // Also kill active Guacamole sessions if disabling (so they disconnect immediately)
+    if (!active) {
+      try {
+        const activeSessions = await guacAPI('GET', '/activeConnections');
+        const studentEmails = students.map(s => s.email);
+        const toKill = Object.entries(activeSessions || {})
+          .filter(([, session]) => studentEmails.includes(session.username))
+          .map(([connId]) => ({ op: 'remove', path: `/${connId}` }));
+
+        if (toKill.length > 0) {
+          const token = await getGuacToken();
+          await fetch(`${GUAC_URL}/api/session/data/${GUAC_DS}/activeConnections?token=${token}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(toKill)
+          });
+          console.log(`[Toggle] Killed ${toKill.length} Guacamole sessions`);
+        }
+      } catch (e) {
+        console.error('[Toggle] Failed to kill Guac sessions:', e.message);
+      }
+    }
+
+    logActivity(req, 'toggle_accounts', 'group', req.params.id, {
+      group_name: result.rows[0].group_name, active, students_updated: updated.rows.length
+    });
+
+    res.json({
+      success: true,
+      group_name: result.rows[0].group_name,
+      active,
+      students_updated: updated.rows.length,
+      lanes_toggled: lanesToggled,
+      vm_errors: vmErrors.length > 0 ? vmErrors : undefined
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// ACCOUNT SCHEDULES
+// ============================================================================
+
+// GET /api/admin/groups/:id/schedule — get the access schedule for a group
+router.get('/groups/:id/schedule', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM account_schedules WHERE group_id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) {
+      return res.json({ group_id: req.params.id, schedule: null });
+    }
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/groups/:id/schedule — create or update schedule
+router.put('/groups/:id/schedule', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { active_days, active_start, active_end, timezone } = req.body;
+
+    // Validate
+    if (!Array.isArray(active_days) || active_days.some(d => d < 0 || d > 6)) {
+      return res.status(400).json({ error: 'active_days must be array of 0-6 (Sun-Sat)' });
+    }
+    if (!active_start || !active_end) {
+      return res.status(400).json({ error: 'active_start and active_end required (HH:MM format)' });
+    }
+
+    // Verify group exists
+    const groupResult = await query(`SELECT id FROM deployed_groups WHERE id = $1`, [req.params.id]);
+    if (groupResult.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
+
+    const result = await query(
+      `INSERT INTO account_schedules (group_id, active_days, active_start, active_end, timezone)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (group_id) DO UPDATE SET
+         active_days = EXCLUDED.active_days,
+         active_start = EXCLUDED.active_start,
+         active_end = EXCLUDED.active_end,
+         timezone = COALESCE(EXCLUDED.timezone, account_schedules.timezone),
+         updated_at = NOW()
+       RETURNING *`,
+      [req.params.id, active_days, active_start, active_end, timezone || 'America/Chicago']
+    );
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PATCH /api/admin/groups/:id/schedule/override — instructor override for schedule
+router.patch('/groups/:id/schedule/override', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { override_active } = req.body; // true, false, or null
+
+    if (override_active !== true && override_active !== false && override_active !== null) {
+      return res.status(400).json({ error: 'override_active must be true, false, or null' });
+    }
+
+    const result = await query(
+      `UPDATE account_schedules
+       SET override_active = $1,
+           override_by = $2,
+           override_at = NOW(),
+           updated_at = NOW()
+       WHERE group_id = $3
+       RETURNING *`,
+      [override_active, req.user.userId, req.params.id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No schedule found for this group. Create one first.' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// CHALLENGE NETWORK DEPLOYMENT
+// ============================================================================
+
+// POST /api/admin/deploy-challenge-network — deploy VMs from a template, then run vuln scripts
+router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { template_id, user_id: targetUserId, selected_scripts, module, confirm } = req.body;
+    const userId = targetUserId || req.user.userId;
+
+    if (!template_id) {
+      return res.status(400).json({ error: 'template_id is required' });
+    }
+
+    // Load challenge from cybercore_db (crucible_challenge is the source of truth)
+    const challengeModule = module || 'crucible';
+    const mod = challengeModule.replace(/[^a-z0-9_]/gi, '');
+    const tplResult = await cybercoreQuery(
+      `SELECT * FROM ${mod}_challenge WHERE challenge_id = $1 AND status = 'active'`,
+      [template_id]
+    );
+    if (tplResult.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
+    const template = tplResult.rows[0];
+    const spec = typeof template.spec === 'string' ? JSON.parse(template.spec) : (template.spec || {});
+    const vmSpecs = spec.vms || (spec.template_vmid ? [{ name: template.challenge_key, template_vmid: spec.template_vmid, type: 'qemu', vm_offset: 600000 }] : []);
+
+    if (!vmSpecs || vmSpecs.length === 0) {
+      return res.status(400).json({ error: 'Template has no VM specs defined' });
+    }
+
+    // Pre-flight resource check
+    if (!confirm) {
+      try {
+        const preview = await buildDeployPreview({
+          numLanes: 1,
+          attackBoxes: false,
+          challengeVmCount: vmSpecs.length,
+          proxmoxAPI,
+          cybercoreQuery
+        });
+        preview.template_name = template.name;
+        preview.vm_count = vmSpecs.length;
+        return res.json({ preview: true, ...preview });
+      } catch (err) {
+        console.error('[ChallengeNetwork] Pre-flight check failed:', err.message);
+      }
+    }
+
+    // Build the spec object compatible with the existing deploy-lane flow
+    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+    const gatewayVmid = gatewayVmidByModule[challengeModule] || 1692;
+    const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
+    const bestNodeInfo = await selectBestNode();
+    const bestNode = bestNodeInfo.node;
+    console.log(`[ChallengeNetwork] Selected node ${bestNode} for deployment (score: ${bestNodeInfo.score})`);
+
+    // Allocate VXLAN from the challenge's VXLAN block (set by "Add New Crucible Challenge" N8N workflow)
+    const vxlanBlock = (spec.vxlan_block?.start && spec.vxlan_block?.end)
+      ? spec.vxlan_block
+      : { start: 10000, end: 10009 };
+    console.log(`[ChallengeNetwork] Using VXLAN block ${vxlanBlock.start}-${vxlanBlock.end} from challenge '${template.challenge_key}'`);
+
+    const vxlanResult = await cybercoreQuery(
+      `WITH used AS (
+        SELECT DISTINCT vxlan_id FROM cybercore_lane
+        WHERE vxlan_id IS NOT NULL AND vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error')
+      )
+      SELECT gs AS vxlan_id FROM generate_series($1::int, $2::int) AS gs
+      LEFT JOIN used u ON u.vxlan_id = gs
+      WHERE u.vxlan_id IS NULL ORDER BY gs LIMIT 1`,
+      [vxlanBlock.start, vxlanBlock.end]
+    );
+    if (vxlanResult.rows.length === 0) {
+      return res.status(503).json({ error: `No available VXLAN IDs in block ${vxlanBlock.start}-${vxlanBlock.end}` });
+    }
+    const vxlanId = vxlanResult.rows[0].vxlan_id;
+
+    // Find VNet — if it doesn't exist, create the SDN zone + VNet (like the N8N workflow does)
+    let vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+    let vnet = vnets.find(v => v.tag === vxlanId);
+
+    if (!vnet) {
+      console.log(`[ChallengeNetwork] VNet for tag ${vxlanId} not found — creating SDN infrastructure...`);
+
+      // Determine zone abbreviation from spec or challenge_key
+      const zoneAbbrev = spec.zone?.abbrev || template.challenge_key?.substring(0, 8)?.replace(/[^a-z0-9]/gi, '').substring(0, 8) || 'chlng001';
+
+      // Check if the SDN zone exists
+      const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
+      const zoneExists = zones.some(z => z.zone === zoneAbbrev);
+
+      if (!zoneExists) {
+        // Get cluster node info for VXLAN zone creation
+        const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+        const nodeNames = nodeList.map(n => n.node).join(',');
+        const nodeIps = nodeList.map(n => n.ip || `100.100.10.${10 + nodeList.indexOf(n)}`).join(',');
+
+        console.log(`[ChallengeNetwork] Creating SDN zone '${zoneAbbrev}' with nodes: ${nodeNames}`);
+        await proxmoxAPI('POST', '/api2/json/cluster/sdn/zones', {
+          zone: zoneAbbrev,
+          type: 'vxlan',
+          peers: nodeIps,
+          ipam: 'pve'
+        });
+      }
+
+      // Create the VNet for this VXLAN ID
+      const vnetName = `${zoneAbbrev}-${vxlanId}`;
+      console.log(`[ChallengeNetwork] Creating VNet '${vnetName}' with tag ${vxlanId} in zone '${zoneAbbrev}'`);
+      await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
+        vnet: vnetName,
+        zone: zoneAbbrev,
+        tag: vxlanId,
+        alias: `${zoneAbbrev}-vnet-${vxlanId}`
+      });
+
+      // Reload SDN so the VNet becomes active
+      console.log('[ChallengeNetwork] Reloading SDN configuration...');
+      await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
+
+      // Wait a moment for SDN to propagate
+      await new Promise(r => setTimeout(r, 5000));
+
+      // Re-fetch VNets
+      vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+      vnet = vnets.find(v => v.tag === vxlanId);
+
+      if (!vnet) {
+        return res.status(503).json({ error: `Failed to create VNet for VXLAN tag ${vxlanId}. SDN may need manual reload.` });
+      }
+
+      console.log(`[ChallengeNetwork] SDN infrastructure created: zone=${zoneAbbrev}, vnet=${vnet.vnet}`);
+    }
+
+    // Sync user to cybercore
+    const userResult = await query(`SELECT id, email, first_name, last_name, role FROM users WHERE id = $1`, [userId]);
+    if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = userResult.rows[0];
+    await cybercoreQuery(
+      `INSERT INTO cybercore_user (user_id, username, email, first_name, last_name, role, auth_provider)
+       VALUES ($1, $2, $3, $4, $5, $6, 'local')
+       ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email, first_name = EXCLUDED.first_name`,
+      [user.id, user.email, user.email, user.first_name, user.last_name, user.role]
+    );
+
+    // Create lane record
+    const laneName = `challenge-${vnet.zone}-${vxlanId}`;
+    const laneInsert = await cybercoreQuery(
+      `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
+       RETURNING lane_id`,
+      [userId, vxlanId, laneName, JSON.stringify({ template_id: template.id, template_name: template.name, module: challengeModule }), challengeModule]
+    );
+    const laneId = laneInsert.rows[0].lane_id;
+
+    // Build selected_scripts list for tracking
+    const scriptsToRun = selected_scripts || [];
+    const scriptEntries = scriptsToRun.map(s => ({
+      script_slug: s.script_slug,
+      vm_name: s.vm_name,
+      status: 'pending',
+      error: null,
+      output: null
+    }));
+
+    // Create deployment tracking record (clinic_db)
+    const dvsResult = await query(
+      `INSERT INTO deployment_vuln_selections (lane_id, challenge_key, selected_scripts, status)
+       VALUES ($1, $2, $3, 'deploying')
+       RETURNING id`,
+      [laneId, template.challenge_key, JSON.stringify(scriptEntries)]
+    );
+    const deploymentId = dvsResult.rows[0].id;
+
+    // Respond immediately
+    res.json({
+      success: true,
+      lane_id: laneId,
+      deployment_id: deploymentId,
+      vxlan_id: vxlanId,
+      template: template.name,
+      vm_count: vmSpecs.length,
+      scripts_count: scriptEntries.length,
+      message: 'Challenge network deployment started. Poll status endpoint for progress.'
+    });
+
+    logActivity(req, 'deploy_challenge_network', 'lane', laneId, {
+      template_id: template.id, template_name: template.name, vxlan_id: vxlanId, vm_count: vmSpecs.length
+    });
+
+    // ---- Background deployment ----
+    (async () => {
+      try {
+        const deployedVMs = [];
+
+        // Clone all VMs
+        for (const vmSpec of vmSpecs) {
+          const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
+          const vmType = vmSpec.type || 'qemu';
+          const vmTemplate = vmSpec.template_vmid;
+          const vmName = vmSpec.name || `vm-${vmId}`;
+
+          if (!vmTemplate) {
+            console.error(`[ChallengeNetwork] VM ${vmName} has no template_vmid, skipping`);
+            continue;
+          }
+
+          console.log(`[ChallengeNetwork] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
+
+          if (vmType === 'lxc') {
+            const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
+              newid: vmId, hostname: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+              description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
+            });
+            if (result) await waitForTask(templateNode, result);
+            await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
+              net1: `name=lan0,bridge=${vnet.vnet}`
+            });
+          } else {
+            const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
+              newid: vmId, name: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+              description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
+            });
+            if (result) await waitForTask(templateNode, result);
+            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+              net0: `virtio,bridge=${vnet.vnet}`
+            });
+          }
+
+          deployedVMs.push({
+            vm_id: vmId, name: vmName, type: vmType, node: bestNode,
+            role: vmSpec.role || '', os: vmSpec.os || '', services: vmSpec.services || [],
+            default_scripts: vmSpec.default_scripts || []
+          });
+        }
+
+        // Clone and start gateway
+        const gatewayVmId = 100000 + vxlanId;
+        const gwResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+          newid: gatewayVmId, hostname: `${laneName}-gateway`, full: 1, target: bestNode,
+          description: `Challenge Network Gateway\nTemplate: ${template.name}\nLane: ${laneId}`,
+        });
+        if (gwResult) await waitForTask(templateNode, gwResult);
+        await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+        });
+
+        // Start gateway first
+        await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
+        await new Promise(r => setTimeout(r, 5000));
+
+        // Start all challenge VMs
+        for (const vm of deployedVMs) {
+          const startPath = vm.type === 'lxc'
+            ? `/api2/json/nodes/${vm.node}/lxc/${vm.vm_id}/status/start`
+            : `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`;
+          await proxmoxAPI('POST', startPath);
+        }
+
+        console.log(`[ChallengeNetwork] All ${deployedVMs.length} VMs cloned and started`);
+
+        // Wait for guest agents on QEMU VMs, then run scripts
+        await query(
+          `UPDATE deployment_vuln_selections SET status = 'running_scripts', updated_at = NOW() WHERE id = $1`,
+          [deploymentId]
+        );
+
+        for (const vm of deployedVMs) {
+          if (vm.type !== 'qemu') continue;
+
+          // Wait for guest agent
+          console.log(`[ChallengeNetwork] Waiting for guest agent on ${vm.name} (${vm.vm_id})...`);
+          const agentReady = await waitForGuestAgent(vm.node, vm.vm_id, 180000);
+          if (!agentReady) {
+            console.error(`[ChallengeNetwork] Guest agent not responding on ${vm.name}`);
+            continue;
+          }
+
+          // Get scripts for this VM
+          const vmScripts = scriptEntries
+            .filter(s => s.vm_name === vm.name)
+            .map(s => s.script_slug);
+
+          if (vmScripts.length > 0) {
+            // Load full script content
+            const scriptResult = await query(
+              `SELECT slug, script_content, os_target, depends_on, script_args FROM vuln_scripts WHERE slug = ANY($1) AND is_active = true`,
+              [vmScripts]
+            );
+            if (scriptResult.rows.length > 0) {
+              await executeScriptsOnVM(vm.node, vm.vm_id, vm.name, scriptResult.rows, deploymentId);
+            }
+          }
+        }
+
+        // Collect IPs from all VMs
+        const networkInfo = { vms: [], gateway_vm_id: gatewayVmId, vxlan_id: vxlanId };
+        for (const vm of deployedVMs) {
+          const ips = vm.type === 'qemu' ? await getVMIPs(vm.node, vm.vm_id) : [];
+          networkInfo.vms.push({
+            ...vm,
+            ips: ips,
+            ip: ips[0] || null
+          });
+        }
+
+        // Update lane config and deployment record
+        const activeConfig = JSON.stringify({
+          template_id: template.id,
+          template_name: template.name,
+          module: challengeModule,
+          gateway_vm_id: gatewayVmId,
+          node: bestNode,
+          vms: deployedVMs
+        });
+
+        await cybercoreQuery(
+          `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+          [laneId, activeConfig]
+        );
+
+        await query(
+          `UPDATE deployment_vuln_selections SET deployed_network = $1, status = 'complete', updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(networkInfo), deploymentId]
+        );
+
+        console.log(`[ChallengeNetwork] Lane ${laneId} fully deployed with ${deployedVMs.length} VMs`);
+
+      } catch (err) {
+        console.error(`[ChallengeNetwork] Deployment failed:`, err.message);
+        await cybercoreQuery(
+          `UPDATE cybercore_lane SET status = 'error', config = $2, updated_at = NOW() WHERE lane_id = $1`,
+          [laneId, JSON.stringify({ error: err.message })]
+        ).catch(() => {});
+        await query(
+          `UPDATE deployment_vuln_selections SET status = 'failed', updated_at = NOW() WHERE id = $1`,
+          [deploymentId]
+        ).catch(() => {});
+      }
+    })();
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/challenge-networks/:laneId/run-script — run a single script on a specific VM
+router.post('/challenge-networks/:laneId/run-script', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { vm_name, script_slug } = req.body;
+    if (!vm_name || !script_slug) {
+      return res.status(400).json({ error: 'vm_name and script_slug required' });
+    }
+
+    // Get lane info
+    const laneResult = await cybercoreQuery(
+      `SELECT config FROM cybercore_lane WHERE lane_id = $1 AND status = 'active'`,
+      [req.params.laneId]
+    );
+    if (laneResult.rows.length === 0) return res.status(404).json({ error: 'Active lane not found' });
+
+    const config = typeof laneResult.rows[0].config === 'string'
+      ? JSON.parse(laneResult.rows[0].config) : laneResult.rows[0].config;
+
+    // Find the target VM — support both multi-VM (config.vms[]) and legacy single-VM (config.challenge_vm_id)
+    let vm = (config.vms || []).find(v => v.name === vm_name);
+    if (!vm) {
+      // Fallback: if there's a challenge_vm_id, use it (single-VM lane)
+      const challengeVmId = config.challenge_vm_id;
+      if (challengeVmId) {
+        vm = { vm_id: challengeVmId, name: vm_name, type: 'qemu', node: config.node };
+      }
+      // Also check if vms array has exactly one entry (just use it regardless of name)
+      if (!vm && config.vms?.length === 1) {
+        vm = config.vms[0];
+      }
+    }
+    if (!vm) return res.status(404).json({ error: `VM not found in lane config` });
+    if (vm.type !== 'qemu') return res.status(400).json({ error: 'Script execution only supported on QEMU VMs' });
+
+    // Load script
+    const scriptResult = await query(
+      `SELECT * FROM vuln_scripts WHERE slug = $1 AND is_active = true`, [script_slug]
+    );
+    if (scriptResult.rows.length === 0) return res.status(404).json({ error: `Script '${script_slug}' not found` });
+    const script = scriptResult.rows[0];
+
+    // Respond immediately — script runs in background
+    res.json({ success: true, message: `Running '${script.name}' on ${vm_name}...`, vm_id: vm.vm_id });
+
+    // Background: find or create tracking record, then run script
+    (async () => {
+    try {
+    let dvsResult = await query(
+      `SELECT id FROM deployment_vuln_selections WHERE lane_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [req.params.laneId]
+    );
+
+    let deploymentId;
+    if (dvsResult.rows.length > 0) {
+      deploymentId = dvsResult.rows[0].id;
+      // Append this script to existing selected_scripts
+      const existing = await query(`SELECT selected_scripts FROM deployment_vuln_selections WHERE id = $1`, [deploymentId]);
+      const scripts = existing.rows[0]?.selected_scripts || [];
+      if (!scripts.some(s => s.script_slug === script_slug && s.vm_name === vm.name)) {
+        scripts.push({ script_slug, vm_name: vm.name, status: 'pending', error: null, output: null });
+        await query(`UPDATE deployment_vuln_selections SET selected_scripts = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(scripts), deploymentId]);
+      }
+    } else {
+      // Create a new record
+      const newDvs = await query(
+        `INSERT INTO deployment_vuln_selections (lane_id, selected_scripts, status)
+         VALUES ($1, $2, 'running_scripts') RETURNING id`,
+        [req.params.laneId,
+         JSON.stringify([{ script_slug, vm_name: vm.name, status: 'pending', error: null, output: null }])]
+      );
+      deploymentId = newDvs.rows[0].id;
+    }
+
+    await executeScriptsOnVM(vm.node, vm.vm_id, vm.name, [script], deploymentId);
+    } catch (err) {
+      console.error(`[RunScript] Background error: ${err.message}`);
+    }
+    })();
+
+  } catch (error) {
+    if (!res.headersSent) res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/challenge-networks/:laneId/generate-profile — generate challenge profile with real IPs
+router.post('/challenge-networks/:laneId/generate-profile', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { client_type, industry, difficulty, company_name } = req.body;
+
+    // Get lane info from cybercore_db
+    const laneResult = await cybercoreQuery(
+      `SELECT lane_id, user_id, vxlan_id, config FROM cybercore_lane WHERE lane_id = $1 AND status = 'active'`,
+      [req.params.laneId]
+    );
+    if (laneResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Active lane not found' });
+    }
+    const lane = laneResult.rows[0];
+    const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config) : (lane.config || {});
+    const laneUserId = lane.user_id;
+
+    // Try to get deployment tracking data (may not exist if no vuln scripts were run)
+    let deployment = {};
+    const dvsResult = await query(
+      `SELECT * FROM deployment_vuln_selections WHERE lane_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [req.params.laneId]
+    );
+    if (dvsResult.rows.length > 0) {
+      deployment = dvsResult.rows[0];
+    }
+
+    // Build VM list from deployment_vuln_selections.deployed_network OR lane config
+    const dvsNetwork = typeof deployment.deployed_network === 'string'
+      ? JSON.parse(deployment.deployed_network || '{}') : (deployment.deployed_network || {});
+
+    // Prefer deployment network data (has IPs collected after boot), fall back to lane config
+    let vms = (dvsNetwork.vms && dvsNetwork.vms.length > 0)
+      ? dvsNetwork.vms
+      : (laneConfig.vms || []);
+
+    // If still no VMs, try single-VM fallback
+    if (vms.length === 0 && laneConfig.challenge_vm_id) {
+      vms = [{
+        vm_id: laneConfig.challenge_vm_id,
+        name: laneConfig.challenge_key || 'challenge',
+        type: 'qemu',
+        node: laneConfig.node,
+        role: 'Primary Target',
+        os: 'Windows'
+      }];
+    }
+
+    if (vms.length === 0) {
+      return res.status(400).json({ error: 'No VMs found in lane config. Is the lane deployed?' });
+    }
+
+    // If VMs don't have IPs yet, try to collect them now
+    for (const vm of vms) {
+      if (!vm.ip && !vm.ips?.length && vm.type === 'qemu' && vm.node && vm.vm_id) {
+        try {
+          const ips = await getVMIPs(vm.node, vm.vm_id);
+          vm.ips = ips;
+          vm.ip = ips[0] || null;
+        } catch (_) {}
+      }
+    }
+
+    // Get phantom assets from the challenge spec in cybercore_db
+    let phantoms = [];
+    const challengeKey = deployment.challenge_key || laneConfig.challenge_key;
+    if (challengeKey) {
+      try {
+        const chalResult = await cybercoreQuery(
+          `SELECT spec FROM crucible_challenge WHERE challenge_key = $1`, [challengeKey]
+        );
+        if (chalResult.rows.length > 0) {
+          const chalSpec = typeof chalResult.rows[0].spec === 'string'
+            ? JSON.parse(chalResult.rows[0].spec) : chalResult.rows[0].spec;
+          phantoms = chalSpec.phantom_assets || [];
+        }
+      } catch (_) {}
+    }
+
+    // Build asset inventory from real VMs + phantom assets
+    const realAssets = vms.map(vm => ({
+      hostname: vm.name,
+      ip: vm.ip || vm.ips?.[0] || 'pending',
+      role: vm.role || 'Server',
+      os: vm.os || 'Unknown',
+      services: vm.services || [],
+      is_real: true
+    }));
+
+    const phantomAssets = phantoms.map(p => ({
+      hostname: p.hostname,
+      ip: p.ip,
+      role: p.role || 'Server',
+      os: p.os || 'Unknown',
+      notes: p.notes,
+      is_real: false
+    }));
+
+    const allAssets = [...realAssets, ...phantomAssets];
+
+    // Get deployed vuln info for the profile
+    const deployedVulns = Array.isArray(deployment.selected_scripts)
+      ? deployment.selected_scripts.filter(s => s.status === 'completed').map(s => s.script_slug)
+      : [];
+
+    // Build N8N payload for challenge profile generation
+    const n8nWebhookUrl = process.env.N8N_CHALLENGE_PROFILE_WEBHOOK || 'http://localhost:5678/webhook-test/NetworkAIProfile';
+
+    const payload = {
+      user_id: laneUserId,
+      profile_type: 'challenge_network',
+      client_type: client_type || 'SMB',
+      industry: industry || 'Technology',
+      difficulty: difficulty || 'intermediate',
+      company_name: company_name || null,
+      lane_id: req.params.laneId,
+      asset_inventory: allAssets,
+      deployed_vulnerabilities: deployedVulns,
+      phantom_asset_count: phantomAssets.length,
+      real_asset_count: realAssets.length,
+      network_topology: {
+        vxlan_id: lane.vxlan_id || dvsNetwork.vxlan_id,
+        gateway_vm_id: laneConfig.gateway_vm_id || dvsNetwork.gateway_vm_id,
+        total_vms: vms.length
+      }
+    };
+
+    // Call N8N webhook
+    console.log(`[ChallengeProfile] Triggering profile generation for lane ${req.params.laneId} with ${allAssets.length} assets`);
+    const webhookResp = await fetch(n8nWebhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!webhookResp.ok) {
+      const errText = await webhookResp.text();
+      throw new Error(`N8N webhook failed (${webhookResp.status}): ${errText}`);
+    }
+
+    const webhookData = await webhookResp.json();
+
+    // If N8N returned a profile_id, link it
+    if (webhookData.profile_id) {
+      await query(
+        `UPDATE deployment_vuln_selections SET profile_id = $1, updated_at = NOW() WHERE id = $2`,
+        [webhookData.profile_id, deployment.id]
+      );
+    }
+
+    logActivity(req, 'generate_challenge_profile', 'lane', req.params.laneId, {
+      assets: allAssets.length, vulns: deployedVulns.length
+    });
+
+    res.json({
+      success: true,
+      profile_id: webhookData.profile_id || null,
+      assets_included: allAssets.length,
+      real_vms: realAssets.length,
+      phantom_hosts: phantomAssets.length,
+      webhook_response: webhookData
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+module.exports = router;

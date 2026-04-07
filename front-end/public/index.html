@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clinic-in-a-Box | Cyber Risk Assessment Training</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <style>
+    .landing-hero {
+      min-height: 100vh;
+      background: linear-gradient(135deg, var(--primary-dark) 0%, var(--primary) 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: white;
+      padding: 2rem;
+    }
+    .hero-content {
+      max-width: 800px;
+    }
+    .hero-logo {
+      font-size: 5rem;
+      margin-bottom: 1.5rem;
+    }
+    .hero-title {
+      font-size: 3rem;
+      font-weight: 700;
+      margin-bottom: 1rem;
+      color: white;
+    }
+    .hero-subtitle {
+      font-size: 1.25rem;
+      opacity: 0.9;
+      margin-bottom: 2.5rem;
+      line-height: 1.6;
+    }
+    .hero-buttons {
+      display: flex;
+      gap: 1rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .btn-hero {
+      padding: 1rem 2rem;
+      font-size: 1.1rem;
+      border-radius: 0.5rem;
+    }
+    .btn-hero-primary {
+      background: white;
+      color: var(--primary);
+    }
+    .btn-hero-primary:hover {
+      background: var(--gray-100);
+    }
+    .btn-hero-outline {
+      background: transparent;
+      border: 2px solid white;
+      color: white;
+    }
+    .btn-hero-outline:hover {
+      background: rgba(255,255,255,0.1);
+    }
+    .features {
+      padding: 5rem 2rem;
+      background: white;
+    }
+    .features-grid {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 2rem;
+    }
+    .feature-card {
+      text-align: center;
+      padding: 2rem;
+    }
+    .feature-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }
+    .feature-title {
+      font-size: 1.25rem;
+      margin-bottom: 0.75rem;
+    }
+    .feature-desc {
+      color: var(--gray-600);
+      line-height: 1.6;
+    }
+    @media (max-width: 768px) {
+      .hero-title { font-size: 2rem; }
+      .hero-subtitle { font-size: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <section class="landing-hero">
+    <div class="hero-content">
+      <div class="hero-logo">🏥</div>
+      <h1 class="hero-title">Clinic-in-a-Box</h1>
+      <p class="hero-subtitle">
+        A comprehensive training platform for cybersecurity students to practice 
+        conducting risk assessments with realistic, AI-generated client profiles.
+      </p>
+      <div class="hero-buttons">
+        <a href="/register" class="btn btn-hero btn-hero-primary">Get Started</a>
+        <a href="/login" class="btn btn-hero btn-hero-outline">Sign In</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="features">
+    <div class="features-grid">
+      <div class="feature-card">
+        <div class="feature-icon">🏢</div>
+        <h3 class="feature-title">Realistic Clients</h3>
+        <p class="feature-desc">Generate detailed client profiles across SMB, Non-Profit, Utility, and K-12 sectors with authentic business contexts.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🎯</div>
+        <h3 class="feature-title">Adjustable Difficulty</h3>
+        <p class="feature-desc">Choose from beginner to advanced scenarios to match your skill level and learning objectives.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">🤖</div>
+        <h3 class="feature-title">AI Assistant</h3>
+        <p class="feature-desc">Get help with stakeholder interviews, compliance questions, and risk assessment methodology from our AI assistant.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon">📊</div>
+        <h3 class="feature-title">Complete Documentation</h3>
+        <p class="feature-desc">Each profile includes network diagrams, compliance requirements, threat scenarios, and stakeholder information.</p>
+      </div>
+    </div>
+  </section>
+
+  <script src="/js/app.js"></script>
+  <script>
+    // If already logged in, redirect to dashboard
+    (async () => {
+      try {
+        await API.auth.verify();
+        window.location.href = '/dashboard';
+      } catch (e) {
+        // Not logged in, stay on landing page
+      }
+    })();
+  </script>
+</body>
+</html>

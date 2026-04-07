@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    /* Thinking indicator styles */
+    .chat-message.thinking { color: #888; }
+    .thinking-dots { display: inline-flex; align-items: center; gap: 4px; }
+    .thinking-dots .dot {
+      display: inline-block; width: 8px; height: 8px;
+      background-color: #666; border-radius: 50%;
+      animation: thinking-bounce 1.4s ease-in-out infinite;
+    }
+    .thinking-dots .dot:nth-child(1) { animation-delay: 0s; }
+    .thinking-dots .dot:nth-child(2) { animation-delay: 0.2s; }
+    .thinking-dots .dot:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes thinking-bounce {
+      0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+      30% { transform: translateY(-8px); opacity: 1; }
+    }
+
+    /* 8-Part Progress Tracker */
+    .progress-tracker {
+      display: flex; gap: 4px; margin: 20px 0;
+      background: var(--gray-50, #f8fafc); padding: 15px; border-radius: 12px;
+    }
+    .progress-step {
+      flex: 1; text-align: center; padding: 10px 5px;
+      background: var(--gray-200, #e2e8f0); border-radius: 8px;
+      font-size: 0.75em; cursor: pointer;
+      transition: all 0.2s;
+    }
+    .progress-step:hover { transform: translateY(-2px); }
+    .progress-step.completed { background: #c6f6d5; color: #276749; }
+    .progress-step.current { background: #bee3f8; color: #2c5282; border: 2px solid #3182ce; }
+    .progress-step.locked { background: #edf2f7; color: #a0aec0; }
+    .progress-step .step-num { font-weight: 700; font-size: 1.2em; }
+    .progress-step .step-name { font-size: 0.85em; margin-top: 4px; }
+
+    /* Profile Card Enhanced */
+    .profile-card {
+      background: var(--bg-card, white); border-radius: 12px; padding: 20px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.07); margin-bottom: 15px;
+      border-left: 4px solid #3182ce; transition: all 0.2s;
+    }
+    .profile-card:hover { transform: translateX(5px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); }
+    .profile-card-header { display: flex; justify-content: space-between; align-items: start; }
+    .profile-card-title { font-size: 1.2em; font-weight: 600; color: #1a365d; }
+    .profile-card-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .profile-card-actions { display: flex; gap: 8px; margin-top: 15px; }
+
+    /* Quick Stats Row */
+    .quick-stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 15px; margin-bottom: 25px;
+    }
+    .quick-stat {
+      background: var(--bg-card, white); padding: 20px; border-radius: 12px;
+      text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .quick-stat-value { font-size: 2em; font-weight: 700; color: #2c5282; }
+    .quick-stat-label { font-size: 0.85em; color: var(--text-muted, #64748b); margin-top: 5px; }
+
+    /* Activity Feed */
+    .activity-feed { max-height: 300px; overflow-y: auto; }
+    .activity-item {
+      display: flex; gap: 12px; padding: 12px 0;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    .activity-icon {
+      width: 36px; height: 36px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 1.2em; flex-shrink: 0;
+    }
+    .activity-icon.generate { background: #c6f6d5; }
+    .activity-icon.view { background: #bee3f8; }
+    .activity-icon.complete { background: #faf089; }
+    .activity-content { flex: 1; }
+    .activity-title { font-weight: 500; color: #1a365d; }
+    .activity-time { font-size: 0.8em; color: #a0aec0; }
+
+    /* Modal Styles */
+    .modal-overlay {
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5); display: none;
+      align-items: center; justify-content: center; z-index: 1000;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+      background: var(--bg-card, white); border-radius: 16px; max-width: 900px;
+      width: 90%; max-height: 90vh; overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .modal-header {
+      padding: 20px 25px; border-bottom: 1px solid #e2e8f0;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .modal-title { font-size: 1.3em; font-weight: 600; color: #1a365d; }
+    .modal-close { background: none; border: none; font-size: 1.5em; cursor: pointer; color: var(--text-muted, #64748b); }
+    .modal-body { padding: 25px; max-height: 70vh; overflow-y: auto; }
+    .modal-tabs { display: flex; gap: 5px; margin-bottom: 20px; }
+    .modal-tab {
+      padding: 10px 20px; background: #edf2f7; border: none;
+      border-radius: 8px; cursor: pointer; font-weight: 500;
+    }
+    .modal-tab.active { background: #3182ce; color: white; }
+
+    /* Interview Simulator */
+    .interview-panel {
+      display: grid; grid-template-columns: 250px 1fr; gap: 20px; height: 500px;
+    }
+    .stakeholder-list { border-right: 1px solid #e2e8f0; padding-right: 20px; overflow-y: auto; }
+    .stakeholder-item {
+      padding: 12px; border-radius: 8px; cursor: pointer;
+      margin-bottom: 8px; transition: all 0.2s;
+    }
+    .stakeholder-item:hover { background: #edf2f7; }
+    .stakeholder-item.active { background: #bee3f8; border-left: 3px solid #3182ce; }
+    .stakeholder-item .name { font-weight: 600; color: #1a365d; }
+    .stakeholder-item .role { font-size: 0.85em; color: var(--text-muted, #64748b); }
+    .interview-chat { display: flex; flex-direction: column; height: 100%; }
+    .interview-messages { flex: 1; overflow-y: auto; padding: 15px; background: var(--gray-50, #f8fafc); border-radius: 8px; }
+    .interview-input { display: flex; gap: 10px; margin-top: 15px; }
+    .interview-input input { flex: 1; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; }
+    .interview-input button { padding: 12px 24px; background: #3182ce; color: white; border: none; border-radius: 8px; cursor: pointer; }
+
+    /* Asset Table Enhanced */
+    .asset-table { font-size: 0.9em; }
+    .asset-table th { background: #2c5282; color: white; padding: 10px 12px; }
+    .asset-table td { padding: 10px 12px; }
+    .asset-table code { background: #edf2f7; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
+    .os-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; }
+    .os-windows { background: #dbeafe; color: #1e40af; }
+    .os-linux { background: #fef3c7; color: #92400e; }
+    .os-network { background: #d1fae5; color: #065f46; }
+    
+    /* Info Grid */
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+    }
+    .info-item label {
+      display: block;
+      font-size: 0.85em;
+      color: var(--text-muted, #64748b);
+      margin-bottom: 4px;
+    }
+    .info-item .value {
+      font-weight: 600;
+      color: #1a365d;
+    }
+
+    /* Policy Viewer Modal */
+    .policy-panel {
+      display: grid; grid-template-columns: 260px 1fr; height: 70vh;
+    }
+    .policy-sidebar {
+      border-right: 1px solid #e2e8f0; padding: 15px; overflow-y: auto;
+    }
+    .policy-sidebar h4 {
+      font-size: 0.8em; text-transform: uppercase; letter-spacing: 1px;
+      color: var(--text-muted, #64748b); margin-bottom: 12px;
+    }
+    .policy-list-item {
+      padding: 12px 14px; border-radius: 8px; cursor: pointer;
+      margin-bottom: 6px; transition: all 0.2s; border-left: 3px solid transparent;
+    }
+    .policy-list-item:hover { background: var(--gray-100, #f1f5f9); }
+    .policy-list-item.active { background: #ebf4ff; border-left-color: #3182ce; }
+    .policy-list-item .policy-name { font-weight: 600; color: #1a365d; font-size: 0.92em; }
+    .policy-list-item .policy-meta { font-size: 0.78em; color: var(--text-muted, #64748b); margin-top: 3px; }
+    .policy-content-area {
+      display: flex; align-items: center; justify-content: center;
+      background: var(--gray-50, #f8fafc); overflow: hidden;
+    }
+    .policy-content-area iframe {
+      width: 100%; height: 100%; border: none; background: var(--bg-card, white);
+    }
+    .policy-empty-state {
+      text-align: center; color: var(--text-muted, #64748b); padding: 40px;
+    }
+    .policy-empty-state .icon { font-size: 3em; margin-bottom: 12px; opacity: 0.5; }
+    .policy-actions {
+      display: flex; gap: 8px; padding: 8px 15px; border-top: 1px solid #e2e8f0;
+      background: var(--gray-50, #f8fafc); border-radius: 0 0 16px 16px;
+    }
+
+    /* DARK MODE */
+    [data-theme="dark"] .dashboard-grid { background: transparent; }
+    [data-theme="dark"] .stat-card,
+    [data-theme="dark"] .stats-card { background: linear-gradient(135deg, #111527 0%, #151b35 100%); border-color: rgba(99,130,255,0.12); }
+    [data-theme="dark"] .stat-card:hover { border-color: rgba(91,140,255,0.3); box-shadow: 0 0 20px rgba(91,140,255,0.08); }
+    [data-theme="dark"] .stat-number,
+    [data-theme="dark"] .stat-value { color: #7ba6ff; text-shadow: 0 0 25px rgba(91,140,255,0.25); }
+    [data-theme="dark"] .stat-label { color: #8890b0; }
+    [data-theme="dark"] .recent-profiles,
+    [data-theme="dark"] .profile-list-section,
+    [data-theme="dark"] .content-card { background: #111527; border-color: rgba(99,130,255,0.1); }
+    [data-theme="dark"] .profile-card,
+    [data-theme="dark"] .profile-item { background: #111527; border-color: rgba(99,130,255,0.08); }
+    [data-theme="dark"] .profile-card:hover { background: #161b33; border-color: rgba(91,140,255,0.2); }
+    [data-theme="dark"] .profile-name,
+    [data-theme="dark"] .profile-card h3 { color: #7ba6ff; }
+    [data-theme="dark"] .profile-meta { color: #8890b0; }
+    [data-theme="dark"] .activity-section,
+    [data-theme="dark"] .sidebar-section,
+    [data-theme="dark"] .quick-actions { background: #111527; border-color: rgba(99,130,255,0.1); }
+    [data-theme="dark"] .activity-item { border-color: rgba(99,130,255,0.06); }
+    [data-theme="dark"] .activity-text { color: #b8c0d8; }
+    [data-theme="dark"] .activity-time { color: #5c6fa0; }
+    [data-theme="dark"] .action-link { color: #8890b0; border-color: rgba(99,130,255,0.06); }
+    [data-theme="dark"] .action-link:hover { color: #7ba6ff; background: rgba(91,140,255,0.06); }
+    [data-theme="dark"] .section-header-text { color: #f0f2fa; }
+    [data-theme="dark"] .view-all-link { color: #5b8cff; }
+    [data-theme="dark"] .btn-action { background: #161b33; border-color: rgba(99,130,255,0.12); color: #8890b0; }
+    [data-theme="dark"] .btn-action:hover { background: #1a2040; border-color: rgba(91,140,255,0.25); color: #7ba6ff; }
+    [data-theme="dark"] .search-bar input,
+    [data-theme="dark"] .search-input { background: #0e1222; border-color: rgba(99,130,255,0.12); color: #d8dde8; }
+    [data-theme="dark"] .policy-modal-content { background: #111527; border-color: rgba(99,130,255,0.15); }
+    [data-theme="dark"] .policy-sidebar { background: #0e1222; border-color: rgba(99,130,255,0.1); }
+    [data-theme="dark"] .policy-sidebar-item { color: #8890b0; border-color: rgba(99,130,255,0.06); }
+    [data-theme="dark"] .policy-sidebar-item:hover { background: rgba(91,140,255,0.06); color: #b8c0d8; }
+    [data-theme="dark"] .policy-sidebar-item.active { background: rgba(91,140,255,0.1); color: #7ba6ff; }
+    [data-theme="dark"] .policy-viewer { background: #0e1222; color: #b8c0d8; }
+    [data-theme="dark"] .policy-actions { background: #0e1222; border-color: rgba(99,130,255,0.08); }
+    [data-theme="dark"] .badge-pending { background: rgba(255,184,48,0.12); color: #ffb830; border: 1px solid rgba(255,184,48,0.2); }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar (populated by layout.js) -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Content injected by Layout.init() -->
+    </aside>
+
+    <!-- Sidebar overlay for mobile -->
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <div class="search-box">
+            <span class="icon">🔍</span>
+            <input type="text" placeholder="Search profiles..." id="searchInput">
+          </div>
+        </div>
+        <div class="header-right">
+          <button class="header-btn" onclick="loadDashboard()" title="Refresh">🔄</button>
+          <button class="header-btn" onclick="toggleChat()" title="AI Assistant">💬</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Dashboard</h1>
+            <p class="page-subtitle">Welcome back! Track your risk assessment progress.</p>
+          </div>
+          <a href="/generator" class="btn btn-primary">⚡ Generate New Profile</a>
+        </div>
+
+        <!-- Quick Stats -->
+        <div class="quick-stats">
+          <div class="quick-stat">
+            <div class="quick-stat-value" id="statTotal">0</div>
+            <div class="quick-stat-label">Total Profiles</div>
+          </div>
+          <div class="quick-stat">
+            <div class="quick-stat-value" id="statCompleted">0</div>
+            <div class="quick-stat-label">Completed Assessments</div>
+          </div>
+          <div class="quick-stat">
+            <div class="quick-stat-value" id="statInProgress">0</div>
+            <div class="quick-stat-label">In Progress</div>
+          </div>
+          <div class="quick-stat">
+            <div class="quick-stat-value" id="statHours">0</div>
+            <div class="quick-stat-label">Hours Practiced</div>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 20px;">
+          <!-- Left Column -->
+          <div>
+            <!-- Current Assessment Progress -->
+            <div class="card" id="currentAssessmentCard" style="display: none;">
+              <div class="card-header">
+                <span class="card-title">📊 Current Assessment</span>
+                <span class="badge badge-primary" id="currentProfileName">-</span>
+              </div>
+              <div class="card-body">
+                <div class="progress-tracker" id="progressTracker">
+                  <div class="progress-step completed" data-part="1">
+                    <div class="step-num">1</div>
+                    <div class="step-name">Orientation</div>
+                  </div>
+                  <div class="progress-step completed" data-part="2">
+                    <div class="step-num">2</div>
+                    <div class="step-name">Scoping</div>
+                  </div>
+                  <div class="progress-step current" data-part="3">
+                    <div class="step-num">3</div>
+                    <div class="step-name">Threats</div>
+                  </div>
+                  <div class="progress-step locked" data-part="4">
+                    <div class="step-num">4</div>
+                    <div class="step-name">Vulns</div>
+                  </div>
+                  <div class="progress-step locked" data-part="5">
+                    <div class="step-num">5</div>
+                    <div class="step-name">Risk</div>
+                  </div>
+                  <div class="progress-step locked" data-part="6">
+                    <div class="step-num">6</div>
+                    <div class="step-name">Controls</div>
+                  </div>
+                  <div class="progress-step locked" data-part="7">
+                    <div class="step-num">7</div>
+                    <div class="step-name">Report</div>
+                  </div>
+                  <div class="progress-step locked" data-part="8">
+                    <div class="step-num">8</div>
+                    <div class="step-name">Reflect</div>
+                  </div>
+                </div>
+                <div style="display: flex; gap: 10px; margin-top: 15px;">
+                  <button class="btn btn-primary" onclick="continueAssessment()">Continue Assessment →</button>
+                  <button class="btn btn-outline" onclick="viewProfile(currentProfileId)">View Profile</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Recent Profiles -->
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Recent Profiles</span>
+                <a href="/my-profiles" class="btn btn-sm btn-outline">View All</a>
+              </div>
+              <div class="card-body" id="recentProfilesContainer">
+                <p class="text-muted text-center">Loading...</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Column -->
+          <div>
+            <!-- Activity Feed -->
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Recent Activity</span>
+              </div>
+              <div class="card-body">
+                <div class="activity-feed" id="activityFeed">
+                  <div class="activity-item">
+                    <div class="activity-icon generate">⚡</div>
+                    <div class="activity-content">
+                      <div class="activity-title">Generated new profile</div>
+                      <div class="activity-time">2 hours ago</div>
+                    </div>
+                  </div>
+                  <div class="activity-item">
+                    <div class="activity-icon complete">✅</div>
+                    <div class="activity-content">
+                      <div class="activity-title">Completed Part 2: Scoping</div>
+                      <div class="activity-time">Yesterday</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Quick Actions -->
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Quick Actions</span>
+              </div>
+              <div class="card-body">
+                <button class="btn btn-outline btn-block" style="margin-bottom: 10px;" onclick="showInterviewSimulator()">
+                  🎤 Practice Interviews
+                </button>
+                <button class="btn btn-outline btn-block" style="margin-bottom: 10px;" onclick="toggleChat()">
+                  💬 Ask AI Assistant
+                </button>
+                <a href="/generator" class="btn btn-outline btn-block">
+                  ⚡ Generate Profile
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Profile Viewer Modal -->
+  <div class="modal-overlay" id="profileModal">
+    <div class="modal" style="max-width: 1100px;">
+      <div class="modal-header">
+        <div class="modal-title" id="modalProfileTitle">Profile Viewer</div>
+        <button class="modal-close" onclick="closeModal('profileModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-tabs">
+          <button class="modal-tab active" onclick="switchTab('overview')">Overview</button>
+          <button class="modal-tab" onclick="switchTab('stakeholders')">Stakeholders</button>
+          <button class="modal-tab" onclick="switchTab('assets')">Assets & Network</button>
+          <button class="modal-tab" onclick="switchTab('threats')">Threats</button>
+          <button class="modal-tab" onclick="switchTab('interview')">Interview</button>
+        </div>
+        <div id="modalContent">
+          <!-- Content loaded dynamically -->
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Interview Simulator Modal -->
+  <div class="modal-overlay" id="interviewModal">
+    <div class="modal" style="max-width: 1000px;">
+      <div class="modal-header">
+        <div class="modal-title">🎤 Stakeholder Interview Simulator</div>
+        <button class="modal-close" onclick="closeModal('interviewModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="interview-panel">
+          <div class="stakeholder-list" id="stakeholderList">
+            <p class="text-muted">Select a profile first</p>
+          </div>
+          <div class="interview-chat">
+            <div class="interview-messages" id="interviewMessages">
+              <div class="chat-message assistant">
+                👋 Select a stakeholder from the left to begin your interview practice.
+              </div>
+            </div>
+            <div class="interview-input">
+              <input type="text" id="interviewInput" placeholder="Ask your interview question..." onkeypress="if(event.key==='Enter')sendInterviewQuestion()">
+              <button onclick="sendInterviewQuestion()">Ask</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Policies Modal -->
+  <div class="modal-overlay" id="policiesModal">
+    <div class="modal" style="max-width: 1100px; height: 82vh; display: flex; flex-direction: column;">
+      <div class="modal-header">
+        <div class="modal-title" id="policiesModalTitle">Policy Documents</div>
+        <button class="modal-close" onclick="closeModal('policiesModal')">&times;</button>
+      </div>
+      <div class="policy-panel" style="flex: 1; overflow: hidden;">
+        <div class="policy-sidebar" id="policySidebar">
+          <h4>Policy Documents</h4>
+          <p class="text-muted" style="font-size: 0.9em;">Loading...</p>
+        </div>
+        <div class="policy-content-area" id="policyContent">
+          <div class="policy-empty-state">
+            <div class="icon">📋</div>
+            <p>Select a policy from the sidebar to view it</p>
+          </div>
+        </div>
+      </div>
+      <div class="policy-actions">
+        <button class="btn btn-sm btn-outline" onclick="openPolicyInNewTab()" id="btnOpenPolicyTab" style="display:none;">Open in New Tab</button>
+        <div style="flex:1;"></div>
+        <span id="policyCount" style="font-size: 0.85em; color: #64748b; align-self: center;"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat is now handled by global layout.js -->
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    let currentUser = null;
+    let currentProfileId = null;
+    let currentProfileData = null;
+    let selectedStakeholder = null;
+    let isChatProcessing = false;
+    let isInterviewProcessing = false;
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const isLoggedIn = await Auth.requireAuth();
+        if (!isLoggedIn) return;
+        currentUser = Auth.getUser();
+        
+        // Safely update UI elements
+        updateUserUI();
+        
+        // Load dashboard data - this is the key call
+        await loadDashboard();
+      } catch (error) {
+        console.error('Initialization error:', error);
+        // Still try to load dashboard even if auth fails
+        loadDashboard();
+      }
+    });
+
+    function updateUserUI() {
+      if (!currentUser) return;
+      
+      // Safely update elements only if they exist
+      const userNameEl = document.getElementById('userName');
+      const userRoleEl = document.getElementById('userRole');
+      const userAvatarEl = document.getElementById('userAvatar');
+      const profileCountEl = document.getElementById('profileCount');
+      
+      if (userNameEl) {
+        userNameEl.textContent = `${currentUser.firstName} ${currentUser.lastName}`;
+      }
+      if (userRoleEl) {
+        userRoleEl.textContent = currentUser.role;
+      }
+      if (userAvatarEl && typeof Utils !== 'undefined') {
+        userAvatarEl.textContent = Utils.getInitials(currentUser.firstName, currentUser.lastName);
+      }
+    }
+
+	async function loadDashboard() {
+	  try {
+		// Load stats first
+		const response = await API.profiles.stats();
+		const stats = response.stats || {}; // Backend returns { success: true, stats: {...} }
+		
+		// Safely update stat elements
+		const statTotalEl = document.getElementById('statTotal');
+		const statCompletedEl = document.getElementById('statCompleted');
+		const statInProgressEl = document.getElementById('statInProgress');
+		const statHoursEl = document.getElementById('statHours');
+		
+		// Use camelCase properties from backend
+		const total = stats.totalProfiles || 0;
+		const advanced = stats.advancedCount || 0;
+		const completed = advanced; // Assume advanced = completed
+		
+		if (statTotalEl) statTotalEl.textContent = total;
+		if (statCompletedEl) statCompletedEl.textContent = completed;
+		if (statInProgressEl) statInProgressEl.textContent = total - completed;
+		if (statHoursEl) statHoursEl.textContent = total * 8;
+
+		// Load recent profiles
+		const profilesResponse = await API.profiles.recent(5);
+		renderRecentProfiles(profilesResponse.profiles || []);
+	  } catch (error) {
+		console.error('Failed to load dashboard:', error);
+		const container = document.getElementById('recentProfilesContainer');
+		if (container) {
+		  container.innerHTML = '<div class="text-center text-muted" style="padding: 20px;"><p>Failed to load dashboard data.</p><button class="btn btn-sm btn-primary" onclick="loadDashboard()">Try Again</button></div>';
+		}
+	  }
+	}
+
+    function renderRecentProfiles(profiles) {
+      const container = document.getElementById('recentProfilesContainer');
+      if (!container) return;
+      
+      if (!profiles || profiles.length === 0) {
+        container.innerHTML = `
+          <div class="text-center text-muted" style="padding: 40px;">
+            <p style="font-size: 3em; margin-bottom: 15px;">📁</p>
+            <p>No profiles yet.</p>
+            <a href="/generator" class="btn btn-primary" style="margin-top: 15px;">Generate Your First Profile</a>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = profiles.map(p => `
+        <div class="profile-card">
+          <div class="profile-card-header">
+            <div>
+              <div class="profile-card-title">${Utils.escapeHtml(p.companyName || 'Unnamed Company')}</div>
+              <div class="profile-card-meta">
+                <span class="badge ${Utils.getClientTypeBadgeClass(p.clientType)}">${p.clientTypeName || p.clientType || 'Unknown'}</span>
+                <span class="badge badge-outline">${Utils.escapeHtml(p.industry || 'Unknown Industry')}</span>
+                <span class="badge ${Utils.getDifficultyBadgeClass(p.difficulty)}">${p.difficulty || 'intermediate'}</span>
+              </div>
+            </div>
+            <span class="badge badge-${p.status === 'completed' ? 'success' : 'warning'}">${p.status || 'pending'}</span>
+          </div>
+          <div class="profile-card-actions">
+            <a href="/workspace?profile=${p.id}" class="btn btn-sm btn-success">📝 Start Assessment</a>
+            <button class="btn btn-sm btn-primary" onclick="openProfileModal('${p.id}')">View Details</button>
+            ${p.htmlFilePath ? `<a href="${p.htmlFilePath}" target="_blank" class="btn btn-sm btn-outline">Open HTML</a>` : ''}
+            <button class="btn btn-sm btn-outline" onclick="startInterview('${p.id}')">Interview</button>
+            <button class="btn btn-sm btn-outline" onclick="viewPolicies('${p.id}', '${(p.companyName || 'Company').replace(/'/g, "\\'")}')">View Policies</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    // Modal Functions
+    function openModal(modalId) {
+      const modal = document.getElementById(modalId);
+      if (modal) modal.classList.add('active');
+    }
+
+    function closeModal(modalId) {
+      const modal = document.getElementById(modalId);
+      if (modal) modal.classList.remove('active');
+    }
+
+    async function openProfileModal(profileId) {
+      try {
+        const profile = await API.profiles.get(profileId);
+        currentProfileData = profile;
+        
+        const titleEl = document.getElementById('modalProfileTitle');
+        if (titleEl) titleEl.textContent = profile.companyName || 'Profile Details';
+        
+        switchTab('overview');
+        openModal('profileModal');
+      } catch (error) {
+        console.error('Failed to load profile:', error);
+        if (typeof Toast !== 'undefined') {
+          Toast.error('Error', 'Failed to load profile');
+        }
+      }
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
+      if (event && event.target) {
+        event.target.classList.add('active');
+      }
+      
+      const content = document.getElementById('modalContent');
+      if (!content) return;
+      
+      if (!currentProfileData) {
+        content.innerHTML = '<p>No profile data available</p>';
+        return;
+      }
+
+      const p = currentProfileData;
+
+      switch(tabName) {
+        case 'overview':
+          content.innerHTML = `
+            <div class="info-grid">
+              <div class="info-item"><label>Company</label><div class="value">${p.companyName || '-'}</div></div>
+              <div class="info-item"><label>Industry</label><div class="value">${p.industry || '-'}</div></div>
+              <div class="info-item"><label>Location</label><div class="value">${p.hqCity || '-'}</div></div>
+              <div class="info-item"><label>Employees</label><div class="value">${p.employeeCount || '-'}</div></div>
+              <div class="info-item"><label>Difficulty</label><div class="value">${p.difficulty || '-'}</div></div>
+              <div class="info-item"><label>Maturity</label><div class="value">${p.maturityLevel || '-'}</div></div>
+            </div>
+          `;
+          break;
+
+        case 'assets':
+          content.innerHTML = `
+            <h4 style="margin-bottom: 15px;">Network Assets</h4>
+            <p class="text-muted">Asset inventory from the generated profile. View the full HTML report for complete details.</p>
+            <div style="margin-top: 20px;">
+              ${p.htmlFilePath ? `<a href="${p.htmlFilePath}" target="_blank" class="btn btn-primary">View Full Profile →</a>` : '<p>No HTML profile available</p>'}
+            </div>
+          `;
+          break;
+
+        case 'stakeholders':
+          content.innerHTML = `
+            <h4 style="margin-bottom: 15px;">Key Stakeholders (${p.stakeholderCount || 0})</h4>
+            <p>View the full profile to see stakeholder details, or use the Interview Simulator to practice.</p>
+            <button class="btn btn-primary" style="margin-top: 15px;" onclick="closeModal('profileModal'); startInterview('${p.id}')">
+              🎤 Start Interview Practice
+            </button>
+          `;
+          break;
+
+        case 'threats':
+          content.innerHTML = `
+            <h4 style="margin-bottom: 15px;">Threat Profile</h4>
+            <p>Key risks identified for this organization:</p>
+            <div style="margin-top: 15px;">
+              ${(p.keyRisks || []).map(r => `<span class="tag warning">${r}</span>`).join('') || '<p class="text-muted">No threats data available</p>'}
+            </div>
+          `;
+          break;
+
+        case 'interview':
+          content.innerHTML = `
+            <h4 style="margin-bottom: 15px;">Interview Practice</h4>
+            <p>Use the Interview Simulator to practice stakeholder interviews for this organization.</p>
+            <button class="btn btn-primary" style="margin-top: 15px;" onclick="closeModal('profileModal'); startInterview('${p.id}')">
+              🎤 Launch Interview Simulator
+            </button>
+          `;
+          break;
+      }
+    }
+
+    // Interview Simulator
+    async function showInterviewSimulator() {
+      if (!currentProfileData && currentProfileId) {
+        try {
+          currentProfileData = await API.profiles.get(currentProfileId);
+        } catch (error) {
+          console.error('Failed to load profile:', error);
+        }
+      }
+      
+      if (currentProfileData) {
+        loadStakeholderList();
+      }
+      openModal('interviewModal');
+    }
+
+    async function startInterview(profileId) {
+      try {
+        currentProfileData = await API.profiles.get(profileId);
+        currentProfileId = profileId;
+        loadStakeholderList();
+        openModal('interviewModal');
+      } catch (error) {
+        console.error('Failed to load profile for interview:', error);
+        if (typeof Toast !== 'undefined') {
+          Toast.error('Error', 'Failed to load profile for interview');
+        }
+      }
+    }
+
+    function loadStakeholderList() {
+      const list = document.getElementById('stakeholderList');
+      if (!list) return;
+      
+      // Mock stakeholders based on typical profile
+      const stakeholders = [
+        { id: 'ceo', name: 'CEO', role: 'Executive Leadership', fluency: 'Low' },
+        { id: 'coo', name: 'COO', role: 'Operations', fluency: 'Medium' },
+        { id: 'cfo', name: 'CFO', role: 'Finance', fluency: 'Low' },
+        { id: 'it_manager', name: 'IT Manager', role: 'Information Technology', fluency: 'High' },
+        { id: 'ops_manager', name: 'Operations Manager', role: 'Operations', fluency: 'Low' },
+        { id: 'hr_manager', name: 'HR Manager', role: 'Human Resources', fluency: 'Low' }
+      ];
+
+      list.innerHTML = stakeholders.map(s => `
+        <div class="stakeholder-item" onclick="selectStakeholder('${s.id}', '${s.name}', '${s.role}')">
+          <div class="name">${s.name}</div>
+          <div class="role">${s.role}</div>
+        </div>
+      `).join('');
+    }
+
+    function selectStakeholder(id, name, role) {
+      selectedStakeholder = { id, name, role };
+      document.querySelectorAll('.stakeholder-item').forEach(el => el.classList.remove('active'));
+      if (event && event.target) {
+        const item = event.target.closest('.stakeholder-item');
+        if (item) item.classList.add('active');
+      }
+      
+      const messages = document.getElementById('interviewMessages');
+      if (messages) {
+        messages.innerHTML = `
+          <div class="chat-message assistant">
+            👋 You're now interviewing <strong>${name}</strong> (${role}).
+            <br><br>
+            This stakeholder will respond based on their role, technical fluency, and concerns. Ask questions to gather information for your risk assessment.
+            <br><br>
+            <em>Tip: Start with open-ended questions about their responsibilities and security concerns.</em>
+          </div>
+        `;
+      }
+    }
+
+    async function sendInterviewQuestion() {
+      if (isInterviewProcessing || !selectedStakeholder) return;
+
+      const input = document.getElementById('interviewInput');
+      if (!input) return;
+      
+      const question = input.value.trim();
+      if (!question) return;
+
+      const messages = document.getElementById('interviewMessages');
+      if (!messages) return;
+      
+      messages.innerHTML += `<div class="chat-message user">${Utils.escapeHtml(question)}</div>`;
+      input.value = '';
+
+      // Show thinking
+      messages.innerHTML += `<div class="chat-message assistant thinking" id="interviewThinking">
+        <span class="thinking-dots"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>
+      </div>`;
+      messages.scrollTop = messages.scrollHeight;
+
+      isInterviewProcessing = true;
+
+      try {
+        // Use the chat API with interview context
+        const context = `You are role-playing as ${selectedStakeholder.name}, the ${selectedStakeholder.role} at ${currentProfileData?.companyName || 'a company'}. 
+        Respond in character based on typical concerns and knowledge of someone in this role. 
+        Keep responses concise (2-3 sentences). Don't break character.`;
+
+        const data = await API.chat(`[Interview Mode - ${selectedStakeholder.name}] ${question}`, currentUser?.id);
+        
+        const thinkingEl = document.getElementById('interviewThinking');
+        if (thinkingEl) thinkingEl.remove();
+        
+        messages.innerHTML += `<div class="chat-message assistant"><strong>${selectedStakeholder.name}:</strong> ${data.response}</div>`;
+      } catch (error) {
+        const thinkingEl = document.getElementById('interviewThinking');
+        if (thinkingEl) thinkingEl.remove();
+        
+        messages.innerHTML += `<div class="chat-message assistant">Sorry, I'm having trouble responding. Please try again.</div>`;
+      } finally {
+        isInterviewProcessing = false;
+        messages.scrollTop = messages.scrollHeight;
+      }
+    }
+
+    function continueAssessment() {
+      if (currentProfileId) {
+        window.location.href = `/my-profiles?view=${currentProfileId}`;
+      }
+    }
+
+    function viewProfile(id) {
+      window.location.href = `/my-profiles?view=${id}`;
+    }
+
+    function showProgress() {
+      window.location.href = '/progress';
+    }
+
+    function downloadScansPdf(profileId) {
+      if (typeof Toast !== 'undefined') Toast.info('Generating PDF', 'Preparing your security documents...');
+      API.profiles.downloadDocumentsPdf(profileId);
+    }
+
+    // ========== Policy Viewer ==========
+    let currentPolicyProfileId = null;
+    let currentPolicySlug = null;
+    let policyCache = {}; // Cache: { slug: html } — loaded once per viewPolicies call
+
+    async function viewPolicies(profileId, companyName) {
+      currentPolicyProfileId = profileId;
+      currentPolicySlug = null;
+      policyCache = {};
+      document.getElementById('policiesModalTitle').textContent = `Policy Documents — ${companyName}`;
+      document.getElementById('policySidebar').innerHTML = '<h4>POLICY DOCUMENTS</h4><p class="text-muted" style="font-size:0.9em;">Loading...</p>';
+      document.getElementById('policyContent').innerHTML = '<div class="policy-empty-state"><div class="icon">📋</div><p>Select a policy from the sidebar to view it</p></div>';
+      document.getElementById('btnOpenPolicyTab').style.display = 'none';
+      document.getElementById('policyCount').textContent = '';
+      openModal('policiesModal');
+
+      try {
+        const data = await API.profiles.policies(profileId);
+        const sidebar = document.getElementById('policySidebar');
+
+        if (!data.policies || data.policies.length === 0) {
+          sidebar.innerHTML = `<h4>POLICY DOCUMENTS</h4>
+            <p class="text-muted" style="font-size:0.9em; margin-bottom: 16px;">No policies generated yet.</p>
+            <button class="btn btn-sm btn-primary" onclick="generatePoliciesForProfile('${profileId}')" id="btnGeneratePolicies">Generate Policies</button>`;
+          document.getElementById('policyContent').innerHTML = '<div class="policy-empty-state"><div class="icon">📋</div><p>Click "Generate Policies" to create policy documents for this profile.</p></div>';
+          document.getElementById('policyCount').textContent = '0 policies';
+          return;
+        }
+
+        // Cache all policy HTML from the single API response
+        data.policies.forEach(p => { policyCache[p.slug] = p.html; });
+
+        sidebar.innerHTML = '<h4>POLICY DOCUMENTS</h4>' + data.policies.map((p, i) =>
+          `<div class="policy-list-item" data-slug="${p.slug}" onclick="selectPolicy('${profileId}', '${p.slug}', this)">
+            <div class="policy-name">${Utils.escapeHtml(p.name)}</div>
+            <div class="policy-meta">Click to view</div>
+          </div>`
+        ).join('');
+
+        document.getElementById('policyCount').textContent = `${data.policies.length} ${data.policies.length === 1 ? 'policy' : 'policies'}`;
+
+        // Auto-select first policy
+        const firstItem = sidebar.querySelector('.policy-list-item');
+        if (firstItem) selectPolicy(profileId, data.policies[0].slug, firstItem);
+      } catch (error) {
+        console.error('Error loading policies:', error);
+        document.getElementById('policySidebar').innerHTML = '<h4>POLICY DOCUMENTS</h4><p class="text-muted" style="font-size:0.9em; color:#e53e3e;">Failed to load policies.</p>';
+      }
+    }
+
+    function selectPolicy(profileId, slug, element) {
+      // Update sidebar selection
+      document.querySelectorAll('#policySidebar .policy-list-item').forEach(el => el.classList.remove('active'));
+      if (element) element.classList.add('active');
+
+      currentPolicySlug = slug;
+      const contentArea = document.getElementById('policyContent');
+      const html = policyCache[slug];
+
+      if (!html) {
+        contentArea.innerHTML = '<div class="policy-empty-state"><div class="icon">⚠️</div><p>Policy content not available. Try regenerating.</p></div>';
+        return;
+      }
+
+      try {
+        const iframe = document.createElement('iframe');
+        iframe.style.cssText = 'width:100%; height:100%; border:none;';
+        contentArea.innerHTML = '';
+        contentArea.appendChild(iframe);
+        iframe.contentDocument.open();
+        iframe.contentDocument.write(html);
+        iframe.contentDocument.close();
+        document.getElementById('btnOpenPolicyTab').style.display = 'inline-flex';
+      } catch (error) {
+        console.error('Error rendering policy:', error);
+        // Fallback: use srcdoc attribute instead of contentDocument.write
+        try {
+          const iframe = document.createElement('iframe');
+          iframe.style.cssText = 'width:100%; height:100%; border:none;';
+          iframe.srcdoc = html;
+          contentArea.innerHTML = '';
+          contentArea.appendChild(iframe);
+          document.getElementById('btnOpenPolicyTab').style.display = 'inline-flex';
+        } catch (e2) {
+          contentArea.innerHTML = '<div class="policy-empty-state"><div class="icon">⚠️</div><p>Failed to render policy document.</p></div>';
+        }
+      }
+    }
+
+    async function generatePoliciesForProfile(profileId) {
+      const btn = document.getElementById('btnGeneratePolicies');
+      const contentArea = document.getElementById('policyContent');
+      if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
+
+      // Show generation progress in the content area
+      contentArea.innerHTML = `
+        <div class="policy-empty-state">
+          <div class="icon" style="animation: pulse 1.5s ease-in-out infinite;">⏳</div>
+          <p style="font-weight: 600; margin-bottom: 8px;">Generating Policy Documents...</p>
+          <p style="font-size: 0.85em;">The AI is writing each policy document. This typically takes 1-3 minutes.</p>
+          <div style="margin-top: 16px; width: 200px; height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden;">
+            <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #3182ce, #63b3ed, #3182ce); background-size: 200%; animation: shimmer 1.5s infinite;"></div>
+          </div>
+        </div>
+        <style>
+          @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+          @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+        </style>`;
+
+      try {
+        const result = await API.profiles.generatePolicies(profileId);
+        if (result.success && result.total_count > 0) {
+          if (typeof Toast !== 'undefined') Toast.success('Policies Generated', `Created ${result.total_count} policy documents.`);
+          // Reload the policies view
+          const title = document.getElementById('policiesModalTitle').textContent.replace('Policy Documents \u2014 ', '');
+          viewPolicies(profileId, title);
+        } else {
+          if (typeof Toast !== 'undefined') Toast.info('No Policies', 'This profile has no policies to generate.');
+          contentArea.innerHTML = '<div class="policy-empty-state"><div class="icon">📋</div><p>No policies found for this profile.</p></div>';
+          if (btn) { btn.disabled = false; btn.textContent = 'Generate Policies'; }
+        }
+      } catch (error) {
+        console.error('Error generating policies:', error);
+        if (typeof Toast !== 'undefined') Toast.error('Error', 'Failed to generate policies. Check that N8N is running and the workflow is active.');
+        contentArea.innerHTML = '<div class="policy-empty-state"><div class="icon">⚠️</div><p>Policy generation failed. Please try again.</p></div>';
+        if (btn) { btn.disabled = false; btn.textContent = 'Generate Policies'; }
+      }
+    }
+
+    function openPolicyInNewTab() {
+      const html = policyCache[currentPolicySlug];
+      if (html) {
+        const blob = new Blob([html], { type: 'text/html' });
+        window.open(URL.createObjectURL(blob), '_blank');
+      } else if (currentPolicyProfileId && currentPolicySlug) {
+        window.open(`/api/profiles/${currentPolicyProfileId}/policies/${currentPolicySlug}`, '_blank');
+      }
+    }
+
+    // Sidebar toggle
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebarOverlay');
+      if (sidebar) sidebar.classList.toggle('open');
+      if (overlay) overlay.classList.toggle('active');
+    }
+
+    function closeSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebarOverlay');
+      if (sidebar) sidebar.classList.remove('open');
+      if (overlay) overlay.classList.remove('active');
+    }
+
+    // Chat functions now handled by global Layout
+    function toggleChat() {
+      if (typeof Layout !== 'undefined') Layout.toggleChat();
+    }
+
+    // Search
+    const searchInput = document.getElementById('searchInput');
+    if (searchInput) {
+      searchInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter' && e.target.value.trim()) {
+          window.location.href = `/my-profiles?search=${encodeURIComponent(e.target.value.trim())}`;
+        }
+      });
+    }
+  </script>
+</body>
+</html>

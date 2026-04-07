@@ -1,0 +1,556 @@
+/**
+ * ============================================================================
+ * Challenge Templates & Vuln Script Library Routes
+ * ============================================================================
+ * vuln_scripts → clinic_db (query)
+ * crucible_challenge → cybercore_db (cybercoreQuery)
+ * deployment_vuln_selections → clinic_db (query)
+ */
+
+const express = require('express');
+const router = express.Router();
+const { query } = require('../utils/db');
+const { cybercoreQuery } = require('../utils/cybercore-db');
+const { proxmoxAPI } = require('../utils/proxmox');
+const { authenticateToken, requireRole } = require('../middleware/auth');
+
+const adminOnly = requireRole('admin');
+
+// ============================================================================
+// VULNERABILITY SCRIPTS (clinic_db)
+// ============================================================================
+
+// GET /api/admin/vuln-scripts
+router.get('/vuln-scripts', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { category, os_target, difficulty, active_only } = req.query;
+    let where = [];
+    let params = [];
+    let idx = 1;
+
+    if (category) { where.push(`category = $${idx++}`); params.push(category); }
+    if (os_target) { where.push(`os_target = $${idx++}`); params.push(os_target); }
+    if (difficulty) { where.push(`difficulty = $${idx++}`); params.push(difficulty); }
+    if (active_only !== 'false') { where.push(`is_active = true`); }
+
+    const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+
+    const result = await query(
+      `SELECT id, slug, name, description, category, os_target, difficulty,
+              services_exposed, depends_on, estimated_runtime_sec, is_active, created_at,
+              LENGTH(script_content) AS script_length
+       FROM vuln_scripts ${whereClause}
+       ORDER BY category, name`,
+      params
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/vuln-scripts/:id
+router.get('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(`SELECT * FROM vuln_scripts WHERE id = $1`, [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Script not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/vuln-scripts
+router.post('/vuln-scripts', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { slug, name, description, category, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, script_args } = req.body;
+    if (!slug || !name || !category || !script_content) {
+      return res.status(400).json({ error: 'slug, name, category, and script_content are required' });
+    }
+
+    const result = await query(
+      `INSERT INTO vuln_scripts (slug, name, description, category, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, script_args)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [slug, name, description || null, category, os_target || 'windows', difficulty || 'intermediate',
+       script_content, JSON.stringify(services_exposed || []), depends_on || [], estimated_runtime_sec || 60, script_args || '']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error.code === '23505') return res.status(409).json({ error: `Script slug '${req.body.slug}' already exists` });
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/vuln-scripts/:id
+router.put('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { slug, name, description, category, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, is_active, script_args } = req.body;
+    const result = await query(
+      `UPDATE vuln_scripts SET
+        slug = COALESCE($2, slug), name = COALESCE($3, name), description = $4,
+        category = COALESCE($5, category), os_target = COALESCE($6, os_target),
+        difficulty = COALESCE($7, difficulty), script_content = COALESCE($8, script_content),
+        services_exposed = COALESCE($9, services_exposed), depends_on = COALESCE($10, depends_on),
+        estimated_runtime_sec = COALESCE($11, estimated_runtime_sec), is_active = COALESCE($12, is_active),
+        script_args = COALESCE($13, script_args)
+       WHERE id = $1 RETURNING *`,
+      [req.params.id, slug, name, description, category, os_target, difficulty,
+       script_content, services_exposed ? JSON.stringify(services_exposed) : null,
+       depends_on, estimated_runtime_sec, is_active, script_args]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Script not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/vuln-scripts/:id
+router.delete('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    await query(`UPDATE vuln_scripts SET is_active = false WHERE id = $1`, [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/vuln-scripts-categories
+router.get('/vuln-scripts-categories', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT DISTINCT category, COUNT(*) AS count FROM vuln_scripts WHERE is_active = true GROUP BY category ORDER BY category`
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// CHALLENGE MANAGEMENT (crucible_challenge in cybercore_db)
+// ============================================================================
+
+// GET /api/admin/challenge-templates — list challenges as "templates"
+router.get('/challenge-templates', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { module } = req.query;
+    const mod = (module || 'crucible').replace(/[^a-z0-9_]/gi, '');
+    const result = await cybercoreQuery(
+      `SELECT challenge_id AS id, challenge_key, name, description, difficulty, spec, status, created_at
+       FROM ${mod}_challenge
+       WHERE status = 'active'
+       ORDER BY created_at DESC`
+    );
+
+    // Enrich with VM count from spec
+    const rows = result.rows.map(r => {
+      const spec = typeof r.spec === 'string' ? JSON.parse(r.spec) : (r.spec || {});
+      return {
+        ...r,
+        vm_count: (spec.vms || []).length || (spec.template_vmid ? 1 : 0),
+        phantom_count: (spec.phantom_assets || []).length,
+        vxlan_block: spec.vxlan_block || null
+      };
+    });
+
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/admin/challenge-templates/:id
+router.get('/challenge-templates/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await cybercoreQuery(
+      `SELECT * FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/admin/challenge-templates/:id — update challenge spec (add VMs, phantom assets, vuln defaults)
+router.put('/challenge-templates/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { name, description, difficulty, spec } = req.body;
+
+    const result = await cybercoreQuery(
+      `UPDATE crucible_challenge SET
+        name = COALESCE($2, name),
+        description = COALESCE($3, description),
+        difficulty = COALESCE($4, difficulty),
+        spec = COALESCE($5::jsonb, spec),
+        updated_at = NOW()
+       WHERE challenge_id = $1
+       RETURNING *`,
+      [req.params.id, name, description, difficulty, spec ? JSON.stringify(spec) : null]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
+    res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// DELETE /api/admin/challenge-templates/:id — delete challenge + clean up SDN
+router.delete('/challenge-templates/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    // Get challenge info
+    const chalResult = await cybercoreQuery(
+      `SELECT * FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]
+    );
+    if (chalResult.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
+
+    const challenge = chalResult.rows[0];
+    const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : (challenge.spec || {});
+    const zoneAbbrev = spec.zone?.abbrev;
+    const vxlanBlock = spec.vxlan_block;
+
+    let vnetsRemoved = 0;
+    let zoneRemoved = false;
+
+    // Clean up VNets and SDN zone from Proxmox
+    if (vxlanBlock?.start && vxlanBlock?.end) {
+      // Check for active lanes using this challenge's VXLAN block
+      const activeLanes = await cybercoreQuery(
+        `SELECT COUNT(*) AS cnt FROM cybercore_lane
+         WHERE vxlan_id BETWEEN $1 AND $2 AND status IN ('active', 'deploying')`,
+        [vxlanBlock.start, vxlanBlock.end]
+      );
+
+      if (parseInt(activeLanes.rows[0].cnt) > 0) {
+        return res.status(400).json({
+          error: `Cannot delete: ${activeLanes.rows[0].cnt} active lane(s) are using this challenge's VXLAN block`
+        });
+      }
+
+      // Remove VNets
+      try {
+        const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+        for (const vnet of vnets) {
+          if (vnet.tag >= vxlanBlock.start && vnet.tag <= vxlanBlock.end) {
+            try {
+              await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet.vnet}`);
+              vnetsRemoved++;
+            } catch (e) {
+              console.error(`[DeleteChallenge] Failed to remove VNet ${vnet.vnet}: ${e.message}`);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`[DeleteChallenge] Failed to query VNets: ${e.message}`);
+      }
+
+      // Remove SDN zone if it exists and has no remaining VNets
+      if (zoneAbbrev) {
+        try {
+          const remainingVnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+          const zoneStillHasVnets = remainingVnets.some(v => v.zone === zoneAbbrev);
+          if (!zoneStillHasVnets) {
+            await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/zones/${zoneAbbrev}`);
+            zoneRemoved = true;
+          }
+        } catch (e) {
+          console.error(`[DeleteChallenge] Failed to remove zone ${zoneAbbrev}: ${e.message}`);
+        }
+      }
+
+      // Reload SDN if we changed anything
+      if (vnetsRemoved > 0 || zoneRemoved) {
+        try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (_) {}
+      }
+    }
+
+    // Delete the challenge record
+    await cybercoreQuery(`DELETE FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]);
+
+    console.log(`[DeleteChallenge] Deleted '${challenge.challenge_key}': ${vnetsRemoved} VNets removed, zone removed: ${zoneRemoved}`);
+
+    res.json({
+      success: true,
+      challenge_key: challenge.challenge_key,
+      vnets_removed: vnetsRemoved,
+      zone_removed: zoneRemoved
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// CREATE CHALLENGE (DB + SDN Zone + VNets — replaces N8N workflow)
+// ============================================================================
+
+// POST /api/admin/create-challenge — full challenge creation with SDN infrastructure
+router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const {
+      name, challenge_key, description, difficulty, zone_abbrev,
+      template_vmid, vms: vmsList, max_lanes, module, challenge_type
+    } = req.body;
+
+    if (!name || !challenge_key || !max_lanes) {
+      return res.status(400).json({
+        error: 'name, challenge_key, and max_lanes are required'
+      });
+    }
+
+    // Must have either vms array or a single template_vmid
+    if ((!vmsList || vmsList.length === 0) && !template_vmid) {
+      return res.status(400).json({ error: 'At least one VM with a template_vmid is required' });
+    }
+
+    // Validate zone_abbrev: 1-8 alphanumeric chars (auto-generated if not provided)
+    const finalZone = (zone_abbrev || challenge_key.replace(/[^a-z0-9]/gi, '').substring(0, 8)).toLowerCase();
+    if (!/^[a-z0-9]{1,8}$/.test(finalZone)) {
+      return res.status(400).json({ error: 'zone_abbrev must be 1-8 alphanumeric characters' });
+    }
+
+    const moduleKey = (module || 'crucible').toLowerCase();
+    const numLanes = parseInt(max_lanes);
+    if (numLanes < 1 || numLanes > 200) {
+      return res.status(400).json({ error: 'max_lanes must be between 1 and 200' });
+    }
+
+    // Map difficulty string to integer (matches N8N workflow convention)
+    const difficultyMap = { beginner: 1, easy: 1, intermediate: 2, medium: 2, hard: 3, advanced: 3, expert: 4, impossible: 5 };
+    const difficultyInt = difficultyMap[(difficulty || 'intermediate').toLowerCase()] || 2;
+
+    const statusUpdates = [];
+    const pushStatus = (msg) => { statusUpdates.push(msg); console.log(`[CreateChallenge] ${msg}`); };
+
+    // 1. Find next available VXLAN block
+    pushStatus('Querying existing VXLAN blocks...');
+    const existingBlocks = await cybercoreQuery(
+      `SELECT
+        (spec->'vxlan_block'->>'start')::int AS vxlan_start,
+        (spec->'vxlan_block'->>'end')::int AS vxlan_end
+       FROM crucible_challenge
+       WHERE spec->'vxlan_block'->>'start' IS NOT NULL`
+    );
+
+    let maxEnd = 9999; // Default: first block starts at 10000
+    for (const row of existingBlocks.rows) {
+      if (row.vxlan_end && row.vxlan_end > maxEnd) maxEnd = row.vxlan_end;
+    }
+    const vxlanStart = maxEnd + 1;
+    const vxlanEnd = vxlanStart + numLanes - 1;
+    pushStatus(`Allocated VXLAN block: ${vxlanStart}–${vxlanEnd} (${numLanes} lanes)`);
+
+    // 2. Build spec with multi-VM support
+    const resolvedZone = finalZone;
+
+    // Build VMs array from input
+    const specVMs = (vmsList && vmsList.length > 0)
+      ? vmsList.map((vm, idx) => ({
+          name: vm.name || `vm${idx + 1}`,
+          role: vm.role || 'Server',
+          os: vm.os || 'Unknown',
+          template_vmid: parseInt(vm.template_vmid),
+          type: vm.type || 'qemu',
+          vm_offset: parseInt(vm.vm_offset) || 600000,
+          services: vm.services || [],
+          default_scripts: vm.default_scripts || [],
+          hostname: `${vm.name || challenge_key}.local`
+        }))
+      : [{
+          name: challenge_key,
+          role: 'primary',
+          os: 'Unknown',
+          template_vmid: parseInt(template_vmid),
+          type: 'qemu',
+          vm_offset: 600000,
+          hostname: `${challenge_key}.local`
+        }];
+
+    const spec = {
+      zone: { abbrev: resolvedZone },
+      template_vmid: specVMs[0].template_vmid, // backward compat for single-VM deploy
+      template_node: 'cyberhub-node-5',
+      vxlan_block: { start: vxlanStart, end: vxlanEnd },
+      vms: specVMs,
+      limits: {
+        max_concurrent_lanes: numLanes
+      }
+    };
+
+    // 3. Insert challenge record into cybercore_db
+    pushStatus('Inserting challenge record...');
+    const insertResult = await cybercoreQuery(
+      `INSERT INTO crucible_challenge (challenge_key, name, description, difficulty, spec, status)
+       VALUES ($1, $2, $3, $4, $5::jsonb, 'active')
+       RETURNING challenge_id, challenge_key`,
+      [challenge_key, name, description || null, difficultyInt, JSON.stringify(spec)]
+    );
+    const challengeId = insertResult.rows[0].challenge_id;
+    pushStatus(`Challenge created: ${challengeId}`);
+
+    // 4. Check if SDN zone exists, create if not
+    pushStatus('Checking SDN zones...');
+    const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
+    const zoneExists = zones.some(z => z.zone === finalZone);
+
+    if (!zoneExists) {
+      pushStatus(`Creating SDN zone '${finalZone}'...`);
+
+      // Get all cluster node IPs
+      const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+      const nodeNames = nodeList.map(n => n.node).join(',');
+
+      // Build peer IPs — try to get from node status, fallback to known pattern
+      const peerIps = [];
+      for (const node of nodeList) {
+        try {
+          const nodeStatus = await proxmoxAPI('GET', `/api2/json/nodes/${node.node}/status`);
+          // Try to find the IP from network info
+          if (nodeStatus.network) {
+            for (const [, iface] of Object.entries(nodeStatus.network)) {
+              if (iface.address && !iface.address.startsWith('127.')) {
+                peerIps.push(iface.address);
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Fallback: use known Tailscale IPs if we couldn't get them dynamically
+      const peers = peerIps.length === nodeList.length
+        ? peerIps.join(',')
+        : nodeList.map((_, i) => `100.100.10.${10 + i}`).join(',');
+
+      await proxmoxAPI('POST', '/api2/json/cluster/sdn/zones', {
+        zone: finalZone,
+        type: 'vxlan',
+        peers: peers,
+        ipam: 'pve'
+      });
+      pushStatus(`SDN zone '${finalZone}' created with peers: ${peers}`);
+    } else {
+      pushStatus(`SDN zone '${finalZone}' already exists`);
+    }
+
+    // 5. Create VNets for each VXLAN ID in the block
+    pushStatus(`Creating ${numLanes} VNets...`);
+    let vnetsCreated = 0;
+
+    // Base-20 encode helper for VNet naming (matches N8N workflow)
+    const ALPHABET = 'abcdefghij0123456789';
+    function encodeBase20(n) {
+      if (n === 0) return 'a';
+      let s = '';
+      let x = n;
+      while (x > 0) {
+        s = ALPHABET[x % 20] + s;
+        x = Math.floor(x / 20);
+      }
+      return s.padStart(8, 'a');
+    }
+
+    for (let vxlanId = vxlanStart; vxlanId <= vxlanEnd; vxlanId++) {
+      const alias = encodeBase20(vxlanId);
+      const vnetName = alias; // 8-char unique name
+
+      try {
+        await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
+          vnet: vnetName,
+          zone: finalZone,
+          tag: vxlanId,
+          alias: `${finalZone}-vnet-${vxlanId}`
+        });
+        vnetsCreated++;
+      } catch (e) {
+        // VNet may already exist
+        if (!e.message.includes('already exists')) {
+          pushStatus(`Warning: VNet ${vnetName} (tag ${vxlanId}): ${e.message}`);
+        }
+      }
+
+      // Rate limit: Proxmox can get overwhelmed with rapid API calls
+      if (vnetsCreated % 10 === 0 && vnetsCreated > 0) {
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+    pushStatus(`${vnetsCreated} VNets created`);
+
+    // 6. Reload SDN configuration
+    pushStatus('Reloading SDN...');
+    await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
+    pushStatus('SDN reloaded');
+
+    // 7. Update challenge with final VXLAN block (in case it wasn't set during insert)
+    await cybercoreQuery(
+      `UPDATE crucible_challenge SET
+        spec = jsonb_set(jsonb_set(COALESCE(spec, '{}'::jsonb),
+          '{vxlan_block,start}', to_jsonb($2::int), true),
+          '{vxlan_block,end}', to_jsonb($3::int), true),
+        updated_at = NOW()
+       WHERE challenge_id = $1`,
+      [challengeId, vxlanStart, vxlanEnd]
+    );
+
+    pushStatus('Challenge creation complete!');
+
+    res.json({
+      success: true,
+      challenge_id: challengeId,
+      challenge_key,
+      zone_abbrev: finalZone,
+      vxlan_block: { start: vxlanStart, end: vxlanEnd },
+      vnets_created: vnetsCreated,
+      steps: statusUpdates
+    });
+  } catch (error) {
+    if (error.code === '23505') {
+      return res.status(409).json({ error: `Challenge '${req.body.challenge_key}' already exists` });
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// DEPLOYMENT STATUS (deployment_vuln_selections in clinic_db)
+// ============================================================================
+
+// GET /api/admin/challenge-networks/:laneId/status
+router.get('/challenge-networks/:laneId/status', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT * FROM deployment_vuln_selections WHERE lane_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [req.params.laneId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'No challenge deployment found for this lane' });
+    }
+
+    const deployment = result.rows[0];
+    const scripts = deployment.selected_scripts || [];
+    const total = scripts.length;
+    const completed = scripts.filter(s => s.status === 'completed').length;
+    const failed = scripts.filter(s => s.status === 'failed').length;
+    const running = scripts.filter(s => s.status === 'running').length;
+    const pending = scripts.filter(s => s.status === 'pending').length;
+
+    res.json({
+      ...deployment,
+      script_summary: { total, completed, failed, running, pending },
+      all_complete: pending === 0 && running === 0
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+module.exports = router;

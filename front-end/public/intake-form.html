@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Client Intake Form | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .intake-layout { display: grid; grid-template-columns: 1fr 400px; gap: 1.5rem; max-width: 1600px; margin: 0 auto; padding: 2rem; }
+    @media (max-width: 1200px) { .intake-layout { grid-template-columns: 1fr; } .interview-panel { position: fixed; bottom: 0; right: 0; width: 400px; max-height: 500px; z-index: 1000; box-shadow: 0 -4px 6px rgba(0,0,0,0.1); } }
+    .form-container { background: var(--bg-card, white); border-radius: 8px; padding: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .form-header { border-bottom: 2px solid var(--gray-200); padding-bottom: 1.5rem; margin-bottom: 2rem; }
+    .form-header h1 { font-size: 1.75rem; color: var(--gray-900); margin-bottom: 0.5rem; }
+    .progress-bar-container { background: var(--gray-100); height: 8px; border-radius: 4px; overflow: hidden; margin-top: 1rem; }
+    .progress-bar-fill { background: linear-gradient(90deg, var(--primary), var(--primary-dark)); height: 100%; transition: width 0.3s ease; }
+    .progress-text { margin-top: 0.5rem; font-size: 0.875rem; color: var(--gray-600); text-align: right; }
+    .form-section { margin-bottom: 2.5rem; border: 1px solid var(--gray-200); border-radius: 8px; padding: 1.5rem; background: var(--gray-50); }
+    .section-header { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.25rem; padding-bottom: 0.75rem; border-bottom: 2px solid var(--primary); }
+    .section-number { background: var(--primary); color: white; width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 0.85rem; }
+    .section-title { font-size: 1.15rem; font-weight: 600; color: var(--gray-900); }
+    .form-field { margin-bottom: 1.25rem; }
+    .field-label { display: block; font-weight: 500; color: var(--gray-700); margin-bottom: 0.5rem; font-size: 0.9rem; }
+    .field-required { color: var(--error); margin-left: 0.25rem; }
+    .field-input { width: 100%; padding: 0.625rem 0.875rem; border: 1px solid var(--gray-300); border-radius: 4px; font-size: 0.9rem; transition: all 0.2s; background: var(--bg-card, white); }
+    .field-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+    .field-textarea { min-height: 80px; resize: vertical; font-family: inherit; }
+    .field-help { font-size: 0.8rem; color: var(--gray-500); margin-top: 0.375rem; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    @media (max-width: 768px) { .form-row { grid-template-columns: 1fr; } }
+    .checkbox-group { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.5rem; margin-top: 0.5rem; }
+    .checkbox-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; background: var(--bg-card, white); border: 1px solid var(--gray-200); border-radius: 4px; cursor: pointer; transition: all 0.2s; }
+    .checkbox-item:hover { border-color: var(--primary); background: var(--gray-50); }
+    .checkbox-item input[type="checkbox"], .checkbox-item input[type="radio"] { width: 16px; height: 16px; cursor: pointer; }
+    .checkbox-item label { font-size: 0.85rem; cursor: pointer; flex: 1; }
+    .radio-group { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.5rem; }
+    .radio-item { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem; background: var(--bg-card, white); border: 1px solid var(--gray-200); border-radius: 4px; cursor: pointer; }
+    .radio-item:hover { border-color: var(--primary); }
+    .radio-item input[type="radio"] { width: 16px; height: 16px; cursor: pointer; }
+    .radio-item label { font-size: 0.85rem; cursor: pointer; flex: 1; }
+    .yes-no-unknown { display: flex; gap: 0.5rem; }
+    .yes-no-unknown label { display: flex; align-items: center; gap: 0.25rem; padding: 0.5rem 1rem; background: var(--bg-card, white); border: 1px solid var(--gray-300); border-radius: 4px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+    .yes-no-unknown input[type="radio"] { display: none; }
+    .yes-no-unknown label:has(input:checked) { background: var(--primary); border-color: var(--primary); color: white; }
+    .subsection { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px dashed var(--gray-300); }
+    .subsection-title { font-weight: 600; color: var(--gray-700); margin-bottom: 1rem; font-size: 0.95rem; }
+    .training-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
+    .training-item { display: flex; align-items: center; gap: 0.5rem; background: var(--bg-card, white); padding: 0.5rem; border: 1px solid var(--gray-200); border-radius: 4px; }
+    .training-item input { width: 50px; padding: 0.25rem; border: 1px solid var(--gray-300); border-radius: 4px; text-align: center; }
+    .training-item input[type="text"] { width: 100%; }
+    .training-item span { font-size: 0.85rem; color: var(--gray-700); white-space: nowrap; }
+    .form-actions { display: flex; gap: 1rem; justify-content: flex-end; padding-top: 2rem; border-top: 2px solid var(--gray-200); position: sticky; bottom: 0; background: var(--bg-card, white); padding-bottom: 1rem; margin-top: 2rem; }
+    .interview-panel { background: var(--bg-card, white); border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; flex-direction: column; max-height: calc(100vh - 4rem); position: sticky; top: 2rem; }
+    .interview-header { padding: 1.25rem; border-bottom: 1px solid var(--gray-200); background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: white; border-radius: 8px 8px 0 0; }
+    .interview-header h3 { font-size: 1.1rem; margin-bottom: 0.25rem; }
+    .interview-header p { font-size: 0.85rem; opacity: 0.9; }
+    .interview-messages { flex: 1; overflow-y: auto; padding: 1.25rem; max-height: 400px; }
+    .message { margin-bottom: 1rem; animation: slideIn 0.3s ease; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .message-user { text-align: right; }
+    .message-bubble { display: inline-block; padding: 0.75rem 1rem; border-radius: 12px; max-width: 85%; word-wrap: break-word; }
+    .message-user .message-bubble { background: var(--primary); color: white; border-bottom-right-radius: 4px; }
+    .message-ai .message-bubble { background: var(--gray-100); color: var(--gray-900); border-bottom-left-radius: 4px; }
+    .message-stakeholder { font-size: 0.75rem; color: var(--gray-500); margin-top: 0.25rem; }
+    .interview-input { padding: 1.25rem; border-top: 1px solid var(--gray-200); }
+    .input-group { display: flex; gap: 0.75rem; }
+    .input-group input { flex: 1; padding: 0.75rem; border: 1px solid var(--gray-300); border-radius: 6px; font-size: 0.9rem; }
+    .input-group button { padding: 0.75rem 1.5rem; background: var(--primary); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: 500; transition: all 0.2s; }
+    .input-group button:hover { background: var(--primary-dark); }
+    .input-group button:disabled { background: var(--gray-300); cursor: not-allowed; }
+    .saved-indicator { position: fixed; bottom: 2rem; left: 50%; transform: translateX(-50%); background: var(--success); color: white; padding: 0.75rem 1.5rem; border-radius: 6px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); animation: slideUp 0.3s ease; z-index: 1000; }
+    @keyframes slideUp { from { opacity: 0; transform: translateX(-50%) translateY(20px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+    .quick-questions { padding: 0 1.25rem 1rem; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+    .quick-question-btn { padding: 0.375rem 0.75rem; background: var(--gray-100); border: 1px solid var(--gray-300); border-radius: 4px; font-size: 0.8rem; cursor: pointer; transition: all 0.2s; }
+    .quick-question-btn:hover { background: var(--gray-200); border-color: var(--gray-400); }
+    .section-nav { position: sticky; top: 0; background: var(--bg-card, white); padding: 1rem 0; margin-bottom: 1rem; border-bottom: 1px solid var(--gray-200); z-index: 10; }
+    .section-nav-list { display: flex; flex-wrap: wrap; gap: 0.5rem; list-style: none; padding: 0; margin: 0; }
+    .section-nav-list a { display: inline-block; padding: 0.375rem 0.75rem; background: var(--gray-100); border-radius: 4px; font-size: 0.8rem; color: var(--gray-700); text-decoration: none; transition: all 0.2s; }
+    .section-nav-list a:hover { background: var(--primary); color: white; }
+    .stakeholder-list { padding: 0.75rem 1.25rem; border-bottom: 1px solid var(--gray-200); }
+    .stakeholder-list-label { font-size: 0.75rem; font-weight: 600; color: var(--gray-500); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+    .stakeholder-chips { display: flex; flex-wrap: wrap; gap: 0.375rem; }
+    .stakeholder-chip { display: inline-flex; align-items: center; padding: 0.25rem 0.625rem; background: var(--gray-100); border: 1px solid var(--gray-200); border-radius: 12px; font-size: 0.75rem; color: var(--gray-700); }
+    .stakeholder-chip.loading { color: var(--gray-400); font-style: italic; border: none; }
+    .stakeholder-chip .chip-role { color: var(--gray-500); margin-left: 0.25rem; }
+    .stakeholder-chip.active { background: var(--primary); color: white; border-color: var(--primary); }
+    .stakeholder-chip.active .chip-role { color: rgba(255,255,255,0.8); }
+    .message-stakeholder { font-size: 0.75rem; color: var(--primary); font-weight: 500; margin-top: 0.25rem; }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .form-container {
+      background: #111527;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .form-header {
+      border-bottom-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .form-header h1 {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .progress-bar-container {
+      background: #1a2040;
+    }
+    [data-theme="dark"] .progress-text {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .form-section {
+      border-color: rgba(99,130,255,0.1);
+      background: #0a0d1a;
+    }
+    [data-theme="dark"] .section-title {
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .field-label {
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .field-input {
+      background: #111527;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .field-input:focus {
+      border-color: #5b8cff;
+      box-shadow: 0 0 0 3px rgba(91,140,255,0.15);
+    }
+    [data-theme="dark"] .field-help {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .checkbox-item {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .checkbox-item:hover {
+      border-color: #5b8cff;
+      background: #161b33;
+    }
+    [data-theme="dark"] .checkbox-item label {
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .radio-item {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .radio-item:hover {
+      border-color: #5b8cff;
+    }
+    [data-theme="dark"] .radio-item label {
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .yes-no-unknown label {
+      background: #111527;
+      border-color: rgba(99,130,255,0.12);
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .subsection {
+      border-top-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .subsection-title {
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .training-item {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .training-item input {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .training-item span {
+      color: #d8dde8;
+    }
+    [data-theme="dark"] .form-actions {
+      background: #111527;
+      border-top-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .section-nav {
+      background: #111527;
+      border-bottom-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .section-nav-list a {
+      background: #1a2040;
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .section-nav-list a:hover {
+      background: #5b8cff;
+      color: white;
+    }
+    [data-theme="dark"] .interview-panel {
+      background: #111527;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .interview-messages {
+      background: #0a0d1a;
+    }
+    [data-theme="dark"] .message-ai .message-bubble {
+      background: #1a2040;
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .interview-input {
+      border-top-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .input-group input {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .stakeholder-list {
+      border-bottom-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .stakeholder-list-label {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .stakeholder-chip {
+      background: #1a2040;
+      border-color: rgba(99,130,255,0.1);
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .stakeholder-chip .chip-role {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .quick-question-btn {
+      background: #1a2040;
+      border-color: rgba(99,130,255,0.12);
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .quick-question-btn:hover {
+      background: #161b33;
+      border-color: rgba(99,130,255,0.2);
+    }
+  </style>
+</head>
+<body>
+  <div class="intake-layout">
+    <div class="form-container">
+      <div class="form-header">
+        <h1>Client Intake Form</h1>
+        <p id="companyName" style="color: var(--gray-600); font-size: 1.1rem;">Loading...</p>
+        <div class="progress-bar-container"><div class="progress-bar-fill" id="progressBar" style="width: 0%"></div></div>
+        <div class="progress-text"><span id="progressText">0% Complete</span></div>
+      </div>
+      
+      <nav class="section-nav">
+        <ul class="section-nav-list">
+          <li><a href="#section1">1. Company</a></li>
+          <li><a href="#section2">2. Policies</a></li>
+          <li><a href="#section3">3. Data</a></li>
+          <li><a href="#section4">4. Network</a></li>
+          <li><a href="#section5">5. Wireless</a></li>
+          <li><a href="#section6">6. Endpoint</a></li>
+          <li><a href="#section7">7. Compliance</a></li>
+          <li><a href="#section8">8. Software</a></li>
+          <li><a href="#section9">9. Vuln Mgmt</a></li>
+          <li><a href="#section10">10. Admin</a></li>
+          <li><a href="#section11">11. Config</a></li>
+          <li><a href="#section12">12. Email/Web</a></li>
+          <li><a href="#section13">13. Ports</a></li>
+          <li><a href="#section14">14. Network Devices</a></li>
+          <li><a href="#section15">15. Pen Testing</a></li>
+        </ul>
+      </nav>
+
+      <!-- SECTION 1: COMPANY INFORMATION -->
+      <div class="form-section" id="section1">
+        <div class="section-header"><span class="section-number">1</span><h2 class="section-title">Company Information</h2></div>
+        <div class="form-row">
+          <div class="form-field"><label class="field-label">Company Name <span class="field-required">*</span></label><input type="text" class="field-input" id="company_name" data-section="company_info" readonly><span class="field-help">Auto-filled from profile</span></div>
+          <div class="form-field"><label class="field-label">Business Address</label><input type="text" class="field-input" id="business_address" data-section="company_info"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-field"><label class="field-label">Industry Sector <span class="field-required">*</span></label><input type="text" class="field-input" id="industry_sector" data-section="company_info"></div>
+          <div class="form-field"><label class="field-label">Number of Employees</label><input type="number" class="field-input" id="num_employees" data-section="company_info"></div>
+        </div>
+        <div class="subsection"><div class="subsection-title">Primary Contact</div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">Name</label><input type="text" class="field-input" id="primary_contact_name" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Title</label><input type="text" class="field-input" id="primary_contact_title" data-section="company_info"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">Email</label><input type="email" class="field-input" id="primary_contact_email" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Phone</label><input type="tel" class="field-input" id="primary_contact_phone" data-section="company_info"></div>
+          </div>
+        </div>
+        <div class="subsection"><div class="subsection-title">Secondary Contact (if applicable)</div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">Name</label><input type="text" class="field-input" id="secondary_contact_name" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Title</label><input type="text" class="field-input" id="secondary_contact_title" data-section="company_info"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">Email</label><input type="email" class="field-input" id="secondary_contact_email" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Phone</label><input type="tel" class="field-input" id="secondary_contact_phone" data-section="company_info"></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">Location(s) of Offices / Operations</label><input type="text" class="field-input" id="locations" data-section="company_info"></div>
+        <div class="form-field"><label class="field-label">Website</label><input type="url" class="field-input" id="website" data-section="company_info"></div>
+        <div class="subsection"><div class="subsection-title">Social Media</div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">LinkedIn</label><input type="text" class="field-input" id="social_linkedin" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Instagram</label><input type="text" class="field-input" id="social_instagram" data-section="company_info"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">X (Twitter)</label><input type="text" class="field-input" id="social_x" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Facebook</label><input type="text" class="field-input" id="social_facebook" data-section="company_info"></div>
+          </div>
+          <div class="form-row">
+            <div class="form-field"><label class="field-label">TikTok</label><input type="text" class="field-input" id="social_tiktok" data-section="company_info"></div>
+            <div class="form-field"><label class="field-label">Other</label><input type="text" class="field-input" id="social_other" data-section="company_info"></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">Key Products or Services Offered</label><textarea class="field-input field-textarea" id="products_services" data-section="company_info"></textarea></div>
+        <div class="form-field"><label class="field-label">1a. What services are you looking to obtain from the Arizona Cybersecurity Clinic?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="service_training" data-section="company_info"><label for="service_training">Cybersecurity Awareness Training</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="service_risk_assessment" data-section="company_info"><label for="service_risk_assessment">Cybersecurity Risk Assessment</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="service_osint" data-section="company_info"><label for="service_osint">Organizational Research using OSINT</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="service_vuln_assessment" data-section="company_info"><label for="service_vuln_assessment">Website Vulnerability Assessment</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">1b. Have there been any recent security incidents or data breaches?</label><textarea class="field-input field-textarea" id="recent_incidents" data-section="company_info"></textarea></div>
+        <div class="form-field"><label class="field-label">1c. What ongoing cybersecurity concerns or threats have been observed?</label><textarea class="field-input field-textarea" id="ongoing_concerns" data-section="company_info"></textarea></div>
+        <div class="form-field"><label class="field-label">1d. What are the primary goals of the cybersecurity program?</label><textarea class="field-input field-textarea" id="primary_goals" data-section="company_info"></textarea><span class="field-help">e.g., risk reduction, compliance, etc.</span></div>
+        <div class="form-field"><label class="field-label">1e. Do you use Artificial Intelligence (AI) within your organization?</label>
+          <div class="radio-group">
+            <div class="radio-item"><input type="radio" name="ai_usage" id="ai_used" value="used" data-section="company_info"><label for="ai_used">AI usage is being used and encouraged</label></div>
+            <div class="radio-item"><input type="radio" name="ai_usage" id="ai_not_allowed" value="not_allowed" data-section="company_info"><label for="ai_not_allowed">AI usage is not allowed</label></div>
+            <div class="radio-item"><input type="radio" name="ai_usage" id="ai_unsure" value="unsure" data-section="company_info"><label for="ai_unsure">We are unsure if AI is being used</label></div>
+          </div>
+          <div class="checkbox-group" style="margin-top:0.5rem;">
+            <div class="checkbox-item"><input type="checkbox" id="ai_has_policy" data-section="company_info"><label for="ai_has_policy">We have an AI policy</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ai_no_policy" data-section="company_info"><label for="ai_no_policy">We DO NOT have an AI policy</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">1f. AI interests and concerns (select all that apply)</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="ai_interest_training" data-section="company_info"><label for="ai_interest_training">General awareness training on AI</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ai_interest_risks" data-section="company_info"><label for="ai_interest_risks">Understand risks of adopting AI</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ai_interest_opportunities" data-section="company_info"><label for="ai_interest_opportunities">Understand opportunities of adopting AI</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ai_interest_policy" data-section="company_info"><label for="ai_interest_policy">Assistance developing an AI Policy</label></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION 2: SECURITY POLICIES AND PROCEDURES -->
+      <div class="form-section" id="section2">
+        <div class="section-header"><span class="section-number">2</span><h2 class="section-title">Security Policies and Procedures</h2></div>
+        <div class="form-field"><label class="field-label">2a. What cybersecurity policies do you have in place?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="policy_incident_response" data-section="security_policies"><label for="policy_incident_response">Incident Response</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_acceptable_use" data-section="security_policies"><label for="policy_acceptable_use">Acceptable Use</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_remote_access" data-section="security_policies"><label for="policy_remote_access">Remote Access</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_network_security" data-section="security_policies"><label for="policy_network_security">Network Security</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_data_management" data-section="security_policies"><label for="policy_data_management">Data Management</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_disaster_recovery" data-section="security_policies"><label for="policy_disaster_recovery">Disaster Recovery</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_employee_awareness" data-section="security_policies"><label for="policy_employee_awareness">Employee Awareness</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_data_backup" data-section="security_policies"><label for="policy_data_backup">Data Backup</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_vendor_management" data-section="security_policies"><label for="policy_vendor_management">Vendor Management</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_data_retention" data-section="security_policies"><label for="policy_data_retention">Data Retention</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_email" data-section="security_policies"><label for="policy_email">Email</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_risk_management" data-section="security_policies"><label for="policy_risk_management">Risk Management</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_change_management" data-section="security_policies"><label for="policy_change_management">Change Management</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_access_control" data-section="security_policies"><label for="policy_access_control">Access Control</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_password" data-section="security_policies"><label for="policy_password">Password</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_vendor_contractor" data-section="security_policies"><label for="policy_vendor_contractor">Vendor / Contractor</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_byod" data-section="security_policies"><label for="policy_byod">BYOD</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="policy_other" data-section="security_policies"><label for="policy_other">Other</label></div>
+          </div>
+          <div class="form-field" style="margin-top:1rem;"><label class="field-label">Policy documents notes:</label><textarea class="field-input field-textarea" id="policy_documents_notes" data-section="security_policies" style="min-height:60px;"></textarea></div>
+        </div>
+        <div class="form-field"><label class="field-label">2b. Employee training frequency (0=None; 1=Annual; 2=Semi-annual; 4=Quarterly)</label>
+          <div class="training-grid" style="margin-top:1rem;">
+            <div class="training-item"><input type="number" id="training_info_security" data-section="security_policies" min="0" max="4"><span>Information Security</span></div>
+            <div class="training-item"><input type="number" id="training_mobile_security" data-section="security_policies" min="0" max="4"><span>Mobile Security</span></div>
+            <div class="training-item"><input type="number" id="training_social_engineering" data-section="security_policies" min="0" max="4"><span>Social Engineering</span></div>
+            <div class="training-item"><input type="number" id="training_phishing" data-section="security_policies" min="0" max="4"><span>Phishing</span></div>
+            <div class="training-item"><input type="number" id="training_physical_security" data-section="security_policies" min="0" max="4"><span>Physical Security</span></div>
+            <div class="training-item"><input type="number" id="training_wireless" data-section="security_policies" min="0" max="4"><span>Wireless</span></div>
+            <div class="training-item"><input type="number" id="training_security_awareness" data-section="security_policies" min="0" max="4"><span>Security Awareness</span></div>
+            <div class="training-item"><input type="number" id="training_safe_internet" data-section="security_policies" min="0" max="4"><span>Safe Internet</span></div>
+            <div class="training-item"><input type="number" id="training_email_security" data-section="security_policies" min="0" max="4"><span>Email Security</span></div>
+            <div class="training-item"><input type="number" id="training_other" data-section="security_policies" min="0" max="4"><span>Other</span></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION 3: DATA AND INFORMATION MANAGEMENT -->
+      <div class="form-section" id="section3">
+        <div class="section-header"><span class="section-number">3</span><h2 class="section-title">Data and Information Management</h2></div>
+        <div class="form-field"><label class="field-label">3a. What types of data do you manage?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="data_biometric" data-section="data_management"><label for="data_biometric">Biometric</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_privacy" data-section="data_management"><label for="data_privacy">Privacy</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_health" data-section="data_management"><label for="data_health">Health</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_business" data-section="data_management"><label for="data_business">Business</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_financial" data-section="data_management"><label for="data_financial">Financial</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_intellectual_property" data-section="data_management"><label for="data_intellectual_property">Intellectual Property</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_credit_card" data-section="data_management"><label for="data_credit_card">Credit Card</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_classified" data-section="data_management"><label for="data_classified">Classified / Sensitive</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_bank_account" data-section="data_management"><label for="data_bank_account">Bank Account</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_trade_secrets" data-section="data_management"><label for="data_trade_secrets">Trade Secrets</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_email_addresses" data-section="data_management"><label for="data_email_addresses">Email Addresses</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_consumer" data-section="data_management"><label for="data_consumer">Consumer (Name/Address/Phone)</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_membership" data-section="data_management"><label for="data_membership">Membership</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="data_other" data-section="data_management"><label for="data_other">Other</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">3b. Where is data stored?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="storage_onprem_physical" data-section="data_management"><label for="storage_onprem_physical">On-Premises (Physical)</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="storage_onprem_digital" data-section="data_management"><label for="storage_onprem_digital">On-Premises (Digital)</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="storage_cloud" data-section="data_management"><label for="storage_cloud">Cloud</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="storage_3rd_party" data-section="data_management"><label for="storage_3rd_party">3rd Party Data Center</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="storage_other" data-section="data_management"><label for="storage_other">Other</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">3c. Backup data storage location?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="backup_onprem" data-section="data_management"><label for="backup_onprem">On-premises</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="backup_cloud" data-section="data_management"><label for="backup_cloud">Cloud</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="backup_3rd_party" data-section="data_management"><label for="backup_3rd_party">3rd Party Data Center</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="backup_other" data-section="data_management"><label for="backup_other">Other</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="backup_unknown" data-section="data_management"><label for="backup_unknown">Unknown</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="backup_none" data-section="data_management"><label for="backup_none">No backup solution</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">3d. Annual backup tests completed?</label><div class="yes-no-unknown"><label><input type="radio" name="backup_tests" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="backup_tests" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="backup_tests" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3e. Data retention policy followed?</label><div class="yes-no-unknown"><label><input type="radio" name="retention_followed" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="retention_followed" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="retention_followed" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3f. Using access control?</label><div class="yes-no-unknown"><label><input type="radio" name="access_control" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="access_control" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="access_control" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3g. Access control type?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="ac_role_based" data-section="data_management"><label for="ac_role_based">Role Based</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ac_attribute_based" data-section="data_management"><label for="ac_attribute_based">Attribute-Based</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ac_mandatory" data-section="data_management"><label for="ac_mandatory">Mandatory</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ac_discretionary" data-section="data_management"><label for="ac_discretionary">Discretionary</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ac_rule_based" data-section="data_management"><label for="ac_rule_based">Rule Based</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="ac_other" data-section="data_management"><label for="ac_other">Other</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">3h. Sensitive info restricted on need-to-know?</label><div class="yes-no-unknown"><label><input type="radio" name="need_to_know" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="need_to_know" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="need_to_know" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3i. Access controls reviewed regularly?</label><div class="yes-no-unknown"><label><input type="radio" name="ac_reviewed" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="ac_reviewed" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="ac_reviewed" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3j. Logs of sensitive info access maintained?</label><div class="yes-no-unknown"><label><input type="radio" name="access_logs" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="access_logs" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="access_logs" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3k. User accounts reviewed for permissions?</label><div class="yes-no-unknown"><label><input type="radio" name="accounts_reviewed" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="accounts_reviewed" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="accounts_reviewed" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3l. Inactive accounts disabled promptly?</label><div class="yes-no-unknown"><label><input type="radio" name="inactive_disabled" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="inactive_disabled" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="inactive_disabled" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">3m. Privileged account activity monitored?</label><div class="yes-no-unknown"><label><input type="radio" name="privileged_monitored" value="yes" data-section="data_management"><span>Yes</span></label><label><input type="radio" name="privileged_monitored" value="no" data-section="data_management"><span>No</span></label><label><input type="radio" name="privileged_monitored" value="unknown" data-section="data_management"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 4: NETWORK SECURITY AND ACCESS CONTROL -->
+      <div class="form-section" id="section4">
+        <div class="section-header"><span class="section-number">4</span><h2 class="section-title">Network Security and Access Control</h2></div>
+        <div class="form-field"><label class="field-label">4a. Network hardware in use (denote type/model)</label>
+          <div class="subsection"><div class="subsection-title">Network Equipment</div>
+            <div class="training-grid">
+              <div class="training-item"><input type="text" id="net_load_balancer" data-section="network_security"><span>Load Balancer</span></div>
+              <div class="training-item"><input type="text" id="net_nac" data-section="network_security"><span>NAC</span></div>
+              <div class="training-item"><input type="text" id="net_utm" data-section="network_security"><span>UTM</span></div>
+              <div class="training-item"><input type="text" id="net_ids_ips" data-section="network_security"><span>IDS/IPS</span></div>
+              <div class="training-item"><input type="text" id="net_vpn" data-section="network_security"><span>VPN</span></div>
+              <div class="training-item"><input type="text" id="net_siem" data-section="network_security"><span>SIEM</span></div>
+              <div class="training-item"><input type="text" id="net_web_filter" data-section="network_security"><span>Web Filter</span></div>
+              <div class="training-item"><input type="text" id="net_switch" data-section="network_security"><span>Switch</span></div>
+              <div class="training-item"><input type="text" id="net_router" data-section="network_security"><span>Router</span></div>
+              <div class="training-item"><input type="text" id="net_wifi_ap" data-section="network_security"><span>Wi-Fi AP</span></div>
+              <div class="training-item"><input type="text" id="net_modem" data-section="network_security"><span>Modem</span></div>
+              <div class="training-item"><input type="text" id="net_other" data-section="network_security"><span>Other</span></div>
+            </div>
+          </div>
+          <div class="subsection"><div class="subsection-title">Server Types</div>
+            <div class="training-grid">
+              <div class="training-item"><input type="text" id="server_mail" data-section="network_security"><span>Mail</span></div>
+              <div class="training-item"><input type="text" id="server_dhcp" data-section="network_security"><span>DHCP</span></div>
+              <div class="training-item"><input type="text" id="server_web" data-section="network_security"><span>Web</span></div>
+              <div class="training-item"><input type="text" id="server_file" data-section="network_security"><span>File</span></div>
+              <div class="training-item"><input type="text" id="server_database" data-section="network_security"><span>Database</span></div>
+              <div class="training-item"><input type="text" id="server_dns" data-section="network_security"><span>DNS</span></div>
+              <div class="training-item"><input type="text" id="server_application" data-section="network_security"><span>Application</span></div>
+              <div class="training-item"><input type="text" id="server_virtual" data-section="network_security"><span>Virtual</span></div>
+              <div class="training-item"><input type="text" id="server_cloud" data-section="network_security"><span>Cloud</span></div>
+              <div class="training-item"><input type="text" id="server_other" data-section="network_security"><span>Other</span></div>
+            </div>
+          </div>
+          <div class="subsection"><div class="subsection-title">Firewall Type</div>
+            <div class="checkbox-group">
+              <div class="checkbox-item"><input type="checkbox" id="fw_stateful" data-section="network_security"><label for="fw_stateful">Stateful</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="fw_stateless" data-section="network_security"><label for="fw_stateless">Stateless</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="fw_ngfw" data-section="network_security"><label for="fw_ngfw">NGFW</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="fw_waf" data-section="network_security"><label for="fw_waf">WAF</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="fw_cloud" data-section="network_security"><label for="fw_cloud">Cloud</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="fw_packet_filtering" data-section="network_security"><label for="fw_packet_filtering">Packet Filtering</label></div>
+            </div>
+          </div>
+          <div class="subsection"><div class="subsection-title">IPS/IDS/SIEM Details</div>
+            <div class="checkbox-group">
+              <div class="checkbox-item"><input type="checkbox" id="ips_network" data-section="network_security"><label for="ips_network">Network IPS</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="ips_host" data-section="network_security"><label for="ips_host">Host IPS</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="ids_network" data-section="network_security"><label for="ids_network">Network IDS</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="ids_host" data-section="network_security"><label for="ids_host">Host IDS</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="siem_splunk" data-section="network_security"><label for="siem_splunk">Splunk</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="siem_qradar" data-section="network_security"><label for="siem_qradar">Qradar</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="siem_logrhythm" data-section="network_security"><label for="siem_logrhythm">LogRhythm</label></div>
+              <div class="checkbox-item"><input type="checkbox" id="siem_other" data-section="network_security"><label for="siem_other">Other SIEM</label></div>
+            </div>
+          </div>
+          <div class="form-row" style="margin-top:1rem;">
+            <div class="form-field"><label class="field-label">EDR</label><input type="text" class="field-input" id="net_edr" data-section="network_security"></div>
+            <div class="form-field"><label class="field-label">XDR</label><input type="text" class="field-input" id="net_xdr" data-section="network_security"></div>
+            <div class="form-field"><label class="field-label">Email Security</label><input type="text" class="field-input" id="net_email_security" data-section="network_security"></div>
+          </div>
+          <div class="form-field" style="margin-top:1rem;"><label class="field-label">Security assets list (make, model, version, serial)</label><textarea class="field-input field-textarea" id="security_assets_list" data-section="network_security"></textarea></div>
+        </div>
+        <div class="form-field"><label class="field-label">4b. Network segmentation used?</label><div class="yes-no-unknown"><label><input type="radio" name="network_segmentation" value="yes" data-section="network_security"><span>Yes</span></label><label><input type="radio" name="network_segmentation" value="no" data-section="network_security"><span>No</span></label><label><input type="radio" name="network_segmentation" value="unknown" data-section="network_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">4c. Multi-Factor Authentication (MFA) utilized?</label><div class="yes-no-unknown"><label><input type="radio" name="mfa_utilized" value="yes" data-section="network_security"><span>Yes</span></label><label><input type="radio" name="mfa_utilized" value="no" data-section="network_security"><span>No</span></label><label><input type="radio" name="mfa_utilized" value="unknown" data-section="network_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">4d. Client device count?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="radio" name="client_count" value="1-20" data-section="network_security"><label>1-20</label></div>
+            <div class="checkbox-item"><input type="radio" name="client_count" value="21-50" data-section="network_security"><label>21-50</label></div>
+            <div class="checkbox-item"><input type="radio" name="client_count" value="51-100" data-section="network_security"><label>51-100</label></div>
+            <div class="checkbox-item"><input type="radio" name="client_count" value="101-250" data-section="network_security"><label>101-250</label></div>
+            <div class="checkbox-item"><input type="radio" name="client_count" value="251-500" data-section="network_security"><label>251-500</label></div>
+            <div class="checkbox-item"><input type="radio" name="client_count" value="501+" data-section="network_security"><label>501+</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">4e. Personal devices for business use?</label><div class="yes-no-unknown"><label><input type="radio" name="personal_devices" value="yes" data-section="network_security"><span>Yes</span></label><label><input type="radio" name="personal_devices" value="no" data-section="network_security"><span>No</span></label><label><input type="radio" name="personal_devices" value="unknown" data-section="network_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">4f. Password manager used?</label><div class="yes-no-unknown"><label><input type="radio" name="password_manager" value="yes" data-section="network_security"><span>Yes</span></label><label><input type="radio" name="password_manager" value="no" data-section="network_security"><span>No</span></label><label><input type="radio" name="password_manager" value="unknown" data-section="network_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">4fi. If yes, which one?</label><input type="text" class="field-input" id="password_manager_name" data-section="network_security"></div>
+      </div>
+
+      <!-- SECTION 5: WIRELESS -->
+      <div class="form-section" id="section5">
+        <div class="section-header"><span class="section-number">5</span><h2 class="section-title">Wireless</h2></div>
+        <div class="form-field"><label class="field-label">5a. Wi-Fi utilized?</label><div class="yes-no-unknown"><label><input type="radio" name="wifi_used" value="yes" data-section="wireless"><span>Yes</span></label><label><input type="radio" name="wifi_used" value="no" data-section="wireless"><span>No</span></label><label><input type="radio" name="wifi_used" value="unknown" data-section="wireless"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">5b. Guest network access allowed?</label><div class="yes-no-unknown"><label><input type="radio" name="guest_access" value="yes" data-section="wireless"><span>Yes</span></label><label><input type="radio" name="guest_access" value="no" data-section="wireless"><span>No</span></label><label><input type="radio" name="guest_access" value="unknown" data-section="wireless"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">5bi. Separate guest network?</label><div class="yes-no-unknown"><label><input type="radio" name="guest_separate" value="yes" data-section="wireless"><span>Yes</span></label><label><input type="radio" name="guest_separate" value="no" data-section="wireless"><span>No</span></label><label><input type="radio" name="guest_separate" value="unknown" data-section="wireless"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">5c. Wi-Fi encryption used?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wep" data-section="wireless"><label for="wifi_wep">WEP</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wps" data-section="wireless"><label for="wifi_wps">WPS</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wpa_personal" data-section="wireless"><label for="wifi_wpa_personal">WPA Personal</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wpa_enterprise" data-section="wireless"><label for="wifi_wpa_enterprise">WPA Enterprise</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wpa2_personal" data-section="wireless"><label for="wifi_wpa2_personal">WPA2 Personal</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wpa2_enterprise" data-section="wireless"><label for="wifi_wpa2_enterprise">WPA2 Enterprise</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wpa3_personal" data-section="wireless"><label for="wifi_wpa3_personal">WPA3 Personal</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_wpa3_enterprise" data-section="wireless"><label for="wifi_wpa3_enterprise">WPA3 Enterprise</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="wifi_unknown" data-section="wireless"><label for="wifi_unknown">Unknown</label></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION 6: ENDPOINT AND APPLICATION SECURITY -->
+      <div class="form-section" id="section6">
+        <div class="section-header"><span class="section-number">6</span><h2 class="section-title">Endpoint and Application Security</h2></div>
+        <div class="form-field"><label class="field-label">6a. 3rd party Antivirus (not Windows Defender)?</label><div class="yes-no-unknown"><label><input type="radio" name="third_party_av" value="yes" data-section="endpoint_security"><span>Yes</span></label><label><input type="radio" name="third_party_av" value="no" data-section="endpoint_security"><span>No</span></label><label><input type="radio" name="third_party_av" value="unknown" data-section="endpoint_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">6b. Free version of AV?</label><div class="yes-no-unknown"><label><input type="radio" name="av_free_version" value="yes" data-section="endpoint_security"><span>Yes</span></label><label><input type="radio" name="av_free_version" value="no" data-section="endpoint_security"><span>No</span></label><label><input type="radio" name="av_free_version" value="unknown" data-section="endpoint_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">6c. Which AV?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="av_norton" data-section="endpoint_security"><label for="av_norton">Norton</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_mcafee" data-section="endpoint_security"><label for="av_mcafee">McAfee</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_crowdstrike" data-section="endpoint_security"><label for="av_crowdstrike">CrowdStrike</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_avast" data-section="endpoint_security"><label for="av_avast">AVAST</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_bitdefender" data-section="endpoint_security"><label for="av_bitdefender">Bitdefender</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_malwarebytes" data-section="endpoint_security"><label for="av_malwarebytes">Malware Bytes</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_sophos" data-section="endpoint_security"><label for="av_sophos">Sophos</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="av_other" data-section="endpoint_security"><label for="av_other">Other</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">6d. Application listing used?</label><div class="yes-no-unknown"><label><input type="radio" name="app_listing" value="yes" data-section="endpoint_security"><span>Yes</span></label><label><input type="radio" name="app_listing" value="no" data-section="endpoint_security"><span>No</span></label><label><input type="radio" name="app_listing" value="unknown" data-section="endpoint_security"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">6di. Type of listing?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="app_blacklist" data-section="endpoint_security"><label for="app_blacklist">Block / Blacklisting</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="app_whitelist" data-section="endpoint_security"><label for="app_whitelist">Allow / Whitelisting</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="app_list_unknown" data-section="endpoint_security"><label for="app_list_unknown">Unknown</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">6e. Patch management frequency?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="radio" name="patch_frequency" value="weekly" data-section="endpoint_security"><label>Weekly</label></div>
+            <div class="checkbox-item"><input type="radio" name="patch_frequency" value="bi-weekly" data-section="endpoint_security"><label>Bi-Weekly</label></div>
+            <div class="checkbox-item"><input type="radio" name="patch_frequency" value="monthly" data-section="endpoint_security"><label>Monthly</label></div>
+            <div class="checkbox-item"><input type="radio" name="patch_frequency" value="quarterly" data-section="endpoint_security"><label>Quarterly</label></div>
+            <div class="checkbox-item"><input type="radio" name="patch_frequency" value="annually" data-section="endpoint_security"><label>Annually</label></div>
+            <div class="checkbox-item"><input type="radio" name="patch_frequency" value="unknown" data-section="endpoint_security"><label>Unknown</label></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SECTION 7: COMPLIANCE -->
+      <div class="form-section" id="section7">
+        <div class="section-header"><span class="section-number">7</span><h2 class="section-title">Compliance and Regulatory Requirements</h2></div>
+        <div class="form-field"><label class="field-label">7a. Compliance requirements?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="comp_gdpr" data-section="compliance"><label for="comp_gdpr">GDPR</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_sox" data-section="compliance"><label for="comp_sox">SOX</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_ferpa" data-section="compliance"><label for="comp_ferpa">FERPA</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_pci_dss" data-section="compliance"><label for="comp_pci_dss">PCI-DSS</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_soc2" data-section="compliance"><label for="comp_soc2">SOC 2</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_glba" data-section="compliance"><label for="comp_glba">GLBA</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_fisma" data-section="compliance"><label for="comp_fisma">FISMA</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_hipaa" data-section="compliance"><label for="comp_hipaa">HIPAA</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_ccpa" data-section="compliance"><label for="comp_ccpa">CCPA</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_cmmc" data-section="compliance"><label for="comp_cmmc">CMMC</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_other" data-section="compliance"><label for="comp_other">Other</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="comp_unknown" data-section="compliance"><label for="comp_unknown">Unknown</label></div>
+          </div>
+        </div>
+        <div class="form-field"><label class="field-label">7b. Annual security audits?</label><div class="yes-no-unknown"><label><input type="radio" name="security_audits" value="yes" data-section="compliance"><span>Yes</span></label><label><input type="radio" name="security_audits" value="no" data-section="compliance"><span>No</span></label><label><input type="radio" name="security_audits" value="unknown" data-section="compliance"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">Third-party vendor compliance requirements:</label><textarea class="field-input field-textarea" id="vendor_compliance" data-section="compliance"></textarea></div>
+        <div class="form-field"><label class="field-label">7c. Sensitive data identified and classified?</label><div class="yes-no-unknown"><label><input type="radio" name="data_classified" value="yes" data-section="compliance"><span>Yes</span></label><label><input type="radio" name="data_classified" value="no" data-section="compliance"><span>No</span></label><label><input type="radio" name="data_classified" value="unknown" data-section="compliance"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">7d. Controls for unauthorized access?</label><div class="yes-no-unknown"><label><input type="radio" name="unauthorized_controls" value="yes" data-section="compliance"><span>Yes</span></label><label><input type="radio" name="unauthorized_controls" value="no" data-section="compliance"><span>No</span></label><label><input type="radio" name="unauthorized_controls" value="unknown" data-section="compliance"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">7e. Data encrypted in transit and at rest?</label><div class="yes-no-unknown"><label><input type="radio" name="data_encrypted" value="yes" data-section="compliance"><span>Yes</span></label><label><input type="radio" name="data_encrypted" value="no" data-section="compliance"><span>No</span></label><label><input type="radio" name="data_encrypted" value="unknown" data-section="compliance"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 8: SOFTWARE ASSETS -->
+      <div class="form-section" id="section8">
+        <div class="section-header"><span class="section-number">8</span><h2 class="section-title">Inventory and Control Software Assets</h2></div>
+        <div class="form-field"><label class="field-label">8a. Up-to-date software inventory?</label><div class="yes-no-unknown"><label><input type="radio" name="software_inventory" value="yes" data-section="software_assets"><span>Yes</span></label><label><input type="radio" name="software_inventory" value="no" data-section="software_assets"><span>No</span></label><label><input type="radio" name="software_inventory" value="unknown" data-section="software_assets"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">8b. Unauthorized software detected and resolved?</label><div class="yes-no-unknown"><label><input type="radio" name="unauthorized_software" value="yes" data-section="software_assets"><span>Yes</span></label><label><input type="radio" name="unauthorized_software" value="no" data-section="software_assets"><span>No</span></label><label><input type="radio" name="unauthorized_software" value="unknown" data-section="software_assets"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">8c. Software inventory reviewed for compliance?</label><div class="yes-no-unknown"><label><input type="radio" name="software_review" value="yes" data-section="software_assets"><span>Yes</span></label><label><input type="radio" name="software_review" value="no" data-section="software_assets"><span>No</span></label><label><input type="radio" name="software_review" value="unknown" data-section="software_assets"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 9: VULNERABILITY MANAGEMENT -->
+      <div class="form-section" id="section9">
+        <div class="section-header"><span class="section-number">9</span><h2 class="section-title">Continuous Vulnerability Management</h2></div>
+        <div class="form-field"><label class="field-label">9a. Regular vulnerability scanning?</label><div class="yes-no-unknown"><label><input type="radio" name="vuln_scanning" value="yes" data-section="vuln_management"><span>Yes</span></label><label><input type="radio" name="vuln_scanning" value="no" data-section="vuln_management"><span>No</span></label><label><input type="radio" name="vuln_scanning" value="unknown" data-section="vuln_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">9b. Timely vulnerability remediation process?</label><div class="yes-no-unknown"><label><input type="radio" name="vuln_remediation" value="yes" data-section="vuln_management"><span>Yes</span></label><label><input type="radio" name="vuln_remediation" value="no" data-section="vuln_management"><span>No</span></label><label><input type="radio" name="vuln_remediation" value="unknown" data-section="vuln_management"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">9c. Scan reports reviewed and acted upon?</label><div class="yes-no-unknown"><label><input type="radio" name="vuln_reports" value="yes" data-section="vuln_management"><span>Yes</span></label><label><input type="radio" name="vuln_reports" value="no" data-section="vuln_management"><span>No</span></label><label><input type="radio" name="vuln_reports" value="unknown" data-section="vuln_management"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 10: ADMIN PRIVILEGES -->
+      <div class="form-section" id="section10">
+        <div class="section-header"><span class="section-number">10</span><h2 class="section-title">Controlled Use of Administrative Privileges</h2></div>
+        <div class="form-field"><label class="field-label">10a. Admin privileges role-based?</label><div class="yes-no-unknown"><label><input type="radio" name="admin_roles" value="yes" data-section="admin_privileges"><span>Yes</span></label><label><input type="radio" name="admin_roles" value="no" data-section="admin_privileges"><span>No</span></label><label><input type="radio" name="admin_roles" value="unknown" data-section="admin_privileges"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">10b. Admin privileges tracked and audited?</label><div class="yes-no-unknown"><label><input type="radio" name="admin_audit" value="yes" data-section="admin_privileges"><span>Yes</span></label><label><input type="radio" name="admin_audit" value="no" data-section="admin_privileges"><span>No</span></label><label><input type="radio" name="admin_audit" value="unknown" data-section="admin_privileges"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">10c. Process to revoke admin privileges?</label><div class="yes-no-unknown"><label><input type="radio" name="admin_revoke" value="yes" data-section="admin_privileges"><span>Yes</span></label><label><input type="radio" name="admin_revoke" value="no" data-section="admin_privileges"><span>No</span></label><label><input type="radio" name="admin_revoke" value="unknown" data-section="admin_privileges"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 11: SECURE CONFIGURATION -->
+      <div class="form-section" id="section11">
+        <div class="section-header"><span class="section-number">11</span><h2 class="section-title">Secure Configuration for Hardware and Software</h2></div>
+        <div class="form-field"><label class="field-label">11a. Secure configs applied on installation?</label><div class="yes-no-unknown"><label><input type="radio" name="secure_config_install" value="yes" data-section="secure_config"><span>Yes</span></label><label><input type="radio" name="secure_config_install" value="no" data-section="secure_config"><span>No</span></label><label><input type="radio" name="secure_config_install" value="unknown" data-section="secure_config"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">11b. Configs regularly updated and validated?</label><div class="yes-no-unknown"><label><input type="radio" name="secure_config_update" value="yes" data-section="secure_config"><span>Yes</span></label><label><input type="radio" name="secure_config_update" value="no" data-section="secure_config"><span>No</span></label><label><input type="radio" name="secure_config_update" value="unknown" data-section="secure_config"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">11c. Config deviations detected and corrected?</label><div class="yes-no-unknown"><label><input type="radio" name="secure_config_deviations" value="yes" data-section="secure_config"><span>Yes</span></label><label><input type="radio" name="secure_config_deviations" value="no" data-section="secure_config"><span>No</span></label><label><input type="radio" name="secure_config_deviations" value="unknown" data-section="secure_config"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 12: EMAIL AND WEB -->
+      <div class="form-section" id="section12">
+        <div class="section-header"><span class="section-number">12</span><h2 class="section-title">Email and Web Browser Protections</h2></div>
+        <div class="form-field"><label class="field-label">12a. Malicious email/web content filtering?</label><div class="yes-no-unknown"><label><input type="radio" name="email_filter" value="yes" data-section="email_web"><span>Yes</span></label><label><input type="radio" name="email_filter" value="no" data-section="email_web"><span>No</span></label><label><input type="radio" name="email_filter" value="unknown" data-section="email_web"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">12b. Email/browser security settings updated?</label><div class="yes-no-unknown"><label><input type="radio" name="browser_settings" value="yes" data-section="email_web"><span>Yes</span></label><label><input type="radio" name="browser_settings" value="no" data-section="email_web"><span>No</span></label><label><input type="radio" name="browser_settings" value="unknown" data-section="email_web"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">12c. Email/web security training?</label><div class="yes-no-unknown"><label><input type="radio" name="email_training" value="yes" data-section="email_web"><span>Yes</span></label><label><input type="radio" name="email_training" value="no" data-section="email_web"><span>No</span></label><label><input type="radio" name="email_training" value="unknown" data-section="email_web"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 13: NETWORK PORTS -->
+      <div class="form-section" id="section13">
+        <div class="section-header"><span class="section-number">13</span><h2 class="section-title">Limitation and Control of Network Ports, Protocols, and Services</h2></div>
+        <div class="form-field"><label class="field-label">13a. Unnecessary ports/protocols disabled?</label><div class="yes-no-unknown"><label><input type="radio" name="ports_disabled" value="yes" data-section="network_ports"><span>Yes</span></label><label><input type="radio" name="ports_disabled" value="no" data-section="network_ports"><span>No</span></label><label><input type="radio" name="ports_disabled" value="unknown" data-section="network_ports"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">13b. Port configurations regularly reviewed?</label><div class="yes-no-unknown"><label><input type="radio" name="ports_review" value="yes" data-section="network_ports"><span>Yes</span></label><label><input type="radio" name="ports_review" value="no" data-section="network_ports"><span>No</span></label><label><input type="radio" name="ports_review" value="unknown" data-section="network_ports"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">13c. Port activities monitored and logged?</label><div class="yes-no-unknown"><label><input type="radio" name="ports_monitor" value="yes" data-section="network_ports"><span>Yes</span></label><label><input type="radio" name="ports_monitor" value="no" data-section="network_ports"><span>No</span></label><label><input type="radio" name="ports_monitor" value="unknown" data-section="network_ports"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 14: NETWORK DEVICES -->
+      <div class="form-section" id="section14">
+        <div class="section-header"><span class="section-number">14</span><h2 class="section-title">Secure Configuration for Network Devices</h2></div>
+        <div class="form-field"><label class="field-label">14a. Secure configs on network devices?</label><div class="yes-no-unknown"><label><input type="radio" name="netdev_secure" value="yes" data-section="network_devices"><span>Yes</span></label><label><input type="radio" name="netdev_secure" value="no" data-section="network_devices"><span>No</span></label><label><input type="radio" name="netdev_secure" value="unknown" data-section="network_devices"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">14b. Network device configs reviewed regularly?</label><div class="yes-no-unknown"><label><input type="radio" name="netdev_review" value="yes" data-section="network_devices"><span>Yes</span></label><label><input type="radio" name="netdev_review" value="no" data-section="network_devices"><span>No</span></label><label><input type="radio" name="netdev_review" value="unknown" data-section="network_devices"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">14c. Vulnerability scanner for config faults?</label><div class="yes-no-unknown"><label><input type="radio" name="netdev_scanner" value="yes" data-section="network_devices"><span>Yes</span></label><label><input type="radio" name="netdev_scanner" value="no" data-section="network_devices"><span>No</span></label><label><input type="radio" name="netdev_scanner" value="unknown" data-section="network_devices"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">14d. Scanner type?</label>
+          <div class="checkbox-group">
+            <div class="checkbox-item"><input type="checkbox" id="scanner_nessus" data-section="network_devices"><label for="scanner_nessus">Nessus</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="scanner_openvas" data-section="network_devices"><label for="scanner_openvas">OpenVas</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="scanner_other" data-section="network_devices"><label for="scanner_other">Other</label></div>
+            <div class="checkbox-item"><input type="checkbox" id="scanner_unknown" data-section="network_devices"><label for="scanner_unknown">Unknown</label></div>
+          </div>
+          <div class="form-field" style="margin-top:0.5rem;"><label class="field-label">Latest report notes:</label><input type="text" class="field-input" id="scanner_report" data-section="network_devices"></div>
+        </div>
+        <div class="form-field"><label class="field-label">14e. Config changes logged and audited?</label><div class="yes-no-unknown"><label><input type="radio" name="netdev_audit" value="yes" data-section="network_devices"><span>Yes</span></label><label><input type="radio" name="netdev_audit" value="no" data-section="network_devices"><span>No</span></label><label><input type="radio" name="netdev_audit" value="unknown" data-section="network_devices"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- SECTION 15: PENETRATION TESTING -->
+      <div class="form-section" id="section15">
+        <div class="section-header"><span class="section-number">15</span><h2 class="section-title">Penetration Tests and Red Team Exercises</h2></div>
+        <div class="form-field"><label class="field-label">15a. Regular penetration tests?</label><div class="yes-no-unknown"><label><input type="radio" name="pentest_regular" value="yes" data-section="pentesting"><span>Yes</span></label><label><input type="radio" name="pentest_regular" value="no" data-section="pentesting"><span>No</span></label><label><input type="radio" name="pentest_regular" value="unknown" data-section="pentesting"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">15b. Pentest results used for improvements?</label><div class="yes-no-unknown"><label><input type="radio" name="pentest_improve" value="yes" data-section="pentesting"><span>Yes</span></label><label><input type="radio" name="pentest_improve" value="no" data-section="pentesting"><span>No</span></label><label><input type="radio" name="pentest_improve" value="unknown" data-section="pentesting"><span>Unknown</span></label></div></div>
+        <div class="form-field"><label class="field-label">15c. Red team exercises employed?</label><div class="yes-no-unknown"><label><input type="radio" name="redteam" value="yes" data-section="pentesting"><span>Yes</span></label><label><input type="radio" name="redteam" value="no" data-section="pentesting"><span>No</span></label><label><input type="radio" name="redteam" value="unknown" data-section="pentesting"><span>Unknown</span></label></div></div>
+      </div>
+
+      <!-- Form Actions -->
+      <div class="form-actions">
+        <button class="btn btn-secondary" onclick="saveDraft()">💾 Save Draft</button>
+        <button class="btn btn-primary" onclick="completeForm()">✅ Complete & Export PDF</button>
+      </div>
+    </div>
+
+    <!-- Interview Panel -->
+    <div class="interview-panel">
+      <div class="interview-header">
+        <h3>Interview Simulator</h3>
+        <p>Group stakeholder briefing - ask questions and the right person will respond</p>
+      </div>
+      <div class="stakeholder-list" id="stakeholderList">
+        <div class="stakeholder-list-label">Stakeholders Present:</div>
+        <div class="stakeholder-chips" id="stakeholderChips">
+          <span class="stakeholder-chip loading">Loading stakeholders...</span>
+        </div>
+      </div>
+      <div class="quick-questions" id="quickQuestions">
+        <button class="quick-question-btn" onclick="askQuick('Can you give me an overview of the organization?')">Overview?</button>
+        <button class="quick-question-btn" onclick="askQuick('What are your biggest security concerns?')">Concerns?</button>
+        <button class="quick-question-btn" onclick="askQuick('What IT systems and servers do you use?')">IT Systems?</button>
+        <button class="quick-question-btn" onclick="askQuick('What compliance requirements apply to you?')">Compliance?</button>
+        <button class="quick-question-btn" onclick="askQuick('How do you handle employee onboarding and offboarding?')">HR Process?</button>
+        <button class="quick-question-btn" onclick="askQuick('What is the annual budget for cybersecurity?')">Budget?</button>
+      </div>
+      <div class="interview-messages" id="chatMessages">
+        <div class="message message-ai">
+          <div class="message-bubble">Welcome to the stakeholder briefing. All key personnel are present and ready to answer your questions about the organization's security posture. Direct your questions to gather information for the intake form.</div>
+          <div class="message-stakeholder">-- System</div>
+        </div>
+      </div>
+      <div class="interview-input">
+        <div class="input-group">
+          <input type="text" id="questionInput" placeholder="Ask a question to the stakeholders..." onkeypress="if(event.key==='Enter') sendQuestion()">
+          <button id="sendBtn" onclick="sendQuestion()">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/js/app.js"></script>
+  <script src="/js/intake-form.js"></script>
+</body>
+</html>

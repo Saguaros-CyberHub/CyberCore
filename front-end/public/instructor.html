@@ -1,0 +1,3346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Instructor Dashboard | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    /* Instructor Dashboard Specific Styles */
+    .instructor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    
+    .stat-card {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+    
+    .stat-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+    }
+    
+    .stat-icon.students { background: linear-gradient(135deg, #667eea, #764ba2); }
+    .stat-icon.pending { background: linear-gradient(135deg, #f093fb, #f5576c); }
+    .stat-icon.reviewed { background: linear-gradient(135deg, #4facfe, #00f2fe); }
+    .stat-icon.documents { background: linear-gradient(135deg, #43e97b, #38f9d7); }
+    
+    .stat-content h3 { font-size: 2rem; font-weight: 700; color: var(--gray-900); margin: 0; }
+    .stat-content p { font-size: 0.9rem; color: var(--gray-500); margin: 0.25rem 0 0; }
+    
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 0.5rem;
+      border-bottom: 2px solid var(--gray-200);
+      margin-bottom: 1.5rem;
+      padding-bottom: 0;
+    }
+    
+    .tab {
+      padding: 0.75rem 1.5rem;
+      cursor: pointer;
+      font-weight: 500;
+      color: var(--gray-500);
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+    
+    .tab:hover { color: var(--primary); }
+    .tab.active { 
+      color: var(--primary); 
+      border-bottom-color: var(--primary);
+      background: rgba(59, 130, 246, 0.05);
+    }
+    
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+    
+    /* Student Cards */
+    .student-card {
+      background: var(--bg-card, white);
+      border: 1px solid var(--gray-200);
+      border-radius: 12px;
+      padding: 1.25rem;
+      margin-bottom: 0.75rem;
+      transition: all 0.2s;
+      cursor: default;
+    }
+
+    .student-card:hover {
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .student-card.expanded {
+      border-color: var(--primary, #3b82f6);
+      box-shadow: 0 4px 16px rgba(59,130,246,0.12);
+    }
+
+    .student-detail-panel {
+      animation: slideDown 0.2s ease-out;
+    }
+    @keyframes slideDown {
+      from { opacity: 0; max-height: 0; }
+      to { opacity: 1; max-height: 2000px; }
+    }
+    
+    .student-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      margin-bottom: 1rem;
+    }
+    
+    .student-info h4 { 
+      margin: 0 0 0.25rem; 
+      font-size: 1.1rem;
+      color: var(--gray-900);
+    }
+    
+    .student-info p { 
+      margin: 0; 
+      font-size: 0.85rem; 
+      color: var(--gray-500); 
+    }
+    
+    .student-profile {
+      background: var(--gray-100);
+      padding: 0.25rem 0.75rem;
+      border-radius: 1rem;
+      font-size: 0.8rem;
+      color: var(--gray-700);
+    }
+    
+    .progress-summary {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1rem;
+      margin: 1rem 0;
+      padding: 1rem;
+      background: var(--gray-50);
+      border-radius: 8px;
+    }
+    
+    .progress-item { text-align: center; }
+    .progress-item .value { 
+      font-size: 1.5rem; 
+      font-weight: 700; 
+      color: var(--primary);
+    }
+    .progress-item .label { 
+      font-size: 0.75rem; 
+      color: var(--gray-500);
+      text-transform: uppercase;
+    }
+    
+    .student-actions {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    
+    /* Review Queue Items */
+    .review-item {
+      background: var(--bg-card, white);
+      border: 1px solid var(--gray-200);
+      border-left: 4px solid var(--warning);
+      padding: 1.25rem;
+      border-radius: 0 8px 8px 0;
+      margin-bottom: 1rem;
+      transition: all 0.2s;
+    }
+    
+    .review-item:hover {
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    
+    .review-item.reviewed {
+      border-left-color: var(--success);
+      opacity: 0.7;
+    }
+    
+    .review-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    
+    .review-meta .student { 
+      font-weight: 600; 
+      color: var(--gray-900);
+    }
+    
+    .review-meta .time-ago {
+      color: var(--gray-500);
+      font-size: 0.85rem;
+    }
+    
+    .review-details {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      margin-bottom: 1rem;
+    }
+    
+    .review-details .badge {
+      padding: 0.25rem 0.75rem;
+      border-radius: 1rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    
+    .review-actions {
+      display: flex;
+      gap: 0.5rem;
+    }
+    
+    /* Document Generation */
+    .document-section {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      border: 1px solid var(--gray-200);
+    }
+    
+    .document-section h4 {
+      margin: 0 0 1rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    
+    .document-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+    }
+    
+    .document-card {
+      background: var(--gray-50);
+      border: 1px dashed var(--gray-300);
+      border-radius: 8px;
+      padding: 1.5rem;
+      text-align: center;
+      transition: all 0.2s;
+    }
+    
+    .document-card:hover {
+      border-color: var(--primary);
+      background: rgba(59, 130, 246, 0.05);
+    }
+    
+    .document-card .icon {
+      font-size: 2rem;
+      margin-bottom: 0.5rem;
+    }
+    
+    .document-card .name {
+      font-weight: 600;
+      color: var(--gray-900);
+      margin-bottom: 0.25rem;
+    }
+    
+    .document-card .desc {
+      font-size: 0.8rem;
+      color: var(--gray-500);
+      margin-bottom: 1rem;
+    }
+    
+    .document-card .status {
+      font-size: 0.75rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      display: inline-block;
+    }
+    
+    .document-card .status.generated {
+      background: #d1fae5;
+      color: #065f46;
+    }
+    
+    .document-card .status.not-generated {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    
+    /* Add Student Modal */
+    .modal-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    
+    .modal-overlay.active { display: flex; }
+    
+    .modal-content {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 2rem;
+      width: 100%;
+      max-width: 500px;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+    }
+    
+    .modal-header h3 { margin: 0; }
+    .modal-close {
+      background: none;
+      border: none;
+      font-size: 1.5rem;
+      cursor: pointer;
+      color: var(--gray-500);
+    }
+    
+    .form-group {
+      margin-bottom: 1.25rem;
+    }
+    
+    .form-group label {
+      display: block;
+      font-weight: 500;
+      margin-bottom: 0.5rem;
+      color: var(--gray-700);
+    }
+    
+    .form-group input,
+    .form-group select,
+    .form-group textarea {
+      width: 100%;
+      padding: 0.75rem;
+      border: 1px solid var(--gray-300);
+      border-radius: 8px;
+      font-size: 0.95rem;
+    }
+    
+    .form-group input:focus,
+    .form-group select:focus,
+    .form-group textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+    }
+    
+    /* Review Modal */
+    .rubric-section {
+      background: var(--gray-50);
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+    
+    .rubric-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--gray-200);
+    }
+    
+    .rubric-item:last-child { border-bottom: none; }
+    
+    .rubric-item label { flex: 1; }
+    
+    .rubric-item input {
+      width: 60px;
+      text-align: center;
+    }
+    
+    .rubric-item .max-points {
+      color: var(--gray-500);
+      font-size: 0.85rem;
+      margin-left: 0.5rem;
+    }
+    
+    /* Empty States */
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: var(--gray-500);
+    }
+    
+    .empty-state .icon { font-size: 3rem; margin-bottom: 1rem; }
+    .empty-state h3 { color: var(--gray-700); margin-bottom: 0.5rem; }
+    .empty-state p { margin-bottom: 1.5rem; }
+    
+    /* Responsive */
+    @media (max-width: 768px) {
+      .instructor-grid { grid-template-columns: 1fr 1fr; }
+      .progress-summary { grid-template-columns: 1fr; }
+      .tabs { flex-wrap: wrap; }
+    }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .stat-card {
+      background: #111527;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .tabs {
+      border-bottom-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .tab {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .tab:hover {
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .tab.active {
+      color: #5b8cff;
+      border-bottom-color: #5b8cff;
+      background: rgba(91,140,255,0.08);
+    }
+    [data-theme="dark"] .student-card {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .student-card:hover {
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .progress-summary {
+      background: #0a0d1a;
+    }
+    [data-theme="dark"] .review-item {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .review-item:hover {
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .review-item.reviewed {
+      opacity: 0.6;
+    }
+    [data-theme="dark"] .document-section {
+      background: #111527;
+      border-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .document-card {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .document-card:hover {
+      border-color: #5b8cff;
+      background: rgba(91,140,255,0.08);
+    }
+    [data-theme="dark"] .document-card .status.generated {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .document-card .status.not-generated {
+      background: rgba(255,184,48,0.15);
+      color: #ffb830;
+    }
+    [data-theme="dark"] .modal-content {
+      background: #111527;
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .rubric-section {
+      background: #0a0d1a;
+    }
+    [data-theme="dark"] .rubric-item {
+      border-bottom-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .form-group input,
+    [data-theme="dark"] .form-group select,
+    [data-theme="dark"] .form-group textarea {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    [data-theme="dark"] .form-group input:focus,
+    [data-theme="dark"] .form-group select:focus,
+    [data-theme="dark"] .form-group textarea:focus {
+      border-color: #5b8cff;
+      box-shadow: 0 0 0 3px rgba(91,140,255,0.15);
+    }
+    [data-theme="dark"] .empty-state {
+      color: #8890b0;
+    }
+    [data-theme="dark"] .empty-state h3 {
+      color: #b8c0d8;
+    }
+    [data-theme="dark"] .empty-state p {
+      color: #8890b0;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Instructor Dashboard</h1>
+            <p class="page-subtitle">Manage students, review submissions, and generate assessment documents.</p>
+          </div>
+          <div>
+            <button class="btn btn-primary" onclick="showAddStudentModal()">+ Add Student</button>
+          </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+          <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
+          <div class="tab" data-tab="students" onclick="switchTab('students')">Students</div>
+          <div class="tab" data-tab="reviews" onclick="switchTab('reviews')">Review Queue</div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: DASHBOARD                                                -->
+        <!-- ============================================================ -->
+        <div class="tab-content active" id="tab-dashboard">
+
+          <!-- Stats Grid -->
+          <div class="instructor-grid" id="statsGrid">
+            <div class="stat-card">
+              <div class="stat-icon students">👥</div>
+              <div class="stat-content">
+                <h3 id="totalStudents">0</h3>
+                <p>Total Students</p>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon pending">📋</div>
+              <div class="stat-content">
+                <h3 id="pendingReviews">0</h3>
+                <p>Pending Reviews</p>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon reviewed">✅</div>
+              <div class="stat-content">
+                <h3 id="completedReviews">0</h3>
+                <p>Completed Reviews</p>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-icon documents">📄</div>
+              <div class="stat-content">
+                <h3 id="generatedDocs">0</h3>
+                <p>Documents Generated</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Action Items -->
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header">
+              <span class="card-title">Action Items</span>
+            </div>
+            <div class="card-body" id="actionItemsContent">
+              <div class="empty-state">
+                <div class="icon">✅</div>
+                <h3>All Caught Up</h3>
+                <p>Nothing needs your attention right now.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- My Groups -->
+          <div class="card">
+            <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
+              <span class="card-title">My Groups</span>
+              <button class="btn btn-outline btn-sm" onclick="showJoinGroupModal()">Join Group</button>
+            </div>
+            <div class="card-body" id="myGroupsContent">
+              <div class="empty-state">
+                <div class="icon">📋</div>
+                <h3>No Groups</h3>
+                <p>You haven't joined any groups yet.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: STUDENTS                                                 -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-students">
+          <!-- Search/Filter Bar -->
+          <div class="card" style="margin-bottom: 1rem;">
+            <div class="card-body" style="padding: 1rem;">
+              <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                <div style="flex: 1; min-width: 250px;">
+                  <input type="text" id="studentSearch" class="form-input" placeholder="Search by name or email..." oninput="filterStudents()">
+                </div>
+                <div>
+                  <select id="studentFilter" class="form-input" onchange="filterStudents()">
+                    <option value="all">All Students</option>
+                    <option value="mine">My Students</option>
+                    <option value="unassigned">Unassigned</option>
+                    <option value="has-profiles">Has Profiles</option>
+                    <option value="pending">Has Pending Reviews</option>
+                  </select>
+                </div>
+                <div>
+                  <span id="studentCount" style="color: var(--gray-500); font-size: 0.9rem;">0 students</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div id="studentsList">
+            <div class="empty-state">
+              <div class="icon">👥</div>
+              <h3>No Students Found</h3>
+              <p>No students match your search criteria.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: REVIEW QUEUE                                             -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-reviews">
+          <div id="reviewQueue">
+            <div class="empty-state">
+              <div class="icon">✅</div>
+              <h3>All Caught Up!</h3>
+              <p>No pending submissions to review.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Hidden containers for document generation (used by student detail panel) -->
+        <div id="docProfileSelect" style="display:none;"></div>
+        <div id="documentGrid" style="display:none;"></div>
+        <div id="generatedDocsList" style="display:none;"></div>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Add Student Modal -->
+  <div class="modal-overlay" id="addStudentModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Add Student to Roster</h3>
+        <button class="modal-close" onclick="closeModal('addStudentModal')">&times;</button>
+      </div>
+      <form id="addStudentForm" onsubmit="submitAddStudent(event)">
+        <div class="form-group">
+          <label for="studentEmail">Student Email</label>
+          <input type="email" id="studentEmail" required placeholder="student@example.edu">
+        </div>
+        <div class="form-group">
+          <label for="assignProfile">Assign Profile (Optional)</label>
+          <select id="assignProfile">
+            <option value="">-- Select a profile --</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="dueDate">Due Date (Optional)</label>
+          <input type="date" id="dueDate">
+        </div>
+        <div class="form-group">
+          <label for="assignNotes">Notes</label>
+          <textarea id="assignNotes" rows="3" placeholder="Any special instructions..."></textarea>
+        </div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('addStudentModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add Student</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Review Modal -->
+  <div class="modal-overlay" id="reviewModal">
+    <div class="modal-content" style="max-width: 600px;">
+      <div class="modal-header">
+        <h3>Review Submission</h3>
+        <button class="modal-close" onclick="closeModal('reviewModal')">&times;</button>
+      </div>
+      <div id="reviewModalContent">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Assign Profile Modal -->
+  <div class="modal-overlay" id="assignProfileModal">
+    <div class="modal-content" style="max-width: 500px;">
+      <div class="modal-header">
+        <h3>Assign Profile to Student</h3>
+        <button class="modal-close" onclick="closeModal('assignProfileModal')">&times;</button>
+      </div>
+      <div id="assignProfileModalContent">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Generate Documents Modal -->
+  <div class="modal-overlay" id="generateDocsModal">
+    <div class="modal-content" style="max-width: 550px;">
+      <div class="modal-header">
+        <h3>📄 Generate Assessment Documents</h3>
+        <button class="modal-close" onclick="closeModal('generateDocsModal')">&times;</button>
+      </div>
+      <div id="generateDocsModalContent">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- View Student Documents Modal -->
+  <div class="modal-overlay" id="viewDocsModal">
+    <div class="modal-content" style="max-width: 600px; max-height: 85vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3>📥 Student Documents</h3>
+        <button class="modal-close" onclick="closeModal('viewDocsModal')">&times;</button>
+      </div>
+      <div id="viewDocsModalContent">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- View Progress Modal -->
+  <div class="modal-overlay" id="viewProgressModal">
+    <div class="modal-content" style="max-width: 700px; max-height: 85vh; overflow-y: auto;">
+      <div class="modal-header">
+        <h3>📊 Student Progress</h3>
+        <button class="modal-close" onclick="closeModal('viewProgressModal')">&times;</button>
+      </div>
+      <div id="viewProgressModalContent">
+        <!-- Populated dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Answer Key Modal -->
+  <div class="modal-overlay" id="answerKeyModal">
+    <div class="modal-content" style="max-width: 900px; max-height: 90vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
+        <h3 style="margin: 0;">📝 Answer Key — <span id="answerKeyProfileName"></span></h3>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-sm" id="regenerateAnswerKeyBtn" onclick="regenerateAnswerKey()" style="font-size: 0.8rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent; display: none;">
+            🔄 Regenerate
+          </button>
+          <button class="btn btn-sm btn-primary" id="downloadPacketBtn" onclick="downloadPacketPdf()" style="font-size: 0.8rem;">
+            📥 Download Packet PDF
+          </button>
+          <button class="modal-close" onclick="closeModal('answerKeyModal')">&times;</button>
+        </div>
+      </div>
+      <div style="display: flex; flex: 1; overflow: hidden; gap: 0;">
+        <!-- Part sidebar -->
+        <div id="answerKeySidebar" style="width: 220px; min-width: 220px; border-right: 1px solid #e2e8f0; overflow-y: auto; padding: 0.5rem 0;">
+        </div>
+        <!-- Content area -->
+        <div id="answerKeyContent" style="flex: 1; overflow-y: auto; padding: 1.5rem;">
+          <div class="empty-state">
+            <div class="icon">📝</div>
+            <h3>Select a Part</h3>
+            <p>Choose a part from the sidebar to view the generated answer key.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    .ak-part-item { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; transition: all 0.15s; font-size: 0.9em; }
+    .ak-part-item:hover { background: #f7fafc; }
+    .ak-part-item.active { background: #ebf8ff; border-left-color: #3182ce; font-weight: 600; }
+    .ak-part-item .part-num { color: #718096; font-size: 0.8em; }
+    .ak-option-block { margin-bottom: 2rem; }
+    .ak-option-block h4 { color: #2d3748; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 12px; }
+    .ak-deliverable { background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+    .ak-deliverable-label { font-size: 0.8em; color: #718096; margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .ak-deliverable-content { line-height: 1.6; }
+    .ak-deliverable-content p { margin-bottom: 8px; }
+    .ak-deliverable-content table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
+    .ak-deliverable-content th { background: #2d3748; color: #fff; padding: 6px 10px; text-align: left; }
+    .ak-deliverable-content td { padding: 6px 10px; border-bottom: 1px solid #e2e8f0; }
+    .ak-deliverable-content ul, .ak-deliverable-content ol { margin: 6px 0 6px 20px; }
+  </style>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    // ============================================================================
+    // INSTRUCTOR DASHBOARD JAVASCRIPT
+    // ============================================================================
+    
+    let dashboardData = null;
+    let allProfiles = [];
+    
+    // Initialize
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!await Auth.requireAuth()) return;
+      
+      // Check if user is instructor/admin
+      const user = Auth.getUser();
+      if (user.role !== 'instructor' && user.role !== 'admin') {
+        Toast.error('Access Denied', 'You must be an instructor to access this page');
+        window.location.href = '/dashboard';
+        return;
+      }
+      
+      await loadDashboard();
+      await loadProfiles();
+      loadDashboardTab();
+    });
+    
+    // Load dashboard data
+    async function loadDashboard() {
+      try {
+        const response = await API.instructor.dashboard();
+        dashboardData = response.dashboard;
+        
+        // Update stats
+        document.getElementById('totalStudents').textContent = dashboardData.total_students || 0;
+        document.getElementById('pendingReviews').textContent = dashboardData.pending_reviews || 0;
+        
+        // Calculate completed reviews
+        let completedReviews = 0;
+        if (dashboardData.students) {
+          completedReviews = dashboardData.students.reduce((acc, s) => acc + (parseInt(s.completed_reviews) || 0), 0);
+        }
+        document.getElementById('completedReviews').textContent = completedReviews;
+        
+        // Render students list
+        renderStudentsList();
+        
+        // Render review queue
+        renderReviewQueue();
+        
+        // Render recent submissions in overview
+        renderRecentSubmissions();
+        
+      } catch (error) {
+        console.error('Failed to load dashboard:', error);
+        Toast.error('Error', 'Failed to load instructor dashboard');
+      }
+    }
+    
+    // Load all profiles for dropdowns
+    async function loadProfiles() {
+      try {
+        const response = await API.profiles.list();
+        allProfiles = response.profiles || [];
+        
+        // Populate dropdowns with more identifying info
+        const options = allProfiles.map(p => {
+          // Build a descriptive name from available fields
+          let displayName = p.company_name || p.name;
+          if (!displayName) {
+            // Fallback to other identifying fields
+            const parts = [];
+            if (p.industry) parts.push(p.industry);
+            if (p.client_type_name) parts.push(p.client_type_name);
+            if (p.difficulty) parts.push(p.difficulty);
+            displayName = parts.length > 0 ? parts.join(' - ') : `Profile ${p.id?.substring(0, 8) || 'Unknown'}`;
+          }
+          
+          // Add extra context
+          const extras = [];
+          if (p.company_name && p.industry) extras.push(p.industry);
+          if (p.difficulty) extras.push(p.difficulty);
+          const extraStr = extras.length > 0 ? ` (${extras.join(', ')})` : '';
+          
+          return `<option value="${p.id}">${displayName}${extraStr}</option>`;
+        }).join('');
+        
+        document.getElementById('assignProfile').innerHTML = 
+          '<option value="">-- Select a profile --</option>' + options;
+        document.getElementById('docProfileSelect').innerHTML = 
+          '<option value="">-- Select a profile --</option>' + options;
+          
+        // Enable generate button and load documents when profile selected
+        document.getElementById('docProfileSelect').addEventListener('change', async function() {
+          const profileId = this.value;
+          document.getElementById('generateDocsBtn').disabled = !profileId;
+          document.getElementById('downloadPdfBtn').disabled = true;
+          document.getElementById('generateExamplesBtn').disabled = !profileId;
+          document.getElementById('viewExamplesBtn').style.display = 'none';
+
+          if (profileId) {
+            // Load existing documents for this profile
+            await loadProfileDocuments(profileId);
+            // Check for existing examples
+            await checkExistingExamples(profileId);
+          } else {
+            // Clear document displays
+            document.getElementById('documentGrid').innerHTML = '';
+            document.getElementById('generatedDocsList').innerHTML = `
+              <div class="empty-state">
+                <div class="icon">📄</div>
+                <h3>No Documents Generated</h3>
+                <p>Select a profile and click "Generate All Documents" to create assessment files.</p>
+              </div>
+            `;
+          }
+        });
+        
+      } catch (error) {
+        console.error('Failed to load profiles:', error);
+      }
+    }
+    
+    // Render students list
+    let expandedStudentId = null;
+
+    function renderStudentsList() {
+      const container = document.getElementById('studentsList');
+      const students = getFilteredStudents();
+      const currentUserId = Auth.getUser()?.sub;
+
+      document.getElementById('studentCount').textContent = `${students.length} student${students.length !== 1 ? 's' : ''}`;
+
+      if (!students || students.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <div class="icon">👥</div>
+            <h3>No Students Found</h3>
+            <p>No students match your search criteria.</p>
+          </div>`;
+        return;
+      }
+
+      container.innerHTML = students.map(student => {
+        const profiles = student.generated_profiles || [];
+        const watchers = student.watching_instructors || [];
+        const assignments = student.assignments || [];
+        const isMyStudent = watchers.some(w => w.instructor_id === currentUserId) ||
+                            assignments.some(a => a.instructor_id === currentUserId);
+        const displayName = student.student_name?.trim() || 'Unnamed Student';
+        const isExpanded = expandedStudentId === student.student_id;
+        const esc = s => (s||'').replace(/'/g, "\\'");
+
+        // Instructor badges
+        const uniqueInstructors = {};
+        for (const a of assignments) { if (a.instructor_id) uniqueInstructors[a.instructor_id] = { name: a.instructor_name, email: a.instructor_email }; }
+        for (const w of watchers) { if (w.instructor_id) uniqueInstructors[w.instructor_id] = { name: w.instructor_name, email: w.instructor_email }; }
+        const instructorList = Object.entries(uniqueInstructors);
+
+        return `
+        <div class="student-card ${isExpanded ? 'expanded' : ''}" data-student-id="${student.student_id}" style="${isExpanded ? 'border-color: var(--primary, #3b82f6); box-shadow: 0 4px 12px rgba(59,130,246,0.15);' : ''}">
+          <!-- Clickable header row -->
+          <div style="display: flex; align-items: center; gap: 1rem; cursor: pointer;" onclick="toggleStudentPanel('${student.student_id}')">
+            <div style="flex: 1;">
+              <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <h4 style="margin: 0;">${displayName}</h4>
+                ${isMyStudent ? '<span class="badge badge-success" style="font-size: 0.7rem;">Yours</span>' : ''}
+              </div>
+              <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.15rem;">${student.student_email}${student.organization ? ` · ${student.organization}` : ''}</div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 1rem;">
+              <div style="text-align: center; font-size: 0.75rem; color: var(--gray-500);">
+                <div style="font-weight: 700; font-size: 1rem; color: var(--gray-700);">${student.parts_started || 0}/8</div>
+                Parts
+              </div>
+              <div style="text-align: center; font-size: 0.75rem; color: var(--gray-500);">
+                <div style="font-weight: 700; font-size: 1rem; color: ${(student.pending_reviews || 0) > 0 ? '#d69e2e' : 'var(--gray-700)'};">${student.pending_reviews || 0}</div>
+                Pending
+              </div>
+              <div style="text-align: center; font-size: 0.75rem; color: var(--gray-500);">
+                <div style="font-weight: 700; font-size: 1rem; color: var(--gray-700);">${profiles.length}</div>
+                Profiles
+              </div>
+              <div style="font-size: 1.2rem; color: var(--gray-400); transition: transform 0.2s; transform: rotate(${isExpanded ? '180' : '0'}deg);">▼</div>
+            </div>
+          </div>
+
+          <!-- Instructor badges row -->
+          <div style="margin-top: 0.5rem; display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center;">
+            ${instructorList.length > 0
+              ? instructorList.map(([id, inst]) =>
+                  `<span class="badge ${id === currentUserId ? 'badge-blue' : 'badge-gray'}" style="font-size: 0.65rem;" title="${inst.email || ''}">${(inst.name || inst.email || '').trim() || 'Unknown'}</span>`
+                ).join('')
+              : `<span style="font-size: 0.7rem; color: var(--gray-400);">No instructor</span>`}
+            ${!isMyStudent
+              ? `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; background: #4299e1; color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); claimStudent('${student.student_id}')">+ Claim</button>`
+              : `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; border: 1px solid #cbd5e0; color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); releaseStudent('${student.student_id}')">Release</button>`}
+          </div>
+
+          <!-- Expandable detail panel -->
+          ${isExpanded ? `
+          <div class="student-detail-panel" style="margin-top: 1rem; border-top: 1px solid #e2e8f0; padding-top: 1rem;">
+            <!-- Quick actions -->
+            <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
+              <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); showAssignModal('${student.student_id}', '${student.student_email}', '${esc(displayName)}')">Assign Profile</button>
+              <button class="btn btn-sm btn-outline" onclick="event.stopPropagation(); viewStudentProgress('${student.student_id}')">Full Progress View</button>
+              ${profiles.length > 0 ? `
+              <button class="btn btn-sm btn-outline" onclick="event.stopPropagation(); showAnswerKeyModal('${student.student_id}', '${esc(displayName)}')">Answer Key</button>
+              ` : ''}
+            </div>
+
+            <!-- Sub-tabs -->
+            <div style="display: flex; gap: 0; border-bottom: 2px solid #e2e8f0; margin-bottom: 1rem;">
+              <button class="detail-subtab active" data-subtab="progress" onclick="event.stopPropagation(); switchDetailSubtab('${student.student_id}', 'progress', this)" style="padding: 0.5rem 1rem; border: none; background: none; font-size: 0.85rem; font-weight: 500; color: var(--gray-500); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;">Progress</button>
+              <button class="detail-subtab" data-subtab="documents" onclick="event.stopPropagation(); switchDetailSubtab('${student.student_id}', 'documents', this)" style="padding: 0.5rem 1rem; border: none; background: none; font-size: 0.85rem; font-weight: 500; color: var(--gray-500); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;">Documents</button>
+              <button class="detail-subtab" data-subtab="labs" onclick="event.stopPropagation(); switchDetailSubtab('${student.student_id}', 'labs', this)" style="padding: 0.5rem 1rem; border: none; background: none; font-size: 0.85rem; font-weight: 500; color: var(--gray-500); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;">Labs</button>
+            </div>
+
+            <div id="detail-content-${student.student_id}">
+              <p style="color: var(--gray-500); font-size: 0.85rem;">Loading...</p>
+            </div>
+          </div>
+          ` : ''}
+        </div>`;
+      }).join('');
+
+      // Auto-load detail content for expanded student
+      if (expandedStudentId) {
+        loadDetailSubtab(expandedStudentId, 'progress');
+      }
+    }
+
+    function toggleStudentPanel(studentId) {
+      if (expandedStudentId === studentId) {
+        expandedStudentId = null;
+      } else {
+        expandedStudentId = studentId;
+      }
+      renderStudentsList();
+    }
+
+    function switchDetailSubtab(studentId, subtab, btn) {
+      // Update active state on sub-tab buttons
+      const card = btn.closest('.student-card');
+      card.querySelectorAll('.detail-subtab').forEach(b => {
+        b.style.color = 'var(--gray-500)';
+        b.style.borderBottomColor = 'transparent';
+      });
+      btn.style.color = 'var(--primary, #3b82f6)';
+      btn.style.borderBottomColor = 'var(--primary, #3b82f6)';
+
+      loadDetailSubtab(studentId, subtab);
+    }
+
+    async function loadDetailSubtab(studentId, subtab) {
+      const container = document.getElementById(`detail-content-${studentId}`);
+      if (!container) return;
+      container.innerHTML = '<p style="color: var(--gray-500); font-size: 0.85rem;">Loading...</p>';
+
+      // Also set first subtab button as active visually
+      const card = container.closest('.student-card');
+      if (card) {
+        card.querySelectorAll('.detail-subtab').forEach(b => {
+          const isActive = b.dataset.subtab === subtab;
+          b.style.color = isActive ? 'var(--primary, #3b82f6)' : 'var(--gray-500)';
+          b.style.borderBottomColor = isActive ? 'var(--primary, #3b82f6)' : 'transparent';
+        });
+      }
+
+      if (subtab === 'progress') {
+        await loadStudentProgressInline(studentId, container);
+      } else if (subtab === 'documents') {
+        await loadStudentDocsInline(studentId, container);
+      } else if (subtab === 'labs') {
+        await loadStudentLabsInline(studentId, container);
+      }
+    }
+
+    async function loadStudentProgressInline(studentId, container) {
+      try {
+        const data = await API.instructor.studentProgress(studentId);
+        if (!data.progress || data.progress.length === 0) {
+          container.innerHTML = '<p style="color: var(--gray-400); font-size: 0.85rem;">No assessment progress yet.</p>';
+          return;
+        }
+
+        const partNames = ['', 'Risk Assessment', 'Security Policies', 'Access Control', 'Network Security', 'Incident Response', 'Business Continuity', 'Compliance', 'Executive Summary'];
+        container.innerHTML = `
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem;">
+            ${[1,2,3,4,5,6,7,8].map(partNum => {
+              const p = data.progress.find(x => x.part_number === partNum);
+              const status = p?.status || 'not_started';
+              const statusColors = { not_started: '#cbd5e0', in_progress: '#4299e1', submitted: '#d69e2e', reviewed: '#38a169', revision_requested: '#e53e3e' };
+              const statusLabels = { not_started: 'Not Started', in_progress: 'In Progress', submitted: 'Submitted', reviewed: 'Reviewed', revision_requested: 'Revision Needed' };
+              return `
+                <div style="padding: 0.6rem 0.75rem; border-radius: 8px; border: 1px solid #e2e8f0; border-left: 4px solid ${statusColors[status]};">
+                  <div style="font-weight: 600; font-size: 0.8rem;">Part ${partNum}</div>
+                  <div style="font-size: 0.75rem; color: var(--gray-500);">${partNames[partNum] || ''}</div>
+                  <div style="font-size: 0.7rem; margin-top: 0.25rem; color: ${statusColors[status]}; font-weight: 600;">${statusLabels[status]}</div>
+                  ${p?.score ? `<div style="font-size: 0.7rem; color: var(--gray-500);">Score: ${p.score}</div>` : ''}
+                </div>`;
+            }).join('')}
+          </div>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error loading progress: ${e.message}</p>`;
+      }
+    }
+
+    async function loadStudentDocsInline(studentId, container) {
+      const student = (dashboardData?.students || []).find(s => s.student_id === studentId);
+      const profiles = student?.generated_profiles || [];
+
+      if (profiles.length === 0) {
+        container.innerHTML = '<p style="color: var(--gray-400); font-size: 0.85rem;">No profiles generated — no documents available.</p>';
+        return;
+      }
+
+      let html = '';
+      for (const profile of profiles) {
+        try {
+          const resp = await fetch(`/api/instructor/documents/${profile.profile_id}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          });
+          const docs = resp.ok ? await resp.json() : [];
+
+          html += `
+            <div style="margin-bottom: 1rem; padding: 0.75rem; background: var(--gray-50, #f7fafc); border-radius: 8px;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                <strong style="font-size: 0.85rem;">${profile.company_name || 'Unnamed'}</strong>
+                <div style="display: flex; gap: 0.4rem;">
+                  <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); generateDocsForProfile('${profile.profile_id}', '${studentId}')">Generate</button>
+                  <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); window.open('/api/profiles/${profile.profile_id}/documents/pdf', '_blank')">PDF</button>
+                </div>
+              </div>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                ${Array.isArray(docs) && docs.length > 0
+                  ? docs.map(d => `<span class="badge badge-success" style="font-size: 0.7rem;">${(d.document_type || d.doc_type || '').toUpperCase()}</span>`).join('')
+                  : '<span style="font-size: 0.75rem; color: var(--gray-400);">No documents generated yet</span>'}
+              </div>
+            </div>`;
+        } catch (e) {
+          html += `<div style="margin-bottom: 0.5rem; padding: 0.5rem; color: var(--gray-400); font-size: 0.8rem;">${profile.company_name || 'Unnamed'} — could not load docs</div>`;
+        }
+      }
+      container.innerHTML = html || '<p style="color: var(--gray-400); font-size: 0.85rem;">No documents found.</p>';
+    }
+
+    async function loadStudentLabsInline(studentId, container) {
+      try {
+        const lanes = await API.request('/instructor/lanes');
+        const studentLanes = lanes.filter(l => l.user_id === studentId);
+
+        if (studentLanes.length === 0) {
+          container.innerHTML = '<p style="color: var(--gray-400); font-size: 0.85rem;">No lab environment deployed for this student.</p>';
+          return;
+        }
+
+        container.innerHTML = studentLanes.map(l => {
+          const cfg = l.config || {};
+          const statusColors = { active: '#38a169', deploying: '#d69e2e', error: '#e53e3e', suspended: '#9f7aea', pending: '#4299e1' };
+          const inet = cfg.internet_enabled;
+          return `
+            <div style="padding: 0.75rem; background: var(--gray-50, #f7fafc); border-radius: 8px; margin-bottom: 0.5rem;">
+              <div style="display: flex; align-items: center; justify-content: space-between;">
+                <div>
+                  <span style="display: inline-block; padding: 0.1rem 0.4rem; border-radius: 8px; font-size: 0.7rem; font-weight: 600; color: white; background: ${statusColors[l.status] || '#718096'};">${l.status}</span>
+                  <span style="font-size: 0.8rem; margin-left: 0.5rem;">VXLAN ${l.vxlan_id || '—'}</span>
+                </div>
+                <div style="display: flex; gap: 0.4rem; align-items: center;">
+                  ${l.status === 'active' ? `
+                    <label style="display: flex; align-items: center; gap: 0.2rem; font-size: 0.75rem; cursor: pointer;">
+                      <input type="checkbox" ${inet ? 'checked' : ''} onchange="event.stopPropagation(); toggleLaneInternet('${l.lane_id}', this.checked)" style="width: auto;">
+                      Internet
+                    </label>
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); connectToLane('${l.lane_id}')">Connect</button>
+                  ` : ''}
+                  <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); fetchLaneIPsInline('${l.lane_id}', this)">IPs</button>
+                </div>
+              </div>
+              <div id="inline-ips-${l.lane_id}" style="margin-top: 0.25rem;"></div>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error: ${e.message}</p>`;
+      }
+    }
+
+    async function fetchLaneIPsInline(laneId) {
+      const ipContainer = document.getElementById(`inline-ips-${laneId}`);
+      if (!ipContainer) return;
+      ipContainer.innerHTML = '<span style="font-size: 0.75rem; color: var(--gray-500);">Loading IPs...</span>';
+      try {
+        const data = await API.request(`/instructor/lanes/${laneId}/ips`);
+        const ips = data.ips || {};
+        const entries = Object.entries(ips).filter(([, v]) => v);
+        ipContainer.innerHTML = entries.length > 0
+          ? entries.map(([k, v]) => `<span style="font-size: 0.75rem; margin-right: 0.75rem;"><strong>${k}:</strong> <code>${v}</code></span>`).join('')
+          : '<span style="font-size: 0.75rem; color: var(--gray-400);">No IPs found</span>';
+      } catch (e) {
+        ipContainer.innerHTML = '<span style="font-size: 0.75rem; color: #e53e3e;">Failed to load IPs</span>';
+      }
+    }
+
+    async function generateDocsForProfile(profileId, studentId) {
+      try {
+        Toast.info('Generating', 'Sending document generation request...');
+        const resp = await fetch(`/api/instructor/generate-documents`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ profile_id: profileId })
+        });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || 'Generation failed');
+        Toast.success('Generated', 'Documents generated successfully');
+        // Refresh the docs subtab
+        const container = document.getElementById(`detail-content-${studentId}`);
+        if (container) loadStudentDocsInline(studentId, container);
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // Get filtered students based on search and filter
+    function getFilteredStudents() {
+      if (!dashboardData || !dashboardData.students) return [];
+
+      const searchTerm = (document.getElementById('studentSearch')?.value || '').toLowerCase();
+      const filterType = document.getElementById('studentFilter')?.value || 'all';
+      const currentUserId = Auth.getUser()?.sub;
+
+      return dashboardData.students.filter(student => {
+        const fullName = student.student_name?.toLowerCase() || '';
+        const firstName = student.first_name?.toLowerCase() || '';
+        const lastName = student.last_name?.toLowerCase() || '';
+        const email = student.student_email?.toLowerCase() || '';
+
+        const matchesSearch = !searchTerm ||
+          fullName.includes(searchTerm) ||
+          firstName.includes(searchTerm) ||
+          lastName.includes(searchTerm) ||
+          email.includes(searchTerm);
+
+        if (!matchesSearch) return false;
+
+        const profiles = student.generated_profiles || [];
+        const assignments = student.assignments || [];
+        const watchers = student.watching_instructors || [];
+        const isMine = watchers.some(w => w.instructor_id === currentUserId) ||
+                       assignments.some(a => a.instructor_id === currentUserId);
+
+        switch (filterType) {
+          case 'mine':
+            return isMine;
+          case 'unassigned':
+            return Object.keys(getUniqueInstructors(student)).length === 0;
+          case 'has-profiles':
+            return profiles.length > 0;
+          case 'pending':
+            return (student.pending_reviews || 0) > 0;
+          default:
+            return true;
+        }
+      });
+    }
+
+    function getUniqueInstructors(student) {
+      const map = {};
+      for (const a of (student.assignments || [])) { if (a.instructor_id) map[a.instructor_id] = true; }
+      for (const w of (student.watching_instructors || [])) { if (w.instructor_id) map[w.instructor_id] = true; }
+      return map;
+    }
+
+    // Filter students (called by search/filter inputs)
+    function filterStudents() {
+      renderStudentsList();
+    }
+
+    // Claim/release student
+    async function claimStudent(studentId) {
+      try {
+        await API.request(`/instructor/claim-student`, { method: 'POST', body: { student_id: studentId } });
+        Toast.success('Claimed', 'Student added to your roster');
+        await loadDashboard();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function releaseStudent(studentId) {
+      if (!confirm('Remove this student from your roster?')) return;
+      try {
+        await API.request(`/instructor/release-student/${studentId}`, { method: 'DELETE' });
+        Toast.success('Released', 'Student removed from your roster');
+        await loadDashboard();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // View student's lab environments
+    // viewStudentLabs — now handled by inline detail panel
+
+    // Join Group modal
+    async function showJoinGroupModal() {
+      // Fetch all groups
+      try {
+        const groups = await API.request('/instructor/all-groups');
+        const body = document.getElementById('assignProfileModalContent');
+        document.querySelector('#assignProfileModal .modal-header h3').textContent = 'Join a Group';
+
+        if (groups.length === 0) {
+          body.innerHTML = '<p style="color: var(--gray-500);">No deployed groups found.</p>';
+          document.getElementById('assignProfileModal').classList.add('active');
+          return;
+        }
+
+        body.innerHTML = `
+          <p style="color: var(--gray-500); margin-bottom: 1rem;">Select a group to add yourself as an instructor. You'll be able to manage students and labs in that group.</p>
+          <div style="display: flex; flex-direction: column; gap: 0.75rem;">
+            ${groups.map(g => `
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: var(--gray-50); border-radius: 8px;">
+                <div>
+                  <strong>${g.group_name}</strong>
+                  <div style="font-size: 0.8rem; color: var(--gray-500);">${g.instructors} instructor(s), ${g.students} student(s)</div>
+                </div>
+                ${g.is_member
+                  ? '<span class="badge badge-success">Joined</span>'
+                  : `<button class="btn btn-sm btn-primary" onclick="joinGroup('${g.id}', '${g.group_name.replace(/'/g, "\\'")}')">Join</button>`}
+              </div>
+            `).join('')}
+          </div>`;
+
+        document.getElementById('assignProfileModal').classList.add('active');
+      } catch (e) {
+        Toast.error('Error', e.message);
+      }
+    }
+
+    async function joinGroup(groupId, groupName) {
+      try {
+        await API.request('/instructor/join-group', { method: 'POST', body: { group_id: groupId } });
+        Toast.success('Joined', `You are now an instructor in "${groupName}"`);
+        closeModal('assignProfileModal');
+        await loadDashboard();
+        loadScheduleTab();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+    
+    // Render review queue
+    function renderReviewQueue() {
+      const container = document.getElementById('reviewQueue');
+      
+      if (!dashboardData.pending_submissions || dashboardData.pending_submissions.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <div class="icon">✅</div>
+            <h3>All Caught Up!</h3>
+            <p>No pending submissions to review.</p>
+          </div>
+        `;
+        return;
+      }
+      
+      const partNames = {
+        1: 'Orientation', 2: 'Scoping', 3: 'Threats', 4: 'Vulnerabilities',
+        5: 'Risk Analysis', 6: 'Controls', 7: 'Reporting', 8: 'Reflection'
+      };
+      
+      container.innerHTML = dashboardData.pending_submissions.map(sub => `
+        <div class="review-item">
+          <div class="review-meta">
+            <span class="student">${sub.student_email}</span>
+            <span class="time-ago">${Utils.formatDateTime(sub.submitted_at)}</span>
+          </div>
+          <div class="review-details">
+            <span class="badge badge-primary">Part ${sub.part_number}: ${partNames[sub.part_number] || 'Unknown'}</span>
+            <span class="badge badge-info">${sub.profile_name}</span>
+          </div>
+          <div class="review-actions">
+            <button class="btn btn-sm btn-primary" onclick="openReviewModal('${sub.id}', ${sub.part_number})">
+              📝 Review
+            </button>
+            <button class="btn btn-sm btn-outline" onclick="viewSubmission('${sub.id}')">
+              👁️ View
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+    
+    // Render recent submissions for overview
+    function renderRecentSubmissions() {
+      const container = document.getElementById('recentSubmissions');
+      
+      const allSubmissions = dashboardData.pending_submissions || [];
+      
+      if (allSubmissions.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state">
+            <div class="icon">📭</div>
+            <h3>No Recent Submissions</h3>
+            <p>Student submissions will appear here.</p>
+          </div>
+        `;
+        return;
+      }
+      
+      // Show last 5
+      const recent = allSubmissions.slice(0, 5);
+      const partNames = {
+        1: 'Orientation', 2: 'Scoping', 3: 'Threats', 4: 'Vulnerabilities',
+        5: 'Risk Analysis', 6: 'Controls', 7: 'Reporting', 8: 'Reflection'
+      };
+      
+      container.innerHTML = recent.map(sub => `
+        <div class="review-item" style="border-left-width: 3px;">
+          <div class="review-meta">
+            <span class="student">${sub.student_email}</span>
+            <span class="time-ago">${Utils.formatDateTime(sub.submitted_at)}</span>
+          </div>
+          <div class="review-details">
+            <span class="badge badge-primary">Part ${sub.part_number}: ${partNames[sub.part_number]}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+    
+    // Tab switching
+    // ============================================================================
+    // DASHBOARD TAB
+    // ============================================================================
+
+    async function loadDashboardTab() {
+      renderActionItems();
+      await loadMyGroups();
+    }
+
+    function renderActionItems() {
+      const container = document.getElementById('actionItemsContent');
+      if (!dashboardData) { container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>'; return; }
+
+      const items = [];
+
+      // Pending reviews
+      const pending = dashboardData.pending_submissions || [];
+      if (pending.length > 0) {
+        items.push(`
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: #fffbeb; border-radius: 8px; border-left: 4px solid #d69e2e;">
+            <div>
+              <strong style="font-size: 0.9rem;">${pending.length} submission${pending.length > 1 ? 's' : ''} awaiting review</strong>
+              <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.15rem;">
+                ${pending.slice(0, 3).map(s => `${s.student_name || s.student_email} - Part ${s.part_number}`).join(', ')}${pending.length > 3 ? ` +${pending.length - 3} more` : ''}
+              </div>
+            </div>
+            <button class="btn btn-sm btn-primary" onclick="switchTab('reviews')">Review Now</button>
+          </div>`);
+      }
+
+      // Students with no profiles
+      const noProfiles = (dashboardData.students || []).filter(s => !(s.generated_profiles || []).length);
+      if (noProfiles.length > 0) {
+        items.push(`
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: #ebf8ff; border-radius: 8px; border-left: 4px solid #4299e1;">
+            <div>
+              <strong style="font-size: 0.9rem;">${noProfiles.length} student${noProfiles.length > 1 ? 's' : ''} without profiles</strong>
+              <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.15rem;">
+                ${noProfiles.slice(0, 4).map(s => s.student_name?.trim() || s.student_email).join(', ')}${noProfiles.length > 4 ? ` +${noProfiles.length - 4} more` : ''}
+              </div>
+            </div>
+            <button class="btn btn-sm btn-outline" onclick="switchTab('students')">View Students</button>
+          </div>`);
+      }
+
+      if (items.length === 0) {
+        container.innerHTML = `
+          <div class="empty-state" style="padding: 1.5rem;">
+            <div class="icon">✅</div>
+            <h3>All Caught Up</h3>
+            <p>Nothing needs your attention right now.</p>
+          </div>`;
+      } else {
+        container.innerHTML = `<div style="display: flex; flex-direction: column; gap: 0.75rem;">${items.join('')}</div>`;
+      }
+    }
+
+    async function loadMyGroups() {
+      const container = document.getElementById('myGroupsContent');
+      try {
+        instructorGroups = await API.request('/instructor/my-groups');
+        if (instructorGroups.length === 0) {
+          container.innerHTML = `
+            <div class="empty-state" style="padding: 1.5rem;">
+              <div class="icon">📋</div>
+              <h3>No Groups</h3>
+              <p>You haven't joined any groups yet. Click "Join Group" above to get started.</p>
+            </div>`;
+          return;
+        }
+
+        let html = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem;">';
+        for (const group of instructorGroups) {
+          let schedule = null;
+          try { schedule = await API.request(`/instructor/groups/${group.id}/schedule`); } catch (_) {}
+
+          const hasSched = schedule && schedule.active_days;
+          const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+          let scheduleHtml = '';
+          let overrideStatus = '';
+          if (hasSched) {
+            const days = schedule.active_days.map(d => dayNames[d]).join(', ');
+            overrideStatus = schedule.override_active === true
+              ? '<span class="badge badge-success" style="font-size: 0.7rem;">Override: ON</span>'
+              : schedule.override_active === false
+              ? '<span class="badge badge-danger" style="font-size: 0.7rem; background: #fed7d7; color: #9b2c2c;">Override: OFF</span>'
+              : '';
+            scheduleHtml = `
+              <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.5rem;">
+                ${days} ${schedule.active_start}–${schedule.active_end} (${schedule.timezone}) ${overrideStatus}
+              </div>`;
+          } else {
+            scheduleHtml = `<div style="font-size: 0.8rem; color: var(--gray-400); margin-top: 0.5rem;">No schedule set</div>`;
+          }
+
+          html += `
+            <div style="background: var(--gray-50, #f7fafc); border-radius: 10px; padding: 1rem; border: 1px solid #e2e8f0;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+                <strong>${group.group_name}</strong>
+                <span style="font-size: 0.8rem; color: var(--gray-500);">${group.students} students</span>
+              </div>
+              ${scheduleHtml}
+              <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.75rem;">
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem;" onclick="showScheduleModalInline('${group.id}', '${group.group_name.replace(/'/g, "\\'")}')">Set Schedule</button>
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; color: #38a169; border-color: #38a169;" onclick="instructorOverride('${group.id}', true)">Enable Access</button>
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; color: #e53e3e; border-color: #e53e3e;" onclick="instructorOverride('${group.id}', false)">Disable Access</button>
+                ${hasSched && schedule.override_active !== null ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem;" onclick="instructorOverride('${group.id}', null)">Clear Override</button>` : ''}
+              </div>
+            </div>`;
+        }
+        html += '</div>';
+        container.innerHTML = html;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    function showScheduleModalInline(groupId, groupName) {
+      // Reuse the assign profile modal for schedule form
+      const body = document.getElementById('assignProfileModalContent');
+      document.querySelector('#assignProfileModal .modal-header h3').textContent = `Schedule — ${groupName}`;
+
+      body.innerHTML = `
+        <div class="form-group">
+          <label>Active Days</label>
+          <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((d, i) => `
+              <label style="display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem;">
+                <input type="checkbox" class="sched-day-inline" value="${i}" ${[1,2,3,4,5].includes(i) ? 'checked' : ''} style="width: auto;">
+                ${d}
+              </label>
+            `).join('')}
+          </div>
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group"><label>Start Time</label><input type="time" id="schedStartInline" value="08:00" class="form-input"></div>
+          <div class="form-group"><label>End Time</label><input type="time" id="schedEndInline" value="17:00" class="form-input"></div>
+        </div>
+        <div class="form-group">
+          <label>Timezone</label>
+          <select id="schedTZInline" class="form-input">
+            <option value="America/Chicago">Central</option>
+            <option value="America/New_York">Eastern</option>
+            <option value="America/Denver">Mountain</option>
+            <option value="America/Los_Angeles">Pacific</option>
+            <option value="America/Phoenix">Arizona</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" onclick="saveScheduleInline('${groupId}')" style="width: 100%;">Save Schedule</button>`;
+
+      // Load existing
+      API.request(`/instructor/groups/${groupId}/schedule`).then(sched => {
+        if (sched.active_days) {
+          document.querySelectorAll('.sched-day-inline').forEach(cb => { cb.checked = sched.active_days.includes(parseInt(cb.value)); });
+          if (sched.active_start) document.getElementById('schedStartInline').value = sched.active_start;
+          if (sched.active_end) document.getElementById('schedEndInline').value = sched.active_end;
+          if (sched.timezone) document.getElementById('schedTZInline').value = sched.timezone;
+        }
+      }).catch(() => {});
+
+      document.getElementById('assignProfileModal').classList.add('active');
+    }
+
+    async function saveScheduleInline(groupId) {
+      const active_days = Array.from(document.querySelectorAll('.sched-day-inline:checked')).map(cb => parseInt(cb.value));
+      const active_start = document.getElementById('schedStartInline').value;
+      const active_end = document.getElementById('schedEndInline').value;
+      const timezone = document.getElementById('schedTZInline').value;
+      if (active_days.length === 0) { Toast.warning('Missing', 'Select at least one day'); return; }
+      try {
+        await API.request(`/instructor/groups/${groupId}/schedule`, { method: 'PUT', body: { active_days, active_start, active_end, timezone } });
+        Toast.success('Schedule Saved', `${active_start} – ${active_end}`);
+        closeModal('assignProfileModal');
+        loadMyGroups();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    // ============================================================================
+    // LAB ENVIRONMENTS
+    // ============================================================================
+
+    async function loadLabEnvironments() {
+      const container = document.getElementById('labEnvContent');
+      container.innerHTML = '<p style="color: var(--gray-500);">Loading lab environments...</p>';
+
+      try {
+        const lanes = await API.request('/instructor/lanes');
+
+        if (lanes.length === 0) {
+          container.innerHTML = `<div class="empty-state"><div class="icon">🖥️</div><h3>No Active Labs</h3><p>Your students don't have any deployed lab environments yet.</p></div>`;
+          return;
+        }
+
+        container.innerHTML = `
+          <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+              <tr style="background: #f7fafc; font-size: 0.8rem; text-transform: uppercase; color: var(--gray-500);">
+                <th style="text-align: left; padding: 0.6rem 0.75rem;">Student</th>
+                <th style="text-align: left; padding: 0.6rem 0.75rem;">Status</th>
+                <th style="text-align: left; padding: 0.6rem 0.75rem;">VXLAN</th>
+                <th style="text-align: left; padding: 0.6rem 0.75rem;">IPs</th>
+                <th style="text-align: left; padding: 0.6rem 0.75rem;">Internet</th>
+                <th style="text-align: left; padding: 0.6rem 0.75rem;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${lanes.map(l => {
+                const statusColors = { active: '#38a169', deploying: '#d69e2e', error: '#e53e3e', pending: '#4299e1' };
+                const statusColor = statusColors[l.status] || '#718096';
+                const inet = l.config?.internet_enabled;
+                return `
+                  <tr style="border-bottom: 1px solid #edf2f7;">
+                    <td style="padding: 0.6rem 0.75rem;">
+                      <strong style="font-size: 0.9rem;">${l.student_name}</strong><br>
+                      <code style="font-size: 0.75rem; color: var(--gray-500);">${l.student_email}</code>
+                    </td>
+                    <td style="padding: 0.6rem 0.75rem;">
+                      <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; color: white; background: ${statusColor};">${l.status}</span>
+                    </td>
+                    <td style="padding: 0.6rem 0.75rem; font-size: 0.85rem;">${l.vxlan_id || '—'}</td>
+                    <td style="padding: 0.6rem 0.75rem;" id="lane-ips-${l.lane_id}">
+                      <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="fetchLaneIPs('${l.lane_id}')">Load IPs</button>
+                    </td>
+                    <td style="padding: 0.6rem 0.75rem;">
+                      ${l.status === 'active' ? `
+                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+                          <input type="checkbox" ${inet ? 'checked' : ''} onchange="toggleLaneInternet('${l.lane_id}', this.checked)" style="width: auto;">
+                          <span style="font-size: 0.8rem;">${inet ? 'On' : 'Off'}</span>
+                        </label>
+                      ` : '<span style="font-size: 0.8rem; color: var(--gray-400);">—</span>'}
+                    </td>
+                    <td style="padding: 0.6rem 0.75rem;">
+                      ${l.status === 'active' ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="connectToLane('${l.lane_id}')">Connect</button>` : ''}
+                    </td>
+                  </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+      }
+    }
+
+    async function fetchLaneIPs(laneId) {
+      const cell = document.getElementById(`lane-ips-${laneId}`);
+      cell.innerHTML = '<span style="font-size: 0.75rem; color: var(--gray-500);">Loading...</span>';
+      try {
+        const data = await API.request(`/instructor/lanes/${laneId}/ips`);
+        const ips = data.ips || {};
+        const entries = Object.entries(ips).filter(([, v]) => v);
+        if (entries.length === 0) {
+          cell.innerHTML = '<span style="font-size: 0.75rem; color: var(--gray-400);">No IPs found</span>';
+        } else {
+          cell.innerHTML = entries.map(([k, v]) =>
+            `<div style="font-size: 0.75rem;"><strong>${k}:</strong> <code>${v}</code></div>`
+          ).join('');
+        }
+      } catch (e) {
+        cell.innerHTML = `<span style="font-size: 0.75rem; color: #e53e3e;">Error</span>`;
+      }
+    }
+
+    async function connectToLane(laneId) {
+      try {
+        const data = await API.request(`/instructor/lanes/${laneId}/connect`);
+        if (data.guac_url) {
+          window.open(data.guac_url, '_blank');
+        } else {
+          Toast.warning('No Connection', 'Could not find a Guacamole connection for this lane');
+        }
+      } catch (e) {
+        Toast.error('Error', e.message);
+      }
+    }
+
+    async function toggleLaneInternet(laneId, enabled) {
+      try {
+        await API.request(`/instructor/lanes/${laneId}/internet`, { method: 'PATCH', body: { enabled } });
+        Toast.success('Internet ' + (enabled ? 'Enabled' : 'Disabled'), `Lane updated`);
+      } catch (e) {
+        Toast.error('Error', e.message);
+        loadLabEnvironments(); // Revert checkbox
+      }
+    }
+
+    function showAddStudentSearchModal() {
+      // Reuse existing modal structure
+      const modal = document.getElementById('addStudentModal');
+      if (!modal) { Toast.warning('Not Available', 'Student search not available'); return; }
+      // For now, open the add student modal
+      modal.classList.add('active');
+    }
+
+    // ============================================================================
+    // ACCESS SCHEDULE
+    // ============================================================================
+
+    let instructorGroups = [];
+
+    async function loadScheduleTab() {
+      const container = document.getElementById('scheduleContent');
+      try {
+        instructorGroups = await API.request('/instructor/my-groups');
+        if (instructorGroups.length === 0) {
+          container.innerHTML = `<div class="empty-state"><div class="icon">📋</div><h3>No Groups</h3><p>You are not assigned to any deployed groups.</p></div>`;
+          return;
+        }
+
+        let html = '';
+        for (const group of instructorGroups) {
+          let schedule = null;
+          try {
+            schedule = await API.request(`/instructor/groups/${group.id}/schedule`);
+          } catch (e) {}
+
+          const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+          const hasSched = schedule && schedule.active_days;
+
+          let overrideStatus = '';
+          if (hasSched) {
+            if (schedule.override_active === true) overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:#c6f6d5;color:#22543d;">Override: Access ON</span>';
+            else if (schedule.override_active === false) overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:#fed7d7;color:#9b2c2c;">Override: Access OFF</span>';
+            else overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:#edf2f7;color:#4a5568;">Using Schedule</span>';
+          }
+
+          html += `
+            <div style="background: var(--bg-card, #f7fafc); border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem; border: 1px solid #e2e8f0;">
+              <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
+                <h4 style="margin: 0;">${group.group_name} <span style="font-weight: 400; color: var(--gray-500); font-size: 0.85rem;">(${group.students} students)</span></h4>
+                ${overrideStatus}
+              </div>
+
+              <div style="margin-bottom: 0.75rem;">
+                <label style="font-weight: 600; font-size: 0.85rem;">Active Days</label>
+                <div style="display: flex; gap: 0.5rem; margin-top: 0.25rem;">
+                  ${dayNames.map((d, i) => `
+                    <label style="display:flex;align-items:center;gap:0.2rem;font-size:0.85rem;">
+                      <input type="checkbox" class="sched-day-${group.id}" value="${i}" ${hasSched && schedule.active_days.includes(i) ? 'checked' : (!hasSched && [1,2,3,4,5].includes(i) ? 'checked' : '')} style="width:auto;">
+                      ${d}
+                    </label>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem;">
+                <div>
+                  <label style="font-weight: 600; font-size: 0.85rem;">Start Time</label>
+                  <input type="time" id="schedStart-${group.id}" value="${hasSched ? schedule.active_start : '08:00'}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid #e2e8f0;">
+                </div>
+                <div>
+                  <label style="font-weight: 600; font-size: 0.85rem;">End Time</label>
+                  <input type="time" id="schedEnd-${group.id}" value="${hasSched ? schedule.active_end : '17:00'}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid #e2e8f0;">
+                </div>
+                <div>
+                  <label style="font-weight: 600; font-size: 0.85rem;">Timezone</label>
+                  <select id="schedTZ-${group.id}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid #e2e8f0;">
+                    <option value="America/Chicago" ${(!hasSched || schedule.timezone === 'America/Chicago') ? 'selected' : ''}>Central</option>
+                    <option value="America/New_York" ${hasSched && schedule.timezone === 'America/New_York' ? 'selected' : ''}>Eastern</option>
+                    <option value="America/Denver" ${hasSched && schedule.timezone === 'America/Denver' ? 'selected' : ''}>Mountain</option>
+                    <option value="America/Los_Angeles" ${hasSched && schedule.timezone === 'America/Los_Angeles' ? 'selected' : ''}>Pacific</option>
+                    <option value="America/Phoenix" ${hasSched && schedule.timezone === 'America/Phoenix' ? 'selected' : ''}>Arizona</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button class="btn btn-primary btn-sm" onclick="saveInstructorSchedule('${group.id}')">Save Schedule</button>
+                <button class="btn btn-outline btn-sm" style="color: #38a169; border-color: #38a169;" onclick="instructorOverride('${group.id}', true)">Enable Access Now</button>
+                <button class="btn btn-outline btn-sm" style="color: #e53e3e; border-color: #e53e3e;" onclick="instructorOverride('${group.id}', false)">Disable Access Now</button>
+                ${hasSched && schedule.override_active !== null ? `<button class="btn btn-outline btn-sm" onclick="instructorOverride('${group.id}', null)">Clear Override</button>` : ''}
+              </div>
+            </div>`;
+        }
+        container.innerHTML = html;
+      } catch (e) {
+        container.innerHTML = `<p style="color: #e53e3e;">Error loading schedule: ${e.message}</p>`;
+      }
+    }
+
+    async function saveInstructorSchedule(groupId) {
+      const active_days = Array.from(document.querySelectorAll(`.sched-day-${groupId}:checked`)).map(cb => parseInt(cb.value));
+      const active_start = document.getElementById(`schedStart-${groupId}`).value;
+      const active_end = document.getElementById(`schedEnd-${groupId}`).value;
+      const timezone = document.getElementById(`schedTZ-${groupId}`).value;
+
+      if (active_days.length === 0) { Toast.warning('Missing', 'Select at least one day'); return; }
+
+      try {
+        await API.request(`/instructor/groups/${groupId}/schedule`, { method: 'PUT', body: { active_days, active_start, active_end, timezone } });
+        Toast.success('Schedule Saved', `${active_start} – ${active_end}`);
+        loadScheduleTab();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    async function instructorOverride(groupId, value) {
+      try {
+        await API.request(`/instructor/groups/${groupId}/schedule/override`, { method: 'PATCH', body: { override_active: value } });
+        const label = value === true ? 'Access enabled for all students' : value === false ? 'Access disabled for all students' : 'Override cleared, using schedule';
+        Toast.success('Updated', label);
+        loadScheduleTab();
+      } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    function switchTab(tabName) {
+      // Update tab buttons
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      const targetTab = document.querySelector(`.tab[data-tab="${tabName}"]`);
+      if (targetTab) targetTab.classList.add('active');
+
+      // Update content
+      document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+      const targetContent = document.getElementById(`tab-${tabName}`);
+      if (targetContent) targetContent.classList.add('active');
+
+      // Lazy-load Dashboard groups
+      if (tabName === 'dashboard') loadDashboardTab();
+    }
+    
+    // Modal functions
+    function showAddStudentModal() {
+      document.getElementById('addStudentModal').classList.add('active');
+    }
+    
+    function closeModal(modalId) {
+      document.getElementById(modalId).classList.remove('active');
+    }
+    
+    // Show assign profile modal for a specific student
+    function showAssignModal(studentId, studentEmail, studentName) {
+      // Find the student in dashboard data
+      const student = dashboardData.students.find(s => s.student_id === studentId);
+      if (!student) {
+        Toast.error('Error', 'Student not found');
+        return;
+      }
+      
+      const profiles = student.generated_profiles || [];
+      const container = document.getElementById('assignProfileModalContent');
+      
+      container.innerHTML = `
+        <div style="margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--gray-200);">
+          <p style="margin: 0;"><strong>${studentName || 'Student'}</strong></p>
+          <p style="margin: 0.25rem 0 0; color: var(--gray-500);">📧 ${studentEmail}</p>
+        </div>
+        
+        <form onsubmit="submitAssignProfile(event, '${studentId}')">
+          <div class="form-group">
+            <label>Select Profile to Assign</label>
+            ${profiles.length > 0 ? `
+              <div style="margin-bottom: 1rem;">
+                <p style="font-size: 0.85rem; color: var(--gray-600); margin-bottom: 0.5rem;">
+                  📁 <strong>Student's Generated Profiles:</strong>
+                </p>
+                <select id="assignStudentProfile" class="form-input" required>
+                  <option value="">-- Select a profile --</option>
+                  ${profiles.map(p => `
+                    <option value="${p.profile_id}">
+                      🏢 ${p.company_name || 'Unnamed'} (${p.industry || 'Unknown Industry'}, ${p.difficulty || 'Standard'})
+                    </option>
+                  `).join('')}
+                </select>
+              </div>
+            ` : `
+              <div style="padding: 1rem; background: var(--gray-50); border-radius: 8px; text-align: center; margin-bottom: 1rem;">
+                <p style="color: var(--gray-500); margin: 0;">⚠️ This student hasn't generated any profiles yet.</p>
+              </div>
+              <select id="assignStudentProfile" class="form-input" required>
+                <option value="">-- Select from all profiles --</option>
+                ${allProfiles.map(p => `
+                  <option value="${p.id}">
+                    ${p.company_name || p.name || 'Unnamed Profile'}
+                  </option>
+                `).join('')}
+              </select>
+            `}
+          </div>
+          
+          <div class="form-group">
+            <label for="assignDueDate">Due Date (Optional)</label>
+            <input type="date" id="assignDueDate" class="form-input">
+          </div>
+          
+          <div class="form-group">
+            <label for="assignNotes">Notes (Optional)</label>
+            <textarea id="assignNotes2" class="form-input" rows="2" placeholder="Any special instructions..."></textarea>
+          </div>
+          
+          <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+            <button type="button" class="btn btn-outline" onclick="closeModal('assignProfileModal')">Cancel</button>
+            <button type="submit" class="btn btn-primary">Assign Profile</button>
+          </div>
+        </form>
+      `;
+      
+      document.getElementById('assignProfileModal').classList.add('active');
+    }
+    
+    // Submit profile assignment
+    async function submitAssignProfile(event, studentId) {
+      event.preventDefault();
+      
+      const profileId = document.getElementById('assignStudentProfile').value;
+      const dueDate = document.getElementById('assignDueDate').value;
+      const notes = document.getElementById('assignNotes2').value;
+      
+      if (!profileId) {
+        Toast.error('Error', 'Please select a profile');
+        return;
+      }
+      
+      try {
+        await API.instructor.assign({
+          student_id: studentId,
+          profile_id: profileId,
+          due_date: dueDate || null,
+          notes: notes || null
+        });
+        
+        Toast.success('Success', 'Profile assigned to student');
+        closeModal('assignProfileModal');
+        await loadDashboard();
+        
+      } catch (error) {
+        console.error('Failed to assign profile:', error);
+        Toast.error('Error', error.message || 'Failed to assign profile');
+      }
+    }
+    
+    // Show view documents modal for a specific student
+    function showViewDocsModal(studentId, studentName) {
+      const student = dashboardData.students.find(s => s.student_id === studentId);
+      if (!student) {
+        Toast.error('Error', 'Student not found');
+        return;
+      }
+
+      const profiles = student.generated_profiles || [];
+      const container = document.getElementById('viewDocsModalContent');
+
+      if (profiles.length === 0) {
+        container.innerHTML = `
+          <div style="text-align: center; padding: 2rem;">
+            <p style="color: var(--gray-500);">This student hasn't generated any profiles yet.</p>
+          </div>
+        `;
+        document.getElementById('viewDocsModal').classList.add('active');
+        return;
+      }
+
+      container.innerHTML = `
+        <div style="padding: 1.5rem;">
+          <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--gray-200);">
+            <p style="margin: 0;"><strong>${studentName || 'Student'}</strong></p>
+          </div>
+
+          <div class="form-group">
+            <label>Select Profile</label>
+            <select id="viewDocsProfileSelect" class="form-input" onchange="loadDocsForProfile(this.value)">
+              <option value="">-- Select a profile --</option>
+              ${profiles.map(p => `
+                <option value="${p.profile_id}">
+                  🏢 ${p.company_name || 'Unnamed'} (${p.industry || 'Unknown'}, ${p.difficulty || 'Standard'})
+                </option>
+              `).join('')}
+            </select>
+          </div>
+
+          <div id="viewDocsListContainer">
+            <div style="text-align: center; padding: 2rem; color: var(--gray-400);">
+              Select a profile above to view its documents.
+            </div>
+          </div>
+
+          <div style="display: flex; justify-content: flex-end; margin-top: 1rem;">
+            <button class="btn btn-outline" onclick="closeModal('viewDocsModal')">Close</button>
+          </div>
+        </div>
+      `;
+
+      document.getElementById('viewDocsModal').classList.add('active');
+    }
+
+    // Load documents for a selected profile in the view docs modal
+    async function loadDocsForProfile(profileId) {
+      const listContainer = document.getElementById('viewDocsListContainer');
+
+      if (!profileId) {
+        listContainer.innerHTML = `
+          <div style="text-align: center; padding: 2rem; color: var(--gray-400);">
+            Select a profile above to view its documents.
+          </div>
+        `;
+        return;
+      }
+
+      listContainer.innerHTML = `
+        <div style="text-align: center; padding: 1.5rem; color: var(--gray-500);">
+          Loading documents...
+        </div>
+      `;
+
+      try {
+        const response = await fetch(`/api/instructor/documents/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        const data = await response.json();
+        const docs = data.documents || [];
+
+        const docIcons = { nessus: '🔍', zap: '🕷️', nmap: '🔌', policies: '📋' };
+        const docNames = { nessus: 'NESSUS Vulnerability Scan', zap: 'OWASP ZAP Report', nmap: 'NMAP Network Scan', policies: 'Security Policy Documents' };
+
+        if (docs.length === 0) {
+          listContainer.innerHTML = `
+            <div style="text-align: center; padding: 2rem;">
+              <div style="font-size: 2.5rem; margin-bottom: 0.75rem;">📭</div>
+              <p style="color: var(--gray-500); margin: 0;">No documents generated for this profile yet.</p>
+              <p style="color: var(--gray-400); font-size: 0.85rem; margin-top: 0.25rem;">Use "Generate Documents" to create them.</p>
+            </div>
+          `;
+          return;
+        }
+
+        const hasPolicies = docs.some(d => d.type === 'policies');
+
+        listContainer.innerHTML = `
+          <div style="display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.5rem;">
+            ${docs.map(doc => `
+              <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; background: var(--gray-50); border: 1px solid var(--gray-200); border-radius: 8px;">
+                <div style="display: flex; align-items: center; gap: 0.75rem;">
+                  <span style="font-size: 1.5rem;">${docIcons[doc.type] || '📄'}</span>
+                  <div>
+                    <div style="font-weight: 600; color: var(--gray-900);">${docNames[doc.type] || doc.type}</div>
+                    <div style="font-size: 0.8rem; color: var(--gray-500);">${doc.filename}</div>
+                    <div style="font-size: 0.75rem; color: var(--gray-400);">
+                      ${formatFileSize(doc.size || 0)} &bull; ${doc.generated_at ? new Date(doc.generated_at).toLocaleString() : 'Unknown date'}
+                    </div>
+                  </div>
+                </div>
+                <button class="btn btn-sm btn-primary" onclick="downloadDocument('${doc.url}', '${doc.filename}')">
+                  📥 Download
+                </button>
+              </div>
+            `).join('')}
+          </div>
+
+          <div style="display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap;">
+            <button class="btn btn-sm btn-outline" style="border-color: #3182ce; color: #3182ce;" onclick="downloadPdfFromModal('${profileId}')">
+              📄 Download PDF
+            </button>
+            ${!hasPolicies ? `
+              <button class="btn btn-sm btn-outline" id="genPoliciesBtnModal" style="border-color: #805ad5; color: #805ad5;" onclick="generatePoliciesFromModal('${profileId}')">
+                📋 Generate Policies
+              </button>
+            ` : ''}
+          </div>
+        `;
+      } catch (error) {
+        console.error('Error loading documents:', error);
+        listContainer.innerHTML = `
+          <div style="text-align: center; padding: 1.5rem;">
+            <p style="color: #e74c3c;">Failed to load documents: ${error.message}</p>
+          </div>
+        `;
+      }
+    }
+
+    // Show generate documents modal for a specific student
+    function showGenerateDocsModal(studentId, studentEmail, studentName) {
+      const student = dashboardData.students.find(s => s.student_id === studentId);
+      if (!student) {
+        Toast.error('Error', 'Student not found');
+        return;
+      }
+      
+      const profiles = student.generated_profiles || [];
+      const container = document.getElementById('generateDocsModalContent');
+      
+      if (profiles.length === 0) {
+        container.innerHTML = `
+          <div style="text-align: center; padding: 2rem;">
+            <p style="color: var(--gray-500);">⚠️ This student hasn't generated any profiles yet.</p>
+          </div>
+        `;
+        document.getElementById('generateDocsModal').classList.add('active');
+        return;
+      }
+      
+      container.innerHTML = `
+        <div style="margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--gray-200);">
+          <p style="margin: 0;"><strong>${studentName || 'Student'}</strong></p>
+          <p style="margin: 0.25rem 0 0; color: var(--gray-500);">📧 ${studentEmail}</p>
+        </div>
+        
+        <div class="form-group">
+          <label>Select Profile to Generate Documents For</label>
+          <select id="generateDocsProfile" class="form-input" required onchange="updateDocPreview()">
+            <option value="">-- Select a profile --</option>
+            ${profiles.map(p => `
+              <option value="${p.profile_id}" data-company="${p.company_name || 'Unknown'}" data-industry="${p.industry || 'Unknown'}" data-difficulty="${p.difficulty || 'Standard'}">
+                🏢 ${p.company_name || 'Unnamed'} (${p.industry || 'Unknown Industry'}, ${p.difficulty || 'Standard'})
+              </option>
+            `).join('')}
+          </select>
+        </div>
+        
+        <div id="docPreviewSection" style="display: none; margin: 1.5rem 0;">
+          <label style="display: block; margin-bottom: 0.75rem; font-weight: 500;">Documents to Generate:</label>
+          <div style="display: grid; gap: 0.75rem;">
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--gray-50); border-radius: 8px;">
+              <span style="font-size: 1.5rem;">🔍</span>
+              <div>
+                <strong>NESSUS Vulnerability Scan</strong>
+                <p style="margin: 0; font-size: 0.85rem; color: var(--gray-500);">XML format - Network vulnerability assessment</p>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--gray-50); border-radius: 8px;">
+              <span style="font-size: 1.5rem;">🕷️</span>
+              <div>
+                <strong>ZAP Security Report</strong>
+                <p style="margin: 0; font-size: 0.85rem; color: var(--gray-500);">HTML format - Web application security scan</p>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: var(--gray-50); border-radius: 8px;">
+              <span style="font-size: 1.5rem;">🔌</span>
+              <div>
+                <strong>NMAP Network Scan</strong>
+                <p style="margin: 0; font-size: 0.85rem; color: var(--gray-500);">XML format - Port and service discovery</p>
+              </div>
+            </div>
+          </div>
+
+          <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px dashed var(--gray-300);">
+            <label style="display: block; margin-bottom: 0.75rem; font-weight: 500;">Policy Documents:</label>
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: #f5f0ff; border: 1px solid #e2d6f3; border-radius: 8px;">
+              <span style="font-size: 1.5rem;">📋</span>
+              <div style="flex: 1;">
+                <strong>Security Policy Documents</strong>
+                <p style="margin: 0; font-size: 0.85rem; color: var(--gray-500);">Auto-generated organizational policies based on profile</p>
+              </div>
+              <button type="button" class="btn btn-sm" id="generatePoliciesBtn2" style="background: #805ad5; color: white; border: none;" onclick="generatePoliciesForStudent()" disabled>
+                📋 Generate Policies
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div id="generateDocsStatus" style="display: none; margin: 1rem 0; padding: 1rem; border-radius: 8px;"></div>
+
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('generateDocsModal')">Cancel</button>
+          <button type="button" class="btn btn-primary" id="generateDocsBtn2" onclick="generateDocsForStudent()" disabled>
+            ⚡ Generate Scan Documents
+          </button>
+        </div>
+      `;
+      
+      document.getElementById('generateDocsModal').classList.add('active');
+    }
+    
+    // Update document preview when profile is selected
+    function updateDocPreview() {
+      const select = document.getElementById('generateDocsProfile');
+      const previewSection = document.getElementById('docPreviewSection');
+      const generateBtn = document.getElementById('generateDocsBtn2');
+      const policiesBtn = document.getElementById('generatePoliciesBtn2');
+
+      if (select.value) {
+        previewSection.style.display = 'block';
+        generateBtn.disabled = false;
+        if (policiesBtn) policiesBtn.disabled = false;
+      } else {
+        previewSection.style.display = 'none';
+        generateBtn.disabled = true;
+        if (policiesBtn) policiesBtn.disabled = true;
+      }
+    }
+    
+    // Generate documents for selected student profile
+    async function generateDocsForStudent() {
+      const profileId = document.getElementById('generateDocsProfile').value;
+      const statusDiv = document.getElementById('generateDocsStatus');
+      const generateBtn = document.getElementById('generateDocsBtn2');
+      
+      if (!profileId) {
+        Toast.error('Error', 'Please select a profile');
+        return;
+      }
+      
+      // Show loading state
+      generateBtn.disabled = true;
+      generateBtn.innerHTML = '⏳ Generating...';
+      statusDiv.style.display = 'block';
+      statusDiv.style.background = 'var(--gray-100)';
+      statusDiv.innerHTML = '<p style="margin: 0; color: var(--gray-600);">🔄 Generating documents... This may take a moment.</p>';
+      
+      try {
+        const response = await API.instructor.generateDocuments(profileId);
+        
+        if (response.success) {
+          const docs = response.documents || [];
+          const docIcons = { nessus: '🔍', zap: '🕷️', nmap: '🔌' };
+          const docNames = { nessus: 'NESSUS Vulnerability Scan', zap: 'OWASP ZAP Report', nmap: 'NMAP Network Scan' };
+
+          statusDiv.style.background = '#d4edda';
+          statusDiv.innerHTML = `
+            <p style="margin: 0 0 1rem; color: #155724; font-weight: 500;">✅ Documents Generated Successfully!</p>
+            <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+              ${docs.map(doc => `
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: white; border: 1px solid #c3e6cb; border-radius: 6px;">
+                  <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span>${docIcons[doc.type] || '📄'}</span>
+                    <span style="font-size: 0.85rem; color: #155724;">${docNames[doc.type] || doc.type}</span>
+                  </div>
+                  <button class="btn btn-sm btn-primary" onclick="downloadDocument('${doc.url}', '${doc.filename}')">
+                    📥 Download
+                  </button>
+                </div>
+              `).join('')}
+            </div>
+          `;
+
+          Toast.success('Success', 'Documents generated successfully');
+
+          // Update button to allow closing
+          generateBtn.innerHTML = '✓ Done';
+          generateBtn.classList.remove('btn-primary');
+          generateBtn.classList.add('btn-success');
+          generateBtn.onclick = () => {
+            closeModal('generateDocsModal');
+            generateBtn.innerHTML = '⚡ Generate Scan Documents';
+            generateBtn.classList.add('btn-primary');
+            generateBtn.classList.remove('btn-success');
+            generateBtn.disabled = false;
+            generateBtn.onclick = generateDocsForStudent;
+            loadDashboard(); // Refresh to show document indicators
+          };
+
+        } else {
+          throw new Error(response.error || 'Generation failed');
+        }
+
+      } catch (error) {
+        console.error('Failed to generate documents:', error);
+        statusDiv.style.background = '#f8d7da';
+        statusDiv.innerHTML = `<p style="margin: 0; color: #721c24;">❌ Error: ${error.message || 'Failed to generate documents'}</p>`;
+
+        generateBtn.innerHTML = '⚡ Generate Scan Documents';
+        generateBtn.disabled = false;
+        
+        Toast.error('Error', error.message || 'Failed to generate documents');
+      }
+    }
+    
+    // Generate policies for student from Generate Documents modal
+    async function generatePoliciesForStudent() {
+      const profileId = document.getElementById('generateDocsProfile').value;
+      if (!profileId) { Toast.warning('Select Profile', 'Please select a profile first'); return; }
+      const btn = document.getElementById('generatePoliciesBtn2');
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Generating...';
+      try {
+        const resp = await fetch(`/api/profiles/${profileId}/policies/generate`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data.success || data.policies) {
+          btn.innerHTML = '✅ Policies Generated';
+          btn.style.background = '#38a169';
+          Toast.success('Success', `${data.total_count || data.policies?.length || 0} policy document(s) generated`);
+        } else {
+          throw new Error(data.error || 'Failed to generate policies');
+        }
+      } catch (err) {
+        console.error('Policy generation error:', err);
+        btn.innerHTML = '📋 Generate Policies';
+        btn.disabled = false;
+        Toast.error('Error', err.message);
+      }
+    }
+
+    // Generate policies from View Documents modal
+    async function generatePoliciesFromModal(profileId) {
+      const btn = document.getElementById('genPoliciesBtnModal');
+      if (!btn) return;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Generating...';
+      try {
+        const resp = await fetch(`/api/profiles/${profileId}/policies/generate`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}`, 'Content-Type': 'application/json' }
+        });
+        const data = await resp.json();
+        if (data.success || data.policies) {
+          Toast.success('Success', `${data.total_count || data.policies?.length || 0} policy document(s) generated`);
+          // Reload the document list to show the new policies
+          await loadDocsForProfile(profileId);
+        } else {
+          throw new Error(data.error || 'Failed to generate policies');
+        }
+      } catch (err) {
+        console.error('Policy generation error:', err);
+        btn.innerHTML = '📋 Generate Policies';
+        btn.disabled = false;
+        Toast.error('Error', err.message);
+      }
+    }
+
+    // Download PDF from View Documents modal
+    function downloadPdfFromModal(profileId) {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Generating...';
+      fetch(`/api/profiles/${profileId}/documents/pdf`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      }).then(async r => {
+        if (!r.ok) {
+          const errData = await r.json().catch(() => ({}));
+          throw new Error(errData.error || `PDF generation failed (${r.status})`);
+        }
+        return r.blob();
+      }).then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'Security_Documents.pdf';
+        a.click();
+        URL.revokeObjectURL(url);
+        Toast.success('Downloaded', 'PDF has been downloaded');
+      }).catch(err => {
+        console.error('PDF download error:', err);
+        Toast.error('Download Failed', err.message);
+      }).finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '📄 Download PDF';
+      });
+    }
+
+    // Submit add student
+    async function submitAddStudent(event) {
+      event.preventDefault();
+      
+      const email = document.getElementById('studentEmail').value;
+      const profileId = document.getElementById('assignProfile').value;
+      const dueDate = document.getElementById('dueDate').value;
+      const notes = document.getElementById('assignNotes').value;
+      
+      try {
+        // First we need to find the student by email
+        // For now, we'll just create the assignment (backend should handle finding user)
+        await API.instructor.assign({
+          student_email: email,
+          profile_id: profileId || null,
+          due_date: dueDate || null,
+          notes: notes
+        });
+        
+        Toast.success('Success', 'Student added to roster');
+        closeModal('addStudentModal');
+        await loadDashboard();
+        
+      } catch (error) {
+        console.error('Failed to add student:', error);
+        Toast.error('Error', error.message || 'Failed to add student');
+      }
+    }
+    
+    // Open review modal
+    async function openReviewModal(progressId, partNumber) {
+      try {
+        // Get rubric for the profile
+        const sub = dashboardData.pending_submissions.find(s => s.id === progressId);
+        if (!sub) return;
+        
+        let rubric = {};
+        try {
+          const rubricResponse = await API.instructor.rubric(sub.profile_id);
+          rubric = rubricResponse.rubric || {};
+        } catch (e) {
+          console.log('Using default rubric');
+        }
+        
+        const partRubric = rubric[`part${partNumber}_*`] || getDefaultPartRubric(partNumber);
+        
+        const modalContent = document.getElementById('reviewModalContent');
+        modalContent.innerHTML = `
+          <div style="margin-bottom: 1.5rem;">
+            <p><strong>Student:</strong> ${sub.student_email}</p>
+            <p><strong>Part:</strong> ${partNumber} - ${getPartName(partNumber)}</p>
+            <p><strong>Profile:</strong> ${sub.profile_name}</p>
+            <p><strong>Submitted:</strong> ${Utils.formatDateTime(sub.submitted_at)}</p>
+          </div>
+          
+          <div class="rubric-section">
+            <h4>Rubric Scoring</h4>
+            ${partRubric.criteria ? partRubric.criteria.map((c, i) => `
+              <div class="rubric-item">
+                <label>${c.item}</label>
+                <input type="number" id="rubric_${i}" min="0" max="${c.points}" value="0">
+                <span class="max-points">/ ${c.points}</span>
+              </div>
+            `).join('') : '<p>No rubric available</p>'}
+          </div>
+          
+          <div class="form-group">
+            <label for="reviewFeedback">Feedback</label>
+            <textarea id="reviewFeedback" rows="5" placeholder="Provide constructive feedback..."></textarea>
+          </div>
+          
+          <div class="form-group">
+            <label for="overallScore">Overall Score (0-100)</label>
+            <input type="number" id="overallScore" min="0" max="100" value="0">
+          </div>
+          
+          <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1.5rem;">
+            <button class="btn btn-outline" onclick="closeModal('reviewModal')">Cancel</button>
+            <button class="btn btn-warning" onclick="submitReview('${progressId}', 'revision_requested')">
+              Request Revision
+            </button>
+            <button class="btn btn-success" onclick="submitReview('${progressId}', 'reviewed')">
+              ✓ Approve
+            </button>
+          </div>
+        `;
+        
+        document.getElementById('reviewModal').classList.add('active');
+        
+      } catch (error) {
+        console.error('Failed to open review modal:', error);
+        Toast.error('Error', 'Failed to load review data');
+      }
+    }
+    
+    function getPartName(num) {
+      const names = {
+        1: 'Orientation', 2: 'Scoping', 3: 'Threats', 4: 'Vulnerabilities',
+        5: 'Risk Analysis', 6: 'Controls', 7: 'Reporting', 8: 'Reflection'
+      };
+      return names[num] || 'Unknown';
+    }
+    
+    function getDefaultPartRubric(partNumber) {
+      return {
+        criteria: [
+          { item: 'Completeness', points: 25 },
+          { item: 'Accuracy', points: 25 },
+          { item: 'Analysis Quality', points: 25 },
+          { item: 'Professional Presentation', points: 25 }
+        ]
+      };
+    }
+    
+    // Submit review
+    async function submitReview(progressId, status) {
+      try {
+        const feedback = document.getElementById('reviewFeedback').value;
+        const score = parseInt(document.getElementById('overallScore').value) || 0;
+        
+        // Collect rubric scores
+        const rubricScores = {};
+        document.querySelectorAll('[id^="rubric_"]').forEach(input => {
+          const idx = input.id.split('_')[1];
+          rubricScores[`criterion_${idx}`] = parseInt(input.value) || 0;
+        });
+        
+        await API.instructor.review(progressId, {
+          feedback,
+          score,
+          rubric_scores: rubricScores,
+          status
+        });
+        
+        Toast.success('Review Submitted', status === 'reviewed' ? 'Submission approved!' : 'Revision requested');
+        closeModal('reviewModal');
+        await loadDashboard();
+        
+      } catch (error) {
+        console.error('Failed to submit review:', error);
+        Toast.error('Error', 'Failed to submit review');
+      }
+    }
+    
+    // View student progress
+    async function viewStudentProgress(studentId) {
+      const container = document.getElementById('viewProgressModalContent');
+      
+      // Show loading state
+      container.innerHTML = `
+        <div style="text-align: center; padding: 3rem;">
+          <div style="font-size: 2rem; margin-bottom: 1rem;">⏳</div>
+          <p style="color: var(--gray-500);">Loading student progress...</p>
+        </div>
+      `;
+      document.getElementById('viewProgressModal').classList.add('active');
+      
+      try {
+        const response = await API.instructor.studentProgress(studentId);
+        
+        if (!response.success) {
+          throw new Error(response.error || 'Failed to load progress');
+        }
+        
+        const { student, profiles, progress, intake_responses } = response;
+        const studentName = student.name || 'Unnamed Student';
+        
+        // Part names
+        const partNames = {
+          1: 'Orientation & Context',
+          2: 'Scoping & Intake', 
+          3: 'Threat Identification',
+          4: 'Vulnerability Identification',
+          5: 'Risk Analysis',
+          6: 'Control Recommendations',
+          7: 'Report Writing',
+          8: 'Reflection & Learning'
+        };
+        
+        // Status badges
+        const getStatusBadge = (status) => {
+          const badges = {
+            'not_started': '<span class="badge" style="background: var(--gray-200); color: var(--gray-600);">Not Started</span>',
+            'in_progress': '<span class="badge" style="background: #fff3cd; color: #856404;">In Progress</span>',
+            'submitted': '<span class="badge" style="background: #cce5ff; color: #004085;">Submitted</span>',
+            'reviewed': '<span class="badge" style="background: #d4edda; color: #155724;">Reviewed</span>',
+            'revision_requested': '<span class="badge" style="background: #f8d7da; color: #721c24;">Needs Revision</span>'
+          };
+          return badges[status] || badges['not_started'];
+        };
+        
+        // Build HTML
+        let html = `
+          <div style="margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--gray-200);">
+            <h4 style="margin: 0 0 0.5rem;">${studentName}</h4>
+            <p style="margin: 0; color: var(--gray-500);">📧 ${student.email}</p>
+            ${student.organization ? `<p style="margin: 0.25rem 0 0; color: var(--gray-500);">🏛️ ${student.organization}</p>` : ''}
+            <p style="margin: 0.25rem 0 0; font-size: 0.85rem; color: var(--gray-400);">Joined: ${Utils.formatDate(student.joined)}</p>
+          </div>
+        `;
+        
+        // Generated Profiles Section
+        html += `
+          <div style="margin-bottom: 1.5rem;">
+            <h5 style="margin: 0 0 0.75rem; color: var(--gray-700);">📁 Generated Profiles (${profiles.length})</h5>
+            ${profiles.length > 0 ? `
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                ${profiles.map(p => `
+                  <span class="student-profile" style="display: inline-block; padding: 0.5rem 0.75rem; background: var(--gray-100); border-radius: 8px; font-size: 0.85rem;">
+                    🏢 ${p.company_name || 'Unnamed'} 
+                    <span style="color: var(--gray-500);">(${p.industry || 'Unknown'}, ${p.difficulty || 'Standard'})</span>
+                  </span>
+                `).join('')}
+              </div>
+            ` : '<p style="color: var(--gray-500); margin: 0;">No profiles generated yet.</p>'}
+          </div>
+        `;
+        
+        // Progress by Profile Section
+        html += `<div style="margin-bottom: 1rem;">
+          <h5 style="margin: 0 0 0.75rem; color: var(--gray-700);">📊 Assessment Progress</h5>
+        `;
+        
+        if (progress.length === 0) {
+          html += `<p style="color: var(--gray-500); margin: 0;">No assessment progress yet.</p>`;
+        } else {
+          for (const profileProgress of progress) {
+            const partsCompleted = Object.values(profileProgress.parts).filter(p => p.status === 'reviewed').length;
+            const partsSubmitted = Object.values(profileProgress.parts).filter(p => p.status === 'submitted').length;
+            const partsStarted = Object.keys(profileProgress.parts).length;
+            
+            html += `
+              <div style="background: var(--gray-50); border-radius: 8px; padding: 1rem; margin-bottom: 1rem;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+                  <strong>🏢 ${profileProgress.profile_name || 'Unknown Profile'}</strong>
+                  <span style="font-size: 0.85rem; color: var(--gray-500);">${partsCompleted}/8 reviewed</span>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.5rem;">
+                  ${[1,2,3,4,5,6,7,8].map(partNum => {
+                    const part = profileProgress.parts[partNum];
+                    const status = part?.status || 'not_started';
+                    const score = part?.score;
+                    
+                    return `
+                      <div style="padding: 0.5rem; background: white; border-radius: 6px; border: 1px solid var(--gray-200); font-size: 0.8rem;">
+                        <div style="font-weight: 500; margin-bottom: 0.25rem;">Part ${partNum}</div>
+                        ${getStatusBadge(status)}
+                        ${score !== null && score !== undefined ? `<div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--gray-500);">Score: ${score}</div>` : ''}
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+                ${partsSubmitted > 0 ? `
+                  <div style="margin-top: 0.75rem; text-align: right;">
+                    <button class="btn btn-sm btn-primary" onclick="switchToReviewQueue()">
+                      Review Submissions (${partsSubmitted})
+                    </button>
+                  </div>
+                ` : ''}
+              </div>
+            `;
+          }
+        }
+        
+        html += `</div>`;
+        
+        // Intake Form Status
+        if (intake_responses && intake_responses.length > 0) {
+          html += `
+            <div style="margin-bottom: 1rem;">
+              <h5 style="margin: 0 0 0.75rem; color: var(--gray-700);">📝 Intake Forms</h5>
+              ${intake_responses.map(ir => `
+                <div style="padding: 0.75rem; background: var(--gray-50); border-radius: 8px; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
+                  <span>🏢 ${ir.profile_name || 'Unknown Profile'}</span>
+                  <span class="badge" style="background: ${ir.status === 'complete' ? '#d4edda' : '#fff3cd'}; color: ${ir.status === 'complete' ? '#155724' : '#856404'};">
+                    ${ir.status === 'complete' ? '✓ Complete' : `In Progress (${ir.completion_percentage || 0}%)`}
+                  </span>
+                </div>
+              `).join('')}
+            </div>
+          `;
+        }
+        
+        // Actions
+        html += `
+          <div style="display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--gray-200);">
+            <button class="btn btn-outline" onclick="closeModal('viewProgressModal')">Close</button>
+            ${profiles.length > 0 ? `
+              <button class="btn btn-primary" onclick="closeModal('viewProgressModal'); showGenerateDocsModal('${studentId}', '${student.email}', '${studentName.replace(/'/g, "\\'")}')">
+                📄 Generate Documents
+              </button>
+            ` : ''}
+          </div>
+        `;
+        
+        container.innerHTML = html;
+        
+      } catch (error) {
+        console.error('Failed to load student progress:', error);
+        container.innerHTML = `
+          <div style="text-align: center; padding: 2rem;">
+            <div style="font-size: 2rem; margin-bottom: 1rem;">❌</div>
+            <p style="color: var(--danger);">Failed to load progress: ${error.message}</p>
+            <button class="btn btn-outline" onclick="closeModal('viewProgressModal')" style="margin-top: 1rem;">Close</button>
+          </div>
+        `;
+      }
+    }
+    
+    // Helper to switch to review queue tab
+    function switchToReviewQueue() {
+      closeModal('viewProgressModal');
+      switchTab('reviews');
+    }
+    
+    // View submission content
+    async function viewSubmission(progressId) {
+      // Find the submission in pending_submissions
+      const submission = dashboardData.pending_submissions.find(s => s.id === progressId);
+      
+      if (!submission) {
+        Toast.error('Error', 'Submission not found');
+        return;
+      }
+      
+      const partNames = {
+        1: 'Orientation & Context',
+        2: 'Scoping & Intake', 
+        3: 'Threat Identification',
+        4: 'Vulnerability Identification',
+        5: 'Risk Analysis',
+        6: 'Control Recommendations',
+        7: 'Report Writing',
+        8: 'Reflection & Learning'
+      };
+      
+      // Create a modal to show submission content
+      const modal = document.createElement('div');
+      modal.className = 'modal-overlay active';
+      modal.id = 'viewSubmissionModal';
+      modal.innerHTML = `
+        <div class="modal-content" style="max-width: 800px; max-height: 85vh; overflow-y: auto;">
+          <div class="modal-header">
+            <h3>📝 Submission: Part ${submission.part_number} - ${partNames[submission.part_number] || 'Unknown'}</h3>
+            <button class="modal-close" onclick="document.getElementById('viewSubmissionModal').remove()">&times;</button>
+          </div>
+          <div style="padding: 1rem 0;">
+            <div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--gray-200);">
+              <p style="margin: 0;"><strong>Student:</strong> ${submission.student_name || submission.student_email}</p>
+              <p style="margin: 0.25rem 0;"><strong>Profile:</strong> ${submission.profile_name || 'Unknown'}</p>
+              <p style="margin: 0;"><strong>Submitted:</strong> ${Utils.formatDateTime(submission.updated_at)}</p>
+            </div>
+            <div style="background: var(--gray-50); padding: 1rem; border-radius: 8px; max-height: 400px; overflow-y: auto;">
+              <pre style="white-space: pre-wrap; word-wrap: break-word; margin: 0; font-family: inherit; font-size: 0.9rem;">${submission.content || 'No content available'}</pre>
+            </div>
+          </div>
+          <div style="display: flex; gap: 0.75rem; justify-content: flex-end; padding-top: 1rem; border-top: 1px solid var(--gray-200);">
+            <button class="btn btn-outline" onclick="document.getElementById('viewSubmissionModal').remove()">Close</button>
+            <button class="btn btn-primary" onclick="document.getElementById('viewSubmissionModal').remove(); openReviewModal('${progressId}', ${submission.part_number})">
+              📝 Review This Submission
+            </button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+    }
+    
+    // Load existing documents for a profile
+    async function loadProfileDocuments(profileId) {
+      try {
+        const response = await fetch(`/api/instructor/documents/${profileId}`, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        });
+
+        if (!response.ok) {
+          console.error('Failed to load documents');
+          return;
+        }
+
+        const data = await response.json();
+        const documents = data.documents || [];
+
+        // Update both displays
+        updateDocumentGrid(documents);
+        updateGeneratedDocsList(documents, profileId);
+
+        // Enable PDF download if documents exist
+        document.getElementById('downloadPdfBtn').disabled = documents.length === 0;
+
+      } catch (error) {
+        console.error('Error loading documents:', error);
+      }
+    }
+
+    // Download all documents as PDF
+    function downloadProfilePdf() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) {
+        Toast.warning('Select Profile', 'Please select a profile first');
+        return;
+      }
+      const btn = document.getElementById('downloadPdfBtn');
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Generating PDF...';
+
+      fetch(`/api/profiles/${profileId}/documents/pdf`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      }).then(async r => {
+        if (!r.ok) {
+          const errData = await r.json().catch(() => ({}));
+          throw new Error(errData.error || `PDF generation failed (${r.status})`);
+        }
+        return r.blob();
+      }).then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'Security_Documents.pdf';
+        a.click();
+        URL.revokeObjectURL(url);
+        Toast.success('Download Complete', 'PDF has been downloaded');
+      }).catch(err => {
+        console.error('PDF download error:', err);
+        Toast.error('Download Failed', err.message);
+      }).finally(() => {
+        btn.disabled = false;
+        btn.innerHTML = '📄 Download PDF';
+      });
+    }
+
+    // Generate documents
+    async function generateDocuments() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) {
+        Toast.warning('Select Profile', 'Please select a profile first');
+        return;
+      }
+      
+      const btn = document.getElementById('generateDocsBtn');
+      const status = document.getElementById('generateStatus');
+      
+      btn.disabled = true;
+      btn.textContent = '⏳ Generating...';
+      status.textContent = 'This may take a minute...';
+      
+      try {
+        // Call N8N webhook or API endpoint to generate documents
+        const response = await fetch('/api/instructor/generate-documents', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ profile_id: profileId })
+        });
+        
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || 'Generation failed');
+        }
+        
+        const data = await response.json();
+
+        // Debug logging
+        console.log('📥 Received from backend:', {
+          success: data.success,
+          documentCount: data.documents?.length || 0,
+          documents: data.documents?.map(d => ({ type: d.type, filename: d.filename, size: d.size }))
+        });
+
+        Toast.success('Documents Generated', 'All security scan files have been created!');
+        status.textContent = 'Generation complete!';
+
+        // Update document grid to show generated status
+        console.log('🔄 Updating document grid with', data.documents?.length || 0, 'documents');
+        updateDocumentGrid(data.documents || []);
+
+        // Update generated documents list
+        updateGeneratedDocsList(data.documents || [], profileId);
+
+        // Update generated docs count
+        document.getElementById('generatedDocs').textContent =
+          (parseInt(document.getElementById('generatedDocs').textContent) || 0) + 3;
+        
+      } catch (error) {
+        console.error('Failed to generate documents:', error);
+        Toast.error('Generation Failed', error.message);
+        status.textContent = 'Generation failed. Please try again.';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '⚡ Generate All Documents';
+      }
+    }
+    
+    function updateDocumentGrid(documents) {
+      const grid = document.getElementById('documentGrid');
+
+      console.log('📊 updateDocumentGrid called with:', documents);
+
+      const docTypes = [
+        { type: 'nessus', icon: '🔍', name: 'NESSUS Scan', desc: 'Vulnerability scanner XML output' },
+        { type: 'zap', icon: '🕷️', name: 'ZAP Report', desc: 'Web application security scan' },
+        { type: 'nmap', icon: '🔌', name: 'NMAP Scan', desc: 'Network port scanner output' }
+      ];
+
+      grid.innerHTML = docTypes.map(dt => {
+        const doc = documents.find(d => d.type === dt.type);
+        const isGenerated = !!doc;
+
+        console.log(`  📄 ${dt.type}:`, { found: isGenerated, doc: doc });
+        
+        return `
+          <div class="document-card">
+            <div class="icon">${dt.icon}</div>
+            <div class="name">${dt.name}</div>
+            <div class="desc">${dt.desc}</div>
+            <div class="status ${isGenerated ? 'generated' : 'not-generated'}">
+              ${isGenerated ? '✓ Generated' : 'Not Generated'}
+            </div>
+            ${isGenerated ? `
+              <button class="btn btn-sm btn-outline" style="margin-top: 0.5rem;" 
+                      onclick="downloadDocument('${doc.url}', '${doc.filename}')">
+                📥 Download
+              </button>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+    }
+
+    function updateGeneratedDocsList(documents, profileId) {
+      const listDiv = document.getElementById('generatedDocsList');
+
+      if (!documents || documents.length === 0) {
+        listDiv.innerHTML = `
+          <div class="empty-state">
+            <div class="icon">📄</div>
+            <h3>No Documents Generated</h3>
+            <p>Select a profile and click "Generate All Documents" to create assessment files.</p>
+          </div>
+        `;
+        return;
+      }
+
+      const docIcons = {
+        'nessus': '🔍',
+        'zap': '🕷️',
+        'nmap': '🔌'
+      };
+
+      const docNames = {
+        'nessus': 'NESSUS Vulnerability Scan',
+        'zap': 'OWASP ZAP Security Report',
+        'nmap': 'NMAP Network Scan'
+      };
+
+      listDiv.innerHTML = `
+        <div style="display: flex; flex-direction: column; gap: 1rem;">
+          ${documents.map(doc => `
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; background: white; border: 1px solid var(--gray-200); border-radius: 8px;">
+              <div style="display: flex; align-items: center; gap: 1rem;">
+                <div style="font-size: 2rem;">${docIcons[doc.type] || '📄'}</div>
+                <div>
+                  <div style="font-weight: 600; color: var(--gray-900);">${docNames[doc.type] || doc.type}</div>
+                  <div style="font-size: 0.875rem; color: var(--gray-600);">${doc.filename}</div>
+                  <div style="font-size: 0.75rem; color: var(--gray-500); margin-top: 0.25rem;">
+                    Size: ${formatFileSize(doc.size || 0)} • Generated: ${new Date().toLocaleString()}
+                  </div>
+                </div>
+              </div>
+              <button class="btn btn-sm btn-primary" onclick="downloadDocument('${doc.url}', '${doc.filename}')">
+                📥 Download
+              </button>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+
+    function formatFileSize(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+    }
+
+    function downloadDocument(url, filename) {
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      a.click();
+    }
+
+    // ============================================================================
+    // ANSWER KEY / EXAMPLE GENERATION
+    // ============================================================================
+
+    let cachedExamples = null; // { parts: [...], profileId }
+
+    async function checkExistingExamples(profileId) {
+      try {
+        const response = await fetch(`/api/instructor/examples/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        const hasExamples = data.examples && data.examples.length > 0;
+        document.getElementById('viewExamplesBtn').style.display = hasExamples ? 'inline-flex' : 'none';
+        if (hasExamples) {
+          cachedExamples = { parts: data.examples, profileId };
+        }
+      } catch (e) {
+        console.error('Error checking examples:', e);
+      }
+    }
+
+    async function generateExamples() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) {
+        Toast.warning('Select Profile', 'Please select a profile first');
+        return;
+      }
+
+      const btn = document.getElementById('generateExamplesBtn');
+      const status = document.getElementById('generateStatus');
+
+      btn.disabled = true;
+      btn.textContent = '⏳ Generating Answer Key...';
+      status.textContent = 'Generating examples for all 8 parts via AI. This may take several minutes...';
+
+      try {
+        const response = await fetch('/api/instructor/generate-examples', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ profile_id: profileId })
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || 'Generation failed');
+        }
+
+        const data = await response.json();
+        const intakeMsg = data.intake_form_generated ? ' + intake form' : '';
+        Toast.success('Answer Key Generated', `Generated examples for ${data.parts_generated.length} parts${intakeMsg}!`);
+        status.textContent = `Answer key generated for ${data.parts_generated.length} parts${intakeMsg}.`;
+
+        // Refresh examples cache
+        await checkExistingExamples(profileId);
+
+      } catch (error) {
+        console.error('Failed to generate examples:', error);
+        Toast.error('Generation Failed', error.message);
+        status.textContent = 'Answer key generation failed. Please try again.';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '📝 Generate Answer Key';
+      }
+    }
+
+    async function viewExamples() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) return;
+
+      // Load examples if not cached or different profile
+      if (!cachedExamples || cachedExamples.profileId !== profileId) {
+        try {
+          const response = await fetch(`/api/instructor/examples/${profileId}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          });
+          if (!response.ok) throw new Error('Failed to load examples');
+          const data = await response.json();
+          cachedExamples = { parts: data.examples || [], profileId };
+        } catch (e) {
+          Toast.error('Error', e.message);
+          return;
+        }
+      }
+
+      if (cachedExamples.parts.length === 0) {
+        Toast.warning('No Examples', 'No answer key has been generated for this profile yet.');
+        return;
+      }
+
+      // Set current profile for download
+      currentAnswerKeyProfileId = profileId;
+
+      // Get profile name
+      const select = document.getElementById('docProfileSelect');
+      const profileName = select.options[select.selectedIndex]?.text || 'Profile';
+      document.getElementById('answerKeyProfileName').textContent = profileName;
+      document.getElementById('downloadPacketBtn').style.display = '';
+      document.getElementById('regenerateAnswerKeyBtn').style.display = '';
+
+      // Build sidebar
+      const sidebar = document.getElementById('answerKeySidebar');
+      sidebar.innerHTML = cachedExamples.parts.map((ex, i) => `
+        <div class="ak-part-item ${i === 0 ? 'active' : ''}" onclick="selectAnswerKeyPart(${i}, this)">
+          <div class="part-num">Part ${ex.part_number}</div>
+          <div>${ex.part_name}</div>
+        </div>
+      `).join('');
+
+      // Show first part
+      renderAnswerKeyPart(0);
+
+      // Open modal
+      document.getElementById('answerKeyModal').classList.add('active');
+    }
+
+    function selectAnswerKeyPart(index, el) {
+      document.querySelectorAll('.ak-part-item').forEach(item => item.classList.remove('active'));
+      el.classList.add('active');
+      renderAnswerKeyPart(index);
+    }
+
+    function renderAnswerKeyPart(index) {
+      const content = document.getElementById('answerKeyContent');
+      const example = cachedExamples.parts[index];
+      if (!example) {
+        content.innerHTML = '<p>No content available.</p>';
+        return;
+      }
+
+      let parsed;
+      try {
+        parsed = typeof example.content === 'string' ? JSON.parse(example.content) : example.content;
+      } catch {
+        content.innerHTML = '<p>Error parsing content.</p>';
+        return;
+      }
+
+      const deliverables = parsed.deliverables || {};
+      const optionKeys = Object.keys(deliverables);
+
+      if (optionKeys.length === 0) {
+        content.innerHTML = '<p>No deliverables found for this part.</p>';
+        return;
+      }
+
+      let html = `<h3 style="margin-bottom: 1rem;">Part ${example.part_number}: ${example.part_name}</h3>`;
+
+      if (parsed.general_notes) {
+        html += `<p style="color: #718096; margin-bottom: 1.5rem; font-style: italic;">${escHtml(parsed.general_notes)}</p>`;
+      }
+
+      for (const [optKey, deliverablesArr] of Object.entries(deliverables)) {
+        const optName = optKey.replace(/^p\d+_/, '').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        html += `<div class="ak-option-block">`;
+        html += `<h4>${optName}</h4>`;
+
+        if (Array.isArray(deliverablesArr)) {
+          deliverablesArr.forEach((del, i) => {
+            html += `
+              <div class="ak-deliverable">
+                <div class="ak-deliverable-label">Deliverable ${i + 1}</div>
+                <div class="ak-deliverable-content">${del}</div>
+              </div>`;
+          });
+        } else if (typeof deliverablesArr === 'string') {
+          html += `<div class="ak-deliverable"><div class="ak-deliverable-content">${deliverablesArr}</div></div>`;
+        }
+
+        html += `</div>`;
+      }
+
+      content.innerHTML = html;
+    }
+
+    function escHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // ============================================================================
+    // ANSWER KEY FROM MY STUDENTS SECTION
+    // ============================================================================
+
+    let currentAnswerKeyProfileId = null;
+
+    function showAnswerKeyModal(studentId, studentName) {
+      const student = dashboardData.students.find(s => s.student_id === studentId);
+      if (!student) { Toast.error('Error', 'Student not found'); return; }
+
+      const profiles = student.generated_profiles || [];
+      if (profiles.length === 0) {
+        Toast.warning('No Profiles', 'This student has no profiles yet.');
+        return;
+      }
+
+      // If single profile, go straight to it; otherwise show a picker
+      if (profiles.length === 1) {
+        openAnswerKeyForProfile(profiles[0].profile_id, `${studentName} — ${profiles[0].company_name || 'Profile'}`);
+        return;
+      }
+
+      // Build a quick profile selection in the answer key modal content area
+      const sidebar = document.getElementById('answerKeySidebar');
+      const content = document.getElementById('answerKeyContent');
+      document.getElementById('answerKeyProfileName').textContent = studentName;
+      document.getElementById('downloadPacketBtn').style.display = 'none';
+      document.getElementById('regenerateAnswerKeyBtn').style.display = 'none';
+
+      sidebar.innerHTML = profiles.map(p => `
+        <div class="ak-part-item" onclick="openAnswerKeyForProfile('${p.profile_id}', '${studentName} — ${(p.company_name || 'Profile').replace(/'/g, "\\'")}')">
+          <div class="part-num">🏢</div>
+          <div>${p.company_name || 'Unnamed'}</div>
+        </div>
+      `).join('');
+
+      content.innerHTML = `
+        <div class="empty-state">
+          <div class="icon">📝</div>
+          <h3>Select a Profile</h3>
+          <p>Choose a profile from the sidebar to view or generate its answer key.</p>
+        </div>`;
+
+      document.getElementById('answerKeyModal').classList.add('active');
+    }
+
+    async function openAnswerKeyForProfile(profileId, displayName) {
+      currentAnswerKeyProfileId = profileId;
+      document.getElementById('answerKeyProfileName').textContent = displayName || 'Profile';
+
+      // Check for existing examples
+      try {
+        const response = await fetch(`/api/instructor/examples/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        if (!response.ok) throw new Error('Failed to load');
+        const data = await response.json();
+
+        if (data.examples && data.examples.length > 0) {
+          cachedExamples = { parts: data.examples, profileId };
+          buildAnswerKeySidebar();
+          document.getElementById('downloadPacketBtn').style.display = '';
+          document.getElementById('regenerateAnswerKeyBtn').style.display = '';
+          document.getElementById('answerKeyModal').classList.add('active');
+        } else {
+          // No examples yet — offer to generate
+          const sidebar = document.getElementById('answerKeySidebar');
+          sidebar.innerHTML = '';
+          const content = document.getElementById('answerKeyContent');
+          content.innerHTML = `
+            <div style="text-align: center; padding: 3rem 1rem;">
+              <div style="font-size: 3rem; margin-bottom: 1rem;">📝</div>
+              <h3>No Answer Key Yet</h3>
+              <p style="color: #718096; margin-bottom: 1.5rem;">Generate an answer key for this profile. This creates example content for all 8 parts plus a completed intake form.</p>
+              <button class="btn btn-primary" id="generateFromModalBtn" onclick="generateAnswerKeyFromModal()">
+                📝 Generate Answer Key
+              </button>
+              <div id="generateFromModalStatus" style="margin-top: 1rem; color: #718096;"></div>
+            </div>`;
+          document.getElementById('downloadPacketBtn').style.display = 'none';
+          document.getElementById('regenerateAnswerKeyBtn').style.display = 'none';
+          document.getElementById('answerKeyModal').classList.add('active');
+        }
+      } catch (e) {
+        Toast.error('Error', e.message);
+      }
+    }
+
+    function buildAnswerKeySidebar() {
+      if (!cachedExamples) return;
+      const sidebar = document.getElementById('answerKeySidebar');
+      sidebar.innerHTML = cachedExamples.parts.map((ex, i) => `
+        <div class="ak-part-item ${i === 0 ? 'active' : ''}" onclick="selectAnswerKeyPart(${i}, this)">
+          <div class="part-num">Part ${ex.part_number}</div>
+          <div>${ex.part_name}</div>
+        </div>
+      `).join('');
+      renderAnswerKeyPart(0);
+    }
+
+    async function generateAnswerKeyFromModal() {
+      if (!currentAnswerKeyProfileId) return;
+      const btn = document.getElementById('generateFromModalBtn');
+      const status = document.getElementById('generateFromModalStatus');
+
+      btn.disabled = true;
+      btn.textContent = '⏳ Generating...';
+      status.textContent = 'Generating examples for all 8 parts via AI. This may take several minutes...';
+
+      try {
+        const response = await fetch('/api/instructor/generate-examples', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ profile_id: currentAnswerKeyProfileId })
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || 'Generation failed');
+        }
+
+        const data = await response.json();
+        Toast.success('Answer Key Generated', `Generated ${data.parts_generated.length} parts + intake form!`);
+
+        // Reload and display
+        await openAnswerKeyForProfile(currentAnswerKeyProfileId, document.getElementById('answerKeyProfileName').textContent);
+
+      } catch (error) {
+        Toast.error('Generation Failed', error.message);
+        status.textContent = 'Generation failed. Please try again.';
+        btn.disabled = false;
+        btn.textContent = '📝 Generate Answer Key';
+      }
+    }
+
+    async function regenerateAnswerKey() {
+      if (!currentAnswerKeyProfileId) return;
+      const btn = document.getElementById('regenerateAnswerKeyBtn');
+      const origText = btn.innerHTML;
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Regenerating...';
+
+      try {
+        const response = await fetch('/api/instructor/generate-examples', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ profile_id: currentAnswerKeyProfileId })
+        });
+
+        if (!response.ok) {
+          const error = await response.json();
+          throw new Error(error.error || 'Regeneration failed');
+        }
+
+        const data = await response.json();
+        Toast.success('Answer Key Regenerated', `Regenerated ${data.parts_generated.length} parts + intake form!`);
+
+        // Reload and display
+        await openAnswerKeyForProfile(currentAnswerKeyProfileId, document.getElementById('answerKeyProfileName').textContent);
+      } catch (error) {
+        Toast.error('Regeneration Failed', error.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = origText;
+      }
+    }
+
+    function downloadPacketPdf() {
+      const profileId = currentAnswerKeyProfileId || document.getElementById('docProfileSelect')?.value;
+      if (!profileId) {
+        Toast.warning('No Profile', 'No profile selected');
+        return;
+      }
+      const a = document.createElement('a');
+      a.href = `/api/instructor/packet/${profileId}/pdf`;
+      // Add auth header via fetch instead
+      fetch(`/api/instructor/packet/${profileId}/pdf`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      })
+      .then(resp => {
+        if (!resp.ok) throw new Error('Download failed');
+        return resp.blob();
+      })
+      .then(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `instructor-packet.pdf`;
+        a.click();
+        URL.revokeObjectURL(url);
+      })
+      .catch(err => Toast.error('Download Failed', err.message));
+    }
+  </script>
+</body>
+</html>

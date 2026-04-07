@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NICE Framework | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .nice-header {
+      background: linear-gradient(135deg, #1a365d, #2c5282);
+      color: white;
+      padding: 2rem;
+      border-radius: 16px;
+      margin-bottom: 2rem;
+    }
+    .nice-header h2 {
+      margin-bottom: 0.5rem;
+    }
+    .nice-header p {
+      opacity: 0.9;
+      max-width: 600px;
+    }
+    
+    .role-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    
+    .role-card {
+      background: white;
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+    
+    .role-card-header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    
+    .role-icon {
+      width: 50px;
+      height: 50px;
+      background: linear-gradient(135deg, #3182ce, #2c5282);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.5rem;
+    }
+    
+    .role-info h3 {
+      color: #1a365d;
+      margin-bottom: 0.25rem;
+    }
+    
+    .role-id {
+      font-size: 0.8rem;
+      color: #64748b;
+      font-family: monospace;
+    }
+    
+    .competency-section {
+      margin-bottom: 1rem;
+    }
+    
+    .competency-label {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: #64748b;
+      margin-bottom: 0.5rem;
+    }
+    
+    .progress-bar {
+      height: 10px;
+      background: #e2e8f0;
+      border-radius: 5px;
+      overflow: hidden;
+      margin-bottom: 0.25rem;
+    }
+    
+    .progress-fill {
+      height: 100%;
+      border-radius: 5px;
+      transition: width 0.5s ease;
+    }
+    
+    .progress-fill.tasks { background: linear-gradient(90deg, #38a169, #48bb78); }
+    .progress-fill.knowledge { background: linear-gradient(90deg, #3182ce, #4299e1); }
+    .progress-fill.skills { background: linear-gradient(90deg, #805ad5, #9f7aea); }
+    
+    .progress-text {
+      font-size: 0.8rem;
+      color: #64748b;
+      text-align: right;
+    }
+    
+    .competency-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+    
+    .competency-badge {
+      padding: 0.5rem;
+      border-radius: 8px;
+      text-align: center;
+      font-size: 0.75rem;
+      font-family: monospace;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .competency-badge.completed {
+      background: #c6f6d5;
+      color: #276749;
+    }
+    
+    .competency-badge.in-progress {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    
+    .competency-badge.not-started {
+      background: #e2e8f0;
+      color: #64748b;
+    }
+    
+    .competency-badge:hover {
+      transform: scale(1.05);
+    }
+    
+    .legend {
+      display: flex;
+      gap: 1.5rem;
+      justify-content: center;
+      margin-bottom: 2rem;
+      flex-wrap: wrap;
+    }
+    
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+      color: #64748b;
+    }
+    
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 3px;
+    }
+    
+    .export-section {
+      text-align: center;
+      padding: 2rem;
+      background: #f8fafc;
+      border-radius: 12px;
+      margin-top: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar (populated by layout.js) -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Content injected by Layout.init() -->
+    </aside>
+
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <div class="search-box">
+            <span class="icon">🔍</span>
+            <input type="text" placeholder="Search competencies..." id="searchInput">
+          </div>
+        </div>
+        <div class="header-right">
+          <button class="btn btn-secondary" onclick="exportProgress()">📥 Export Portfolio</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="nice-header">
+          <h2>🎯 NICE Framework Progress</h2>
+          <p>Track your demonstrated competencies against the NICE Cybersecurity Workforce Framework. Complete assessment activities to earn credit toward professional work roles.</p>
+        </div>
+
+        <div class="legend">
+          <div class="legend-item">
+            <div class="legend-dot" style="background: #c6f6d5;"></div>
+            <span>Completed</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot" style="background: #fef3c7;"></div>
+            <span>In Progress</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-dot" style="background: #e2e8f0;"></div>
+            <span>Not Started</span>
+          </div>
+        </div>
+
+        <div class="role-cards">
+          <!-- Risk Management Specialist -->
+          <div class="role-card">
+            <div class="role-card-header">
+              <div class="role-icon">📊</div>
+              <div class="role-info">
+                <h3>Risk Management Specialist</h3>
+                <span class="role-id">OV-RA-001</span>
+              </div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Tasks</div>
+              <div class="progress-bar">
+                <div class="progress-fill tasks" style="width: 60%"></div>
+              </div>
+              <div class="progress-text">12 / 20 demonstrated</div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Knowledge</div>
+              <div class="progress-bar">
+                <div class="progress-fill knowledge" style="width: 45%"></div>
+              </div>
+              <div class="progress-text">9 / 20 demonstrated</div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Skills</div>
+              <div class="progress-bar">
+                <div class="progress-fill skills" style="width: 30%"></div>
+              </div>
+              <div class="progress-text">6 / 20 demonstrated</div>
+            </div>
+
+            <div class="competency-grid">
+              <div class="competency-badge completed">T0015</div>
+              <div class="competency-badge completed">T0084</div>
+              <div class="competency-badge completed">T0145</div>
+              <div class="competency-badge in-progress">T0177</div>
+              <div class="competency-badge in-progress">T0199</div>
+              <div class="competency-badge not-started">T0038</div>
+            </div>
+          </div>
+
+          <!-- Cybersecurity Analyst -->
+          <div class="role-card">
+            <div class="role-card-header">
+              <div class="role-icon">🔍</div>
+              <div class="role-info">
+                <h3>Cybersecurity Analyst</h3>
+                <span class="role-id">PR-CDA-001</span>
+              </div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Tasks</div>
+              <div class="progress-bar">
+                <div class="progress-fill tasks" style="width: 45%"></div>
+              </div>
+              <div class="progress-text">9 / 20 demonstrated</div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Knowledge</div>
+              <div class="progress-bar">
+                <div class="progress-fill knowledge" style="width: 35%"></div>
+              </div>
+              <div class="progress-text">7 / 20 demonstrated</div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Skills</div>
+              <div class="progress-bar">
+                <div class="progress-fill skills" style="width: 25%"></div>
+              </div>
+              <div class="progress-text">5 / 20 demonstrated</div>
+            </div>
+
+            <div class="competency-grid">
+              <div class="competency-badge completed">K0002</div>
+              <div class="competency-badge completed">K0004</div>
+              <div class="competency-badge in-progress">K0005</div>
+              <div class="competency-badge not-started">K0013</div>
+              <div class="competency-badge not-started">S0001</div>
+              <div class="competency-badge not-started">S0003</div>
+            </div>
+          </div>
+
+          <!-- Security Control Assessor -->
+          <div class="role-card">
+            <div class="role-card-header">
+              <div class="role-icon">🛡️</div>
+              <div class="role-info">
+                <h3>Security Control Assessor</h3>
+                <span class="role-id">OV-TEA-001</span>
+              </div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Tasks</div>
+              <div class="progress-bar">
+                <div class="progress-fill tasks" style="width: 30%"></div>
+              </div>
+              <div class="progress-text">6 / 20 demonstrated</div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Knowledge</div>
+              <div class="progress-bar">
+                <div class="progress-fill knowledge" style="width: 20%"></div>
+              </div>
+              <div class="progress-text">4 / 20 demonstrated</div>
+            </div>
+            
+            <div class="competency-section">
+              <div class="competency-label">Skills</div>
+              <div class="progress-bar">
+                <div class="progress-fill skills" style="width: 15%"></div>
+              </div>
+              <div class="progress-text">3 / 20 demonstrated</div>
+            </div>
+
+            <div class="competency-grid">
+              <div class="competency-badge completed">T0019</div>
+              <div class="competency-badge in-progress">T0180</div>
+              <div class="competency-badge not-started">T0234</div>
+              <div class="competency-badge not-started">K0027</div>
+              <div class="competency-badge not-started">K0028</div>
+              <div class="competency-badge not-started">S0006</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="export-section">
+          <h3 style="color: #1a365d; margin-bottom: 0.5rem;">📋 Export Your Progress</h3>
+          <p style="color: #64748b; margin-bottom: 1rem;">Download your NICE Framework competency report for job applications and portfolio.</p>
+          <button class="btn btn-primary" onclick="exportProgress()">📥 Download PDF Report</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      const isLoggedIn = await Auth.requireAuth();
+      if (!isLoggedIn) return;
+    });
+
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('open');
+      document.getElementById('sidebarOverlay').classList.toggle('active');
+    }
+    function closeSidebar() {
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebarOverlay').classList.remove('active');
+    }
+    
+    function exportProgress() {
+      Toast.info('Coming Soon', 'PDF export will be available in the next update!');
+    }
+  </script>
+</body>
+</html>

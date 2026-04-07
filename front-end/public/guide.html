@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberHub Instructor Guide | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', sans-serif;
+      line-height: 1.7;
+      color: #2d3748;
+      background: #f7fafc;
+      padding: 2rem;
+    }
+    .guide-container {
+      max-width: 900px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 16px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      padding: 3rem;
+    }
+    h1 {
+      font-size: 2rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      color: #1a202c;
+    }
+    .subtitle {
+      color: #718096;
+      font-size: 1.1rem;
+      margin-bottom: 2rem;
+      padding-bottom: 1.5rem;
+      border-bottom: 2px solid #e2e8f0;
+    }
+    h2 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      margin: 2rem 0 0.75rem;
+      color: #2b6cb0;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    h3 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 1.5rem 0 0.5rem;
+      color: #1a202c;
+    }
+    p { margin-bottom: 0.75rem; }
+    ul, ol { margin: 0.5rem 0 1rem 1.5rem; }
+    li { margin-bottom: 0.4rem; }
+    code {
+      background: #edf2f7;
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.85em;
+      color: #e53e3e;
+    }
+    .tip {
+      background: #ebf8ff;
+      border-left: 4px solid #4299e1;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+    .warning {
+      background: #fffbeb;
+      border-left: 4px solid #d69e2e;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+    .danger {
+      background: #fff5f5;
+      border-left: 4px solid #e53e3e;
+      padding: 0.75rem 1rem;
+      border-radius: 0 8px 8px 0;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 1rem 0;
+      font-size: 0.9rem;
+    }
+    th {
+      background: #2d3748;
+      color: white;
+      padding: 0.6rem 0.75rem;
+      text-align: left;
+      font-weight: 500;
+    }
+    td {
+      padding: 0.6rem 0.75rem;
+      border-bottom: 1px solid #e2e8f0;
+    }
+    tr:hover td { background: #f7fafc; }
+    .toc {
+      background: #f7fafc;
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    .toc h3 { margin-top: 0; }
+    .toc ul { list-style: none; margin-left: 0; }
+    .toc li { margin-bottom: 0.3rem; }
+    .toc a { color: #2b6cb0; text-decoration: none; }
+    .toc a:hover { text-decoration: underline; }
+    .back-link {
+      display: inline-block;
+      margin-bottom: 1.5rem;
+      color: #4299e1;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .back-link:hover { text-decoration: underline; }
+    @media print {
+      body { padding: 0; background: white; }
+      .guide-container { box-shadow: none; padding: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="guide-container">
+    <a href="/admin" class="back-link">&larr; Back to Admin Dashboard</a>
+
+    <h1>CyberHub for Instructors</h1>
+    <p class="subtitle">Everything you need to know to manage student lab environments in Clinic-in-a-Box</p>
+
+    <div class="toc">
+      <h3>Table of Contents</h3>
+      <ul>
+        <li><a href="#overview">1. System Overview</a></li>
+        <li><a href="#accounts">2. Account Management</a></li>
+        <li><a href="#deploying">3. Deploying Lab Environments</a></li>
+        <li><a href="#managing">4. Managing Active Labs</a></li>
+        <li><a href="#access">5. Accessing Student VMs</a></li>
+        <li><a href="#schedules">6. Access Schedules</a></li>
+        <li><a href="#internet">7. Internet Access Control</a></li>
+        <li><a href="#troubleshooting">8. Troubleshooting</a></li>
+        <li><a href="#glossary">9. Glossary</a></li>
+      </ul>
+    </div>
+
+    <h2 id="overview">1. System Overview</h2>
+    <p>The CyberHub system provides isolated virtual lab environments for cybersecurity education. Each student gets their own "lane" — a private network containing:</p>
+    <ul>
+      <li><strong>Challenge VM(s)</strong> — The target system(s) students analyze (e.g., a vulnerable web server)</li>
+      <li><strong>Gateway</strong> — A lightweight container that controls network access to the challenge VM</li>
+      <li><strong>Attack Box</strong> (optional) — A Kali Linux VM for running security tools</li>
+    </ul>
+    <p>Students access their VMs through <strong>Apache Guacamole</strong>, a browser-based remote desktop gateway. No VPN or special software is needed — just a web browser.</p>
+
+    <h2 id="accounts">2. Account Management</h2>
+    <h3>Group Deployment</h3>
+    <p>The admin creates groups with instructor and student accounts in bulk. When a group is deployed:</p>
+    <ol>
+      <li>Instructor and student accounts are created in the Clinic-in-a-Box system</li>
+      <li>Matching Guacamole accounts are created for VM access</li>
+      <li>Each account gets a <strong>unique random password</strong> (shown once at deployment — save them!)</li>
+      <li>Optionally, a VM lane is deployed for each student</li>
+    </ol>
+
+    <div class="tip"><strong>Tip:</strong> After group deployment, immediately download the credentials CSV. Passwords cannot be recovered later since they are hashed in the database.</div>
+
+    <h3>Disabling Accounts</h3>
+    <p>You can disable all student accounts in a group at once. Disabled accounts cannot log in. Go to the <strong>User Management</strong> tab (admin) or <strong>Access Schedule</strong> tab (instructor) to toggle.</p>
+
+    <h2 id="deploying">3. Deploying Lab Environments</h2>
+    <h3>Pre-flight Checks</h3>
+    <p>Before any deployment, the system checks:</p>
+    <ul>
+      <li>Cluster resource usage (CPU, memory, storage per node)</li>
+      <li>Available VXLAN IDs (network isolation slots)</li>
+      <li>Number of concurrent deployments in progress</li>
+    </ul>
+    <p>A confirmation dialog shows the resource impact before you commit. Deployments are <strong>blocked</strong> if resources are insufficient.</p>
+
+    <h3>Deploying a Group</h3>
+    <ol>
+      <li>Go to the <strong>Deploy Lane</strong> tab in the admin dashboard</li>
+      <li>Fill in the Group Name, number of instructors and students</li>
+      <li>Select a Module and Challenge from the dropdowns</li>
+      <li>Check "Deploy CyberHub Lanes" if you want VMs for each student</li>
+      <li>Click Deploy Group and confirm the resource preview</li>
+      <li>Save the credentials from the results panel</li>
+    </ol>
+
+    <div class="warning"><strong>Note:</strong> Lane deployment takes 30-90 seconds per student (VMs are cloned sequentially). Check the Active Lanes tab for progress.</div>
+
+    <h3>Deploying a Single Lane</h3>
+    <p>For individual students, use the "Deploy Single Lane" form on the right side of the Deploy tab. Select a module, challenge, and click Deploy.</p>
+
+    <h2 id="managing">4. Managing Active Labs</h2>
+    <p>The <strong>Active Lanes</strong> tab (admin) and <strong>Lab Environments</strong> tab (instructor) show all deployed lab environments.</p>
+
+    <table>
+      <tr><th>Status</th><th>Meaning</th></tr>
+      <tr><td><span style="color: #38a169; font-weight: 600;">active</span></td><td>VMs are running and accessible</td></tr>
+      <tr><td><span style="color: #d69e2e; font-weight: 600;">deploying</span></td><td>VMs are being cloned (wait 30-90 sec)</td></tr>
+      <tr><td><span style="color: #e53e3e; font-weight: 600;">error</span></td><td>Deployment failed — check logs</td></tr>
+      <tr><td><span style="color: #4299e1; font-weight: 600;">pending</span></td><td>Queued for deployment</td></tr>
+    </table>
+
+    <h3>Deleting a Lane</h3>
+    <p>Clicking Delete on a lane will:</p>
+    <ol>
+      <li>Force-stop all VMs in the lane</li>
+      <li>Destroy (purge) the VMs from Proxmox</li>
+      <li>Free the VXLAN ID for reuse</li>
+    </ol>
+    <div class="danger"><strong>Warning:</strong> Lane deletion is irreversible. All data on the VMs is permanently lost.</div>
+
+    <h2 id="access">5. Accessing Student VMs</h2>
+    <p>As an instructor, you can view and connect to your students' VMs from the <strong>Lab Environments</strong> tab:</p>
+    <ol>
+      <li>Click <strong>Load IPs</strong> to fetch the current IP addresses of VMs in a lane</li>
+      <li>Click <strong>Connect</strong> to open the Guacamole remote desktop in a new browser tab</li>
+    </ol>
+    <p>You can only see lanes belonging to students in your group. To monitor a student from another group, use the <strong>Add Student</strong> search to add them to your view.</p>
+
+    <h2 id="schedules">6. Access Schedules</h2>
+    <p>You can restrict when students can access the system by setting an access schedule for your group:</p>
+    <ol>
+      <li>Go to the <strong>Access Schedule</strong> tab</li>
+      <li>Select the active days (e.g., Mon-Fri)</li>
+      <li>Set the start and end times (e.g., 8:00 AM - 5:00 PM)</li>
+      <li>Choose the timezone</li>
+      <li>Click <strong>Save Schedule</strong></li>
+    </ol>
+    <p>Students will receive a clear error message when they try to log in outside scheduled hours.</p>
+
+    <h3>Overrides</h3>
+    <p>If class time changes or you need to grant emergency access:</p>
+    <ul>
+      <li><strong>Enable Access Now</strong> — Forces all student accounts active, ignoring the schedule</li>
+      <li><strong>Disable Access Now</strong> — Forces all student accounts off, ignoring the schedule</li>
+      <li><strong>Clear Override</strong> — Returns to the normal schedule</li>
+    </ul>
+
+    <h2 id="internet">7. Internet Access Control</h2>
+    <p>By default, student challenge VMs are <strong>fully isolated</strong> with no internet access. You can toggle internet access per lane:</p>
+    <ul>
+      <li>Admin: Toggle in the <strong>Active Lanes</strong> tab (Internet column)</li>
+      <li>Instructor: Toggle in the <strong>Lab Environments</strong> tab</li>
+    </ul>
+    <p>This works by configuring iptables rules on the gateway container. When enabled, the gateway NATs traffic from the challenge VM to the internet.</p>
+
+    <div class="tip"><strong>Tip:</strong> Only enable internet when students need to download tools or updates. Keep it off during assessments to prevent cheating.</div>
+
+    <h2 id="troubleshooting">8. Troubleshooting</h2>
+
+    <h3>Lane stuck in "deploying"</h3>
+    <p>If a lane stays in "deploying" for more than 5 minutes:</p>
+    <ol>
+      <li>Check the Proxmox web UI for stuck clone tasks</li>
+      <li>The lane can be deleted and re-deployed</li>
+      <li>Check the server logs for error details</li>
+    </ol>
+
+    <h3>Student can't connect to VM</h3>
+    <ol>
+      <li>Verify the lane status is "active"</li>
+      <li>Check that the student's Guacamole account exists (admin Users tab)</li>
+      <li>Try clicking "Load IPs" to verify the VM has an IP address</li>
+      <li>If IPs are missing, the VM may not have fully booted — wait 1-2 minutes</li>
+    </ol>
+
+    <h3>"Account only accessible during class hours"</h3>
+    <p>The student is trying to log in outside the scheduled access window. As an instructor, you can:</p>
+    <ul>
+      <li>Click "Enable Access Now" to override the schedule temporarily</li>
+      <li>Adjust the schedule to match the new class time</li>
+    </ul>
+
+    <h3>Cluster resources maxed out</h3>
+    <p>If deployments are being blocked:</p>
+    <ol>
+      <li>Check the Cluster Resources bar at the top of the admin dashboard</li>
+      <li>Delete unused lanes to free up VXLANs and node resources</li>
+      <li>Ask the system administrator to increase resource limits</li>
+    </ol>
+
+    <h2 id="glossary">9. Glossary</h2>
+    <table>
+      <tr><th>Term</th><th>Definition</th></tr>
+      <tr><td>Lane</td><td>An isolated lab environment containing VMs for one student</td></tr>
+      <tr><td>VXLAN</td><td>Virtual network tag that isolates each lane's traffic</td></tr>
+      <tr><td>Guacamole</td><td>Browser-based remote desktop gateway (no VPN needed)</td></tr>
+      <tr><td>Proxmox</td><td>The virtualization platform that hosts the VMs</td></tr>
+      <tr><td>Gateway</td><td>Lightweight Linux container that controls network access</td></tr>
+      <tr><td>Challenge VM</td><td>The target system students analyze for vulnerabilities</td></tr>
+      <tr><td>Attack Box</td><td>Kali Linux VM with pre-installed security tools</td></tr>
+      <tr><td>Module</td><td>A collection of related challenges (e.g., Crucible, CyberLabs)</td></tr>
+      <tr><td>Group</td><td>A batch of instructor + student accounts deployed together</td></tr>
+    </table>
+
+    <hr style="margin: 2rem 0; border: none; border-top: 1px solid #e2e8f0;">
+    <p style="color: #718096; font-size: 0.85rem; text-align: center;">
+      Clinic-in-a-Box CyberHub Guide | Pin this URL to your Teams channel for easy access
+    </p>
+  </div>
+</body>
+</html>

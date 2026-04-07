@@ -1,0 +1,679 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Generate Profile | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .generator-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; }
+    @media (max-width: 1024px) { .generator-grid { grid-template-columns: 1fr; } }
+    
+    .config-tabs { display: flex; border-bottom: 2px solid var(--gray-200); margin-bottom: 1.25rem; gap: 0.25rem; }
+    .config-tab { padding: 0.75rem 1.25rem; cursor: pointer; color: var(--gray-500); font-weight: 500; border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.2s; }
+    .config-tab:hover { color: var(--primary); background: var(--gray-50); }
+    .config-tab.active { color: var(--primary); border-bottom-color: var(--primary); font-weight: 600; }
+    
+    .config-panel { display: none; animation: fadeIn 0.3s; }
+    .config-panel.active { display: block; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    
+    .range-row { display: flex; align-items: center; gap: 0.75rem; }
+    .range-row input { width: 80px; text-align: center; }
+    .range-row .sep { color: var(--gray-400); }
+    
+    .preview-item { display: flex; justify-content: space-between; padding: 0.625rem 0; border-bottom: 1px solid var(--gray-100); }
+    .preview-item:last-child { border-bottom: none; }
+    .preview-label { color: var(--gray-500); font-size: 0.9rem; }
+    .preview-value { font-weight: 600; text-align: right; }
+    
+    .tag-list { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-top: 0.5rem; }
+    .tag { padding: 0.25rem 0.625rem; border-radius: 1rem; font-size: 0.75rem; font-weight: 500; }
+    .tag-compliance { background: #d1fae5; color: #065f46; }
+    .tag-risk { background: #fee2e2; color: #991b1b; }
+    
+    .info-box { background: #eff6ff; border-left: 3px solid var(--primary); padding: 1rem; border-radius: 0.375rem; margin-bottom: 1.25rem; }
+    .info-box-title { font-weight: 600; color: var(--primary); margin-bottom: 0.25rem; font-size: 0.9rem; }
+    .info-box-text { color: var(--gray-600); font-size: 0.85rem; }
+    
+    .warning-box { background: #fffbeb; border-left: 3px solid #f59e0b; padding: 1rem; border-radius: 0.375rem; margin-bottom: 1.25rem; }
+    .warning-box-title { font-weight: 600; color: #92400e; margin-bottom: 0.25rem; font-size: 0.9rem; }
+    .warning-box-text { color: #78350f; font-size: 0.85rem; }
+    
+    .generate-section { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 2px solid var(--gray-100); }
+    
+    .checkbox-group { display: flex; flex-direction: column; gap: 0.75rem; }
+    .checkbox-item { display: flex; align-items: center; gap: 0.5rem; }
+    .checkbox-item input[type="checkbox"] { width: auto; cursor: pointer; }
+    .checkbox-item label { margin: 0; cursor: pointer; font-weight: normal; }
+    
+    .help-text { display: block; margin-top: 0.375rem; color: var(--gray-500); font-size: 0.85rem; }
+
+    /* ============================================================================
+       DARK MODE OVERRIDES
+       ============================================================================ */
+    [data-theme="dark"] .config-tabs {
+      border-bottom-color: rgba(99,130,255,0.12);
+    }
+    [data-theme="dark"] .config-tab {
+      color: #7882a4;
+    }
+    [data-theme="dark"] .config-tab:hover {
+      color: #7ba6ff;
+      background: rgba(91,140,255,0.06);
+    }
+    [data-theme="dark"] .config-tab.active {
+      color: #5b8cff;
+      border-bottom-color: #5b8cff;
+    }
+    [data-theme="dark"] .range-row .sep {
+      color: #5c6585;
+    }
+    [data-theme="dark"] .preview-item {
+      border-bottom-color: rgba(99,130,255,0.08);
+    }
+    [data-theme="dark"] .preview-label {
+      color: #7882a4;
+    }
+    [data-theme="dark"] .preview-value {
+      color: #e4e8f7;
+    }
+    [data-theme="dark"] .tag-compliance {
+      background: rgba(0,230,138,0.15);
+      color: #00e68a;
+    }
+    [data-theme="dark"] .tag-risk {
+      background: rgba(255,92,114,0.15);
+      color: #ff5c72;
+    }
+    [data-theme="dark"] .info-box {
+      background: rgba(91,140,255,0.08);
+      border-left-color: #5b8cff;
+    }
+    [data-theme="dark"] .info-box-title {
+      color: #7ba6ff;
+    }
+    [data-theme="dark"] .info-box-text {
+      color: #a8b1cc;
+    }
+    [data-theme="dark"] .warning-box {
+      background: rgba(255,184,48,0.08);
+      border-left-color: #ffb830;
+    }
+    [data-theme="dark"] .warning-box-title {
+      color: #ffb830;
+    }
+    [data-theme="dark"] .warning-box-text {
+      color: #c8cee0;
+    }
+    [data-theme="dark"] .generate-section {
+      border-top-color: rgba(99,130,255,0.1);
+    }
+    [data-theme="dark"] .help-text {
+      color: #5c6585;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Sidebar (populated by layout.js) -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Content injected by Layout.init() -->
+    </aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Generate Profile</h1>
+            <p class="page-subtitle">Configure and generate a new client profile.</p>
+          </div>
+        </div>
+
+        <div class="generator-grid">
+          <!-- MAIN FORM -->
+          <div class="card">
+            <div class="card-body">
+              <div class="config-tabs">
+                <div class="config-tab active" data-tab="basic">Basic</div>
+                <div class="config-tab" data-tab="org">Organization</div>
+                <div class="config-tab" data-tab="tech">Technical</div>
+                <div class="config-tab" data-tab="advanced">Advanced</div>
+              </div>
+
+              <!-- BASIC TAB -->
+              <div class="config-panel active" id="panel-basic">
+                <div class="info-box">
+                  <div class="info-box-title">🎯 Quick Setup</div>
+                  <div class="info-box-text">Start with these basic settings. The system will generate appropriate defaults for other fields.</div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Client Type <span style="color: var(--error);">*</span></label>
+                  <select class="form-input" id="clientType" onchange="updatePreview()" required>
+                    <option value="SMB">Small-Medium Business (SMB)</option>
+                    <option value="NonProfit">Non-Profit Organization</option>
+                    <option value="Utility_IT_OT">Utility Company (IT/OT)</option>
+                    <option value="K12">K-12 School District</option>
+                  </select>
+                  <span class="help-text">Determines organization size, industry options, and complexity.</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Industry</label>
+                  <select class="form-input" id="industry" onchange="updatePreview()">
+                    <option value="">🎲 Random (Recommended)</option>
+                  </select>
+                  <span class="help-text">Leave as Random to let the system choose an appropriate industry.</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Difficulty <span style="color: var(--error);">*</span></label>
+                  <select class="form-input" id="difficulty" onchange="updatePreview()" required>
+                    <option value="beginner">Beginner (Group 1 - Secondary/Introductory)</option>
+                    <option value="intermediate" selected>Intermediate (Group 2 - Post-Secondary)</option>
+                    <option value="advanced">Advanced (Group 3 - Clinic-Based)</option>
+                  </select>
+                  <span class="help-text">Controls complexity, number of weaknesses, and scaffolding level.</span>
+                </div>
+              </div>
+
+              <!-- ORGANIZATION TAB -->
+              <div class="config-panel" id="panel-org">
+                <div class="info-box">
+                  <div class="info-box-title">🏢 Organization Details</div>
+                  <div class="info-box-text">Optional overrides for specific organizational characteristics. Leave blank to use intelligent defaults.</div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group">
+                    <label class="form-label">Company Name</label>
+                    <input type="text" class="form-input" id="companyName" placeholder="Auto-generated">
+                    <span class="help-text">Custom name or leave blank for realistic generated name</span>
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">Domain Name</label>
+                    <input type="text" class="form-input" id="domain" placeholder="Auto-generated">
+                    <span class="help-text">Public domain (e.g., example.com)</span>
+                  </div>
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group">
+                    <label class="form-label">HQ City</label>
+                    <input type="text" class="form-input" id="hqCity" placeholder="Auto-generated">
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label">IT Maturity Level</label>
+                    <select class="form-input" id="maturity">
+                      <option value="">Auto (Based on Type)</option>
+                      <option value="Very Low">Very Low</option>
+                      <option value="Low">Low</option>
+                      <option value="Intermediate">Intermediate</option>
+                      <option value="High">High</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Number of Employees</label>
+                  <div class="range-row">
+                    <input type="number" class="form-input" id="empMin" value="25" min="10" max="5000">
+                    <span class="sep">to</span>
+                    <input type="number" class="form-input" id="empMax" value="200" min="10" max="5000">
+                  </div>
+                  <span class="help-text">Total employees (auto-adjusted based on client type)</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Stakeholder Count</label>
+                  <div class="range-row">
+                    <input type="number" class="form-input" id="stakMin" value="5" min="3" max="20">
+                    <span class="sep">to</span>
+                    <input type="number" class="form-input" id="stakMax" value="8" min="3" max="20">
+                  </div>
+                  <span class="help-text">Number of key stakeholders for interviews</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Compliance Framework</label>
+                  <select class="form-input" id="framework">
+                    <option value="">Auto (Industry-Specific)</option>
+                    <option value="HIPAA">HIPAA (Healthcare)</option>
+                    <option value="PCI-DSS">PCI-DSS (Payment Cards)</option>
+                    <option value="FERPA">FERPA (Education)</option>
+                    <option value="SOC 2">SOC 2 (Service Organizations)</option>
+                    <option value="NIST CSF">NIST Cybersecurity Framework</option>
+                    <option value="CIS Controls">CIS Critical Security Controls</option>
+                    <option value="NERC CIP">NERC CIP (Electric Utilities)</option>
+                    <option value="None">None / Minimal</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- TECHNICAL TAB -->
+              <div class="config-panel" id="panel-tech">
+                <div class="info-box">
+                  <div class="info-box-title">⚙️ Technical Configuration</div>
+                  <div class="info-box-text">Network and infrastructure settings. Advanced users only - defaults are recommended.</div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">IT Delivery Model</label>
+                  <select class="form-input" id="delivery">
+                    <option value="">Auto (Based on Type/Maturity)</option>
+                    <option value="On-Prem Heavy">On-Premises Heavy</option>
+                    <option value="Hybrid (On-Prem + M365)">Hybrid (On-Prem + M365)</option>
+                    <option value="Mostly Cloud (M365 + SaaS)">Mostly Cloud (M365 + SaaS)</option>
+                    <option value="Cloud-First (Google Workspace)">Cloud-First (Google Workspace)</option>
+                    <option value="Air-Gapped OT + IT">Air-Gapped OT + IT (Utilities)</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Endpoint Count</label>
+                  <div class="range-row">
+                    <input type="number" class="form-input" id="endMin" value="20" min="5" max="5000">
+                    <span class="sep">to</span>
+                    <input type="number" class="form-input" id="endMax" value="90" min="5" max="5000">
+                  </div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Firewall Rules</label>
+                  <div class="range-row">
+                    <input type="number" class="form-input" id="fwMin" value="5" min="3" max="100">
+                    <span class="sep">to</span>
+                    <input type="number" class="form-input" id="fwMax" value="15" min="3" max="100">
+                  </div>
+                  <span class="help-text">Number of firewall rules to generate</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Deliberate Weaknesses</label>
+                  <div class="range-row">
+                    <input type="number" class="form-input" id="weakMin" value="3" min="2" max="30">
+                    <span class="sep">to</span>
+                    <input type="number" class="form-input" id="weakMax" value="8" min="2" max="30">
+                  </div>
+                  <span class="help-text">Security issues for students to find (auto-set by difficulty)</span>
+                </div>
+
+                <div class="warning-box">
+                  <div class="warning-box-title">⚠️ Advanced Settings</div>
+                  <div class="warning-box-text">Modifying these values may affect the realism and difficulty calibration. Only change if you understand the implications.</div>
+                </div>
+              </div>
+
+              <!-- ADVANCED TAB -->
+              <div class="config-panel" id="panel-advanced">
+                <div class="info-box">
+                  <div class="info-box-title">🔧 Advanced Options</div>
+                  <div class="info-box-text">Additional configuration for specific use cases.</div>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Stakeholder Cooperation Level</label>
+                  <select class="form-input" id="cooperation">
+                    <option value="">Auto (Based on Difficulty)</option>
+                    <option value="high">High (Very Helpful)</option>
+                    <option value="moderate">Moderate (Realistic)</option>
+                    <option value="varied">Varied (Some Helpful, Some Difficult)</option>
+                    <option value="low">Low (Challenging)</option>
+                  </select>
+                  <span class="help-text">For interview simulations - how cooperative stakeholders will be</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Scaffolding Level</label>
+                  <select class="form-input" id="scaffolding">
+                    <option value="">Auto (Based on Difficulty)</option>
+                    <option value="extensive">Extensive (High Support)</option>
+                    <option value="moderate">Moderate (Guided)</option>
+                    <option value="minimal">Minimal (Independent Work)</option>
+                  </select>
+                  <span class="help-text">Amount of guidance provided in instructor materials</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Estimated Completion Time (hours)</label>
+                  <input type="number" class="form-input" id="estHours" min="2" max="40" placeholder="Auto (based on difficulty)">
+                  <span class="help-text">Expected time for students to complete assessment</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">LLM Model</label>
+                  <select class="form-input" id="llmModel">
+                    <option value="qwen3:14b">Qwen 3.0 14B (Recommended)</option>
+                    <option value="qwen2.5:7b-instruct">Qwen 2.5 7B (Faster)</option>
+                    <option value="llama3.2">Llama 3.2</option>
+                  </select>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Temperature (Creativity)</label>
+                  <input type="number" class="form-input" id="temperature" value="0.7" min="0" max="1" step="0.1">
+                  <span class="help-text">0.0 = Very consistent, 1.0 = More creative</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label">Custom Seed (Optional)</label>
+                  <input type="text" class="form-input" id="customSeed" placeholder="Random">
+                  <span class="help-text">For reproducible generation - same seed produces same profile</span>
+                </div>
+
+                <div class="form-group">
+                  <label class="form-label" style="font-weight: 600; margin-bottom: 0.75rem;">Generated Materials</label>
+                  <div class="checkbox-group">
+                    <div class="checkbox-item">
+                      <input type="checkbox" id="includeRubric" checked>
+                      <label for="includeRubric">Generate Grading Rubric</label>
+                    </div>
+                    <div class="checkbox-item">
+                      <input type="checkbox" id="includeInstructor" checked>
+                      <label for="includeInstructor">Generate Instructor Answer Key</label>
+                    </div>
+                    <div class="checkbox-item">
+                      <input type="checkbox" id="includeDiagram" checked>
+                      <label for="includeDiagram">Generate Network Diagram</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- GENERATE BUTTON -->
+              <div class="generate-section">
+                <button class="btn btn-primary btn-lg" id="generateBtn" onclick="generateProfile()">
+                  ⚡ Generate Client Profile
+                </button>
+                <div class="progress-bar mt-3" id="progressBar" style="display: none;">
+                  <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+                </div>
+                <p class="text-muted mt-2" id="statusText"></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- PREVIEW PANEL -->
+          <div class="card">
+            <div class="card-header"><span class="card-title">📋 Preview</span></div>
+            <div class="card-body">
+              <div class="preview-item">
+                <span class="preview-label">Type</span>
+                <span class="preview-value" id="prevType">SMB</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Industry</span>
+                <span class="preview-value" id="prevIndustry">Random</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Difficulty</span>
+                <span class="preview-value" id="prevDiff">Intermediate</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Employees</span>
+                <span class="preview-value" id="prevEmp">25-200</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Stakeholders</span>
+                <span class="preview-value" id="prevStak">5-8</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Endpoints</span>
+                <span class="preview-value" id="prevEnd">20-90</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Est. Time</span>
+                <span class="preview-value" id="prevTime">10 hours</span>
+              </div>
+              <div class="preview-item">
+                <span class="preview-label">Weaknesses</span>
+                <span class="preview-value" id="prevWeak">3-8</span>
+              </div>
+              
+              <h4 class="mt-3 mb-2" style="font-size:0.85rem;color:var(--gray-500);font-weight:600;">Compliance</h4>
+              <div class="tag-list" id="prevCompliance"></div>
+              
+              <h4 class="mt-3 mb-2" style="font-size:0.85rem;color:var(--gray-500);font-weight:600;">Key Risks</h4>
+              <div class="tag-list" id="prevRisks"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    // =========================================================================
+    // CLIENT TYPE DEFINITIONS
+    // =========================================================================
+    const CLIENT_TYPES = {
+      SMB: {
+        name: 'Small-Medium Business',
+        industries: [
+          { name: 'Regional Logistics & Warehousing', compliance: ['SOC 2'], risks: ['ransomware', 'phishing', 'vendor portal compromise'] },
+          { name: 'Mid-size Dental Group', compliance: ['HIPAA'], risks: ['PHI exposure', 'ransomware', 'email compromise'] },
+          { name: 'Light Manufacturing', compliance: ['OSHA', 'Industry Standards'], risks: ['OT/ICS attacks', 'supply chain phishing', 'ransomware'] },
+          { name: 'Professional Services Firm', compliance: ['Professional Licensing'], risks: ['client data breach', 'business email compromise', 'insider threats'] },
+          { name: 'Retail Chain (Regional)', compliance: ['PCI-DSS'], risks: ['POS malware', 'payment card theft', 'inventory manipulation'] }
+        ],
+        defaults: { emp: [25, 200], stak: [5, 8], end: [20, 90], fw: [5, 15], weak: [3, 8] },
+        hours: { beginner: 6, intermediate: 10, advanced: 16 }
+      },
+      NonProfit: {
+        name: 'Non-Profit Organization',
+        industries: [
+          { name: 'Community Health Center', compliance: ['HIPAA', 'HRSA'], risks: ['PHI breach', 'ransomware', 'grant fraud'] },
+          { name: 'Social Services Agency', compliance: ['State Regulations'], risks: ['client data exposure', 'phishing', 'funding disruption'] }
+        ],
+        defaults: { emp: [10, 100], stak: [4, 7], end: [15, 60], fw: [3, 10], weak: [3, 6] },
+        hours: { beginner: 4, intermediate: 8, advanced: 12 }
+      },
+      Utility_IT_OT: {
+        name: 'Utility (IT/OT)',
+        industries: [
+          { name: 'Municipal Water/Wastewater', compliance: ['AWIA'], risks: ['SCADA attacks', 'ransomware', 'insider sabotage'] },
+          { name: 'Rural Electric Cooperative', compliance: ['NERC CIP'], risks: ['grid attacks', 'ransomware', 'supply chain'] }
+        ],
+        defaults: { emp: [50, 500], stak: [6, 12], end: [50, 300], fw: [15, 50], weak: [5, 12] },
+        hours: { beginner: 8, intermediate: 12, advanced: 20 }
+      },
+      K12: {
+        name: 'K-12 School District',
+        industries: [
+          { name: 'Rural School District', compliance: ['FERPA', 'COPPA'], risks: ['ransomware', 'student data breach', 'phishing'] },
+          { name: 'Suburban School District', compliance: ['FERPA', 'CIPA'], risks: ['ransomware', 'social engineering', 'insider threats'] }
+        ],
+        defaults: { emp: [100, 2000], stak: [5, 10], end: [200, 5000], fw: [10, 30], weak: [4, 10] },
+        hours: { beginner: 6, intermediate: 10, advanced: 16 }
+      }
+    };
+
+    let currentUser = null;
+
+    // =========================================================================
+    // INITIALIZATION
+    // =========================================================================
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!await Auth.requireAuth()) return;
+      currentUser = Auth.getUser();
+      
+      // Setup tab switching
+      document.querySelectorAll('.config-tab').forEach(tab => {
+        tab.onclick = () => {
+          document.querySelectorAll('.config-tab').forEach(t => t.classList.remove('active'));
+          document.querySelectorAll('.config-panel').forEach(p => p.classList.remove('active'));
+          tab.classList.add('active');
+          document.getElementById(`panel-${tab.dataset.tab}`).classList.add('active');
+        };
+      });
+      
+      updatePreview();
+    });
+
+    // =========================================================================
+    // UPDATE PREVIEW
+    // =========================================================================
+    function updatePreview() {
+      const type = document.getElementById('clientType').value;
+      const cfg = CLIENT_TYPES[type];
+      const difficulty = document.getElementById('difficulty').value;
+      
+      // Update industry dropdown
+      const indSel = document.getElementById('industry');
+      indSel.innerHTML = '<option value="">🎲 Random</option>' + 
+        cfg.industries.map(i => `<option value="${i.name}">${i.name}</option>`).join('');
+      
+      // Update defaults
+      document.getElementById('empMin').value = cfg.defaults.emp[0];
+      document.getElementById('empMax').value = cfg.defaults.emp[1];
+      document.getElementById('stakMin').value = cfg.defaults.stak[0];
+      document.getElementById('stakMax').value = cfg.defaults.stak[1];
+      document.getElementById('endMin').value = cfg.defaults.end[0];
+      document.getElementById('endMax').value = cfg.defaults.end[1];
+      document.getElementById('fwMin').value = cfg.defaults.fw[0];
+      document.getElementById('fwMax').value = cfg.defaults.fw[1];
+      document.getElementById('weakMin').value = cfg.defaults.weak[0];
+      document.getElementById('weakMax').value = cfg.defaults.weak[1];
+      
+      // Update preview panel
+      document.getElementById('prevType').textContent = cfg.name;
+      document.getElementById('prevIndustry').textContent = indSel.value || 'Random';
+      document.getElementById('prevDiff').textContent = difficulty.charAt(0).toUpperCase() + difficulty.slice(1);
+      document.getElementById('prevEmp').textContent = `${document.getElementById('empMin').value}-${document.getElementById('empMax').value}`;
+      document.getElementById('prevStak').textContent = `${document.getElementById('stakMin').value}-${document.getElementById('stakMax').value}`;
+      document.getElementById('prevEnd').textContent = `${document.getElementById('endMin').value}-${document.getElementById('endMax').value}`;
+      document.getElementById('prevTime').textContent = `${cfg.hours[difficulty]} hours`;
+      document.getElementById('prevWeak').textContent = `${document.getElementById('weakMin').value}-${document.getElementById('weakMax').value}`;
+      
+      // Show sample compliance and risks
+      const sampleInd = cfg.industries[0];
+      document.getElementById('prevCompliance').innerHTML = 
+        sampleInd.compliance.map(c => `<span class="tag tag-compliance">${c}</span>`).join('');
+      document.getElementById('prevRisks').innerHTML = 
+        sampleInd.risks.slice(0, 3).map(r => `<span class="tag tag-risk">${r}</span>`).join('');
+    }
+
+    // =========================================================================
+    // GENERATE PROFILE
+    // =========================================================================
+    async function generateProfile() {
+      const btn = document.getElementById('generateBtn');
+      const bar = document.getElementById('progressBar');
+      const fill = document.getElementById('progressFill');
+      const status = document.getElementById('statusText');
+      
+      btn.disabled = true;
+      bar.style.display = 'block';
+      fill.style.width = '10%';
+      status.textContent = 'Starting generation...';
+
+      // Collect all configuration
+      const config = {
+        // Basic
+        client_type: document.getElementById('clientType').value,
+        industry: document.getElementById('industry').value || undefined,
+        difficulty: document.getElementById('difficulty').value,
+        
+        // Organization
+        org_name: document.getElementById('companyName').value || undefined,
+        domain: document.getElementById('domain').value || undefined,
+        hq_city: document.getElementById('hqCity').value || undefined,
+        maturity: document.getElementById('maturity').value || undefined,
+        framework: document.getElementById('framework').value || undefined,
+        
+        // Ranges
+        employees: document.getElementById('empMin').value ? {
+          min: +document.getElementById('empMin').value,
+          max: +document.getElementById('empMax').value
+        } : undefined,
+        stakeholders: document.getElementById('stakMin').value ? {
+          min: +document.getElementById('stakMin').value,
+          max: +document.getElementById('stakMax').value
+        } : undefined,
+        endpoints: document.getElementById('endMin').value ? {
+          min: +document.getElementById('endMin').value,
+          max: +document.getElementById('endMax').value
+        } : undefined,
+        
+        // Technical
+        delivery: document.getElementById('delivery').value || undefined,
+        min_firewall_rules: document.getElementById('fwMin').value ? +document.getElementById('fwMin').value : undefined,
+        max_firewall_rules: document.getElementById('fwMax').value ? +document.getElementById('fwMax').value : undefined,
+        min_weaknesses: document.getElementById('weakMin').value ? +document.getElementById('weakMin').value : undefined,
+        max_weaknesses: document.getElementById('weakMax').value ? +document.getElementById('weakMax').value : undefined,
+        
+        // Advanced
+        cooperation: document.getElementById('cooperation').value || undefined,
+        scaffolding: document.getElementById('scaffolding').value || undefined,
+        est_hours: document.getElementById('estHours').value ? +document.getElementById('estHours').value : undefined,
+        llmModel: document.getElementById('llmModel').value,
+        temperature: +document.getElementById('temperature').value,
+        custom_seed: document.getElementById('customSeed').value || undefined,
+        
+        // Features
+        include_rubric: document.getElementById('includeRubric').checked,
+        include_instructor_materials: document.getElementById('includeInstructor').checked,
+        include_diagram: document.getElementById('includeDiagram').checked
+      };
+
+      // Progress simulation
+      let progress = 10;
+      const interval = setInterval(() => {
+        progress = Math.min(progress + Math.random() * 15, 90);
+        fill.style.width = `${progress}%`;
+        status.textContent = progress < 30 ? 'Building organization profile...' : 
+                            progress < 50 ? 'Creating network architecture...' : 
+                            progress < 70 ? 'Generating threat scenarios...' : 
+                            'Finalizing documents...';
+      }, 2000);
+
+      try {
+        const result = await API.generate(config);
+        clearInterval(interval);
+        fill.style.width = '100%';
+        status.textContent = 'Profile generated successfully!';
+        Toast.success('Success', 'Profile generated successfully!');
+        
+        setTimeout(() => {
+          window.location.href = '/my-profiles';
+        }, 1500);
+        
+      } catch (error) {
+        clearInterval(interval);
+        fill.style.width = '0%';
+        bar.style.display = 'none';
+        status.textContent = `Error: ${error.message}`;
+        Toast.error('Generation Failed', error.message);
+        btn.disabled = false;
+      }
+    }
+
+    // =========================================================================
+    // SIDEBAR CONTROLS
+    // =========================================================================
+    function toggleSidebar() {
+      document.getElementById('sidebar').classList.toggle('open');
+      document.getElementById('sidebarOverlay').classList.toggle('active');
+    }
+    
+    function closeSidebar() {
+      document.getElementById('sidebar').classList.remove('open');
+      document.getElementById('sidebarOverlay').classList.remove('active');
+    }
+  </script>
+</body>
+</html>
