@@ -157,11 +157,9 @@
     "executionOrder": "v1",
     "availableInMCP": false
   },
-  "versionId": "892c6bee-b666-42e7-8454-51d4a46e7a30",
   "meta": {
     "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
   },
-  "id": "pMEnvE2s18s5WntT",
   "tags": [
     {
       "name": "CyberCore",

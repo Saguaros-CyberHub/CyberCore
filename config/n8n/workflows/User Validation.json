@@ -279,12 +279,10 @@
     "executionOrder": "v1",
     "availableInMCP": false
   },
-  "versionId": "1d4833e7-02c1-43d2-b34e-2fe506c29845",
   "meta": {
     "templateCredsSetupCompleted": true,
     "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
   },
-  "id": "N6XNdWnEX4Ot9YPW",
   "tags": [
     {
       "name": "CyberCore",
