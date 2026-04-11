@@ -3,6 +3,13 @@
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- === Groups (text key) — must come before users ===
+CREATE TABLE IF NOT EXISTS cybercore_group (
+  key         TEXT PRIMARY KEY,            -- 'cyberlabs','crucible','forge','university','library','wiki'
+  label       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 -- === Users ===
 CREATE TABLE IF NOT EXISTS cybercore_user (
   user_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -18,19 +25,12 @@ CREATE TABLE IF NOT EXISTS cybercore_user (
   status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive','suspended','banned','deleted')),
   active         BOOLEAN NOT NULL DEFAULT TRUE,
   role           TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','student','admin','instructor')),
-  group_key      TEXT REFERENCES app_group(key) ON DELETE SET NULL,
+  group_key      TEXT REFERENCES cybercore_group(key) ON DELETE SET NULL,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_auth_at   TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_user_email_lower ON cybercore_user (lower(email));
-
--- === Groups (text key) ===
-CREATE TABLE IF NOT EXISTS cybercore_group (
-  key         TEXT PRIMARY KEY,            -- 'cyberlabs','crucible','forge','university','library','wiki'
-  label       TEXT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
 
 -- === User↔Group bridge ===
 CREATE TABLE IF NOT EXISTS cybercore_user_group (
@@ -41,9 +41,15 @@ CREATE TABLE IF NOT EXISTS cybercore_user_group (
 
 -- === Modules (text key) ===
 CREATE TABLE IF NOT EXISTS cybercore_module (
-  key     TEXT PRIMARY KEY,                -- 'cyberlabs','crucible','forge','university','library','wiki'
-  name    TEXT NOT NULL,
-  active  BOOLEAN NOT NULL DEFAULT TRUE
+  key            TEXT PRIMARY KEY,                -- 'cyberlabs','crucible','forge','university','library','wiki'
+  name           TEXT NOT NULL,
+  icon           TEXT,
+  description    TEXT,
+  entry_url      TEXT,
+  category       TEXT,
+  color          TEXT,
+  display_order  INTEGER NOT NULL DEFAULT 0,
+  active         BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 -- === Resources (generic infra objects) ===
