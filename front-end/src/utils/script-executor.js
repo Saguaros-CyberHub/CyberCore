@@ -73,7 +73,7 @@ async function agentExec(node, vmId, command) {
 /**
  * Poll guest-exec-status until command completes
  */
-async function pollExecStatus(node, vmId, pid, timeoutMs = 600000) {
+async function pollExecStatus(node, vmId, pid, timeoutMs = 1800000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {

@@ -34,7 +34,7 @@ function authenticate(req, res, next) {
     }
 
     // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default-secret');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     // Attach user info to request
     req.user = {
@@ -218,7 +218,7 @@ function optionalAuth(req, res, next) {
     }
 
     if (token) {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default-secret');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
       req.user = {
         userId: decoded.sub,
         email: decoded.email,

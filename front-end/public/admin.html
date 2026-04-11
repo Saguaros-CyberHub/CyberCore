@@ -1587,6 +1587,7 @@
                       ${l.status === 'active' ? `
                         <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" onclick="showRunScriptModal('${l.lane_id}', '${escHtml(l.name || '')}')">Run Script</button>
                         <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #805ad5; border-color: #805ad5;" onclick="showGenerateChallengeProfileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Generate Profile</button>
+                        <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #d69e2e; border-color: #d69e2e;" onclick="showPushFileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Push File</button>
                       ` : ''}
                       ${l.status !== 'deleted' ? `<button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" data-lane-id="${l.lane_id}" data-lane-name="${escHtml(l.name || '')}" onclick="deleteLane(this.dataset.laneId, this.dataset.laneName)">Delete</button>` : '—'}
                     </td>
@@ -1914,6 +1915,94 @@
     // GENERATE CHALLENGE PROFILE
     // ============================================================================
 
+    // ============================================================================
+    // PUSH FILE TO VM
+    // ============================================================================
+
+    async function showPushFileModal(laneId, laneName) {
+      const body = document.getElementById('permissionsBody');
+      document.getElementById('permUsername').textContent = `Push File — ${laneName}`;
+
+      // Get lane config for VM list
+      const lane = await api('GET', `/lanes/${laneId}`);
+      const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+      let vms = cfg.vms || [];
+      if (vms.length === 0 && cfg.challenge_vm_id) {
+        vms = [{ name: cfg.challenge_key || 'challenge', vm_id: cfg.challenge_vm_id }];
+      }
+
+      // Get available files from vuln-assets
+      let files = [];
+      try {
+        files = await api('GET', '/vuln-asset-list');
+      } catch (_) {}
+
+      body.innerHTML = `
+        <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+          Push a file from the server's vuln-assets/ folder directly to a VM via the guest agent. No network access needed on the VM.
+        </p>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+          <div class="form-group">
+            <label>Target VM</label>
+            <select id="pushFileVm">
+              ${vms.map(v => `<option value="${escHtml(v.name)}">${escHtml(v.name)} (${v.vm_id || '?'})</option>`).join('')}
+            </select>
+          </div>
+          <div class="form-group">
+            <label>File</label>
+            <select id="pushFileSelect">
+              ${files.length > 0
+                ? files.map(f => `<option value="${escHtml(f.name)}">${escHtml(f.name)} (${f.size_mb} MB)</option>`).join('')
+                : '<option value="">No files in vuln-assets/</option>'}
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Destination Path on VM</label>
+          <input type="text" id="pushFileDest" value="C:\\Windows\\Temp\\" placeholder="C:\\LabApps\\file.jar">
+        </div>
+        <button class="btn btn-primary" onclick="pushFileToVM('${laneId}')" style="width: 100%;">Push File</button>
+        <div id="pushFileStatus" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>`;
+
+      // Auto-fill dest path when file is selected
+      document.getElementById('pushFileSelect').onchange = function() {
+        const filename = this.value;
+        document.getElementById('pushFileDest').value = `C:\\LabApps\\${filename}`;
+      };
+      // Trigger initial fill
+      if (files.length > 0) {
+        document.getElementById('pushFileDest').value = `C:\\LabApps\\${files[0].name}`;
+      }
+
+      const mc = document.querySelector('#permissionsModal .modal-content');
+      mc.style.maxWidth = '600px';
+      document.getElementById('permissionsModal').classList.add('active');
+    }
+
+    async function pushFileToVM(laneId) {
+      const vm_name = document.getElementById('pushFileVm').value;
+      const filename = document.getElementById('pushFileSelect').value;
+      const dest_path = document.getElementById('pushFileDest').value.trim();
+      const status = document.getElementById('pushFileStatus');
+
+      if (!filename || !dest_path) {
+        Toast.warning('Missing', 'Select a file and enter a destination path');
+        return;
+      }
+
+      status.innerHTML = '<strong style="color: var(--gray-500);">Pushing file... This may take a few minutes for large files. You can close this modal.</strong>';
+
+      try {
+        const data = await api('POST', '/push-file', { lane_id: laneId, vm_name, filename, dest_path });
+        status.innerHTML = `<strong style="color: #38a169;">${escHtml(data.message)}</strong><br>
+          <span style="font-size: 0.8rem; color: var(--gray-500);">Check server console for progress. Large files may take 5-10 minutes.</span>`;
+        Toast.success('Push Started', `${filename} → ${vm_name}`);
+      } catch (e) {
+        status.innerHTML = `<strong style="color: #e53e3e;">Error:</strong> ${escHtml(e.message)}`;
+        Toast.error('Failed', e.message);
+      }
+    }
+
     async function showGenerateChallengeProfileModal(laneId, laneName) {
       const body = document.getElementById('permissionsBody');
       document.getElementById('permUsername').textContent = `Generate Challenge Profile — ${laneName}`;
@@ -2122,8 +2211,8 @@
     async function pollScriptExecution(laneId, scripts) {
       const remaining = new Set(scripts.map(s => `${s.vm_name}:${s.script_slug}`));
 
-      for (let i = 0; i < 200 && remaining.size > 0; i++) {
-        await new Promise(r => setTimeout(r, 3000));
+      for (let i = 0; i < 600 && remaining.size > 0; i++) {
+        await new Promise(r => setTimeout(r, 5000));
         try {
           const data = await api('GET', `/challenge-networks/${laneId}/status`);
           const entries = data.selected_scripts || [];
@@ -2147,7 +2236,14 @@
               Toast.error('Script Failed', `${s.script_slug} failed`);
             } else if (entry.status === 'running') {
               updateExecStatus(s.vm_name, s.script_slug, 'running...', '#d69e2e');
-              if (entry.output) updateExecOutput(s.vm_name, s.script_slug, entry.output);
+
+              // Poll VM progress log for live updates
+              try {
+                const progress = await api('GET', `/vm-progress/${laneId}?vm_name=${encodeURIComponent(s.vm_name)}`);
+                if (progress.log && progress.log !== 'No progress log yet' && progress.log !== 'No output') {
+                  updateExecOutput(s.vm_name, s.script_slug, progress.log.trim());
+                }
+              } catch (_) {}
             }
           }
 

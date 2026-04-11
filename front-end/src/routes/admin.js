@@ -1856,17 +1856,85 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       } catch (e) { errors.push(`Guac group delete: ${e.message}`); }
     }
 
-    // 5. Remove group record
+    // 5. Verify all VMs are actually destroyed in Proxmox before removing the group
+    const orphanedVMs = [];
+    try {
+      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      for (const student of students) {
+        const lanesResult = await cybercoreQuery(
+          `SELECT vxlan_id, config FROM cybercore_lane WHERE user_id = $1`,
+          [student.id]
+        );
+        for (const lane of lanesResult.rows) {
+          const lc = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+          const vmIds = [];
+          if (Array.isArray(lc.vms)) {
+            lc.vms.forEach(v => vmIds.push(v.vm_id));
+          } else if (lc.challenge_vm_id) {
+            vmIds.push(lc.challenge_vm_id);
+          }
+          if (lc.gateway_vm_id) vmIds.push(lc.gateway_vm_id);
+          if (lc.attack_box_vm_id) vmIds.push(lc.attack_box_vm_id);
+
+          for (const vmid of vmIds) {
+            const stillExists = resources.find(r => r.vmid === vmid);
+            if (stillExists) {
+              orphanedVMs.push({ vmid, node: stillExists.node, type: stillExists.type, status: stillExists.status });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[Group Teardown] Failed to verify VM cleanup: ${e.message}`);
+    }
+
+    if (orphanedVMs.length > 0) {
+      console.warn(`[Group Teardown] ${orphanedVMs.length} VMs still exist after teardown — retrying...`);
+
+      // Retry destroying orphaned VMs
+      for (const vm of orphanedVMs) {
+        try {
+          try { await proxmoxAPI('PUT', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
+          try { await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/status/stop`); } catch (_) {}
+          await new Promise(r => setTimeout(r, 3000));
+          try {
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
+          } catch (_) {
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1`);
+          }
+          console.log(`[Group Teardown] Retry destroyed ${vm.type} ${vm.vmid} on ${vm.node}`);
+        } catch (e) {
+          errors.push(`Orphaned VM ${vm.vmid} on ${vm.node}: could not destroy (${e.message})`);
+        }
+      }
+
+      // Final verification
+      try {
+        const finalCheck = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+        const stillOrphaned = orphanedVMs.filter(vm =>
+          finalCheck.find(r => r.vmid === vm.vmid)
+        );
+        if (stillOrphaned.length > 0) {
+          const vmList = stillOrphaned.map(v => `${v.type}/${v.vmid} on ${v.node}`).join(', ');
+          errors.push(`WARNING: ${stillOrphaned.length} VMs still exist after retry: ${vmList}`);
+          console.error(`[Group Teardown] STILL ORPHANED: ${vmList}`);
+        }
+      } catch (_) {}
+    }
+
+    // 6. Remove group record
     await query(`DELETE FROM deployed_groups WHERE id = $1`, [req.params.id]);
 
     logActivity(req, 'delete_group', 'group', req.params.id, {
-      group_name: group.group_name, users_deleted: allUsers.length, lanes_deleted: lanesDeleted
+      group_name: group.group_name, users_deleted: allUsers.length, lanes_deleted: lanesDeleted,
+      orphaned_vms_found: orphanedVMs.length, errors: errors.length
     });
 
     res.json({
       success: true,
       users_deleted: allUsers.length,
       lanes_deleted: lanesDeleted,
+      orphaned_vms_retried: orphanedVMs.length,
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
@@ -2758,6 +2826,8 @@ router.post('/challenge-networks/:laneId/generate-profile', authenticateToken, a
 
     // Call N8N webhook
     console.log(`[ChallengeProfile] Triggering profile generation for lane ${req.params.laneId} with ${allAssets.length} assets`);
+    console.log(`[ChallengeProfile] Real assets:`, realAssets.map(a => `${a.hostname}=${a.ip}`).join(', '));
+    console.log(`[ChallengeProfile] Deployed vulns:`, deployedVulns.join(', ') || 'none');
     const webhookResp = await fetch(n8nWebhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2791,6 +2861,234 @@ router.post('/challenge-networks/:laneId/generate-profile', authenticateToken, a
       phantom_hosts: phantomAssets.length,
       webhook_response: webhookData
     });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// GET /api/admin/vm-progress/:laneId — read progress log from a VM
+router.get('/vm-progress/:laneId', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { vm_name } = req.query;
+    const laneResult = await cybercoreQuery(
+      `SELECT config FROM cybercore_lane WHERE lane_id = $1 AND status = 'active'`,
+      [req.params.laneId]
+    );
+    if (laneResult.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+
+    const config = typeof laneResult.rows[0].config === 'string'
+      ? JSON.parse(laneResult.rows[0].config) : laneResult.rows[0].config;
+
+    let vm = (config.vms || []).find(v => v.name === vm_name);
+    if (!vm && config.challenge_vm_id) {
+      vm = { vm_id: config.challenge_vm_id, node: config.node };
+    }
+    if (!vm && config.vms?.length === 1) vm = config.vms[0];
+    if (!vm) return res.json({ log: 'VM not found' });
+
+    // Read progress log via exec
+    const result = await proxmoxAPI('POST',
+      `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/exec`, {
+        command: 'powershell.exe',
+        'input-data': `if (Test-Path 'C:\\LabApps\\progress.log') { Get-Content 'C:\\LabApps\\progress.log' -Raw } else { Write-Host 'No progress log yet' }\n[Environment]::Exit(0)\n`
+      }
+    );
+
+    if (result?.pid) {
+      const { pollExecStatus } = require('../utils/script-executor');
+      const execResult = await pollExecStatus(vm.node, vm.vm_id, result.pid, 10000);
+      return res.json({ log: execResult.stdout || 'No output' });
+    }
+    res.json({ log: 'Could not read progress' });
+  } catch (e) {
+    res.json({ log: `Error: ${e.message}` });
+  }
+});
+
+// LIST VULN ASSETS — List available files in vuln-assets/
+router.get('/vuln-asset-list', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const assetsDir = require('path').join(__dirname, '../../vuln-assets');
+    const files = require('fs').readdirSync(assetsDir)
+      .filter(f => !f.startsWith('.') && f !== 'download-assets.ps1')
+      .map(f => {
+        const stat = require('fs').statSync(require('path').join(assetsDir, f));
+        return { name: f, size_mb: (stat.size / 1048576).toFixed(1), size_bytes: stat.size };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    res.json(files);
+  } catch (e) {
+    res.json([]);
+  }
+});
+
+// FILE PUSH — Push a file from vuln-assets/ to a VM via guest agent
+// ============================================================================
+
+const fs = require('fs');
+const pathModule = require('path');
+
+// POST /api/admin/push-file — push a local file to a VM via guest agent file-write
+router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { lane_id, vm_name, filename, dest_path } = req.body;
+
+    if (!lane_id || !filename || !dest_path) {
+      return res.status(400).json({ error: 'lane_id, filename, and dest_path are required' });
+    }
+
+    const safeName = pathModule.basename(filename);
+    const localPath = pathModule.join(__dirname, '../../vuln-assets', safeName);
+
+    if (!fs.existsSync(localPath)) {
+      return res.status(404).json({ error: `File '${safeName}' not found in vuln-assets/` });
+    }
+
+    const fileSize = fs.statSync(localPath).size;
+    const fileSizeMB = (fileSize / 1048576).toFixed(1);
+
+    // Get lane info
+    const laneResult = await cybercoreQuery(
+      `SELECT config FROM cybercore_lane WHERE lane_id = $1 AND status = 'active'`,
+      [lane_id]
+    );
+    if (laneResult.rows.length === 0) return res.status(404).json({ error: 'Active lane not found' });
+
+    const config = typeof laneResult.rows[0].config === 'string'
+      ? JSON.parse(laneResult.rows[0].config) : laneResult.rows[0].config;
+
+    let vm = (config.vms || []).find(v => v.name === vm_name);
+    if (!vm && config.challenge_vm_id) {
+      vm = { vm_id: config.challenge_vm_id, node: config.node, type: 'qemu' };
+    }
+    if (!vm && config.vms?.length === 1) vm = config.vms[0];
+    if (!vm) return res.status(404).json({ error: 'VM not found in lane' });
+
+    res.json({
+      success: true,
+      message: `Pushing ${safeName} (${fileSizeMB} MB) to ${dest_path} on VM ${vm.vm_id}...`,
+      file_size_mb: fileSizeMB
+    });
+
+    // Background: use file-write API to push binary data directly
+    (async () => {
+      try {
+        const https = require('https');
+        const PX_URL = process.env.PROXMOX_API_URL || 'https://100.100.10.10:8006';
+        const PX_TOKEN_ID = process.env.PROXMOX_TOKEN_ID || 'root@pam!clinic-app-token';
+        const PX_TOKEN_SECRET = process.env.PROXMOX_TOKEN_SECRET || '';
+
+        // Helper: write binary chunk via file-write JSON API
+        const writeChunk = (filePath, b64Data) => {
+          return new Promise((resolve, reject) => {
+            const url = new URL(`${PX_URL}/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/file-write`);
+            const body = JSON.stringify({ file: filePath, content: b64Data });
+            const req = https.request({
+              hostname: url.hostname, port: url.port || 8006, path: url.pathname, method: 'POST',
+              headers: {
+                'Authorization': `PVEAPIToken=${PX_TOKEN_ID}=${PX_TOKEN_SECRET}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body)
+              },
+              rejectUnauthorized: false,
+              timeout: 30000
+            }, (res) => {
+              let data = '';
+              res.on('data', c => data += c);
+              res.on('end', () => {
+                if (res.statusCode >= 400) return reject(new Error(`file-write failed (${res.statusCode}): ${data}`));
+                resolve();
+              });
+            });
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+            req.write(body);
+            req.end();
+          });
+        };
+
+        // Strategy: split file into chunk files, write each via file-write,
+        // then use PowerShell to reassemble them
+        const CHUNK_SIZE = 256 * 1024; // 256KB raw → ~341KB base64 per chunk (under Proxmox file-write limit)
+        const fileBuffer = fs.readFileSync(localPath);
+        const totalChunks = Math.ceil(fileBuffer.length / CHUNK_SIZE);
+        const tempDir = 'C:\\Windows\\Temp\\push_' + Date.now();
+
+        console.log(`[PushFile] Pushing ${safeName} (${fileSizeMB} MB, ${totalChunks} chunks of 2MB) to VM ${vm.vm_id}`);
+
+        // Create temp dir on VM
+        const { pollExecStatus } = require('../utils/script-executor');
+        const mkdirResult = await proxmoxAPI('POST',
+          `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/exec`, {
+            command: 'powershell.exe',
+            'input-data': `New-Item -ItemType Directory -Path '${tempDir}' -Force | Out-Null\n[Environment]::Exit(0)\n`
+          }
+        );
+        if (mkdirResult?.pid) await pollExecStatus(vm.node, vm.vm_id, mkdirResult.pid, 10000);
+
+        // Write each chunk via file-write API (binary, not PowerShell)
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, fileBuffer.length);
+          const chunkBuffer = fileBuffer.slice(start, end);
+          const b64 = chunkBuffer.toString('base64');
+          const chunkPath = `${tempDir}\\chunk_${String(i).padStart(4, '0')}`;
+
+          let retries = 3;
+          while (retries > 0) {
+            try {
+              await writeChunk(chunkPath, b64);
+              break;
+            } catch (e) {
+              retries--;
+              if (retries === 0) throw new Error(`Chunk ${i} failed after 3 retries: ${e.message}`);
+              console.log(`[PushFile] Chunk ${i} retry (${3 - retries}/3): ${e.message}`);
+              await new Promise(r => setTimeout(r, 2000));
+            }
+          }
+
+          if ((i + 1) % 20 === 0 || i === totalChunks - 1) {
+            console.log(`[PushFile] Written ${i + 1}/${totalChunks} chunks (${Math.round((i + 1) / totalChunks * 100)}%)`);
+          }
+
+          // Small delay to avoid overwhelming the guest agent
+          if (i % 10 === 9) await new Promise(r => setTimeout(r, 300));
+        }
+
+        // Reassemble chunks on the VM using PowerShell
+        console.log(`[PushFile] Reassembling ${totalChunks} chunks on VM...`);
+        const assembleScript = `
+$chunks = Get-ChildItem '${tempDir}\\chunk_*' | Sort-Object Name
+$outStream = [System.IO.File]::Create('${dest_path}')
+foreach ($chunk in $chunks) {
+    $b64 = [System.IO.File]::ReadAllText($chunk.FullName)
+    $bytes = [Convert]::FromBase64String($b64)
+    $outStream.Write($bytes, 0, $bytes.Length)
+}
+$outStream.Close()
+Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
+$size = (Get-Item '${dest_path}').Length
+Write-Host "File assembled: ${dest_path} ($size bytes)"
+`;
+        const assembleResult = await proxmoxAPI('POST',
+          `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/exec`, {
+            command: 'powershell.exe',
+            'input-data': assembleScript + '\n[Environment]::Exit(0)\n'
+          }
+        );
+        if (assembleResult?.pid) {
+          const result = await pollExecStatus(vm.node, vm.vm_id, assembleResult.pid, 120000);
+          console.log(`[PushFile] Assemble output: ${(result.stdout || '').trim()}`);
+        }
+
+        console.log(`[PushFile] Done: ${safeName} (${fileSizeMB} MB) → ${dest_path} on VM ${vm.vm_id}`);
+      } catch (err) {
+        console.error(`[PushFile] Failed: ${err.message}`);
+      }
+    })();
 
   } catch (error) {
     res.status(500).json({ error: error.message });

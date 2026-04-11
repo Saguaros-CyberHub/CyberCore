@@ -100,6 +100,12 @@ router.post('/chat', optionalAuth, async (req, res) => {
 
 router.post('/webhook/profile-complete', async (req, res) => {
   try {
+    // Verify webhook shared secret (set WEBHOOK_SECRET in .env and in N8N HTTP node headers)
+    const webhookSecret = process.env.WEBHOOK_SECRET;
+    if (webhookSecret && req.headers['x-webhook-secret'] !== webhookSecret) {
+      return res.status(403).json({ error: 'Invalid webhook secret' });
+    }
+
     const {
       userId,
       runId,

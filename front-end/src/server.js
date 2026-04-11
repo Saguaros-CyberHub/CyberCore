@@ -5,6 +5,7 @@
  */
 
 require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -12,6 +13,20 @@ const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const rateLimit = require('express-rate-limit');
 const path = require('path');
+
+// ============================================================================
+// SECURITY: Require critical secrets or generate random per-boot fallbacks
+// A random fallback means tokens/sessions invalidate on restart — acceptable
+// for dev, but .env MUST be configured for production.
+// ============================================================================
+if (!process.env.JWT_SECRET) {
+  process.env.JWT_SECRET = crypto.randomBytes(48).toString('hex');
+  console.warn('⚠️  JWT_SECRET not set — generated random secret (tokens will invalidate on restart)');
+}
+if (!process.env.SESSION_SECRET) {
+  process.env.SESSION_SECRET = crypto.randomBytes(48).toString('hex');
+  console.warn('⚠️  SESSION_SECRET not set — generated random secret');
+}
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -70,14 +85,22 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Stricter rate limit for auth routes
+// Stricter rate limit for auth routes (5 attempts per 15 min)
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // 10 attempts per window
+  windowMs: 15 * 60 * 1000,
+  max: 5,
   message: { error: 'Too many login attempts, please try again later.' }
 });
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
+
+// Webhook rate limit (N8N callbacks — 10 per minute max)
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  message: { error: 'Too many webhook calls.' }
+});
+app.use('/api/webhook', webhookLimiter);
 
 // ============================================================================
 // BODY PARSING & COOKIES
@@ -89,7 +112,7 @@ app.use(cookieParser());
 
 // Session configuration
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-this-secret',
+  secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -106,6 +129,7 @@ app.use(session({
 
 app.use(express.static(path.join(__dirname, '../public')));
 app.use('/profiles', express.static(path.join(__dirname, '../profiles')));
+app.use('/vuln-assets', express.static(path.join(__dirname, '../vuln-assets')));
 
 //app.use('/profiles', express.static('F:/Projects/mounts/ftp'));
 
@@ -183,19 +207,18 @@ app.get('/guide', (req, res) => {
 
 const { authenticateToken } = require('./middleware/auth');
 
-// Debug endpoint
-app.get('/api/auth/debug', (req, res) => {
+// Debug endpoint (admin-only)
+app.get('/api/auth/debug', authenticateToken, (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   res.json({
     env: {
-      JWT_SECRET: !!process.env.JWT_SECRET ? 'Set ✅' : 'NOT SET ❌',
-      DB_NAME: process.env.DB_NAME
+      JWT_SECRET: 'Set ✅',
+      DB_NAME: process.env.DB_NAME ? '***' : 'NOT SET'
     },
     headers: {
       authorization: req.headers.authorization ? 'Present ✅' : 'Missing ❌'
     },
-    cookies: {
-      token: req.cookies?.token ? 'Present ✅' : 'Missing ❌'
-    }
+    user: { email: req.user.email, role: req.user.role }
   });
 });
 

@@ -11,7 +11,7 @@ const pool = new Pool({
   port: parseInt(process.env.DB_PORT) || 5432,
   database: process.env.DB_NAME || 'clinic_db',
   user: process.env.DB_USER || 'clinic_admin',
-  password: process.env.DB_PASSWORD || 'ClinicSecure2024!',
+  password: process.env.DB_PASSWORD,
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,

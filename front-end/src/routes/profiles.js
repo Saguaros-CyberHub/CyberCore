@@ -153,7 +153,7 @@ router.get('/stats/summary', authenticateToken, async (req, res) => {
 router.get('/recent', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
-    const limit = req.query.limit || 5;
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
     
     const result = await pool.query(`
       SELECT 
