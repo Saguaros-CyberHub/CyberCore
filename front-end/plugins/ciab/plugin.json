@@ -1,0 +1,35 @@
+{
+  "key": "ciab",
+  "name": "Clinic-in-a-Box",
+  "icon": "🏥",
+  "description": "Cyber risk assessment training with AI-powered interviews and profiles",
+  "category": "plugin",
+  "color": "#1e40af",
+  "entryUrl": "/ciab/dashboard",
+  "displayOrder": 10,
+
+  "database": {
+    "name": "clinic_db",
+    "migrations": "migrations/"
+  },
+
+  "routes": [
+    { "file": "routes/pages.js", "mountPath": "/ciab" },
+    { "file": "routes/api.js",   "mountPath": "/" }
+  ],
+
+  "staticDir": "public",
+  "staticMountPath": "/ciab",
+
+  "subnav": [
+    { "label": "Dashboard",     "icon": "📊", "url": "/ciab/dashboard",   "page": "dashboard" },
+    { "label": "My Profiles",   "icon": "📁", "url": "/ciab/my-profiles", "page": "profiles" },
+    { "label": "Generate New",  "icon": "⚡", "url": "/ciab/generator",   "page": "generator" },
+    { "label": "Workspace",     "icon": "📝", "url": "/ciab/workspace",   "page": "workspace" },
+    { "label": "My Progress",   "icon": "📈", "url": "/ciab/progress",    "page": "progress" },
+    { "label": "Interview Sim", "icon": "🎤", "url": "/ciab/interview",   "page": "interview" },
+    { "label": "Instructor",    "icon": "👨‍🏫", "url": "/ciab/instructor",  "page": "instructor", "roles": ["instructor", "admin"] },
+    { "label": "Admin",         "icon": "🖥️", "url": "/ciab/admin",       "page": "admin",      "roles": ["admin"] },
+    { "label": "AI Assistant",  "icon": "🤖", "url": "#",                 "page": "ai-assistant", "onclick": "Layout.openChat(); return false;" }
+  ]
+}

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Clinic-in-a-Box | Cyber Risk Assessment Training</title>
+  <title>CyberHub | Saguaros Cybersecurity Platform</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/main.css">
   <style>
@@ -98,11 +98,11 @@
 <body>
   <section class="landing-hero">
     <div class="hero-content">
-      <div class="hero-logo">🏥</div>
-      <h1 class="hero-title">Clinic-in-a-Box</h1>
+      <div class="hero-logo">🛡️</div>
+      <h1 class="hero-title">CyberHub</h1>
       <p class="hero-subtitle">
-        A comprehensive training platform for cybersecurity students to practice 
-        conducting risk assessments with realistic, AI-generated client profiles.
+        The official cybersecurity lab, cyber warfare range, and eLearning platform
+        of the Cyber Saguaros at the University of Arizona.
       </p>
       <div class="hero-buttons">
         <a href="/register" class="btn btn-hero btn-hero-primary">Get Started</a>
@@ -114,24 +114,24 @@
   <section class="features">
     <div class="features-grid">
       <div class="feature-card">
-        <div class="feature-icon">🏢</div>
-        <h3 class="feature-title">Realistic Clients</h3>
-        <p class="feature-desc">Generate detailed client profiles across SMB, Non-Profit, Utility, and K-12 sectors with authentic business contexts.</p>
+        <div class="feature-icon">🔥</div>
+        <h3 class="feature-title">The Crucible</h3>
+        <p class="feature-desc">CTF-style cyber warfare range with isolated lanes, vulnerable hosts, and real-time scoring.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">🎯</div>
-        <h3 class="feature-title">Adjustable Difficulty</h3>
-        <p class="feature-desc">Choose from beginner to advanced scenarios to match your skill level and learning objectives.</p>
+        <div class="feature-icon">🧪</div>
+        <h3 class="feature-title">CyberLabs</h3>
+        <p class="feature-desc">On-demand virtualization environments for student projects, research, and hands-on learning.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">🤖</div>
-        <h3 class="feature-title">AI Assistant</h3>
-        <p class="feature-desc">Get help with stakeholder interviews, compliance questions, and risk assessment methodology from our AI assistant.</p>
+        <div class="feature-icon">🎓</div>
+        <h3 class="feature-title">Saguaros University</h3>
+        <p class="feature-desc">Structured courses, digital badges, and certifications aligned with industry training paths.</p>
       </div>
       <div class="feature-card">
-        <div class="feature-icon">📊</div>
-        <h3 class="feature-title">Complete Documentation</h3>
-        <p class="feature-desc">Each profile includes network diagrams, compliance requirements, threat scenarios, and stakeholder information.</p>
+        <div class="feature-icon">🏥</div>
+        <h3 class="feature-title">Clinic-in-a-Box</h3>
+        <p class="feature-desc">AI-powered cyber risk assessment training with realistic client profiles and stakeholder interviews.</p>
       </div>
     </div>
   </section>
@@ -142,7 +142,7 @@
     (async () => {
       try {
         await API.auth.verify();
-        window.location.href = '/dashboard';
+        window.location.href = '/hub';
       } catch (e) {
         // Not logged in, stay on landing page
       }

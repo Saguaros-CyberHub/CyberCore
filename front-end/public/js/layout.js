@@ -1,12 +1,19 @@
 /**
- * Clinic-in-a-Box Shared Layout Components
- * - Unified Sidebar Navigation
+ * CyberHub Shared Layout Components
+ * - Dynamic Sidebar Navigation (modules fetched from API)
+ * - Context-sensitive sub-navigation per module
  * - Persistent Global AI Chat
  */
 
 const Layout = {
   // Current page detection
   currentPage: window.location.pathname,
+
+  // Cached module data
+  _modules: null,
+
+  // Subnav configs fetched from /api/modules (populated by plugins)
+  _subnavs: {},
 
   // Initialize layout components
   init() {
@@ -18,7 +25,6 @@ const Layout = {
     // Patch white backgrounds after DOM is ready
     if (document.documentElement.getAttribute('data-theme') === 'dark') {
       requestAnimationFrame(() => this.patchDarkBackgrounds());
-      // Also patch after dynamic content loads
       setTimeout(() => this.patchDarkBackgrounds(), 500);
       setTimeout(() => this.patchDarkBackgrounds(), 2000);
     }
@@ -56,92 +62,55 @@ const Layout = {
   // Placeholder — dark mode is now handled purely via CSS
   patchDarkBackgrounds() {},
 
-  // Generate unified sidebar HTML
-  getSidebarHTML(activePage = '') {
+  // Detect which module is active based on URL
+  getActiveModule() {
+    const path = this.currentPage;
+    const segments = path.split('/').filter(Boolean);
+    // /ciab/dashboard → 'ciab', /crucible → 'crucible', /hub → 'hub'
+    return segments[0] || 'hub';
+  },
+
+  // Detect which sub-page is active (for context sub-nav)
+  getActiveSubPage() {
+    const path = this.currentPage;
+    // Handle both /ciab/dashboard and legacy /dashboard
+    if (path.includes('dashboard')) return 'dashboard';
+    if (path.includes('profile') || path.includes('my-profiles')) return 'profiles';
+    if (path.includes('generator')) return 'generator';
+    if (path.includes('workspace')) return 'workspace';
+    if (path.includes('progress')) return 'progress';
+    if (path.includes('interview')) return 'interview';
+    if (path.includes('instructor')) return 'instructor';
+    if (path.includes('admin')) return 'admin';
+    if (path.includes('intake-form')) return 'intake-form';
+    return '';
+  },
+
+  // Generate the skeleton sidebar (header + footer, nav populated async)
+  getSidebarHTML() {
     const user = Auth.getUser();
-    const initials = user?.firstName && user?.lastName 
+    const initials = user?.firstName && user?.lastName
       ? `${user.firstName[0]}${user.lastName[0]}`.toUpperCase()
       : user?.email?.substring(0, 2).toUpperCase() || '--';
-    const userName = user?.firstName && user?.lastName 
+    const userName = user?.firstName && user?.lastName
       ? `${user.firstName} ${user.lastName}`
       : user?.email?.split('@')[0] || 'User';
     const userRole = user?.role ? user.role.charAt(0).toUpperCase() + user.role.slice(1) : 'Student';
-    const isInstructor = user?.role === 'instructor' || user?.role === 'admin';
-
-    // Determine active states
-    const isActive = (page) => activePage === page ? 'active' : '';
 
     return `
       <div class="sidebar-header">
-        <a href="/dashboard" class="sidebar-logo">
-          <span class="icon">🏥</span>
-          <span>Clinic-in-a-Box</span>
+        <a href="/hub" class="sidebar-logo">
+          <span class="icon">🛡️</span>
+          <span>CyberHub</span>
         </a>
       </div>
-      
-      <nav class="sidebar-nav">
-        <div class="nav-section">
-          <div class="nav-section-title">Main</div>
-          <a href="/dashboard" class="nav-item ${isActive('dashboard')}">
-            <span class="icon">📊</span>
-            <span>Dashboard</span>
-          </a>
-          <a href="/my-profiles" class="nav-item ${isActive('profiles')}">
-            <span class="icon">📁</span>
-            <span>My Profiles</span>
-            <span class="nav-badge" id="profileCount">0</span>
-          </a>
-          <a href="/generator" class="nav-item ${isActive('generator')}">
-            <span class="icon">⚡</span>
-            <span>Generate New</span>
-          </a>
-        </div>
-        
-        <div class="nav-section">
-          <div class="nav-section-title">Assessment</div>
-          <a href="/workspace" class="nav-item ${isActive('workspace')}">
-            <span class="icon">📝</span>
-            <span>Workspace</span>
-          </a>
-          <a href="/progress" class="nav-item ${isActive('progress')}">
-            <span class="icon">📈</span>
-            <span>My Progress</span>
-          </a>
-        </div>
-        
-        ${isInstructor ? `
-        <div class="nav-section">
-          <div class="nav-section-title">Instructor</div>
-          <a href="/instructor" class="nav-item ${isActive('instructor')}">
-            <span class="icon">👨‍🏫</span>
-            <span>Instructor Dashboard</span>
-          </a>
-        </div>
-        ` : ''}
 
-        ${user?.role === 'admin' ? `
+      <nav class="sidebar-nav" id="sidebarNav">
         <div class="nav-section">
-          <div class="nav-section-title">Administration</div>
-          <a href="/admin" class="nav-item ${isActive('admin')}">
-            <span class="icon">🖥️</span>
-            <span>CyberHub Admin</span>
-          </a>
-        </div>
-        ` : ''}
-        
-        <div class="nav-section">
-          <div class="nav-section-title">Resources</div>
-          <a href="#" class="nav-item ${isActive('ai-assistant')}" onclick="Layout.openChat(); return false;">
-            <span class="icon">🤖</span>
-            <span>AI Assistant</span>
-          </a>
-          <a href="/interview" class="nav-item ${isActive('interview')}">
-            <span class="icon">🎤</span>
-            <span>Interview Simulator</span>
-          </a>
+          <div class="nav-section-title" style="color:var(--text-muted);font-size:0.75rem">Loading modules...</div>
         </div>
       </nav>
-      
+
       <div class="sidebar-footer">
         <div class="theme-toggle-row">
           <button class="theme-toggle-btn" onclick="Layout.toggleTheme()" title="Toggle dark/light mode" id="themeToggleBtn">
@@ -161,39 +130,128 @@ const Layout = {
     `;
   },
 
+  // Build the dynamic nav sections from module data
+  buildNavHTML(modules, plugins) {
+    const user = Auth.getUser();
+    const activeModule = this.getActiveModule();
+    const activeSubPage = this.getActiveSubPage();
+
+    // Check if we're on a legacy (non-namespaced) CIAB page
+    const legacyCiabPages = ['dashboard','profiles','generator','workspace','progress','interview','instructor','admin','intake-form','guide'];
+    const isLegacyCiab = legacyCiabPages.includes(activeModule);
+    const effectiveModule = isLegacyCiab ? 'ciab' : activeModule;
+
+    const isModuleActive = (mod) => {
+      const entryKey = (mod.entry_url || '').split('/').filter(Boolean)[0];
+      return mod.key === effectiveModule || entryKey === effectiveModule;
+    };
+
+    let html = '';
+
+    // Modules section
+    if (modules.length > 0) {
+      html += `<div class="nav-section">
+        <div class="nav-section-title">Modules</div>`;
+      modules.forEach(mod => {
+        const active = isModuleActive(mod) ? 'active' : '';
+        html += `<a href="${mod.entry_url}" class="nav-item ${active}">
+          <span class="icon">${mod.icon || ''}</span>
+          <span>${mod.name}</span>
+        </a>`;
+      });
+      html += `</div>`;
+    }
+
+    // Plugins section
+    if (plugins.length > 0) {
+      html += `<div class="nav-section">
+        <div class="nav-section-title">Plugins</div>`;
+      plugins.forEach(mod => {
+        const active = isModuleActive(mod) ? 'active' : '';
+        html += `<a href="${mod.entry_url}" class="nav-item ${active}">
+          <span class="icon">${mod.icon || ''}</span>
+          <span>${mod.name}</span>
+        </a>`;
+      });
+      html += `</div>`;
+    }
+
+    // Context sub-navigation (show when inside a module that has sub-pages)
+    const subnavData = this._subnavs[effectiveModule];
+    const subnav = subnavData?.items;
+    if (subnav) {
+      html += `<div class="nav-section module-subnav">
+        <div class="nav-section-title">${subnavData?.label || effectiveModule}</div>`;
+      subnav.forEach(item => {
+        // Role filtering
+        if (item.roles && !item.roles.includes(user?.role)) return;
+
+        const active = activeSubPage === item.page ? 'active' : '';
+        const onclick = item.onclick ? ` onclick="${item.onclick}"` : '';
+        html += `<a href="${item.url}" class="nav-item subnav-item ${active}"${onclick}>
+          <span class="icon">${item.icon}</span>
+          <span>${item.label}</span>
+          ${item.page === 'profiles' ? '<span class="nav-badge" id="profileCount">0</span>' : ''}
+        </a>`;
+      });
+      html += `</div>`;
+    }
+
+    return html;
+  },
+
   // Inject sidebar into page
   injectSidebar() {
     const sidebar = document.getElementById('sidebar');
     if (!sidebar) return;
 
-    // Detect current page
-    let activePage = '';
-    const path = this.currentPage;
-    if (path.includes('dashboard')) activePage = 'dashboard';
-    else if (path.includes('profile') || path.includes('my-profiles')) activePage = 'profiles';
-    else if (path.includes('generator')) activePage = 'generator';
-    else if (path.includes('progress')) activePage = 'progress';
-
-    else if (path.includes('interview')) activePage = 'interview';
-    else if (path.includes('instructor')) activePage = 'instructor';
-    else if (path.includes('workspace')) activePage = 'workspace';
-    else if (path === 'admin' || path.includes('admin')) activePage = 'admin';
-
-    sidebar.innerHTML = this.getSidebarHTML(activePage);
-
-    // Update theme button state
+    // Render skeleton immediately
+    sidebar.innerHTML = this.getSidebarHTML();
     this.updateThemeButton();
 
-    // Load profile count
-    this.loadProfileCount();
+    // Fetch modules and populate nav
+    this.loadModules();
+  },
+
+  // Fetch modules from API and populate sidebar nav
+  async loadModules() {
+    try {
+      let data = this._modules;
+      if (!data) {
+        data = await API.modules.list();
+        this._modules = data;
+        this._subnavs = data.subnavs || {};
+      }
+
+      const nav = document.getElementById('sidebarNav');
+      if (nav) {
+        nav.innerHTML = this.buildNavHTML(data.modules || [], data.plugins || []);
+      }
+
+      // Load profile count if CIAB sub-nav is visible
+      this.loadProfileCount();
+    } catch (e) {
+      // Fallback: show hub link if modules fail to load
+      const nav = document.getElementById('sidebarNav');
+      if (nav) {
+        nav.innerHTML = `
+          <div class="nav-section">
+            <a href="/hub" class="nav-item active">
+              <span class="icon">🏠</span>
+              <span>Home</span>
+            </a>
+          </div>`;
+      }
+    }
   },
 
   // Load profile count for badge
   async loadProfileCount() {
     try {
-      const data = await API.profiles.list();
       const countEl = document.getElementById('profileCount');
-      if (countEl && data.profiles) {
+      if (!countEl) return;
+      const data = await API.profiles.list();
+      if (data.profiles) {
         countEl.textContent = data.profiles.length;
       }
     } catch (e) {

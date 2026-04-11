@@ -9,7 +9,7 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../utils/db');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken } = require('../../../src/middleware/auth');
 const fs = require('fs');
 const path = require('path');
 

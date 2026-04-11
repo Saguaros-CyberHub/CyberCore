@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberHub</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .hub-welcome {
+      margin-bottom: 32px;
+    }
+    .hub-welcome h1 {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 4px;
+    }
+    .hub-welcome p {
+      color: var(--text-secondary);
+      font-size: 0.95rem;
+    }
+
+    .section-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted, #718096);
+      margin-bottom: 16px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border-color, #e2e8f0);
+    }
+
+    .module-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+
+    .module-card {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      border-left: 4px solid var(--card-accent, #3182ce);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-decoration: none;
+      display: block;
+      color: inherit;
+    }
+    .module-card:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 8px 25px rgba(0,0,0,0.12);
+    }
+
+    .module-card-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .module-card-icon {
+      font-size: 1.75rem;
+      width: 48px;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 10px;
+      background: var(--icon-bg, #edf2f7);
+      flex-shrink: 0;
+    }
+
+    .module-card-name {
+      font-size: 1.1rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .module-card-desc {
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .module-card-status {
+      margin-top: 14px;
+      font-size: 0.75rem;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      background: var(--status-bg, #edf2f7);
+      color: var(--status-color, #718096);
+    }
+    .module-card-status.active {
+      background: #c6f6d5;
+      color: #276749;
+    }
+    .module-card-status.coming-soon {
+      background: var(--gray-100, #f7fafc);
+      color: var(--text-muted, #a0aec0);
+    }
+
+    .module-grid-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 60px;
+      color: var(--text-muted);
+    }
+
+    [data-theme="dark"] .module-card {
+      background: var(--bg-card);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+    [data-theme="dark"] .module-card:hover {
+      box-shadow: 0 8px 25px rgba(0,0,0,0.4);
+    }
+    [data-theme="dark"] .module-card-icon {
+      background: rgba(255,255,255,0.08);
+    }
+    [data-theme="dark"] .module-card-status.coming-soon {
+      background: rgba(255,255,255,0.06);
+    }
+    [data-theme="dark"] .module-card-status.active {
+      background: rgba(72,187,120,0.15);
+      color: #68d391;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="Layout.toggleSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <button class="menu-toggle" id="menuToggle" onclick="Layout.toggleSidebar()">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="header-title">CyberHub</div>
+        <div class="header-actions">
+          <span class="header-user" id="headerUser"></span>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="hub-welcome">
+          <h1 id="welcomeTitle">Welcome to CyberHub</h1>
+          <p>Select a module to get started, or explore what's available below.</p>
+        </div>
+
+        <div class="section-title">Modules</div>
+        <div class="module-grid" id="moduleGrid">
+          <div class="module-grid-loading">Loading modules...</div>
+        </div>
+
+        <div class="section-title" id="pluginsTitle" style="display:none">Plugins</div>
+        <div class="module-grid" id="pluginGrid"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/js/hub.js"></script>
+</body>
+</html>

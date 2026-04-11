@@ -3,6 +3,9 @@ networks:
     driver: bridge
 
 services:
+  # ============================================================================
+  # POSTGRES — Single instance hosting cybercore_db + plugin databases
+  # ============================================================================
   postgres:
     image: postgres:17
     container_name: cybercore-postgres
@@ -32,6 +35,9 @@ services:
     networks:
       - cybercore-net
 
+  # ============================================================================
+  # REDIS — Cache, queues, idempotency
+  # ============================================================================
   redis:
     image: redis:7-alpine
     container_name: cybercore-redis
@@ -47,8 +53,67 @@ services:
     networks:
       - cybercore-net
 
+  # ============================================================================
+  # CYBERHUB APP — Node.js/Express application
+  # ============================================================================
+  app:
+    build:
+      context: ./front-end
+      dockerfile: Dockerfile
+    container_name: cybercore-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      # CyberCore DB (single source of truth for users, modules, lanes)
+      CYBERCORE_DB_HOST: postgres
+      CYBERCORE_DB_PORT: 5432
+      CYBERCORE_DB_NAME: ${CORE_DB_NAME}
+      CYBERCORE_DB_USER: ${CORE_DB_USER}
+      CYBERCORE_DB_PASSWORD: ${CORE_DB_PASSWORD}
+      # Security
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: 7d
+      SESSION_SECRET: ${SESSION_SECRET}
+      COOKIE_SECURE: "false"
+      # N8N
+      N8N_BASE_URL: http://n8n:5678
+      N8N_GENERATE_WEBHOOK: /webhook/clinic-generate
+      N8N_DOCUMENT_GENERATOR_WEBHOOK: /webhook/generate-documents
+      N8N_CHAT_WEBHOOK: /webhook/0ff455fa-3bda-43db-a352-ba55517ad2b8/chat
+      N8N_DEPLOY_LANE_WEBHOOK: http://n8n:5678/webhook-test/6bcb6b80-01d9-41a4-86e5-c0747fef50db
+      N8N_TEARDOWN_LANE_WEBHOOK: http://n8n:5678/webhook-test/60949de5-d0f9-40bc-8441-5cf4f9b08048
+      # Guacamole
+      GUAC_API_URL: ${GUAC_API_URL}
+      GUAC_ADMIN_USER: ${GUAC_ADMIN_USER}
+      GUAC_ADMIN_PASSWORD: ${GUAC_ADMIN_PASSWORD}
+      GUAC_DATASOURCE: postgresql
+      # Proxmox
+      PROXMOX_API_URL: ${PROXMOX_API_URL}
+      PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}
+      PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET}
+      # Rate Limiting
+      RATE_LIMIT_WINDOW_MS: 900000
+      RATE_LIMIT_MAX_REQUESTS: 100
+    ports:
+      - "0.0.0.0:3000:3000"
+    volumes:
+      - ./front-end/plugins:/app/plugins:rw
+      - ./front-end/profiles:/app/profiles:rw
+      - ./front-end/vuln-assets:/app/vuln-assets:ro
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # N8N — Workflow automation (use patched image)
+  # ============================================================================
   n8n:
-    image: docker.n8n.io/n8nio/n8n:2.1.2
+    image: n8n:patched
     container_name: cybercore-n8n
     restart: unless-stopped
     depends_on:
@@ -56,17 +121,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    user: 0:0 # run as root to be able to bind to low ports if needed (CHANGEME)
+    user: 0:0
     environment:
       N8N_USER_FOLDER: /home/node
       TZ: ${TZ}
       GENERIC_TIMEZONE: ${TZ}
       NODE_ENV: production
-      N8N_HOST: 100.100.20.50
+      N8N_HOST: 0.0.0.0
       N8N_PORT: 5678
       N8N_PROTOCOL: http
       N8N_SECURE_COOKIE: "false"
-      # WEBHOOK_URL: http://100.100.20.50:5678/
       WEBHOOK_URL: http://0.0.0.0:5678/
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
@@ -100,7 +164,7 @@ services:
       - cybercore-net
 
   n8n-worker:
-    image: docker.n8n.io/n8nio/n8n:2.1.2
+    image: n8n:patched
     container_name: cybercore-n8n-worker
     restart: unless-stopped
     depends_on:
@@ -108,19 +172,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      # n8n:
-       #  condition: service_healthy
     user: 0:0
     environment:
       N8N_USER_FOLDER: /home/node
       TZ: ${TZ}
       GENERIC_TIMEZONE: ${TZ}
       NODE_ENV: production
-      N8N_HOST: 100.100.20.50
+      N8N_HOST: 0.0.0.0
       N8N_PORT: 5678
       N8N_PROTOCOL: http
       N8N_SECURE_COOKIE: "false"
-      # WEBHOOK_URL: http://100.100.20.50:5678/
       WEBHOOK_URL: http://0.0.0.0:5678/
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
@@ -146,15 +207,43 @@ services:
     networks:
       - cybercore-net
 
-  adminer:
-    image: adminer:latest
-    container_name: cybercore-adminer
+  # ============================================================================
+  # PGADMIN — Database web interface
+  # ============================================================================
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: cybercore-pgadmin
     restart: unless-stopped
     depends_on:
       - postgres
     environment:
-      ADMINER_DEFAULT_SERVER: postgres
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      PGADMIN_LISTEN_PORT: 5050
     ports:
-      - "0.0.0.0:8080:8080"
+      - "0.0.0.0:5050:5050"
+    volumes:
+      - ./data/pgadmin:/var/lib/pgadmin:rw
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # FTP — File transfer for profile delivery
+  # ============================================================================
+  ftp:
+    image: fauria/vsftpd:latest
+    container_name: cybercore-ftp
+    restart: unless-stopped
+    environment:
+      FTP_USER: ${FTP_USER}
+      FTP_PASS: ${FTP_PASSWORD}
+      PASV_ADDRESS: 0.0.0.0
+      PASV_MIN_PORT: 21100
+      PASV_MAX_PORT: 21110
+    ports:
+      - "0.0.0.0:21:21"
+      - "21100-21110:21100-21110"
+    volumes:
+      - ./front-end/profiles:/home/vsftpd/${FTP_USER}:rw
     networks:
       - cybercore-net

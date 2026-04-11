@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CyberHub</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .placeholder-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 50vh;
+      text-align: center;
+      padding: 40px;
+    }
+    .placeholder-icon {
+      font-size: 4rem;
+      margin-bottom: 20px;
+      opacity: 0.8;
+    }
+    .placeholder-title {
+      font-size: 1.75rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin-bottom: 8px;
+    }
+    .placeholder-desc {
+      font-size: 1rem;
+      color: var(--text-secondary);
+      max-width: 500px;
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    .placeholder-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 16px;
+      border-radius: 20px;
+      background: var(--gray-100, #f7fafc);
+      color: var(--text-muted, #a0aec0);
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-bottom: 32px;
+    }
+    .placeholder-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 24px;
+      background: var(--primary, #3182ce);
+      color: white;
+      border-radius: 8px;
+      text-decoration: none;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    .placeholder-back:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+    [data-theme="dark"] .placeholder-badge {
+      background: rgba(255,255,255,0.06);
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="Layout.toggleSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <button class="menu-toggle" id="menuToggle" onclick="Layout.toggleSidebar()">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="header-title" id="headerTitle">CyberHub</div>
+        <div class="header-actions">
+          <span class="header-user" id="headerUser"></span>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="placeholder-container">
+          <div class="placeholder-icon" id="placeholderIcon"></div>
+          <div class="placeholder-title" id="placeholderTitle">Module</div>
+          <div class="placeholder-badge">Under Development</div>
+          <div class="placeholder-desc" id="placeholderDesc">
+            This module is being built and will be available soon.
+          </div>
+          <a href="/hub" class="placeholder-back">Back to CyberHub</a>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', async () => {
+      const authed = await Auth.requireAuth();
+      if (!authed) return;
+
+      document.getElementById('headerUser').textContent = Auth.getUser()?.email || '';
+      Layout.init();
+
+      // Determine which module from the URL path
+      const moduleKey = window.location.pathname.split('/').filter(Boolean)[0];
+
+      try {
+        const data = await API.modules.list();
+        const all = [...(data.modules || []), ...(data.plugins || [])];
+        const mod = all.find(m => {
+          // Match by key or by entry_url first segment
+          const entryKey = (m.entry_url || '').split('/').filter(Boolean)[0];
+          return m.key === moduleKey || entryKey === moduleKey;
+        });
+
+        if (mod) {
+          document.title = `${mod.name} | CyberHub`;
+          document.getElementById('headerTitle').textContent = mod.name;
+          document.getElementById('placeholderIcon').textContent = mod.icon || '';
+          document.getElementById('placeholderTitle').textContent = mod.name;
+          if (mod.description) {
+            document.getElementById('placeholderDesc').textContent = mod.description;
+          }
+        } else {
+          document.getElementById('placeholderTitle').textContent = moduleKey
+            ? moduleKey.charAt(0).toUpperCase() + moduleKey.slice(1)
+            : 'Module';
+        }
+      } catch (e) {
+        console.error('Failed to load module info:', e);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+node_modules
+.env
+.git
+data/
+*.md
+Info/
+N8N Workflow/
+migrations/

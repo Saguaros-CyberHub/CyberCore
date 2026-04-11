@@ -509,21 +509,13 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
       return res.status(400).json({ error: `Module '${module}' is not installed` });
     }
 
-    // 2. Ensure user exists in CyberCore cybercore_user table (maintains FK integrity)
-    //    Syncs user from clinic_db → cybercore_db (upsert by username to handle re-deploys)
-    const clinicUser = await query(
-      `SELECT id, email, first_name, last_name, role, organization, password_hash FROM users WHERE id = $1`, [user_id]
+    // 2. Verify user exists in cybercore_user (single source of truth)
+    const userResult = await cybercoreQuery(
+      `SELECT user_id, email, first_name, last_name, role, organization FROM cybercore_user WHERE user_id = $1`, [user_id]
     );
-    if (clinicUser.rows.length === 0) {
-      return res.status(400).json({ error: 'User not found in clinic database' });
+    if (userResult.rows.length === 0) {
+      return res.status(400).json({ error: 'User not found' });
     }
-    const u = clinicUser.rows[0];
-    await cybercoreQuery(
-      `INSERT INTO cybercore_user (user_id, username, email, first_name, last_name, role, auth_provider, organization, password_hash, password_alg)
-       VALUES ($1, $2, $3, $4, $5, $6, 'local', $7, $8, $9)
-       ON CONFLICT (username) DO UPDATE SET user_id = $1, email = $3, organization = $7, password_hash = $8, password_alg = $9`,
-      [u.id, u.email, u.email, u.first_name || '', u.last_name || '', u.role || 'user', u.organization || '', u.password_hash || null, u.password_hash ? 'bcrypt' : null]
-    );
 
     // 3. Check user doesn't already have an active lane
     const laneCheck = await cybercoreQuery(
@@ -1218,11 +1210,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       const password = generatePassword();
       const passwordHash = await bcrypt.hash(password, 12);
 
-      await query(
-        `INSERT INTO users (id, email, password_hash, first_name, last_name, organization, role, email_verified, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
-         RETURNING id, email, first_name, last_name, role`,
-        [userId, email, passwordHash, firstName, lastName, group_name, 'instructor']
+      await cybercoreQuery(
+        `INSERT INTO cybercore_user (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
+         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, $8, true, NOW())
+         RETURNING user_id, email, first_name, last_name, role`,
+        [userId, email, email, passwordHash, firstName, lastName, group_name, 'instructor']
       );
       created.instructors.push({ id: userId, email, name: `${firstName} ${lastName}` });
       created.credentials.push({ email, password, role: 'instructor' });
@@ -1246,11 +1238,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       const password = generatePassword();
       const passwordHash = await bcrypt.hash(password, 12);
 
-      await query(
-        `INSERT INTO users (id, email, password_hash, first_name, last_name, organization, role, email_verified, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, NOW())
-         RETURNING id, email, first_name, last_name, role`,
-        [userId, email, passwordHash, firstName, lastName, group_name, 'student']
+      await cybercoreQuery(
+        `INSERT INTO cybercore_user (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
+         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, $8, true, NOW())
+         RETURNING user_id, email, first_name, last_name, role`,
+        [userId, email, email, passwordHash, firstName, lastName, group_name, 'student']
       );
       created.students.push({ id: userId, email, name: `${firstName} ${lastName}` });
       created.credentials.push({ email, password, role: 'student' });
@@ -1828,17 +1820,10 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       }
     }
 
-    // Also clean up instructor cybercore_user records
-    for (const inst of (config.instructors || [])) {
-      try {
-        await cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = $1 OR username = $2`, [inst.id, inst.email]);
-      } catch (e) { /* may not exist */ }
-    }
-
-    // 2. Delete users from clinic_db
+    // 2. Delete users from cybercore_user
     for (const u of allUsers) {
       try {
-        await query(`DELETE FROM users WHERE id = $1`, [u.id]);
+        await cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = $1 OR username = $2`, [u.id, u.email]);
       } catch (e) { errors.push(`DB delete ${u.email}: ${e.message}`); }
     }
 
@@ -1975,7 +1960,7 @@ router.get('/activity-log', authenticateToken, adminOnly, async (req, res) => {
       params.push(to);
     }
     if (search) {
-      where.push(`(u.email ILIKE $${paramIdx} OR a.action_type ILIKE $${paramIdx} OR a.entity_type ILIKE $${paramIdx})`);
+      where.push(`(a.action_type ILIKE $${paramIdx} OR a.entity_type ILIKE $${paramIdx})`);
       params.push(`%${search}%`);
       paramIdx++;
     }
@@ -1984,16 +1969,15 @@ router.get('/activity-log', authenticateToken, adminOnly, async (req, res) => {
 
     const [logs, countResult] = await Promise.all([
       query(
-        `SELECT a.*, u.email, u.first_name, u.last_name
+        `SELECT a.*
          FROM activity_log a
-         LEFT JOIN users u ON u.id = a.user_id
          ${whereClause}
          ORDER BY a.created_at DESC
          LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
         [...params, limit, offset]
       ),
       query(
-        `SELECT COUNT(*) AS total FROM activity_log a LEFT JOIN users u ON u.id = a.user_id ${whereClause}`,
+        `SELECT COUNT(*) AS total FROM activity_log a ${whereClause}`,
         params
       )
     ]);
@@ -2014,21 +1998,41 @@ router.get('/activity-log', authenticateToken, adminOnly, async (req, res) => {
 // USER MANAGEMENT
 // ============================================================================
 
-// GET /api/admin/users — list all clinic_db users
+// GET /api/admin/users — list all users from cybercore_user
 router.get('/users', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const result = await query(
-      `SELECT u.id, u.email, u.first_name, u.last_name, u.role, u.organization,
-              u.is_active, u.last_login, u.created_at,
-              dg.group_name, dg.id AS group_id
-       FROM users u
-       LEFT JOIN deployed_groups dg ON (
-         dg.config::jsonb->'students' @> jsonb_build_array(jsonb_build_object('id', u.id::text))
-         OR dg.config::jsonb->'instructors' @> jsonb_build_array(jsonb_build_object('id', u.id::text))
-       )
-       ORDER BY u.created_at DESC`
+    // Get users from cybercore_user (single source of truth)
+    const usersResult = await cybercoreQuery(
+      `SELECT user_id AS id, email, first_name, last_name, role, organization,
+              active AS is_active, last_auth_at AS last_login, created_at
+       FROM cybercore_user
+       ORDER BY created_at DESC`
     );
-    res.json(result.rows);
+
+    // Get deployed groups from clinic_db (if available) to enrich user data
+    let groups = [];
+    try {
+      const groupsResult = await query(
+        `SELECT id, group_name, config FROM deployed_groups`
+      );
+      groups = groupsResult.rows;
+    } catch (e) { /* clinic_db may not be available if CIAB plugin not loaded */ }
+
+    // Merge group info into users
+    const users = usersResult.rows.map(u => {
+      const group = groups.find(g => {
+        const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
+        const allMembers = [...(cfg.students || []), ...(cfg.instructors || [])];
+        return allMembers.some(m => m.id === u.id);
+      });
+      return {
+        ...u,
+        group_name: group?.group_name || null,
+        group_id: group?.id || null
+      };
+    });
+
+    res.json(users);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2054,10 +2058,10 @@ router.patch('/groups/:id/toggle-active', authenticateToken, adminOnly, async (r
     }
 
     const studentIds = students.map(s => s.id);
-    const updated = await query(
-      `UPDATE users SET is_active = $1, updated_at = NOW()
-       WHERE id = ANY($2) AND role = 'student'
-       RETURNING id, email, is_active`,
+    const updated = await cybercoreQuery(
+      `UPDATE cybercore_user SET active = $1, status = CASE WHEN $1 THEN 'active' ELSE 'inactive' END, updated_at = NOW()
+       WHERE user_id = ANY($2) AND role = 'student'
+       RETURNING user_id, email, active`,
       [active, studentIds]
     );
 
@@ -2400,16 +2404,12 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
       console.log(`[ChallengeNetwork] SDN infrastructure created: zone=${zoneAbbrev}, vnet=${vnet.vnet}`);
     }
 
-    // Sync user to cybercore
-    const userResult = await query(`SELECT id, email, first_name, last_name, role FROM users WHERE id = $1`, [userId]);
+    // Verify user exists in cybercore_user
+    const userResult = await cybercoreQuery(
+      `SELECT user_id, email, first_name, last_name, role FROM cybercore_user WHERE user_id = $1`, [userId]
+    );
     if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     const user = userResult.rows[0];
-    await cybercoreQuery(
-      `INSERT INTO cybercore_user (user_id, username, email, first_name, last_name, role, auth_provider)
-       VALUES ($1, $2, $3, $4, $5, $6, 'local')
-       ON CONFLICT (username) DO UPDATE SET email = EXCLUDED.email, first_name = EXCLUDED.first_name`,
-      [user.id, user.email, user.email, user.first_name, user.last_name, user.role]
-    );
 
     // Create lane record
     const laneName = `challenge-${vnet.zone}-${vxlanId}`;

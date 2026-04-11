@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * CLINIC-IN-A-BOX - MAIN SERVER
+ * CYBERHUB - MAIN SERVER
  * ============================================================================
  */
 
@@ -16,45 +16,35 @@ const path = require('path');
 
 // ============================================================================
 // SECURITY: Require critical secrets or generate random per-boot fallbacks
-// A random fallback means tokens/sessions invalidate on restart — acceptable
-// for dev, but .env MUST be configured for production.
 // ============================================================================
 if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = crypto.randomBytes(48).toString('hex');
-  console.warn('⚠️  JWT_SECRET not set — generated random secret (tokens will invalidate on restart)');
+  console.warn('JWT_SECRET not set — generated random secret (tokens will invalidate on restart)');
 }
 if (!process.env.SESSION_SECRET) {
   process.env.SESSION_SECRET = crypto.randomBytes(48).toString('hex');
-  console.warn('⚠️  SESSION_SECRET not set — generated random secret');
+  console.warn('SESSION_SECRET not set — generated random secret');
 }
 
-// Import routes
+// Import core routes
 const authRoutes = require('./routes/auth');
-const profileRoutes = require('./routes/profiles');
-const apiRoutes = require('./routes/api');
-const progressRoutes = require('./routes/progress');
-const interviewRoutes = require('./routes/interview');
-const instructorRoutes = require('./routes/instructor');
-const intakeFormRoutes = require('./routes/intake-form');
 const adminRoutes = require('./routes/admin');
 const challengeTemplateRoutes = require('./routes/challenge-templates');
+const moduleRoutes = require('./routes/modules');
 
+// Import plugin loader
+const pluginLoader = require('./plugin-loader');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
-const { checkSchedule } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-
 
 // ============================================================================
 // SECURITY MIDDLEWARE
 // ============================================================================
 
-// Helmet for security headers
-// Helmet for security headers
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -69,10 +59,9 @@ app.use(helmet({
   }
 }));
 
-// CORS configuration
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production' 
-    ? process.env.ALLOWED_ORIGINS?.split(',') 
+  origin: process.env.NODE_ENV === 'production'
+    ? process.env.ALLOWED_ORIGINS?.split(',')
     : true,
   credentials: true
 }));
@@ -85,7 +74,6 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
-// Stricter rate limit for auth routes (5 attempts per 15 min)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
@@ -94,7 +82,6 @@ const authLimiter = rateLimit({
 app.use('/api/auth/login', authLimiter);
 app.use('/api/auth/register', authLimiter);
 
-// Webhook rate limit (N8N callbacks — 10 per minute max)
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
@@ -110,7 +97,6 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// Session configuration
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: false,
@@ -131,34 +117,25 @@ app.use(express.static(path.join(__dirname, '../public')));
 app.use('/profiles', express.static(path.join(__dirname, '../profiles')));
 app.use('/vuln-assets', express.static(path.join(__dirname, '../vuln-assets')));
 
-//app.use('/profiles', express.static('F:/Projects/mounts/ftp'));
-
 // ============================================================================
-// API ROUTES
+// CORE API ROUTES
 // ============================================================================
 
 app.use('/api/auth', authRoutes);
-// Student-facing routes get schedule check (blocks outside class hours)
-app.use('/api/profiles', checkSchedule, profileRoutes);
-app.use('/api', checkSchedule, apiRoutes);
-app.use('/api/progress', checkSchedule, progressRoutes);
-app.use('/api/interview', checkSchedule, interviewRoutes);
-app.use('/api/instructor', instructorRoutes);
-app.use('/api/intake-form', checkSchedule, intakeFormRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', challengeTemplateRoutes);
+app.use('/api/modules', moduleRoutes);
 
 // ============================================================================
-// PAGE ROUTES
+// CORE PAGE ROUTES
 // ============================================================================
 
-// Serve HTML pages
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
 });
 
-app.get('/workspace', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/workspace.html'));
+app.get('/hub', (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/hub.html'));
 });
 
 app.get('/login', (req, res) => {
@@ -169,40 +146,12 @@ app.get('/register', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/register.html'));
 });
 
-app.get('/dashboard', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/dashboard.html'));
-});
-
-app.get('/generator', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/generator.html'));
-});
-
-app.get('/my-profiles', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/profiles.html'));
-});
-
-app.get('/interview', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/interview.html'));
-});
-
-app.get('/progress', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/progress.html'));
-});
-
-app.get('/instructor', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/instructor.html'));
-});
-
-app.get('/intake-form', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/intake-form.html'));
-});
-
-app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/admin.html'));
-});
-
-app.get('/guide', (req, res) => {
-  res.sendFile(path.join(__dirname, '../public/guide.html'));
+// Placeholder pages for modules without content
+const placeholderModules = ['crucible', 'cyberlabs', 'forge', 'university', 'archive', 'wiki', 'library', 'cyberprobe'];
+placeholderModules.forEach(mod => {
+  app.get(`/${mod}`, (req, res) => {
+    res.sendFile(path.join(__dirname, '../public/module-placeholder.html'));
+  });
 });
 
 const { authenticateToken } = require('./middleware/auth');
@@ -211,55 +160,50 @@ const { authenticateToken } = require('./middleware/auth');
 app.get('/api/auth/debug', authenticateToken, (req, res) => {
   if (req.user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
   res.json({
-    env: {
-      JWT_SECRET: 'Set ✅',
-      DB_NAME: process.env.DB_NAME ? '***' : 'NOT SET'
-    },
-    headers: {
-      authorization: req.headers.authorization ? 'Present ✅' : 'Missing ❌'
-    },
+    env: { JWT_SECRET: 'Set', CYBERCORE_DB: process.env.CYBERCORE_DB_NAME ? '***' : 'NOT SET' },
+    headers: { authorization: req.headers.authorization ? 'Present' : 'Missing' },
     user: { email: req.user.email, role: req.user.role }
   });
 });
 
-// Test protected route
 app.get('/api/auth/test', authenticateToken, (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'Auth working!', 
-    user: req.user 
+  res.json({ success: true, message: 'Auth working!', user: req.user });
+});
+
+// ============================================================================
+// STARTUP — Load plugins, then start listening
+// ============================================================================
+
+async function start() {
+  try {
+    // Load plugins from plugins/ directory
+    await pluginLoader.loadAll(app);
+  } catch (err) {
+    console.error('Plugin loading error (non-fatal):', err.message);
+  }
+
+  // 404 handler (must come after plugin routes)
+  app.use((req, res) => {
+    res.status(404).json({ error: 'Not found' });
   });
-});
 
-// ============================================================================
-// ERROR HANDLING
-// ============================================================================
+  // Global error handler
+  app.use(errorHandler);
 
-// 404 handler
-app.use((req, res, next) => {
-  res.status(404).json({ error: 'Not found' });
-});
+  app.listen(PORT, () => {
+    console.log(`
++---------------------------------------------------------------+
+|               CYBERHUB SERVER STARTED                         |
++---------------------------------------------------------------+
+|  Server:     http://localhost:${PORT}                             |
+|  Hub:        http://localhost:${PORT}/hub                         |
+|  Login:      http://localhost:${PORT}/login                       |
+|  Environment: ${process.env.NODE_ENV || 'development'}                                |
++---------------------------------------------------------------+
+    `);
+  });
+}
 
-// Global error handler
-app.use(errorHandler);
-
-// ============================================================================
-// START SERVER
-// ============================================================================
-
-app.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════╗
-║           CLINIC-IN-A-BOX SERVER STARTED                      ║
-╠═══════════════════════════════════════════════════════════════╣
-║  🌐 Server:     http://localhost:${PORT}                         ║
-║  📊 Dashboard:  http://localhost:${PORT}/dashboard               ║
-║  🔐 Login:      http://localhost:${PORT}/login                   ║
-║  📝 Register:   http://localhost:${PORT}/register                ║
-╠═══════════════════════════════════════════════════════════════╣
-║  Environment:   ${process.env.NODE_ENV || 'development'}                              ║
-╚═══════════════════════════════════════════════════════════════╝
-  `);
-});
+start();
 
 module.exports = app;

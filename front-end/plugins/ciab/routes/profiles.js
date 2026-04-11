@@ -11,7 +11,7 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs');
 const { pool } = require('../utils/db');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken } = require('../../../src/middleware/auth');
 // Policy generation is handled by the N8N Policy Generator workflow
 // Template fallback available at: require('../utils/policy-templates')
 

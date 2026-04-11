@@ -7,7 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../utils/db');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken } = require('../../../src/middleware/auth');
 
 // GET /api/progress/:profileId - Get all progress for a profile
 router.get('/:profileId', authenticateToken, async (req, res) => {

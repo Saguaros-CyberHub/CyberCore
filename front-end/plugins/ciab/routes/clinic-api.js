@@ -7,7 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../utils/db');
-const { authenticate, optionalAuth } = require('../middleware/auth');
+const { authenticate, optionalAuth } = require('../../../src/middleware/auth');
 
 // ============================================================================
 // POST /api/generate - Trigger profile generation via N8N
