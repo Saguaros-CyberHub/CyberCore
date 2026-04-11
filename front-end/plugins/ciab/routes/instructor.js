@@ -9,21 +9,12 @@ const router = express.Router();
 const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
-<<<<<<<< HEAD:front-end/plugins/ciab/routes/instructor.js
 const { query, pool } = require('../utils/db');
 const { authenticateToken, requireRole } = require('../../../src/middleware/auth');
 const { renderIntakePdf } = require('./intake-form');
 const { cybercoreQuery } = require('../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../src/utils/proxmox');
 const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../../src/utils/guacamole');
-========
-const { query, pool } = require('../core/utils/db');
-const { authenticateToken, requireRole } = require('../core/middleware/auth');
-const { renderIntakePdf } = require('./intake-form');
-const { cybercoreQuery } = require('../core/utils/cybercore-db');
-const { proxmoxAPI } = require('../core/utils/proxmox');
-const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../core/utils/guacamole');
->>>>>>>> 92070e5ce56df726143f2b62c2e9027f2d3f335b:cyberhub-web-interface/src/routes/instructor.js
 
 const instructorOnly = requireRole('instructor', 'admin');
 

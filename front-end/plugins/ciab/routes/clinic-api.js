@@ -6,13 +6,8 @@
 
 const express = require('express');
 const router = express.Router();
-<<<<<<<< HEAD:front-end/plugins/ciab/routes/clinic-api.js
 const { query } = require('../utils/db');
 const { authenticate, optionalAuth } = require('../../../src/middleware/auth');
-========
-const { query } = require('../core/utils/db');
-const { authenticate, optionalAuth } = require('../core/middleware/auth');
->>>>>>>> 92070e5ce56df726143f2b62c2e9027f2d3f335b:cyberhub-web-interface/src/routes/api.js
 
 // ============================================================================
 // POST /api/generate - Trigger profile generation via N8N
