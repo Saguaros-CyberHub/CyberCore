@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 set -euo pipefail
 
 echo "[modules] ENABLED_MODULES=${ENABLED_MODULES:-<none>}"
@@ -11,7 +11,8 @@ echo "[modules] ENABLED_MODULES=${ENABLED_MODULES:-<none>}"
 DB_NAME="${POSTGRES_DB:-postgres}"
 DB_USER="${POSTGRES_USER:-postgres}"
 
-for mod in ${ENABLED_MODULES}; do
+IFS=',' read -r -a _mods <<< "${ENABLED_MODULES}"
+for mod in "${_mods[@]}"; do
   file="/docker-entrypoint-initdb.d/modules/${mod}.sql"
   if [ -f "$file" ]; then
     echo "[modules] Applying module: ${mod} -> ${file}"
