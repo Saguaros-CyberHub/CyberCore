@@ -228,6 +228,20 @@ services:
       - cybercore-net
 
   # ============================================================================
+  # ADMINER — Lightweight DB management UI
+  # ============================================================================
+  adminer:
+    image: adminer:latest
+    container_name: cybercore-adminer
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    ports:
+      - "0.0.0.0:8080:8080"
+    networks:
+      - cybercore-net
+
+  # ============================================================================
   # FTP — File transfer for profile delivery
   # ============================================================================
   ftp:
