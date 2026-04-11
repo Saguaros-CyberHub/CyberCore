@@ -13,13 +13,13 @@ DATA_ROOT="${N8N_DATA_ROOT:-/home/node}"
 # Treat DATA_ROOT as the n8n "user folder" (the persistent mount root).
 export N8N_USER_FOLDER="${N8N_USER_FOLDER:-$DATA_ROOT}"
 
-# Import locations:
-WF_DIR_DEFAULT_1="$N8N_USER_FOLDER/config/workflows"
-CREDS_DIR_DEFAULT_1="$N8N_USER_FOLDER/config/credentials"
+# Import locations (mounted at /seed to avoid clashing with n8n's config file):
+WF_DIR_DEFAULT_1="/seed/workflows"
+CREDS_DIR_DEFAULT_1="/seed/credentials"
 
-# Optional legacy fallbacks if you ever mount /config/*
-WF_DIR_DEFAULT_2="/config/workflows"
-CREDS_DIR_DEFAULT_2="/config/credentials"
+# Optional legacy fallbacks
+WF_DIR_DEFAULT_2="$N8N_USER_FOLDER/config/workflows"
+CREDS_DIR_DEFAULT_2="$N8N_USER_FOLDER/config/credentials"
 
 pick_dir() {
   # Usage: pick_dir preferred fallback

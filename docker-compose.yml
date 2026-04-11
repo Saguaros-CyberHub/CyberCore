@@ -152,9 +152,9 @@ services:
     volumes:
       - ./data/n8n:/home/node:rw,z
       - ./config/n8n/init.sh:/docker-entrypoint-initn8n.sh:ro,z
-      - ./config/n8n/workflows:/home/node/.n8n/config/workflows:ro,z
-      - ./config/n8n/credentials:/home/node/.n8n/config/credentials:ro,z
-      - ./config/site.json:/home/node/.n8n/config/site.json:ro,z
+      - ./config/n8n/workflows:/seed/workflows:ro,z
+      - ./config/n8n/credentials:/seed/credentials:ro,z
+      - ./config/site.json:/seed/site.json:ro,z
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://0.0.0.0:5678/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 15s
@@ -201,9 +201,9 @@ services:
       - ./config/secrets.env
     volumes:
       - ./data/n8n:/home/node:z
-      - ./config/n8n/workflows:/home/node/.n8n/config/workflows:ro,z
-      - ./config/n8n/credentials:/home/node/.n8n/config/credentials:ro,z
-      - ./config/site.json:/home/node/.n8n/config/site.json:ro,z
+      - ./config/n8n/workflows:/seed/workflows:ro,z
+      - ./config/n8n/credentials:/seed/credentials:ro,z
+      - ./config/site.json:/seed/site.json:ro,z
     networks:
       - cybercore-net
 
