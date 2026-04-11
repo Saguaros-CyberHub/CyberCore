@@ -1,6 +1,6 @@
 -- Crucible (CTF range) module: enabled tables + badges
 
-INSERT INTO module (key, name, active)
+INSERT INTO cybercore_module (key, name, active)
 VALUES ('crucible', 'The Crucible', TRUE)
 ON CONFLICT (key) DO NOTHING;
 
@@ -204,7 +204,7 @@ COMMENT ON TABLE cybercore_lane IS
 ----------------------------------------------------------------------------
 -- Module-scoped badges
 ----------------------------------------------------------------------------
-INSERT INTO badge (key, name, description, module_key, active) VALUES
+INSERT INTO cybercore_badge (key, name, description, module_key, active) VALUES
   ('crucible_ctf_scorer', 'CTF Scorer', 'Scored in a Crucible CTF event', 'crucible', TRUE),
   ('crucible_ctf_winner', 'CTF Winner', 'Won a Crucible CTF event', 'crucible', TRUE)
 ON CONFLICT (key) DO NOTHING;
@@ -220,7 +220,7 @@ WITH latest_allocations AS (
          a.ends_at,
          a.purpose,
          a.metadata AS allocation_metadata
-  FROM allocation a
+  FROM cybercore_allocation a
   WHERE a.ends_at IS NULL OR a.ends_at > now()
   ORDER BY a.resource_id, a.starts_at DESC
 )
@@ -255,10 +255,10 @@ SELECT
   la.starts_at AS allocation_starts_at,
   la.ends_at AS allocation_ends_at,
   la.purpose AS allocation_purpose
-FROM resource r
-JOIN vm_instance vi ON vi.resource_id = r.resource_id
-LEFT JOIN vm_template t ON vi.template_id = t.template_id
+FROM cybercore_resource r
+JOIN cybercore_vm_instance vi ON vi.resource_id = r.resource_id
+LEFT JOIN cybercore_vm_template t ON vi.template_id = t.template_id
 LEFT JOIN latest_allocations la ON la.resource_id = r.resource_id
-LEFT JOIN app_user u ON la.user_id = u.user_id
+LEFT JOIN cybercore_user u ON la.user_id = u.user_id
 WHERE r.type = 'vm'
   AND r.module_key = 'crucible';
