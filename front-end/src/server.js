@@ -54,9 +54,11 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
       scriptSrcAttr: ["'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "blob:"],
-      connectSrc: ["'self'", "http://localhost:5678", "ws://localhost:5678"]
+      connectSrc: ["'self'", "http://localhost:5678", "ws://localhost:5678"],
+      upgradeInsecureRequests: null
     }
-  }
+  },
+  crossOriginOpenerPolicy: false
 }));
 
 app.use(cors({
