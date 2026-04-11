@@ -113,7 +113,7 @@ services:
   # N8N — Workflow automation (use patched image)
   # ============================================================================
   n8n:
-    image: n8n:patched
+    image: docker.n8n.io/n8nio/n8n:2.1.2
     container_name: cybercore-n8n
     restart: unless-stopped
     depends_on:
@@ -164,7 +164,7 @@ services:
       - cybercore-net
 
   n8n-worker:
-    image: n8n:patched
+    image: docker.n8n.io/n8nio/n8n:2.1.2
     container_name: cybercore-n8n-worker
     restart: unless-stopped
     depends_on:
