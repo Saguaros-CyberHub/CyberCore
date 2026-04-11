@@ -76,6 +76,12 @@ services:
       CYBERCORE_DB_NAME: ${CORE_DB_NAME}
       CYBERCORE_DB_USER: ${CORE_DB_USER}
       CYBERCORE_DB_PASSWORD: ${CORE_DB_PASSWORD}
+      # CIAB / legacy plugin DB
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: clinic_db
+      DB_USER: ${CORE_DB_USER}
+      DB_PASSWORD: ${CORE_DB_PASSWORD}
       # Security
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRES_IN: 7d
