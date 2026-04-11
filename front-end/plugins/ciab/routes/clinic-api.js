@@ -6,8 +6,13 @@
 
 const express = require('express');
 const router = express.Router();
+<<<<<<<< HEAD:front-end/plugins/ciab/routes/clinic-api.js
 const { query } = require('../utils/db');
 const { authenticate, optionalAuth } = require('../../../src/middleware/auth');
+========
+const { query } = require('../core/utils/db');
+const { authenticate, optionalAuth } = require('../core/middleware/auth');
+>>>>>>>> 92070e5ce56df726143f2b62c2e9027f2d3f335b:cyberhub-web-interface/src/routes/api.js
 
 // ============================================================================
 // POST /api/generate - Trigger profile generation via N8N
@@ -100,12 +105,6 @@ router.post('/chat', optionalAuth, async (req, res) => {
 
 router.post('/webhook/profile-complete', async (req, res) => {
   try {
-    // Verify webhook shared secret (set WEBHOOK_SECRET in .env and in N8N HTTP node headers)
-    const webhookSecret = process.env.WEBHOOK_SECRET;
-    if (webhookSecret && req.headers['x-webhook-secret'] !== webhookSecret) {
-      return res.status(403).json({ error: 'Invalid webhook secret' });
-    }
-
     const {
       userId,
       runId,

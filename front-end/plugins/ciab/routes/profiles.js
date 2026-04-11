@@ -10,10 +10,15 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
+<<<<<<<< HEAD:front-end/plugins/ciab/routes/profiles.js
 const { pool } = require('../utils/db');
 const { authenticateToken } = require('../../../src/middleware/auth');
+========
+const { pool } = require('../core/utils/db');
+const { authenticateToken } = require('../core/middleware/auth');
+>>>>>>>> 92070e5ce56df726143f2b62c2e9027f2d3f335b:cyberhub-web-interface/src/routes/profiles.js
 // Policy generation is handled by the N8N Policy Generator workflow
-// Template fallback available at: require('../utils/policy-templates')
+// Template fallback available at: require('../../installed-plugins/crucible-plugins/ciab/utils/policy-templates')
 
 // ============================================================================
 // Helper Functions
@@ -153,7 +158,7 @@ router.get('/stats/summary', authenticateToken, async (req, res) => {
 router.get('/recent', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
-    const limit = Math.min(Math.max(parseInt(req.query.limit) || 5, 1), 50);
+    const limit = req.query.limit || 5;
     
     const result = await pool.query(`
       SELECT 

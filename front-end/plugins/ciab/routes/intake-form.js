@@ -1,8 +1,13 @@
 // /src/routes/intake-form.js - V7.2 with 15 sections
 const express = require('express');
 const router = express.Router();
+<<<<<<<< HEAD:front-end/plugins/ciab/routes/intake-form.js
 const { pool } = require('../utils/db');
 const { authenticateToken } = require('../../../src/middleware/auth');
+========
+const { pool } = require('../core/utils/db');
+const { authenticateToken } = require('../core/middleware/auth');
+>>>>>>>> 92070e5ce56df726143f2b62c2e9027f2d3f335b:cyberhub-web-interface/src/routes/intake-form.js
 const PDFDocument = require('pdfkit');
 const fs = require('fs');
 const path = require('path');

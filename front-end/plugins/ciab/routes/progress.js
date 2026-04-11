@@ -6,8 +6,13 @@
 
 const express = require('express');
 const router = express.Router();
+<<<<<<<< HEAD:front-end/plugins/ciab/routes/progress.js
 const { query } = require('../utils/db');
 const { authenticateToken } = require('../../../src/middleware/auth');
+========
+const { query } = require('../core/utils/db');
+const { authenticateToken } = require('../core/middleware/auth');
+>>>>>>>> 92070e5ce56df726143f2b62c2e9027f2d3f335b:cyberhub-web-interface/src/routes/progress.js
 
 // GET /api/progress/:profileId - Get all progress for a profile
 router.get('/:profileId', authenticateToken, async (req, res) => {
