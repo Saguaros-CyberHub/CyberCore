@@ -39,7 +39,7 @@
             <h1 class="page-title">My Profiles</h1>
             <p class="page-subtitle">View and manage your generated client profiles.</p>
           </div>
-          <a href="/generator" class="btn btn-primary">⚡ Generate New</a>
+          <a href="/ciab/generator" class="btn btn-primary">⚡ Generate New</a>
         </div>
 
         <div class="card">
@@ -199,7 +199,7 @@
       const tbody = document.getElementById('profilesTable');
       
       if (!profiles || profiles.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted">No profiles found. <a href="/generator">Generate your first profile</a></td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted">No profiles found. <a href="/ciab/generator">Generate your first profile</a></td></tr>`;
         return;
       }
 

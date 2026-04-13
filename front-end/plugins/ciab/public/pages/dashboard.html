@@ -266,7 +266,7 @@
             <h1 class="page-title">Dashboard</h1>
             <p class="page-subtitle">Welcome back! Track your risk assessment progress.</p>
           </div>
-          <a href="/generator" class="btn btn-primary">⚡ Generate New Profile</a>
+          <a href="/ciab/generator" class="btn btn-primary">⚡ Generate New Profile</a>
         </div>
 
         <!-- Quick Stats -->
@@ -391,7 +391,7 @@
                 <button class="btn btn-outline btn-block" style="margin-bottom: 10px;" onclick="toggleChat()">
                   💬 Ask AI Assistant
                 </button>
-                <a href="/generator" class="btn btn-outline btn-block">
+                <a href="/ciab/generator" class="btn btn-outline btn-block">
                   ⚡ Generate Profile
                 </a>
               </div>
@@ -574,7 +574,7 @@
           <div class="text-center text-muted" style="padding: 40px;">
             <p style="font-size: 3em; margin-bottom: 15px;">📁</p>
             <p>No profiles yet.</p>
-            <a href="/generator" class="btn btn-primary" style="margin-top: 15px;">Generate Your First Profile</a>
+            <a href="/ciab/generator" class="btn btn-primary" style="margin-top: 15px;">Generate Your First Profile</a>
           </div>
         `;
         return;
@@ -594,7 +594,7 @@
             <span class="badge badge-${p.status === 'completed' ? 'success' : 'warning'}">${p.status || 'pending'}</span>
           </div>
           <div class="profile-card-actions">
-            <a href="/workspace?profile=${p.id}" class="btn btn-sm btn-success">📝 Start Assessment</a>
+            <a href="/ciab/workspace?profile=${p.id}" class="btn btn-sm btn-success">📝 Start Assessment</a>
             <button class="btn btn-sm btn-primary" onclick="openProfileModal('${p.id}')">View Details</button>
             ${p.htmlFilePath ? `<a href="${p.htmlFilePath}" target="_blank" class="btn btn-sm btn-outline">Open HTML</a>` : ''}
             <button class="btn btn-sm btn-outline" onclick="startInterview('${p.id}')">Interview</button>
@@ -827,16 +827,16 @@
 
     function continueAssessment() {
       if (currentProfileId) {
-        window.location.href = `/my-profiles?view=${currentProfileId}`;
+        window.location.href = `/ciab/my-profiles?view=${currentProfileId}`;
       }
     }
 
     function viewProfile(id) {
-      window.location.href = `/my-profiles?view=${id}`;
+      window.location.href = `/ciab/my-profiles?view=${id}`;
     }
 
     function showProgress() {
-      window.location.href = '/progress';
+      window.location.href = '/ciab/progress';
     }
 
     function downloadScansPdf(profileId) {
@@ -1008,7 +1008,7 @@
     if (searchInput) {
       searchInput.addEventListener('keypress', (e) => {
         if (e.key === 'Enter' && e.target.value.trim()) {
-          window.location.href = `/my-profiles?search=${encodeURIComponent(e.target.value.trim())}`;
+          window.location.href = `/ciab/my-profiles?search=${encodeURIComponent(e.target.value.trim())}`;
         }
       });
     }

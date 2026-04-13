@@ -7,6 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const { query } = require('../utils/db');
+const { cybercoreQuery } = require('../../../src/utils/cybercore-db');
 const { authenticateToken } = require('../../../src/middleware/auth');
 
 // GET /api/progress/:profileId - Get all progress for a profile
@@ -14,14 +15,28 @@ router.get('/:profileId', authenticateToken, async (req, res) => {
   try {
     const { profileId } = req.params;
     const userId = req.user.userId;
-    
+
     const result = await query(`
-      SELECT ap.*, u_reviewer.email AS reviewer_email
+      SELECT ap.*
       FROM assessment_progress ap
-      LEFT JOIN users u_reviewer ON ap.reviewer_id = u_reviewer.id
       WHERE ap.user_id = $1 AND ap.profile_id = $2
       ORDER BY ap.part_number
     `, [userId, profileId]);
+
+    // Enrich with reviewer email from cybercore_db (cross-DB)
+    const reviewerIds = [...new Set(result.rows.map(r => r.reviewer_id).filter(Boolean))];
+    if (reviewerIds.length > 0) {
+      const placeholders = reviewerIds.map((_, i) => `$${i + 1}`).join(',');
+      const reviewersResult = await cybercoreQuery(
+        `SELECT user_id, email FROM cybercore_user WHERE user_id::text IN (${placeholders})`,
+        reviewerIds
+      );
+      const reviewerMap = {};
+      reviewersResult.rows.forEach(u => { reviewerMap[u.user_id] = u.email; });
+      result.rows.forEach(r => {
+        r.reviewer_email = r.reviewer_id ? reviewerMap[r.reviewer_id] || null : null;
+      });
+    }
     
     // Build progress map for all 8 parts
     const progressMap = {};

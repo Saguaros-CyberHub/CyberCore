@@ -38,74 +38,116 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
     
     let students = [];
     let pendingSubmissions = [];
-    
-    // Get ALL students (not just assigned ones) with their generated profiles
+
+    // Get ALL students from cybercore_db (users live in cybercore_user, not in clinic_db)
     try {
-      const studentsResult = await query(`
-        SELECT 
-          u.id AS student_id, 
-          u.email AS student_email,
-          CONCAT(u.first_name, ' ', u.last_name) AS student_name,
-          u.first_name,
-          u.last_name,
-          u.created_at AS student_joined,
-          u.role,
-          u.organization,
-          (
-            SELECT json_agg(json_build_object(
-              'profile_id', p.id,
-              'company_name', p.company_name,
-              'industry', p.industry,
-              'difficulty', p.difficulty,
-              'created_at', p.created_at
-            ))
-            FROM profiles p
-            WHERE p.user_id = u.id
-          ) AS generated_profiles,
-          (
-            SELECT json_agg(json_build_object(
-              'profile_id', ia.profile_id,
-              'instructor_id', ia.instructor_id,
-              'instructor_email', inst.email,
-              'instructor_name', CONCAT(inst.first_name, ' ', inst.last_name),
-              'due_date', ia.due_date,
-              'assigned_at', ia.assigned_at
-            ))
-            FROM instructor_assignments ia
-            LEFT JOIN users inst ON inst.id = ia.instructor_id
-            WHERE ia.student_id = u.id
-          ) AS assignments,
-          (
-            SELECT json_agg(DISTINCT jsonb_build_object(
-              'instructor_id', iw.instructor_id,
-              'instructor_email', iw_user.email,
-              'instructor_name', CONCAT(iw_user.first_name, ' ', iw_user.last_name)
-            ))
-            FROM instructor_working_sets iw
-            LEFT JOIN users iw_user ON iw_user.id = iw.instructor_id
-            WHERE iw.student_id = u.id
-          ) AS watching_instructors,
-          (
-            SELECT COUNT(*) 
-            FROM assessment_progress ap 
-            WHERE ap.user_id = u.id AND ap.status = 'submitted'
-          ) AS pending_reviews,
-          (
-            SELECT COUNT(*) 
-            FROM assessment_progress ap 
-            WHERE ap.user_id = u.id AND ap.status = 'reviewed'
-          ) AS completed_reviews,
-          (
-            SELECT COUNT(DISTINCT ap.part_number) 
-            FROM assessment_progress ap 
-            WHERE ap.user_id = u.id
-          ) AS parts_started
-        FROM users u
-        WHERE u.role = 'student' OR u.role IS NULL
-        ORDER BY u.last_name ASC NULLS LAST, u.first_name ASC NULLS LAST, u.email ASC
+      const usersResult = await cybercoreQuery(`
+        SELECT
+          user_id AS student_id,
+          email AS student_email,
+          CONCAT(first_name, ' ', last_name) AS student_name,
+          first_name,
+          last_name,
+          created_at AS student_joined,
+          role,
+          organization
+        FROM cybercore_user
+        WHERE role = 'student' OR role IS NULL
+        ORDER BY last_name ASC NULLS LAST, first_name ASC NULLS LAST, email ASC
       `);
-      
-      students = studentsResult.rows;
+      const userRows = usersResult.rows;
+
+      // Build a lookup map of all users (so we can resolve instructor names for assignments/watching)
+      const allUsersResult = await cybercoreQuery(`
+        SELECT user_id AS id, email, first_name, last_name FROM cybercore_user
+      `);
+      const userMap = {};
+      allUsersResult.rows.forEach(u => { userMap[u.id] = u; });
+
+      const studentIds = userRows.map(u => u.student_id);
+      const profilesByUser = {};
+      const assignmentsByStudent = {};
+      const watchingByStudent = {};
+      const reviewCountsByUser = {};
+
+      if (studentIds.length > 0) {
+        const placeholders = studentIds.map((_, i) => `$${i + 1}`).join(',');
+
+        // Fetch profiles per student (clinic_db)
+        const profilesResult = await query(
+          `SELECT id AS profile_id, user_id, company_name, industry, difficulty, created_at
+           FROM profiles
+           WHERE user_id::text IN (${placeholders})`,
+          studentIds
+        );
+        profilesResult.rows.forEach(p => {
+          if (!profilesByUser[p.user_id]) profilesByUser[p.user_id] = [];
+          profilesByUser[p.user_id].push(p);
+        });
+
+        // Fetch instructor assignments per student
+        const assignmentsResult = await query(
+          `SELECT student_id, profile_id, instructor_id, due_date, assigned_at
+           FROM instructor_assignments
+           WHERE student_id::text IN (${placeholders})`,
+          studentIds
+        );
+        assignmentsResult.rows.forEach(a => {
+          if (!assignmentsByStudent[a.student_id]) assignmentsByStudent[a.student_id] = [];
+          const inst = userMap[a.instructor_id] || {};
+          assignmentsByStudent[a.student_id].push({
+            profile_id: a.profile_id,
+            instructor_id: a.instructor_id,
+            instructor_email: inst.email || null,
+            instructor_name: inst.first_name ? `${inst.first_name} ${inst.last_name}` : null,
+            due_date: a.due_date,
+            assigned_at: a.assigned_at
+          });
+        });
+
+        // Fetch instructors watching each student
+        const watchingResult = await query(
+          `SELECT DISTINCT student_id, instructor_id
+           FROM instructor_working_sets
+           WHERE student_id::text IN (${placeholders})`,
+          studentIds
+        );
+        watchingResult.rows.forEach(w => {
+          if (!watchingByStudent[w.student_id]) watchingByStudent[w.student_id] = [];
+          const inst = userMap[w.instructor_id] || {};
+          watchingByStudent[w.student_id].push({
+            instructor_id: w.instructor_id,
+            instructor_email: inst.email || null,
+            instructor_name: inst.first_name ? `${inst.first_name} ${inst.last_name}` : null
+          });
+        });
+
+        // Fetch progress counts (pending_reviews, completed_reviews, parts_started)
+        const progressResult = await query(
+          `SELECT user_id,
+                  COUNT(*) FILTER (WHERE status = 'submitted') AS pending_reviews,
+                  COUNT(*) FILTER (WHERE status = 'reviewed') AS completed_reviews,
+                  COUNT(DISTINCT part_number) AS parts_started
+           FROM assessment_progress
+           WHERE user_id::text IN (${placeholders})
+           GROUP BY user_id`,
+          studentIds
+        );
+        progressResult.rows.forEach(r => {
+          reviewCountsByUser[r.user_id] = r;
+        });
+      }
+
+      // Merge everything per student
+      students = userRows.map(u => ({
+        ...u,
+        generated_profiles: profilesByUser[u.student_id] || null,
+        assignments: assignmentsByStudent[u.student_id] || null,
+        watching_instructors: watchingByStudent[u.student_id] || null,
+        pending_reviews: reviewCountsByUser[u.student_id]?.pending_reviews || 0,
+        completed_reviews: reviewCountsByUser[u.student_id]?.completed_reviews || 0,
+        parts_started: reviewCountsByUser[u.student_id]?.parts_started || 0
+      }));
     } catch (studentError) {
       console.error('Error fetching students:', studentError.message);
     }
@@ -159,10 +201,10 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
       console.error('Error enriching students with group instructors:', groupError.message);
     }
 
-    // Get pending submissions
+    // Get pending submissions (merge with cybercore_user data after)
     try {
       const pendingResult = await query(`
-        SELECT 
+        SELECT
           ap.id,
           ap.user_id,
           ap.profile_id,
@@ -171,18 +213,37 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
           ap.content,
           ap.created_at,
           ap.updated_at,
-          u.email AS student_email,
-          CONCAT(u.first_name, ' ', u.last_name) AS student_name,
           p.company_name AS profile_name
         FROM assessment_progress ap
-        JOIN users u ON ap.user_id = u.id
         LEFT JOIN profiles p ON ap.profile_id = p.id
         WHERE ap.status = 'submitted'
         ORDER BY ap.updated_at DESC
         LIMIT 50
       `);
-      
+
       pendingSubmissions = pendingResult.rows;
+
+      // Enrich with student email/name from cybercore_db
+      const userIds = [...new Set(pendingSubmissions.map(p => p.user_id).filter(Boolean))];
+      if (userIds.length > 0) {
+        const placeholders = userIds.map((_, i) => `$${i + 1}`).join(',');
+        const usersResult = await cybercoreQuery(
+          `SELECT user_id, email, first_name, last_name FROM cybercore_user WHERE user_id::text IN (${placeholders})`,
+          userIds
+        );
+        const map = {};
+        usersResult.rows.forEach(u => {
+          map[u.user_id] = {
+            email: u.email,
+            name: `${u.first_name || ''} ${u.last_name || ''}`.trim()
+          };
+        });
+        pendingSubmissions.forEach(p => {
+          const info = map[p.user_id] || {};
+          p.student_email = info.email || null;
+          p.student_name = info.name || null;
+        });
+      }
     } catch (pendingError) {
       console.error('Error fetching pending submissions:', pendingError.message);
     }
@@ -2132,9 +2193,9 @@ router.get('/students/search', authenticateToken, instructorOnly, async (req, re
 
     const myStudentIds = await getInstructorStudentIds(req.user.userId);
 
-    const result = await query(
-      `SELECT id, email, first_name, last_name, organization
-       FROM users
+    const result = await cybercoreQuery(
+      `SELECT user_id AS id, email, first_name, last_name, organization
+       FROM cybercore_user
        WHERE role = 'student'
          AND (email ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1)
        ORDER BY email

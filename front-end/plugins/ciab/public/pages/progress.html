@@ -369,7 +369,7 @@
           <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
         </div>
         <div class="header-right">
-          <a href="/generator" class="btn btn-primary">Generate New Profile</a>
+          <a href="/ciab/generator" class="btn btn-primary">Generate New Profile</a>
         </div>
       </header>
 
@@ -398,7 +398,7 @@
             <div class="icon">&#128203;</div>
             <h3>No Profiles Yet</h3>
             <p>Generate a client profile to begin your risk assessment.</p>
-            <a href="/generator" class="btn btn-primary" style="margin-top:1rem;">Generate Profile</a>
+            <a href="/ciab/generator" class="btn btn-primary" style="margin-top:1rem;">Generate Profile</a>
           </div>
         </div>
 
@@ -621,7 +621,7 @@
     function goToWorkspace(partNumber) {
       if (currentProfileId) {
         localStorage.setItem('activeProfileId', currentProfileId);
-        window.location.href = `/workspace?profile=${currentProfileId}&part=${partNumber}`;
+        window.location.href = `/ciab/workspace?profile=${currentProfileId}&part=${partNumber}`;
       }
     }
 
