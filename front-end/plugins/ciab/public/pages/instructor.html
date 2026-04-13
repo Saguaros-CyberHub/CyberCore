@@ -527,6 +527,7 @@
           <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
           <div class="tab" data-tab="students" onclick="switchTab('students')">Students</div>
           <div class="tab" data-tab="reviews" onclick="switchTab('reviews')">Review Queue</div>
+          <div class="tab" data-tab="documents" onclick="switchTab('documents')">Documents & Answer Keys</div>
         </div>
 
         <!-- ============================================================ -->
@@ -644,10 +645,74 @@
           </div>
         </div>
 
-        <!-- Hidden containers for document generation (used by student detail panel) -->
-        <div id="docProfileSelect" style="display:none;"></div>
-        <div id="documentGrid" style="display:none;"></div>
-        <div id="generatedDocsList" style="display:none;"></div>
+        <!-- ============================================================ -->
+        <!-- TAB: DOCUMENTS & ANSWER KEYS                                  -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-documents">
+
+          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            <h3 style="margin: 0 0 0.5rem 0;">Profile Selection</h3>
+            <p style="color: var(--gray-600); margin: 0 0 1rem 0; font-size: 0.9rem;">Select a profile to generate security documents, PDFs, or AI-generated answer keys.</p>
+
+            <div class="form-group" style="margin: 0;">
+              <label for="docProfileSelect" style="font-weight: 600;">Profile</label>
+              <select id="docProfileSelect" style="width: 100%; padding: 0.5rem; border: 1px solid var(--gray-300); border-radius: 4px;">
+                <option value="">-- Select a profile --</option>
+              </select>
+            </div>
+          </div>
+
+          <!-- Security Documents Card -->
+          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+              <div>
+                <h3 style="margin: 0 0 0.25rem 0;">🛡️ Security Scan Documents</h3>
+                <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">Generate Nessus, ZAP, and Nmap scan reports for the selected profile.</p>
+              </div>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button id="generateDocsBtn" class="btn btn-primary" onclick="generateDocuments()" disabled>
+                  ⚡ Generate All Documents
+                </button>
+                <button id="downloadPdfBtn" class="btn btn-outline" onclick="downloadProfilePdf()" disabled>
+                  📥 Download PDF
+                </button>
+              </div>
+            </div>
+
+            <div id="generateStatus" style="color: var(--gray-600); font-size: 0.9rem; margin-bottom: 1rem;"></div>
+
+            <div id="documentGrid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.75rem;"></div>
+
+            <div id="generatedDocsList" style="margin-top: 1rem;">
+              <div class="empty-state">
+                <div class="icon">📄</div>
+                <h3>No Documents Generated</h3>
+                <p>Select a profile and click "Generate All Documents" to create assessment files.</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- Answer Key Card -->
+          <div style="background: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+              <div>
+                <h3 style="margin: 0 0 0.25rem 0;">📝 AI Answer Key</h3>
+                <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">Generate example solutions for all 8 parts of the assessment using AI.</p>
+              </div>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button id="generateExamplesBtn" class="btn btn-primary" onclick="generateExamples()" disabled>
+                  📝 Generate Answer Key
+                </button>
+                <button id="viewExamplesBtn" class="btn btn-outline" onclick="viewExamples()" style="display: none;">
+                  👁️ View Answer Key
+                </button>
+              </div>
+            </div>
+
+            <div id="examplesStatus" style="color: var(--gray-600); font-size: 0.9rem;"></div>
+          </div>
+
+        </div>
 
       </div>
     </main>

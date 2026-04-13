@@ -208,10 +208,10 @@ router.get('/student/:studentId/progress', authenticateToken, instructorOnly, as
   try {
     const { studentId } = req.params;
     
-    // Get student info
-    const studentResult = await query(`
-      SELECT id, email, first_name, last_name, organization, created_at
-      FROM users WHERE id = $1
+    // Get student info (from cybercore_user in cybercore_db)
+    const studentResult = await cybercoreQuery(`
+      SELECT user_id AS id, email, first_name, last_name, organization, created_at
+      FROM cybercore_user WHERE user_id = $1
     `, [studentId]);
     
     if (studentResult.rows.length === 0) {
@@ -385,10 +385,10 @@ router.post('/assign', authenticateToken, instructorOnly, async (req, res) => {
     
     let studentId = student_id;
     
-    // If student_email provided, look up the student
+    // If student_email provided, look up the student (from cybercore_user)
     if (student_email && !student_id) {
-      const userResult = await query(
-        'SELECT id FROM users WHERE email = $1',
+      const userResult = await cybercoreQuery(
+        'SELECT user_id AS id FROM cybercore_user WHERE email = $1',
         [student_email]
       );
       
@@ -1934,10 +1934,10 @@ router.get('/lanes', authenticateToken, instructorOnly, async (req, res) => {
       studentIds
     );
 
-    // Enrich with student email from clinic_db
+    // Enrich with student email from cybercore_db
     const userPlaceholders = studentIds.map((_, i) => `$${i + 1}`).join(',');
-    const usersResult = await query(
-      `SELECT id, email, first_name, last_name FROM users WHERE id::text IN (${userPlaceholders})`,
+    const usersResult = await cybercoreQuery(
+      `SELECT user_id AS id, email, first_name, last_name FROM cybercore_user WHERE user_id::text IN (${userPlaceholders})`,
       studentIds
     );
     const userMap = {};
@@ -2162,8 +2162,8 @@ router.post('/students/watch', authenticateToken, instructorOnly, async (req, re
       return res.status(400).json({ error: 'student_id required' });
     }
 
-    // Verify student exists
-    const studentResult = await query(`SELECT id, email FROM users WHERE id = $1 AND role = 'student'`, [student_id]);
+    // Verify student exists (cybercore_user)
+    const studentResult = await cybercoreQuery(`SELECT user_id AS id, email FROM cybercore_user WHERE user_id = $1 AND role = 'student'`, [student_id]);
     if (studentResult.rows.length === 0) {
       return res.status(404).json({ error: 'Student not found' });
     }
@@ -2330,8 +2330,8 @@ router.post('/join-group', authenticateToken, instructorOnly, async (req, res) =
       return res.status(400).json({ error: 'Already a member of this group' });
     }
 
-    // Get instructor's user info
-    const userResult = await query(`SELECT id, email, first_name, last_name FROM users WHERE id = $1`, [req.user.userId]);
+    // Get instructor's user info (cybercore_user)
+    const userResult = await cybercoreQuery(`SELECT user_id AS id, email, first_name, last_name FROM cybercore_user WHERE user_id = $1`, [req.user.userId]);
     if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     const user = userResult.rows[0];
 
@@ -2360,8 +2360,8 @@ router.post('/claim-student', authenticateToken, instructorOnly, async (req, res
     const { student_id } = req.body;
     if (!student_id) return res.status(400).json({ error: 'student_id required' });
 
-    // Verify student exists
-    const studentResult = await query(`SELECT id, email, first_name, last_name FROM users WHERE id = $1 AND role = 'student'`, [student_id]);
+    // Verify student exists (cybercore_user)
+    const studentResult = await cybercoreQuery(`SELECT user_id AS id, email, first_name, last_name FROM cybercore_user WHERE user_id = $1 AND role = 'student'`, [student_id]);
     if (studentResult.rows.length === 0) return res.status(404).json({ error: 'Student not found' });
 
     // Add to working sets
