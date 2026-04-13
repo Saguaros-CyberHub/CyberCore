@@ -1360,7 +1360,7 @@ function updateIntakeFormBadge() {
 }
 
 function openIntakeForm() {
-  window.open(`/intake-form.html?profileId=${currentProfileId}`, '_blank');
+  window.open(`/ciab/intake-form?profileId=${currentProfileId}`, '_blank');
 }
 
 function openInterviewSimulator() {
