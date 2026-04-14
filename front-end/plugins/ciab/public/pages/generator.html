@@ -392,6 +392,31 @@
                 </div>
               </div>
 
+              <!-- REAL-CLIENT FILLER PANEL (shown when ?real_intake_id=…&challenge_id=… is present) -->
+              <div id="realClientPanel" style="display:none; background: #fff7ed; border: 1px solid #fdba74; border-radius: 10px; padding: 1rem 1.25rem; margin-top: 1rem;">
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
+                  <strong style="color:#9a3412;">📨 Real-Client profile: <span id="realClientCover">—</span></strong>
+                  <a id="realClientIntakeLink" href="#" target="_blank" style="font-size:0.85rem; color:#9a3412;">View intake →</a>
+                </div>
+                <div id="realClientChallengeSummary" style="font-size: 0.85rem; color: #431407; margin-bottom: 0.75rem;"></div>
+
+                <div style="background: white; border-radius: 8px; padding: 0.75rem 1rem; border: 1px dashed #fdba74;">
+                  <div style="font-weight:600; color:#9a3412; margin-bottom:0.5rem;">Filler assets (narrative only — not deployed)</div>
+                  <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.5rem 1rem;">
+                    <label style="font-size:0.8rem;">Windows Desktop <input type="number" min="0" value="0" id="fill_windows_desktop" style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Windows Laptop  <input type="number" min="0" value="0" id="fill_windows_laptop"  style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">macOS           <input type="number" min="0" value="0" id="fill_macos"            style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Linux Workstation <input type="number" min="0" value="0" id="fill_linux_workstation" style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Printer         <input type="number" min="0" value="0" id="fill_printer"          style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Mobile / BYOD   <input type="number" min="0" value="0" id="fill_mobile_byod"      style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">IoT             <input type="number" min="0" value="0" id="fill_iot"              style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Server (Windows) <input type="number" min="0" value="0" id="fill_server_windows"  style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Server (Linux)  <input type="number" min="0" value="0" id="fill_server_linux"     style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                  </div>
+                  <div id="realClientTotals" style="margin-top:0.75rem; font-size:0.85rem; color:#7c2d12;">Deployed (real): 0 · Filler: 0 · Total in profile: 0</div>
+                </div>
+              </div>
+
               <!-- GENERATE BUTTON -->
               <div class="generate-section">
                 <button class="btn btn-primary btn-lg" id="generateBtn" onclick="generateProfile()">
@@ -523,6 +548,7 @@
       });
       
       updatePreview();
+      initRealClientMode();
     });
 
     // =========================================================================
@@ -569,14 +595,89 @@
     }
 
     // =========================================================================
+    // REAL-CLIENT MODE (activated by ?real_intake_id=…&challenge_id=…)
+    // =========================================================================
+    const FILLER_KEYS = ['windows_desktop','windows_laptop','macos','linux_workstation','printer','mobile_byod','iot','server_windows','server_linux'];
+    let realClientCtx = null;  // { intake_id, challenge_id, real_count, cover_name }
+
+    function updateFillerTotals() {
+      if (!realClientCtx) return;
+      let filler = 0;
+      FILLER_KEYS.forEach(k => { filler += Math.max(0, Number(document.getElementById('fill_'+k).value) || 0); });
+      const real = realClientCtx.real_count || 0;
+      document.getElementById('realClientTotals').textContent =
+        `Deployed (real): ${real} · Filler: ${filler} · Total in profile: ${real + filler}`;
+    }
+
+    async function initRealClientMode() {
+      const params = new URLSearchParams(window.location.search);
+      const intakeId    = params.get('real_intake_id');
+      const challengeId = params.get('challenge_id');
+      if (!intakeId || !challengeId) return;
+
+      try {
+        const res = await fetch('/api/real-client/intake/' + encodeURIComponent(intakeId), { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        const it = body.intake;
+        realClientCtx = { intake_id: it.id, challenge_id: challengeId, cover_name: it.cover_name, real_count: 0 };
+
+        document.getElementById('realClientPanel').style.display = 'block';
+        document.getElementById('realClientCover').textContent = it.cover_name;
+        document.getElementById('realClientIntakeLink').href = '/ciab/real-client-intake/' + encodeURIComponent(it.id);
+        document.getElementById('realClientChallengeSummary').textContent =
+          `Challenge ${challengeId.slice(0,8)} — Filler assets appear in the generated profile JSON and documents only, never deployed to Proxmox.`;
+
+        const btn = document.getElementById('generateBtn');
+        if (btn) btn.textContent = '⚡ Generate Real-Client Profile';
+
+        FILLER_KEYS.forEach(k => document.getElementById('fill_'+k).addEventListener('input', updateFillerTotals));
+        updateFillerTotals();
+      } catch (err) {
+        console.warn('[real-client mode] init failed:', err);
+      }
+    }
+
+    async function generateRealClientProfile() {
+      const btn = document.getElementById('generateBtn');
+      const status = document.getElementById('statusText');
+      btn.disabled = true;
+      status.textContent = 'Generating real-client profile…';
+      const filler = {};
+      FILLER_KEYS.forEach(k => { filler[k] = Math.max(0, Number(document.getElementById('fill_'+k).value) || 0); });
+      try {
+        const res = await fetch('/api/real-client/intake/' + encodeURIComponent(realClientCtx.intake_id) + '/generate-profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ challenge_id: realClientCtx.challenge_id, filler })
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || ('HTTP ' + res.status));
+        }
+        const body = await res.json();
+        status.textContent = `Profile created: ${body.profile.total_assets} assets (${body.profile.real_count} real + ${body.profile.filler_count} filler)`;
+        Toast.success('Profile generated', body.profile.company_name);
+        setTimeout(() => { window.location.href = '/ciab/my-profiles'; }, 1500);
+      } catch (err) {
+        status.textContent = 'Error: ' + err.message;
+        Toast.error('Generation failed', err.message);
+        btn.disabled = false;
+      }
+    }
+
+    // =========================================================================
     // GENERATE PROFILE
     // =========================================================================
     async function generateProfile() {
+      if (realClientCtx) return generateRealClientProfile();
+
       const btn = document.getElementById('generateBtn');
       const bar = document.getElementById('progressBar');
       const fill = document.getElementById('progressFill');
       const status = document.getElementById('statusText');
-      
+
       btn.disabled = true;
       bar.style.display = 'block';
       fill.style.width = '10%';

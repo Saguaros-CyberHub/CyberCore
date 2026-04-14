@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Intake Detail · CyberCore</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel-2: #111a2e;
+    --text: #e2e8f0; --muted: #94a3b8; --border: #334155;
+    --accent: #38bdf8; --accent-2: #0ea5e9; --ok: #22c55e;
+    --warn: #f59e0b; --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { margin: 0; font-size: 22px; }
+  .sub { color: var(--muted); }
+  .spacer { flex: 1; }
+  .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { background: #273449; }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #001018; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
+  .card h2 { margin: 0 0 10px 0; font-size: 16px; color: #f8fafc; }
+  .kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 16px; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; }
+  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #0b1220; border: 1px solid var(--border); margin-right: 4px; }
+  .pill.yes     { border-color: var(--ok);    color: #86efac; }
+  .pill.no      { border-color: var(--danger); color: #fecaca; }
+  .pill.partial { border-color: var(--warn);  color: #fde68a; }
+  .pill.unknown { border-color: var(--muted); color: var(--muted); }
+  .summary-row { display: flex; gap: 20px; flex-wrap: wrap; }
+  .stat { background: var(--panel-2); border: 1px solid var(--border); padding: 10px 14px; border-radius: 8px; min-width: 140px; }
+  .stat .val { font-size: 22px; color: var(--accent); font-weight: 600; }
+  .stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  table.segments { width: 100%; border-collapse: collapse; }
+  table.segments th, table.segments td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  table.segments th { color: var(--muted); font-weight: 600; background: var(--panel-2); font-size: 12px; }
+  .ig1-group { margin-bottom: 14px; }
+  .ig1-group h3 { margin: 0 0 8px 0; font-size: 14px; color: #f8fafc; border-left: 3px solid var(--accent-2); padding-left: 8px; }
+  .ig1-item { padding: 6px 0 6px 10px; border-bottom: 1px dashed var(--border); }
+  .ig1-item:last-child { border-bottom: 0; }
+  .ig1-item .num { color: var(--muted); font-size: 12px; margin-right: 6px; }
+  .ig1-item .notes { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
+  .error { color: var(--danger); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="container" id="root">
+  <div class="header">
+    <a class="btn" href="/ciab/real-client-intakes">← Back to intakes</a>
+    <div class="spacer"></div>
+    <div id="actions"></div>
+  </div>
+  <div id="content">Loading…</div>
+</div>
+
+<script type="application/json" id="ig1-safeguards">
+[
+  { "control": 1, "num": "1.1", "control_name": "Inventory and Control of Enterprise Assets", "name": "Establish and Maintain Detailed Enterprise Asset Inventory" },
+  { "control": 1, "num": "1.2", "control_name": "Inventory and Control of Enterprise Assets", "name": "Address Unauthorized Assets" },
+  { "control": 2, "num": "2.1", "control_name": "Inventory and Control of Software Assets", "name": "Establish and Maintain a Software Inventory" },
+  { "control": 2, "num": "2.2", "control_name": "Inventory and Control of Software Assets", "name": "Ensure Authorized Software is Currently Supported" },
+  { "control": 2, "num": "2.3", "control_name": "Inventory and Control of Software Assets", "name": "Address Unauthorized Software" },
+  { "control": 3, "num": "3.1", "control_name": "Data Protection", "name": "Establish and Maintain a Data Management Process" },
+  { "control": 3, "num": "3.2", "control_name": "Data Protection", "name": "Establish and Maintain a Data Inventory" },
+  { "control": 3, "num": "3.3", "control_name": "Data Protection", "name": "Configure Data Access Control Lists" },
+  { "control": 3, "num": "3.4", "control_name": "Data Protection", "name": "Enforce Data Retention" },
+  { "control": 3, "num": "3.5", "control_name": "Data Protection", "name": "Securely Dispose of Data" },
+  { "control": 3, "num": "3.6", "control_name": "Data Protection", "name": "Encrypt Data on End-User Devices" },
+  { "control": 4, "num": "4.1", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Establish and Maintain a Secure Configuration Process" },
+  { "control": 4, "num": "4.2", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Establish and Maintain a Secure Configuration Process for Network Infrastructure" },
+  { "control": 4, "num": "4.3", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Configure Automatic Session Locking on Enterprise Assets" },
+  { "control": 4, "num": "4.4", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Implement and Manage a Firewall on Servers" },
+  { "control": 4, "num": "4.5", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Implement and Manage a Firewall on End-User Devices" },
+  { "control": 4, "num": "4.6", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Securely Manage Enterprise Assets and Software" },
+  { "control": 4, "num": "4.7", "control_name": "Secure Configuration of Enterprise Assets and Software", "name": "Manage Default Accounts on Enterprise Assets and Software" },
+  { "control": 5, "num": "5.1", "control_name": "Account Management", "name": "Establish and Maintain an Inventory of Accounts" },
+  { "control": 5, "num": "5.2", "control_name": "Account Management", "name": "Use Unique Passwords" },
+  { "control": 5, "num": "5.3", "control_name": "Account Management", "name": "Disable Dormant Accounts" },
+  { "control": 5, "num": "5.4", "control_name": "Account Management", "name": "Restrict Administrator Privileges to Dedicated Administrator Accounts" },
+  { "control": 6, "num": "6.1", "control_name": "Access Control Management", "name": "Establish an Access Granting Process" },
+  { "control": 6, "num": "6.2", "control_name": "Access Control Management", "name": "Establish an Access Revoking Process" },
+  { "control": 6, "num": "6.3", "control_name": "Access Control Management", "name": "Require MFA for Externally-Exposed Applications" },
+  { "control": 6, "num": "6.4", "control_name": "Access Control Management", "name": "Require MFA for Remote Network Access" },
+  { "control": 6, "num": "6.5", "control_name": "Access Control Management", "name": "Require MFA for Administrative Access" },
+  { "control": 7, "num": "7.1", "control_name": "Continuous Vulnerability Management", "name": "Establish and Maintain a Vulnerability Management Process" },
+  { "control": 7, "num": "7.2", "control_name": "Continuous Vulnerability Management", "name": "Establish and Maintain a Remediation Process" },
+  { "control": 7, "num": "7.3", "control_name": "Continuous Vulnerability Management", "name": "Perform Automated Operating System Patch Management" },
+  { "control": 7, "num": "7.4", "control_name": "Continuous Vulnerability Management", "name": "Perform Automated Application Patch Management" },
+  { "control": 8, "num": "8.1", "control_name": "Audit Log Management", "name": "Establish and Maintain an Audit Log Management Process" },
+  { "control": 8, "num": "8.2", "control_name": "Audit Log Management", "name": "Collect Audit Logs" },
+  { "control": 8, "num": "8.3", "control_name": "Audit Log Management", "name": "Ensure Adequate Audit Log Storage" },
+  { "control": 9, "num": "9.1", "control_name": "Email and Web Browser Protections", "name": "Ensure Use of Only Fully Supported Browsers and Email Clients" },
+  { "control": 9, "num": "9.2", "control_name": "Email and Web Browser Protections", "name": "Use DNS Filtering Services" },
+  { "control": 10, "num": "10.1", "control_name": "Malware Defenses", "name": "Deploy and Maintain Anti-Malware Software" },
+  { "control": 10, "num": "10.2", "control_name": "Malware Defenses", "name": "Configure Automatic Anti-Malware Signature Updates" },
+  { "control": 10, "num": "10.3", "control_name": "Malware Defenses", "name": "Disable Autorun and Autoplay for Removable Media" },
+  { "control": 11, "num": "11.1", "control_name": "Data Recovery", "name": "Establish and Maintain a Data Recovery Process" },
+  { "control": 11, "num": "11.2", "control_name": "Data Recovery", "name": "Perform Automated Backups" },
+  { "control": 11, "num": "11.3", "control_name": "Data Recovery", "name": "Protect Recovery Data" },
+  { "control": 11, "num": "11.4", "control_name": "Data Recovery", "name": "Establish and Maintain an Isolated Instance of Recovery Data" },
+  { "control": 12, "num": "12.1", "control_name": "Network Infrastructure Management", "name": "Ensure Network Infrastructure is Up-to-Date" },
+  { "control": 14, "num": "14.1", "control_name": "Security Awareness and Skills Training", "name": "Establish and Maintain a Security Awareness Program" },
+  { "control": 14, "num": "14.2", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members to Recognize Social Engineering Attacks" },
+  { "control": 14, "num": "14.3", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members on Authentication Best Practices" },
+  { "control": 14, "num": "14.4", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce on Data Handling Best Practices" },
+  { "control": 14, "num": "14.5", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members on Causes of Unintentional Data Exposure" },
+  { "control": 14, "num": "14.6", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce Members on Recognizing and Reporting Security Incidents" },
+  { "control": 14, "num": "14.7", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce on How to Identify and Report if Their Enterprise Assets are Missing Security Updates" },
+  { "control": 14, "num": "14.8", "control_name": "Security Awareness and Skills Training", "name": "Train Workforce on the Dangers of Connecting to and Transmitting Enterprise Data Over Insecure Networks" },
+  { "control": 15, "num": "15.1", "control_name": "Service Provider Management", "name": "Establish and Maintain an Inventory of Service Providers" },
+  { "control": 17, "num": "17.1", "control_name": "Incident Response Management", "name": "Designate Personnel to Manage Incident Handling" },
+  { "control": 17, "num": "17.2", "control_name": "Incident Response Management", "name": "Establish and Maintain Contact Information for Reporting Security Incidents" },
+  { "control": 17, "num": "17.3", "control_name": "Incident Response Management", "name": "Establish and Maintain an Enterprise Process for Reporting Incidents" }
+]
+</script>
+
+<script>
+(function () {
+  'use strict';
+
+  const IG1 = JSON.parse(document.getElementById('ig1-safeguards').textContent);
+
+  const id = location.pathname.split('/').pop();
+
+  function esc(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+
+  function kv(obj, order) {
+    const keys = order || Object.keys(obj || {});
+    const rows = keys.filter(k => obj?.[k] !== undefined && obj?.[k] !== '' && obj?.[k] !== null && !(Array.isArray(obj[k]) && obj[k].length === 0))
+      .map(k => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd>${renderVal(obj[k])}</dd>`);
+    return rows.length ? `<dl class="kv">${rows.join('')}</dl>` : '<div class="sub">No data.</div>';
+  }
+
+  function renderVal(v) {
+    if (Array.isArray(v)) {
+      if (!v.length) return '<span class="sub">—</span>';
+      if (typeof v[0] === 'object') return v.map(seg => esc(JSON.stringify(seg))).join('<br/>');
+      return v.map(x => `<span class="pill">${esc(x)}</span>`).join(' ');
+    }
+    if (typeof v === 'object') return esc(JSON.stringify(v));
+    return esc(v);
+  }
+
+  function renderSegments(segs) {
+    if (!segs || !segs.length) return '<div class="sub">No segments listed.</div>';
+    return `<table class="segments">
+      <thead><tr><th>VLAN</th><th>CIDR</th><th>Purpose</th></tr></thead>
+      <tbody>${segs.map(s => `<tr><td>${esc(s.vlan)}</td><td>${esc(s.cidr)}</td><td>${esc(s.purpose)}</td></tr>`).join('')}</tbody>
+    </table>`;
+  }
+
+  function renderIG1(ig1) {
+    ig1 = ig1 || {};
+    const grouped = {};
+    IG1.forEach(sg => { (grouped[sg.control] ||= []).push(sg); });
+    return Object.keys(grouped).sort((a,b)=>+a-+b).map(ctrl => {
+      const list = grouped[ctrl];
+      return `<div class="ig1-group">
+        <h3>Control ${ctrl} — ${esc(list[0].control_name)}</h3>
+        ${list.map(sg => {
+          const status = ig1['ig1_'+sg.num] || 'unknown';
+          const notes = ig1['ig1_'+sg.num+'_notes'] || '';
+          return `<div class="ig1-item">
+            <span class="num">${sg.num}</span>
+            <span class="pill ${status}">${status}</span>
+            ${esc(sg.name)}
+            ${notes ? `<div class="notes">${esc(notes)}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>`;
+    }).join('');
+  }
+
+  async function load() {
+    try {
+      const res = await fetch('/api/real-client/intake/' + encodeURIComponent(id), { credentials: 'same-origin' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || ('HTTP ' + res.status));
+      }
+      const data = await res.json();
+      render(data);
+    } catch (err) {
+      document.getElementById('content').innerHTML = `<div class="card error">Failed to load: ${esc(err.message)}</div>`;
+    }
+  }
+
+  function render(data) {
+    const it = data.intake;
+    const p  = it.payload || {};
+    const s  = p.sections || {};
+    const summary = data.summary || {};
+    document.title = `${it.cover_name} · Intake`;
+
+    // Action buttons
+    const actions = [];
+    actions.push(`<button class="btn" id="btn-export-json">⬇️ Export JSON</button>`);
+    if (it.linked_challenge_id) {
+      actions.push(`<span class="pill" title="Challenge linked">🎯 challenge linked</span>`);
+    } else {
+      actions.push(`<a class="btn primary" href="/ciab/admin?from_intake_id=${encodeURIComponent(it.id)}&suggested_name=${encodeURIComponent(it.cover_name)}">🎯 Create Challenge</a>`);
+    }
+    if (it.linked_profile_id) {
+      actions.push(`<a class="btn" href="/ciab/my-profiles">📁 View linked profile</a>`);
+    } else if (it.linked_challenge_id) {
+      actions.push(`<a class="btn primary" href="/ciab/generator?real_intake_id=${encodeURIComponent(it.id)}&challenge_id=${encodeURIComponent(it.linked_challenge_id)}">📁 Generate Profile</a>`);
+    }
+    document.getElementById('actions').innerHTML = actions.join(' ');
+
+    document.getElementById('content').innerHTML = `
+      <div class="header" style="margin-top:0">
+        <h1>🛡️ ${esc(it.cover_name)}</h1>
+        <span class="pill role-${esc(it.uploaded_role)}">${esc(it.uploaded_role)}</span>
+        <span class="pill status-${esc(it.status)}">${esc(it.status)}</span>
+        <span class="sub">uploaded ${new Date(it.created_at).toLocaleString()} · schema v${esc(it.schema_version)}</span>
+      </div>
+
+      <div class="card">
+        <div class="summary-row">
+          <div class="stat"><div class="val">${summary.asset_total ?? 0}</div><div class="lbl">Devices reported</div></div>
+          <div class="stat"><div class="val">${summary.ig1_answered ?? 0}/${summary.ig1_total ?? 56}</div><div class="lbl">IG1 answered</div></div>
+          <div class="stat"><div class="val">${summary.ig1_coverage_pct ?? 0}%</div><div class="lbl">IG1 coverage</div></div>
+        </div>
+      </div>
+
+      <div class="card"><h2>1 · Cover Profile</h2>${kv(s.company, ['cover_name','industry','employees_band','region','revenue_band','frameworks'])}</div>
+
+      <div class="card"><h2>2 · Network Topology</h2>
+        ${kv(s.network, ['workstation_count','laptop_count','server_count','os_win_server','os_win_client','os_linux','os_macos','os_other','role_dc','role_file','role_mail','role_web','role_db','role_backup','role_print','role_other','role_other_notes','services','domain_mode','domain_cover'])}
+        <h2 style="margin-top:14px">Segments</h2>
+        ${renderSegments(s.network?.segments)}
+      </div>
+
+      <div class="card"><h2>3 · Wireless</h2>${kv(s.wireless, ['ssid_count','wifi_encryption','guest_wifi','guest_isolated'])}</div>
+      <div class="card"><h2>4 · Endpoint Security</h2>${kv(s.endpoint, ['av_vendor','disk_encryption','usb_policy','patch_cadence'])}</div>
+      <div class="card"><h2>5 · Email & Web</h2>${kv(s.email_web, ['email_provider','web_filtering','spf','dkim','dmarc'])}</div>
+      <div class="card"><h2>6 · Account & Access</h2>${kv(s.access, ['mfa_coverage','priv_count_band','password_manager','lockout_policy','dormant_cleanup'])}</div>
+      <div class="card"><h2>7 · Data Protection</h2>${kv(s.data, ['backup_cadence','offsite_backup','offline_backup','encryption_at_rest','dlp','restore_test'])}</div>
+      <div class="card"><h2>8 · Vulnerability & Audit</h2>${kv(s.vuln_audit, ['vuln_scanning','logging_coverage','siem','audit_retention'])}</div>
+
+      <div class="card"><h2>9 · CIS Controls IG1 Safeguards</h2>${renderIG1(s.ig1)}</div>
+
+      <div class="card"><h2>10 · Additional notes</h2>${s.notes?.free_text ? `<div style="white-space:pre-wrap">${esc(s.notes.free_text)}</div>` : '<div class="sub">No notes.</div>'}</div>
+    `;
+
+    document.getElementById('btn-export-json').addEventListener('click', () => {
+      const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `intake-${it.cover_name}-${it.id.slice(0,8)}.json`;
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+    });
+  }
+
+  load();
+})();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Real-Client Intakes · CyberCore</title>
+<style>
+  :root {
+    --bg: #0f172a; --panel: #1e293b; --panel-2: #111a2e;
+    --text: #e2e8f0; --muted: #94a3b8; --border: #334155;
+    --accent: #38bdf8; --accent-2: #0ea5e9; --ok: #22c55e;
+    --warn: #f59e0b; --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  h1 { margin: 0 0 4px 0; font-size: 22px; }
+  .sub { color: var(--muted); margin-bottom: 18px; }
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+  .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 6px;
+    cursor: pointer; font-size: 13px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+  .btn:hover { background: #273449; }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #001018; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; background: var(--panel-2); }
+  tr:hover td { background: #1c2942; }
+  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #0b1220; border: 1px solid var(--border); }
+  .pill.role-student  { border-color: #1e40af; color: #93c5fd; }
+  .pill.role-admin    { border-color: #7f1d1d; color: #fecaca; }
+  .pill.role-instructor { border-color: #166534; color: #86efac; }
+  .pill.status-uploaded { border-color: var(--warn); color: #fde68a; }
+  .pill.status-linked   { border-color: var(--ok);  color: #86efac; }
+  .empty { text-align: center; padding: 40px 20px; color: var(--muted); }
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel); border: 1px solid var(--accent-2); color: var(--text);
+    padding: 10px 16px; border-radius: 6px; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
+  .hidden { display: none !important; }
+  a.row-link { color: var(--accent); text-decoration: none; }
+  a.row-link:hover { text-decoration: underline; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <h1>📨 Real-Client Intakes</h1>
+  <div class="sub">Anonymized intake forms submitted for real client engagements. Parallel to the AI-simulated flow — does not replace it.</div>
+
+  <div class="toolbar">
+    <a class="btn primary" href="/ciab/real-client-intake" target="_blank">✍️ Start new intake</a>
+    <a class="btn" href="/ciab/real-client-intake" download="real-client-intake-blank.html">📥 Download blank form</a>
+    <button class="btn" id="btn-upload">⬆️ Upload completed intake (JSON or HTML)</button>
+    <input type="file" id="file-input" accept=".json,.html,application/json,text/html" />
+  </div>
+
+  <div class="card">
+    <div id="table-wrap">
+      <div class="empty">Loading…</div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  const toast = (msg, type) => {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.borderColor = type === 'error' ? 'var(--danger)' : 'var(--accent-2)';
+    el.classList.remove('hidden');
+    setTimeout(() => el.classList.add('hidden'), 3500);
+  };
+
+  async function loadList() {
+    const wrap = document.getElementById('table-wrap');
+    try {
+      const res = await fetch('/api/real-client/intake', { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const body = await res.json();
+      if (!body.intakes.length) {
+        wrap.innerHTML = '<div class="empty">No intakes uploaded yet. Use <strong>Start new intake</strong> or upload a completed form.</div>';
+        return;
+      }
+      const rows = body.intakes.map(it => {
+        const when = new Date(it.created_at).toLocaleString();
+        const statusClass = 'status-' + (it.status || 'uploaded');
+        const roleClass   = 'role-'   + (it.uploaded_role || 'student');
+        return `
+          <tr>
+            <td><a class="row-link" href="/ciab/real-client-intake/${it.id}">${escapeHtml(it.cover_name)}</a></td>
+            <td><span class="pill ${roleClass}">${it.uploaded_role || '—'}</span></td>
+            <td>${when}</td>
+            <td><span class="pill ${statusClass}">${it.status || '—'}</span></td>
+            <td>${it.linked_challenge_id ? '🎯 linked' : '—'}</td>
+            <td>${it.linked_profile_id ? '📁 linked' : '—'}</td>
+          </tr>`;
+      }).join('');
+      wrap.innerHTML = `
+        <table>
+          <thead>
+            <tr>
+              <th>Cover name</th>
+              <th>Uploader</th>
+              <th>Uploaded</th>
+              <th>Status</th>
+              <th>Challenge</th>
+              <th>Profile</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    } catch (err) {
+      wrap.innerHTML = `<div class="empty" style="color:var(--danger)">Failed to load: ${err.message}</div>`;
+    }
+  }
+
+  function escapeHtml(s) {
+    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+  }
+
+  document.getElementById('btn-upload').addEventListener('click', () => document.getElementById('file-input').click());
+
+  document.getElementById('file-input').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = async (ev) => {
+      try {
+        const text = String(ev.target.result || '');
+        let payload;
+        if (/\.html$/i.test(f.name) || /^<!doctype|<html/i.test(text.trim())) {
+          const m = text.match(/<script[^>]+id=["']responses["'][^>]*>([\s\S]*?)<\/script>/i);
+          if (!m || !m[1].trim()) throw new Error('No embedded responses found in HTML file.');
+          payload = JSON.parse(m[1]);
+        } else {
+          payload = JSON.parse(text);
+        }
+        const res = await fetch('/api/real-client/intake/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || ('HTTP ' + res.status));
+        }
+        const body = await res.json();
+        toast('Uploaded: ' + body.cover_name);
+        await loadList();
+      } catch (err) {
+        toast('Upload failed: ' + err.message, 'error');
+      } finally {
+        e.target.value = '';
+      }
+    };
+    reader.readAsText(f);
+  });
+
+  loadList();
+})();
+</script>
+
+</body>
+</html>

@@ -21,7 +21,14 @@ const pages = {
   '/intake-form': 'intake-form.html',
   '/guide':       'guide.html',
   '/nice-framework': 'nice-framework.html',
+  '/real-client-intake':        'real-client-intake.html',
+  '/real-client-intakes':       'real-client-intakes.html',
 };
+
+// Dynamic page route for viewing a specific real-client intake
+router.get('/real-client-intake/:id', (req, res) => {
+  res.sendFile(path.join(PAGES_DIR, 'real-client-intake-detail.html'));
+});
 
 Object.entries(pages).forEach(([route, file]) => {
   router.get(route, (req, res) => {

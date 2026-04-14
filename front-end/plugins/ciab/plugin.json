@@ -25,6 +25,7 @@
     { "label": "Dashboard",     "icon": "📊", "url": "/ciab/dashboard",   "page": "dashboard" },
     { "label": "My Profiles",   "icon": "📁", "url": "/ciab/my-profiles", "page": "profiles" },
     { "label": "Generate New",  "icon": "⚡", "url": "/ciab/generator",   "page": "generator" },
+    { "label": "Real-Client Intakes", "icon": "📨", "url": "/ciab/real-client-intakes", "page": "real-client-intakes" },
     { "label": "Workspace",     "icon": "📝", "url": "/ciab/workspace",   "page": "workspace" },
     { "label": "My Progress",   "icon": "📈", "url": "/ciab/progress",    "page": "progress" },
     { "label": "Interview Sim", "icon": "🎤", "url": "/ciab/interview",   "page": "interview" },

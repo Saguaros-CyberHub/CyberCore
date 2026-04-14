@@ -512,6 +512,15 @@
             <button class="btn btn-outline" onclick="loadChallengeTemplates()">Refresh</button>
           </div>
 
+          <!-- Real-Client Intake context panel (populated from ?from_intake_id=…) -->
+          <div id="intakeContextPanel" style="display:none; background: #fff7ed; border: 1px solid #fdba74; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem;">
+            <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.5rem;">
+              <strong style="color:#9a3412;">📨 Building challenge from real-client intake: <span id="intakeCtxCover">—</span></strong>
+              <a id="intakeCtxLink" class="btn btn-sm btn-outline" href="#" target="_blank">View full intake →</a>
+            </div>
+            <div id="intakeCtxBody" style="font-size: 0.85rem; color: #431407;"></div>
+          </div>
+
           <!-- Create Challenge Form (hidden by default) -->
           <div id="createChallengeForm" style="display: none; background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
@@ -2906,6 +2915,65 @@
 
     let challengeVMs = [];
 
+    // === Real-Client Intake context (populated when admin.html is opened with ?from_intake_id=…) ===
+    let activeIntakeContext = null;
+
+    async function loadIntakeContextFromQuery() {
+      const params = new URLSearchParams(window.location.search);
+      const intakeId = params.get('from_intake_id');
+      if (!intakeId) return;
+      try {
+        const res = await fetch('/api/real-client/intake/' + encodeURIComponent(intakeId), { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const body = await res.json();
+        const it = body.intake;
+        const p = it.payload || {};
+        const net = p.sections?.network || {};
+        const suggestedName = params.get('suggested_name') || it.cover_name;
+        activeIntakeContext = { id: it.id, cover_name: it.cover_name, suggested_name: suggestedName };
+
+        // Show the panel
+        document.getElementById('intakeContextPanel').style.display = 'block';
+        document.getElementById('intakeCtxCover').textContent = it.cover_name;
+        document.getElementById('intakeCtxLink').href = '/ciab/real-client-intake/' + encodeURIComponent(it.id);
+
+        const roles = [
+          ['Domain Controllers', net.role_dc], ['File servers', net.role_file],
+          ['Mail servers', net.role_mail], ['Web/app servers', net.role_web],
+          ['Database servers', net.role_db], ['Backup servers', net.role_backup],
+          ['Print servers', net.role_print], ['Other servers', net.role_other]
+        ].filter(([, v]) => Number(v) > 0).map(([k, v]) => `<li>${escHtml(k)}: <strong>${escHtml(v)}</strong></li>`).join('');
+        const services = (net.services || []).map(s => `<span style="display:inline-block; background:#fed7aa; color:#7c2d12; padding:2px 8px; border-radius:10px; margin:2px; font-size:11px;">${escHtml(s)}</span>`).join('');
+        const segRows = (net.segments || []).map(s => `<tr><td>${escHtml(s.vlan)}</td><td><code>${escHtml(s.cidr)}</code></td><td>${escHtml(s.purpose)}</td></tr>`).join('');
+
+        document.getElementById('intakeCtxBody').innerHTML = `
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem 1.25rem; margin-bottom: 0.75rem;">
+            <div><strong>Workstations:</strong> ${escHtml(net.workstation_count || 0)}</div>
+            <div><strong>Laptops:</strong> ${escHtml(net.laptop_count || 0)}</div>
+            <div><strong>Servers:</strong> ${escHtml(net.server_count || 0)}</div>
+            <div><strong>Domain mode:</strong> ${escHtml(net.domain_mode || '—')}</div>
+            <div><strong>Domain cover:</strong> <code>${escHtml(net.domain_cover || '—')}</code></div>
+          </div>
+          ${roles ? `<div style="margin-bottom:0.5rem;"><strong>Server roles reported:</strong><ul style="margin:0.25rem 0 0 1.25rem;">${roles}</ul></div>` : ''}
+          ${services ? `<div style="margin-bottom:0.5rem;"><strong>Services in use:</strong> ${services}</div>` : ''}
+          ${segRows ? `<div><strong>Network segments:</strong><table style="width:100%; border-collapse: collapse; margin-top:0.25rem; font-size:0.8rem;"><thead><tr style="background:#ffedd5;"><th style="text-align:left; padding:4px 8px;">VLAN</th><th style="text-align:left; padding:4px 8px;">CIDR</th><th style="text-align:left; padding:4px 8px;">Purpose</th></tr></thead><tbody>${segRows}</tbody></table></div>` : ''}
+          <div style="margin-top:0.75rem; color:#7c2d12; font-style:italic;">Use these values to hand-author a realistic VM list below. The challenge will be auto-linked to this intake on save.</div>`;
+
+        // Switch to Challenges tab, open the form, pre-populate name/key
+        try { if (typeof showTab === 'function') showTab('challenges'); } catch (_) {}
+        showCreateChallengeForm();
+        const keySlug = (suggestedName || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'real-client';
+        const nameEl = document.getElementById('newChalName');
+        const keyEl  = document.getElementById('newChalKey');
+        const zoneEl = document.getElementById('newChalZone');
+        if (nameEl && !nameEl.value) nameEl.value = suggestedName;
+        if (keyEl  && !keyEl.value)  keyEl.value  = keySlug;
+        if (zoneEl && !zoneEl.value) zoneEl.value = keySlug.replace(/[^a-z0-9]/g, '').slice(0, 8);
+      } catch (err) {
+        console.warn('[intake context] failed to load:', err);
+      }
+    }
+
     function showCreateChallengeForm() {
       const form = document.getElementById('createChallengeForm');
       form.style.display = form.style.display === 'none' ? 'block' : 'none';
@@ -3038,6 +3106,25 @@
           </details>`;
 
         Toast.success('Challenge Created', `${vms.length} VM(s), ${data.vnets_created} VNets`);
+
+        // If this challenge was built from a real-client intake, link them.
+        if (activeIntakeContext && activeIntakeContext.id && data.challenge_id) {
+          try {
+            await fetch('/api/real-client/intake/' + encodeURIComponent(activeIntakeContext.id) + '/link', {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ linked_challenge_id: data.challenge_id })
+            });
+            Toast.success('Intake Linked', `Linked to intake "${activeIntakeContext.cover_name}"`);
+            activeIntakeContext = null;
+            document.getElementById('intakeContextPanel').style.display = 'none';
+          } catch (linkErr) {
+            console.warn('[intake link] failed:', linkErr);
+            Toast.warning('Link failed', 'Challenge created but could not be linked to intake: ' + linkErr.message);
+          }
+        }
+
         document.getElementById('createChallengeForm').style.display = 'none';
         challengeVMs = [];
         loadChallengeTemplates();
@@ -3502,6 +3589,9 @@
       }
 
       refreshAll();
+
+      // Load real-client intake context if ?from_intake_id=… is present.
+      loadIntakeContextFromQuery();
 
       // Show walkthrough on first visit
       if (!localStorage.getItem('admin_walkthrough_seen')) {
