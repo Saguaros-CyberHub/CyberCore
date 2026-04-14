@@ -12,67 +12,86 @@
 <title>Real-Client Intake Form</title>
 <style>
   :root {
-    --bg: #0f172a; --panel: #1e293b; --panel-2: #111a2e;
-    --text: #e2e8f0; --muted: #94a3b8; --border: #334155;
-    --accent: #38bdf8; --accent-2: #0ea5e9; --ok: #22c55e;
-    --warn: #f59e0b; --danger: #ef4444;
+    --bg: #f8fafc; --panel: #ffffff; --panel-2: #f1f5f9;
+    --text: #0f172a; --muted: #64748b; --border: #e2e8f0;
+    --accent: #0ea5e9; --accent-2: #0284c7; --ok: #16a34a;
+    --warn: #d97706; --danger: #dc2626;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; line-height: 1.5; }
-  header.bar { position: sticky; top: 0; z-index: 40; background: #0b1220; border-bottom: 1px solid var(--border); padding: 10px 20px;
-    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  header.bar h1 { font-size: 16px; margin: 0 12px 0 0; }
-  header.bar .mode-tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #1e293b; color: var(--muted); border: 1px solid var(--border); }
+  header.bar { position: sticky; top: 0; z-index: 40; background: #ffffff; border-bottom: 1px solid var(--border); padding: 10px 20px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05); }
+  header.bar h1 { font-size: 16px; margin: 0 12px 0 0; color: #0f172a; }
+  header.bar .mode-tag { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
   header.bar .spacer { flex: 1; }
   .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 6px 12px; border-radius: 6px;
-    cursor: pointer; font-size: 13px; }
-  .btn:hover { background: #273449; }
-  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #001018; font-weight: 600; }
-  .btn.primary:hover { background: var(--accent); }
-  .btn.danger  { background: #2d1316; border-color: #7f1d1d; color: #fecaca; }
+    cursor: pointer; font-size: 13px; transition: background 0.15s; }
+  .btn:hover { background: var(--panel-2); }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #ffffff; font-weight: 600; }
+  .btn.primary:hover { background: var(--accent); border-color: var(--accent); }
+  .btn.danger  { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+  .btn.danger:hover { background: #fee2e2; }
   main { max-width: 1100px; margin: 0 auto; padding: 24px; }
-  .banner { background: #3f1f14; border: 1px solid #7f1d1d; color: #fecaca; padding: 14px 18px; border-radius: 8px; margin-bottom: 20px; }
-  .banner strong { color: #fff; }
-  .section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 18px; }
-  .section h2 { margin: 0 0 6px 0; font-size: 17px; color: #f8fafc; }
+  .banner { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; padding: 14px 18px; border-radius: 8px; margin-bottom: 20px; }
+  .banner strong { color: #451a03; }
+  .section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 18px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04); }
+  .section h2 { margin: 0 0 6px 0; font-size: 17px; color: #0f172a; }
   .section .desc { color: var(--muted); margin-bottom: 14px; }
   .grid { display: grid; gap: 12px; }
   .grid.cols-2 { grid-template-columns: 1fr 1fr; }
   .grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
   @media (max-width: 720px) { .grid.cols-2, .grid.cols-3 { grid-template-columns: 1fr; } }
-  .field label { display: block; font-size: 13px; color: #cbd5e1; margin-bottom: 4px; }
+  .field label { display: block; font-size: 13px; color: #334155; margin-bottom: 4px; font-weight: 500; }
   .field input[type=text], .field input[type=number], .field select, .field textarea {
-    width: 100%; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px;
+    width: 100%; background: #ffffff; color: var(--text); border: 1px solid var(--border); padding: 8px 10px; border-radius: 6px;
     font-family: inherit; font-size: 13px;
   }
+  .field input:focus, .field select:focus, .field textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.15); }
   .field textarea { min-height: 64px; resize: vertical; }
   .field.checkbox-row { display: flex; flex-wrap: wrap; gap: 12px; }
   .field.checkbox-row label { display: inline-flex; align-items: center; gap: 6px; margin: 0; background: var(--panel-2);
-    padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; }
+    padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; font-weight: 400; color: var(--text); }
+  .field.checkbox-row label:hover { background: #e0f2fe; border-color: var(--accent); }
   .field.checkbox-row input { accent-color: var(--accent); }
   .help-trigger { display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%;
-    background: #334155; color: #cbd5e1; font-size: 11px; margin-left: 6px; cursor: help; border: 0; padding: 0; }
-  .help-trigger:hover, .help-trigger:focus { background: var(--accent); color: #001018; outline: none; }
-  .help-pop { position: absolute; z-index: 100; max-width: 340px; background: #020617; color: #f8fafc; border: 1px solid var(--accent-2);
-    padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.4; box-shadow: 0 4px 16px rgba(0,0,0,0.5); }
-  .help-pop strong { color: var(--accent); }
+    background: var(--panel-2); color: var(--muted); font-size: 11px; margin-left: 6px; cursor: help; border: 1px solid var(--border); padding: 0; font-weight: 600; }
+  .help-trigger:hover, .help-trigger:focus { background: var(--accent); color: #ffffff; border-color: var(--accent); outline: none; }
+  .help-pop { position: absolute; z-index: 100; max-width: 340px; background: #ffffff; color: var(--text); border: 1px solid var(--accent);
+    padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.4; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15); }
+  .help-pop strong { color: var(--accent-2); }
+  .guide-trigger { display: inline-flex; align-items: center; gap: 4px; background: var(--panel-2); color: var(--accent-2); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
+  .guide-trigger:hover, .guide-trigger:focus { background: #e0f2fe; border-color: var(--accent); outline: none; }
+  .guide-pop { position: absolute; z-index: 110; max-width: 480px; background: #ffffff; color: var(--text); border: 1px solid var(--accent);
+    padding: 16px 18px; border-radius: 8px; font-size: 13px; line-height: 1.5; box-shadow: 0 8px 24px rgba(15, 23, 42, 0.18); }
+  .guide-pop h4 { margin: 0 0 8px 0; font-size: 14px; color: var(--accent-2); }
+  .guide-pop ol { margin: 0 0 8px 0; padding-left: 20px; }
+  .guide-pop ol li { margin-bottom: 6px; }
+  .guide-pop .plat { background: var(--panel-2); padding: 8px 10px; border-radius: 6px; margin: 6px 0; font-size: 12px; border-left: 3px solid var(--accent); }
+  .guide-pop .plat strong { color: var(--accent-2); }
+  .guide-pop .tip { background: #fef3c7; border-left: 3px solid var(--warn); padding: 8px 10px; border-radius: 6px; margin-top: 8px; font-size: 12px; color: #78350f; }
+  .guide-pop .close { position: absolute; top: 6px; right: 8px; background: none; border: 0; cursor: pointer; color: var(--muted); font-size: 18px; padding: 2px 6px; }
+  .guide-pop .close:hover { color: var(--danger); }
+  .section-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .section-header h2 { margin: 0; }
   .segment-row { display: grid; grid-template-columns: 1fr 1fr 2fr auto; gap: 8px; margin-bottom: 8px; }
   .segment-row .btn { padding: 6px 10px; }
-  .ig1-control { border-left: 3px solid var(--accent-2); padding: 8px 12px; margin-bottom: 10px; background: var(--panel-2); border-radius: 4px; }
-  .ig1-control h3 { margin: 0 0 8px 0; font-size: 14px; color: #f8fafc; }
+  .ig1-control { border-left: 3px solid var(--accent); padding: 10px 14px; margin-bottom: 10px; background: var(--panel-2); border-radius: 4px; }
+  .ig1-control h3 { margin: 0 0 8px 0; font-size: 14px; color: #0f172a; }
   .ig1-safeguard { padding: 8px 0; border-bottom: 1px dashed var(--border); }
   .ig1-safeguard:last-child { border-bottom: 0; }
-  .ig1-safeguard .sg-title { font-weight: 600; color: #e2e8f0; }
+  .ig1-safeguard .sg-title { font-weight: 600; color: var(--text); }
   .ig1-safeguard .sg-num { color: var(--muted); font-size: 12px; margin-right: 6px; }
-  .ig1-safeguard .radio-row { margin: 6px 0; display: flex; gap: 14px; }
+  .ig1-safeguard .radio-row { margin: 6px 0; display: flex; gap: 14px; font-size: 13px; }
+  .ig1-safeguard .radio-row label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--text); }
   .ig1-safeguard textarea { margin-top: 4px; font-size: 12px; min-height: 44px; }
   .status-bar { font-size: 12px; color: var(--muted); }
   .status-bar.saved { color: var(--ok); }
   .status-bar.unsaved { color: var(--warn); }
-  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel); border: 1px solid var(--accent-2); color: var(--text);
-    padding: 10px 16px; border-radius: 6px; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,0.4); }
-  .validation-panel { background: #3f2a14; border: 1px solid #7f4f1d; color: #fde68a; padding: 12px 14px; border-radius: 8px;
+  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel); border: 1px solid var(--accent); color: var(--text);
+    padding: 10px 16px; border-radius: 6px; z-index: 200; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15); }
+  .validation-panel { background: #fef3c7; border: 1px solid #fcd34d; color: #78350f; padding: 12px 14px; border-radius: 8px;
     margin-bottom: 14px; display: none; }
   .validation-panel.active { display: block; }
   .validation-panel ul { margin: 6px 0 0 18px; padding: 0; }
@@ -179,7 +198,157 @@
   "Dormant account": "A user account that has not been used for a long time (e.g., 90+ days) — often belonging to former employees.",
   "DNS filtering": "A service that blocks your users from reaching known-malicious websites at the DNS lookup stage (Umbrella, Quad9, Cloudflare Gateway, NextDNS).",
   "Session locking": "Automatically locking the screen after a period of inactivity so someone can't walk up and use an unattended computer.",
-  "Cover name": "An alias — a made-up company name you will use instead of the real client name throughout this form. It's purely for anonymization."
+  "Cover name": "An alias — a made-up company name you will use instead of the real client name throughout this form. It's purely for anonymization.",
+  "OS counts": "How many computers/servers run each operating system. Exact numbers are best, but rough estimates are fine — round up or down if you're not sure.",
+  "Server": "A computer that runs 24/7 to provide services (files, email, apps, databases) to other computers in your office. Usually in a server room or closet, not a regular desk.",
+  "Workstation": "A regular desktop or laptop a person uses for daily work.",
+  "Domain": "A 'domain' is Microsoft's way of centrally managing all PCs in an office. If you log in to your work computer with the same username/password as your email, you probably have a domain.",
+  "Workgroup": "Each computer is independent — users log in locally, no central management. Small offices (<10 machines) often use workgroups.",
+  "On-prem Exchange": "A Microsoft Exchange email server that lives inside your office (not in the cloud). Getting rare — most companies have moved to Microsoft 365 or Google Workspace.",
+  "Patch cadence": "How often you install security updates. 'Monthly' is typical; 'weekly or faster' is best practice; 'rarely or never' is dangerous.",
+  "Password manager": "A tool (1Password, Bitwarden, LastPass, Dashlane) that stores passwords securely so users don't reuse the same password everywhere.",
+  "Lockout policy": "After N failed login attempts, the account is locked for some time. Stops attackers from guessing passwords.",
+  "Incident response": "The plan for what to do when something bad happens (ransomware, data breach, suspicious login). Even a one-pager is better than nothing.",
+  "Audit log": "A record of who did what, when. Required by most compliance frameworks. Logs are useless if nobody reviews them.",
+  "Vulnerability scanning": "Automated software (Nessus, Qualys, Rapid7) that checks your systems for known security problems. Usually run monthly.",
+  "Managed service provider": "An outside company (MSP) that runs your IT for you. If you have one, they can answer most questions on this form.",
+  "Service provider": "Any outside company that holds or processes your data — payroll (ADP), CRM (Salesforce), cloud apps, payment processing, etc.",
+  "Regulatory framework": "A set of security rules you're required to follow because of your industry. Healthcare → HIPAA. Credit-card processing → PCI-DSS. Defense contracting → CMMC. Education → FERPA."
+}
+</script>
+
+<!-- ============================================================= -->
+<!-- SECTION GUIDES — "How to find this information"               -->
+<!-- ============================================================= -->
+<script type="application/json" id="section-guides">
+{
+  "company": {
+    "title": "Filling out the Cover Profile",
+    "steps": [
+      "Invent a cover name — any made-up company name. It goes on every document we create, so keep it consistent.",
+      "Pick the closest industry match from the dropdown.",
+      "Employee count is a band — just estimate. Include full-time, part-time, and contractors who have a login.",
+      "Region is country-level only. We don't need city/state.",
+      "For regulatory frameworks, check all that apply. If you're not sure, check 'None / Don't know' — honest is better than guessing."
+    ],
+    "tip": "Nothing in this section should be the real company name or address. If you're unsure, just invent details that are in the same ballpark as the real thing."
+  },
+  "network": {
+    "title": "How do I know how many computers/servers we have?",
+    "steps": [
+      "If you have a managed IT provider or internal IT person — ask them. They almost certainly have an asset inventory spreadsheet or tool.",
+      "Rough headcount works: typically 1 computer per employee + a few shared (conference rooms, reception).",
+      "Servers are different from workstations — they run 24/7, usually live in a closet or server room, and often have names like SERVER01, FILE01, MAILSRV.",
+      "If you have Active Directory, open 'Active Directory Users and Computers' (on any domain-joined admin machine) — the 'Computers' folder lists everything.",
+      "For segments/VLANs — most small offices only have one network. If you don't know what a VLAN is, you probably don't have them."
+    ],
+    "platforms": [
+      { "label": "Windows (per machine)", "howto": "Right-click Start → System. The 'Device specifications' section shows OS name and version." },
+      { "label": "Mac (per machine)", "howto": "Apple menu → About This Mac. Shows macOS version." },
+      { "label": "Network scan", "howto": "Tools like Fing (free phone app) can scan your network and list most devices in a couple of minutes." }
+    ],
+    "tip": "Rough numbers are fine. 'Approximately 45 workstations' is more useful than a blank field. Round to the nearest 5 or 10."
+  },
+  "wireless": {
+    "title": "How do I find my Wi-Fi encryption type?",
+    "steps": [
+      "The fastest way: ask whoever set up the Wi-Fi (IT person, the installer, or your internet provider).",
+      "Or check the router admin page — see platform tips below."
+    ],
+    "platforms": [
+      { "label": "Windows 10/11", "howto": "Click the Wi-Fi icon in the system tray → right-click your network → Properties → look for 'Security type' (e.g., WPA2-Personal, WPA3-Personal)." },
+      { "label": "macOS", "howto": "System Settings → Wi-Fi → click 'Details' next to your network → see 'Security'." },
+      { "label": "Router admin page", "howto": "In a web browser, go to http://192.168.1.1 or http://192.168.0.1. Login is usually on a sticker on the router. Look under 'Wireless' or 'Security settings'." },
+      { "label": "iPhone / Android", "howto": "Harder to find — settings vary. Use one of the options above instead." }
+    ],
+    "tip": "WEP is outdated and insecure. WPA2 is the current standard. WPA3 is the newest. If you don't know — select 'Unknown' and we'll follow up."
+  },
+  "endpoint": {
+    "title": "How do I know what antivirus/EDR we use?",
+    "steps": [
+      "Look for icons near the clock (Windows system tray) or the menu bar (Mac) — security software usually puts an icon there.",
+      "Check Windows Security (Start → type 'Windows Security'). If it says 'Your organization manages this' or shows a different provider, that's your EDR.",
+      "If you have managed IT, ask them — they'll know exactly.",
+      "If you're not sure: 'Microsoft Defender (built-in)' is the default on Windows when nothing else is installed."
+    ],
+    "platforms": [
+      { "label": "Windows", "howto": "Start → Settings → Privacy & security → Windows Security → Virus & threat protection. It names the active provider at the top." },
+      { "label": "macOS", "howto": "System Settings → Privacy & Security. Look at 'Full Disk Access' and 'Accessibility' permissions — AV tools show up there." },
+      { "label": "Ask IT", "howto": "One quick email to your IT provider with 'What AV/EDR do we use?' answers this in minutes." }
+    ],
+    "tip": "If you pay an IT company a monthly fee, you likely have an EDR (CrowdStrike, SentinelOne, Defender for Endpoint, Huntress, Sophos). If you just bought computers and use what they came with, you're probably on built-in Defender."
+  },
+  "email_web": {
+    "title": "Microsoft 365, Google Workspace, or something else?",
+    "steps": [
+      "Look at where you log in to email:",
+      "• portal.office.com or outlook.office.com → Microsoft 365",
+      "• mail.google.com with a business address → Google Workspace",
+      "• Outlook that connects to a server whose name you've never heard of → On-prem Exchange (rare)",
+      "SPF/DKIM/DMARC are DNS records — most small businesses don't know off the top of their head. If unsure, pick 'Unknown' — we can look them up."
+    ],
+    "platforms": [
+      { "label": "Microsoft 365 admins", "howto": "admin.microsoft.com → Settings → Domains → pick your domain → 'DNS records' tab shows SPF/DKIM/DMARC status." },
+      { "label": "Google admins", "howto": "admin.google.com → Apps → Google Workspace → Gmail → Authenticate email." },
+      { "label": "Quick lookup", "howto": "On any computer, someone technical can run a free public tool like mxtoolbox.com to check SPF/DKIM/DMARC for any domain." }
+    ],
+    "tip": "Web filtering = does your office block known bad websites? If you use Cisco Umbrella, DNSFilter, Cloudflare Gateway, or similar — yes. If you've never heard of it — probably no."
+  },
+  "access": {
+    "title": "MFA and admin accounts — how to check",
+    "steps": [
+      "MFA test: try logging into email from a browser you've never used. Were you prompted for a code, app approval, or text message?",
+      "  • Yes, every time → 'All users, all systems'",
+      "  • Only for admins → 'Admin accounts only'",
+      "  • Only the first time on a new device → probably 'All users' (modern MFA remembers trusted devices)",
+      "Privileged accounts are the ones that can install software, reset passwords, or create new users. Count your internal IT people + any outside IT contractor accounts."
+    ],
+    "platforms": [
+      { "label": "Microsoft 365", "howto": "admin.microsoft.com → Users → Active users → pick a user → 'Multi-factor authentication' link at the top lists status per user." },
+      { "label": "Google Workspace", "howto": "admin.google.com → Reports → User Reports → '2-Step Verification' column shows enrollment." }
+    ],
+    "tip": "If your IT provider says they 'require MFA' but you never get prompted — double-check. MFA only counts if it's actually enforced."
+  },
+  "data": {
+    "title": "Backups — the most important question on this form",
+    "steps": [
+      "Ask three questions of whoever runs IT:",
+      "  1. How often does a backup run? (daily is minimum)",
+      "  2. Where does it go? (offsite or cloud = yes to offsite)",
+      "  3. Have we ever tested restoring from one?",
+      "If the answer to #3 is 'no', flag it — untested backups are a huge risk.",
+      "'Offline/air-gapped' means the backup is physically disconnected from the network when not being written. This protects against ransomware."
+    ],
+    "platforms": [
+      { "label": "Microsoft 365", "howto": "M365 does NOT back up your mailboxes/files in the way most people assume. If you use Veeam, Datto, SkyKick, AvePoint, Spanning — that's your backup. If none of those ring a bell, you may not have a real backup." },
+      { "label": "File server", "howto": "Common tools: Veeam Backup & Replication, Acronis, Rubrik, Datto. Look for one of these names in your IT docs or invoices." }
+    ],
+    "tip": "If you don't know: 'Unknown' is a valid answer. Don't guess — we'd rather have honest gaps than false assurance."
+  },
+  "vuln_audit": {
+    "title": "Vulnerability scanning, logging, and SIEM — jargon decoded",
+    "steps": [
+      "Vulnerability scanning = automated tool that checks your computers and servers for known security holes. Common names: Nessus, Qualys, Rapid7 InsightVM, Tenable.io.",
+      "Logging = are audit logs collected and kept somewhere central? Or just on each machine?",
+      "SIEM = a system that reads those logs and alerts on suspicious patterns. Common names: Splunk, Microsoft Sentinel, Arctic Wolf, Huntress, Blumira.",
+      "Audit retention = how long you keep the logs. Compliance frameworks usually require 1+ year."
+    ],
+    "platforms": [
+      { "label": "Quick check", "howto": "Do you get a monthly security report from IT listing 'vulnerabilities' or 'findings'? That's scanning. Do they ever mention alerts they investigated? That's probably a SIEM." }
+    ],
+    "tip": "Most small businesses don't have these. That's not unusual — just answer honestly. 'None' / 'Unknown' are common and useful answers."
+  },
+  "ig1": {
+    "title": "About the CIS Controls IG1 checklist",
+    "steps": [
+      "These are the 56 baseline cybersecurity safeguards from the Center for Internet Security (cisecurity.org).",
+      "For each one: Yes (we fully do this), Partial (some of the way there), No (we don't), or Don't Know.",
+      "You do NOT have to know every answer — 'Don't know' is perfectly valid. The gaps tell us where to focus.",
+      "Evidence notes are optional but helpful. Examples: 'We use Datto for backups', 'AV is Defender', 'Passwords min 12 chars'.",
+      "Skim quickly — don't spend more than ~20 minutes on this section. Rough answers are better than none."
+    ],
+    "tip": "Your IT provider can help with the technical ones. For policy/training questions, the business owner usually knows best."
+  }
 }
 </script>
 
@@ -259,7 +428,7 @@
       </select>
     </div>
     <div class="field">
-      <label>Applicable regulatory frameworks</label>
+      <label>Applicable regulatory frameworks <span class="help-trigger" data-help="Regulatory framework">?</span></label>
       <div class="field checkbox-row">
         <label><input type="checkbox" name="frameworks" value="HIPAA" /> HIPAA</label>
         <label><input type="checkbox" name="frameworks" value="PCI-DSS" /> PCI-DSS</label>
@@ -280,18 +449,18 @@
   <h2>2 · Network Topology</h2>
   <div class="desc">Enough about the environment to simulate it realistically. Estimates are fine — no need to be exact.</div>
   <div class="grid cols-3">
-    <div class="field"><label>Workstation count</label><input type="number" min="0" name="workstation_count" /></div>
+    <div class="field"><label>Workstation count <span class="help-trigger" data-help="Workstation">?</span></label><input type="number" min="0" name="workstation_count" /></div>
     <div class="field"><label>Laptop count</label><input type="number" min="0" name="laptop_count" /></div>
-    <div class="field"><label>Server count</label><input type="number" min="0" name="server_count" /></div>
+    <div class="field"><label>Server count <span class="help-trigger" data-help="Server">?</span></label><input type="number" min="0" name="server_count" /></div>
   </div>
 
-  <div class="field"><label>OS mix (percentages should total ~100%)</label></div>
+  <div class="field"><label>Operating systems (exact counts) <span class="help-trigger" data-help="OS counts">?</span></label></div>
   <div class="grid cols-3">
-    <div class="field"><label>Windows Server %</label><input type="number" min="0" max="100" name="os_win_server" /></div>
-    <div class="field"><label>Windows Client %</label><input type="number" min="0" max="100" name="os_win_client" /></div>
-    <div class="field"><label>Linux %</label><input type="number" min="0" max="100" name="os_linux" /></div>
-    <div class="field"><label>macOS %</label><input type="number" min="0" max="100" name="os_macos" /></div>
-    <div class="field"><label>Other / unknown %</label><input type="number" min="0" max="100" name="os_other" /></div>
+    <div class="field"><label>Windows Server count</label><input type="number" min="0" name="os_count_win_server" /></div>
+    <div class="field"><label>Windows Client (10/11) count</label><input type="number" min="0" name="os_count_win_client" /></div>
+    <div class="field"><label>Linux count</label><input type="number" min="0" name="os_count_linux" /></div>
+    <div class="field"><label>macOS count</label><input type="number" min="0" name="os_count_macos" /></div>
+    <div class="field"><label>Other / unknown count</label><input type="number" min="0" name="os_count_other" /></div>
   </div>
 
   <div class="field"><label>Server roles (count of each)</label></div>
@@ -322,7 +491,7 @@
     </div>
   </div>
 
-  <div class="field"><label>Domain mode <span class="help-trigger" data-help="AD">?</span></label>
+  <div class="field"><label>Domain mode <span class="help-trigger" data-help="Domain">?</span> <span class="help-trigger" data-help="Workgroup">?</span></label>
     <select name="domain_mode">
       <option value="">— choose —</option>
       <option value="ad">Active Directory domain</option>
@@ -401,7 +570,7 @@
         <option>Unknown</option>
       </select>
     </div>
-    <div class="field"><label>Patch cadence (OS + apps)</label>
+    <div class="field"><label>Patch cadence (OS + apps) <span class="help-trigger" data-help="Patch cadence">?</span></label>
       <select name="patch_cadence">
         <option value="">—</option>
         <option>Automated, weekly or faster</option>
@@ -465,10 +634,10 @@
         <option>Unknown</option>
       </select>
     </div>
-    <div class="field"><label>Password manager used?</label>
+    <div class="field"><label>Password manager used? <span class="help-trigger" data-help="Password manager">?</span></label>
       <select name="password_manager"><option value="">—</option><option>Yes, company-wide</option><option>Some users</option><option>No</option><option>Unknown</option></select>
     </div>
-    <div class="field"><label>Account lockout policy?</label>
+    <div class="field"><label>Account lockout policy? <span class="help-trigger" data-help="Lockout policy">?</span></label>
       <select name="lockout_policy"><option value="">—</option><option>Yes</option><option>No</option><option>Unknown</option></select>
     </div>
     <div class="field"><label>Dormant-account cleanup <span class="help-trigger" data-help="Dormant account">?</span></label>
@@ -513,7 +682,7 @@
 <section class="section" data-section="vuln_audit">
   <h2>8 · Vulnerability &amp; Audit</h2>
   <div class="grid cols-2">
-    <div class="field"><label>Vulnerability scanning?</label>
+    <div class="field"><label>Vulnerability scanning? <span class="help-trigger" data-help="Vulnerability scanning">?</span></label>
       <select name="vuln_scanning">
         <option value="">—</option>
         <option>Continuous / automated</option>
@@ -535,7 +704,7 @@
     <div class="field"><label>SIEM in place? <span class="help-trigger" data-help="SIEM">?</span></label>
       <select name="siem"><option value="">—</option><option>Yes</option><option>Partial / limited</option><option>No</option><option>Unknown</option></select>
     </div>
-    <div class="field"><label>Audit log retention</label>
+    <div class="field"><label>Audit log retention <span class="help-trigger" data-help="Audit log">?</span></label>
       <select name="audit_retention">
         <option value="">—</option>
         <option>&lt; 30 days</option><option>30–90 days</option>
@@ -579,6 +748,7 @@
 
   const IG1 = JSON.parse(document.getElementById('ig1-safeguards').textContent);
   const HELP = JSON.parse(document.getElementById('help-definitions').textContent);
+  const GUIDES = JSON.parse(document.getElementById('section-guides').textContent);
   const embeddedRaw = document.getElementById('responses').textContent.trim();
 
   const isHosted = location.protocol === 'http:' || location.protocol === 'https:';
@@ -624,24 +794,71 @@
   }
   document.getElementById('btn-add-segment').addEventListener('click', () => { addSegment(); scheduleSave(); });
 
-  // --- Help popover ---
+  // --- Inject per-section "How to find this" guide triggers ---
+  document.querySelectorAll('.section[data-section]').forEach(sec => {
+    const key = sec.dataset.section;
+    if (!GUIDES[key]) return;
+    const h2 = sec.querySelector('h2');
+    if (!h2 || h2.parentElement.classList.contains('section-header')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'section-header';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'guide-trigger';
+    btn.dataset.guide = key;
+    btn.innerHTML = '📖 How to find this info';
+    btn.setAttribute('aria-label', 'Open guide for ' + key);
+    h2.parentElement.insertBefore(wrap, h2);
+    wrap.appendChild(h2);
+    wrap.appendChild(btn);
+  });
+
+  // --- Popovers (tooltips + section guides) ---
   let activePop = null;
   function closePop() { if (activePop) { activePop.remove(); activePop = null; } }
-  document.addEventListener('click', (e) => {
-    const t = e.target.closest('.help-trigger');
-    if (!t) { if (!e.target.closest('.help-pop')) closePop(); return; }
-    e.preventDefault();
-    closePop();
-    const key = t.dataset.help;
-    const text = HELP[key] || 'No definition available.';
-    const pop = document.createElement('div');
-    pop.className = 'help-pop';
-    pop.innerHTML = `<strong>${key}</strong><br>${text}`;
-    document.body.appendChild(pop);
-    const r = t.getBoundingClientRect();
+  function positionPop(pop, anchor) {
+    const r = anchor.getBoundingClientRect();
     pop.style.top = (window.scrollY + r.bottom + 6) + 'px';
-    pop.style.left = Math.max(8, Math.min(window.scrollX + r.left - 10, window.scrollX + window.innerWidth - pop.offsetWidth - 8)) + 'px';
+    const left = Math.min(window.scrollX + r.left, window.scrollX + window.innerWidth - pop.offsetWidth - 16);
+    pop.style.left = Math.max(8, left) + 'px';
+  }
+  function openGuide(key, anchor) {
+    closePop();
+    const guide = GUIDES[key];
+    if (!guide) return;
+    const pop = document.createElement('div');
+    pop.className = 'guide-pop';
+    const steps = (guide.steps || []).map(s => `<li>${s}</li>`).join('');
+    const platforms = (guide.platforms || []).map(p => `<div class="plat"><strong>${p.label}:</strong> ${p.howto}</div>`).join('');
+    const tip = guide.tip ? `<div class="tip">💡 ${guide.tip}</div>` : '';
+    pop.innerHTML = `<button class="close" aria-label="Close">&times;</button>
+      <h4>${guide.title}</h4>
+      ${steps ? `<ol>${steps}</ol>` : ''}
+      ${platforms}
+      ${tip}`;
+    document.body.appendChild(pop);
+    pop.querySelector('.close').addEventListener('click', closePop);
+    positionPop(pop, anchor);
     activePop = pop;
+  }
+  document.addEventListener('click', (e) => {
+    const guide = e.target.closest('.guide-trigger');
+    if (guide) { e.preventDefault(); openGuide(guide.dataset.guide, guide); return; }
+    const t = e.target.closest('.help-trigger');
+    if (t) {
+      e.preventDefault();
+      closePop();
+      const key = t.dataset.help;
+      const text = HELP[key] || 'No definition available.';
+      const pop = document.createElement('div');
+      pop.className = 'help-pop';
+      pop.innerHTML = `<strong>${key}</strong><br>${text}`;
+      document.body.appendChild(pop);
+      positionPop(pop, t);
+      activePop = pop;
+      return;
+    }
+    if (!e.target.closest('.help-pop, .guide-pop')) closePop();
   });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePop(); });
 

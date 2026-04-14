@@ -1,68 +1,66 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Intake Detail · CyberCore</title>
-<style>
-  :root {
-    --bg: #0f172a; --panel: #1e293b; --panel-2: #111a2e;
-    --text: #e2e8f0; --muted: #94a3b8; --border: #334155;
-    --accent: #38bdf8; --accent-2: #0ea5e9; --ok: #22c55e;
-    --warn: #f59e0b; --danger: #ef4444;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px; }
-  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
-  .header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
-  h1 { margin: 0; font-size: 22px; }
-  .sub { color: var(--muted); }
-  .spacer { flex: 1; }
-  .btn { background: var(--panel); color: var(--text); border: 1px solid var(--border); padding: 8px 14px; border-radius: 6px;
-    cursor: pointer; font-size: 13px; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
-  .btn:hover { background: #273449; }
-  .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #001018; font-weight: 600; }
-  .btn.primary:hover { background: var(--accent); }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 16px; }
-  .card h2 { margin: 0 0 10px 0; font-size: 16px; color: #f8fafc; }
-  .kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 16px; }
-  .kv dt { color: var(--muted); }
-  .kv dd { margin: 0; }
-  .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #0b1220; border: 1px solid var(--border); margin-right: 4px; }
-  .pill.yes     { border-color: var(--ok);    color: #86efac; }
-  .pill.no      { border-color: var(--danger); color: #fecaca; }
-  .pill.partial { border-color: var(--warn);  color: #fde68a; }
-  .pill.unknown { border-color: var(--muted); color: var(--muted); }
-  .summary-row { display: flex; gap: 20px; flex-wrap: wrap; }
-  .stat { background: var(--panel-2); border: 1px solid var(--border); padding: 10px 14px; border-radius: 8px; min-width: 140px; }
-  .stat .val { font-size: 22px; color: var(--accent); font-weight: 600; }
-  .stat .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
-  table.segments { width: 100%; border-collapse: collapse; }
-  table.segments th, table.segments td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
-  table.segments th { color: var(--muted); font-weight: 600; background: var(--panel-2); font-size: 12px; }
-  .ig1-group { margin-bottom: 14px; }
-  .ig1-group h3 { margin: 0 0 8px 0; font-size: 14px; color: #f8fafc; border-left: 3px solid var(--accent-2); padding-left: 8px; }
-  .ig1-item { padding: 6px 0 6px 10px; border-bottom: 1px dashed var(--border); }
-  .ig1-item:last-child { border-bottom: 0; }
-  .ig1-item .num { color: var(--muted); font-size: 12px; margin-right: 6px; }
-  .ig1-item .notes { color: var(--muted); font-size: 12px; margin-top: 2px; white-space: pre-wrap; }
-  .error { color: var(--danger); }
-  .hidden { display: none !important; }
-</style>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Intake Detail | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .kv { display: grid; grid-template-columns: 200px 1fr; gap: 6px 16px; margin: 0; }
+    .kv dt { color: var(--gray-500, #718096); font-size: 0.85rem; }
+    .kv dd { margin: 0; font-size: 0.9rem; }
+    .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--gray-200, #e2e8f0); background: var(--bg-card, #fff); color: var(--gray-600, #4a5568); margin-right: 4px; }
+    .pill.role-student    { border-color: #3b82f6; color: #1e40af; background: #dbeafe; }
+    .pill.role-instructor { border-color: #16a34a; color: #166534; background: #dcfce7; }
+    .pill.role-admin      { border-color: #dc2626; color: #991b1b; background: #fee2e2; }
+    .pill.status-uploaded { border-color: #d97706; color: #92400e; background: #fef3c7; }
+    .pill.status-linked   { border-color: #16a34a; color: #166534; background: #dcfce7; }
+    .pill.yes     { border-color: #16a34a; color: #166534; background: #dcfce7; }
+    .pill.no      { border-color: #dc2626; color: #991b1b; background: #fee2e2; }
+    .pill.partial { border-color: #d97706; color: #92400e; background: #fef3c7; }
+    .pill.unknown { border-color: var(--gray-300, #cbd5e0); color: var(--gray-600, #4a5568); background: var(--gray-100, #edf2f7); }
+    .stats { display: flex; gap: 1rem; flex-wrap: wrap; }
+    .stat { background: var(--bg-page, #f7fafc); border: 1px solid var(--gray-200, #e2e8f0); border-radius: 8px; padding: 0.75rem 1rem; min-width: 140px; flex: 1; }
+    .stat .val { font-size: 1.75rem; color: var(--primary, #1e40af); font-weight: 700; line-height: 1.2; }
+    .stat .lbl { font-size: 0.7rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+    table.segments { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+    table.segments th, table.segments td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gray-200, #e2e8f0); font-size: 0.85rem; }
+    table.segments th { color: var(--gray-500, #718096); font-weight: 600; background: var(--bg-page, #f7fafc); }
+    .ig1-group { margin-bottom: 1rem; }
+    .ig1-group h4 { margin: 0 0 0.5rem 0; font-size: 0.95rem; color: var(--gray-700, #2d3748); border-left: 3px solid var(--primary, #1e40af); padding-left: 0.5rem; }
+    .ig1-item { padding: 0.4rem 0 0.4rem 0.6rem; border-bottom: 1px dashed var(--gray-200, #e2e8f0); font-size: 0.85rem; }
+    .ig1-item:last-child { border-bottom: 0; }
+    .ig1-item .num { color: var(--gray-500, #718096); font-size: 0.75rem; margin-right: 6px; }
+    .ig1-item .notes { color: var(--gray-500, #718096); font-size: 0.8rem; margin-top: 2px; white-space: pre-wrap; padding-left: 0.5rem; border-left: 2px solid var(--gray-200, #e2e8f0); }
+    .sub { color: var(--gray-500, #718096); font-size: 0.85rem; font-style: italic; }
+    .header-meta { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.3rem; }
+  </style>
 </head>
 <body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
 
-<div class="container" id="root">
-  <div class="header">
-    <a class="btn" href="/ciab/real-client-intakes">← Back to intakes</a>
-    <div class="spacer"></div>
-    <div id="actions"></div>
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <a href="/ciab/real-client-intakes" class="btn btn-outline btn-sm">← Back to intakes</a>
+        </div>
+        <div class="header-right" id="action-bar"></div>
+      </header>
+
+      <div class="page-content" id="content">
+        <div class="card"><div class="card-body">Loading…</div></div>
+      </div>
+    </main>
   </div>
-  <div id="content">Loading…</div>
-</div>
 
-<script type="application/json" id="ig1-safeguards">
+  <script type="application/json" id="ig1-safeguards">
 [
   { "control": 1, "num": "1.1", "control_name": "Inventory and Control of Enterprise Assets", "name": "Establish and Maintain Detailed Enterprise Asset Inventory" },
   { "control": 1, "num": "1.2", "control_name": "Inventory and Control of Enterprise Assets", "name": "Address Unauthorized Assets" },
@@ -121,152 +119,155 @@
   { "control": 17, "num": "17.2", "control_name": "Incident Response Management", "name": "Establish and Maintain Contact Information for Reporting Security Incidents" },
   { "control": 17, "num": "17.3", "control_name": "Incident Response Management", "name": "Establish and Maintain an Enterprise Process for Reporting Incidents" }
 ]
-</script>
+  </script>
 
-<script>
-(function () {
-  'use strict';
+  <script src="/js/app.js"></script>
+  <script src="/ciab/js/ciab-api.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const IG1 = JSON.parse(document.getElementById('ig1-safeguards').textContent);
+    const id  = location.pathname.split('/').pop();
 
-  const IG1 = JSON.parse(document.getElementById('ig1-safeguards').textContent);
-
-  const id = location.pathname.split('/').pop();
-
-  function esc(s) {
-    return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
-  }
-
-  function kv(obj, order) {
-    const keys = order || Object.keys(obj || {});
-    const rows = keys.filter(k => obj?.[k] !== undefined && obj?.[k] !== '' && obj?.[k] !== null && !(Array.isArray(obj[k]) && obj[k].length === 0))
-      .map(k => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd>${renderVal(obj[k])}</dd>`);
-    return rows.length ? `<dl class="kv">${rows.join('')}</dl>` : '<div class="sub">No data.</div>';
-  }
-
-  function renderVal(v) {
-    if (Array.isArray(v)) {
-      if (!v.length) return '<span class="sub">—</span>';
-      if (typeof v[0] === 'object') return v.map(seg => esc(JSON.stringify(seg))).join('<br/>');
-      return v.map(x => `<span class="pill">${esc(x)}</span>`).join(' ');
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
     }
-    if (typeof v === 'object') return esc(JSON.stringify(v));
-    return esc(v);
-  }
 
-  function renderSegments(segs) {
-    if (!segs || !segs.length) return '<div class="sub">No segments listed.</div>';
-    return `<table class="segments">
-      <thead><tr><th>VLAN</th><th>CIDR</th><th>Purpose</th></tr></thead>
-      <tbody>${segs.map(s => `<tr><td>${esc(s.vlan)}</td><td>${esc(s.cidr)}</td><td>${esc(s.purpose)}</td></tr>`).join('')}</tbody>
-    </table>`;
-  }
+    function kv(obj, order) {
+      const keys = order || Object.keys(obj || {});
+      const rows = keys
+        .filter(k => obj?.[k] !== undefined && obj?.[k] !== '' && obj?.[k] !== null && !(Array.isArray(obj[k]) && obj[k].length === 0))
+        .map(k => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd>${renderVal(obj[k])}</dd>`);
+      return rows.length ? `<dl class="kv">${rows.join('')}</dl>` : '<div class="sub">No data.</div>';
+    }
 
-  function renderIG1(ig1) {
-    ig1 = ig1 || {};
-    const grouped = {};
-    IG1.forEach(sg => { (grouped[sg.control] ||= []).push(sg); });
-    return Object.keys(grouped).sort((a,b)=>+a-+b).map(ctrl => {
-      const list = grouped[ctrl];
-      return `<div class="ig1-group">
-        <h3>Control ${ctrl} — ${esc(list[0].control_name)}</h3>
-        ${list.map(sg => {
-          const status = ig1['ig1_'+sg.num] || 'unknown';
-          const notes = ig1['ig1_'+sg.num+'_notes'] || '';
-          return `<div class="ig1-item">
-            <span class="num">${sg.num}</span>
-            <span class="pill ${status}">${status}</span>
-            ${esc(sg.name)}
-            ${notes ? `<div class="notes">${esc(notes)}</div>` : ''}
-          </div>`;
-        }).join('')}
-      </div>`;
-    }).join('');
-  }
-
-  async function load() {
-    try {
-      const res = await fetch('/api/real-client/intake/' + encodeURIComponent(id), { credentials: 'same-origin' });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || ('HTTP ' + res.status));
+    function renderVal(v) {
+      if (Array.isArray(v)) {
+        if (!v.length) return '<span class="sub">—</span>';
+        if (typeof v[0] === 'object') return v.map(seg => esc(JSON.stringify(seg))).join('<br/>');
+        return v.map(x => `<span class="pill">${esc(x)}</span>`).join(' ');
       }
-      const data = await res.json();
-      render(data);
-    } catch (err) {
-      document.getElementById('content').innerHTML = `<div class="card error">Failed to load: ${esc(err.message)}</div>`;
+      if (typeof v === 'object') return esc(JSON.stringify(v));
+      return esc(v);
     }
-  }
 
-  function render(data) {
-    const it = data.intake;
-    const p  = it.payload || {};
-    const s  = p.sections || {};
-    const summary = data.summary || {};
-    document.title = `${it.cover_name} · Intake`;
-
-    // Action buttons
-    const actions = [];
-    actions.push(`<button class="btn" id="btn-export-json">⬇️ Export JSON</button>`);
-    if (it.linked_challenge_id) {
-      actions.push(`<span class="pill" title="Challenge linked">🎯 challenge linked</span>`);
-    } else {
-      actions.push(`<a class="btn primary" href="/ciab/admin?from_intake_id=${encodeURIComponent(it.id)}&suggested_name=${encodeURIComponent(it.cover_name)}">🎯 Create Challenge</a>`);
+    function renderSegments(segs) {
+      if (!segs || !segs.length) return '<div class="sub">No segments listed.</div>';
+      return `<table class="segments">
+        <thead><tr><th>VLAN</th><th>CIDR</th><th>Purpose</th></tr></thead>
+        <tbody>${segs.map(s => `<tr><td>${esc(s.vlan)}</td><td><code>${esc(s.cidr)}</code></td><td>${esc(s.purpose)}</td></tr>`).join('')}</tbody>
+      </table>`;
     }
-    if (it.linked_profile_id) {
-      actions.push(`<a class="btn" href="/ciab/my-profiles">📁 View linked profile</a>`);
-    } else if (it.linked_challenge_id) {
-      actions.push(`<a class="btn primary" href="/ciab/generator?real_intake_id=${encodeURIComponent(it.id)}&challenge_id=${encodeURIComponent(it.linked_challenge_id)}">📁 Generate Profile</a>`);
+
+    function renderIG1(ig1) {
+      ig1 = ig1 || {};
+      const grouped = {};
+      IG1.forEach(sg => { (grouped[sg.control] ||= []).push(sg); });
+      return Object.keys(grouped).sort((a,b)=>+a-+b).map(ctrl => {
+        const list = grouped[ctrl];
+        return `<div class="ig1-group">
+          <h4>Control ${ctrl} — ${esc(list[0].control_name)}</h4>
+          ${list.map(sg => {
+            const status = ig1['ig1_'+sg.num] || 'unknown';
+            const notes = ig1['ig1_'+sg.num+'_notes'] || '';
+            return `<div class="ig1-item">
+              <span class="num">${sg.num}</span>
+              <span class="pill ${status}">${status}</span>
+              ${esc(sg.name)}
+              ${notes ? `<div class="notes">${esc(notes)}</div>` : ''}
+            </div>`;
+          }).join('')}
+        </div>`;
+      }).join('');
     }
-    document.getElementById('actions').innerHTML = actions.join(' ');
 
-    document.getElementById('content').innerHTML = `
-      <div class="header" style="margin-top:0">
-        <h1>🛡️ ${esc(it.cover_name)}</h1>
-        <span class="pill role-${esc(it.uploaded_role)}">${esc(it.uploaded_role)}</span>
-        <span class="pill status-${esc(it.status)}">${esc(it.status)}</span>
-        <span class="sub">uploaded ${new Date(it.created_at).toLocaleString()} · schema v${esc(it.schema_version)}</span>
-      </div>
-
-      <div class="card">
-        <div class="summary-row">
-          <div class="stat"><div class="val">${summary.asset_total ?? 0}</div><div class="lbl">Devices reported</div></div>
-          <div class="stat"><div class="val">${summary.ig1_answered ?? 0}/${summary.ig1_total ?? 56}</div><div class="lbl">IG1 answered</div></div>
-          <div class="stat"><div class="val">${summary.ig1_coverage_pct ?? 0}%</div><div class="lbl">IG1 coverage</div></div>
-        </div>
-      </div>
-
-      <div class="card"><h2>1 · Cover Profile</h2>${kv(s.company, ['cover_name','industry','employees_band','region','revenue_band','frameworks'])}</div>
-
-      <div class="card"><h2>2 · Network Topology</h2>
-        ${kv(s.network, ['workstation_count','laptop_count','server_count','os_win_server','os_win_client','os_linux','os_macos','os_other','role_dc','role_file','role_mail','role_web','role_db','role_backup','role_print','role_other','role_other_notes','services','domain_mode','domain_cover'])}
-        <h2 style="margin-top:14px">Segments</h2>
-        ${renderSegments(s.network?.segments)}
-      </div>
-
-      <div class="card"><h2>3 · Wireless</h2>${kv(s.wireless, ['ssid_count','wifi_encryption','guest_wifi','guest_isolated'])}</div>
-      <div class="card"><h2>4 · Endpoint Security</h2>${kv(s.endpoint, ['av_vendor','disk_encryption','usb_policy','patch_cadence'])}</div>
-      <div class="card"><h2>5 · Email & Web</h2>${kv(s.email_web, ['email_provider','web_filtering','spf','dkim','dmarc'])}</div>
-      <div class="card"><h2>6 · Account & Access</h2>${kv(s.access, ['mfa_coverage','priv_count_band','password_manager','lockout_policy','dormant_cleanup'])}</div>
-      <div class="card"><h2>7 · Data Protection</h2>${kv(s.data, ['backup_cadence','offsite_backup','offline_backup','encryption_at_rest','dlp','restore_test'])}</div>
-      <div class="card"><h2>8 · Vulnerability & Audit</h2>${kv(s.vuln_audit, ['vuln_scanning','logging_coverage','siem','audit_retention'])}</div>
-
-      <div class="card"><h2>9 · CIS Controls IG1 Safeguards</h2>${renderIG1(s.ig1)}</div>
-
-      <div class="card"><h2>10 · Additional notes</h2>${s.notes?.free_text ? `<div style="white-space:pre-wrap">${esc(s.notes.free_text)}</div>` : '<div class="sub">No notes.</div>'}</div>
-    `;
-
-    document.getElementById('btn-export-json').addEventListener('click', () => {
-      const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = `intake-${it.cover_name}-${it.id.slice(0,8)}.json`;
-      document.body.appendChild(a); a.click();
-      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!await Auth.requireAuth()) return;
+      try {
+        const res = await fetch('/api/real-client/intake/' + encodeURIComponent(id), { credentials: 'same-origin' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error || ('HTTP ' + res.status));
+        }
+        const data = await res.json();
+        render(data);
+      } catch (err) {
+        document.getElementById('content').innerHTML = `<div class="card"><div class="card-body" style="color:#dc2626;">Failed to load: ${esc(err.message)}</div></div>`;
+      }
     });
-  }
 
-  load();
-})();
-</script>
+    function render(data) {
+      const it = data.intake;
+      const p  = it.payload || {};
+      const s  = p.sections || {};
+      const summary = data.summary || {};
+      document.title = `${it.cover_name} | Intake`;
 
+      // Action buttons in header
+      const actions = [];
+      actions.push(`<button class="header-btn" id="btn-export-json" title="Export JSON">⬇️</button>`);
+      if (it.linked_challenge_id) {
+        actions.push(`<span class="pill status-linked">🎯 challenge linked</span>`);
+      } else {
+        actions.push(`<a class="btn btn-primary btn-sm" href="/ciab/admin?from_intake_id=${encodeURIComponent(it.id)}&suggested_name=${encodeURIComponent(it.cover_name)}">🎯 Create Challenge</a>`);
+      }
+      if (it.linked_profile_id) {
+        actions.push(`<a class="btn btn-outline btn-sm" href="/ciab/my-profiles">📁 View profile</a>`);
+      } else if (it.linked_challenge_id) {
+        actions.push(`<a class="btn btn-primary btn-sm" href="/ciab/generator?real_intake_id=${encodeURIComponent(it.id)}&challenge_id=${encodeURIComponent(it.linked_challenge_id)}">📁 Generate Profile</a>`);
+      }
+      document.getElementById('action-bar').innerHTML = actions.join(' ');
+
+      document.getElementById('content').innerHTML = `
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">🛡️ ${esc(it.cover_name)}</h1>
+            <div class="header-meta">
+              <span class="pill role-${esc(it.uploaded_role)}">${esc(it.uploaded_role)}</span>
+              <span class="pill status-${esc(it.status)}">${esc(it.status)}</span>
+              <span class="sub">uploaded ${new Date(it.created_at).toLocaleString()} · schema v${esc(it.schema_version)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card"><div class="card-body">
+          <div class="stats">
+            <div class="stat"><div class="val">${summary.asset_total ?? 0}</div><div class="lbl">Devices reported</div></div>
+            <div class="stat"><div class="val">${summary.ig1_answered ?? 0}/${summary.ig1_total ?? 56}</div><div class="lbl">IG1 answered</div></div>
+            <div class="stat"><div class="val">${summary.ig1_coverage_pct ?? 0}%</div><div class="lbl">IG1 coverage</div></div>
+          </div>
+        </div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">1 · Cover Profile</span></div><div class="card-body">
+          ${kv(s.company, ['cover_name','industry','employees_band','region','revenue_band','frameworks'])}
+        </div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">2 · Network Topology</span></div><div class="card-body">
+          ${kv(s.network, ['workstation_count','laptop_count','server_count','os_count_win_server','os_count_win_client','os_count_linux','os_count_macos','os_count_other','role_dc','role_file','role_mail','role_web','role_db','role_backup','role_print','role_other','role_other_notes','services','domain_mode','domain_cover'])}
+          <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Segments</h4>
+          ${renderSegments(s.network?.segments)}
+        </div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">3 · Wireless</span></div><div class="card-body">${kv(s.wireless, ['ssid_count','wifi_encryption','guest_wifi','guest_isolated'])}</div></div>
+        <div class="card"><div class="card-header"><span class="card-title">4 · Endpoint Security</span></div><div class="card-body">${kv(s.endpoint, ['av_vendor','disk_encryption','usb_policy','patch_cadence'])}</div></div>
+        <div class="card"><div class="card-header"><span class="card-title">5 · Email & Web</span></div><div class="card-body">${kv(s.email_web, ['email_provider','web_filtering','spf','dkim','dmarc'])}</div></div>
+        <div class="card"><div class="card-header"><span class="card-title">6 · Account & Access</span></div><div class="card-body">${kv(s.access, ['mfa_coverage','priv_count_band','password_manager','lockout_policy','dormant_cleanup'])}</div></div>
+        <div class="card"><div class="card-header"><span class="card-title">7 · Data Protection</span></div><div class="card-body">${kv(s.data, ['backup_cadence','offsite_backup','offline_backup','encryption_at_rest','dlp','restore_test'])}</div></div>
+        <div class="card"><div class="card-header"><span class="card-title">8 · Vulnerability & Audit</span></div><div class="card-body">${kv(s.vuln_audit, ['vuln_scanning','logging_coverage','siem','audit_retention'])}</div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">9 · CIS Controls IG1 Safeguards</span></div><div class="card-body">${renderIG1(s.ig1)}</div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">10 · Additional notes</span></div><div class="card-body">${s.notes?.free_text ? `<div style="white-space:pre-wrap">${esc(s.notes.free_text)}</div>` : '<div class="sub">No notes.</div>'}</div></div>
+      `;
+
+      document.getElementById('btn-export-json').addEventListener('click', () => {
+        const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `intake-${it.cover_name}-${it.id.slice(0,8)}.json`;
+        document.body.appendChild(a); a.click();
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 0);
+      });
+    }
+  </script>
 </body>
 </html>
