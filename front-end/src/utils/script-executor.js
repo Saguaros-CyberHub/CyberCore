@@ -4,9 +4,10 @@
  * Runs vulnerability scripts on deployed VMs via Proxmox Guest Agent
  *
  * Key Proxmox API details:
- * - agent/exec: `command` = executable path only, `arg0`..`argN` = separate args
- * - agent/file-write: `content` = base64 string; do NOT pass `encode: 1` — that makes Proxmox double-encode and the literal base64 ends up on disk
- * - agent/exec-status: `out-data`/`err-data` are returned as plain text (Proxmox decodes)
+ * - agent/exec: `command` = full command string with args (space-separated, quoted as needed)
+ * - agent/file-write: `content` is stored verbatim on disk — we always chunk + reassemble with FromBase64String on the VM for binary safety
+ * - agent/exec-status: `out-data`/`err-data` are returned as plain text, only after the process exits
+ * - agent/file-read: used to tail a Tee'd log file for real-time progress during long-running scripts
  * ============================================================================
  */
 
@@ -179,11 +180,11 @@ Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
  * which crashes the QEMU guest agent on larger payloads and trips Perl
  * "Wide character" errors on any non-ASCII content.
  */
-async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = '') {
+async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = '', onProgress = null) {
   // Strip BOM, map common smart-punctuation to ASCII, then drop any remaining
   // non-ASCII. Proxmox's Perl API has no utf8::encode on this path, so any
   // multi-byte character in the payload can crash the exec call.
-  const cleaned = scriptContent
+  const cleanedLocal = scriptContent
     .replace(/^\uFEFF/, '')
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
@@ -193,7 +194,7 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
     .replace(/[\u2190]/g, '<-')
     .replace(/[^\x00-\x7F]/g, '');
 
-  const strippedCount = scriptContent.length - cleaned.length;
+  const strippedCount = scriptContent.length - cleanedLocal.length;
   if (strippedCount > 0) {
     console.log(`[ScriptExec] Stripped ${strippedCount} non-ASCII chars from script (preserves agent stability)`);
   }
@@ -201,17 +202,19 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
   const ts = Date.now();
   const rand = Math.random().toString(36).slice(2, 8);
   const ps1Path = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.ps1`;
+  const wrapperPath = `C:\\Windows\\Temp\\vuln_${ts}_${rand}_run.ps1`;
   const logPath = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.log`;
-  const size = Buffer.byteLength(cleaned, 'utf-8');
+  const size = Buffer.byteLength(cleanedLocal, 'utf-8');
 
   console.log(`[ScriptExec] Writing ${size}-byte script to ${ps1Path} on VM ${vmId}`);
-  await guestWriteLargeText(node, vmId, ps1Path, cleaned);
+  await guestWriteLargeText(node, vmId, ps1Path, cleanedLocal);
 
-  // Stub: Tee-Object gives us a line-flushed log that Node can tail in real
-  // time via agent/file-read while exec-status is still running. The script
-  // is guaranteed to finish (synchronous &) before Remove-Item; the log is
-  // left on disk so the final tail-read can drain it, then Node removes it.
-  const runStub = [
+  // Wrapper runs on the VM via `powershell -File`, so no interactive-stdin
+  // echo pollutes stdout. Tee duplicates script output to a log file we can
+  // tail in real time via agent/file-read. Script deletion happens *after*
+  // $LASTEXITCODE is captured — it is guaranteed to have finished. Log is
+  // left in place; Node reads it and removes it post-exit.
+  const wrapper = [
     `$ErrorActionPreference = 'Continue'`,
     `$ec = 0`,
     `try {`,
@@ -222,30 +225,36 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
     `  $ec = 1`,
     `}`,
     `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue`,
-    `[Environment]::Exit($ec)`
-  ].join('\n') + '\n';
+    `[Environment]::Exit($ec)`,
+    ''
+  ].join('\r\n');
+  await guestWriteLargeText(node, vmId, wrapperPath, wrapper);
 
-  console.log(`[ScriptExec] Invoking script on VM ${vmId} (stub: ${runStub.length} chars, log: ${logPath})`);
+  const invocation = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${wrapperPath}"`;
+  console.log(`[ScriptExec] Invoking wrapper on VM ${vmId}: ${invocation}`);
 
   const result = await proxmoxAPI('POST',
-    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
-      command: 'powershell.exe',
-      'input-data': runStub
-    }
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+    { command: invocation }
   );
 
   const pid = result?.pid;
   if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
 
-  const finalStatus = await pollExecStatusWithLog(node, vmId, pid, logPath);
+  const finalStatus = await pollExecStatusWithLog(node, vmId, pid, logPath, onProgress);
 
-  // Clean up log on the VM (fire-and-forget — don't block caller).
+  // Cleanup wrapper + log on the VM (fire-and-forget).
   proxmoxAPI('POST',
-    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
-      command: 'powershell.exe',
-      'input-data': `Remove-Item '${logPath}' -Force -ErrorAction SilentlyContinue\n[Environment]::Exit(0)\n`
-    }
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+    { command: `powershell.exe -NoProfile -NonInteractive -Command "Remove-Item '${wrapperPath}','${logPath}' -Force -ErrorAction SilentlyContinue"` }
   ).catch(() => {});
+
+  // If exec-status stdout is empty (no -File output capture on some PVE builds),
+  // fall back to the log contents we captured while tailing.
+  if (!finalStatus.stdout && finalStatus._logSoFar) {
+    finalStatus.stdout = finalStatus._logSoFar;
+  }
+  delete finalStatus._logSoFar;
 
   return finalStatus;
 }
@@ -271,15 +280,23 @@ async function guestFileRead(node, vmId, filePath) {
  * Emits new log content to console as it appears. Returns the same shape
  * as pollExecStatus.
  */
-async function pollExecStatusWithLog(node, vmId, pid, logPath, timeoutMs = 1800000) {
+async function pollExecStatusWithLog(node, vmId, pid, logPath, onProgress = null, timeoutMs = 1800000) {
   const start = Date.now();
   let lastLen = 0;
-  const tail = async () => {
+  let fullLog = '';
+  let lastProgressAt = 0;
+
+  const tail = async ({ force = false } = {}) => {
     const content = await guestFileRead(node, vmId, logPath);
     if (content.length > lastLen) {
       const delta = content.slice(lastLen);
       process.stdout.write(`[ScriptExec:${vmId}] ${delta.replace(/\n(?!$)/g, `\n[ScriptExec:${vmId}] `)}`);
       lastLen = content.length;
+      fullLog = content;
+    }
+    if (onProgress && (force || Date.now() - lastProgressAt > 4000) && fullLog) {
+      lastProgressAt = Date.now();
+      try { await onProgress(fullLog); } catch (e) { /* best-effort */ }
     }
   };
 
@@ -299,20 +316,20 @@ async function pollExecStatusWithLog(node, vmId, pid, logPath, timeoutMs = 18000
     await tail();
 
     if (exited) {
-      // One more drain to capture anything written after the last tail.
-      await tail();
+      await tail({ force: true });
       return {
         exited: true,
         exitcode: statusSnapshot.exitcode ?? 0,
         stdout: statusSnapshot['out-data'] || '',
-        stderr: statusSnapshot['err-data'] || ''
+        stderr: statusSnapshot['err-data'] || '',
+        _logSoFar: fullLog
       };
     }
 
     await new Promise(r => setTimeout(r, 2500));
   }
 
-  return { exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' };
+  return { exited: false, exitcode: -1, stdout: '', stderr: 'Timed out', _logSoFar: fullLog };
 }
 
 /**
@@ -377,7 +394,11 @@ async function executeScriptsOnVM(node, vmId, vmName, scripts, deploymentId) {
     await updateScriptStatus(deploymentId, vmName, script.slug, 'running');
 
     try {
-      const result = await executePowerShellViaFile(node, vmId, script.script_content, script.script_args || '');
+      const onProgress = async (logSoFar) => {
+        // Stream partial log into DB output field so the UI panel sees live progress.
+        await updateScriptStatus(deploymentId, vmName, script.slug, 'running', null, logSoFar);
+      };
+      const result = await executePowerShellViaFile(node, vmId, script.script_content, script.script_args || '', onProgress);
 
       if (result.exited) {
         const output = (result.stdout || '') + (result.stderr ? `\nSTDERR:\n${result.stderr}` : '');
