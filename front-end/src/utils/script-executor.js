@@ -5,7 +5,7 @@
  *
  * Key Proxmox API details:
  * - agent/exec: `command` = executable path only, `arg0`..`argN` = separate args
- * - agent/file-write: `content` = base64 string, `encode` = 1 to tell Proxmox to decode it
+ * - agent/file-write: `content` = base64 string; do NOT pass `encode: 1` — that makes Proxmox double-encode and the literal base64 ends up on disk
  * - agent/exec-status: `out-data`/`err-data` are returned as plain text (Proxmox decodes)
  * ============================================================================
  */
@@ -30,9 +30,13 @@ async function waitForGuestAgent(node, vmId, timeoutMs = 180000) {
 }
 
 /**
- * Write a file to the VM via guest agent
- * Content is base64-encoded, with encode=1 so Proxmox decodes it before sending to QGA
- * This avoids the Perl "Wide character" error
+ * Write a file to the VM via guest agent.
+ *
+ * The QEMU guest agent's file-write endpoint treats `content` as base64 by
+ * default. Passing `encode: 1` tells Proxmox to base64-encode our content again,
+ * which ends up writing the literal base64 string to disk — so we do NOT set
+ * it. `content` is sent as base64; Proxmox forwards verbatim; QGA decodes once
+ * and writes raw bytes.
  */
 async function guestFileWrite(node, vmId, filePath, content) {
   const cleaned = content
@@ -46,8 +50,7 @@ async function guestFileWrite(node, vmId, filePath, content) {
   await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
       file: filePath,
-      content: b64,
-      encode: 1  // Tell Proxmox: content is base64, please decode before writing
+      content: b64
     }
   );
 }
@@ -116,8 +119,7 @@ async function guestWriteLargeText(node, vmId, remotePath, content) {
     await proxmoxAPI('POST',
       `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
         file: remotePath,
-        content: bytes.toString('base64'),
-        encode: 1
+        content: bytes.toString('base64')
       }
     );
     return;
@@ -142,8 +144,7 @@ async function guestWriteLargeText(node, vmId, remotePath, content) {
     await proxmoxAPI('POST',
       `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
         file: chunkPath,
-        content: bytes.subarray(start, end).toString('base64'),
-        encode: 1
+        content: bytes.subarray(start, end).toString('base64')
       }
     );
     if (i % 10 === 9) await new Promise(r => setTimeout(r, 300));
