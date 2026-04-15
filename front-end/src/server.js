@@ -117,7 +117,16 @@ app.use(session({
 
 app.use(express.static(path.join(__dirname, '../public')));
 app.use('/profiles', express.static(path.join(__dirname, '../profiles')));
-app.use('/vuln-assets', express.static(path.join(__dirname, '../vuln-assets')));
+// /vuln-assets is gated by short-lived HMAC-signed URLs minted by the orchestrator
+// (see src/utils/signed-url.js). Lab VMs carry ?token=…&exp=… on every request.
+const { verifySignedUrl } = require('./utils/signed-url');
+app.use('/vuln-assets', (req, res, next) => {
+  const filename = decodeURIComponent(req.path.replace(/^\/+/, ''));
+  if (!filename) return res.status(404).send('Not found');
+  const v = verifySignedUrl(filename, req.query.exp, req.query.token);
+  if (!v.ok) return res.status(403).send(`Forbidden: ${v.reason}`);
+  next();
+}, express.static(path.join(__dirname, '../vuln-assets')));
 
 // ============================================================================
 // CORE API ROUTES
