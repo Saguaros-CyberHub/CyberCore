@@ -2973,77 +2973,123 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
       file_size_mb: fileSizeMB
     });
 
-    // Background: have the VM HTTP-pull the file directly from the orchestrator's
-    // public /vuln-assets/ static serve. Two guest-agent exec round-trips total
-    // (one to download, one optional verify) regardless of file size, vs. hundreds
-    // of chunked file-write calls that the 60 KB Proxmox cap forces.
+    // Background: push the file to the VM via Proxmox guest-agent file-write.
+    // This deliberately uses the virtio-serial channel (not TCP) so a compromised
+    // target VM cannot initiate any connection back to the orchestrator — the host
+    // always drives the conversation. Proxmox caps `content` at 61,440 chars of
+    // base64, so we chunk at 45 KB raw (~60,000 base64 chars) and reassemble on
+    // the VM with a single PowerShell call.
     (async () => {
       try {
+        const https = require('https');
+        const PX_URL = process.env.PROXMOX_API_URL || 'https://100.100.10.10:8006';
+        const PX_TOKEN_ID = process.env.PROXMOX_TOKEN_ID || 'root@pam!clinic-app-token';
+        const PX_TOKEN_SECRET = process.env.PROXMOX_TOKEN_SECRET || '';
+
+        // Helper: write one binary chunk via the file-write JSON API.
+        const writeChunk = (filePath, b64Data) => {
+          return new Promise((resolve, reject) => {
+            const url = new URL(`${PX_URL}/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/file-write`);
+            const body = JSON.stringify({ file: filePath, content: b64Data });
+            const req = https.request({
+              hostname: url.hostname, port: url.port || 8006, path: url.pathname, method: 'POST',
+              headers: {
+                'Authorization': `PVEAPIToken=${PX_TOKEN_ID}=${PX_TOKEN_SECRET}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(body)
+              },
+              rejectUnauthorized: false,
+              timeout: 30000
+            }, (res) => {
+              let data = '';
+              res.on('data', c => data += c);
+              res.on('end', () => {
+                if (res.statusCode >= 400) return reject(new Error(`file-write failed (${res.statusCode}): ${data}`));
+                resolve();
+              });
+            });
+            req.on('error', reject);
+            req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+            req.write(body);
+            req.end();
+          });
+        };
+
+        // Proxmox caps agent/file-write `content` at 61,440 chars of base64.
+        // 45 KB raw -> 60,000 base64 chars, leaving headroom under the cap.
+        const CHUNK_SIZE = 45 * 1024;
+        const fileBuffer = fs.readFileSync(localPath);
+        const totalChunks = Math.ceil(fileBuffer.length / CHUNK_SIZE);
+        const tempDir = 'C:\\Windows\\Temp\\push_' + Date.now();
+
+        console.log(`[PushFile] Pushing ${safeName} (${fileSizeMB} MB, ${totalChunks} chunks of ${CHUNK_SIZE / 1024}KB) to VM ${vm.vm_id}`);
+
+        // Create temp dir on VM
         const { pollExecStatus } = require('../utils/script-executor');
-        const { buildSignedUrl } = require('../utils/signed-url');
-        const ORCHESTRATOR_URL = (process.env.ORCHESTRATOR_PUBLIC_URL || 'http://100.100.20.50:3000').replace(/\/+$/, '');
-        // Signed URL is valid for 15 minutes — enough for large-file pulls on slow links.
-        const downloadUrl = buildSignedUrl(ORCHESTRATOR_URL, safeName, 15 * 60);
-
-        console.log(`[PushFile] HTTP-pull ${safeName} (${fileSizeMB} MB) from ${downloadUrl} to VM ${vm.vm_id}`);
-
-        // Single PowerShell invocation:
-        //   - creates the parent directory
-        //   - silences the progress bar (10× speedup on Windows PowerShell 5.1)
-        //   - downloads with Invoke-WebRequest, retrying up to 3 times
-        //   - verifies the byte count matches what the orchestrator says it should be
-        const dl = `
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'
-$dest   = '${dest_path.replace(/'/g, "''")}'
-$url    = '${downloadUrl}'
-$expect = ${fileSize}
-
-$parent = Split-Path -Parent $dest
-if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
-
-$attempt = 0
-$success = $false
-while (-not $success -and $attempt -lt 3) {
-    $attempt++
-    try {
-        Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 600
-        $success = $true
-    } catch {
-        Write-Host "[PUSH] Attempt $attempt failed: $($_.Exception.Message)"
-        if ($attempt -lt 3) { Start-Sleep -Seconds 3 }
-    }
-}
-if (-not $success) { Write-Host "[PUSH] FAILED after 3 attempts"; [Environment]::Exit(1) }
-
-$got = (Get-Item $dest).Length
-if ($got -ne $expect) {
-    Write-Host "[PUSH] SIZE MISMATCH expected=$expect got=$got"
-    [Environment]::Exit(2)
-}
-Write-Host "[PUSH] OK $got bytes → $dest"
-`;
-
-        const execResult = await proxmoxAPI('POST',
+        const mkdirResult = await proxmoxAPI('POST',
           `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/exec`, {
             command: 'powershell.exe',
-            'input-data': dl + '\n[Environment]::Exit(0)\n'
+            'input-data': `New-Item -ItemType Directory -Path '${tempDir}' -Force | Out-Null\n[Environment]::Exit(0)\n`
           }
         );
+        if (mkdirResult?.pid) await pollExecStatus(vm.node, vm.vm_id, mkdirResult.pid, 10000);
 
-        if (execResult?.pid) {
-          // Cap the wait at 15 minutes — enough for a ~200 MB file over a slow virtio NIC.
-          const result = await pollExecStatus(vm.node, vm.vm_id, execResult.pid, 15 * 60 * 1000);
-          const out = (result.stdout || '').trim();
-          const err = (result.stderr || '').trim();
-          if (out) console.log(`[PushFile] VM stdout: ${out}`);
-          if (err) console.log(`[PushFile] VM stderr: ${err}`);
-          if (result.exitcode && result.exitcode !== 0) {
-            throw new Error(`VM download failed (exit ${result.exitcode}): ${out || err}`);
+        // Write each chunk
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * CHUNK_SIZE;
+          const end = Math.min(start + CHUNK_SIZE, fileBuffer.length);
+          const chunkBuffer = fileBuffer.subarray(start, end);
+          const b64 = chunkBuffer.toString('base64');
+          const chunkPath = `${tempDir}\\chunk_${String(i).padStart(4, '0')}`;
+
+          let retries = 3;
+          while (retries > 0) {
+            try {
+              await writeChunk(chunkPath, b64);
+              break;
+            } catch (e) {
+              retries--;
+              if (retries === 0) throw new Error(`Chunk ${i} failed after 3 retries: ${e.message}`);
+              console.log(`[PushFile] Chunk ${i} retry (${3 - retries}/3): ${e.message}`);
+              await new Promise(r => setTimeout(r, 2000));
+            }
           }
+
+          if ((i + 1) % 20 === 0 || i === totalChunks - 1) {
+            console.log(`[PushFile] Written ${i + 1}/${totalChunks} chunks (${Math.round((i + 1) / totalChunks * 100)}%)`);
+          }
+          if (i % 10 === 9) await new Promise(r => setTimeout(r, 300));
         }
 
-        console.log(`[PushFile] Done: ${safeName} (${fileSizeMB} MB) → ${dest_path} on VM ${vm.vm_id}`);
+        // Reassemble chunks on the VM using PowerShell
+        console.log(`[PushFile] Reassembling ${totalChunks} chunks on VM...`);
+        const assembleScript = `
+$chunks = Get-ChildItem '${tempDir}\\chunk_*' | Sort-Object Name
+$parent = Split-Path -Parent '${dest_path}'
+if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+$outStream = [System.IO.File]::Create('${dest_path}')
+foreach ($chunk in $chunks) {
+    $b64 = [System.IO.File]::ReadAllText($chunk.FullName)
+    $bytes = [Convert]::FromBase64String($b64)
+    $outStream.Write($bytes, 0, $bytes.Length)
+}
+$outStream.Close()
+Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
+$size = (Get-Item '${dest_path}').Length
+Write-Host "File assembled: ${dest_path} ($size bytes)"
+`;
+        const assembleResult = await proxmoxAPI('POST',
+          `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/agent/exec`, {
+            command: 'powershell.exe',
+            'input-data': assembleScript + '\n[Environment]::Exit(0)\n'
+          }
+        );
+        if (assembleResult?.pid) {
+          const result = await pollExecStatus(vm.node, vm.vm_id, assembleResult.pid, 120000);
+          console.log(`[PushFile] Assemble output: ${(result.stdout || '').trim()}`);
+        }
+
+        console.log(`[PushFile] Done: ${safeName} (${fileSizeMB} MB) -> ${dest_path} on VM ${vm.vm_id}`);
       } catch (err) {
         console.error(`[PushFile] Failed: ${err.message}`);
       }
