@@ -149,18 +149,25 @@ async function guestWriteLargeText(node, vmId, remotePath, content) {
   }
 
   const reassemble = `
+$ErrorActionPreference = 'Stop'
 $chunks = Get-ChildItem '${tempDir}\\chunk_*' | Sort-Object Name
 $parent = Split-Path -Parent '${remotePath}'
 if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
 $out = [System.IO.File]::Create('${remotePath}')
-foreach ($c in $chunks) {
+try {
+  foreach ($c in $chunks) {
     $b64 = [System.IO.File]::ReadAllText($c.FullName)
     $b = [Convert]::FromBase64String($b64)
     $out.Write($b, 0, $b.Length)
+  }
+} finally {
+  $out.Close()
 }
-$out.Close()
 Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
+$finalSize = (Get-Item '${remotePath}').Length
+Write-Host "[Reassemble] Wrote ${remotePath} ($finalSize bytes from ${totalChunks} chunks)"
 [Environment]::Exit(0)
+
 `;
   const rs = await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
@@ -168,7 +175,14 @@ Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
       'input-data': reassemble
     }
   );
-  if (rs?.pid) await pollExecStatus(node, vmId, rs.pid, 120000);
+  if (rs?.pid) {
+    const rsResult = await pollExecStatus(node, vmId, rs.pid, 120000);
+    if (rsResult.stdout) console.log(`[ScriptExec] ${rsResult.stdout.trim()}`);
+    if (rsResult.stderr) console.error(`[ScriptExec] Reassemble stderr: ${rsResult.stderr.trim()}`);
+    if (rsResult.exitcode !== 0) {
+      throw new Error(`Reassembly failed (exit ${rsResult.exitcode}): ${rsResult.stderr || rsResult.stdout}`);
+    }
+  }
 }
 
 /**
@@ -218,9 +232,12 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
   // $LASTEXITCODE is captured — script is guaranteed to finish first.
   const runStub =
     `$ErrorActionPreference = 'Continue'\n` +
+    `$sz = (Get-Item '${ps1Path}' -ErrorAction SilentlyContinue).Length\n` +
+    `Write-Host "[ScriptExec] Running ${ps1Path} ($sz bytes)"\n` +
     `& '${ps1Path}' ${scriptArgs} *>&1 | Tee-Object -FilePath '${logPath}'\n` +
     `$ec = $LASTEXITCODE\n` +
     `if ($null -eq $ec) { $ec = 0 }\n` +
+    `Write-Host "[ScriptExec] Exit code: $ec"\n` +
     `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue\n` +
     `[Environment]::Exit($ec)\n\n`;
 
