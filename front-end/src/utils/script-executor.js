@@ -201,21 +201,31 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
   const ts = Date.now();
   const rand = Math.random().toString(36).slice(2, 8);
   const ps1Path = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.ps1`;
+  const logPath = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.log`;
   const size = Buffer.byteLength(cleaned, 'utf-8');
 
   console.log(`[ScriptExec] Writing ${size}-byte script to ${ps1Path} on VM ${vmId}`);
   await guestWriteLargeText(node, vmId, ps1Path, cleaned);
 
-  // Short invocation stub — fits trivially in input-data regardless of script size.
+  // Stub: Tee-Object gives us a line-flushed log that Node can tail in real
+  // time via agent/file-read while exec-status is still running. The script
+  // is guaranteed to finish (synchronous &) before Remove-Item; the log is
+  // left on disk so the final tail-read can drain it, then Node removes it.
   const runStub = [
     `$ErrorActionPreference = 'Continue'`,
-    `& '${ps1Path}' ${scriptArgs}`,
-    `$ec = $LASTEXITCODE`,
+    `$ec = 0`,
+    `try {`,
+    `  & '${ps1Path}' ${scriptArgs} 2>&1 | Tee-Object -FilePath '${logPath}'`,
+    `  $ec = $LASTEXITCODE`,
+    `} catch {`,
+    `  $_ | Out-File -FilePath '${logPath}' -Append -Encoding ascii`,
+    `  $ec = 1`,
+    `}`,
     `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue`,
     `[Environment]::Exit($ec)`
   ].join('\n') + '\n';
 
-  console.log(`[ScriptExec] Invoking script on VM ${vmId} (stub: ${runStub.length} chars)`);
+  console.log(`[ScriptExec] Invoking script on VM ${vmId} (stub: ${runStub.length} chars, log: ${logPath})`);
 
   const result = await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
@@ -227,7 +237,82 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
   const pid = result?.pid;
   if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
 
-  return await pollExecStatus(node, vmId, pid);
+  const finalStatus = await pollExecStatusWithLog(node, vmId, pid, logPath);
+
+  // Clean up log on the VM (fire-and-forget — don't block caller).
+  proxmoxAPI('POST',
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
+      command: 'powershell.exe',
+      'input-data': `Remove-Item '${logPath}' -Force -ErrorAction SilentlyContinue\n[Environment]::Exit(0)\n`
+    }
+  ).catch(() => {});
+
+  return finalStatus;
+}
+
+/**
+ * Read a text file from the VM via guest agent. Proxmox returns
+ * { content, truncated } where `content` is plain text for text files.
+ * Returns '' on any failure (file not yet created, transient error, etc).
+ */
+async function guestFileRead(node, vmId, filePath) {
+  try {
+    const resp = await proxmoxAPI('GET',
+      `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-read?file=${encodeURIComponent(filePath)}`
+    );
+    return typeof resp?.content === 'string' ? resp.content : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+/**
+ * Poll exec-status while tailing a log file for real-time visibility.
+ * Emits new log content to console as it appears. Returns the same shape
+ * as pollExecStatus.
+ */
+async function pollExecStatusWithLog(node, vmId, pid, logPath, timeoutMs = 1800000) {
+  const start = Date.now();
+  let lastLen = 0;
+  const tail = async () => {
+    const content = await guestFileRead(node, vmId, logPath);
+    if (content.length > lastLen) {
+      const delta = content.slice(lastLen);
+      process.stdout.write(`[ScriptExec:${vmId}] ${delta.replace(/\n(?!$)/g, `\n[ScriptExec:${vmId}] `)}`);
+      lastLen = content.length;
+    }
+  };
+
+  while (Date.now() - start < timeoutMs) {
+    let exited = false;
+    let statusSnapshot = null;
+    try {
+      const status = await proxmoxAPI('GET',
+        `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec-status?pid=${pid}`
+      );
+      if (status?.exited) {
+        exited = true;
+        statusSnapshot = status;
+      }
+    } catch (e) { /* may error while running */ }
+
+    await tail();
+
+    if (exited) {
+      // One more drain to capture anything written after the last tail.
+      await tail();
+      return {
+        exited: true,
+        exitcode: statusSnapshot.exitcode ?? 0,
+        stdout: statusSnapshot['out-data'] || '',
+        stderr: statusSnapshot['err-data'] || ''
+      };
+    }
+
+    await new Promise(r => setTimeout(r, 2500));
+  }
+
+  return { exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' };
 }
 
 /**
