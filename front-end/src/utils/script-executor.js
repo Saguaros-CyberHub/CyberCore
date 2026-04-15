@@ -32,11 +32,10 @@ async function waitForGuestAgent(node, vmId, timeoutMs = 180000) {
 /**
  * Write a file to the VM via guest agent.
  *
- * The QEMU guest agent's file-write endpoint treats `content` as base64 by
- * default. Passing `encode: 1` tells Proxmox to base64-encode our content again,
- * which ends up writing the literal base64 string to disk — so we do NOT set
- * it. `content` is sent as base64; Proxmox forwards verbatim; QGA decodes once
- * and writes raw bytes.
+ * Proxmox's agent/file-write stores `content` verbatim on disk (no base64
+ * decode). To handle arbitrary/binary-safe payloads we chunk the bytes,
+ * write each chunk as base64 text, and reassemble on the VM with
+ * [Convert]::FromBase64String. This matches the proven push-file pattern.
  */
 async function guestFileWrite(node, vmId, filePath, content) {
   const cleaned = content
@@ -45,14 +44,7 @@ async function guestFileWrite(node, vmId, filePath, content) {
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'");
 
-  const b64 = Buffer.from(cleaned, 'utf-8').toString('base64');
-
-  await proxmoxAPI('POST',
-    `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
-      file: filePath,
-      content: b64
-    }
-  );
+  await guestWriteLargeText(node, vmId, filePath, cleaned);
 }
 
 /**
@@ -113,21 +105,14 @@ async function guestWriteLargeText(node, vmId, remotePath, content) {
   // Normalize line endings to Windows CRLF so the file looks right when opened in PS.
   const normalized = content.replace(/\r?\n/g, '\r\n');
   const bytes = Buffer.from(normalized, 'utf-8');
-  const SINGLE_WRITE_LIMIT = 45 * 1024; // 45 KB raw -> ~60,000 b64 chars (under the 61,440 cap)
 
-  if (bytes.length <= SINGLE_WRITE_LIMIT) {
-    await proxmoxAPI('POST',
-      `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
-        file: remotePath,
-        content: bytes.toString('base64')
-      }
-    );
-    return;
-  }
-
-  // Chunked path: write chunk_NNNN files into a temp dir, then reassemble with PS.
-  const tempDir = `C:\\Windows\\Temp\\psw_${Date.now()}`;
-  const totalChunks = Math.ceil(bytes.length / SINGLE_WRITE_LIMIT);
+  // Always chunk using the proven push-file pattern: each chunk file holds
+  // base64 TEXT, reassembled on the VM with [Convert]::FromBase64String.
+  // This is binary-safe and avoids any ambiguity about whether QGA decodes
+  // the `content` field (it does not — contents are written verbatim).
+  const CHUNK_SIZE = 45 * 1024; // 45 KB raw -> ~60,000 b64 chars (under 61,440 cap)
+  const tempDir = `C:\\Windows\\Temp\\psw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const totalChunks = Math.ceil(bytes.length / CHUNK_SIZE);
 
   const mkdir = await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
@@ -138,15 +123,27 @@ async function guestWriteLargeText(node, vmId, remotePath, content) {
   if (mkdir?.pid) await pollExecStatus(node, vmId, mkdir.pid, 10000);
 
   for (let i = 0; i < totalChunks; i++) {
-    const start = i * SINGLE_WRITE_LIMIT;
-    const end = Math.min(start + SINGLE_WRITE_LIMIT, bytes.length);
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, bytes.length);
+    const b64 = bytes.subarray(start, end).toString('base64');
     const chunkPath = `${tempDir}\\chunk_${String(i).padStart(4, '0')}`;
-    await proxmoxAPI('POST',
-      `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
-        file: chunkPath,
-        content: bytes.subarray(start, end).toString('base64')
+
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        await proxmoxAPI('POST',
+          `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
+            file: chunkPath,
+            content: b64
+          }
+        );
+        break;
+      } catch (e) {
+        retries--;
+        if (retries === 0) throw new Error(`Chunk ${i} failed after 3 retries: ${e.message}`);
+        await new Promise(r => setTimeout(r, 2000));
       }
-    );
+    }
     if (i % 10 === 9) await new Promise(r => setTimeout(r, 300));
   }
 
@@ -156,7 +153,8 @@ $parent = Split-Path -Parent '${remotePath}'
 if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
 $out = [System.IO.File]::Create('${remotePath}')
 foreach ($c in $chunks) {
-    $b = [System.IO.File]::ReadAllBytes($c.FullName)
+    $b64 = [System.IO.File]::ReadAllText($c.FullName)
+    $b = [Convert]::FromBase64String($b64)
     $out.Write($b, 0, $b.Length)
 }
 $out.Close()
@@ -169,7 +167,7 @@ Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
       'input-data': reassemble
     }
   );
-  if (rs?.pid) await pollExecStatus(node, vmId, rs.pid, 60000);
+  if (rs?.pid) await pollExecStatus(node, vmId, rs.pid, 120000);
 }
 
 /**
