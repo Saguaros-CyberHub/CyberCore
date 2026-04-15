@@ -208,26 +208,21 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
   console.log(`[ScriptExec] Writing ${size}-byte script to ${ps1Path} on VM ${vmId} (chunked, matches push-file)`);
   await guestWriteLargeText(node, vmId, ps1Path, cleanedLocal);
 
-  // Same invocation shape as push-file's reassemble step: command=powershell.exe
-  // with a small input-data payload. `*>&1` merges ALL PS streams (Output,
-  // Error, Warning, Verbose, Debug, Information) so Write-Host shows up in
-  // exec-status stdout — `2>&1` alone does not capture Write-Host in PS 5+.
-  // Tee duplicates to a log file that Node tails via agent/file-read for
-  // real-time progress. Remove-Item runs only after $LASTEXITCODE is captured.
-  const runStub = [
-    `$ErrorActionPreference = 'Continue'`,
-    `$ec = 0`,
-    `try {`,
-    `  & '${ps1Path}' ${scriptArgs} *>&1 | Tee-Object -FilePath '${logPath}'`,
-    `  $ec = $LASTEXITCODE`,
-    `} catch {`,
-    `  $_ | Out-File -FilePath '${logPath}' -Append -Encoding ascii`,
-    `  $ec = 1`,
-    `}`,
-    `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue`,
-    `[Environment]::Exit($ec)`,
-    ''
-  ].join('\n');
+  // Mirror push-file's shape exactly: command=powershell.exe with a small
+  // input-data payload of FLAT top-level statements (no try/catch block —
+  // PS reading stdin as a REPL needs a blank line to flush multi-line blocks,
+  // and without one the block sits on the `>>` continuation prompt forever
+  // and the script never runs). `*>&1` merges ALL streams including Write-Host
+  // (Information stream). Tee duplicates to a log so Node can tail it via
+  // agent/file-read for live progress. Remove-Item runs only after
+  // $LASTEXITCODE is captured — script is guaranteed to finish first.
+  const runStub =
+    `$ErrorActionPreference = 'Continue'\n` +
+    `& '${ps1Path}' ${scriptArgs} *>&1 | Tee-Object -FilePath '${logPath}'\n` +
+    `$ec = $LASTEXITCODE\n` +
+    `if ($null -eq $ec) { $ec = 0 }\n` +
+    `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue\n` +
+    `[Environment]::Exit($ec)\n\n`;
 
   console.log(`[ScriptExec] Invoking on VM ${vmId} (stub: ${runStub.length} chars, log: ${logPath})`);
 
