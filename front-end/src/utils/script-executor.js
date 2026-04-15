@@ -202,23 +202,23 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
   const ts = Date.now();
   const rand = Math.random().toString(36).slice(2, 8);
   const ps1Path = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.ps1`;
-  const wrapperPath = `C:\\Windows\\Temp\\vuln_${ts}_${rand}_run.ps1`;
   const logPath = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.log`;
   const size = Buffer.byteLength(cleanedLocal, 'utf-8');
 
-  console.log(`[ScriptExec] Writing ${size}-byte script to ${ps1Path} on VM ${vmId}`);
+  console.log(`[ScriptExec] Writing ${size}-byte script to ${ps1Path} on VM ${vmId} (chunked, matches push-file)`);
   await guestWriteLargeText(node, vmId, ps1Path, cleanedLocal);
 
-  // Wrapper runs on the VM via `powershell -File`, so no interactive-stdin
-  // echo pollutes stdout. Tee duplicates script output to a log file we can
-  // tail in real time via agent/file-read. Script deletion happens *after*
-  // $LASTEXITCODE is captured — it is guaranteed to have finished. Log is
-  // left in place; Node reads it and removes it post-exit.
-  const wrapper = [
+  // Same invocation shape as push-file's reassemble step: command=powershell.exe
+  // with a small input-data payload. `*>&1` merges ALL PS streams (Output,
+  // Error, Warning, Verbose, Debug, Information) so Write-Host shows up in
+  // exec-status stdout — `2>&1` alone does not capture Write-Host in PS 5+.
+  // Tee duplicates to a log file that Node tails via agent/file-read for
+  // real-time progress. Remove-Item runs only after $LASTEXITCODE is captured.
+  const runStub = [
     `$ErrorActionPreference = 'Continue'`,
     `$ec = 0`,
     `try {`,
-    `  & '${ps1Path}' ${scriptArgs} 2>&1 | Tee-Object -FilePath '${logPath}'`,
+    `  & '${ps1Path}' ${scriptArgs} *>&1 | Tee-Object -FilePath '${logPath}'`,
     `  $ec = $LASTEXITCODE`,
     `} catch {`,
     `  $_ | Out-File -FilePath '${logPath}' -Append -Encoding ascii`,
@@ -227,15 +227,16 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
     `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue`,
     `[Environment]::Exit($ec)`,
     ''
-  ].join('\r\n');
-  await guestWriteLargeText(node, vmId, wrapperPath, wrapper);
+  ].join('\n');
 
-  const invocation = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${wrapperPath}"`;
-  console.log(`[ScriptExec] Invoking wrapper on VM ${vmId}: ${invocation}`);
+  console.log(`[ScriptExec] Invoking on VM ${vmId} (stub: ${runStub.length} chars, log: ${logPath})`);
 
   const result = await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
-    { command: invocation }
+    {
+      command: 'powershell.exe',
+      'input-data': runStub
+    }
   );
 
   const pid = result?.pid;
@@ -243,15 +244,18 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
 
   const finalStatus = await pollExecStatusWithLog(node, vmId, pid, logPath, onProgress);
 
-  // Cleanup wrapper + log on the VM (fire-and-forget).
+  // Cleanup log on the VM (fire-and-forget). Script.ps1 already removed by the stub.
   proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
-    { command: `powershell.exe -NoProfile -NonInteractive -Command "Remove-Item '${wrapperPath}','${logPath}' -Force -ErrorAction SilentlyContinue"` }
+    {
+      command: 'powershell.exe',
+      'input-data': `Remove-Item '${logPath}' -Force -ErrorAction SilentlyContinue\n[Environment]::Exit(0)\n`
+    }
   ).catch(() => {});
 
-  // If exec-status stdout is empty (no -File output capture on some PVE builds),
-  // fall back to the log contents we captured while tailing.
-  if (!finalStatus.stdout && finalStatus._logSoFar) {
+  // exec-status stdout includes the echoed input-data plus the script output.
+  // Prefer the clean log (script output only) when available.
+  if (finalStatus._logSoFar) {
     finalStatus.stdout = finalStatus._logSoFar;
   }
   delete finalStatus._logSoFar;
