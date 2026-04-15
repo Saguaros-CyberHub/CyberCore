@@ -101,48 +101,127 @@ async function pollExecStatus(node, vmId, pid, timeoutMs = 1800000) {
 }
 
 /**
- * Execute a PowerShell script on a Windows VM
- * Strategy: write script to file via file-write, then execute with short exec command
+ * Write a potentially-large text payload (e.g., a PowerShell script) to a path
+ * on the VM via the guest agent. Single file-write for small payloads, chunked
+ * write + PowerShell reassembly for payloads over Proxmox's 61,440-char base64 cap.
+ * The only traffic is over virtio-serial; no TCP path from VM to host is required.
+ */
+async function guestWriteLargeText(node, vmId, remotePath, content) {
+  // Normalize line endings to Windows CRLF so the file looks right when opened in PS.
+  const normalized = content.replace(/\r?\n/g, '\r\n');
+  const bytes = Buffer.from(normalized, 'utf-8');
+  const SINGLE_WRITE_LIMIT = 45 * 1024; // 45 KB raw -> ~60,000 b64 chars (under the 61,440 cap)
+
+  if (bytes.length <= SINGLE_WRITE_LIMIT) {
+    await proxmoxAPI('POST',
+      `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
+        file: remotePath,
+        content: bytes.toString('base64'),
+        encode: 1
+      }
+    );
+    return;
+  }
+
+  // Chunked path: write chunk_NNNN files into a temp dir, then reassemble with PS.
+  const tempDir = `C:\\Windows\\Temp\\psw_${Date.now()}`;
+  const totalChunks = Math.ceil(bytes.length / SINGLE_WRITE_LIMIT);
+
+  const mkdir = await proxmoxAPI('POST',
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
+      command: 'powershell.exe',
+      'input-data': `New-Item -ItemType Directory -Path '${tempDir}' -Force | Out-Null\n[Environment]::Exit(0)\n`
+    }
+  );
+  if (mkdir?.pid) await pollExecStatus(node, vmId, mkdir.pid, 10000);
+
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * SINGLE_WRITE_LIMIT;
+    const end = Math.min(start + SINGLE_WRITE_LIMIT, bytes.length);
+    const chunkPath = `${tempDir}\\chunk_${String(i).padStart(4, '0')}`;
+    await proxmoxAPI('POST',
+      `/api2/json/nodes/${node}/qemu/${vmId}/agent/file-write`, {
+        file: chunkPath,
+        content: bytes.subarray(start, end).toString('base64'),
+        encode: 1
+      }
+    );
+    if (i % 10 === 9) await new Promise(r => setTimeout(r, 300));
+  }
+
+  const reassemble = `
+$chunks = Get-ChildItem '${tempDir}\\chunk_*' | Sort-Object Name
+$parent = Split-Path -Parent '${remotePath}'
+if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+$out = [System.IO.File]::Create('${remotePath}')
+foreach ($c in $chunks) {
+    $b = [System.IO.File]::ReadAllBytes($c.FullName)
+    $out.Write($b, 0, $b.Length)
+}
+$out.Close()
+Remove-Item '${tempDir}' -Recurse -Force -ErrorAction SilentlyContinue
+[Environment]::Exit(0)
+`;
+  const rs = await proxmoxAPI('POST',
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
+      command: 'powershell.exe',
+      'input-data': reassemble
+    }
+  );
+  if (rs?.pid) await pollExecStatus(node, vmId, rs.pid, 60000);
+}
+
+/**
+ * Execute a PowerShell script on a Windows VM.
+ *
+ * Always writes the script to disk via guest agent file-write (chunked if large),
+ * then runs it with a short exec call whose `input-data` is just the invocation
+ * stub. This avoids piping the full script through virtio-serial in one message,
+ * which crashes the QEMU guest agent on larger payloads and trips Perl
+ * "Wide character" errors on any non-ASCII content.
  */
 async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = '') {
-  // Normalize content: strip BOM, smart quotes, and ALL non-ASCII characters
-  // (Proxmox's Perl backend crashes with "Wide character" on any non-ASCII in input-data)
+  // Strip BOM, map common smart-punctuation to ASCII, then drop any remaining
+  // non-ASCII. Proxmox's Perl API has no utf8::encode on this path, so any
+  // multi-byte character in the payload can crash the exec call.
   const cleaned = scriptContent
     .replace(/^\uFEFF/, '')
     .replace(/[\u201C\u201D]/g, '"')
     .replace(/[\u2018\u2019]/g, "'")
     .replace(/[\u2014]/g, '--')
+    .replace(/[\u2013]/g, '-')
+    .replace(/[\u2192]/g, '->')
+    .replace(/[\u2190]/g, '<-')
     .replace(/[^\x00-\x7F]/g, '');
 
-  // Pipe the entire script directly into PowerShell via stdin (input-data)
-  // Add script args handling: if scriptArgs provided, wrap in a param-forwarding block
-  let stdinContent;
-  if (scriptArgs) {
-    // For scripts with param() blocks, save to file first then run with args
-    // Use PowerShell to decode from base64 and save, then invoke
-    const b64 = Buffer.from(cleaned, 'utf-8').toString('base64');
-    const ts = Date.now();
-    const ps1Path = `C:\\Windows\\Temp\\vuln_${ts}.ps1`;
-    stdinContent = [
-      `$bytes = [Convert]::FromBase64String('${b64}')`,
-      `[IO.File]::WriteAllBytes('${ps1Path}', $bytes)`,
-      `& '${ps1Path}' ${scriptArgs}`,
-      `$ec = $LASTEXITCODE`,
-      `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue`,
-      `[Environment]::Exit($ec)`
-    ].join('\n') + '\n';
-  } else {
-    // No args — pipe script directly as stdin
-    // Use [Environment]::Exit() to force-kill the process cleanly
-    stdinContent = cleaned + '\n[Environment]::Exit($LASTEXITCODE)\n';
+  const strippedCount = scriptContent.length - cleaned.length;
+  if (strippedCount > 0) {
+    console.log(`[ScriptExec] Stripped ${strippedCount} non-ASCII chars from script (preserves agent stability)`);
   }
 
-  console.log(`[ScriptExec] Piping ${stdinContent.length} chars via stdin to powershell.exe on VM ${vmId}`);
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const ps1Path = `C:\\Windows\\Temp\\vuln_${ts}_${rand}.ps1`;
+  const size = Buffer.byteLength(cleaned, 'utf-8');
+
+  console.log(`[ScriptExec] Writing ${size}-byte script to ${ps1Path} on VM ${vmId}`);
+  await guestWriteLargeText(node, vmId, ps1Path, cleaned);
+
+  // Short invocation stub — fits trivially in input-data regardless of script size.
+  const runStub = [
+    `$ErrorActionPreference = 'Continue'`,
+    `& '${ps1Path}' ${scriptArgs}`,
+    `$ec = $LASTEXITCODE`,
+    `Remove-Item '${ps1Path}' -Force -ErrorAction SilentlyContinue`,
+    `[Environment]::Exit($ec)`
+  ].join('\n') + '\n';
+
+  console.log(`[ScriptExec] Invoking script on VM ${vmId} (stub: ${runStub.length} chars)`);
 
   const result = await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`, {
       command: 'powershell.exe',
-      'input-data': stdinContent
+      'input-data': runStub
     }
   );
 
