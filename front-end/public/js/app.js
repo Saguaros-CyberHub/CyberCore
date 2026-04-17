@@ -195,6 +195,7 @@ const Auth = {
     try {
       const data = await API.auth.me();
       this.user = data.user;
+      window.dispatchEvent(new Event('authReady'));
       return true;
     } catch (error) {
       this.user = null;

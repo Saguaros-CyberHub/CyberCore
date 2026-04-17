@@ -19,8 +19,9 @@ const { generatePassword } = require('../../../src/utils/password-generator');
 // HELPERS
 // ============================================================================
 
-async function getInstructorGroups(userId) {
+async function getInstructorGroups(userId, userRole) {
   const result = await query(`SELECT id, group_name, config, created_at FROM deployed_groups ORDER BY created_at DESC`);
+  if (userRole === 'admin') return result.rows;
   return result.rows.filter(g => {
     const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
     return (cfg.instructors || []).some(i => i.id === userId);
@@ -41,7 +42,7 @@ async function getGroupStudents(groupId) {
 // GET / — list students in instructor's groups with lane + session info
 router.get('/', async (req, res) => {
   try {
-    const groups = await getInstructorGroups(req.user.userId);
+    const groups = await getInstructorGroups(req.user.userId, req.user.role);
     if (groups.length === 0) return res.json({ groups: [], students: [] });
 
     const allStudents = [];
@@ -114,7 +115,7 @@ router.post('/', async (req, res) => {
 
   try {
     // Verify instructor belongs to this group
-    const groups = await getInstructorGroups(req.user.userId);
+    const groups = await getInstructorGroups(req.user.userId, req.user.role);
     const group = groups.find(g => g.id === group_id);
     if (!group) return res.status(403).json({ error: 'You are not an instructor for this group' });
 
@@ -192,7 +193,7 @@ router.delete('/:id', async (req, res) => {
 
   try {
     // Verify instructor has authority over this student
-    const groups = await getInstructorGroups(req.user.userId);
+    const groups = await getInstructorGroups(req.user.userId, req.user.role);
     let targetGroup = null;
     let targetCfg = null;
 
@@ -301,7 +302,7 @@ router.patch('/:id', async (req, res) => {
 
   try {
     // Verify instructor has authority
-    const groups = await getInstructorGroups(req.user.userId);
+    const groups = await getInstructorGroups(req.user.userId, req.user.role);
     let authorized = false;
     for (const g of groups) {
       const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;

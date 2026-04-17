@@ -21,13 +21,13 @@ try {
 // HELPERS
 // ============================================================================
 
-async function getInstructorStudentEmails(userId) {
+async function getInstructorStudentEmails(userId, userRole) {
   const result = await query(`SELECT id, config FROM deployed_groups`);
   const emails = new Set();
 
   for (const g of result.rows) {
     const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
-    if ((cfg.instructors || []).some(i => i.id === userId)) {
+    if (userRole === 'admin' || (cfg.instructors || []).some(i => i.id === userId)) {
       (cfg.students || []).forEach(s => { if (s.email) emails.add(s.email); });
     }
   }
@@ -45,7 +45,7 @@ router.get('/', async (req, res) => {
   }
 
   try {
-    const studentEmails = await getInstructorStudentEmails(req.user.userId);
+    const studentEmails = await getInstructorStudentEmails(req.user.userId, req.user.role);
     if (studentEmails.length === 0) return res.json({ sessions: [], summary: [] });
 
     const { from, to, limit: rawLimit } = req.query;
@@ -112,7 +112,7 @@ router.get('/:studentId/summary', async (req, res) => {
     const email = userResult.rows[0].email;
 
     // Verify instructor has authority
-    const studentEmails = await getInstructorStudentEmails(req.user.userId);
+    const studentEmails = await getInstructorStudentEmails(req.user.userId, req.user.role);
     if (!studentEmails.includes(email)) {
       return res.status(403).json({ error: 'Student not in your groups' });
     }
@@ -157,7 +157,7 @@ router.get('/:studentId/history', async (req, res) => {
     if (userResult.rows.length === 0) return res.status(404).json({ error: 'Student not found' });
     const email = userResult.rows[0].email;
 
-    const studentEmails = await getInstructorStudentEmails(req.user.userId);
+    const studentEmails = await getInstructorStudentEmails(req.user.userId, req.user.role);
     if (!studentEmails.includes(email)) {
       return res.status(403).json({ error: 'Student not in your groups' });
     }
