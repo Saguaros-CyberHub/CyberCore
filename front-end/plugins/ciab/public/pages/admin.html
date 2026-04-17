@@ -1627,7 +1627,7 @@
       try {
         const r = await api('GET', '/reconcile');
         const s = r.summary;
-        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0;
+        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0;
         const statusColor = hasIssues ? '#e53e3e' : '#38a169';
         const statusLabel = hasIssues ? 'Issues Found' : 'In Sync';
 
@@ -1658,6 +1658,28 @@
             </tr>`).join('');
         }
 
+        let zoneRows = '';
+        if (r.orphaned_zones?.length) {
+          zoneRows = r.orphaned_zones.map(z => `
+            <tr>
+              <td><code>${escHtml(z.zone)}</code></td>
+              <td>${z.type}</td>
+              <td>${z.vnet_count}</td>
+              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanZone('${escHtml(z.zone)}', this)">Destroy Zone + VNets</button></td>
+            </tr>`).join('');
+        }
+
+        let vnetRows = '';
+        if (r.orphaned_vnets?.length) {
+          vnetRows = r.orphaned_vnets.map(v => `
+            <tr>
+              <td><code>${escHtml(v.vnet)}</code></td>
+              <td>${escHtml(v.zone)}</td>
+              <td>${v.tag || '-'}</td>
+              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #d69e2e; color:#d69e2e; background:transparent;" onclick="destroyOrphanVNet('${escHtml(v.vnet)}', this)">Delete</button></td>
+            </tr>`).join('');
+        }
+
         panel.innerHTML = `
           <div style="background:var(--card-bg, white); border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid ${statusColor};">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
@@ -1666,7 +1688,7 @@
               </h3>
               <span style="font-size:0.75rem; color:var(--gray-400);">${r.timestamp}</span>
             </div>
-            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:0.75rem; margin-bottom:1rem;">
+            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:0.75rem; margin-bottom:1rem;">
               <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
                 <div style="font-size:1.25rem; font-weight:700;">${s.proxmox_cyberhub_vms}</div>
                 <div style="font-size:0.75rem; color:var(--gray-500);">Proxmox VMs</div>
@@ -1683,21 +1705,39 @@
                 <div style="font-size:1.25rem; font-weight:700; color:${s.stale_in_db?'#d69e2e':'inherit'};">${s.stale_in_db}</div>
                 <div style="font-size:0.75rem; color:var(--gray-500);">Stale DB Records</div>
               </div>
-              <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
-                <div style="font-size:1.25rem; font-weight:700;">${s.sdn_vnets}</div>
-                <div style="font-size:0.75rem; color:var(--gray-500);">SDN VNets</div>
+              <div style="text-align:center; padding:0.5rem; background:${s.orphaned_zones?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_zones?'#e53e3e':'inherit'};">${s.orphaned_zones}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Zones</div>
+              </div>
+              <div style="text-align:center; padding:0.5rem; background:${s.orphaned_vnets?'#fffff0':'var(--bg, #f7fafc)'}; border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_vnets?'#d69e2e':'inherit'};">${s.orphaned_vnets}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned VNets</div>
               </div>
             </div>
             ${orphanRows ? `
-              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned on Proxmox (no DB lane)</h4>
-              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">These VMs exist on Proxmox but have no matching lane in the database.</p>
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned VMs (no DB lane)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">VMs in CyberHub ID ranges with no matching lane in the database.</p>
               <table class="admin-table" style="font-size:0.8rem;">
                 <thead><tr><th>VMID</th><th>Name</th><th>Role</th><th>Node</th><th>Status</th><th>VXLAN</th><th>Action</th></tr></thead>
                 <tbody>${orphanRows}</tbody>
               </table>` : ''}
+            ${zoneRows ? `
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned SDN Zones (no challenge template)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">VXLAN zones on Proxmox with no matching challenge template in the database. Destroying a zone also removes all its VNets.</p>
+              <table class="admin-table" style="font-size:0.8rem;">
+                <thead><tr><th>Zone</th><th>Type</th><th>VNets</th><th>Action</th></tr></thead>
+                <tbody>${zoneRows}</tbody>
+              </table>` : ''}
+            ${vnetRows ? `
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Orphaned VNets (no active lane)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">VNets whose VXLAN tag has no active lane. May be leftover from deleted deployments.</p>
+              <table class="admin-table" style="font-size:0.8rem;">
+                <thead><tr><th>VNet</th><th>Zone</th><th>Tag</th><th>Action</th></tr></thead>
+                <tbody>${vnetRows}</tbody>
+              </table>` : ''}
             ${staleRows ? `
-              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Stale in DB (VMs gone from Proxmox)</h4>
-              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">These lanes exist in the database but their VMs are no longer on Proxmox.</p>
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Stale DB Lanes (VMs gone from Proxmox)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">Lanes in the database whose VMs no longer exist on Proxmox.</p>
               <table class="admin-table" style="font-size:0.8rem;">
                 <thead><tr><th>Lane ID</th><th>Name</th><th>VXLAN</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
                 <tbody>${staleRows}</tbody>
@@ -1726,6 +1766,38 @@
         alert('Failed to destroy VM: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Destroy';
+      }
+    }
+
+    async function destroyOrphanZone(zone, btn) {
+      if (!confirm('Destroy zone "' + zone + '" and ALL its VNets? This cannot be undone.')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        const result = await api('POST', '/reconcile/destroy-zone', { zone });
+        btn.textContent = 'Destroyed (' + result.vnets_removed + ' VNets)';
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+      } catch (e) {
+        alert('Failed to destroy zone: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Destroy Zone + VNets';
+      }
+    }
+
+    async function destroyOrphanVNet(vnet, btn) {
+      if (!confirm('Delete VNet "' + vnet + '"?')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await api('POST', '/reconcile/destroy-vnet', { vnet });
+        btn.textContent = 'Deleted';
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Delete';
       }
     }
 

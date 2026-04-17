@@ -1065,7 +1065,47 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
       });
     }
 
-    // 6. Build set of VM IDs that match CyberHub ID ranges on Proxmox
+    // 6. Audit SDN zones — cross-reference against challenge templates
+    let pxZones = [];
+    try {
+      const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
+      pxZones = (Array.isArray(zones) ? zones : []).filter(z => z.type === 'vxlan');
+    } catch (e) { /* SDN may not be configured */ }
+
+    const dbChallenges = (await cybercoreQuery(
+      `SELECT challenge_key, name, spec FROM crucible_challenge`
+    )).rows;
+
+    // Build set of zone names the DB knows about (from challenge_key or spec.zone.abbrev)
+    const dbZoneNames = new Set();
+    for (const ch of dbChallenges) {
+      const spec = typeof ch.spec === 'string' ? JSON.parse(ch.spec || '{}') : (ch.spec || {});
+      const zoneName = spec.zone?.abbrev
+        || ch.challenge_key?.substring(0, 8)?.replace(/[^a-z0-9]/gi, '').substring(0, 8);
+      if (zoneName) dbZoneNames.add(zoneName);
+    }
+
+    // Also check if any active lane's VNets reference this zone
+    const laneZoneNames = new Set();
+    for (const vnet of pxVNets) {
+      if (vnet.zone) laneZoneNames.add(vnet.zone);
+    }
+
+    const orphanedZones = pxZones
+      .filter(z => !dbZoneNames.has(z.zone) && z.zone !== 'localnetwork')
+      .map(z => ({
+        zone: z.zone,
+        type: z.type,
+        has_vnets: laneZoneNames.has(z.zone),
+        vnet_count: pxVNets.filter(v => v.zone === z.zone).length
+      }));
+
+    // VNets with no active lane using their tag
+    const activeVxlanIds = new Set(dbLanes.map(l => l.vxlan_id).filter(Boolean));
+    const orphanedVNets = pxVNets.filter(v => v.tag && !activeVxlanIds.has(v.tag))
+      .map(v => ({ vnet: v.vnet, zone: v.zone, tag: v.tag, alias: v.alias }));
+
+    // 7. Build set of VM IDs that match CyberHub ID ranges on Proxmox
     const CYBERHUB_RANGES = [
       { min: 100000, max: 199999, role: 'gateway' },
       { min: 600000, max: 699999, role: 'challenge' },
@@ -1119,11 +1159,16 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
         db_expected_vms: dbExpectedVmIds.size,
         orphaned_on_proxmox: orphanedOnProxmox.length,
         stale_in_db: staleInDB.length,
+        sdn_zones: pxZones.length,
+        orphaned_zones: orphanedZones.length,
         sdn_vnets: pxVNets.length,
+        orphaned_vnets: orphanedVNets.length,
         deployed_groups: dbGroups.length
       },
       orphaned_on_proxmox: orphanedOnProxmox,
       stale_in_db: staleInDB,
+      orphaned_zones: orphanedZones,
+      orphaned_vnets: orphanedVNets,
       sdn_vnets: pxVNets,
       all_proxmox_cyberhub_vms: pxCyberhubVMs
     });
@@ -1169,6 +1214,45 @@ router.post('/reconcile/mark-deleted', authenticateToken, adminOnly, async (req,
     );
     console.log(`[Reconcile] Marked lane ${lane_id} as deleted (stale — no Proxmox VMs)`);
     res.json({ ok: true, lane_id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/reconcile/destroy-zone — remove an orphaned SDN zone and its VNets
+router.post('/reconcile/destroy-zone', authenticateToken, adminOnly, async (req, res) => {
+  const { zone } = req.body;
+  if (!zone) return res.status(400).json({ error: 'zone required' });
+  try {
+    // First delete all VNets in the zone
+    const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+    const zoneVnets = (Array.isArray(vnets) ? vnets : []).filter(v => v.zone === zone);
+    for (const vnet of zoneVnets) {
+      console.log(`[Reconcile] Deleting VNet '${vnet.vnet}' in zone '${zone}'`);
+      await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet.vnet}`);
+    }
+    // Then delete the zone itself
+    console.log(`[Reconcile] Deleting SDN zone '${zone}'`);
+    await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/zones/${zone}`);
+    // Apply SDN changes
+    try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (e) { /* best effort */ }
+    console.log(`[Reconcile] Zone '${zone}' destroyed (${zoneVnets.length} VNets removed)`);
+    res.json({ ok: true, zone, vnets_removed: zoneVnets.length });
+  } catch (error) {
+    console.error(`[Reconcile] Failed to destroy zone ${zone}: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/reconcile/destroy-vnet — remove a single orphaned VNet
+router.post('/reconcile/destroy-vnet', authenticateToken, adminOnly, async (req, res) => {
+  const { vnet } = req.body;
+  if (!vnet) return res.status(400).json({ error: 'vnet required' });
+  try {
+    await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet}`);
+    try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (e) { /* best effort */ }
+    console.log(`[Reconcile] Deleted orphaned VNet '${vnet}'`);
+    res.json({ ok: true, vnet });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
