@@ -454,6 +454,7 @@
         <div class="tab-content" id="tab-lanes">
           <div class="action-bar">
             <button class="btn btn-outline" onclick="loadLanes()">Refresh</button>
+            <button class="btn btn-outline" onclick="runReconcile()" id="btnReconcile" style="border-color:#ed8936; color:#ed8936;">Audit Proxmox</button>
             <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
               <option value="">All Statuses</option>
               <option value="active">Active</option>
@@ -464,6 +465,7 @@
             </select>
           </div>
           <div id="lanesTable"></div>
+          <div id="reconcileResults" style="display:none; margin-top:1rem;"></div>
 
           <!-- Persistent script execution panel (stays visible when modal closes) -->
           <div id="scriptExecPanel" style="display: none; margin-top: 1rem; background: var(--bg-card, white); border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden;">
@@ -1607,6 +1609,140 @@
           </table>`;
       } catch (e) {
         container.innerHTML = `<p style="color: #e53e3e;">Error loading lanes: ${e.message}</p>`;
+      }
+    }
+
+    // ============================================================================
+    // PROXMOX AUDIT / RECONCILIATION
+    // ============================================================================
+
+    async function runReconcile() {
+      const btn = document.getElementById('btnReconcile');
+      const panel = document.getElementById('reconcileResults');
+      btn.disabled = true;
+      btn.textContent = 'Auditing...';
+      panel.style.display = 'block';
+      panel.innerHTML = '<p style="color: var(--gray-500);">Querying Proxmox and DB...</p>';
+
+      try {
+        const r = await api('GET', '/reconcile');
+        const s = r.summary;
+        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0;
+        const statusColor = hasIssues ? '#e53e3e' : '#38a169';
+        const statusLabel = hasIssues ? 'Issues Found' : 'In Sync';
+
+        let orphanRows = '';
+        if (r.orphaned_on_proxmox.length) {
+          orphanRows = r.orphaned_on_proxmox.map(vm => `
+            <tr>
+              <td><code>${vm.vmid}</code></td>
+              <td>${escHtml(vm.name)}</td>
+              <td>${vm.role}</td>
+              <td>${vm.node}</td>
+              <td><span style="color:${vm.status==='running'?'#38a169':'#a0aec0'}">${vm.status}</span></td>
+              <td>VXLAN ${vm.vxlan_inferred}</td>
+              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanVM(${vm.vmid}, '${vm.node}', '${vm.type}', this)">Destroy</button></td>
+            </tr>`).join('');
+        }
+
+        let staleRows = '';
+        if (r.stale_in_db.length) {
+          staleRows = r.stale_in_db.map(lane => `
+            <tr>
+              <td><code style="font-size:0.75rem;">${escHtml((lane.lane_id||'').substring(0,8))}...</code></td>
+              <td>${escHtml(lane.name || 'unnamed')}</td>
+              <td>${lane.vxlan_id || '-'}</td>
+              <td>${lane.status}</td>
+              <td>${new Date(lane.created_at).toLocaleDateString()}</td>
+              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #d69e2e; color:#d69e2e; background:transparent;" onclick="markLaneDeleted('${lane.lane_id}', this)">Mark Deleted</button></td>
+            </tr>`).join('');
+        }
+
+        panel.innerHTML = `
+          <div style="background:var(--card-bg, white); border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid ${statusColor};">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+              <h3 style="margin:0; font-size:1rem;">Proxmox Audit
+                <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:12px; color:white; background:${statusColor}; margin-left:0.5rem;">${statusLabel}</span>
+              </h3>
+              <span style="font-size:0.75rem; color:var(--gray-400);">${r.timestamp}</span>
+            </div>
+            <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:0.75rem; margin-bottom:1rem;">
+              <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700;">${s.proxmox_cyberhub_vms}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Proxmox VMs</div>
+              </div>
+              <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700;">${s.db_active_lanes}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">DB Lanes</div>
+              </div>
+              <div style="text-align:center; padding:0.5rem; background:${s.orphaned_on_proxmox?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_on_proxmox?'#e53e3e':'inherit'};">${s.orphaned_on_proxmox}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned VMs</div>
+              </div>
+              <div style="text-align:center; padding:0.5rem; background:${s.stale_in_db?'#fffff0':'var(--bg, #f7fafc)'}; border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700; color:${s.stale_in_db?'#d69e2e':'inherit'};">${s.stale_in_db}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Stale DB Records</div>
+              </div>
+              <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700;">${s.sdn_vnets}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">SDN VNets</div>
+              </div>
+            </div>
+            ${orphanRows ? `
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned on Proxmox (no DB lane)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">These VMs exist on Proxmox but have no matching lane in the database.</p>
+              <table class="admin-table" style="font-size:0.8rem;">
+                <thead><tr><th>VMID</th><th>Name</th><th>Role</th><th>Node</th><th>Status</th><th>VXLAN</th><th>Action</th></tr></thead>
+                <tbody>${orphanRows}</tbody>
+              </table>` : ''}
+            ${staleRows ? `
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Stale in DB (VMs gone from Proxmox)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">These lanes exist in the database but their VMs are no longer on Proxmox.</p>
+              <table class="admin-table" style="font-size:0.8rem;">
+                <thead><tr><th>Lane ID</th><th>Name</th><th>VXLAN</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
+                <tbody>${staleRows}</tbody>
+              </table>` : ''}
+            ${!hasIssues ? '<p style="color:#38a169; font-weight:600; margin-top:0.5rem;">All clear -- DB and Proxmox are in sync.</p>' : ''}
+            <button class="btn btn-outline" style="margin-top:1rem; font-size:0.8rem;" onclick="document.getElementById('reconcileResults').style.display='none'">Dismiss</button>
+          </div>`;
+      } catch (e) {
+        panel.innerHTML = `<p style="color:#e53e3e;">Audit failed: ${escHtml(e.message)}</p>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Audit Proxmox';
+      }
+    }
+
+    async function destroyOrphanVM(vmid, node, type, btn) {
+      if (!confirm('Destroy VM ' + vmid + ' on ' + node + '? This cannot be undone.')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await api('POST', '/reconcile/destroy-vm', { vmid, node, type });
+        btn.textContent = 'Destroyed';
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+      } catch (e) {
+        alert('Failed to destroy VM: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Destroy';
+      }
+    }
+
+    async function markLaneDeleted(laneId, btn) {
+      if (!confirm('Mark this lane as deleted in the DB? The VXLAN will be freed for reuse.')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await api('POST', '/reconcile/mark-deleted', { lane_id: laneId });
+        btn.textContent = 'Cleaned';
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+        loadLanes();
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Mark Deleted';
       }
     }
 
