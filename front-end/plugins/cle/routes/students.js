@@ -162,21 +162,37 @@ router.post('/', async (req, res) => {
     const groupSlug = group.group_name.toLowerCase().replace(/[^a-z0-9]/g, '');
     const nextNum = (cfg.students || []).length + 1;
 
-    const userId = uuidv4();
     const studentEmail = email || `${groupSlug}-student${nextNum}@clinic.local`;
     const studentFirstName = first_name || 'Student';
     const studentLastName = last_name || `${nextNum}`;
     const password = generatePassword();
     const passwordHash = await bcrypt.hash(password, 12);
 
-    // 1. Create cybercore_user
-    await cybercoreQuery(
-      `INSERT INTO cybercore_user (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
-       VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, 'student', true, NOW())`,
-      [userId, studentEmail, studentEmail, passwordHash, studentFirstName, studentLastName, group.group_name]
+    // 1. Check if user already exists (e.g., previously removed student with same email)
+    const existingUser = await cybercoreQuery(
+      `SELECT user_id FROM cybercore_user WHERE username = $1`, [studentEmail]
     );
 
-    // 2. Create Guacamole user + grant group permission
+    let userId;
+    if (existingUser.rows.length > 0) {
+      userId = existingUser.rows[0].user_id;
+      await cybercoreQuery(
+        `UPDATE cybercore_user SET password_hash = $1, password_alg = 'bcrypt',
+         first_name = $2, last_name = $3, organization = $4, role = 'student', updated_at = NOW()
+         WHERE user_id = $5`,
+        [passwordHash, studentFirstName, studentLastName, group.group_name, userId]
+      );
+      console.log(`[CLE] Re-activated existing user ${studentEmail} (${userId})`);
+    } else {
+      userId = uuidv4();
+      await cybercoreQuery(
+        `INSERT INTO cybercore_user (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
+         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, 'student', true, NOW())`,
+        [userId, studentEmail, studentEmail, passwordHash, studentFirstName, studentLastName, group.group_name]
+      );
+    }
+
+    // 2. Create Guacamole user (or reset password if exists) + grant group permission
     let guacCreated = false;
     try {
       await guacAPI('POST', '/users', {
@@ -185,13 +201,23 @@ router.post('/', async (req, res) => {
         attributes: { disabled: null, timezone: 'America/Phoenix' }
       });
       guacCreated = true;
-      if (cfg.guac_group?.identifier) {
+    } catch (e) {
+      // User may already exist — reset their password instead
+      try {
+        await guacAPI('PUT', `/users/${encodeURIComponent(studentEmail)}/password`, {
+          oldPassword: null, newPassword: password
+        });
+        guacCreated = true;
+      } catch (_) {
+        console.warn(`[CLE] Guac user create/reset failed for ${studentEmail}: ${e.message}`);
+      }
+    }
+    if (guacCreated && cfg.guac_group?.identifier) {
+      try {
         await guacAPI('PATCH', `/users/${encodeURIComponent(studentEmail)}/permissions`, [
           { op: 'add', path: `/connectionGroupPermissions/${cfg.guac_group.identifier}`, value: 'READ' }
         ]);
-      }
-    } catch (e) {
-      console.warn(`[CLE] Guac user creation failed for ${studentEmail}: ${e.message}`);
+      } catch (_) {}
     }
 
     // 3. Update deployed_groups config
