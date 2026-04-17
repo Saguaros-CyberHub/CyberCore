@@ -234,7 +234,7 @@ async function executePowerShellViaFile(node, vmId, scriptContent, scriptArgs = 
     `$ErrorActionPreference = 'Continue'\n` +
     `$sz = (Get-Item '${ps1Path}' -ErrorAction SilentlyContinue).Length\n` +
     `Write-Host "[ScriptExec] Running ${ps1Path} ($sz bytes)"\n` +
-    `& '${ps1Path}' ${scriptArgs} *>&1 | Tee-Object -FilePath '${logPath}'\n` +
+    `& '${ps1Path}' ${scriptArgs} *>&1 | Tee-Object -FilePath '${logPath}' -Encoding utf8\n` +
     `$ec = $LASTEXITCODE\n` +
     `if ($null -eq $ec) { $ec = 0 }\n` +
     `Write-Host "[ScriptExec] Exit code: $ec"\n` +
@@ -450,10 +450,16 @@ async function updateScriptStatus(deploymentId, vmName, scriptSlug, status, erro
 
     const scripts = result.rows[0].selected_scripts || [];
     const entry = scripts.find(s => s.vm_name === vmName && s.script_slug === scriptSlug);
+    // Sanitize: strip UTF-16 BOM, NULL bytes, and any other characters JSONB rejects.
+    // Tee-Object on PS 5.1 defaults to UTF-16LE which leaves \u0000 bytes between chars;
+    // Postgres JSONB rejects \u0000 with "unsupported Unicode escape sequence".
+    const clean = (s) => typeof s === 'string'
+      ? s.replace(/^\uFEFF/, '').replace(/\u0000/g, '').replace(/\uFFFD/g, '')
+      : s;
     if (entry) {
       entry.status = status;
-      if (error) entry.error = error;
-      if (output) entry.output = output;
+      if (error) entry.error = clean(error);
+      if (output) entry.output = clean(output);
       entry.updated_at = new Date().toISOString();
     }
 

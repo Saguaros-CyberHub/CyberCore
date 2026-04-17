@@ -4,15 +4,22 @@
     WinRM (5985), and RDP (3389) on the MedAlliance-WIN Tier 1 target.
 
 .NOTES
-    SQL Server 2019 Express must already be installed in the template.
-    This script configures it (SA password, TCP, xp_cmdshell, databases).
+    Originally assumed Windows Server 2019 with SQL Express pre-installed.
+    Now also runs on Windows 11 client SKUs (25H2) for instructor testing.
+
+    SQL configuration is OPTIONAL — if no MSSQL* service is detected, the
+    SQL section is skipped but all other artifacts (IT_Docs breadcrumb that
+    references the SA password, planted creds, etc.) remain intact, so
+    students still have a consistent lab story.
 #>
 
 param(
-    [Parameter(Mandatory=$true)][string]$WinIP
+    [Parameter(Mandatory=$true)][string]$WinIP,
+    [switch]$SkipSQL
 )
 
 $ErrorActionPreference = "Continue"
+$script:SectionFailures = @()
 
 function Write-Phase {
     param([string]$Msg)
@@ -20,29 +27,118 @@ function Write-Phase {
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  1. IIS WEB SERVER
+#  0. SKU DETECTION + DEPLOY-CONTEXT MARKER
 # ═══════════════════════════════════════════════════════════════
-Write-Phase "Installing IIS features..."
+$script:OSInfo   = Get-CimInstance Win32_OperatingSystem
+$script:IsServer = $script:OSInfo.ProductType -ne 1  # 1=workstation, 2=DC, 3=member server
+$script:OSCaption = $script:OSInfo.Caption
+Write-Host "[Prereq] Detected: $script:OSCaption (IsServer=$script:IsServer)"
 
-Install-WindowsFeature -Name `
-    Web-Server, Web-Common-Http, Web-Default-Doc, Web-Dir-Browsing, `
-    Web-Http-Errors, Web-Static-Content, Web-Http-Logging, `
-    Web-Stat-Compression, Web-Filtering, Web-Asp-Net45, `
-    Web-Net-Ext45, Web-ISAPI-Ext, Web-ISAPI-Filter, `
-    Web-Mgmt-Console, Web-Mgmt-Service, `
-    Web-Ftp-Server, Web-Ftp-Service `
-    -IncludeManagementTools -ErrorAction SilentlyContinue
+# Persist a small marker file so the sibling scripts don't have to re-detect.
+$ctxDir = "C:\ProgramData\MedAlliance"
+if (-not (Test-Path $ctxDir)) { New-Item -Path $ctxDir -ItemType Directory -Force | Out-Null }
+$ctxPath = Join-Path $ctxDir "deploy-context.json"
+$ctx = @{
+    OSCaption = $script:OSCaption
+    IsServer  = $script:IsServer
+    WinIP     = $WinIP
+    Timestamp = (Get-Date).ToString("s")
+}
+$ctx | ConvertTo-Json | Set-Content -Path $ctxPath -Encoding UTF8
+Write-Phase "Wrote deploy context marker: $ctxPath"
 
-Import-Module WebAdministration -ErrorAction SilentlyContinue
+# ═══════════════════════════════════════════════════════════════
+#  Helper: Install-MedFeature — branches Server vs Client feature API
+# ═══════════════════════════════════════════════════════════════
+# On Server SKUs: Install-WindowsFeature <ServerName> -IncludeManagementTools
+# On Client SKUs: Enable-WindowsOptionalFeature -Online -FeatureName <ClientName> -NoRestart
+function Install-MedFeature {
+    param(
+        [Parameter(Mandatory=$true)][string]$ServerName,
+        [Parameter(Mandatory=$true)][string]$ClientName
+    )
+    try {
+        if ($script:IsServer) {
+            if (Get-Command Install-WindowsFeature -ErrorAction SilentlyContinue) {
+                Install-WindowsFeature -Name $ServerName -IncludeManagementTools -ErrorAction SilentlyContinue | Out-Null
+                Write-Phase "  [Feature:Server] $ServerName enabled."
+            } else {
+                Write-Warning "  [Feature:Server] Install-WindowsFeature unavailable for $ServerName"
+            }
+        } else {
+            if (Get-Command Enable-WindowsOptionalFeature -ErrorAction SilentlyContinue) {
+                $state = (Get-WindowsOptionalFeature -Online -FeatureName $ClientName -ErrorAction SilentlyContinue).State
+                if ($state -ne 'Enabled') {
+                    Enable-WindowsOptionalFeature -Online -FeatureName $ClientName -NoRestart -All -ErrorAction SilentlyContinue | Out-Null
+                    Write-Phase "  [Feature:Client] $ClientName enabled."
+                } else {
+                    Write-Phase "  [Feature:Client] $ClientName already enabled."
+                }
+            } else {
+                Write-Warning "  [Feature:Client] Enable-WindowsOptionalFeature unavailable for $ClientName"
+            }
+        }
+    } catch {
+        Write-Warning "  [Feature] Could not enable $ServerName/$ClientName : $_"
+    }
+}
 
-# ── Default site on port 80: corporate landing page ──
-$wwwroot = "C:\inetpub\wwwroot"
+# ═══════════════════════════════════════════════════════════════
+#  1. IIS + FTP FEATURE INSTALLATION
+# ═══════════════════════════════════════════════════════════════
+try {
+    Write-Phase "[Section] Starting IIS/FTP feature install..."
 
-# Remove default IIS pages
-Remove-Item "$wwwroot\iisstart.htm"  -Force -ErrorAction SilentlyContinue
-Remove-Item "$wwwroot\iisstart.png"  -Force -ErrorAction SilentlyContinue
+    # Core IIS
+    Install-MedFeature -ServerName 'Web-Server'         -ClientName 'IIS-WebServer'
+    Install-MedFeature -ServerName 'Web-Common-Http'    -ClientName 'IIS-CommonHttpFeatures'
+    Install-MedFeature -ServerName 'Web-Default-Doc'    -ClientName 'IIS-DefaultDocument'
+    Install-MedFeature -ServerName 'Web-Dir-Browsing'   -ClientName 'IIS-DirectoryBrowsing'
+    Install-MedFeature -ServerName 'Web-Http-Errors'    -ClientName 'IIS-HttpErrors'
+    Install-MedFeature -ServerName 'Web-Static-Content' -ClientName 'IIS-StaticContent'
+    Install-MedFeature -ServerName 'Web-Http-Logging'   -ClientName 'IIS-HttpLogging'
+    Install-MedFeature -ServerName 'Web-Stat-Compression' -ClientName 'IIS-HttpCompressionStatic'
+    Install-MedFeature -ServerName 'Web-Filtering'      -ClientName 'IIS-RequestFiltering'
+    Install-MedFeature -ServerName 'Web-Asp-Net45'      -ClientName 'IIS-ASPNET45'
+    Install-MedFeature -ServerName 'Web-Net-Ext45'      -ClientName 'IIS-NetFxExtensibility45'
+    Install-MedFeature -ServerName 'Web-ISAPI-Ext'      -ClientName 'IIS-ISAPIExtensions'
+    Install-MedFeature -ServerName 'Web-ISAPI-Filter'   -ClientName 'IIS-ISAPIFilter'
+    Install-MedFeature -ServerName 'Web-Mgmt-Console'   -ClientName 'IIS-ManagementConsole'
 
-$landingPage = @"
+    # FTP
+    Install-MedFeature -ServerName 'Web-Ftp-Server'     -ClientName 'IIS-FTPServer'
+    Install-MedFeature -ServerName 'Web-Ftp-Service'    -ClientName 'IIS-FTPSvc'
+    Install-MedFeature -ServerName 'Web-Ftp-Ext'        -ClientName 'IIS-FTPExtensibility'
+
+    Write-Phase "[Section] IIS/FTP features completed."
+} catch {
+    Write-Warning "[Section] IIS/FTP feature install failed: $_"
+    $script:SectionFailures += 'IIS-Features'
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  2. IIS SITE CONFIGURATION (default + HealthMonitor on 8080)
+# ═══════════════════════════════════════════════════════════════
+try {
+    Write-Phase "[Section] Starting IIS site configuration..."
+
+    if (-not (Get-Module -ListAvailable WebAdministration)) {
+        Write-Warning "[IIS] WebAdministration module not available — IIS site config skipped."
+        $script:SectionFailures += 'IIS-Sites'
+    } else {
+        Import-Module WebAdministration -ErrorAction Stop
+
+        # ── Default site on port 80: corporate landing page ──
+        $wwwroot = "C:\inetpub\wwwroot"
+        if (-not (Test-Path $wwwroot)) {
+            New-Item -Path $wwwroot -ItemType Directory -Force | Out-Null
+        }
+
+        # Remove default IIS pages (only if present)
+        Remove-Item "$wwwroot\iisstart.htm" -Force -ErrorAction SilentlyContinue
+        Remove-Item "$wwwroot\iisstart.png" -Force -ErrorAction SilentlyContinue
+
+        $landingPage = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -132,16 +228,16 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;color:#333}
 </body>
 </html>
 "@
-Set-Content -Path "$wwwroot\index.html" -Value $landingPage -Encoding UTF8
+        Set-Content -Path "$wwwroot\index.html" -Value $landingPage -Encoding UTF8
+        Write-Phase "Default site (port 80) configured."
 
-Write-Phase "Default site (port 80) configured."
+        # ── Health Monitor dashboard on port 8080 ──
+        $monitorPath = "C:\inetpub\healthmonitor"
+        if (-not (Test-Path $monitorPath)) {
+            New-Item -Path $monitorPath -ItemType Directory -Force | Out-Null
+        }
 
-# ── Health Monitor dashboard on port 8080 ──
-$monitorPath = "C:\inetpub\healthmonitor"
-New-Item -Path $monitorPath -ItemType Directory -Force | Out-Null
-
-# Login page
-$loginPage = @"
+        $loginPage = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -184,14 +280,10 @@ button:hover{background:#b91c1c}
 </body>
 </html>
 "@
-Set-Content -Path "$monitorPath\index.html" -Value $loginPage -Encoding UTF8
+        Set-Content -Path "$monitorPath\index.html" -Value $loginPage -Encoding UTF8
 
-# Dashboard page (no real auth — form just redirects here)
-# Replace X with actual subnet offset at deploy time
-$dashboardContent = Get-Content -Raw -Path "$monitorPath\index.html" -ErrorAction SilentlyContinue
-$subnetRef = $WinIP -replace '\.\d+$', ''  # e.g., 192.168.10
-
-$dashboardPage = @"
+        $subnetRef = $WinIP -replace '\.\d+$', ''  # e.g., 192.168.10
+        $dashboardPage = @"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -320,29 +412,43 @@ Connection: <code>${WinIP},1433</code> | Credentials in IT_Docs share (server_se
 </body>
 </html>
 "@
-Set-Content -Path "$monitorPath\dashboard.html" -Value $dashboardPage -Encoding UTF8
+        Set-Content -Path "$monitorPath\dashboard.html" -Value $dashboardPage -Encoding UTF8
 
-# Create the IIS site on port 8080
-try {
-    Remove-Website -Name "HealthMonitor" -ErrorAction SilentlyContinue
-    New-Website -Name "HealthMonitor" -Port 8080 -PhysicalPath $monitorPath -Force | Out-Null
-    Start-Website -Name "HealthMonitor"
-    Write-Phase "Health Monitor site (port 8080) created."
+        # Create/refresh the IIS site on port 8080 (guarded)
+        if (Get-Command Get-Website -ErrorAction SilentlyContinue) {
+            if (Get-Website -Name "HealthMonitor" -ErrorAction SilentlyContinue) {
+                Remove-Website -Name "HealthMonitor" -ErrorAction SilentlyContinue
+            }
+            New-Website -Name "HealthMonitor" -Port 8080 -PhysicalPath $monitorPath -Force | Out-Null
+            Start-Website -Name "HealthMonitor" -ErrorAction SilentlyContinue
+            Write-Phase "Health Monitor site (port 8080) created."
+        } else {
+            Write-Warning "[IIS] Get-Website unavailable — skipping HealthMonitor site creation."
+        }
+
+        Write-Phase "[Section] IIS site configuration completed."
+    }
 } catch {
-    Write-Phase "WARNING: Could not create HealthMonitor site — $($_.Exception.Message)"
+    Write-Warning "[Section] IIS site configuration failed: $_"
+    $script:SectionFailures += 'IIS-Sites'
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  2. FTP SERVICE (IIS FTP)
+#  3. FTP SERVICE (IIS FTP)
 # ═══════════════════════════════════════════════════════════════
-Write-Phase "Configuring FTP..."
+try {
+    Write-Phase "[Section] Starting FTP configuration..."
 
-$ftpRoot = "C:\inetpub\ftproot"
-$ftpLogs = "$ftpRoot\logs"
-New-Item -Path $ftpLogs -ItemType Directory -Force | Out-Null
+    $ftpRoot = "C:\inetpub\ftproot"
+    $ftpLogs = "$ftpRoot\logs"
+    if (-not (Test-Path $ftpLogs)) {
+        New-Item -Path $ftpLogs -ItemType Directory -Force | Out-Null
+    }
 
-# Fake log files with info leakage
-@"
+    $subnetRef = $WinIP -replace '\.\d+$', ''
+
+    # Fake log files with info leakage
+    @"
 #Software: MedAlliance Health Monitor v3.1
 #Date: 2024-11-15
 #Fields: date time s-ip cs-username s-computername s-port cs-method result
@@ -359,7 +465,7 @@ New-Item -Path $ftpLogs -ItemType Directory -Force | Out-Null
 2024-11-09 14:22:11 ${subnetRef}.20 j.thompson MEDALLIANCE-WIN 445 SMB_CONNECT IT_Docs
 "@ | Set-Content -Path "$ftpLogs\monitor_2024-11.log" -Encoding UTF8
 
-@"
+    @"
 #Software: Microsoft Internet Information Services 10.0
 #Date: 2024-11-01
 #Fields: date time s-ip cs-method cs-uri-stem s-port cs-username c-ip sc-status
@@ -371,7 +477,7 @@ New-Item -Path $ftpLogs -ItemType Directory -Force | Out-Null
 2024-11-13 09:00:00 ${WinIP} GET / 80 - ${subnetRef}.20 200
 "@ | Set-Content -Path "$ftpLogs\iis_access_2024-11.log" -Encoding UTF8
 
-@"
+    @"
 MedAlliance Health Partners — FTP Service
 ==========================================
 Read-only access to system and application logs.
@@ -379,115 +485,148 @@ For authenticated file share access, use SMB (\\MEDALLIANCE-WIN).
 Contact IT (ext 4200) for access requests.
 "@ | Set-Content -Path "$ftpRoot\README.txt" -Encoding UTF8
 
-# Create FTP site with anonymous access
-try {
-    Remove-WebSite -Name "MedAlliance-FTP" -ErrorAction SilentlyContinue
-    New-WebFtpSite -Name "MedAlliance-FTP" -Port 21 -PhysicalPath $ftpRoot -Force | Out-Null
+    # Create FTP site with anonymous access (guarded — FTP cmdlets require WebAdministration + FTP role)
+    if (-not (Get-Module -ListAvailable WebAdministration)) {
+        Write-Warning "[FTP] WebAdministration module not available — FTP site creation skipped."
+        $script:SectionFailures += 'FTP'
+    } elseif (-not (Get-Command New-WebFtpSite -ErrorAction SilentlyContinue)) {
+        Write-Warning "[FTP] New-WebFtpSite unavailable (FTP feature likely not installed) — FTP site skipped."
+        $script:SectionFailures += 'FTP'
+    } else {
+        Import-Module WebAdministration -ErrorAction SilentlyContinue
+        if (Get-Website -Name "MedAlliance-FTP" -ErrorAction SilentlyContinue) {
+            Remove-WebSite -Name "MedAlliance-FTP" -ErrorAction SilentlyContinue
+        }
+        New-WebFtpSite -Name "MedAlliance-FTP" -Port 21 -PhysicalPath $ftpRoot -Force | Out-Null
 
-    Set-ItemProperty "IIS:\Sites\MedAlliance-FTP" `
-        -Name ftpServer.security.authentication.anonymousAuthentication.enabled -Value $true
-    Set-ItemProperty "IIS:\Sites\MedAlliance-FTP" `
-        -Name ftpServer.security.authentication.basicAuthentication.enabled -Value $false
+        Set-ItemProperty "IIS:\Sites\MedAlliance-FTP" `
+            -Name ftpServer.security.authentication.anonymousAuthentication.enabled -Value $true -ErrorAction SilentlyContinue
+        Set-ItemProperty "IIS:\Sites\MedAlliance-FTP" `
+            -Name ftpServer.security.authentication.basicAuthentication.enabled -Value $false -ErrorAction SilentlyContinue
 
-    Add-WebConfiguration "/system.ftpServer/security/authorization" `
-        -PSPath "IIS:" -Location "MedAlliance-FTP" `
-        -Value @{accessType="Allow"; roles=""; permissions="Read"; users="*"}
+        Add-WebConfiguration "/system.ftpServer/security/authorization" `
+            -PSPath "IIS:" -Location "MedAlliance-FTP" `
+            -Value @{accessType="Allow"; roles=""; permissions="Read"; users="*"} -ErrorAction SilentlyContinue
 
-    Start-Website -Name "MedAlliance-FTP"
-    Write-Phase "FTP configured (anonymous read on /logs)."
+        Start-Website -Name "MedAlliance-FTP" -ErrorAction SilentlyContinue
+        Write-Phase "FTP configured (anonymous read on /logs)."
+    }
+
+    Write-Phase "[Section] FTP configuration completed."
 } catch {
-    Write-Phase "WARNING: FTP configuration issue — $($_.Exception.Message)"
+    Write-Warning "[Section] FTP configuration failed: $_"
+    $script:SectionFailures += 'FTP'
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  3. SQL SERVER 2019 EXPRESS CONFIGURATION
+#  4. SQL SERVER CONFIGURATION (optional — auto-detect instance)
 # ═══════════════════════════════════════════════════════════════
-Write-Phase "Configuring SQL Server..."
+$sqlService = Get-Service -Name 'MSSQL*' -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like 'MSSQL$*' -or $_.Name -eq 'MSSQLSERVER' } |
+              Select-Object -First 1
 
-# Start SQL services
-Start-Service -Name 'MSSQL$SQLEXPRESS' -ErrorAction SilentlyContinue
-Set-Service  -Name 'MSSQL$SQLEXPRESS' -StartupType Automatic
-Start-Service -Name 'SQLBrowser' -ErrorAction SilentlyContinue
-Set-Service  -Name 'SQLBrowser' -StartupType Automatic
+if ($SkipSQL -or -not $sqlService) {
+    Write-Warning "[SQL] Skipping — no MSSQL service present (or -SkipSQL set). IT_Docs breadcrumb still planted."
+    $script:SectionFailures += 'SQL-Skipped'
+} else {
+    try {
+        Write-Phase "[Section] Starting SQL Server configuration (service: $($sqlService.Name))..."
 
-# Enable TCP/IP on port 1433 via WMI (more reliable than registry)
-try {
-    $sqlWmi = New-Object Microsoft.SqlServer.Management.Smo.Wmi.ManagedComputer
-    $tcp = $sqlWmi.ServerInstances['SQLEXPRESS'].ServerProtocols['Tcp']
-    $tcp.IsEnabled = $true
-    $tcp.Alter()
-    $ipAll = $tcp.IPAddresses | Where-Object { $_.Name -eq 'IPAll' }
-    $ipAll.IPAddressProperties['TcpPort'].Value = '1433'
-    $ipAll.IPAddressProperties['TcpDynamicPorts'].Value = ''
-    $tcp.Alter()
-    Write-Phase "SQL TCP/IP enabled on port 1433 via WMI."
-} catch {
-    Write-Phase "WMI method failed, falling back to registry..."
-    # Registry fallback
-    $regBase = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server"
-    $instances = Get-ChildItem "$regBase" -ErrorAction SilentlyContinue |
-                 Where-Object { $_.Name -match "MSSQL\d+\.SQLEXPRESS" }
+        # Start SQL services
+        Start-Service -Name $sqlService.Name -ErrorAction SilentlyContinue
+        Set-Service   -Name $sqlService.Name -StartupType Automatic -ErrorAction SilentlyContinue
 
-    foreach ($inst in $instances) {
-        $tcpPath = "$($inst.PSPath)\MSSQLServer\SuperSocketNetLib\Tcp"
-        if (Test-Path $tcpPath) {
-            Set-ItemProperty -Path $tcpPath -Name "Enabled" -Value 1
-            $ipAllPath = "$tcpPath\IPAll"
-            if (Test-Path $ipAllPath) {
-                Set-ItemProperty -Path $ipAllPath -Name "TcpPort" -Value "1433"
-                Set-ItemProperty -Path $ipAllPath -Name "TcpDynamicPorts" -Value ""
+        if (Get-Service -Name 'SQLBrowser' -ErrorAction SilentlyContinue) {
+            Start-Service -Name 'SQLBrowser' -ErrorAction SilentlyContinue
+            Set-Service   -Name 'SQLBrowser' -StartupType Automatic -ErrorAction SilentlyContinue
+        }
+
+        # Derive instance short name (e.g. "MSSQL$SQLEXPRESS" → "SQLEXPRESS", "MSSQLSERVER" → "MSSQLSERVER")
+        $instanceName = if ($sqlService.Name -like 'MSSQL$*') {
+            $sqlService.Name.Substring(6)
+        } else {
+            'MSSQLSERVER'
+        }
+        $sqlServerArg = if ($instanceName -eq 'MSSQLSERVER') { '.' } else { ".\$instanceName" }
+
+        # Enable TCP/IP on port 1433 via WMI (more reliable than registry)
+        try {
+            $sqlWmi = New-Object Microsoft.SqlServer.Management.Smo.Wmi.ManagedComputer
+            $tcp = $sqlWmi.ServerInstances[$instanceName].ServerProtocols['Tcp']
+            $tcp.IsEnabled = $true
+            $tcp.Alter()
+            $ipAll = $tcp.IPAddresses | Where-Object { $_.Name -eq 'IPAll' }
+            $ipAll.IPAddressProperties['TcpPort'].Value = '1433'
+            $ipAll.IPAddressProperties['TcpDynamicPorts'].Value = ''
+            $tcp.Alter()
+            Write-Phase "SQL TCP/IP enabled on port 1433 via WMI."
+        } catch {
+            Write-Phase "WMI method failed, falling back to registry..."
+            $regBase = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server"
+            $instances = Get-ChildItem "$regBase" -ErrorAction SilentlyContinue |
+                         Where-Object { $_.Name -match "MSSQL\d+\.$instanceName" }
+
+            foreach ($inst in $instances) {
+                $tcpPath = "$($inst.PSPath)\MSSQLServer\SuperSocketNetLib\Tcp"
+                if (Test-Path $tcpPath) {
+                    Set-ItemProperty -Path $tcpPath -Name "Enabled" -Value 1 -Force
+                    $ipAllPath = "$tcpPath\IPAll"
+                    if (Test-Path $ipAllPath) {
+                        Set-ItemProperty -Path $ipAllPath -Name "TcpPort" -Value "1433" -Force
+                        Set-ItemProperty -Path $ipAllPath -Name "TcpDynamicPorts" -Value "" -Force
+                    }
+                }
+            }
+            Write-Phase "SQL TCP/IP configured via registry."
+        }
+
+        # Enable mixed-mode auth via registry
+        $regBase = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server"
+        $instances = Get-ChildItem $regBase -ErrorAction SilentlyContinue |
+                     Where-Object { $_.Name -match "MSSQL\d+\.$instanceName" }
+        foreach ($inst in $instances) {
+            $serverPath = "$($inst.PSPath)\MSSQLServer"
+            if (Test-Path $serverPath) {
+                Set-ItemProperty -Path $serverPath -Name "LoginMode" -Value 2 -Force
             }
         }
-    }
-    Write-Phase "SQL TCP/IP configured via registry."
-}
 
-# Enable mixed-mode auth via registry
-$regBase = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server"
-$instances = Get-ChildItem $regBase -ErrorAction SilentlyContinue |
-             Where-Object { $_.Name -match "MSSQL\d+\.SQLEXPRESS" }
-foreach ($inst in $instances) {
-    $serverPath = "$($inst.PSPath)\MSSQLServer"
-    if (Test-Path $serverPath) {
-        Set-ItemProperty -Path $serverPath -Name "LoginMode" -Value 2
-    }
-}
+        # Restart SQL to apply changes
+        Restart-Service -Name $sqlService.Name -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 8
 
-# Restart SQL to apply changes
-Restart-Service -Name 'MSSQL$SQLEXPRESS' -Force
-Start-Sleep -Seconds 8
+        # Find sqlcmd
+        $sqlcmd = $null
+        $searchPaths = @(
+            "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\*\Tools\Binn\SQLCMD.EXE",
+            "C:\Program Files\Microsoft SQL Server\*\Tools\Binn\SQLCMD.EXE",
+            "C:\Program Files\Microsoft SQL Server\*\SQLCMD.EXE"
+        )
+        foreach ($pattern in $searchPaths) {
+            $found = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $sqlcmd = $found.FullName; break }
+        }
 
-# Find sqlcmd
-$sqlcmd = $null
-$searchPaths = @(
-    "C:\Program Files\Microsoft SQL Server\Client SDK\ODBC\*\Tools\Binn\SQLCMD.EXE",
-    "C:\Program Files\Microsoft SQL Server\*\Tools\Binn\SQLCMD.EXE",
-    "C:\Program Files\Microsoft SQL Server\*\SQLCMD.EXE"
-)
-foreach ($pattern in $searchPaths) {
-    $found = Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($found) { $sqlcmd = $found.FullName; break }
-}
+        if (-not $sqlcmd) {
+            Write-Warning "[SQL] sqlcmd not found — SQL data seeding skipped."
+            $script:SectionFailures += 'SQL-Seed'
+        } else {
+            Write-Phase "Found sqlcmd at: $sqlcmd"
 
-if (-not $sqlcmd) {
-    Write-Phase "ERROR: sqlcmd not found. SQL configuration requires manual setup."
-} else {
-    Write-Phase "Found sqlcmd at: $sqlcmd"
+            # Change SA password and enable account
+            & $sqlcmd -S $sqlServerArg -E -Q "ALTER LOGIN [sa] WITH PASSWORD = N'SQLAdmin2024!'; ALTER LOGIN [sa] ENABLE;" 2>&1 | Out-Null
 
-    # Change SA password and enable account
-    & $sqlcmd -S ".\SQLEXPRESS" -E -Q "ALTER LOGIN [sa] WITH PASSWORD = N'SQLAdmin2024!'; ALTER LOGIN [sa] ENABLE;" 2>&1 | Out-Null
-
-    # Enable xp_cmdshell (the main exploitation vector)
-    & $sqlcmd -S ".\SQLEXPRESS" -E -Q @"
+            # Enable xp_cmdshell (the main exploitation vector)
+            & $sqlcmd -S $sqlServerArg -E -Q @"
 EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
 EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;
 "@ 2>&1 | Out-Null
 
-    # Create HR database
-    & $sqlcmd -S ".\SQLEXPRESS" -E -Q "IF DB_ID('hr_database') IS NULL CREATE DATABASE hr_database;" 2>&1 | Out-Null
+            # Create HR database
+            & $sqlcmd -S $sqlServerArg -E -Q "IF DB_ID('hr_database') IS NULL CREATE DATABASE hr_database;" 2>&1 | Out-Null
 
-    # Create tables
-    & $sqlcmd -S ".\SQLEXPRESS" -E -d "hr_database" -Q @"
+            # Create tables
+            & $sqlcmd -S $sqlServerArg -E -d "hr_database" -Q @"
 IF OBJECT_ID('employees','U') IS NULL
 CREATE TABLE employees (
     id INT PRIMARY KEY IDENTITY(1,1),
@@ -521,8 +660,8 @@ CREATE TABLE system_credentials (
 );
 "@ 2>&1 | Out-Null
 
-    # Populate employee data (realistic fake PII)
-    & $sqlcmd -S ".\SQLEXPRESS" -E -d "hr_database" -Q @"
+            # Populate employee data (realistic fake PII)
+            & $sqlcmd -S $sqlServerArg -E -d "hr_database" -Q @"
 DELETE FROM employees;
 
 INSERT INTO employees (first_name,last_name,email,ssn,department,title,salary,hire_date,manager_id) VALUES
@@ -548,8 +687,8 @@ INSERT INTO employees (first_name,last_name,email,ssn,department,title,salary,hi
 ('Stephanie','White','s.white@medalliance.local','832-71-4495','Clinical','Compliance Officer',91000.00,'2017-10-01',NULL);
 "@ 2>&1 | Out-Null
 
-    # Populate payroll data
-    & $sqlcmd -S ".\SQLEXPRESS" -E -d "hr_database" -Q @"
+            # Populate payroll data
+            & $sqlcmd -S $sqlServerArg -E -d "hr_database" -Q @"
 DELETE FROM payroll;
 
 INSERT INTO payroll (employee_id,pay_period,gross_pay,tax_withheld,net_pay,account_last4) VALUES
@@ -565,8 +704,8 @@ INSERT INTO payroll (employee_id,pay_period,gross_pay,tax_withheld,net_pay,accou
 (10,'2024-11-01',2416.67,604.17,1812.50,'4479');
 "@ 2>&1 | Out-Null
 
-    # System credentials table — breadcrumb for students
-    & $sqlcmd -S ".\SQLEXPRESS" -E -d "hr_database" -Q @"
+            # System credentials table — breadcrumb for students
+            & $sqlcmd -S $sqlServerArg -E -d "hr_database" -Q @"
 DELETE FROM system_credentials;
 
 INSERT INTO system_credentials (system_name,username,credential,notes,last_rotated) VALUES
@@ -578,10 +717,10 @@ INSERT INTO system_credentials (system_name,username,credential,notes,last_rotat
 ('Backup Service','svc_backup','Backup#2024Secure','Nightly SQL backup job','2024-01-15');
 "@ 2>&1 | Out-Null
 
-    # Create app_config database
-    & $sqlcmd -S ".\SQLEXPRESS" -E -Q "IF DB_ID('app_config') IS NULL CREATE DATABASE app_config;" 2>&1 | Out-Null
+            # Create app_config database
+            & $sqlcmd -S $sqlServerArg -E -Q "IF DB_ID('app_config') IS NULL CREATE DATABASE app_config;" 2>&1 | Out-Null
 
-    & $sqlcmd -S ".\SQLEXPRESS" -E -d "app_config" -Q @"
+            & $sqlcmd -S $sqlServerArg -E -d "app_config" -Q @"
 IF OBJECT_ID('settings','U') IS NULL
 CREATE TABLE settings (
     key_name NVARCHAR(100) PRIMARY KEY,
@@ -613,42 +752,79 @@ INSERT INTO app_users (username,password_hash,role) VALUES
 ('j.thompson','827ccb0eea8a706c4c34a16891f84e7b','viewer');
 "@ 2>&1 | Out-Null
 
-    Write-Phase "SQL Server configured: SA enabled, xp_cmdshell on, databases populated."
+            Write-Phase "SQL Server configured: SA enabled, xp_cmdshell on, databases populated."
+        }
+
+        Write-Phase "[Section] SQL Server configuration completed."
+    } catch {
+        Write-Warning "[Section] SQL Server configuration failed: $_"
+        $script:SectionFailures += 'SQL'
+    }
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  4. WINRM
+#  5. WINRM
 # ═══════════════════════════════════════════════════════════════
-Write-Phase "Configuring WinRM..."
+try {
+    Write-Phase "[Section] Starting WinRM configuration..."
 
-Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction SilentlyContinue
-Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true -Force
-Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true -Force
-winrm set winrm/config/service '@{AllowUnencrypted="true"}'  2>&1 | Out-Null
-winrm set winrm/config/service/auth '@{Basic="true"}'        2>&1 | Out-Null
+    # On Win11 client, any adapter on a "Public" profile will cause WinRM Enable-PSRemoting
+    # to refuse. Force Public → Private before touching WSMan.
+    Get-NetConnectionProfile -ErrorAction SilentlyContinue |
+        Where-Object { $_.NetworkCategory -eq 'Public' } |
+        Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
 
-# Ensure WinRM listener exists on HTTP
-$listeners = Get-ChildItem WSMan:\localhost\Listener -ErrorAction SilentlyContinue
-if (-not ($listeners | Where-Object { $_.Keys -contains "Transport=HTTP" })) {
-    New-Item -Path WSMan:\localhost\Listener -Transport HTTP -Address * -Force | Out-Null
+    Enable-PSRemoting -Force -SkipNetworkProfileCheck -ErrorAction SilentlyContinue
+    Set-Item WSMan:\localhost\Service\AllowUnencrypted -Value $true -Force -ErrorAction SilentlyContinue
+    Set-Item WSMan:\localhost\Service\Auth\Basic -Value $true -Force -ErrorAction SilentlyContinue
+    winrm set winrm/config/service '@{AllowUnencrypted="true"}' 2>&1 | Out-Null
+    winrm set winrm/config/service/auth '@{Basic="true"}'       2>&1 | Out-Null
+
+    # Ensure WinRM listener exists on HTTP
+    $listeners = Get-ChildItem WSMan:\localhost\Listener -ErrorAction SilentlyContinue
+    if (-not ($listeners | Where-Object { $_.Keys -contains "Transport=HTTP" })) {
+        New-Item -Path WSMan:\localhost\Listener -Transport HTTP -Address * -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+
+    Restart-Service WinRM -ErrorAction SilentlyContinue
+    Write-Phase "WinRM configured (port 5985, HTTP, basic auth)."
+    Write-Phase "[Section] WinRM configuration completed."
+} catch {
+    Write-Warning "[Section] WinRM configuration failed: $_"
+    $script:SectionFailures += 'WinRM'
 }
 
-Restart-Service WinRM
-Write-Phase "WinRM configured (port 5985, HTTP, basic auth)."
+# ═══════════════════════════════════════════════════════════════
+#  6. RDP
+# ═══════════════════════════════════════════════════════════════
+try {
+    Write-Phase "[Section] Starting RDP configuration..."
+
+    Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+        -Name "fDenyTSConnections" -Value 0 -Force -ErrorAction SilentlyContinue
+
+    $nlaPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+    if (Test-Path $nlaPath) {
+        Set-ItemProperty -Path $nlaPath -Name "UserAuthentication" -Value 1 -Force -ErrorAction SilentlyContinue
+    }
+
+    Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+
+    Write-Phase "RDP enabled (port 3389, NLA on)."
+    Write-Phase "[Section] RDP configuration completed."
+} catch {
+    Write-Warning "[Section] RDP configuration failed: $_"
+    $script:SectionFailures += 'RDP'
+}
 
 # ═══════════════════════════════════════════════════════════════
-#  5. RDP
+#  7. SUMMARY
 # ═══════════════════════════════════════════════════════════════
-Write-Phase "Enabling RDP..."
-
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
-    -Name "fDenyTSConnections" -Value 0
-Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
-    -Name "UserAuthentication" -Value 1  # NLA enabled
-
-# Enable RDP firewall rule (even though we disabled firewall, good practice)
-Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-
-Write-Phase "RDP enabled (port 3389, NLA on)."
-
-Write-Phase "All services configured."
+Write-Phase ""
+if ($script:SectionFailures.Count -eq 0) {
+    Write-Phase "All services configured successfully."
+    exit 0
+} else {
+    Write-Warning "Completed with failures/skips in sections: $($script:SectionFailures -join ', ')"
+    exit 1
+}

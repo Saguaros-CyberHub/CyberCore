@@ -132,11 +132,29 @@
       return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
     }
 
+    const FIELD_LABELS = {
+      workstation_count: 'Desktops', laptop_count: 'Laptops', server_count: 'Servers',
+      os_count_win_server: 'Windows Server', os_count_win_client: 'Windows Client',
+      os_count_linux: 'Linux', os_count_macos: 'macOS', os_count_other: 'Other / Unknown',
+      role_dc: 'Domain Controller', role_dc_version: 'DC OS/Version',
+      role_file: 'File Server', role_file_version: 'File Server OS/Version',
+      role_mail: 'Mail Server', role_mail_version: 'Mail Server Software',
+      role_web: 'Web / App Server', role_web_version: 'Web Server Software',
+      role_db: 'Database Server', role_db_version: 'DB Server Software',
+      role_backup: 'Backup Server', role_backup_version: 'Backup Software',
+      role_print: 'Print Server', role_print_version: 'Print Server OS',
+      role_other: 'Other', role_other_version: 'Other Details', role_other_notes: 'Server Notes',
+      svc_version_smb: 'SMB version', svc_version_rdp: 'RDP version',
+      svc_version_ssh: 'SSH version', svc_version_http: 'HTTP version',
+      svc_version_sql: 'SQL version', svc_version_ftp: 'FTP version',
+      svc_version_dns: 'DNS version', svc_version_ldap: 'LDAP version',
+      svc_version_vpn: 'VPN type', domain_mode: 'Domain mode', domain_cover: 'Domain cover-name'
+    };
     function kv(obj, order) {
       const keys = order || Object.keys(obj || {});
       const rows = keys
         .filter(k => obj?.[k] !== undefined && obj?.[k] !== '' && obj?.[k] !== null && !(Array.isArray(obj[k]) && obj[k].length === 0))
-        .map(k => `<dt>${esc(k.replace(/_/g,' '))}</dt><dd>${renderVal(obj[k])}</dd>`);
+        .map(k => `<dt>${esc(FIELD_LABELS[k] || k.replace(/_/g,' '))}</dt><dd>${renderVal(obj[k])}</dd>`);
       return rows.length ? `<dl class="kv">${rows.join('')}</dl>` : '<div class="sub">No data.</div>';
     }
 
@@ -242,7 +260,16 @@
         </div></div>
 
         <div class="card"><div class="card-header"><span class="card-title">2 · Network Topology</span></div><div class="card-body">
-          ${kv(s.network, ['workstation_count','laptop_count','server_count','os_count_win_server','os_count_win_client','os_count_linux','os_count_macos','os_count_other','role_dc','role_file','role_mail','role_web','role_db','role_backup','role_print','role_other','role_other_notes','services','domain_mode','domain_cover'])}
+          <h4 style="margin-bottom:0.25rem; font-size:0.9rem;">Device Counts</h4>
+          ${kv(s.network, ['workstation_count','laptop_count','server_count'])}
+          <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Operating Systems</h4>
+          ${kv(s.network, ['os_count_win_server','os_count_win_client','os_count_linux','os_count_macos','os_count_other'])}
+          <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Server Roles</h4>
+          ${kv(s.network, ['role_dc','role_dc_version','role_file','role_file_version','role_mail','role_mail_version','role_web','role_web_version','role_db','role_db_version','role_backup','role_backup_version','role_print','role_print_version','role_other','role_other_version','role_other_notes'])}
+          <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Services</h4>
+          ${kv(s.network, ['services','svc_version_smb','svc_version_rdp','svc_version_ssh','svc_version_http','svc_version_sql','svc_version_ftp','svc_version_dns','svc_version_ldap','svc_version_vpn'])}
+          <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Domain</h4>
+          ${kv(s.network, ['domain_mode','domain_cover'])}
           <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Segments</h4>
           ${renderSegments(s.network?.segments)}
         </div></div>

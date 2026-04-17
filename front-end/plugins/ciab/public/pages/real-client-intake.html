@@ -60,6 +60,8 @@
   .help-pop { position: absolute; z-index: 100; max-width: 340px; background: #ffffff; color: var(--text); border: 1px solid var(--accent);
     padding: 10px 12px; border-radius: 6px; font-size: 12px; line-height: 1.4; box-shadow: 0 4px 16px rgba(15, 23, 42, 0.15); }
   .help-pop strong { color: var(--accent-2); }
+  .help-pop a { color: var(--accent); text-decoration: underline; font-weight: 500; }
+  .help-pop a:hover { color: var(--accent-2); }
   .guide-trigger { display: inline-flex; align-items: center; gap: 4px; background: var(--panel-2); color: var(--accent-2); border: 1px solid var(--border);
     padding: 4px 10px; border-radius: 6px; font-size: 12px; cursor: pointer; font-weight: 500; }
   .guide-trigger:hover, .guide-trigger:focus { background: #e0f2fe; border-color: var(--accent); outline: none; }
@@ -198,10 +200,10 @@
   "Dormant account": "A user account that has not been used for a long time (e.g., 90+ days) — often belonging to former employees.",
   "DNS filtering": "A service that blocks your users from reaching known-malicious websites at the DNS lookup stage (Umbrella, Quad9, Cloudflare Gateway, NextDNS).",
   "Session locking": "Automatically locking the screen after a period of inactivity so someone can't walk up and use an unattended computer.",
-  "Cover name": "An alias — a made-up company name you will use instead of the real client name throughout this form. It's purely for anonymization.",
+  "Name": "The organization's name. Not required to be entered, do not enter real company name.",
   "OS counts": "How many computers/servers run each operating system. Exact numbers are best, but rough estimates are fine — round up or down if you're not sure.",
   "Server": "A computer that runs 24/7 to provide services (files, email, apps, databases) to other computers in your office. Usually in a server room or closet, not a regular desk.",
-  "Workstation": "A regular desktop or laptop a person uses for daily work.",
+  "Workstation": "A regular desktop computer a person uses for daily work. Laptops are counted separately.",
   "Domain": "A 'domain' is Microsoft's way of centrally managing all PCs in an office. If you log in to your work computer with the same username/password as your email, you probably have a domain.",
   "Workgroup": "Each computer is independent — users log in locally, no central management. Small offices (<10 machines) often use workgroups.",
   "On-prem Exchange": "A Microsoft Exchange email server that lives inside your office (not in the cloud). Getting rare — most companies have moved to Microsoft 365 or Google Workspace.",
@@ -213,7 +215,7 @@
   "Vulnerability scanning": "Automated software (Nessus, Qualys, Rapid7) that checks your systems for known security problems. Usually run monthly.",
   "Managed service provider": "An outside company (MSP) that runs your IT for you. If you have one, they can answer most questions on this form.",
   "Service provider": "Any outside company that holds or processes your data — payroll (ADP), CRM (Salesforce), cloud apps, payment processing, etc.",
-  "Regulatory framework": "A set of security rules you're required to follow because of your industry. Healthcare → HIPAA. Credit-card processing → PCI-DSS. Defense contracting → CMMC. Education → FERPA."
+  "Regulatory framework": "A set of security rules you're required to follow because of your industry:\nHealthcare → <a href='https://www.hhs.gov/hipaa/index.html' target='_blank'>HIPAA</a>\nCredit-card processing → <a href='https://www.pcisecuritystandards.org/' target='_blank'>PCI-DSS</a>\nDefense contracting → <a href='https://dodcio.defense.gov/CMMC/' target='_blank'>CMMC</a>\nPublic companies → <a href='https://www.sec.gov/spotlight/sarbanes-oxley.htm' target='_blank'>SOX</a>\nFinancial services → <a href='https://www.ftc.gov/legal-library/browse/statutes/gramm-leach-bliley-act' target='_blank'>GLBA</a>\nEU data → <a href='https://gdpr.eu/' target='_blank'>GDPR</a>\nEducation → <a href='https://studentprivacy.ed.gov/ferpa' target='_blank'>FERPA</a>\nFederal agencies → <a href='https://www.nist.gov/cyberframework' target='_blank'>NIST CSF</a>"
 }
 </script>
 
@@ -223,15 +225,15 @@
 <script type="application/json" id="section-guides">
 {
   "company": {
-    "title": "Filling out the Cover Profile",
+    "title": "Filling out the Profile",
     "steps": [
-      "Invent a cover name — any made-up company name. It goes on every document we create, so keep it consistent.",
+      "Enter the organization's name. Not required to be entered, do not enter real company name.",
       "Pick the closest industry match from the dropdown.",
       "Employee count is a band — just estimate. Include full-time, part-time, and contractors who have a login.",
       "Region is country-level only. We don't need city/state.",
       "For regulatory frameworks, check all that apply. If you're not sure, check 'None / Don't know' — honest is better than guessing."
     ],
-    "tip": "Nothing in this section should be the real company name or address. If you're unsure, just invent details that are in the same ballpark as the real thing."
+    "tip": "Be as accurate as you can — Ensure no identifying details are entered into this form"
   },
   "network": {
     "title": "How do I know how many computers/servers we have?",
@@ -247,7 +249,7 @@
       { "label": "Mac (per machine)", "howto": "Apple menu → About This Mac. Shows macOS version." },
       { "label": "Network scan", "howto": "Tools like Fing (free phone app) can scan your network and list most devices in a couple of minutes." }
     ],
-    "tip": "Rough numbers are fine. 'Approximately 45 workstations' is more useful than a blank field. Round to the nearest 5 or 10."
+    "tip": "Rough numbers are fine. 'Approximately 45 desktops' is more useful than a blank field. Round to the nearest 5 or 10."
   },
   "wireless": {
     "title": "How do I find my Wi-Fi encryption type?",
@@ -256,7 +258,7 @@
       "Or check the router admin page — see platform tips below."
     ],
     "platforms": [
-      { "label": "Windows 10/11", "howto": "Click the Wi-Fi icon in the system tray → right-click your network → Properties → look for 'Security type' (e.g., WPA2-Personal, WPA3-Personal)." },
+      { "label": "Windows Client", "howto": "Click the Wi-Fi icon in the system tray → right-click your network → Properties → look for 'Security type' (e.g., WPA2-Personal, WPA3-Personal)." },
       { "label": "macOS", "howto": "System Settings → Wi-Fi → click 'Details' next to your network → see 'Security'." },
       { "label": "Router admin page", "howto": "In a web browser, go to http://192.168.1.1 or http://192.168.0.1. Login is usually on a sticker on the router. Look under 'Wireless' or 'Security settings'." },
       { "label": "iPhone / Android", "howto": "Harder to find — settings vary. Use one of the options above instead." }
@@ -374,7 +376,7 @@
 
 <div class="banner">
   <strong>⚠ Privacy notice —</strong> Do not use the real company name, addresses, phone numbers, emails, or domain names anywhere on this form.
-  Invent a <em>cover name</em> (an alias) and use it throughout. Free-text fields should describe your systems in general terms —
+  Free-text fields should describe your systems in general terms —
   never paste real usernames, hostnames, or IPs that could identify the organization.
 </div>
 
@@ -383,14 +385,14 @@
   <ul id="validation-list"></ul>
 </div>
 
-<!-- SECTION 1: Cover profile -->
+<!-- SECTION 1: Organization profile -->
 <section class="section" data-section="company">
-  <h2>1 · Cover Profile</h2>
-  <div class="desc">Non-identifying information about the organization. No real names.</div>
+  <h2>1 · Organization Profile</h2>
+  <div class="desc">Basic information about the organization. Your administrator will anonymize this before student use.</div>
   <div class="grid cols-2">
     <div class="field">
-      <label>Cover Name <span class="help-trigger" data-help="Cover name" tabindex="0">?</span> <span style="color:var(--danger)">*</span></label>
-      <input type="text" name="cover_name" required placeholder="e.g., Acme Widgets" />
+      <label>Name <span class="help-trigger" data-help="Name" tabindex="0">?</span></label>
+      <input type="text" name="cover_name" placeholder="e.g., Acme Widgets" />
     </div>
     <div class="field">
       <label>Industry</label>
@@ -449,46 +451,79 @@
   <h2>2 · Network Topology</h2>
   <div class="desc">Enough about the environment to simulate it realistically. Estimates are fine — no need to be exact.</div>
   <div class="grid cols-3">
-    <div class="field"><label>Workstation count <span class="help-trigger" data-help="Workstation">?</span></label><input type="number" min="0" name="workstation_count" /></div>
+    <div class="field"><label>Desktop count <span class="help-trigger" data-help="Workstation">?</span></label><input type="number" min="0" name="workstation_count" /></div>
     <div class="field"><label>Laptop count</label><input type="number" min="0" name="laptop_count" /></div>
     <div class="field"><label>Server count <span class="help-trigger" data-help="Server">?</span></label><input type="number" min="0" name="server_count" /></div>
   </div>
 
-  <div class="field"><label>Operating systems (exact counts) <span class="help-trigger" data-help="OS counts">?</span></label></div>
+  <h3 style="margin-top:1.5rem; margin-bottom:0.25rem; font-size:0.95rem; color:var(--fg);">Operating Systems</h3>
+  <div class="desc" style="margin-bottom:0.5rem;">How many machines run each OS <span class="help-trigger" data-help="OS counts">?</span></div>
   <div class="grid cols-3">
-    <div class="field"><label>Windows Server count</label><input type="number" min="0" name="os_count_win_server" /></div>
-    <div class="field"><label>Windows Client (10/11) count</label><input type="number" min="0" name="os_count_win_client" /></div>
-    <div class="field"><label>Linux count</label><input type="number" min="0" name="os_count_linux" /></div>
-    <div class="field"><label>macOS count</label><input type="number" min="0" name="os_count_macos" /></div>
-    <div class="field"><label>Other / unknown count</label><input type="number" min="0" name="os_count_other" /></div>
+    <div class="field"><label>Windows Server</label><input type="number" min="0" name="os_count_win_server" /></div>
+    <div class="field"><label>Windows Client</label><input type="number" min="0" name="os_count_win_client" /></div>
+    <div class="field"><label>Linux</label><input type="number" min="0" name="os_count_linux" /></div>
+    <div class="field"><label>macOS</label><input type="number" min="0" name="os_count_macos" /></div>
+    <div class="field"><label>Other / unknown</label><input type="number" min="0" name="os_count_other" /></div>
   </div>
 
-  <div class="field"><label>Server roles (count of each)</label></div>
-  <div class="grid cols-3">
-    <div class="field"><label>Domain Controllers <span class="help-trigger" data-help="DC" tabindex="0">?</span></label><input type="number" min="0" name="role_dc" /></div>
-    <div class="field"><label>File servers <span class="help-trigger" data-help="SMB" tabindex="0">?</span></label><input type="number" min="0" name="role_file" /></div>
-    <div class="field"><label>Mail servers</label><input type="number" min="0" name="role_mail" /></div>
-    <div class="field"><label>Web / application servers</label><input type="number" min="0" name="role_web" /></div>
-    <div class="field"><label>Database servers</label><input type="number" min="0" name="role_db" /></div>
-    <div class="field"><label>Backup servers</label><input type="number" min="0" name="role_backup" /></div>
-    <div class="field"><label>Print servers</label><input type="number" min="0" name="role_print" /></div>
-    <div class="field"><label>Other servers (describe below)</label><input type="number" min="0" name="role_other" /></div>
-  </div>
-  <div class="field"><label>Describe other servers</label><textarea name="role_other_notes" placeholder="e.g., 1 ERP app server, 1 camera NVR"></textarea></div>
-
-  <div class="field"><label>Exposed / in-use services</label>
-    <div class="field checkbox-row">
-      <label><input type="checkbox" name="services" value="SMB" /> SMB <span class="help-trigger" data-help="SMB">?</span></label>
-      <label><input type="checkbox" name="services" value="RDP" /> RDP <span class="help-trigger" data-help="RDP">?</span></label>
-      <label><input type="checkbox" name="services" value="SSH" /> SSH <span class="help-trigger" data-help="SSH">?</span></label>
-      <label><input type="checkbox" name="services" value="HTTP" /> HTTP</label>
-      <label><input type="checkbox" name="services" value="HTTPS" /> HTTPS</label>
-      <label><input type="checkbox" name="services" value="SQL" /> SQL</label>
-      <label><input type="checkbox" name="services" value="FTP" /> FTP</label>
-      <label><input type="checkbox" name="services" value="DNS" /> DNS</label>
-      <label><input type="checkbox" name="services" value="LDAP" /> LDAP <span class="help-trigger" data-help="LDAP">?</span></label>
-      <label><input type="checkbox" name="services" value="VPN" /> VPN</label>
+  <h3 style="margin-top:1.5rem; margin-bottom:0.25rem; font-size:0.95rem; color:var(--fg);">Server Roles</h3>
+  <div class="desc" style="margin-bottom:0.5rem;">Does your environment have any of these?</div>
+  <div class="grid cols-3" id="server-roles-grid">
+    <div class="field role-field">
+      <label>Domain Controller <span class="help-trigger" data-help="DC" tabindex="0">?</span></label>
+      <select name="role_dc" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_dc_version" class="role-version" placeholder="OS / Version (e.g., Server 2019)" style="display:none; margin-top:0.25rem;" />
     </div>
+    <div class="field role-field">
+      <label>File Server <span class="help-trigger" data-help="SMB" tabindex="0">?</span></label>
+      <select name="role_file" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_file_version" class="role-version" placeholder="OS / Version (e.g., Server 2022)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Mail Server</label>
+      <select name="role_mail" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_mail_version" class="role-version" placeholder="Software / Version (e.g., Exchange 2019)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Web / App Server</label>
+      <select name="role_web" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_web_version" class="role-version" placeholder="Software / Version (e.g., IIS 10, Apache 2.4)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Database Server</label>
+      <select name="role_db" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_db_version" class="role-version" placeholder="Software / Version (e.g., MSSQL 2019)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Backup Server</label>
+      <select name="role_backup" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_backup_version" class="role-version" placeholder="Software / Version (e.g., Veeam 12)" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Print Server</label>
+      <select name="role_print" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option><option value="unknown">Unknown</option></select>
+      <input type="text" name="role_print_version" class="role-version" placeholder="OS / Version" style="display:none; margin-top:0.25rem;" />
+    </div>
+    <div class="field role-field">
+      <label>Other</label>
+      <select name="role_other" class="role-select"><option value="">--</option><option value="yes">Yes</option><option value="no">No</option></select>
+      <input type="text" name="role_other_version" class="role-version" placeholder="Describe (e.g., NVR, VOIP PBX)" style="display:none; margin-top:0.25rem;" />
+    </div>
+  </div>
+  <div class="field"><label>Additional server notes</label><textarea name="role_other_notes" placeholder="Any extra details about servers not captured above"></textarea></div>
+
+  <h3 style="margin-top:1.5rem; margin-bottom:0.25rem; font-size:0.95rem; color:var(--fg);">Exposed / In-Use Services</h3>
+  <div class="desc" style="margin-bottom:0.5rem;">Check all that are running. Add version if known.</div>
+  <div class="grid cols-2">
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="SMB" class="svc-check" /> SMB / File Sharing <span class="help-trigger" data-help="SMB">?</span></label><input type="text" name="svc_version_smb" class="svc-version" placeholder="Version (e.g., SMBv3)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="RDP" class="svc-check" /> RDP <span class="help-trigger" data-help="RDP">?</span></label><input type="text" name="svc_version_rdp" class="svc-version" placeholder="Version (if known)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="SSH" class="svc-check" /> SSH <span class="help-trigger" data-help="SSH">?</span></label><input type="text" name="svc_version_ssh" class="svc-version" placeholder="Version (e.g., OpenSSH 8.9)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="HTTP" class="svc-check" /> HTTP / HTTPS</label><input type="text" name="svc_version_http" class="svc-version" placeholder="Version (e.g., Apache 2.4, IIS 10)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="SQL" class="svc-check" /> SQL / Database</label><input type="text" name="svc_version_sql" class="svc-version" placeholder="Version (e.g., MSSQL 2019, MySQL 8)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="FTP" class="svc-check" /> FTP</label><input type="text" name="svc_version_ftp" class="svc-version" placeholder="Version (e.g., vsftpd 3.0)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="DNS" class="svc-check" /> DNS</label><input type="text" name="svc_version_dns" class="svc-version" placeholder="Version (if known)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="LDAP" class="svc-check" /> LDAP <span class="help-trigger" data-help="LDAP">?</span></label><input type="text" name="svc_version_ldap" class="svc-version" placeholder="Version (if known)" style="display:none; margin-top:0.25rem;" /></div>
+    <div class="field svc-field"><label><input type="checkbox" name="services" value="VPN" class="svc-check" /> VPN</label><input type="text" name="svc_version_vpn" class="svc-version" placeholder="Type (e.g., WireGuard, OpenVPN)" style="display:none; margin-top:0.25rem;" /></div>
   </div>
 
   <div class="field"><label>Domain mode <span class="help-trigger" data-help="Domain">?</span> <span class="help-trigger" data-help="Workgroup">?</span></label>
@@ -849,7 +884,7 @@
       e.preventDefault();
       closePop();
       const key = t.dataset.help;
-      const text = HELP[key] || 'No definition available.';
+      const text = (HELP[key] || 'No definition available.').replace(/\n/g, '<br>');
       const pop = document.createElement('div');
       pop.className = 'help-pop';
       pop.innerHTML = `<strong>${key}</strong><br>${text}`;
@@ -918,7 +953,33 @@
         }
       });
     });
+    document.querySelectorAll('.role-select').forEach(sel => toggleRoleVersion(sel));
+    document.querySelectorAll('.svc-check').forEach(cb => toggleSvcVersion(cb));
   }
+
+  // --- Server role version toggle ---
+  function toggleRoleVersion(select) {
+    const versionInput = select.closest('.role-field')?.querySelector('.role-version');
+    if (!versionInput) return;
+    versionInput.style.display = select.value === 'yes' ? '' : 'none';
+    if (select.value !== 'yes') versionInput.value = '';
+  }
+  document.querySelectorAll('.role-select').forEach(sel => {
+    sel.addEventListener('change', () => toggleRoleVersion(sel));
+    toggleRoleVersion(sel);
+  });
+
+  // --- Service version toggle ---
+  function toggleSvcVersion(checkbox) {
+    const versionInput = checkbox.closest('.svc-field')?.querySelector('.svc-version');
+    if (!versionInput) return;
+    versionInput.style.display = checkbox.checked ? '' : 'none';
+    if (!checkbox.checked) versionInput.value = '';
+  }
+  document.querySelectorAll('.svc-check').forEach(cb => {
+    cb.addEventListener('change', () => toggleSvcVersion(cb));
+    toggleSvcVersion(cb);
+  });
 
   // --- Autosave ---
   const statusEl = document.getElementById('status');
@@ -945,7 +1006,7 @@
   // --- Validation (soft) ---
   function validate(state) {
     const missing = [];
-    if (!state.cover_name) missing.push('Cover Name (Section 1)');
+    // Name is optional — admin assigns cover name later
     const net = state.sections.network || {};
     const hasAsset = ['workstation_count','laptop_count','server_count'].some(k => Number(net[k]) > 0);
     if (!hasAsset) missing.push('At least one non-zero device count in Section 2 (Network Topology)');

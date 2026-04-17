@@ -16,6 +16,7 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+$script:SectionFailures = @()
 $subnetRef = $WinIP -replace '\.\d+$', ''  # e.g., 192.168.10
 
 function Write-Phase {
@@ -23,24 +24,46 @@ function Write-Phase {
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')][Shares] $Msg"
 }
 
+# ── Load deploy-context marker (written by Install-Services.ps1) ──
+$ctxPath = "C:\ProgramData\MedAlliance\deploy-context.json"
+if (Test-Path $ctxPath) {
+    try {
+        $ctx = Get-Content $ctxPath -Raw | ConvertFrom-Json
+        $script:IsServer = [bool]$ctx.IsServer
+        Write-Phase "Loaded deploy context: IsServer=$script:IsServer"
+    } catch {
+        $script:IsServer = ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)
+    }
+} else {
+    $script:IsServer = ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  1. CREATE SHARE DIRECTORIES
 # ═══════════════════════════════════════════════════════════════
+try {
+    Write-Phase "[Section] Creating share directories..."
+    $shareBase = "C:\Shares"
+    $dirs = @(
+        "$shareBase\Company_Docs",
+        "$shareBase\Company_Docs\Policies",
+        "$shareBase\Company_Docs\Templates",
+        "$shareBase\IT_Docs",
+        "$shareBase\IT_Docs\Network",
+        "$shareBase\IT_Docs\Procedures",
+        "$shareBase\HR_Files",
+        "$shareBase\HR_Files\Onboarding",
+        "$shareBase\HR_Files\Payroll"
+    )
+    foreach ($d in $dirs) {
+        if (-not (Test-Path $d)) { New-Item -Path $d -ItemType Directory -Force | Out-Null }
+    }
+    Write-Phase "Share directories created."
+} catch {
+    Write-Warning "[Section] Share directories failed: $_"
+    $script:SectionFailures += 'ShareDirs'
+}
 $shareBase = "C:\Shares"
-$dirs = @(
-    "$shareBase\Company_Docs",
-    "$shareBase\Company_Docs\Policies",
-    "$shareBase\Company_Docs\Templates",
-    "$shareBase\IT_Docs",
-    "$shareBase\IT_Docs\Network",
-    "$shareBase\IT_Docs\Procedures",
-    "$shareBase\HR_Files",
-    "$shareBase\HR_Files\Onboarding",
-    "$shareBase\HR_Files\Payroll"
-)
-foreach ($d in $dirs) { New-Item -Path $d -ItemType Directory -Force | Out-Null }
-
-Write-Phase "Share directories created."
 
 # ═══════════════════════════════════════════════════════════════
 #  2. POPULATE COMPANY_DOCS (non-sensitive, but leaks usernames)
@@ -382,30 +405,55 @@ Write-Phase "HR_Files populated."
 # ═══════════════════════════════════════════════════════════════
 #  5. CREATE SMB SHARES WITH PERMISSIONS
 # ═══════════════════════════════════════════════════════════════
-Write-Phase "Creating SMB shares..."
+try {
+    Write-Phase "[Section] Creating SMB shares..."
 
-# Remove existing shares (idempotent)
-"Company_Docs", "IT_Docs", "HR_Files" | ForEach-Object {
-    Remove-SmbShare -Name $_ -Force -ErrorAction SilentlyContinue
+    if (-not (Get-Command New-SmbShare -ErrorAction SilentlyContinue)) {
+        Write-Warning "[Shares] New-SmbShare unavailable — SMB share creation skipped."
+        $script:SectionFailures += 'SMB-Shares'
+    } else {
+        # Remove existing shares (idempotent)
+        foreach ($shareName in @("Company_Docs", "IT_Docs", "HR_Files")) {
+            if (Get-SmbShare -Name $shareName -ErrorAction SilentlyContinue) {
+                Remove-SmbShare -Name $shareName -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        # Company_Docs — Everyone read (including Guest/anonymous)
+        New-SmbShare -Name "Company_Docs" -Path "$shareBase\Company_Docs" `
+            -ReadAccess "Everyone" -Description "Company documents — all staff" `
+            -FullAccess "Administrators" -ErrorAction SilentlyContinue | Out-Null
+
+        # IT_Docs — Everyone read (intentionally too open — a finding)
+        New-SmbShare -Name "IT_Docs" -Path "$shareBase\IT_Docs" `
+            -ReadAccess "Everyone" -Description "IT documentation and procedures" `
+            -FullAccess "Administrators" -ErrorAction SilentlyContinue | Out-Null
+
+        # HR_Files — only m.chen and Administrators (dept-level restriction)
+        New-SmbShare -Name "HR_Files" -Path "$shareBase\HR_Files" `
+            -ReadAccess "m.chen" -Description "HR confidential files" `
+            -FullAccess "Administrators" -ErrorAction SilentlyContinue | Out-Null
+
+        # Verify shares
+        Get-SmbShare | Where-Object { $_.Name -notin @('ADMIN$','C$','IPC$') } |
+            Format-Table Name, Path, Description -AutoSize | Out-String | Write-Host
+
+        Write-Phase "SMB shares created and permissioned."
+    }
+    Write-Phase "[Section] SMB shares completed."
+} catch {
+    Write-Warning "[Section] SMB shares failed: $_"
+    $script:SectionFailures += 'SMB-Shares'
 }
 
-# Company_Docs — Everyone read (including Guest/anonymous)
-New-SmbShare -Name "Company_Docs" -Path "$shareBase\Company_Docs" `
-    -ReadAccess "Everyone" -Description "Company documents — all staff" `
-    -FullAccess "Administrators"
-
-# IT_Docs — Everyone read (this is intentionally too open — a finding)
-New-SmbShare -Name "IT_Docs" -Path "$shareBase\IT_Docs" `
-    -ReadAccess "Everyone" -Description "IT documentation and procedures" `
-    -FullAccess "Administrators"
-
-# HR_Files — only m.chen and Administrators (simulates dept-level restriction)
-New-SmbShare -Name "HR_Files" -Path "$shareBase\HR_Files" `
-    -ReadAccess "m.chen" -Description "HR confidential files" `
-    -FullAccess "Administrators"
-
-# Verify shares
-Get-SmbShare | Where-Object { $_.Name -notin @('ADMIN$','C$','IPC$') } |
-    Format-Table Name, Path, Description -AutoSize | Out-String | Write-Host
-
-Write-Phase "SMB shares created and permissioned."
+# ═══════════════════════════════════════════════════════════════
+#  SUMMARY
+# ═══════════════════════════════════════════════════════════════
+Write-Phase ""
+if ($script:SectionFailures.Count -eq 0) {
+    Write-Phase "Configure-Shares completed successfully."
+    exit 0
+} else {
+    Write-Warning "Completed with failures in: $($script:SectionFailures -join ', ')"
+    exit 1
+}

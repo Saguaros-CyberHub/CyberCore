@@ -1003,6 +1003,177 @@ router.get('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
   }
 });
 
+// GET /api/admin/reconcile — compare DB state against live Proxmox resources
+router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    // 1. Fetch all VMs from Proxmox
+    const pxResources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const pxVMs = (Array.isArray(pxResources) ? pxResources : []).map(vm => ({
+      vmid: vm.vmid,
+      name: vm.name || '',
+      status: vm.status,
+      node: vm.node,
+      type: vm.type
+    }));
+
+    // 2. Fetch SDN VNets from Proxmox
+    let pxVNets = [];
+    try {
+      const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+      pxVNets = (Array.isArray(vnets) ? vnets : []).map(v => ({
+        vnet: v.vnet, zone: v.zone, tag: v.tag, alias: v.alias || ''
+      }));
+    } catch (e) { /* SDN may not be configured */ }
+
+    // 3. Fetch all lanes from DB (non-deleted)
+    const dbLanes = (await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, name, status, config, created_at
+       FROM cybercore_lane WHERE status NOT IN ('deleted')
+       ORDER BY created_at DESC`
+    )).rows;
+
+    // 4. Fetch deployed groups from DB
+    const dbGroups = (await query(
+      `SELECT id, group_name, config, created_at FROM deployed_groups ORDER BY created_at DESC`
+    )).rows;
+
+    // 5. Build set of VM IDs the DB expects to exist
+    const dbExpectedVmIds = new Set();
+    const laneVmMap = {};
+    for (const lane of dbLanes) {
+      const vxlan = lane.vxlan_id;
+      if (!vxlan) continue;
+      const cfg = lane.config || {};
+      const vmIds = [];
+
+      // Challenge VMs from config.vms array
+      if (Array.isArray(cfg.vms)) {
+        cfg.vms.forEach(vm => { if (vm.vm_id) vmIds.push(vm.vm_id); });
+      } else {
+        vmIds.push(cfg.challenge_vm_id || (600000 + vxlan));
+      }
+      // Gateway
+      const gwId = cfg.gateway_vm_id || (100000 + vxlan);
+      vmIds.push(gwId);
+      // Attack box
+      if (cfg.attack_box_vm_id) vmIds.push(cfg.attack_box_vm_id);
+      else if (cfg.attack_box) vmIds.push(700000 + vxlan);
+
+      vmIds.forEach(id => {
+        dbExpectedVmIds.add(id);
+        laneVmMap[id] = { lane_id: lane.lane_id, name: lane.name, vxlan_id: vxlan, status: lane.status };
+      });
+    }
+
+    // 6. Build set of VM IDs that match CyberHub ID ranges on Proxmox
+    const CYBERHUB_RANGES = [
+      { min: 100000, max: 199999, role: 'gateway' },
+      { min: 600000, max: 699999, role: 'challenge' },
+      { min: 700000, max: 799999, role: 'attack_box' }
+    ];
+    const pxCyberhubVMs = pxVMs.filter(vm =>
+      CYBERHUB_RANGES.some(r => vm.vmid >= r.min && vm.vmid <= r.max)
+    );
+    const pxVmIdSet = new Set(pxCyberhubVMs.map(vm => vm.vmid));
+
+    // 7. Diff
+    const orphanedOnProxmox = pxCyberhubVMs
+      .filter(vm => !dbExpectedVmIds.has(vm.vmid))
+      .map(vm => ({
+        vmid: vm.vmid,
+        name: vm.name,
+        status: vm.status,
+        node: vm.node,
+        type: vm.type,
+        role: CYBERHUB_RANGES.find(r => vm.vmid >= r.min && vm.vmid <= r.max)?.role,
+        vxlan_inferred: vm.vmid % 100000
+      }));
+
+    const staleInDB = dbLanes
+      .filter(lane => {
+        const vxlan = lane.vxlan_id;
+        if (!vxlan) return false;
+        const cfg = lane.config || {};
+        const vmIds = [];
+        if (Array.isArray(cfg.vms)) {
+          cfg.vms.forEach(vm => { if (vm.vm_id) vmIds.push(vm.vm_id); });
+        } else {
+          vmIds.push(cfg.challenge_vm_id || (600000 + vxlan));
+        }
+        // Lane is stale if NONE of its expected VMs exist on Proxmox
+        return vmIds.length > 0 && vmIds.every(id => !pxVmIdSet.has(id));
+      })
+      .map(lane => ({
+        lane_id: lane.lane_id,
+        name: lane.name,
+        vxlan_id: lane.vxlan_id,
+        status: lane.status,
+        created_at: lane.created_at
+      }));
+
+    res.json({
+      timestamp: new Date().toISOString(),
+      summary: {
+        proxmox_cyberhub_vms: pxCyberhubVMs.length,
+        db_active_lanes: dbLanes.length,
+        db_expected_vms: dbExpectedVmIds.size,
+        orphaned_on_proxmox: orphanedOnProxmox.length,
+        stale_in_db: staleInDB.length,
+        sdn_vnets: pxVNets.length,
+        deployed_groups: dbGroups.length
+      },
+      orphaned_on_proxmox: orphanedOnProxmox,
+      stale_in_db: staleInDB,
+      sdn_vnets: pxVNets,
+      all_proxmox_cyberhub_vms: pxCyberhubVMs
+    });
+  } catch (error) {
+    console.error('[Reconcile] Error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/reconcile/destroy-vm — destroy an orphaned VM on Proxmox
+router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, res) => {
+  const { vmid, node, type } = req.body;
+  if (!vmid || !node) return res.status(400).json({ error: 'vmid and node required' });
+  try {
+    const path = type === 'lxc'
+      ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1&force=1`;
+    // Stop VM first if running
+    try {
+      const stopPath = type === 'lxc'
+        ? `/api2/json/nodes/${node}/lxc/${vmid}/status/stop`
+        : `/api2/json/nodes/${node}/qemu/${vmid}/status/stop`;
+      await proxmoxAPI('POST', stopPath);
+      await new Promise(r => setTimeout(r, 3000));
+    } catch (e) { /* may already be stopped */ }
+    await proxmoxAPI('DELETE', path);
+    console.log(`[Reconcile] Destroyed orphaned VM ${vmid} on ${node}`);
+    res.json({ ok: true, vmid, node });
+  } catch (error) {
+    console.error(`[Reconcile] Failed to destroy VM ${vmid}: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/reconcile/mark-deleted — mark a stale lane as deleted in DB
+router.post('/reconcile/mark-deleted', authenticateToken, adminOnly, async (req, res) => {
+  const { lane_id } = req.body;
+  if (!lane_id) return res.status(400).json({ error: 'lane_id required' });
+  try {
+    await cybercoreQuery(
+      `UPDATE cybercore_lane SET status = 'deleted', updated_at = NOW() WHERE lane_id = $1`,
+      [lane_id]
+    );
+    console.log(`[Reconcile] Marked lane ${lane_id} as deleted (stale — no Proxmox VMs)`);
+    res.json({ ok: true, lane_id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // PATCH /api/admin/lanes/:id/internet — toggle internet access on a lane (admin version)
 router.patch('/lanes/:id/internet', authenticateToken, adminOnly, async (req, res) => {
   try {

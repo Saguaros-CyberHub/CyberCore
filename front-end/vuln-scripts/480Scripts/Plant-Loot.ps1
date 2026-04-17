@@ -23,11 +23,25 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+$script:SectionFailures = @()
 $subnetRef = $WinIP -replace '\.\d+$', ''
 
 function Write-Phase {
     param([string]$Msg)
     Write-Host "[$(Get-Date -Format 'HH:mm:ss')][Loot] $Msg"
+}
+
+# ── Load deploy-context marker (written by Install-Services.ps1) ──
+$ctxPath = "C:\ProgramData\MedAlliance\deploy-context.json"
+if (Test-Path $ctxPath) {
+    try {
+        $ctx = Get-Content $ctxPath -Raw | ConvertFrom-Json
+        $script:IsServer = [bool]$ctx.IsServer
+    } catch {
+        $script:IsServer = ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)
+    }
+} else {
+    $script:IsServer = ((Get-CimInstance Win32_OperatingSystem).ProductType -ne 1)
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -53,9 +67,12 @@ Write-Phase "Generated proof hashes for student: $StudentId"
 #  2. PLANT PROOF FILES
 # ═══════════════════════════════════════════════════════════════
 
+try {
+Write-Phase "[Section] Planting proof files..."
+
 # m.chen's Desktop — local.txt (user-level access proof)
 $mchenDesktop = "C:\Users\m.chen\Desktop"
-New-Item -Path $mchenDesktop -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $mchenDesktop)) { New-Item -Path $mchenDesktop -ItemType Directory -Force | Out-Null }
 
 @"
 ===================================
@@ -79,9 +96,12 @@ Next steps:
 
 Write-Phase "Planted local.txt on m.chen Desktop ($localHash)"
 
-# Administrator's Desktop — proof.txt (admin-level access proof)
+# Administrator's Desktop — proof.txt (admin-level access proof).
+# Note: on client SKUs the Administrator profile may not exist until first logon.
+# Creating the directory preemptively is fine — the file will just sit until the
+# student escalates and browses there.
 $adminDesktop = "C:\Users\Administrator\Desktop"
-New-Item -Path $adminDesktop -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $adminDesktop)) { New-Item -Path $adminDesktop -ItemType Directory -Force | Out-Null }
 
 @"
 ===================================
@@ -104,13 +124,20 @@ All in one terminal window.
 "@ | Set-Content "$adminDesktop\proof.txt" -Encoding UTF8
 
 Write-Phase "Planted proof.txt on Administrator Desktop ($proofHash)"
+Write-Phase "[Section] Proof files completed."
+} catch {
+    Write-Warning "[Section] Proof files failed: $_"
+    $script:SectionFailures += 'Proof'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  3. PLANT LOOT IN m.chen's PROFILE
 # ═══════════════════════════════════════════════════════════════
+try {
+Write-Phase "[Section] Planting loot in m.chen profile..."
 
 $mchenDocs = "C:\Users\m.chen\Documents"
-New-Item -Path $mchenDocs -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $mchenDocs)) { New-Item -Path $mchenDocs -ItemType Directory -Force | Out-Null }
 
 # Fake "saved browser passwords" file (simulating browser credential dump)
 @"
@@ -167,14 +194,19 @@ Prepared by: D. Park | Approved by: A. Foster
 "@ | Set-Content "$mchenDocs\payroll_summary_Q3_2024.txt" -Encoding UTF8
 
 Write-Phase "Planted loot in m.chen Documents."
+Write-Phase "[Section] Loot-in-profile completed."
+} catch {
+    Write-Warning "[Section] Loot-in-profile failed: $_"
+    $script:SectionFailures += 'Loot-Profile'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  4. PLANT RDP CONNECTION HISTORY
 # ═══════════════════════════════════════════════════════════════
+try {
+Write-Phase "[Section] Planting RDP connection history..."
 
-Write-Phase "Planting RDP connection history..."
-
-# Plant RDP connection history in Default user's registry
+# Plant RDP connection history in current user's registry
 # (will show up when students check recent connections)
 $rdpServers = "HKCU:\SOFTWARE\Microsoft\Terminal Server Client\Servers"
 if (-not (Test-Path $rdpServers)) { New-Item -Path $rdpServers -Force | Out-Null }
@@ -187,26 +219,31 @@ $targets = @(
 
 foreach ($t in $targets) {
     $serverPath = "$rdpServers\$($t.IP)"
-    New-Item -Path $serverPath -Force | Out-Null
-    Set-ItemProperty -Path $serverPath -Name "UsernameHint" -Value "$($t.Hint)\$($t.User)"
+    if (-not (Test-Path $serverPath)) { New-Item -Path $serverPath -Force | Out-Null }
+    Set-ItemProperty -Path $serverPath -Name "UsernameHint" -Value "$($t.Hint)\$($t.User)" -Force
 }
 
 # Also set MRU (Most Recently Used) for the RDP client
 $mruPath = "HKCU:\SOFTWARE\Microsoft\Terminal Server Client\Default"
 if (-not (Test-Path $mruPath)) { New-Item -Path $mruPath -Force | Out-Null }
-Set-ItemProperty -Path $mruPath -Name "MRU0" -Value "${subnetRef}.20"
-Set-ItemProperty -Path $mruPath -Name "MRU1" -Value "${subnetRef}.50"
+Set-ItemProperty -Path $mruPath -Name "MRU0" -Value "${subnetRef}.20" -Force
+Set-ItemProperty -Path $mruPath -Name "MRU1" -Value "${subnetRef}.50" -Force
 
 Write-Phase "RDP history planted (shows connections to .20 and .50)."
+Write-Phase "[Section] RDP history completed."
+} catch {
+    Write-Warning "[Section] RDP history failed: $_"
+    $script:SectionFailures += 'RDP-History'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  5. PLANT POWERSHELL HISTORY (equivalent of .bash_history)
 # ═══════════════════════════════════════════════════════════════
-
-Write-Phase "Planting PowerShell history..."
+try {
+Write-Phase "[Section] Planting PowerShell history..."
 
 $psHistoryDir = "C:\Users\m.chen\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine"
-New-Item -Path $psHistoryDir -ItemType Directory -Force | Out-Null
+if (-not (Test-Path $psHistoryDir)) { New-Item -Path $psHistoryDir -ItemType Directory -Force | Out-Null }
 
 @"
 Get-Service | Where-Object {`$_.Status -eq 'Running'}
@@ -228,10 +265,17 @@ ssh j.thompson@${subnetRef}.20
 "@ | Set-Content "$psHistoryDir\ConsoleHost_history.txt" -Encoding UTF8
 
 Write-Phase "PowerShell history planted."
+Write-Phase "[Section] PowerShell history completed."
+} catch {
+    Write-Warning "[Section] PowerShell history failed: $_"
+    $script:SectionFailures += 'PSHistory'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  6. PLANT ADDITIONAL BREADCRUMBS
 # ═══════════════════════════════════════════════════════════════
+try {
+Write-Phase "[Section] Planting additional breadcrumbs..."
 
 # Sticky notes / Desktop notes
 @"
@@ -266,6 +310,11 @@ Backup encryption key: (stored in HR safe, not digital)
 "@ | Set-Content "$adminDesktop\admin_recovery_notes.txt" -Encoding UTF8
 
 Write-Phase "All loot and breadcrumbs planted."
+Write-Phase "[Section] Breadcrumbs completed."
+} catch {
+    Write-Warning "[Section] Breadcrumbs failed: $_"
+    $script:SectionFailures += 'Breadcrumbs'
+}
 
 # ═══════════════════════════════════════════════════════════════
 #  SUMMARY
@@ -279,3 +328,10 @@ Write-Phase "            : $proofHash"
 Write-Phase "  Loot      : browser passwords, payroll, personal notes, PS history"
 Write-Phase "  Breadcrumbs: RDP history, reminders, admin recovery notes"
 Write-Phase ""
+if ($script:SectionFailures.Count -eq 0) {
+    Write-Phase "Plant-Loot completed successfully."
+    exit 0
+} else {
+    Write-Warning "Completed with failures in: $($script:SectionFailures -join ', ')"
+    exit 1
+}

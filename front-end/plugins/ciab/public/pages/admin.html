@@ -2938,17 +2938,17 @@
         document.getElementById('intakeCtxLink').href = '/ciab/real-client-intake/' + encodeURIComponent(it.id);
 
         const roles = [
-          ['Domain Controllers', net.role_dc], ['File servers', net.role_file],
-          ['Mail servers', net.role_mail], ['Web/app servers', net.role_web],
-          ['Database servers', net.role_db], ['Backup servers', net.role_backup],
-          ['Print servers', net.role_print], ['Other servers', net.role_other]
-        ].filter(([, v]) => Number(v) > 0).map(([k, v]) => `<li>${escHtml(k)}: <strong>${escHtml(v)}</strong></li>`).join('');
+          ['Domain Controller', net.role_dc], ['File Server', net.role_file],
+          ['Mail Server', net.role_mail], ['Web / App Server', net.role_web],
+          ['Database Server', net.role_db], ['Backup Server', net.role_backup],
+          ['Print Server', net.role_print], ['Other', net.role_other]
+        ].filter(([, v]) => v && v !== 'no' && v !== '' && v !== '—').map(([k, v]) => `<li>${escHtml(k)}: <strong>${escHtml(v)}</strong></li>`).join('');
         const services = (net.services || []).map(s => `<span style="display:inline-block; background:#fed7aa; color:#7c2d12; padding:2px 8px; border-radius:10px; margin:2px; font-size:11px;">${escHtml(s)}</span>`).join('');
         const segRows = (net.segments || []).map(s => `<tr><td>${escHtml(s.vlan)}</td><td><code>${escHtml(s.cidr)}</code></td><td>${escHtml(s.purpose)}</td></tr>`).join('');
 
         document.getElementById('intakeCtxBody').innerHTML = `
           <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.75rem 1.25rem; margin-bottom: 0.75rem;">
-            <div><strong>Workstations:</strong> ${escHtml(net.workstation_count || 0)}</div>
+            <div><strong>Desktops:</strong> ${escHtml(net.workstation_count || 0)}</div>
             <div><strong>Laptops:</strong> ${escHtml(net.laptop_count || 0)}</div>
             <div><strong>Servers:</strong> ${escHtml(net.server_count || 0)}</div>
             <div><strong>Domain mode:</strong> ${escHtml(net.domain_mode || '—')}</div>
