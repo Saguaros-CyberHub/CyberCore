@@ -1,0 +1,24 @@
+{
+  "key": "cle",
+  "name": "Cyber Learning Environment",
+  "icon": "🎓",
+  "description": "Instructor tools for managing class environments, students, and VM access",
+  "category": "plugin",
+  "color": "#059669",
+  "entryUrl": "/cle/dashboard",
+  "displayOrder": 20,
+
+  "routes": [
+    { "file": "routes/pages.js", "mountPath": "/cle" },
+    { "file": "routes/api.js",   "mountPath": "/" }
+  ],
+
+  "staticDir": "public",
+  "staticMountPath": "/cle",
+
+  "subnav": [
+    { "label": "Dashboard",   "icon": "📊", "url": "/cle/dashboard", "page": "dashboard", "roles": ["instructor", "admin"] },
+    { "label": "Students",    "icon": "👥", "url": "/cle/students",  "page": "students",  "roles": ["instructor", "admin"] },
+    { "label": "Session Log", "icon": "📋", "url": "/cle/sessions",  "page": "sessions",  "roles": ["instructor", "admin"] }
+  ]
+}

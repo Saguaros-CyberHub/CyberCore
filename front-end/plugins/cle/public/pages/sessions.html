@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Session Log | Cyber Learning Environment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .action-bar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    .admin-table { width: 100%; border-collapse: collapse; background: var(--card-bg, white); border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .admin-table th { background: var(--bg, #f7fafc); padding: 0.6rem 1rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); text-align: left; }
+    .admin-table td { padding: 0.6rem 1rem; border-top: 1px solid var(--border, #e2e8f0); font-size: 0.85rem; }
+    .btn { padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: transparent; cursor: pointer; font-size: 0.8rem; font-weight: 500; }
+    .summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .summary-card { background: var(--card-bg, white); border-radius: 12px; padding: 1rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .summary-card .student-name { font-weight: 600; font-size: 0.95rem; margin-bottom: 0.5rem; }
+    .summary-card .meta-row { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 0.25rem; }
+    .summary-card .meta-val { font-weight: 600; color: var(--text-primary); }
+    .no-access { color: #e53e3e; font-weight: 600; }
+    .verified { color: #38a169; }
+    .filter-row { display: flex; gap: 0.5rem; align-items: center; }
+    .filter-row input, .filter-row select { padding: 0.35rem 0.6rem; border-radius: 6px; border: 1px solid var(--border); font-size: 0.82rem; }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main-area">
+      <header class="topbar" id="topbar"></header>
+      <main class="content" style="max-width: 1200px;">
+        <h1 style="font-size:1.5rem; font-weight:700; margin-bottom:0.25rem;">Session Log</h1>
+        <p style="color:var(--text-secondary); margin-bottom:1rem;">Audit student Guacamole access. Verify login claims against actual connection history.</p>
+
+        <div class="action-bar">
+          <div class="filter-row">
+            <label style="font-size:0.82rem; font-weight:500;">From:</label>
+            <input type="date" id="filterFrom">
+            <label style="font-size:0.82rem; font-weight:500;">To:</label>
+            <input type="date" id="filterTo">
+          </div>
+          <button class="btn" onclick="loadSessions()">Refresh</button>
+        </div>
+
+        <h2 style="font-size:1rem; font-weight:600; margin-bottom:0.75rem;">Student Summary</h2>
+        <div class="summary-grid" id="summaryGrid"><p style="color:var(--text-secondary);">Loading...</p></div>
+
+        <h2 style="font-size:1rem; font-weight:600; margin-bottom:0.75rem;">Recent Sessions</h2>
+        <div id="sessionsTable"><p style="color:var(--text-secondary);">Loading...</p></div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const TOKEN = () => localStorage.getItem('token');
+    const headers = () => ({ 'Authorization': `Bearer ${TOKEN()}`, 'Content-Type': 'application/json' });
+
+    async function api(method, path, body) {
+      const opts = { method, headers: headers() };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch('/api/cle' + path, opts);
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+      return res.json();
+    }
+
+    function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    function formatDuration(seconds) {
+      if (!seconds || seconds < 0) return '-';
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (h > 0) return `${h}h ${m}m`;
+      if (m > 0) return `${m}m`;
+      return `${Math.round(seconds)}s`;
+    }
+
+    function formatDate(d) {
+      if (!d) return '-';
+      return new Date(d).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    async function loadSessions() {
+      const summaryEl = document.getElementById('summaryGrid');
+      const tableEl = document.getElementById('sessionsTable');
+
+      try {
+        let queryStr = '';
+        const from = document.getElementById('filterFrom').value;
+        const to = document.getElementById('filterTo').value;
+        if (from) queryStr += `?from=${from}T00:00:00Z`;
+        if (to) queryStr += `${queryStr ? '&' : '?'}to=${to}T23:59:59Z`;
+
+        const data = await api('GET', '/sessions' + queryStr);
+        const summary = data.summary || [];
+        const sessions = data.sessions || [];
+
+        // Summary cards
+        if (summary.length === 0) {
+          summaryEl.innerHTML = '<p style="color:var(--text-secondary);">No session data available. Students may not have connected yet, or the Guacamole database is not configured.</p>';
+        } else {
+          summaryEl.innerHTML = summary.map(s => {
+            const hasAccess = s.session_count > 0;
+            const lastLogin = s.last_login ? formatDate(s.last_login) : 'Never';
+            const totalTime = formatDuration(parseFloat(s.total_seconds || 0));
+            return `
+              <div class="summary-card">
+                <div class="student-name">${escHtml(s.username)}</div>
+                <div class="meta-row"><span>Last Login</span><span class="meta-val ${hasAccess ? 'verified' : 'no-access'}">${lastLogin}</span></div>
+                <div class="meta-row"><span>Sessions</span><span class="meta-val">${s.session_count}</span></div>
+                <div class="meta-row"><span>Total Time</span><span class="meta-val">${totalTime}</span></div>
+              </div>`;
+          }).join('');
+        }
+
+        // Sessions table
+        if (sessions.length === 0) {
+          tableEl.innerHTML = '<div style="background:var(--card-bg,white); border-radius:12px; padding:2rem; text-align:center; box-shadow:0 2px 8px rgba(0,0,0,0.06); color:var(--text-secondary);">No sessions found for the selected period.</div>';
+        } else {
+          tableEl.innerHTML = `
+            <table class="admin-table">
+              <thead><tr>
+                <th>Student</th><th>Connection</th><th>Start</th><th>End</th><th>Duration</th><th>Remote Host</th>
+              </tr></thead>
+              <tbody>
+                ${sessions.map(s => `
+                  <tr>
+                    <td>${escHtml(s.username)}</td>
+                    <td>${escHtml(s.connection_name || '-')}</td>
+                    <td>${formatDate(s.start_date)}</td>
+                    <td>${s.end_date ? formatDate(s.end_date) : '<span style="color:#d69e2e">Active</span>'}</td>
+                    <td>${formatDuration(parseFloat(s.duration_seconds || 0))}</td>
+                    <td><code style="font-size:0.75rem;">${escHtml(s.remote_host || '-')}</code></td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>`;
+        }
+      } catch (e) {
+        summaryEl.innerHTML = `<p style="color:#e53e3e;">Error: ${escHtml(e.message)}</p>`;
+        tableEl.innerHTML = '';
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      Layout.init('cle');
+      // Default date range: last 7 days
+      const now = new Date();
+      const weekAgo = new Date(Date.now() - 7 * 86400000);
+      document.getElementById('filterFrom').value = weekAgo.toISOString().split('T')[0];
+      document.getElementById('filterTo').value = now.toISOString().split('T')[0];
+      loadSessions();
+    });
+  </script>
+</body>
+</html>

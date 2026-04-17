@@ -112,6 +112,11 @@ const Layout = {
       </nav>
 
       <div class="sidebar-footer">
+        ${user?.role === 'admin' ? `
+        <a href="/admin" class="admin-link-btn" title="Admin Dashboard">
+          <span class="admin-link-icon">&#9881;</span>
+          <span>Admin</span>
+        </a>` : ''}
         <div class="theme-toggle-row">
           <button class="theme-toggle-btn" onclick="Layout.toggleTheme()" title="Toggle dark/light mode" id="themeToggleBtn">
             <span class="theme-icon" id="themeIcon">🌙</span>

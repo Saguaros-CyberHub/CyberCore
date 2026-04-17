@@ -165,7 +165,12 @@ placeholderModules.forEach(mod => {
   });
 });
 
-const { authenticateToken } = require('./middleware/auth');
+const { authenticateToken, requireRole } = require('./middleware/auth');
+
+// Core admin page (role-gated)
+app.get('/admin', authenticateToken, requireRole('admin'), (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/admin.html'));
+});
 
 // Debug endpoint (admin-only)
 app.get('/api/auth/debug', authenticateToken, (req, res) => {

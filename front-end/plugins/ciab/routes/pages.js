@@ -17,7 +17,6 @@ const pages = {
   '/progress':    'progress.html',
   '/interview':   'interview.html',
   '/instructor':  'instructor.html',
-  '/admin':       'admin.html',
   '/intake-form': 'intake-form.html',
   '/guide':       'guide.html',
   '/nice-framework': 'nice-framework.html',

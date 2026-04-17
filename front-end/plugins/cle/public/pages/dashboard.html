@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard | Cyber Learning Environment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .cle-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+    .stat-card { background: var(--card-bg, white); border-radius: 12px; padding: 1.25rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); text-align: center; }
+    .stat-card .val { font-size: 2rem; font-weight: 700; color: var(--text-primary); }
+    .stat-card .lbl { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
+    .group-card { background: var(--card-bg, white); border-radius: 12px; padding: 1.25rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); margin-bottom: 1rem; }
+    .group-card h3 { margin: 0 0 0.5rem; font-size: 1.1rem; }
+    .group-meta { display: flex; gap: 1.5rem; font-size: 0.85rem; color: var(--text-secondary); flex-wrap: wrap; }
+    .group-meta span { display: flex; align-items: center; gap: 0.3rem; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; color: white; }
+    .badge-active { background: #38a169; }
+    .badge-pending { background: #d69e2e; }
+    .quick-links { display: flex; gap: 0.75rem; margin-top: 0.75rem; }
+    .quick-links a { font-size: 0.85rem; color: var(--accent, #3b82f6); text-decoration: none; font-weight: 500; }
+    .quick-links a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main-area">
+      <header class="topbar" id="topbar"></header>
+      <main class="content" style="max-width: 1100px;">
+        <h1 style="font-size:1.5rem; font-weight:700; margin-bottom:0.25rem;">Cyber Learning Environment</h1>
+        <p style="color:var(--text-secondary); margin-bottom:1.5rem;">Manage your class environments, students, and VM access.</p>
+
+        <div class="cle-stats" id="statsRow">
+          <div class="stat-card"><div class="val" id="statGroups">-</div><div class="lbl">My Groups</div></div>
+          <div class="stat-card"><div class="val" id="statStudents">-</div><div class="lbl">Students</div></div>
+          <div class="stat-card"><div class="val" id="statLanes">-</div><div class="lbl">Active Lanes</div></div>
+          <div class="stat-card"><div class="val" id="statSessions">-</div><div class="lbl">Sessions (7d)</div></div>
+        </div>
+
+        <h2 style="font-size:1.1rem; font-weight:600; margin-bottom:0.75rem;">My Groups</h2>
+        <div id="groupsList"><p style="color:var(--text-secondary);">Loading...</p></div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const TOKEN = () => localStorage.getItem('token');
+    const headers = () => ({ 'Authorization': `Bearer ${TOKEN()}`, 'Content-Type': 'application/json' });
+
+    async function api(method, path, body) {
+      const opts = { method, headers: headers() };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch('/api/cle' + path, opts);
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+      return res.json();
+    }
+
+    function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    async function loadDashboard() {
+      try {
+        const data = await api('GET', '/students');
+        const groups = data.groups || [];
+        const students = data.students || [];
+        const activeLanes = students.filter(s => s.lane?.status === 'active').length;
+
+        document.getElementById('statGroups').textContent = groups.length;
+        document.getElementById('statStudents').textContent = students.length;
+        document.getElementById('statLanes').textContent = activeLanes;
+
+        // Try session count
+        try {
+          const sessions = await api('GET', '/sessions?from=' + new Date(Date.now() - 7 * 86400000).toISOString());
+          document.getElementById('statSessions').textContent = sessions.sessions?.length || 0;
+        } catch (_) {
+          document.getElementById('statSessions').textContent = '-';
+        }
+
+        if (groups.length === 0) {
+          document.getElementById('groupsList').innerHTML = '<p style="color:var(--text-secondary);">No groups found. Ask an admin to add you as an instructor to a deployed group.</p>';
+          return;
+        }
+
+        document.getElementById('groupsList').innerHTML = groups.map(g => {
+          const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
+          const groupStudents = students.filter(s => s.group_id === g.id);
+          const activeCount = groupStudents.filter(s => s.lane?.status === 'active').length;
+          return `
+            <div class="group-card">
+              <h3>${escHtml(g.group_name)}</h3>
+              <div class="group-meta">
+                <span>👥 ${groupStudents.length} students</span>
+                <span>🖥️ ${activeCount} active lanes</span>
+                <span>📅 Created ${new Date(g.created_at).toLocaleDateString()}</span>
+                ${cfg.challenge_key ? `<span>🎯 ${escHtml(cfg.challenge_key)}</span>` : ''}
+              </div>
+              <div class="quick-links">
+                <a href="/cle/students?group=${g.id}">Manage Students</a>
+                <a href="/cle/sessions">Session Log</a>
+              </div>
+            </div>`;
+        }).join('');
+      } catch (e) {
+        document.getElementById('groupsList').innerHTML = `<p style="color:#e53e3e;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      Layout.init('cle');
+      loadDashboard();
+    });
+  </script>
+</body>
+</html>

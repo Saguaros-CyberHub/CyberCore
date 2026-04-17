@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Students | Cyber Learning Environment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .action-bar { display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+    .admin-table { width: 100%; border-collapse: collapse; background: var(--card-bg, white); border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .admin-table th { background: var(--bg, #f7fafc); padding: 0.6rem 1rem; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; color: var(--text-secondary); text-align: left; }
+    .admin-table td { padding: 0.6rem 1rem; border-top: 1px solid var(--border, #e2e8f0); font-size: 0.85rem; }
+    .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.7rem; font-weight: 600; color: white; }
+    .btn { padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border); background: transparent; cursor: pointer; font-size: 0.8rem; font-weight: 500; transition: all 0.15s; }
+    .btn:hover { opacity: 0.85; }
+    .btn-primary { background: #3b82f6; color: white; border-color: #3b82f6; }
+    .btn-danger { color: #e53e3e; border-color: #e53e3e; }
+    .btn-warning { color: #d69e2e; border-color: #d69e2e; }
+    .btn-sm { padding: 0.2rem 0.5rem; font-size: 0.75rem; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 100; display: flex; align-items: center; justify-content: center; }
+    .modal { background: var(--card-bg, white); border-radius: 12px; padding: 1.5rem; max-width: 480px; width: 90%; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+    .modal h3 { margin: 0 0 1rem; }
+    .modal .field { margin-bottom: 0.75rem; }
+    .modal .field label { display: block; font-size: 0.8rem; font-weight: 600; margin-bottom: 0.25rem; }
+    .modal .field input, .modal .field select { width: 100%; padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem; box-sizing: border-box; }
+    .modal-actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 1rem; }
+    .credential-box { background: #f0fdf4; border: 1px solid #86efac; border-radius: 8px; padding: 0.75rem; margin-top: 0.75rem; font-family: monospace; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="main-area">
+      <header class="topbar" id="topbar"></header>
+      <main class="content" style="max-width: 1200px;">
+        <h1 style="font-size:1.5rem; font-weight:700; margin-bottom:0.25rem;">Student Management</h1>
+        <p style="color:var(--text-secondary); margin-bottom:1rem;">Add, remove, or modify students in your class environments.</p>
+
+        <div class="action-bar">
+          <button class="btn btn-primary" onclick="showAddModal()">+ Add Student</button>
+          <button class="btn" onclick="loadStudents()">Refresh</button>
+          <select id="groupFilter" onchange="loadStudents()" style="padding:0.4rem 0.8rem; border-radius:6px; border:1px solid var(--border); font-size:0.85rem;">
+            <option value="">All Groups</option>
+          </select>
+        </div>
+
+        <div id="studentsTable"><p style="color:var(--text-secondary);">Loading...</p></div>
+        <div id="addModal"></div>
+      </main>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const TOKEN = () => localStorage.getItem('token');
+    const headers = () => ({ 'Authorization': `Bearer ${TOKEN()}`, 'Content-Type': 'application/json' });
+
+    async function api(method, path, body) {
+      const opts = { method, headers: headers() };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch('/api/cle' + path, opts);
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+      return res.json();
+    }
+
+    function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    let allGroups = [];
+
+    async function loadStudents() {
+      const container = document.getElementById('studentsTable');
+      try {
+        const data = await api('GET', '/students');
+        allGroups = data.groups || [];
+        let students = data.students || [];
+
+        // Populate filter
+        const filter = document.getElementById('groupFilter');
+        const currentVal = filter.value;
+        filter.innerHTML = '<option value="">All Groups</option>' +
+          allGroups.map(g => `<option value="${g.id}" ${g.id === currentVal ? 'selected' : ''}>${escHtml(g.group_name)}</option>`).join('');
+
+        if (currentVal) students = students.filter(s => s.group_id === currentVal);
+
+        if (students.length === 0) {
+          container.innerHTML = '<div style="background:var(--card-bg,white); border-radius:12px; padding:2rem; text-align:center; box-shadow:0 2px 8px rgba(0,0,0,0.06); color:var(--text-secondary);">No students found.</div>';
+          return;
+        }
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr>
+              <th>Name</th><th>Email</th><th>Group</th><th>Lane</th><th>Actions</th>
+            </tr></thead>
+            <tbody>
+              ${students.map(s => {
+                const laneStatus = s.lane ? s.lane.status : 'none';
+                const statusColor = { active: '#38a169', deploying: '#d69e2e', error: '#e53e3e', none: '#a0aec0' }[laneStatus] || '#718096';
+                return `<tr>
+                  <td><strong>${escHtml(s.first_name)} ${escHtml(s.last_name)}</strong></td>
+                  <td><code style="font-size:0.8rem;">${escHtml(s.email)}</code></td>
+                  <td>${escHtml(s.group_name)}</td>
+                  <td><span class="badge" style="background:${statusColor}">${laneStatus}</span></td>
+                  <td>
+                    <button class="btn btn-sm btn-warning" onclick="resetPassword('${s.id}', this)">Reset PW</button>
+                    <button class="btn btn-sm btn-danger" onclick="removeStudent('${s.id}', '${escHtml(s.email)}', this)">Remove</button>
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color:#e53e3e;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    function showAddModal() {
+      if (allGroups.length === 0) { alert('No groups available. Ask an admin to assign you to a group.'); return; }
+      const modal = document.getElementById('addModal');
+      modal.innerHTML = `
+        <div class="modal-overlay" onclick="if(event.target===this)closeAddModal()">
+          <div class="modal">
+            <h3>Add Student</h3>
+            <div class="field"><label>Group</label>
+              <select id="addGroup">${allGroups.map(g => `<option value="${g.id}">${escHtml(g.group_name)}</option>`).join('')}</select>
+            </div>
+            <div class="field"><label>First Name (optional)</label><input id="addFirst" placeholder="Auto-generated if blank"></div>
+            <div class="field"><label>Last Name (optional)</label><input id="addLast" placeholder="Auto-generated if blank"></div>
+            <div class="field"><label>Email (optional)</label><input id="addEmail" placeholder="Auto-generated if blank"></div>
+            <div id="addResult"></div>
+            <div class="modal-actions">
+              <button class="btn" onclick="closeAddModal()">Cancel</button>
+              <button class="btn btn-primary" id="addBtn" onclick="doAddStudent()">Add Student</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function closeAddModal() { document.getElementById('addModal').innerHTML = ''; }
+
+    async function doAddStudent() {
+      const btn = document.getElementById('addBtn');
+      btn.disabled = true; btn.textContent = 'Adding...';
+      try {
+        const result = await api('POST', '/students', {
+          group_id: document.getElementById('addGroup').value,
+          first_name: document.getElementById('addFirst').value || undefined,
+          last_name: document.getElementById('addLast').value || undefined,
+          email: document.getElementById('addEmail').value || undefined
+        });
+        document.getElementById('addResult').innerHTML = `
+          <div class="credential-box">
+            <strong>Student created:</strong><br>
+            Email: ${escHtml(result.credentials.email)}<br>
+            Password: ${escHtml(result.credentials.password)}<br>
+            <small style="color:#6b7280;">Save these credentials. Password cannot be recovered.</small>
+          </div>`;
+        btn.textContent = 'Added';
+        btn.style.background = '#38a169';
+        loadStudents();
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Add Student';
+      }
+    }
+
+    async function removeStudent(id, email, btn) {
+      if (!confirm('Remove ' + email + '? Their lane and Guacamole access will be destroyed.')) return;
+      btn.disabled = true; btn.textContent = '...';
+      try {
+        await api('DELETE', '/students/' + id);
+        loadStudents();
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Remove';
+      }
+    }
+
+    async function resetPassword(id, btn) {
+      if (!confirm('Reset this student\'s password? They will need the new credentials to log in.')) return;
+      btn.disabled = true; btn.textContent = '...';
+      try {
+        const result = await api('PATCH', '/students/' + id, { reset_password: true });
+        alert('New password: ' + result.new_password + '\n\nSave this — it cannot be recovered.');
+        btn.disabled = false; btn.textContent = 'Reset PW';
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false; btn.textContent = 'Reset PW';
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      Layout.init('cle');
+      loadStudents();
+    });
+  </script>
+</body>
+</html>

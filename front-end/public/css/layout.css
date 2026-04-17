@@ -138,6 +138,30 @@
 }
 
 /* Theme toggle row */
+.admin-link-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: rgba(237, 137, 54, 0.1);
+  border: 1px solid rgba(237, 137, 54, 0.25);
+  border-radius: var(--border-radius);
+  color: #ed8936;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+.admin-link-btn:hover {
+  background: rgba(237, 137, 54, 0.2);
+  border-color: rgba(237, 137, 54, 0.4);
+  color: #f6ad55;
+}
+.admin-link-icon { font-size: 1rem; }
+
 .theme-toggle-row {
   margin-bottom: 0.75rem;
 }
