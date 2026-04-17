@@ -32,12 +32,16 @@
   </style>
 </head>
 <body>
-  <div class="app-container">
+  <div class="app-layout">
     <aside class="sidebar" id="sidebar"></aside>
-    <div class="main-area">
-      <header class="topbar" id="topbar"></header>
-      <main class="content">
-        <h1 style="font-size:1.5rem; font-weight:700; margin-bottom:0.25rem;">Student Management</h1>
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
+          <h2 style="margin:0; font-size:1.1rem;">Student Management</h2>
+        </div>
+      </header>
+      <div class="page-content">
         <p style="color:var(--text-secondary); margin-bottom:1rem;">Add, remove, or modify students in your class environments.</p>
 
         <div class="action-bar">
@@ -50,8 +54,8 @@
 
         <div id="studentsTable"><p style="color:var(--text-secondary);">Loading...</p></div>
         <div id="addModal"></div>
-      </main>
-    </div>
+      </div>
+    </main>
   </div>
 
   <script src="/js/app.js"></script>

@@ -27,12 +27,16 @@
   </style>
 </head>
 <body>
-  <div class="app-container">
+  <div class="app-layout">
     <aside class="sidebar" id="sidebar"></aside>
-    <div class="main-area">
-      <header class="topbar" id="topbar"></header>
-      <main class="content">
-        <h1 style="font-size:1.5rem; font-weight:700; margin-bottom:0.25rem;">Cyber Learning Environment</h1>
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
+          <h2 style="margin:0; font-size:1.1rem;">Cyber Learning Environment</h2>
+        </div>
+      </header>
+      <div class="page-content">
         <p style="color:var(--text-secondary); margin-bottom:1.5rem;">Manage your class environments, students, and VM access.</p>
 
         <div class="cle-stats" id="statsRow">
@@ -44,8 +48,8 @@
 
         <h2 style="font-size:1.1rem; font-weight:600; margin-bottom:0.75rem;">My Groups</h2>
         <div id="groupsList"><p style="color:var(--text-secondary);">Loading...</p></div>
-      </main>
-    </div>
+      </div>
+    </main>
   </div>
 
   <script src="/js/app.js"></script>
