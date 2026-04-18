@@ -1645,9 +1645,35 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           succeeded: 0,
           failed: 0,
           started_at: new Date().toISOString(),
-          lanes: {}
+          phase: 'preparing',
+          phase_detail: 'Replicating gateway templates',
+          elapsed_s: 0,
+          avg_lane_s: null,
+          eta_s: null,
+          eta_at: null,
+          lanes: {},
+          _laneTimes: []  // internal: track per-lane durations for ETA calc
         };
         const progress = global._batchDeployProgress[batchId];
+        const deployStartTime = Date.now();
+
+        // Helper to update timing fields
+        function updateProgressTiming() {
+          const now = Date.now();
+          progress.elapsed_s = Math.round((now - deployStartTime) / 1000);
+
+          if (progress._laneTimes.length > 0) {
+            const avgMs = progress._laneTimes.reduce((a, b) => a + b, 0) / progress._laneTimes.length;
+            progress.avg_lane_s = Math.round(avgMs / 1000);
+
+            const remaining = progress.total - progress.completed;
+            // Lanes run in batches of `concurrency`, so estimate batches remaining
+            const batchesRemaining = Math.ceil(remaining / concurrency);
+            const etaMs = batchesRemaining * avgMs;
+            progress.eta_s = Math.round(etaMs / 1000);
+            progress.eta_at = new Date(now + etaMs).toISOString();
+          }
+        }
 
         // ── Phase 1: Replicate gateway template to each target node, then clone all in parallel ──
         // LXC containers lock the source during clone, so we can't clone from one template concurrently.
@@ -1660,6 +1686,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         const TEMP_GW_TEMPLATE_BASE = 169200;  // temp copies: 169200, 169201, ...
         let tempIdCounter = 0;
 
+        progress.phase = 'gateway_replication';
+        progress.phase_detail = `Replicating gateway template to ${uniqueTargetNodes.length} nodes`;
         console.log(`[Group ${group_name}] Phase 1a: Replicating gateway template ${gatewayVmid} to ${uniqueTargetNodes.length} nodes...`);
 
         // Clone gateway template to each target node sequentially (one LXC lock, but only N nodes not N lanes)
@@ -1692,6 +1720,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         }
 
         // Phase 1b: Clone all gateways IN PARALLEL — each from its node-local template copy
+        progress.phase = 'gateway_cloning';
+        progress.phase_detail = `Cloning ${laneJobs.length} gateways in parallel`;
+        updateProgressTiming();
         console.log(`[Group ${group_name}] Phase 1b: Cloning ${laneJobs.length} gateways in parallel from node-local templates...`);
         const gatewayResults = {};
 
@@ -1743,6 +1774,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           .map(([node, id]) => ({ node, id }));
 
         if (tempIdsToDelete.length > 0) {
+          progress.phase_detail = 'Cleaning up temp gateway templates';
           console.log(`[Group ${group_name}] Phase 1c: Cleaning up ${tempIdsToDelete.length} temp gateway templates...`);
           await Promise.all(tempIdsToDelete.map(async ({ node, id }) => {
             try {
@@ -1755,6 +1787,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         }
 
         // ── Phase 2: Clone QEMU VMs + Kali in PARALLEL (no LXC lock issue) ──
+        progress.phase = 'deploying';
+        progress.phase_detail = `Deploying lanes (${concurrency} at a time, max ${cloneSem.max} concurrent clones)`;
+        updateProgressTiming();
         console.log(`[Group ${group_name}] Phase 2: Cloning challenge VMs and Kali in parallel (concurrency: ${concurrency})...`);
 
         const { results, errors } = await runBatch(laneJobs, async (job) => {
@@ -1766,7 +1801,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             throw new Error(`Skipped: gateway clone failed — ${gatewayResults[laneId]?.error}`);
           }
 
-          progress.lanes[laneId] = { student: student.email, vxlan: vxlanId, node: bestNode, status: 'cloning' };
+          progress.lanes[laneId] = { student: student.email, vxlan: vxlanId, node: bestNode, status: 'cloning', _startedAt: Date.now() };
           console.log(`[Group ${group_name}] Deploying lane ${laneId} for ${student.email} on ${bestNode} (VXLAN ${vxlanId})${use_webhook ? ' via webhook' : ''}...`);
 
           if (use_webhook) {
@@ -2071,7 +2106,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             progress.completed = completed;
             if (result.success) progress.succeeded++;
             else progress.failed++;
-            console.log(`[Group ${group_name}] Progress: ${completed}/${total} (${progress.succeeded} ok, ${progress.failed} failed)`);
+
+            // Track lane duration for ETA calculation
+            const laneProgress = progress.lanes[job.laneId];
+            if (laneProgress && laneProgress._startedAt) {
+              progress._laneTimes.push(Date.now() - laneProgress._startedAt);
+            }
+            updateProgressTiming();
+            progress.phase_detail = `Deploying lanes: ${completed}/${total} complete`;
+
+            const etaStr = progress.eta_s != null ? ` — ETA ${Math.ceil(progress.eta_s / 60)}min` : '';
+            console.log(`[Group ${group_name}] Progress: ${completed}/${total} (${progress.succeeded} ok, ${progress.failed} failed)${etaStr}`);
           }
         });
 
@@ -2086,8 +2131,13 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           }
         }
 
+        progress.phase = 'complete';
+        progress.phase_detail = `${progress.succeeded} succeeded, ${progress.failed} failed`;
         progress.finished_at = new Date().toISOString();
-        console.log(`[Group ${group_name}] All ${laneJobs.length} lane deployments complete (${progress.succeeded} succeeded, ${progress.failed} failed).`);
+        progress.eta_s = 0;
+        progress.eta_at = null;
+        updateProgressTiming();
+        console.log(`[Group ${group_name}] All ${laneJobs.length} lane deployments complete (${progress.succeeded} succeeded, ${progress.failed} failed) in ${progress.elapsed_s}s.`);
 
         // Clean up progress tracker after 1 hour
         setTimeout(() => { delete global._batchDeployProgress[batchId]; }, 3600000);
@@ -2122,7 +2172,14 @@ router.get('/deploy-group/:groupId/progress', authenticateToken, adminOnly, (req
   if (!progress) {
     return res.status(404).json({ error: 'No active batch deployment found for this group' });
   }
-  res.json(progress);
+  // Strip internal fields and per-lane _startedAt before sending
+  const { _laneTimes, ...clean } = progress;
+  const cleanLanes = {};
+  for (const [id, lane] of Object.entries(clean.lanes || {})) {
+    const { _startedAt, ...laneClean } = lane;
+    cleanLanes[id] = laneClean;
+  }
+  res.json({ ...clean, lanes: cleanLanes });
 });
 
 // GET /api/admin/groups — list all deployed groups
