@@ -2150,110 +2150,133 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
 
     console.log(`[Group Teardown] ${group.group_name}: ${allVmsToDestroy.length} VMs to destroy across ${laneIds.length} lanes`);
 
-    // ── Phase 2: Stop all VMs in parallel (batch fire-and-forget) ──
-    const TEARDOWN_CONCURRENCY = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 10;
+    // Only operate on VMs that actually exist in the cluster
+    const existingVms = allVmsToDestroy.filter(vm => vmNodeMap[vm.vmid]);
+    const missingVms = allVmsToDestroy.length - existingVms.length;
+    if (missingVms > 0) {
+      console.log(`[Group Teardown] ${missingVms} VMs not found in cluster (already deleted or never created)`);
+    }
 
-    // Disable protection on all VMs in parallel
-    await Promise.all(allVmsToDestroy.map(async (vm) => {
+    // ── Phase 2: Unprotect + force-stop all VMs in parallel ──
+    console.log(`[Group Teardown] Phase 2: Unprotecting and force-stopping ${existingVms.length} VMs...`);
+    await Promise.all(existingVms.map(async (vm) => {
       const node = vmNodeMap[vm.vmid];
-      if (!node) return;
       try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
       try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { lock: '' }); } catch (_) {}
     }));
 
-    // Stop all VMs in parallel
-    await Promise.all(allVmsToDestroy.map(async (vm) => {
+    // Force-stop: use timeout=0 for immediate kill instead of graceful shutdown
+    const stopTasks = [];
+    await Promise.all(existingVms.map(async (vm) => {
       const node = vmNodeMap[vm.vmid];
-      if (!node) return;
-      try { await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`); } catch (_) {}
+      try {
+        const upid = await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`, { timeout: 0 });
+        if (upid) stopTasks.push({ node, upid });
+      } catch (_) {}
     }));
 
-    // Brief wait for stops to take effect
-    await new Promise(r => setTimeout(r, 5000));
-
-    // ── Phase 3: Delete all VMs in parallel with concurrency limit ──
-    const { errors: destroyErrors } = await runBatch(allVmsToDestroy, async (vm) => {
-      const knownNode = vmNodeMap[vm.vmid];
-      const nodesToTry = knownNode ? [knownNode] : allNodeNames;
-
-      for (const node of nodesToTry) {
+    // Wait for stop tasks to actually complete (poll up to 30s)
+    console.log(`[Group Teardown] Waiting for ${stopTasks.length} stop tasks to complete...`);
+    const stopDeadline = Date.now() + 30000;
+    let pendingStops = [...stopTasks];
+    while (pendingStops.length > 0 && Date.now() < stopDeadline) {
+      await new Promise(r => setTimeout(r, 3000));
+      const stillPending = [];
+      for (const task of pendingStops) {
         try {
-          try {
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
-          } catch (_) {
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1`);
-          }
-          console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
-          return;
-        } catch (e) {
-          if (nodesToTry.length === 1 || node === nodesToTry[nodesToTry.length - 1]) {
-            throw new Error(`${vm.type} ${vm.vmid} (${vm.label}): ${e.message}`);
-          }
+          const status = await proxmoxAPI('GET', `/api2/json/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}/status`);
+          if (status.status !== 'stopped') stillPending.push(task);
+        } catch (_) {
+          // Task query failed, assume done
         }
       }
-    }, { concurrency: TEARDOWN_CONCURRENCY });
+      pendingStops = stillPending;
+    }
+    if (pendingStops.length > 0) {
+      console.warn(`[Group Teardown] ${pendingStops.length} stop tasks still pending after 30s, proceeding with delete...`);
+    }
+
+    // ── Phase 3: Delete all VMs in parallel ──
+    console.log(`[Group Teardown] Phase 3: Deleting ${existingVms.length} VMs...`);
+    const { errors: destroyErrors } = await runBatch(existingVms, async (vm) => {
+      const node = vmNodeMap[vm.vmid];
+      try {
+        await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
+      } catch (_) {
+        await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1`);
+      }
+      console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
+    }, { concurrency: 15 });
 
     for (const err of destroyErrors) {
       errors.push(err.error);
     }
 
-    // ── Phase 4: Cleanup DB and Guac in parallel ──
-    const allUserIds = allUsers.map(u => u.id);
-    const allUserEmails = allUsers.map(u => u.email);
-
-    await Promise.all([
-      // Delete all lane records in one query
-      laneIds.length > 0
-        ? cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = ANY($1)`, [laneIds]).catch(e => errors.push(`Lane cleanup: ${e.message}`))
-        : Promise.resolve(),
-
-      // Delete all user records in one query
-      allUserIds.length > 0
-        ? cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = ANY($1) OR username = ANY($2)`, [allUserIds, allUserEmails]).catch(e => errors.push(`User cleanup: ${e.message}`))
-        : Promise.resolve(),
-
-      // Delete all Guac users in parallel
-      ...((config.guac_users || []).map(username =>
-        guacAPI('DELETE', `/users/${encodeURIComponent(username)}`).catch(e => errors.push(`Guac delete ${username}: ${e.message}`))
-      )),
-
-      // Delete Guac connection group
-      config.guac_group?.identifier
-        ? guacAPI('DELETE', `/connectionGroups/${config.guac_group.identifier}`).catch(e => errors.push(`Guac group delete: ${e.message}`))
-        : Promise.resolve()
-    ]);
-
-    // ── Phase 5: Verify cleanup ──
+    // ── Phase 4: Verify and retry orphans (up to 3 rounds) ──
     let orphanedCount = 0;
-    try {
-      const finalResources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
-      const allTargetVmIds = allVmsToDestroy.map(v => v.vmid);
-      const stillAlive = finalResources.filter(r => allTargetVmIds.includes(r.vmid));
+    const allTargetVmIds = allVmsToDestroy.map(v => v.vmid);
 
-      if (stillAlive.length > 0) {
+    for (let round = 1; round <= 3; round++) {
+      try {
+        const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+        const stillAlive = resources.filter(r => allTargetVmIds.includes(r.vmid));
+        if (stillAlive.length === 0) {
+          console.log(`[Group Teardown] All VMs confirmed destroyed${round > 1 ? ` (after ${round - 1} retry rounds)` : ''}`);
+          break;
+        }
+
         orphanedCount = stillAlive.length;
-        console.warn(`[Group Teardown] ${stillAlive.length} VMs still exist — retrying in parallel...`);
+        console.warn(`[Group Teardown] Round ${round}: ${stillAlive.length} VMs still exist — retrying...`);
 
-        // Retry orphans in parallel
+        // Force-stop + delete each orphan
         await Promise.all(stillAlive.map(async (vm) => {
           try {
             try { await proxmoxAPI('PUT', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
-            try { await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/status/stop`); } catch (_) {}
-            await new Promise(r => setTimeout(r, 3000));
+            try { await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/status/stop`, { timeout: 0 }); } catch (_) {}
+          } catch (_) {}
+        }));
+
+        await new Promise(r => setTimeout(r, 8000));
+
+        await Promise.all(stillAlive.map(async (vm) => {
+          try {
             try {
               await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
             } catch (_) {
               await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1`);
             }
-            console.log(`[Group Teardown] Retry destroyed ${vm.type} ${vm.vmid} on ${vm.node}`);
+            console.log(`[Group Teardown] Retry round ${round}: destroyed ${vm.type} ${vm.vmid} on ${vm.node}`);
           } catch (e) {
-            errors.push(`Orphaned VM ${vm.vmid} on ${vm.node}: could not destroy (${e.message})`);
+            if (round === 3) errors.push(`Orphaned VM ${vm.vmid} on ${vm.node}: ${e.message}`);
           }
         }));
+      } catch (e) {
+        console.error(`[Group Teardown] Verify round ${round} failed: ${e.message}`);
+        break;
       }
-    } catch (e) {
-      console.error(`[Group Teardown] Failed to verify VM cleanup: ${e.message}`);
     }
+
+    // ── Phase 5: Cleanup DB and Guac in parallel ──
+    const allUserIds = allUsers.map(u => u.id);
+    const allUserEmails = allUsers.map(u => u.email);
+
+    await Promise.all([
+      laneIds.length > 0
+        ? cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = ANY($1)`, [laneIds]).catch(e => errors.push(`Lane cleanup: ${e.message}`))
+        : Promise.resolve(),
+
+      allUserIds.length > 0
+        ? cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = ANY($1) OR username = ANY($2)`, [allUserIds, allUserEmails]).catch(e => errors.push(`User cleanup: ${e.message}`))
+        : Promise.resolve(),
+
+      ...((config.guac_users || []).map(username =>
+        guacAPI('DELETE', `/users/${encodeURIComponent(username)}`).catch(e => errors.push(`Guac delete ${username}: ${e.message}`))
+      )),
+
+      config.guac_group?.identifier
+        ? guacAPI('DELETE', `/connectionGroups/${config.guac_group.identifier}`).catch(e => errors.push(`Guac group delete: ${e.message}`))
+        : Promise.resolve()
+    ]);
 
     // 6. Remove group record
     await query(`DELETE FROM deployed_groups WHERE id = $1`, [req.params.id]);
