@@ -2607,11 +2607,6 @@
     }
 
     function handleDeployGroupSuccess(data, status) {
-      let lanesHtml = '';
-      if (data.lanes_deploying > 0) {
-        lanesHtml = `<br>Lanes deploying: ${data.lanes_deploying} (check Active Lanes tab for status)`;
-      }
-
       // Build credentials table
       let credsHtml = '';
       if (data.credentials && data.credentials.length > 0) {
@@ -2642,17 +2637,117 @@
       }
 
       status.innerHTML = `
-        <strong style="color: #38a169;">Group deployed!</strong><br>
+        <strong style="color: #38a169;">Group created!</strong><br>
         ${data.instructors_created} instructors + ${data.students_created} students created<br>
-        Guac users: ${data.guac_users_created} | Guac group: ${data.guac_group}${lanesHtml}
+        Guac users: ${data.guac_users_created} | Guac group: ${data.guac_group}
         ${credsHtml}
       `;
+
       const laneMsg = data.lanes_deploying > 0 ? `, ${data.lanes_deploying} lanes deploying` : '';
       Toast.success('Group Deployed', `${data.students_created} students + ${data.instructors_created} instructors${laneMsg}`);
       loadDeployedGroups();
       loadUsers();
       loadClusterHealth();
-      if (data.lanes_deploying > 0) loadLanes();
+
+      // Start polling deployment progress if lanes are deploying
+      if (data.lanes_deploying > 0 && data.group_id) {
+        startDeployProgressPoll(data.group_id, data.lanes_deploying, status);
+        loadLanes();
+      }
+    }
+
+    function startDeployProgressPoll(groupId, totalLanes, statusEl) {
+      // Insert progress tracker below the status
+      const progressDiv = document.createElement('div');
+      progressDiv.id = 'deployProgressTracker';
+      progressDiv.style.cssText = 'margin-top: 0.75rem; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;';
+      statusEl.parentNode.insertBefore(progressDiv, statusEl.nextSibling);
+
+      function renderProgress(p) {
+        const pct = p.total > 0 ? Math.round((p.completed / p.total) * 100) : 0;
+        const barColor = p.failed > 0 ? '#e53e3e' : '#38a169';
+        const succeededPct = p.total > 0 ? Math.round((p.succeeded / p.total) * 100) : 0;
+        const failedPct = p.total > 0 ? Math.round((p.failed / p.total) * 100) : 0;
+
+        let phaseLabel = p.phase || 'preparing';
+        const phaseLabels = {
+          preparing: 'Preparing',
+          gateway_replication: 'Replicating Gateways',
+          gateway_cloning: 'Cloning Gateways',
+          deploying: 'Deploying VMs',
+          complete: 'Complete'
+        };
+        phaseLabel = phaseLabels[phaseLabel] || phaseLabel;
+
+        let etaHtml = '';
+        if (p.phase !== 'complete' && p.eta_s != null && p.eta_s > 0) {
+          const mins = Math.floor(p.eta_s / 60);
+          const secs = p.eta_s % 60;
+          etaHtml = `<span style="color: var(--gray-500); font-size: 0.8rem;"> — ETA: ${mins > 0 ? mins + 'm ' : ''}${secs}s</span>`;
+        }
+
+        let elapsedHtml = '';
+        if (p.elapsed_s != null) {
+          const mins = Math.floor(p.elapsed_s / 60);
+          const secs = p.elapsed_s % 60;
+          elapsedHtml = `<span style="color: var(--gray-500); font-size: 0.75rem;">Elapsed: ${mins > 0 ? mins + 'm ' : ''}${secs}s</span>`;
+        }
+
+        let avgHtml = '';
+        if (p.avg_lane_s != null) {
+          avgHtml = ` <span style="color: var(--gray-500); font-size: 0.75rem;">| Avg/lane: ${p.avg_lane_s}s</span>`;
+        }
+
+        progressDiv.innerHTML = `
+          <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
+            <strong style="font-size: 0.85rem;">
+              ${p.phase === 'complete' ? '&#10003;' : '&#9881;'} ${phaseLabel}${etaHtml}
+            </strong>
+            <span style="font-size: 0.85rem; font-weight: 600;">${p.completed}/${p.total} lanes</span>
+          </div>
+          <div style="background: var(--border); border-radius: 4px; height: 20px; overflow: hidden; margin-bottom: 0.4rem;">
+            <div style="display: flex; height: 100%;">
+              <div style="width: ${succeededPct}%; background: #38a169; transition: width 0.5s;"></div>
+              <div style="width: ${failedPct}%; background: #e53e3e; transition: width 0.5s;"></div>
+            </div>
+          </div>
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 0.75rem;">
+              <span style="color: #38a169; font-weight: 600;">${p.succeeded} succeeded</span>
+              ${p.failed > 0 ? `<span style="color: #e53e3e; font-weight: 600; margin-left: 0.5rem;">${p.failed} failed</span>` : ''}
+            </span>
+            <span>${elapsedHtml}${avgHtml}</span>
+          </div>
+        `;
+
+        if (p.phase === 'complete') {
+          progressDiv.style.borderColor = p.failed > 0 ? '#e53e3e' : '#38a169';
+        }
+      }
+
+      // Initial render
+      renderProgress({ total: totalLanes, completed: 0, succeeded: 0, failed: 0, phase: 'preparing', elapsed_s: 0 });
+
+      const pollInterval = setInterval(async () => {
+        try {
+          const p = await api('GET', `/deploy-group/${groupId}/progress`);
+          renderProgress(p);
+
+          if (p.phase === 'complete' || p.completed >= p.total) {
+            clearInterval(pollInterval);
+            loadLanes();
+            loadClusterHealth();
+            if (p.failed > 0) {
+              Toast.warning('Deployment Finished', `${p.succeeded}/${p.total} lanes deployed, ${p.failed} failed`);
+            } else {
+              Toast.success('Deployment Complete', `All ${p.succeeded} lanes deployed successfully`);
+            }
+          }
+        } catch (e) {
+          // Progress endpoint may 404 if deployment finished and was cleaned up
+          clearInterval(pollInterval);
+        }
+      }, 5000);
     }
 
     function copyCredentials() {
