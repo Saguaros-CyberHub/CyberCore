@@ -1191,7 +1191,13 @@ router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, r
       await proxmoxAPI('POST', stopPath);
       await new Promise(r => setTimeout(r, 3000));
     } catch (e) { /* may already be stopped */ }
-    // QEMU: purge + skiplock only. LXC: purge + force.
+    // Disable protection mode if enabled
+    try {
+      const cfgPath = type === 'lxc'
+        ? `/api2/json/nodes/${node}/lxc/${vmid}/config`
+        : `/api2/json/nodes/${node}/qemu/${vmid}/config`;
+      await proxmoxAPI('PUT', cfgPath, { protection: 0 });
+    } catch (e) { /* may not have protection set */ }
     const delPath = type === 'lxc'
       ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
       : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
