@@ -40,21 +40,31 @@ function parseCfg(row) {
 async function getGroupDeploymentContext(cfg) {
   const challengeKey = cfg.challenge_key;
   const module = cfg.module;
-  if (!challengeKey || !module) return null;
+  if (!challengeKey) return null;
 
-  try {
-    const challengeResult = await cybercoreQuery(
-      `SELECT challenge_key, spec FROM ${module}_challenge WHERE challenge_key = $1 AND status = 'active'`,
-      [challengeKey]
-    );
-    if (challengeResult.rows.length === 0) return null;
-    const spec = typeof challengeResult.rows[0].spec === 'string'
-      ? JSON.parse(challengeResult.rows[0].spec) : challengeResult.rows[0].spec;
-    return { challengeKey, module, spec };
-  } catch (e) {
-    console.error(`[CLE] Failed to load challenge spec: ${e.message}`);
-    return null;
+  // Challenge tables may be named {module}_challenge or crucible_challenge
+  const tablesToTry = [];
+  if (module) tablesToTry.push(`${module}_challenge`);
+  if (module !== 'crucible') tablesToTry.push('crucible_challenge');
+
+  for (const table of tablesToTry) {
+    try {
+      const challengeResult = await cybercoreQuery(
+        `SELECT challenge_key, spec FROM ${table} WHERE challenge_key = $1 AND status = 'active'`,
+        [challengeKey]
+      );
+      if (challengeResult.rows.length > 0) {
+        const spec = typeof challengeResult.rows[0].spec === 'string'
+          ? JSON.parse(challengeResult.rows[0].spec) : challengeResult.rows[0].spec;
+        return { challengeKey, module: module || 'crucible', spec };
+      }
+    } catch (e) {
+      // Table doesn't exist — try next
+    }
   }
+
+  console.error(`[CLE] No challenge found for key '${challengeKey}' in any table`);
+  return null;
 }
 
 async function allocateVxlan(spec) {
@@ -258,8 +268,12 @@ router.post('/', async (req, res) => {
             const bestNode = bestNodeInfo.node;
 
             const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
-            const vnet = (Array.isArray(vnets) ? vnets : []).find(v => v.tag === vxlanId);
+            const vnet = (Array.isArray(vnets) ? vnets : []).find(v => String(v.tag) === String(vxlanId));
             if (!vnet) throw new Error(`No VNet for VXLAN ${vxlanId}`);
+            if (!vnet.vnet || vnet.vnet === vnet.zone) {
+              throw new Error(`VNet lookup returned zone name '${vnet.vnet}' instead of a VNet for VXLAN ${vxlanId}. Available VNets: ${(vnets||[]).map(v=>`${v.vnet}(tag:${v.tag})`).join(', ')}`);
+            }
+            console.log(`[CLE] Using VNet '${vnet.vnet}' (zone: ${vnet.zone}, tag: ${vnet.tag}) for VXLAN ${vxlanId}`);
 
             const laneName = `${vnet.zone}-${vxlanId}`;
             const laneConfig = JSON.stringify({ challenge_key: challengeKey, module, group_id: group_id, group_name: group.group_name });
