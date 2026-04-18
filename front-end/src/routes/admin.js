@@ -1622,7 +1622,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
       // Background: deploy lanes in PARALLEL with concurrency control
       (async () => {
-        const concurrency = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 5;
+        const concurrency = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 3;
         console.log(`[Group ${group_name}] Starting parallel deployment of ${laneJobs.length} lanes (concurrency: ${concurrency})...`);
 
         // Track progress for the status endpoint
@@ -1639,9 +1639,49 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         };
         const progress = global._batchDeployProgress[batchId];
 
+        // ── Phase 1: Clone all LXC gateways SEQUENTIALLY ──
+        // LXC containers lock the source template during clone, so these must be serialized.
+        // Gateways are small so this is fast (~5-10s each).
+        console.log(`[Group ${group_name}] Phase 1: Cloning ${laneJobs.length} gateways sequentially (LXC lock constraint)...`);
+        const gatewayResults = {};  // laneId → { success, error }
+        for (const job of laneJobs) {
+          const { laneId, student, vxlanId, vnet, targetNode } = job;
+          const gatewayVmId = 100000 + vxlanId;
+          try {
+            console.log(`[Group ${group_name}] Cloning gateway LXC ${gatewayVmid} → ${gatewayVmId} for ${student.email}`);
+            const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+              newid: gatewayVmId,
+              hostname: `${job.laneName}-gateway`,
+              full: 1,
+              target: targetNode,
+              description: `Group: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
+              pool: `${module}-pool`
+            });
+            if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
+            await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/config`, {
+              net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+            });
+            gatewayResults[laneId] = { success: true };
+            console.log(`[Group ${group_name}] Gateway ${gatewayVmId} cloned to ${targetNode}`);
+          } catch (err) {
+            console.error(`[Group ${group_name}] Gateway clone failed for ${student.email}: ${err.message}`);
+            gatewayResults[laneId] = { success: false, error: err.message };
+          }
+        }
+        const gwSuccessCount = Object.values(gatewayResults).filter(r => r.success).length;
+        console.log(`[Group ${group_name}] Phase 1 complete: ${gwSuccessCount}/${laneJobs.length} gateways cloned`);
+
+        // ── Phase 2: Clone QEMU VMs + Kali in PARALLEL (no LXC lock issue) ──
+        console.log(`[Group ${group_name}] Phase 2: Cloning challenge VMs and Kali in parallel (concurrency: ${concurrency})...`);
+
         const { results, errors } = await runBatch(laneJobs, async (job) => {
           const { laneId, student, vxlanId, vnet, targetNode } = job;
           const bestNode = targetNode;
+
+          // Skip if gateway failed for this lane
+          if (!gatewayResults[laneId]?.success) {
+            throw new Error(`Skipped: gateway clone failed — ${gatewayResults[laneId]?.error}`);
+          }
 
           progress.lanes[laneId] = { student: student.email, vxlan: vxlanId, node: bestNode, status: 'cloning' };
           console.log(`[Group ${group_name}] Deploying lane ${laneId} for ${student.email} on ${bestNode} (VXLAN ${vxlanId})${use_webhook ? ' via webhook' : ''}...`);
@@ -1675,7 +1715,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             const gatewayVmId = 100000 + vxlanId;
             const deployedVMs = [];
 
-            // Clone all challenge VMs in parallel within this lane
+            // Clone all challenge VMs in parallel within this lane (QEMU — no lock issues)
             const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
             const clonePromises = vmSpecs.map(async (vmSpec) => {
               const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
@@ -1686,22 +1726,46 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               console.log(`[Group ${group_name}] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${student.email}`);
 
               if (vmType === 'lxc') {
-                const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
-                  newid: vmId, hostname: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
-                  description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
-                  pool: `${module}-pool`
-                });
-                if (result) await waitForTask(templateNode, result);
+                // LXC challenge VMs also need sequential cloning — queue via retry
+                let cloneSuccess = false;
+                for (let attempt = 0; attempt < 5 && !cloneSuccess; attempt++) {
+                  try {
+                    const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
+                      newid: vmId, hostname: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+                      description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
+                      pool: `${module}-pool`
+                    });
+                    if (result) await waitForTask(templateNode, result);
+                    cloneSuccess = true;
+                  } catch (e) {
+                    if (e.message.includes('locked') && attempt < 4) {
+                      console.log(`[Group ${group_name}] LXC ${vmTemplate} locked, retrying in 10s (attempt ${attempt + 1}/5)...`);
+                      await new Promise(r => setTimeout(r, 10000));
+                    } else throw e;
+                  }
+                }
                 await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
                   net1: `name=lan0,bridge=${vnet.vnet}`
                 });
               } else {
-                const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
-                  newid: vmId, name: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
-                  description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
-                  pool: `${module}-pool`
-                });
-                if (result) await waitForTask(templateNode, result);
+                // QEMU clone with retry on storage pool lock timeout
+                let cloneSuccess = false;
+                for (let attempt = 0; attempt < 5 && !cloneSuccess; attempt++) {
+                  try {
+                    const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
+                      newid: vmId, name: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
+                      description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
+                      pool: `${module}-pool`
+                    });
+                    if (result) await waitForTask(templateNode, result);
+                    cloneSuccess = true;
+                  } catch (e) {
+                    if ((e.message.includes('locked') || e.message.includes('lock')) && attempt < 4) {
+                      console.log(`[Group ${group_name}] QEMU ${vmTemplate} → ${vmId} lock contention, retrying in 15s (attempt ${attempt + 1}/5)...`);
+                      await new Promise(r => setTimeout(r, 15000));
+                    } else throw e;
+                  }
+                }
                 await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
                   net0: `virtio,bridge=${vnet.vnet}`
                 });
@@ -1710,23 +1774,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               return { vm_id: vmId, name: vmName, type: vmType, node: bestNode };
             });
 
-            // Clone gateway in parallel with challenge VMs
-            const gwClonePromise = (async () => {
-              const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
-                newid: gatewayVmId,
-                hostname: `${job.laneName}-gateway`,
-                full: 1,
-                target: bestNode,
-                description: `Group: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
-                pool: `${module}-pool`
-              });
-              if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
-              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-                net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
-              });
-            })();
-
-            // Clone attack box in parallel if requested
+            // Clone attack box (QEMU) with retry on lock
             const shouldDeployAttackBox = !!attack_boxes;
             let attackBoxVmId = shouldDeployAttackBox ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null;
             const studentUsername = student.email.split('@')[0].replace(/[^a-z0-9_-]/gi, '-');
@@ -1735,14 +1783,25 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
             const kaliClonePromise = shouldDeployAttackBox ? (async () => {
               console.log(`[Group ${group_name}] Cloning Kali attack box → ${attackBoxVmId} for ${student.email}...`);
-              const kaliClone = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${KALI_TEMPLATE_VMID}/clone`, {
-                newid: attackBoxVmId,
-                name: `kali-${studentUsername}`,
-                full: 1,
-                target: bestNode,
-                description: `Attack Box (Kali)\nGroup: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
-                pool: `${module}-pool`
-              });
+              let kaliClone;
+              for (let attempt = 0; attempt < 5; attempt++) {
+                try {
+                  kaliClone = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${KALI_TEMPLATE_VMID}/clone`, {
+                    newid: attackBoxVmId,
+                    name: `kali-${studentUsername}`,
+                    full: 1,
+                    target: bestNode,
+                    description: `Attack Box (Kali)\nGroup: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
+                    pool: `${module}-pool`
+                  });
+                  break;
+                } catch (e) {
+                  if ((e.message.includes('locked') || e.message.includes('lock')) && attempt < 4) {
+                    console.log(`[Group ${group_name}] Kali clone lock contention, retrying in 15s (attempt ${attempt + 1}/5)...`);
+                    await new Promise(r => setTimeout(r, 15000));
+                  } else throw e;
+                }
+              }
               if (kaliClone) await waitForTask(templateNode, kaliClone);
 
               console.log(`[Group ${group_name}] Configuring cloud-init for ${attackBoxVmId} (user: ${studentUsername})...`);
@@ -1754,11 +1813,10 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/cloudinit`);
             })() : Promise.resolve();
 
-            // Wait for ALL clones to finish in parallel
+            // Wait for all QEMU clones to finish in parallel (gateway already done in Phase 1)
             progress.lanes[laneId].status = 'cloning';
             const [clonedVMs] = await Promise.all([
               Promise.all(clonePromises),
-              gwClonePromise,
               kaliClonePromise
             ]);
             deployedVMs.push(...clonedVMs);
