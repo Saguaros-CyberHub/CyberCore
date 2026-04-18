@@ -2212,16 +2212,18 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     const laneIds = [];
     const vmNodeMap = {};          // vmid → node (from cluster resources)
 
-    // Fetch cluster resources and node list ONCE
+    // Fetch cluster resources (VMs + LXC) and node list ONCE
     const [clusterResources, nodeList] = await Promise.all([
-      proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm').catch(() => []),
+      proxmoxAPI('GET', '/api2/json/cluster/resources').catch(() => []),
       proxmoxAPI('GET', '/api2/json/nodes').catch(() => [])
     ]);
     const allNodeNames = nodeList.map(n => n.node);
     if (allNodeNames.length === 0) allNodeNames.push('cyberhub-node-5');
 
     for (const r of clusterResources) {
-      vmNodeMap[r.vmid] = r.node;
+      if (r.type === 'qemu' || r.type === 'lxc') {
+        vmNodeMap[r.vmid] = r.node;
+      }
     }
 
     // Collect all lanes for all students in parallel
@@ -2334,13 +2336,24 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     // ── Phase 3: Delete all VMs in parallel ──
     console.log(`[Group Teardown] Phase 3: Deleting ${existingVms.length} VMs...`);
     const { errors: destroyErrors } = await runBatch(existingVms, async (vm) => {
-      const node = vmNodeMap[vm.vmid];
-      try {
-        await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
-      } catch (_) {
-        await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1`);
+      const knownNode = vmNodeMap[vm.vmid];
+      const nodesToTry = knownNode ? [knownNode, ...allNodeNames.filter(n => n !== knownNode)] : allNodeNames;
+
+      for (const node of nodesToTry) {
+        try {
+          try {
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
+          } catch (_) {
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1`);
+          }
+          console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
+          return;
+        } catch (e) {
+          if (node === nodesToTry[nodesToTry.length - 1]) {
+            throw new Error(`${vm.type} ${vm.vmid} (${vm.label}): failed on all nodes — ${e.message}`);
+          }
+        }
       }
-      console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
     }, { concurrency: 15 });
 
     for (const err of destroyErrors) {
@@ -2353,8 +2366,8 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
 
     for (let round = 1; round <= 3; round++) {
       try {
-        const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
-        const stillAlive = resources.filter(r => allTargetVmIds.includes(r.vmid));
+        const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
+        const stillAlive = resources.filter(r => (r.type === 'qemu' || r.type === 'lxc') && allTargetVmIds.includes(r.vmid));
         if (stillAlive.length === 0) {
           console.log(`[Group Teardown] All VMs confirmed destroyed${round > 1 ? ` (after ${round - 1} retry rounds)` : ''}`);
           break;

@@ -3786,6 +3786,7 @@
       loadLanes();
       loadModulesAndChallenges();
       loadClusterHealth();
+      setInterval(loadClusterHealth, 15000);
       loadMergedUsers();
       loadChallengeTemplates();
       loadVulnScripts();
