@@ -532,7 +532,7 @@ router.delete('/:id', async (req, res) => {
             await new Promise(r => setTimeout(r, 2000));
             const delPath = vm.type === 'lxc'
               ? `/api2/json/nodes/${node}/lxc/${vm.id}?purge=1&force=1`
-              : `/api2/json/nodes/${node}/qemu/${vm.id}?purge=1&skiplock=1&force=1`;
+              : `/api2/json/nodes/${node}/qemu/${vm.id}?purge=1&skiplock=1`;
             await proxmoxAPI('DELETE', delPath);
           } catch (_) {}
         }

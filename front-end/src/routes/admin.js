@@ -1183,9 +1183,6 @@ router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, r
   const { vmid, node, type } = req.body;
   if (!vmid || !node) return res.status(400).json({ error: 'vmid and node required' });
   try {
-    const path = type === 'lxc'
-      ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
-      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1&force=1`;
     // Stop VM first if running
     try {
       const stopPath = type === 'lxc'
@@ -1194,7 +1191,11 @@ router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, r
       await proxmoxAPI('POST', stopPath);
       await new Promise(r => setTimeout(r, 3000));
     } catch (e) { /* may already be stopped */ }
-    await proxmoxAPI('DELETE', path);
+    // QEMU: purge + skiplock only. LXC: purge + force.
+    const delPath = type === 'lxc'
+      ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
+    await proxmoxAPI('DELETE', delPath);
     console.log(`[Reconcile] Destroyed orphaned VM ${vmid} on ${node}`);
     res.json({ ok: true, vmid, node });
   } catch (error) {
