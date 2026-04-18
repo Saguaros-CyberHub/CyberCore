@@ -1598,13 +1598,22 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             [student.id, student.email, student.email, `Student`, `${i + 1}`, group_name, studentPwHash]
           );
 
-          // Insert lane record
+          // Insert lane record — include expected VM IDs so teardown can find them even if deploy fails
           const laneName = `${vnet.zone}-${vxlanId}`;
+          const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: spec.template_vmid || 1600, type: 'qemu', vm_offset: 600000 }];
+          const expectedVms = vmSpecs.map(vs => ({
+            vm_id: (vs.vm_offset || 600000) + vxlanId,
+            name: vs.name || challenge_key,
+            type: vs.type || 'qemu'
+          }));
           const laneConfig = JSON.stringify({
             challenge_key,
             module,
             group_id: groupId,
-            group_name
+            group_name,
+            gateway_vm_id: 100000 + vxlanId,
+            attack_box_vm_id: attack_boxes ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null,
+            vms: expectedVms
           });
           const laneInsert = await cybercoreQuery(
             `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
@@ -2168,6 +2177,23 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       )
     );
 
+    // Look up the challenge spec so we can compute all expected VM IDs even for failed lanes
+    let groupChallengeSpec = null;
+    const groupChallengeKey = config.challenge_key;
+    const groupModule = config.module;
+    if (groupChallengeKey && groupModule) {
+      try {
+        const specResult = await cybercoreQuery(
+          `SELECT spec FROM ${groupModule}_challenge WHERE challenge_key = $1 AND status = 'active'`,
+          [groupChallengeKey]
+        );
+        if (specResult.rows.length > 0) {
+          groupChallengeSpec = typeof specResult.rows[0].spec === 'string'
+            ? JSON.parse(specResult.rows[0].spec) : specResult.rows[0].spec;
+        }
+      } catch (_) {}
+    }
+
     for (const lanes of studentLaneResults) {
       for (const lane of lanes) {
         laneIds.push(lane.lane_id);
@@ -2176,9 +2202,16 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
 
         const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
 
+        // Use lane config vms, or fall back to computing from the challenge spec
         if (Array.isArray(laneConfig.vms) && laneConfig.vms.length > 0) {
           for (const vm of laneConfig.vms) {
             allVmsToDestroy.push({ vmid: vm.vm_id, type: vm.type || 'qemu', label: vm.name || `VM-${vm.vm_id}`, laneId: lane.lane_id });
+          }
+        } else if (groupChallengeSpec && Array.isArray(groupChallengeSpec.vms) && groupChallengeSpec.vms.length > 0) {
+          // Compute VM IDs from challenge spec (handles failed lanes with no vms array)
+          for (const vmSpec of groupChallengeSpec.vms) {
+            const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
+            allVmsToDestroy.push({ vmid: vmId, type: vmSpec.type || 'qemu', label: vmSpec.name || `VM-${vmId}`, laneId: lane.lane_id });
           }
         } else {
           const challengeVmId = laneConfig.challenge_vm_id || (600000 + vxlanId);
