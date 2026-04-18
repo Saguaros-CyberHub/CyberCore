@@ -1194,7 +1194,7 @@ router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, r
     // QEMU: purge + skiplock only. LXC: purge + force.
     const delPath = type === 'lxc'
       ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
-      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
+      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
     await proxmoxAPI('DELETE', delPath);
     console.log(`[Reconcile] Destroyed orphaned VM ${vmid} on ${node}`);
     res.json({ ok: true, vmid, node });
