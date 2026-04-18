@@ -8,6 +8,57 @@
  */
 
 const MAX_CONCURRENT_LANES = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 5;
+const MAX_CONCURRENT_CLONES = parseInt(process.env.MAX_CONCURRENT_CLONES) || 4;
+
+/**
+ * Semaphore — limits concurrent access to a shared resource.
+ * Used to throttle Proxmox clone operations across all lanes.
+ */
+class Semaphore {
+  constructor(max) {
+    this.max = max;
+    this.current = 0;
+    this.queue = [];
+  }
+
+  async acquire() {
+    if (this.current < this.max) {
+      this.current++;
+      return;
+    }
+    return new Promise(resolve => this.queue.push(resolve));
+  }
+
+  release() {
+    this.current--;
+    if (this.queue.length > 0) {
+      this.current++;
+      this.queue.shift()();
+    }
+  }
+
+  /** Run an async function with the semaphore held */
+  async run(fn) {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+}
+
+/**
+ * Create a shared clone semaphore for a batch deployment.
+ * This limits the total number of Proxmox clone operations in flight
+ * regardless of how many lanes are deploying simultaneously.
+ *
+ * @param {number} maxClones - max concurrent clone operations (default MAX_CONCURRENT_CLONES)
+ * @returns {Semaphore}
+ */
+function createCloneSemaphore(maxClones) {
+  return new Semaphore(maxClones || MAX_CONCURRENT_CLONES);
+}
 
 /**
  * Run an array of async jobs with bounded concurrency.
@@ -131,4 +182,4 @@ async function distributeAcrossNodes(proxmoxAPI, numLanes) {
   return assignments;
 }
 
-module.exports = { runBatch, distributeAcrossNodes, MAX_CONCURRENT_LANES };
+module.exports = { runBatch, distributeAcrossNodes, createCloneSemaphore, MAX_CONCURRENT_LANES, MAX_CONCURRENT_CLONES };

@@ -1726,8 +1726,8 @@
                 <tbody>${zoneRows}</tbody>
               </table>` : ''}
             ${vnetRows ? `
-              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Orphaned VNets (no active lane)</h4>
-              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">VNets whose VXLAN tag has no active lane. May be leftover from deleted deployments.</p>
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Orphaned VNets (zone deleted)</h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">VNets whose SDN zone no longer exists. Leftover from deleted zones.</p>
               <table class="admin-table" style="font-size:0.8rem;">
                 <thead><tr><th>VNet</th><th>Zone</th><th>Tag</th><th>Action</th></tr></thead>
                 <tbody>${vnetRows}</tbody>
