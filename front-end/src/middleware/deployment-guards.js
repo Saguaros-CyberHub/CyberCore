@@ -15,7 +15,11 @@ const MAX_CONCURRENT_DEPLOYS = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 3
  * Returns { nodes[], totalVMs, warnings[] }
  */
 async function getClusterHealth(proxmoxAPI) {
-  const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
+  // Fetch cluster resources and Ceph storage status in parallel
+  const [resources, storageList] = await Promise.all([
+    proxmoxAPI('GET', '/api2/json/cluster/resources'),
+    proxmoxAPI('GET', '/api2/json/storage').catch(() => [])
+  ]);
 
   // Two-pass: collect nodes first, then count VMs per node
   const nodes = {};
@@ -31,9 +35,9 @@ async function getClusterHealth(proxmoxAPI) {
         mem_pct: Math.round(((r.mem || 0) / (r.maxmem || 1)) * 100),
         mem_used_gb: Math.round((r.mem || 0) / 1073741824 * 10) / 10,
         mem_total_gb: Math.round((r.maxmem || 0) / 1073741824 * 10) / 10,
-        disk_pct: r.maxdisk ? Math.round(((r.disk || 0) / r.maxdisk) * 100) : 0,
-        disk_used_gb: Math.round((r.disk || 0) / 1073741824 * 10) / 10,
-        disk_total_gb: Math.round((r.maxdisk || 0) / 1073741824 * 10) / 10,
+        local_disk_pct: r.maxdisk ? Math.round(((r.disk || 0) / r.maxdisk) * 100) : 0,
+        local_disk_used_gb: Math.round((r.disk || 0) / 1073741824 * 10) / 10,
+        local_disk_total_gb: Math.round((r.maxdisk || 0) / 1073741824 * 10) / 10,
         vm_count: 0
       };
     }
@@ -49,21 +53,55 @@ async function getClusterHealth(proxmoxAPI) {
     }
   }
 
+  // Pass 3: Get Ceph/shared storage usage from storage resources
+  // Look for RBD/Ceph storage entries in cluster resources
+  let ceph = null;
+  const storageResources = resources.filter(r => r.type === 'storage');
+  // Find the primary VM storage pool (RBD type, or the one named vmpool)
+  const rdbStorages = storageResources.filter(r =>
+    r.storage === 'vmpool' || r.plugintype === 'rbd'
+  );
+  if (rdbStorages.length > 0) {
+    // Use the first matching entry (all nodes report the same Ceph pool stats)
+    const s = rdbStorages[0];
+    const maxdisk = Number(s.maxdisk || 0);
+    const disk = Number(s.disk || 0);
+    ceph = {
+      storage: s.storage,
+      used_bytes: disk,
+      total_bytes: maxdisk,
+      used_gb: Math.round(disk / 1073741824 * 10) / 10,
+      total_gb: Math.round(maxdisk / 1073741824 * 10) / 10,
+      used_tb: Math.round(disk / (1024 ** 4) * 100) / 100,
+      total_tb: Math.round(maxdisk / (1024 ** 4) * 100) / 100,
+      pct: maxdisk > 0 ? Math.round((disk / maxdisk) * 100) : 0
+    };
+  }
+
+  // Apply Ceph storage percentage to each node's disk display (since VMs live on Ceph, not local)
   const nodeList = Object.values(nodes);
+  for (const n of nodeList) {
+    n.disk_pct = ceph ? ceph.pct : n.local_disk_pct;
+    n.disk_used_gb = ceph ? ceph.used_gb : n.local_disk_used_gb;
+    n.disk_total_gb = ceph ? ceph.total_gb : n.local_disk_total_gb;
+  }
+
   const warnings = [];
 
   for (const n of nodeList) {
     if (n.mem_pct >= MAX_NODE_MEMORY_PCT) {
       warnings.push(`Node ${n.node} memory at ${n.mem_pct}% (threshold: ${MAX_NODE_MEMORY_PCT}%)`);
     }
-    if (n.disk_pct >= MAX_NODE_STORAGE_PCT) {
-      warnings.push(`Node ${n.node} storage at ${n.disk_pct}% (threshold: ${MAX_NODE_STORAGE_PCT}%)`);
-    }
+  }
+  // Storage warning based on Ceph (cluster-wide, not per-node)
+  if (ceph && ceph.pct >= MAX_NODE_STORAGE_PCT) {
+    warnings.push(`Ceph storage at ${ceph.pct}% (${ceph.used_tb} / ${ceph.total_tb} TiB, threshold: ${MAX_NODE_STORAGE_PCT}%)`);
   }
 
   return {
     nodes: nodeList,
     totalVMs,
+    ceph,
     thresholds: {
       max_memory_pct: MAX_NODE_MEMORY_PCT,
       max_storage_pct: MAX_NODE_STORAGE_PCT,

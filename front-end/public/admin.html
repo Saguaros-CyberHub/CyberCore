@@ -883,9 +883,25 @@
           statusEl.className = 'badge badge-green';
         }
 
-        // Node gauges
+        // Ceph storage bar (cluster-wide, shown above per-node gauges)
         const gauges = document.getElementById('clusterNodeGauges');
-        gauges.innerHTML = health.nodes.map(n => `
+        let cephHtml = '';
+        if (health.ceph) {
+          const c = health.ceph;
+          cephHtml = `
+            <div style="background: #f7fafc; border-radius: 8px; padding: 0.6rem 0.75rem; grid-column: 1 / -1;">
+              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
+                <span style="font-weight: 600; font-size: 0.8rem;">Ceph Storage <span style="font-weight: 400; color: var(--gray-500);">(${c.storage})</span></span>
+                <span style="font-size: 0.8rem; font-weight: 600; color: ${gaugeColor(c.pct)};">${c.used_tb} / ${c.total_tb} TiB (${c.pct}%)</span>
+              </div>
+              <div style="background: #e2e8f0; border-radius: 4px; height: 8px;">
+                <div style="background: ${gaugeColor(c.pct)}; height: 100%; border-radius: 4px; width: ${c.pct}%; transition: width 0.5s;"></div>
+              </div>
+            </div>`;
+        }
+
+        // Per-node gauges (CPU + MEM only, disk is shared via Ceph)
+        gauges.innerHTML = cephHtml + health.nodes.map(n => `
           <div style="background: #f7fafc; border-radius: 8px; padding: 0.6rem 0.75rem;">
             <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.4rem;">${escHtml(n.node)} <span style="font-weight: 400; color: var(--gray-500);">(${n.vm_count} VMs)</span></div>
             <div style="display: flex; gap: 0.5rem; font-size: 0.75rem;">
@@ -899,12 +915,6 @@
                 <div style="display: flex; justify-content: space-between;"><span>MEM</span><span>${n.mem_pct}%</span></div>
                 <div style="background: #e2e8f0; border-radius: 4px; height: 6px; margin-top: 2px;">
                   <div style="background: ${gaugeColor(n.mem_pct)}; height: 100%; border-radius: 4px; width: ${n.mem_pct}%;"></div>
-                </div>
-              </div>
-              <div style="flex: 1;">
-                <div style="display: flex; justify-content: space-between;"><span>DISK</span><span>${n.disk_pct}%</span></div>
-                <div style="background: #e2e8f0; border-radius: 4px; height: 6px; margin-top: 2px;">
-                  <div style="background: ${gaugeColor(n.disk_pct)}; height: 100%; border-radius: 4px; width: ${n.disk_pct}%;"></div>
                 </div>
               </div>
             </div>
