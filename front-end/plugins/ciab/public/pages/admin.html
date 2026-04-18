@@ -1870,7 +1870,7 @@
             }).join('')}
           </div>
           <!-- Script panel (right) -->
-          <div id="${selectorId}-scriptpanel" style="flex: 1; padding: 0.75rem; overflow-y: auto; max-height: 350px;"></div>
+          <div id="${selectorId}-scriptpanel" style="flex: 1; min-width: 0; padding: 0.75rem; overflow-y: auto; overflow-x: hidden; max-height: 350px;"></div>
         </div>`;
 
       container.style.display = 'block';
@@ -1946,7 +1946,7 @@
                     ${escHtml(s.name)}
                     ${isDefault ? '<span style="font-size: 0.6rem; background: #c6f6d5; color: #22543d; padding: 0 0.3rem; border-radius: 3px;">default</span>' : ''}
                   </div>
-                  ${s.description ? `<div style="font-size: 0.7rem; color: var(--gray-500); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${escHtml(s.description)}</div>` : ''}
+                  ${s.description ? `<div style="font-size: 0.7rem; color: var(--gray-500); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.3;">${escHtml(s.description)}</div>` : ''}
                   <div style="display: flex; gap: 0.5rem; margin-top: 0.1rem;">
                     ${services ? `<span style="font-size: 0.6rem; color: #4299e1;">${escHtml(services)}</span>` : ''}
                     ${deps ? `<span style="font-size: 0.6rem; color: var(--gray-400);">deps: ${escHtml(deps)}</span>` : ''}
