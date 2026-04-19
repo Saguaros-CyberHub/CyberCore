@@ -204,7 +204,7 @@ services:
       QUEUE_BULL_REDIS_PORT: 6379
       QUEUE_HEALTH_CHECK_ACTIVE: "true"
       N8N_SKIP_DB_MIGRATIONS: "true"
-      N8N_RUNNERS_TASK_TIMEOUT: 600
+      N8N_RUNNERS_TASK_TIMEOUT: 1200
     command: ["worker"]
     env_file:
       - ./config/secrets.env
