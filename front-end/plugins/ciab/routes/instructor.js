@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs');
 const PDFDocument = require('pdfkit');
 const { query, pool } = require('../utils/db');
+const jwt = require('jsonwebtoken');
 const { authenticateToken, requireRole } = require('../../../src/middleware/auth');
 const { renderIntakePdf } = require('./intake-form');
 const { cybercoreQuery } = require('../../../src/utils/cybercore-db');
@@ -56,6 +57,46 @@ router.get('/generation-status/:profileId', authenticateToken, instructorOnly, (
     res.json({ generating: true, ...job });
   } else {
     res.json({ generating: false });
+  }
+});
+
+// POST /api/instructor/store-example — Called by N8N E4 node to store answer key parts
+// Secured via JWT — N8N passes through a service token minted by the generate-examples route
+router.post('/store-example', authenticateToken, async (req, res) => {
+  try {
+    const { user_id, profile_id, part_number, part_name, content, output_option } = req.body;
+
+    if (!user_id || !profile_id || !part_number) {
+      return res.status(400).json({ error: 'Missing required fields: user_id, profile_id, part_number' });
+    }
+
+    // Parse output_option to build output_option_name
+    let optionNames = null;
+    try {
+      const keys = JSON.parse(output_option || '[]');
+      if (Array.isArray(keys)) {
+        optionNames = keys.join(', ');
+      }
+    } catch (_) {}
+
+    await query(`
+      INSERT INTO assessment_progress
+        (user_id, profile_id, part_number, part_name, content, output_option, output_option_name, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'reviewed')
+      ON CONFLICT (user_id, profile_id, part_number)
+      DO UPDATE SET
+        content = EXCLUDED.content,
+        output_option = EXCLUDED.output_option,
+        output_option_name = EXCLUDED.output_option_name,
+        status = 'reviewed',
+        updated_at = NOW()
+    `, [user_id, profile_id, part_number, part_name, content, output_option, optionNames]);
+
+    console.log(`[StoreExample] Stored part ${part_number} for profile ${profile_id}`);
+    res.json({ success: true, part_number });
+  } catch (error) {
+    console.error('[StoreExample] Error:', error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1637,147 +1678,98 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
 
     const partsToGenerate = parts || [1, 2, 3, 4, 5, 6, 7, 8];
 
-    // ─── Mark job as active and respond immediately ───
+    // ─── Delete old answer key rows, then fire N8N and respond immediately ───
+    try {
+      const deleted = await query(
+        `DELETE FROM assessment_progress WHERE user_id = $1 AND profile_id = $2`,
+        [instructorId, profile_id]
+      );
+      console.log(`[Examples] Deleted ${deleted.rowCount} old answer key rows for profile ${profile_id}`);
+    } catch (delErr) {
+      console.error('[Examples] Failed to delete old rows:', delErr.message);
+    }
+
     setJobActive(instructorId, profile_id, model);
+
+    // Fire N8N webhook — don't wait for response.
+    // N8N will generate all parts and store them via E4 → POST /api/instructor/store-example
+    const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_EXAMPLES_WEBHOOK || '/webhook-test/generate-examples'}`;
+    console.log('[Examples] Firing N8N (fire-and-forget):', n8nUrl);
+
+    // Mint a service JWT for N8N webhook auth + E4 store-example auth
+    const serviceToken = jwt.sign(
+      { userId: instructorId, role: 'instructor', service: 'example-generator' },
+      process.env.JWT_SECRET,
+      { expiresIn: '30m' }
+    );
+
+    fetch(n8nUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${serviceToken}`
+      },
+      body: JSON.stringify({
+        profile_id,
+        user_id: instructorId,
+        service_token: serviceToken,
+        profile_context: profileContext,
+        parts: partsToGenerate,
+        part_definitions: PART_DEFINITIONS,
+        model: model || undefined
+      })
+    }).then(async (resp) => {
+      if (!resp.ok) {
+        console.error(`[Examples] N8N webhook returned ${resp.status}:`, await resp.text().catch(() => ''));
+      } else {
+        console.log('[Examples] N8N webhook accepted, generation + DB storage handled by N8N pipeline');
+      }
+      // Also generate intake form locally (fast, no LLM needed)
+      try {
+        const intakeData = generateIntakeFormFromProfile(profile, fullProfileData);
+        const V72_SECTIONS = [
+          'company_info', 'security_policies', 'data_management', 'network_security',
+          'wireless', 'endpoint_security', 'compliance', 'software_assets',
+          'vuln_management', 'admin_privileges', 'secure_config', 'email_web',
+          'network_ports', 'network_devices', 'pentesting'
+        ];
+        await query(`
+          INSERT INTO intake_form_responses
+            (user_id, profile_id, status, completion_percentage,
+             company_info, security_policies, data_management, network_security,
+             wireless, endpoint_security, compliance, software_assets,
+             vuln_management, admin_privileges, secure_config, email_web,
+             network_ports, network_devices, pentesting, started_at, completed_at)
+          VALUES ($1, $2, 'complete', 100,
+             $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
+          ON CONFLICT (user_id, profile_id)
+          DO UPDATE SET
+             status = 'complete', completion_percentage = 100,
+             company_info = EXCLUDED.company_info, security_policies = EXCLUDED.security_policies,
+             data_management = EXCLUDED.data_management, network_security = EXCLUDED.network_security,
+             wireless = EXCLUDED.wireless, endpoint_security = EXCLUDED.endpoint_security,
+             compliance = EXCLUDED.compliance, software_assets = EXCLUDED.software_assets,
+             vuln_management = EXCLUDED.vuln_management, admin_privileges = EXCLUDED.admin_privileges,
+             secure_config = EXCLUDED.secure_config, email_web = EXCLUDED.email_web,
+             network_ports = EXCLUDED.network_ports, network_devices = EXCLUDED.network_devices,
+             pentesting = EXCLUDED.pentesting, completed_at = NOW(), updated_at = NOW()
+        `, [instructorId, profile_id, ...V72_SECTIONS.map(s => JSON.stringify(intakeData[s] || {}))]);
+        console.log('[Examples] Intake form generated and stored');
+      } catch (intakeErr) {
+        console.error('[Examples] Failed to store intake form:', intakeErr.message);
+      }
+      setJobComplete(instructorId, profile_id);
+    }).catch((err) => {
+      console.error('[Examples] N8N fire-and-forget failed:', err.message);
+      setJobComplete(instructorId, profile_id);
+    });
 
     res.json({
       success: true,
       status: 'generating',
       profile_id,
-      message: `Answer key generation started for ${partsToGenerate.length} parts. You can leave this page — results will be saved automatically.`
+      message: `Answer key generation started for ${partsToGenerate.length} parts. N8N will store results directly. You can leave this page.`
     });
-
-    // ─── Background: call N8N, store results ───
-    (async () => {
-      try {
-        // Delete old answer key rows for this profile before generating new ones
-        try {
-          const deleted = await query(
-            `DELETE FROM assessment_progress WHERE user_id = $1 AND profile_id = $2`,
-            [instructorId, profile_id]
-          );
-          console.log(`[Examples] Background: Deleted ${deleted.rowCount} old answer key rows for profile ${profile_id}`);
-        } catch (delErr) {
-          console.error('[Examples] Background: Failed to delete old rows:', delErr.message);
-        }
-
-        const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_EXAMPLES_WEBHOOK || '/webhook-test/generate-examples'}`;
-        console.log('[Examples] Background: calling N8N:', n8nUrl);
-
-        const n8nResponse = await fetch(n8nUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            profile_id,
-            profile_context: profileContext,
-            parts: partsToGenerate,
-            part_definitions: PART_DEFINITIONS,
-            model: model || undefined
-          })
-        });
-
-        if (!n8nResponse.ok) {
-          const errText = await n8nResponse.text();
-          throw new Error(`N8N failed: ${n8nResponse.status} ${errText}`);
-        }
-
-        let n8nData = await n8nResponse.json();
-        // N8N wraps responses in arrays — unwrap until we find the examples object
-        if (Array.isArray(n8nData)) n8nData = n8nData[0] || {};
-        if (n8nData.json) n8nData = n8nData.json; // N8N sometimes nests under .json
-        if (Array.isArray(n8nData)) n8nData = n8nData[0] || {};
-        console.log('[Examples] Background: N8N returned keys:', Object.keys(n8nData));
-        console.log('[Examples] Background: examples keys:', Object.keys(n8nData.examples || {}));
-
-        // Store results in DB
-        const stored = [];
-        const failed = [];
-        const examples = n8nData.examples || {};
-
-        for (const [partNum, partContent] of Object.entries(examples)) {
-          const pNum = parseInt(partNum);
-          const partDef = PART_DEFINITIONS[pNum];
-          if (!partDef) continue;
-
-          const allOptionKeys = partDef.options.map(o => o.key);
-          const envelope = {
-            deliverables: partContent.deliverables || {},
-            general_notes: partContent.general_notes || '',
-            is_example: true
-          };
-
-          try {
-            await query(`
-              INSERT INTO assessment_progress
-                (user_id, profile_id, part_number, part_name, content, output_option, status)
-              VALUES ($1, $2, $3, $4, $5, $6, 'reviewed')
-              ON CONFLICT (user_id, profile_id, part_number)
-              DO UPDATE SET
-                content = EXCLUDED.content,
-                output_option = EXCLUDED.output_option,
-                status = 'reviewed',
-                updated_at = NOW()
-            `, [
-              instructorId, profile_id, pNum, partDef.name,
-              JSON.stringify(envelope),
-              JSON.stringify(allOptionKeys)
-            ]);
-            stored.push(pNum);
-          } catch (dbErr) {
-            console.error(`[Examples] Background: Failed to store part ${pNum}:`, dbErr.message);
-            failed.push({ part: pNum, error: dbErr.message });
-          }
-        }
-
-        console.log('[Examples] Background: Stored parts:', stored, 'Failed:', failed);
-
-        // Also generate and store intake form
-        try {
-          const intakeData = generateIntakeFormFromProfile(profile, fullProfileData);
-          const V72_SECTIONS = [
-            'company_info', 'security_policies', 'data_management', 'network_security',
-            'wireless', 'endpoint_security', 'compliance', 'software_assets',
-            'vuln_management', 'admin_privileges', 'secure_config', 'email_web',
-            'network_ports', 'network_devices', 'pentesting'
-          ];
-
-          await query(`
-            INSERT INTO intake_form_responses
-              (user_id, profile_id, status, completion_percentage,
-               company_info, security_policies, data_management, network_security,
-               wireless, endpoint_security, compliance, software_assets,
-               vuln_management, admin_privileges, secure_config, email_web,
-               network_ports, network_devices, pentesting, started_at, completed_at)
-            VALUES ($1, $2, 'complete', 100,
-               $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
-            ON CONFLICT (user_id, profile_id)
-            DO UPDATE SET
-               status = 'complete', completion_percentage = 100,
-               company_info = EXCLUDED.company_info, security_policies = EXCLUDED.security_policies,
-               data_management = EXCLUDED.data_management, network_security = EXCLUDED.network_security,
-               wireless = EXCLUDED.wireless, endpoint_security = EXCLUDED.endpoint_security,
-               compliance = EXCLUDED.compliance, software_assets = EXCLUDED.software_assets,
-               vuln_management = EXCLUDED.vuln_management, admin_privileges = EXCLUDED.admin_privileges,
-               secure_config = EXCLUDED.secure_config, email_web = EXCLUDED.email_web,
-               network_ports = EXCLUDED.network_ports, network_devices = EXCLUDED.network_devices,
-               pentesting = EXCLUDED.pentesting, completed_at = NOW(), updated_at = NOW()
-          `, [
-            instructorId, profile_id,
-            ...V72_SECTIONS.map(s => JSON.stringify(intakeData[s] || {}))
-          ]);
-          console.log('[Examples] Background: Intake form generated and stored');
-        } catch (intakeErr) {
-          console.error('[Examples] Background: Failed to store intake form:', intakeErr.message);
-        }
-
-        console.log(`[Examples] Background: COMPLETE — ${stored.length} parts stored for profile ${profile_id}`);
-        setJobComplete(instructorId, profile_id);
-
-      } catch (bgError) {
-        console.error('[Examples] Background generation failed:', bgError.message);
-        setJobComplete(instructorId, profile_id);
-      }
-    })();
 
   } catch (error) {
     console.error('[Examples] Error:', error);
