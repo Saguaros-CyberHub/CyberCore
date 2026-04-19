@@ -2266,12 +2266,66 @@
             <input type="text" id="chalProfileCompany" placeholder="Leave blank for AI-generated">
           </div>
         </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.5rem;">
+          <div class="form-group">
+            <label>AI Model</label>
+            <select id="chalProfileModel" onchange="updateChalProfileCost()">
+              <optgroup label="Cloud APIs">
+                <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Recommended)</option>
+                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+              </optgroup>
+              <optgroup label="Local (Ollama)">
+                <option value="qwen3:14b">Qwen 3.0 14B</option>
+                <option value="llama3.2">Llama 3.2</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Est. Cost</label>
+            <div id="chalProfileCost" style="padding: 0.5rem; font-weight: 700; font-size: 1.1rem; color: #38a169;">< $0.01</div>
+          </div>
+        </div>
         <button class="btn btn-primary" onclick="generateChallengeProfileFromModal('${laneId}')" style="width: 100%; margin-top: 0.5rem;">Generate Challenge Profile</button>
         <div id="chalProfileStatus" style="margin-top: 0.75rem; font-size: 0.85rem;"></div>`;
+
+      updateChalProfileCost();
 
       const mc = document.querySelector('#permissionsModal .modal-content');
       mc.style.maxWidth = '600px';
       document.getElementById('permissionsModal').classList.add('active');
+    }
+
+    // ─── AI Model Cost Estimation (shared across modals) ───
+    const AI_MODEL_INFO = {
+      'claude-sonnet-4-5':   { label: 'Claude Sonnet 4.5',  input: 3.00,  output: 15.00, provider: 'anthropic' },
+      'claude-haiku-4-5':    { label: 'Claude Haiku 4.5',   input: 0.80,  output: 4.00,  provider: 'anthropic' },
+      'gemini-2.5-flash':    { label: 'Gemini 2.5 Flash',   input: 0.15,  output: 0.60,  provider: 'google' },
+      'gemini-2.5-pro':      { label: 'Gemini 2.5 Pro',     input: 1.25,  output: 10.00, provider: 'google' },
+      'qwen3:14b':           { label: 'Qwen 3.0 14B',       input: 0,     output: 0,     provider: 'ollama' },
+      'llama3.2':            { label: 'Llama 3.2',           input: 0,     output: 0,     provider: 'ollama' }
+    };
+
+    function estimateCost(modelId, inputTokens, outputTokens) {
+      const info = AI_MODEL_INFO[modelId] || { input: 0, output: 0, provider: 'unknown' };
+      if (info.provider === 'ollama') return { text: 'Free (local)', color: '#38a169' };
+      const total = (inputTokens / 1_000_000) * info.input + (outputTokens / 1_000_000) * info.output;
+      if (total < 0.01) return { text: '< $0.01', color: '#38a169' };
+      return {
+        text: `~$${total.toFixed(2)}`,
+        color: total > 0.50 ? '#e53e3e' : total > 0.10 ? '#d69e2e' : '#38a169'
+      };
+    }
+
+    function updateChalProfileCost() {
+      const el = document.getElementById('chalProfileCost');
+      if (!el) return;
+      const model = document.getElementById('chalProfileModel').value;
+      // Profile generation: ~12K input + ~18K output across 3 branches
+      const est = estimateCost(model, 12000, 18000);
+      el.textContent = est.text;
+      el.style.color = est.color;
     }
 
     async function generateChallengeProfileFromModal(laneId) {
@@ -2279,13 +2333,14 @@
       const industry = document.getElementById('chalProfileIndustry').value.trim();
       const difficulty = document.getElementById('chalProfileDifficulty').value;
       const company_name = document.getElementById('chalProfileCompany').value.trim() || null;
+      const llm_model = document.getElementById('chalProfileModel').value;
       const status = document.getElementById('chalProfileStatus');
 
       status.innerHTML = '<strong style="color: var(--gray-500);">Sending to N8N for AI generation... This may take 1-3 minutes.</strong>';
 
       try {
         const data = await api('POST', `/challenge-networks/${laneId}/generate-profile`, {
-          client_type, industry, difficulty, company_name
+          client_type, industry, difficulty, company_name, llm_model
         });
 
         status.innerHTML = `
@@ -2667,19 +2722,29 @@
     }
 
     function startDeployProgressPoll(groupId, totalLanes, statusEl) {
-      // Insert progress tracker below the status
       const progressDiv = document.createElement('div');
       progressDiv.id = 'deployProgressTracker';
       progressDiv.style.cssText = 'margin-top: 0.75rem; background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem;';
       statusEl.parentNode.insertBefore(progressDiv, statusEl.nextSibling);
 
-      function renderProgress(p) {
-        const pct = p.total > 0 ? Math.round((p.completed / p.total) * 100) : 0;
-        const barColor = p.failed > 0 ? '#e53e3e' : '#38a169';
-        const succeededPct = p.total > 0 ? Math.round((p.succeeded / p.total) * 100) : 0;
-        const failedPct = p.total > 0 ? Math.round((p.failed / p.total) * 100) : 0;
+      // Live state — updated by polls, ticked every second
+      const state = {
+        total: totalLanes, completed: 0, succeeded: 0, failed: 0,
+        phase: 'preparing', elapsed_s: 0, eta_s: null, avg_lane_s: null,
+        _lastPollTime: Date.now(), _done: false
+      };
 
-        let phaseLabel = p.phase || 'preparing';
+      function formatTime(totalSecs) {
+        if (totalSecs == null || totalSecs < 0) return '--';
+        const m = Math.floor(totalSecs / 60);
+        const s = totalSecs % 60;
+        return m > 0 ? `${m}m ${s}s` : `${s}s`;
+      }
+
+      function render() {
+        const succeededPct = state.total > 0 ? Math.round((state.succeeded / state.total) * 100) : 0;
+        const failedPct = state.total > 0 ? Math.round((state.failed / state.total) * 100) : 0;
+
         const phaseLabels = {
           preparing: 'Preparing',
           gateway_replication: 'Replicating Gateways',
@@ -2687,64 +2752,77 @@
           deploying: 'Deploying VMs',
           complete: 'Complete'
         };
-        phaseLabel = phaseLabels[phaseLabel] || phaseLabel;
+        const phaseLabel = phaseLabels[state.phase] || state.phase || 'Preparing';
 
-        let etaHtml = '';
-        if (p.phase !== 'complete' && p.eta_s != null && p.eta_s > 0) {
-          const mins = Math.floor(p.eta_s / 60);
-          const secs = p.eta_s % 60;
-          etaHtml = `<span style="color: var(--gray-500); font-size: 0.8rem;"> — ETA: ${mins > 0 ? mins + 'm ' : ''}${secs}s</span>`;
-        }
+        const etaHtml = (state.phase !== 'complete' && state.eta_s != null && state.eta_s > 0)
+          ? `<span style="color: var(--gray-500); font-size: 0.8rem;"> — ETA: ${formatTime(state.eta_s)}</span>`
+          : '';
 
-        let elapsedHtml = '';
-        if (p.elapsed_s != null) {
-          const mins = Math.floor(p.elapsed_s / 60);
-          const secs = p.elapsed_s % 60;
-          elapsedHtml = `<span style="color: var(--gray-500); font-size: 0.75rem;">Elapsed: ${mins > 0 ? mins + 'm ' : ''}${secs}s</span>`;
-        }
+        const elapsedHtml = state.elapsed_s != null
+          ? `<span style="color: var(--gray-500); font-size: 0.75rem;">Elapsed: ${formatTime(state.elapsed_s)}</span>`
+          : '';
 
-        let avgHtml = '';
-        if (p.avg_lane_s != null) {
-          avgHtml = ` <span style="color: var(--gray-500); font-size: 0.75rem;">| Avg/lane: ${p.avg_lane_s}s</span>`;
-        }
+        const avgHtml = state.avg_lane_s != null
+          ? ` <span style="color: var(--gray-500); font-size: 0.75rem;">| Avg/lane: ${state.avg_lane_s}s</span>`
+          : '';
 
         progressDiv.innerHTML = `
           <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
             <strong style="font-size: 0.85rem;">
-              ${p.phase === 'complete' ? '&#10003;' : '&#9881;'} ${phaseLabel}${etaHtml}
+              ${state.phase === 'complete' ? '&#10003;' : '&#9881;'} ${phaseLabel}${etaHtml}
             </strong>
-            <span style="font-size: 0.85rem; font-weight: 600;">${p.completed}/${p.total} lanes</span>
+            <span style="font-size: 0.85rem; font-weight: 600;">${state.completed}/${state.total} lanes</span>
           </div>
           <div style="background: var(--border); border-radius: 4px; height: 20px; overflow: hidden; margin-bottom: 0.4rem;">
             <div style="display: flex; height: 100%;">
-              <div style="width: ${succeededPct}%; background: #38a169; transition: width 0.5s;"></div>
-              <div style="width: ${failedPct}%; background: #e53e3e; transition: width 0.5s;"></div>
+              <div style="width: ${succeededPct}%; background: #38a169; transition: width 0.3s;"></div>
+              <div style="width: ${failedPct}%; background: #e53e3e; transition: width 0.3s;"></div>
             </div>
           </div>
           <div style="display: flex; justify-content: space-between; align-items: center;">
             <span style="font-size: 0.75rem;">
-              <span style="color: #38a169; font-weight: 600;">${p.succeeded} succeeded</span>
-              ${p.failed > 0 ? `<span style="color: #e53e3e; font-weight: 600; margin-left: 0.5rem;">${p.failed} failed</span>` : ''}
+              <span style="color: #38a169; font-weight: 600;">${state.succeeded} succeeded</span>
+              ${state.failed > 0 ? `<span style="color: #e53e3e; font-weight: 600; margin-left: 0.5rem;">${state.failed} failed</span>` : ''}
             </span>
             <span>${elapsedHtml}${avgHtml}</span>
           </div>
         `;
 
-        if (p.phase === 'complete') {
-          progressDiv.style.borderColor = p.failed > 0 ? '#e53e3e' : '#38a169';
+        if (state.phase === 'complete') {
+          progressDiv.style.borderColor = state.failed > 0 ? '#e53e3e' : '#38a169';
         }
       }
 
-      // Initial render
-      renderProgress({ total: totalLanes, completed: 0, succeeded: 0, failed: 0, phase: 'preparing', elapsed_s: 0 });
+      // Tick every second — increment elapsed, decrement ETA
+      const tickInterval = setInterval(() => {
+        if (state._done) return;
+        state.elapsed_s++;
+        if (state.eta_s != null && state.eta_s > 0) state.eta_s--;
+        render();
+      }, 1000);
 
+      // Poll server every 2 seconds for actual progress
       const pollInterval = setInterval(async () => {
         try {
           const p = await api('GET', `/deploy-group/${groupId}/progress`);
-          renderProgress(p);
+          // Sync state from server (authoritative values)
+          state.total = p.total;
+          state.completed = p.completed;
+          state.succeeded = p.succeeded;
+          state.failed = p.failed;
+          state.phase = p.phase;
+          state.avg_lane_s = p.avg_lane_s;
+          // Use server elapsed/eta as ground truth, tick interpolates between polls
+          if (p.elapsed_s != null) state.elapsed_s = p.elapsed_s;
+          if (p.eta_s != null) state.eta_s = p.eta_s;
+          state._lastPollTime = Date.now();
+          render();
 
           if (p.phase === 'complete' || p.completed >= p.total) {
+            state._done = true;
             clearInterval(pollInterval);
+            clearInterval(tickInterval);
+            render();
             loadLanes();
             loadClusterHealth();
             if (p.failed > 0) {
@@ -2754,10 +2832,14 @@
             }
           }
         } catch (e) {
-          // Progress endpoint may 404 if deployment finished and was cleaned up
+          state._done = true;
           clearInterval(pollInterval);
+          clearInterval(tickInterval);
         }
-      }, 5000);
+      }, 2000);
+
+      // Initial render
+      render();
     }
 
     function copyCredentials() {

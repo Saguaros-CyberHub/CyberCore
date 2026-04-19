@@ -1521,14 +1521,14 @@ function generateIntakeFormFromProfile(profile, fullProfileData) {
 // POST /api/instructor/generate-examples - Generate answer key for all parts
 router.post('/generate-examples', authenticateToken, instructorOnly, async (req, res) => {
   try {
-    const { profile_id, parts } = req.body;
+    const { profile_id, parts, model } = req.body;
     const instructorId = req.user.userId;
 
     if (!profile_id) {
       return res.status(400).json({ success: false, error: 'Missing profile_id' });
     }
 
-    console.log('[Examples] Generate request:', { profile_id, instructorId });
+    console.log('[Examples] Generate request:', { profile_id, instructorId, model: model || 'default' });
 
     // Load profile data (reuse same logic as generate-documents)
     const profileResult = await query(
@@ -1608,7 +1608,8 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
         profile_id,
         profile_context: profileContext,
         parts: partsToGenerate,
-        part_definitions: PART_DEFINITIONS
+        part_definitions: PART_DEFINITIONS,
+        model: model || undefined
       })
     });
 

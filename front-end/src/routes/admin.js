@@ -1667,9 +1667,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             progress.avg_lane_s = Math.round(avgMs / 1000);
 
             const remaining = progress.total - progress.completed;
-            // Lanes run in batches of `concurrency`, so estimate batches remaining
-            const batchesRemaining = Math.ceil(remaining / concurrency);
-            const etaMs = batchesRemaining * avgMs;
+            // Lanes run concurrently: remaining lanes / concurrency * avg lane time
+            const etaMs = (remaining / concurrency) * avgMs;
             progress.eta_s = Math.round(etaMs / 1000);
             progress.eta_at = new Date(now + etaMs).toISOString();
           }
@@ -3220,7 +3219,7 @@ router.post('/challenge-networks/:laneId/run-script', authenticateToken, adminOn
 // POST /api/admin/challenge-networks/:laneId/generate-profile — generate challenge profile with real IPs
 router.post('/challenge-networks/:laneId/generate-profile', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { client_type, industry, difficulty, company_name } = req.body;
+    const { client_type, industry, difficulty, company_name, llm_model } = req.body;
 
     // Get lane info from cybercore_db
     const laneResult = await cybercoreQuery(
@@ -3332,6 +3331,7 @@ router.post('/challenge-networks/:laneId/generate-profile', authenticateToken, a
       industry: industry || 'Technology',
       difficulty: difficulty || 'intermediate',
       company_name: company_name || null,
+      llmModel: llm_model || 'gemini-2.5-flash',
       lane_id: req.params.laneId,
       asset_inventory: allAssets,
       deployed_vulnerabilities: deployedVulns,

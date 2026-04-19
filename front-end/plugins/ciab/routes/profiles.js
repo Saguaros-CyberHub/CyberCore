@@ -301,13 +301,15 @@ router.get('/', authenticateToken, async (req, res) => {
 router.post('/generate', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
-    const { 
+    const {
       client_type = 'SMB',
       industry,
       difficulty = 'intermediate',
       maturity,
       delivery,
       employees,
+      llmModel,
+      temperature,
       custom_config = {}
     } = req.body;
     
@@ -335,6 +337,8 @@ router.post('/generate', authenticateToken, async (req, res) => {
       maturity,
       delivery,
       employees,
+      llmModel: llmModel || undefined,
+      temperature: temperature || undefined,
       ...custom_config
     };
     
@@ -515,7 +519,8 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
-    console.log(`📋 [policies/generate] Starting for profile ${id}, user ${userId}`);
+    const { model } = req.body || {};
+    console.log(`📋 [policies/generate] Starting for profile ${id}, user ${userId}, model ${model || 'default'}`);
 
     const role = req.user.role;
     let profileResult;
@@ -553,6 +558,7 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
         user_id: userId,
         profile_data: profileJson,
         difficulty: profile.difficulty,
+        model: model || undefined,
       }),
       signal: AbortSignal.timeout(600000) // 10 minute timeout (LLM generation is slow)
     });

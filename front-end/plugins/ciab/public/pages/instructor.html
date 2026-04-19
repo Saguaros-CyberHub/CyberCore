@@ -662,6 +662,38 @@
             </div>
           </div>
 
+          <!-- AI Model Configuration Card -->
+          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 3px solid var(--primary, #3b82f6);">
+            <h3 style="margin: 0 0 0.5rem 0;">🤖 AI Model Configuration</h3>
+            <p style="color: var(--gray-600); margin: 0 0 1rem 0; font-size: 0.9rem;">Choose which AI model to use for generating answer keys and policy documents.</p>
+            <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 1rem; align-items: end;">
+              <div class="form-group" style="margin: 0;">
+                <label style="font-weight: 600; font-size: 0.85rem;">Model</label>
+                <select id="instructorLlmModel" onchange="updateInstructorCostEstimate()" style="width: 100%; padding: 0.5rem; border: 1px solid var(--gray-300); border-radius: 4px;">
+                  <optgroup label="Cloud APIs">
+                    <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Recommended)</option>
+                    <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                    <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
+                    <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
+                  </optgroup>
+                  <optgroup label="Local (Ollama)">
+                    <option value="qwen3:14b">Qwen 3.0 14B</option>
+                    <option value="llama3.2">Llama 3.2</option>
+                  </optgroup>
+                </select>
+              </div>
+              <div class="form-group" style="margin: 0;">
+                <label style="font-weight: 600; font-size: 0.85rem;">Provider</label>
+                <div id="instructorProviderLabel" style="padding: 0.5rem; color: var(--gray-600); font-size: 0.9rem;">Google (Gemini)</div>
+              </div>
+              <div style="text-align: center; min-width: 100px;">
+                <div style="font-size: 0.75rem; color: var(--gray-500); font-weight: 600; margin-bottom: 0.25rem;">EST. COST</div>
+                <div id="instructorCostEstimate" style="font-size: 1.1rem; font-weight: 700; color: #38a169;">—</div>
+                <div id="instructorCostContext" style="font-size: 0.7rem; color: var(--gray-400); margin-top: 0.15rem;"></div>
+              </div>
+            </div>
+          </div>
+
           <!-- Security Documents Card -->
           <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
@@ -693,13 +725,14 @@
           </div>
 
           <!-- Answer Key Card -->
-          <div style="background: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
               <div>
                 <h3 style="margin: 0 0 0.25rem 0;">📝 AI Answer Key</h3>
                 <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">Generate example solutions for all 8 parts of the assessment using AI.</p>
               </div>
-              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <span id="examplesCostBadge" style="font-size: 0.8rem; font-weight: 600; color: #38a169; background: #f0fff4; padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
                 <button id="generateExamplesBtn" class="btn btn-primary" onclick="generateExamples()" disabled>
                   📝 Generate Answer Key
                 </button>
@@ -710,6 +743,23 @@
             </div>
 
             <div id="examplesStatus" style="color: var(--gray-600); font-size: 0.9rem;"></div>
+          </div>
+
+          <!-- Policy Generation Card -->
+          <div style="background: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+              <div>
+                <h3 style="margin: 0 0 0.25rem 0;">📋 Policy Documents</h3>
+                <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">Generate security policy documents based on the profile's governance framework.</p>
+              </div>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <span id="policyCostBadge" style="font-size: 0.8rem; font-weight: 600; color: #38a169; background: #f0fff4; padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
+                <button id="generatePoliciesBtn" class="btn btn-primary" onclick="generatePoliciesForProfile()" disabled>
+                  📋 Generate Policies
+                </button>
+              </div>
+            </div>
+            <div id="policiesStatus" style="color: var(--gray-600); font-size: 0.9rem;"></div>
           </div>
 
         </div>
@@ -875,11 +925,76 @@
     
     let dashboardData = null;
     let allProfiles = [];
-    
+
+    // ─── AI Model Cost Estimation ────────────────────────────────────────
+    const AI_MODEL_INFO = {
+      'claude-sonnet-4-5':   { label: 'Claude Sonnet 4.5',  input: 3.00,  output: 15.00, provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
+      'claude-haiku-4-5':    { label: 'Claude Haiku 4.5',   input: 0.80,  output: 4.00,  provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
+      'gemini-2.5-flash':    { label: 'Gemini 2.5 Flash',   input: 0.15,  output: 0.60,  provider: 'google',    providerLabel: 'Google (Gemini)' },
+      'gemini-2.5-pro':      { label: 'Gemini 2.5 Pro',     input: 1.25,  output: 10.00, provider: 'google',    providerLabel: 'Google (Gemini)' },
+      'qwen3:14b':           { label: 'Qwen 3.0 14B',       input: 0,     output: 0,     provider: 'ollama',    providerLabel: 'Local (Ollama)' },
+      'llama3.2':            { label: 'Llama 3.2',           input: 0,     output: 0,     provider: 'ollama',    providerLabel: 'Local (Ollama)' }
+    };
+
+    function getSelectedModel() {
+      return document.getElementById('instructorLlmModel')?.value || 'gemini-2.5-flash';
+    }
+
+    function formatCost(modelId, inputTokens, outputTokens) {
+      const info = AI_MODEL_INFO[modelId] || { input: 0, output: 0, provider: 'unknown' };
+      if (info.provider === 'ollama') return { text: 'Free (local)', color: '#38a169' };
+      const total = (inputTokens / 1_000_000) * info.input + (outputTokens / 1_000_000) * info.output;
+      if (total < 0.01) return { text: '< $0.01', color: '#38a169' };
+      return {
+        text: `~$${total.toFixed(2)}`,
+        color: total > 0.50 ? '#e53e3e' : total > 0.10 ? '#d69e2e' : '#38a169'
+      };
+    }
+
+    function updateInstructorCostEstimate() {
+      const modelId = getSelectedModel();
+      const info = AI_MODEL_INFO[modelId] || {};
+
+      // Provider label
+      const providerEl = document.getElementById('instructorProviderLabel');
+      if (providerEl) providerEl.textContent = info.providerLabel || modelId;
+
+      // Examples cost: 8 parts * ~2K input + ~3K output each = ~16K in + ~24K out
+      const exCost = formatCost(modelId, 16000, 24000);
+      const exBadge = document.getElementById('examplesCostBadge');
+      if (exBadge) {
+        exBadge.textContent = exCost.text;
+        exBadge.style.color = exCost.color;
+        exBadge.style.background = exCost.color === '#38a169' ? '#f0fff4' : exCost.color === '#d69e2e' ? '#fffff0' : '#fff5f5';
+      }
+
+      // Policies cost: ~5 policies * ~1.5K input + ~2.5K output each = ~7.5K in + ~12.5K out
+      const polCost = formatCost(modelId, 7500, 12500);
+      const polBadge = document.getElementById('policyCostBadge');
+      if (polBadge) {
+        polBadge.textContent = polCost.text;
+        polBadge.style.color = polCost.color;
+        polBadge.style.background = polCost.color === '#38a169' ? '#f0fff4' : polCost.color === '#d69e2e' ? '#fffff0' : '#fff5f5';
+      }
+
+      // Overall cost display
+      const costEl = document.getElementById('instructorCostEstimate');
+      const contextEl = document.getElementById('instructorCostContext');
+      if (info.provider === 'ollama') {
+        if (costEl) { costEl.textContent = 'Free'; costEl.style.color = '#38a169'; }
+        if (contextEl) contextEl.textContent = 'Runs locally — no API cost';
+      } else {
+        // Total if both are generated
+        const totalCost = formatCost(modelId, 23500, 36500);
+        if (costEl) { costEl.textContent = totalCost.text; costEl.style.color = totalCost.color; }
+        if (contextEl) contextEl.textContent = 'examples + policies';
+      }
+    }
+
     // Initialize
     document.addEventListener('DOMContentLoaded', async () => {
       if (!await Auth.requireAuth()) return;
-      
+
       // Check if user is instructor/admin
       const user = Auth.getUser();
       if (user.role !== 'instructor' && user.role !== 'admin') {
@@ -887,10 +1002,11 @@
         window.location.href = '/dashboard';
         return;
       }
-      
+
       await loadDashboard();
       await loadProfiles();
       loadDashboardTab();
+      updateInstructorCostEstimate();
     });
     
     // Load dashboard data
@@ -964,6 +1080,7 @@
           document.getElementById('generateDocsBtn').disabled = !profileId;
           document.getElementById('downloadPdfBtn').disabled = true;
           document.getElementById('generateExamplesBtn').disabled = !profileId;
+          document.getElementById('generatePoliciesBtn').disabled = !profileId;
           document.getElementById('viewExamplesBtn').style.display = 'none';
 
           if (profileId) {
@@ -3061,13 +3178,14 @@
       status.textContent = 'Generating examples for all 8 parts via AI. This may take several minutes...';
 
       try {
+        const selectedModel = getSelectedModel();
         const response = await fetch('/api/instructor/generate-examples', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('token')}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ profile_id: profileId })
+          body: JSON.stringify({ profile_id: profileId, model: selectedModel })
         });
 
         if (!response.ok) {
@@ -3077,8 +3195,9 @@
 
         const data = await response.json();
         const intakeMsg = data.intake_form_generated ? ' + intake form' : '';
-        Toast.success('Answer Key Generated', `Generated examples for ${data.parts_generated.length} parts${intakeMsg}!`);
-        status.textContent = `Answer key generated for ${data.parts_generated.length} parts${intakeMsg}.`;
+        const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
+        Toast.success('Answer Key Generated', `Generated examples for ${data.parts_generated.length} parts${intakeMsg} using ${modelLabel}!`);
+        status.textContent = `Answer key generated for ${data.parts_generated.length} parts${intakeMsg} (${modelLabel}).`;
 
         // Refresh examples cache
         await checkExistingExamples(profileId);
@@ -3090,6 +3209,49 @@
       } finally {
         btn.disabled = false;
         btn.textContent = '📝 Generate Answer Key';
+      }
+    }
+
+    async function generatePoliciesForProfile() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) {
+        Toast.warning('Select Profile', 'Please select a profile first');
+        return;
+      }
+
+      const btn = document.getElementById('generatePoliciesBtn');
+      const status = document.getElementById('policiesStatus');
+      const selectedModel = getSelectedModel();
+
+      btn.disabled = true;
+      btn.innerHTML = '⏳ Generating Policies...';
+      status.textContent = 'Generating policy documents via AI. This may take several minutes...';
+
+      try {
+        const resp = await fetch(`/api/profiles/${profileId}/policies/generate`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ model: selectedModel })
+        });
+        const data = await resp.json();
+        if (data.success || data.policies) {
+          const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
+          Toast.success('Policies Generated', `${data.total_count || data.policies?.length || 0} policy document(s) generated using ${modelLabel}`);
+          status.textContent = `${data.total_count || 0} policies generated (${modelLabel}).`;
+          btn.innerHTML = '📋 Generate Policies';
+        } else {
+          throw new Error(data.error || 'Failed to generate policies');
+        }
+      } catch (err) {
+        console.error('Policy generation error:', err);
+        status.textContent = 'Policy generation failed. Please try again.';
+        Toast.error('Error', err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '📋 Generate Policies';
       }
     }
 
@@ -3354,13 +3516,14 @@
       btn.innerHTML = '⏳ Regenerating...';
 
       try {
+        const selectedModel = getSelectedModel();
         const response = await fetch('/api/instructor/generate-examples', {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${localStorage.getItem('token')}`,
             'Content-Type': 'application/json'
           },
-          body: JSON.stringify({ profile_id: currentAnswerKeyProfileId })
+          body: JSON.stringify({ profile_id: currentAnswerKeyProfileId, model: selectedModel })
         });
 
         if (!response.ok) {
@@ -3369,7 +3532,8 @@
         }
 
         const data = await response.json();
-        Toast.success('Answer Key Regenerated', `Regenerated ${data.parts_generated.length} parts + intake form!`);
+        const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
+        Toast.success('Answer Key Regenerated', `Regenerated ${data.parts_generated.length} parts using ${modelLabel}!`);
 
         // Reload and display
         await openAnswerKeyForProfile(currentAnswerKeyProfileId, document.getElementById('answerKeyProfileName').textContent);

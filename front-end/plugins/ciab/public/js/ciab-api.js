@@ -51,8 +51,8 @@ API.profiles = {
     return API.request(`/profiles/${id}/policies`);
   },
 
-  async generatePolicies(id) {
-    return API.request(`/profiles/${id}/policies/generate`, { method: 'POST' });
+  async generatePolicies(id, options = {}) {
+    return API.request(`/profiles/${id}/policies/generate`, { method: 'POST', body: options });
   },
 
   async policyHtml(id, slug) {
