@@ -1671,8 +1671,12 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
         }
 
         let n8nData = await n8nResponse.json();
+        // N8N wraps responses in arrays — unwrap until we find the examples object
         if (Array.isArray(n8nData)) n8nData = n8nData[0] || {};
-        console.log('[Examples] Background: N8N returned', Object.keys(n8nData.examples || {}).length, 'parts');
+        if (n8nData.json) n8nData = n8nData.json; // N8N sometimes nests under .json
+        if (Array.isArray(n8nData)) n8nData = n8nData[0] || {};
+        console.log('[Examples] Background: N8N returned keys:', Object.keys(n8nData));
+        console.log('[Examples] Background: examples keys:', Object.keys(n8nData.examples || {}));
 
         // Store results in DB
         const stored = [];

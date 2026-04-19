@@ -3195,6 +3195,9 @@
         return;
       }
 
+      // Clear stale cache so View will fetch fresh after generation
+      cachedExamples = null;
+
       const btn = document.getElementById('generateExamplesBtn');
       const status = document.getElementById('examplesStatus');
 
@@ -3328,19 +3331,17 @@
       const profileId = document.getElementById('docProfileSelect').value;
       if (!profileId) return;
 
-      // Load examples if not cached or different profile
-      if (!cachedExamples || cachedExamples.profileId !== profileId) {
-        try {
-          const response = await fetch(`/api/instructor/examples/${profileId}`, {
-            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-          });
-          if (!response.ok) throw new Error('Failed to load examples');
-          const data = await response.json();
-          cachedExamples = { parts: data.examples || [], profileId };
-        } catch (e) {
-          Toast.error('Error', e.message);
-          return;
-        }
+      // Always fetch fresh from server (never rely on cache — regeneration may have updated DB)
+      try {
+        const response = await fetch(`/api/instructor/examples/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        if (!response.ok) throw new Error('Failed to load examples');
+        const data = await response.json();
+        cachedExamples = { parts: data.examples || [], profileId };
+      } catch (e) {
+        Toast.error('Error', e.message);
+        return;
       }
 
       if (cachedExamples.parts.length === 0) {
