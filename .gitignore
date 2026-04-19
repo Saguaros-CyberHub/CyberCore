@@ -22,6 +22,9 @@ site.json
 **/credentials/*
 cybercore-postgres.jsn
 
+# Ignore the new web interface directory
+cyberhub-web-interface/
+
 # web interface
 **/profiles/*
 node_modules/
