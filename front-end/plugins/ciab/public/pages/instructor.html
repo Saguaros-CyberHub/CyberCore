@@ -1086,6 +1086,8 @@
           if (profileId) {
             // Load existing documents for this profile
             await loadProfileDocuments(profileId);
+            // Check if generation is currently running
+            await checkGenerationStatus(profileId);
             // Check for existing examples
             await checkExistingExamples(profileId);
           } else {
@@ -3145,6 +3147,29 @@
     // ============================================================================
 
     let cachedExamples = null; // { parts: [...], profileId }
+    let activePollingInterval = null; // track active poll so we don't double-poll
+
+    // Check if answer key generation is currently in progress (server-side status)
+    async function checkGenerationStatus(profileId) {
+      try {
+        const response = await fetch(`/api/instructor/generation-status/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        if (!response.ok) return;
+        const data = await response.json();
+        if (data.generating) {
+          const btn = document.getElementById('generateExamplesBtn');
+          const status = document.getElementById('examplesStatus');
+          const modelLabel = AI_MODEL_INFO[data.model]?.label || data.model || 'AI';
+          if (btn) { btn.disabled = true; btn.textContent = '⏳ Generating...'; }
+          if (status) status.innerHTML = `<span style="color: var(--primary);">Answer key generation in progress using <strong>${modelLabel}</strong> (started ${new Date(data.startedAt).toLocaleTimeString()}). Results will be saved automatically.</span>`;
+          // Start polling to detect when it finishes
+          pollForExamples(profileId);
+        }
+      } catch (e) {
+        console.error('Error checking generation status:', e);
+      }
+    }
 
     async function checkExistingExamples(profileId) {
       try {
@@ -3211,34 +3236,49 @@
       }
     }
 
-    // Poll every 30s to check if background generation finished
+    // Poll every 20s to check if background generation finished
     function pollForExamples(profileId) {
+      // Prevent double-polling
+      if (activePollingInterval) clearInterval(activePollingInterval);
+
       let polls = 0;
-      const maxPolls = 30; // 15 minutes max
-      const interval = setInterval(async () => {
+      const maxPolls = 40; // ~13 minutes max
+      activePollingInterval = setInterval(async () => {
         polls++;
         if (polls > maxPolls) {
-          clearInterval(interval);
+          clearInterval(activePollingInterval);
+          activePollingInterval = null;
+          const btn = document.getElementById('generateExamplesBtn');
+          const status = document.getElementById('examplesStatus');
+          if (btn) { btn.disabled = false; btn.textContent = '📝 Generate Answer Key'; }
+          if (status) status.innerHTML = '<span style="color: #d69e2e;">Generation may still be running. Refresh the page to check.</span>';
           return;
         }
         try {
-          const response = await fetch(`/api/instructor/examples/${profileId}`, {
+          // Check server-side job status first
+          const statusResp = await fetch(`/api/instructor/generation-status/${profileId}`, {
             headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
           });
-          if (!response.ok) return;
-          const data = await response.json();
-          if (data.examples && data.examples.length > 0) {
-            clearInterval(interval);
-            const btn = document.getElementById('generateExamplesBtn');
-            const status = document.getElementById('examplesStatus');
-            if (btn) { btn.disabled = false; btn.textContent = '📝 Generate Answer Key'; }
-            if (status) status.innerHTML = `<span style="color: #38a169;">Answer key ready! ${data.examples.length} parts generated.</span>`;
-            document.getElementById('viewExamplesBtn').style.display = 'inline-flex';
-            cachedExamples = { parts: data.examples, profileId };
-            Toast.success('Answer Key Ready', `${data.examples.length} parts generated and saved.`);
+          if (statusResp.ok) {
+            const statusData = await statusResp.json();
+            if (!statusData.generating) {
+              // Job finished — check for results
+              clearInterval(activePollingInterval);
+              activePollingInterval = null;
+              await checkExistingExamples(profileId);
+              const btn = document.getElementById('generateExamplesBtn');
+              const status = document.getElementById('examplesStatus');
+              if (btn) { btn.disabled = false; btn.textContent = '📝 Generate Answer Key'; }
+              if (cachedExamples && cachedExamples.parts.length > 0) {
+                if (status) status.innerHTML = `<span style="color: #38a169;">Answer key ready! ${cachedExamples.parts.length} parts generated.</span>`;
+                Toast.success('Answer Key Ready', `${cachedExamples.parts.length} parts generated and saved.`);
+              } else {
+                if (status) status.innerHTML = '<span style="color: #e53e3e;">Generation completed but no results found. Check server logs.</span>';
+              }
+            }
           }
         } catch (_) {}
-      }, 30000);
+      }, 20000);
     }
 
     async function generatePoliciesForProfile() {

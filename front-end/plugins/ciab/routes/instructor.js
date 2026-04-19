@@ -18,6 +18,47 @@ const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../../src/utils
 
 const instructorOnly = requireRole('instructor', 'admin');
 
+// ─── In-memory generation job tracker ────────────────────────────────────────
+// Tracks active example generation jobs so the frontend can check status on
+// page load/refresh and prevent duplicate generation requests.
+const activeGenerationJobs = new Map(); // key: `${userId}:${profileId}` → { status, startedAt, model }
+
+function getJobKey(userId, profileId) { return `${userId}:${profileId}`; }
+
+function setJobActive(userId, profileId, model) {
+  activeGenerationJobs.set(getJobKey(userId, profileId), {
+    status: 'generating',
+    startedAt: new Date().toISOString(),
+    model: model || 'default'
+  });
+}
+
+function setJobComplete(userId, profileId) {
+  activeGenerationJobs.delete(getJobKey(userId, profileId));
+}
+
+function getJobStatus(userId, profileId) {
+  const job = activeGenerationJobs.get(getJobKey(userId, profileId));
+  if (!job) return null;
+  // Auto-expire stale jobs after 20 minutes (safety net)
+  const elapsed = Date.now() - new Date(job.startedAt).getTime();
+  if (elapsed > 20 * 60 * 1000) {
+    activeGenerationJobs.delete(getJobKey(userId, profileId));
+    return null;
+  }
+  return job;
+}
+
+// GET /api/instructor/generation-status/:profileId — check if generation is in progress
+router.get('/generation-status/:profileId', authenticateToken, instructorOnly, (req, res) => {
+  const job = getJobStatus(req.user.userId, req.params.profileId);
+  if (job) {
+    res.json({ generating: true, ...job });
+  } else {
+    res.json({ generating: false });
+  }
+});
+
 // Simple test endpoint
 router.get('/test', authenticateToken, async (req, res) => {
   try {
@@ -1596,7 +1637,9 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
 
     const partsToGenerate = parts || [1, 2, 3, 4, 5, 6, 7, 8];
 
-    // ─── Respond immediately — generation continues in background ───
+    // ─── Mark job as active and respond immediately ───
+    setJobActive(instructorId, profile_id, model);
+
     res.json({
       success: true,
       status: 'generating',
@@ -1713,9 +1756,11 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
         }
 
         console.log(`[Examples] Background: COMPLETE — ${stored.length} parts stored for profile ${profile_id}`);
+        setJobComplete(instructorId, profile_id);
 
       } catch (bgError) {
         console.error('[Examples] Background generation failed:', bgError.message);
+        setJobComplete(instructorId, profile_id);
       }
     })();
 
