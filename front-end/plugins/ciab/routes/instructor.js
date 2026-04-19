@@ -1650,6 +1650,17 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
     // ─── Background: call N8N, store results ───
     (async () => {
       try {
+        // Delete old answer key rows for this profile before generating new ones
+        try {
+          const deleted = await query(
+            `DELETE FROM assessment_progress WHERE user_id = $1 AND profile_id = $2`,
+            [instructorId, profile_id]
+          );
+          console.log(`[Examples] Background: Deleted ${deleted.rowCount} old answer key rows for profile ${profile_id}`);
+        } catch (delErr) {
+          console.error('[Examples] Background: Failed to delete old rows:', delErr.message);
+        }
+
         const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_EXAMPLES_WEBHOOK || '/webhook-test/generate-examples'}`;
         console.log('[Examples] Background: calling N8N:', n8nUrl);
 
