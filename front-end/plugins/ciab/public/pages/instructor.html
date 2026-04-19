@@ -3171,14 +3171,16 @@
       }
 
       const btn = document.getElementById('generateExamplesBtn');
-      const status = document.getElementById('generateStatus');
+      const status = document.getElementById('examplesStatus');
 
       btn.disabled = true;
       btn.textContent = '⏳ Generating Answer Key...';
-      status.textContent = 'Generating examples for all 8 parts via AI. This may take several minutes...';
 
       try {
         const selectedModel = getSelectedModel();
+        const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
+        status.innerHTML = `<span style="color: var(--primary);">Generating examples for all 8 parts using <strong>${modelLabel}</strong>. This runs in the background — you can leave this page and results will be saved automatically.</span>`;
+
         const response = await fetch('/api/instructor/generate-examples', {
           method: 'POST',
           headers: {
@@ -3194,22 +3196,49 @@
         }
 
         const data = await response.json();
-        const intakeMsg = data.intake_form_generated ? ' + intake form' : '';
-        const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
-        Toast.success('Answer Key Generated', `Generated examples for ${data.parts_generated.length} parts${intakeMsg} using ${modelLabel}!`);
-        status.textContent = `Answer key generated for ${data.parts_generated.length} parts${intakeMsg} (${modelLabel}).`;
+        Toast.success('Generation Started', data.message || 'Answer key generation is running in the background.');
+        status.innerHTML = `<span style="color: #38a169;">Answer key generation running in background using <strong>${modelLabel}</strong>. You can leave this page — results will be saved automatically. Come back and refresh to view.</span>`;
 
-        // Refresh examples cache
-        await checkExistingExamples(profileId);
+        // Poll for completion in background
+        pollForExamples(profileId);
 
       } catch (error) {
-        console.error('Failed to generate examples:', error);
+        console.error('Failed to start example generation:', error);
         Toast.error('Generation Failed', error.message);
         status.textContent = 'Answer key generation failed. Please try again.';
-      } finally {
         btn.disabled = false;
         btn.textContent = '📝 Generate Answer Key';
       }
+    }
+
+    // Poll every 30s to check if background generation finished
+    function pollForExamples(profileId) {
+      let polls = 0;
+      const maxPolls = 30; // 15 minutes max
+      const interval = setInterval(async () => {
+        polls++;
+        if (polls > maxPolls) {
+          clearInterval(interval);
+          return;
+        }
+        try {
+          const response = await fetch(`/api/instructor/examples/${profileId}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          });
+          if (!response.ok) return;
+          const data = await response.json();
+          if (data.examples && data.examples.length > 0) {
+            clearInterval(interval);
+            const btn = document.getElementById('generateExamplesBtn');
+            const status = document.getElementById('examplesStatus');
+            if (btn) { btn.disabled = false; btn.textContent = '📝 Generate Answer Key'; }
+            if (status) status.innerHTML = `<span style="color: #38a169;">Answer key ready! ${data.examples.length} parts generated.</span>`;
+            document.getElementById('viewExamplesBtn').style.display = 'inline-flex';
+            cachedExamples = { parts: data.examples, profileId };
+            Toast.success('Answer Key Ready', `${data.examples.length} parts generated and saved.`);
+          }
+        } catch (_) {}
+      }, 30000);
     }
 
     async function generatePoliciesForProfile() {
@@ -3517,6 +3546,7 @@
 
       try {
         const selectedModel = getSelectedModel();
+        const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
         const response = await fetch('/api/instructor/generate-examples', {
           method: 'POST',
           headers: {
@@ -3531,12 +3561,13 @@
           throw new Error(error.error || 'Regeneration failed');
         }
 
-        const data = await response.json();
-        const modelLabel = AI_MODEL_INFO[selectedModel]?.label || selectedModel;
-        Toast.success('Answer Key Regenerated', `Regenerated ${data.parts_generated.length} parts using ${modelLabel}!`);
+        Toast.success('Regeneration Started', `Answer key regeneration running in background using ${modelLabel}. Results will be saved automatically.`);
 
-        // Reload and display
-        await openAnswerKeyForProfile(currentAnswerKeyProfileId, document.getElementById('answerKeyProfileName').textContent);
+        // Close modal — results will be available when they come back
+        document.getElementById('answerKeyModal').classList.remove('active');
+
+        // Poll for completion
+        pollForExamples(currentAnswerKeyProfileId);
       } catch (error) {
         Toast.error('Regeneration Failed', error.message);
       } finally {

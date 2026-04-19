@@ -91,6 +91,8 @@ services:
       N8N_BASE_URL: http://n8n:5678
       N8N_GENERATE_WEBHOOK: /webhook/clinic-generate
       N8N_DOCUMENT_GENERATOR_WEBHOOK: /webhook/generate-documents
+      N8N_POLICY_WEBHOOK_URL: http://n8n:5678/webhook/generate-policies
+      N8N_EXAMPLES_WEBHOOK: /webhook/generate-examples
       N8N_CHAT_WEBHOOK: /webhook/0ff455fa-3bda-43db-a352-ba55517ad2b8/chat
       N8N_DEPLOY_LANE_WEBHOOK: http://n8n:5678/webhook-test/6bcb6b80-01d9-41a4-86e5-c0747fef50db
       N8N_TEARDOWN_LANE_WEBHOOK: http://n8n:5678/webhook-test/60949de5-d0f9-40bc-8441-5cf4f9b08048
@@ -202,6 +204,7 @@ services:
       QUEUE_BULL_REDIS_PORT: 6379
       QUEUE_HEALTH_CHECK_ACTIVE: "true"
       N8N_SKIP_DB_MIGRATIONS: "true"
+      N8N_RUNNERS_TASK_TIMEOUT: 600
     command: ["worker"]
     env_file:
       - ./config/secrets.env

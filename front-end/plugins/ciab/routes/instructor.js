@@ -1519,6 +1519,7 @@ function generateIntakeFormFromProfile(profile, fullProfileData) {
 }
 
 // POST /api/instructor/generate-examples - Generate answer key for all parts
+// Responds immediately and runs generation in background so the user can leave the page.
 router.post('/generate-examples', authenticateToken, instructorOnly, async (req, res) => {
   try {
     const { profile_id, parts, model } = req.body;
@@ -1530,7 +1531,7 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
 
     console.log('[Examples] Generate request:', { profile_id, instructorId, model: model || 'default' });
 
-    // Load profile data (reuse same logic as generate-documents)
+    // Load profile data (validate before responding)
     const profileResult = await query(
       `SELECT id, company_name, industry, client_type, client_type_name, difficulty,
         maturity_level, employee_count, endpoint_count, compliance_frameworks,
@@ -1576,7 +1577,6 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
     const itEnvironment = studentView?.it?.it_environment || threatsData?.it_environment || {};
     const threatProfile = studentView?.threat_profile || threatsData?.threat_profile || {};
 
-    // Build profile context for the LLM
     const profileContext = {
       company_name: profile.company_name,
       industry: profile.industry,
@@ -1594,128 +1594,130 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
       threat_profile: threatProfile
     };
 
-    // Determine which parts to generate (default: all 8)
     const partsToGenerate = parts || [1, 2, 3, 4, 5, 6, 7, 8];
 
-    // Call N8N webhook
-    const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_EXAMPLES_WEBHOOK || '/webhook-test/generate-examples'}`;
-    console.log('[Examples] Calling N8N:', n8nUrl);
-
-    const n8nResponse = await fetch(n8nUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        profile_id,
-        profile_context: profileContext,
-        parts: partsToGenerate,
-        part_definitions: PART_DEFINITIONS,
-        model: model || undefined
-      })
-    });
-
-    if (!n8nResponse.ok) {
-      const errText = await n8nResponse.text();
-      throw new Error(`N8N failed: ${n8nResponse.status} ${errText}`);
-    }
-
-    let n8nData = await n8nResponse.json();
-    // N8N respondToWebhook with "allIncomingItems" wraps in an array
-    if (Array.isArray(n8nData)) n8nData = n8nData[0] || {};
-    console.log('[Examples] N8N returned', Object.keys(n8nData.examples || {}).length, 'parts');
-
-    // Store results in assessment_progress using the instructor's user_id
-    // with a special convention: stored under the instructor's own user_id
-    const stored = [];
-    const failed = [];
-    const examples = n8nData.examples || {};
-
-    for (const [partNum, partContent] of Object.entries(examples)) {
-      const pNum = parseInt(partNum);
-      const partDef = PART_DEFINITIONS[pNum];
-      if (!partDef) continue;
-
-      // Build the envelope format matching workspace.js
-      const allOptionKeys = partDef.options.map(o => o.key);
-      const envelope = {
-        deliverables: partContent.deliverables || {},
-        general_notes: partContent.general_notes || '',
-        is_example: true
-      };
-
-      try {
-        await query(`
-          INSERT INTO assessment_progress
-            (user_id, profile_id, part_number, part_name, content, output_option, status)
-          VALUES ($1, $2, $3, $4, $5, $6, 'reviewed')
-          ON CONFLICT (user_id, profile_id, part_number)
-          DO UPDATE SET
-            content = EXCLUDED.content,
-            output_option = EXCLUDED.output_option,
-            status = 'reviewed',
-            updated_at = NOW()
-        `, [
-          instructorId, profile_id, pNum, partDef.name,
-          JSON.stringify(envelope),
-          JSON.stringify(allOptionKeys)
-        ]);
-        stored.push(pNum);
-      } catch (dbErr) {
-        console.error(`[Examples] Failed to store part ${pNum}:`, dbErr.message);
-        failed.push({ part: pNum, error: dbErr.message });
-      }
-    }
-
-    console.log('[Examples] Stored parts:', stored, 'Failed:', failed);
-
-    // Also generate and store a completed intake form from profile data
-    let intakeFormStored = false;
-    try {
-      const intakeData = generateIntakeFormFromProfile(profile, fullProfileData);
-      const V72_SECTIONS = [
-        'company_info', 'security_policies', 'data_management', 'network_security',
-        'wireless', 'endpoint_security', 'compliance', 'software_assets',
-        'vuln_management', 'admin_privileges', 'secure_config', 'email_web',
-        'network_ports', 'network_devices', 'pentesting'
-      ];
-
-      await query(`
-        INSERT INTO intake_form_responses
-          (user_id, profile_id, status, completion_percentage,
-           company_info, security_policies, data_management, network_security,
-           wireless, endpoint_security, compliance, software_assets,
-           vuln_management, admin_privileges, secure_config, email_web,
-           network_ports, network_devices, pentesting, started_at, completed_at)
-        VALUES ($1, $2, 'complete', 100,
-           $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
-        ON CONFLICT (user_id, profile_id)
-        DO UPDATE SET
-           status = 'complete', completion_percentage = 100,
-           company_info = EXCLUDED.company_info, security_policies = EXCLUDED.security_policies,
-           data_management = EXCLUDED.data_management, network_security = EXCLUDED.network_security,
-           wireless = EXCLUDED.wireless, endpoint_security = EXCLUDED.endpoint_security,
-           compliance = EXCLUDED.compliance, software_assets = EXCLUDED.software_assets,
-           vuln_management = EXCLUDED.vuln_management, admin_privileges = EXCLUDED.admin_privileges,
-           secure_config = EXCLUDED.secure_config, email_web = EXCLUDED.email_web,
-           network_ports = EXCLUDED.network_ports, network_devices = EXCLUDED.network_devices,
-           pentesting = EXCLUDED.pentesting, completed_at = NOW(), updated_at = NOW()
-      `, [
-        instructorId, profile_id,
-        ...V72_SECTIONS.map(s => JSON.stringify(intakeData[s] || {}))
-      ]);
-      intakeFormStored = true;
-      console.log('[Examples] Intake form generated and stored');
-    } catch (intakeErr) {
-      console.error('[Examples] Failed to store intake form:', intakeErr.message);
-    }
-
+    // ─── Respond immediately — generation continues in background ───
     res.json({
       success: true,
+      status: 'generating',
       profile_id,
-      parts_generated: stored,
-      parts_failed: failed,
-      intake_form_generated: intakeFormStored,
-      generated_at: new Date().toISOString()
+      message: `Answer key generation started for ${partsToGenerate.length} parts. You can leave this page — results will be saved automatically.`
     });
+
+    // ─── Background: call N8N, store results ───
+    (async () => {
+      try {
+        const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_EXAMPLES_WEBHOOK || '/webhook-test/generate-examples'}`;
+        console.log('[Examples] Background: calling N8N:', n8nUrl);
+
+        const n8nResponse = await fetch(n8nUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            profile_id,
+            profile_context: profileContext,
+            parts: partsToGenerate,
+            part_definitions: PART_DEFINITIONS,
+            model: model || undefined
+          })
+        });
+
+        if (!n8nResponse.ok) {
+          const errText = await n8nResponse.text();
+          throw new Error(`N8N failed: ${n8nResponse.status} ${errText}`);
+        }
+
+        let n8nData = await n8nResponse.json();
+        if (Array.isArray(n8nData)) n8nData = n8nData[0] || {};
+        console.log('[Examples] Background: N8N returned', Object.keys(n8nData.examples || {}).length, 'parts');
+
+        // Store results in DB
+        const stored = [];
+        const failed = [];
+        const examples = n8nData.examples || {};
+
+        for (const [partNum, partContent] of Object.entries(examples)) {
+          const pNum = parseInt(partNum);
+          const partDef = PART_DEFINITIONS[pNum];
+          if (!partDef) continue;
+
+          const allOptionKeys = partDef.options.map(o => o.key);
+          const envelope = {
+            deliverables: partContent.deliverables || {},
+            general_notes: partContent.general_notes || '',
+            is_example: true
+          };
+
+          try {
+            await query(`
+              INSERT INTO assessment_progress
+                (user_id, profile_id, part_number, part_name, content, output_option, status)
+              VALUES ($1, $2, $3, $4, $5, $6, 'reviewed')
+              ON CONFLICT (user_id, profile_id, part_number)
+              DO UPDATE SET
+                content = EXCLUDED.content,
+                output_option = EXCLUDED.output_option,
+                status = 'reviewed',
+                updated_at = NOW()
+            `, [
+              instructorId, profile_id, pNum, partDef.name,
+              JSON.stringify(envelope),
+              JSON.stringify(allOptionKeys)
+            ]);
+            stored.push(pNum);
+          } catch (dbErr) {
+            console.error(`[Examples] Background: Failed to store part ${pNum}:`, dbErr.message);
+            failed.push({ part: pNum, error: dbErr.message });
+          }
+        }
+
+        console.log('[Examples] Background: Stored parts:', stored, 'Failed:', failed);
+
+        // Also generate and store intake form
+        try {
+          const intakeData = generateIntakeFormFromProfile(profile, fullProfileData);
+          const V72_SECTIONS = [
+            'company_info', 'security_policies', 'data_management', 'network_security',
+            'wireless', 'endpoint_security', 'compliance', 'software_assets',
+            'vuln_management', 'admin_privileges', 'secure_config', 'email_web',
+            'network_ports', 'network_devices', 'pentesting'
+          ];
+
+          await query(`
+            INSERT INTO intake_form_responses
+              (user_id, profile_id, status, completion_percentage,
+               company_info, security_policies, data_management, network_security,
+               wireless, endpoint_security, compliance, software_assets,
+               vuln_management, admin_privileges, secure_config, email_web,
+               network_ports, network_devices, pentesting, started_at, completed_at)
+            VALUES ($1, $2, 'complete', 100,
+               $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
+            ON CONFLICT (user_id, profile_id)
+            DO UPDATE SET
+               status = 'complete', completion_percentage = 100,
+               company_info = EXCLUDED.company_info, security_policies = EXCLUDED.security_policies,
+               data_management = EXCLUDED.data_management, network_security = EXCLUDED.network_security,
+               wireless = EXCLUDED.wireless, endpoint_security = EXCLUDED.endpoint_security,
+               compliance = EXCLUDED.compliance, software_assets = EXCLUDED.software_assets,
+               vuln_management = EXCLUDED.vuln_management, admin_privileges = EXCLUDED.admin_privileges,
+               secure_config = EXCLUDED.secure_config, email_web = EXCLUDED.email_web,
+               network_ports = EXCLUDED.network_ports, network_devices = EXCLUDED.network_devices,
+               pentesting = EXCLUDED.pentesting, completed_at = NOW(), updated_at = NOW()
+          `, [
+            instructorId, profile_id,
+            ...V72_SECTIONS.map(s => JSON.stringify(intakeData[s] || {}))
+          ]);
+          console.log('[Examples] Background: Intake form generated and stored');
+        } catch (intakeErr) {
+          console.error('[Examples] Background: Failed to store intake form:', intakeErr.message);
+        }
+
+        console.log(`[Examples] Background: COMPLETE — ${stored.length} parts stored for profile ${profile_id}`);
+
+      } catch (bgError) {
+        console.error('[Examples] Background generation failed:', bgError.message);
+      }
+    })();
 
   } catch (error) {
     console.error('[Examples] Error:', error);

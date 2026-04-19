@@ -61,6 +61,9 @@ rocky-cis-vault.yml
 .vault_pass
 .vault_password
 
+# Docker
+docker-compose.yml
+
 # Terraform variable files
 runs/
 *.tfstate
