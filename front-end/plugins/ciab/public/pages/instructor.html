@@ -581,6 +581,20 @@
             </div>
           </div>
 
+          <!-- Recent Submissions -->
+          <div class="card" style="margin-bottom: 1.5rem;">
+            <div class="card-header">
+              <span class="card-title">Recent Submissions</span>
+            </div>
+            <div class="card-body" id="recentSubmissions">
+              <div class="empty-state">
+                <div class="icon">📝</div>
+                <h3>No Recent Submissions</h3>
+                <p>Student submissions will appear here.</p>
+              </div>
+            </div>
+          </div>
+
           <!-- My Groups -->
           <div class="card">
             <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
@@ -1122,10 +1136,12 @@
 
     function renderStudentsList() {
       const container = document.getElementById('studentsList');
+      if (!container) return;
       const students = getFilteredStudents();
       const currentUserId = Auth.getUser()?.sub;
 
-      document.getElementById('studentCount').textContent = `${students.length} student${students.length !== 1 ? 's' : ''}`;
+      const studentCountEl = document.getElementById('studentCount');
+      if (studentCountEl) studentCountEl.textContent = `${students.length} student${students.length !== 1 ? 's' : ''}`;
 
       if (!students || students.length === 0) {
         container.innerHTML = `
@@ -1539,7 +1555,8 @@
     // Render review queue
     function renderReviewQueue() {
       const container = document.getElementById('reviewQueue');
-      
+      if (!container) return;
+
       if (!dashboardData.pending_submissions || dashboardData.pending_submissions.length === 0) {
         container.innerHTML = `
           <div class="empty-state">
@@ -1581,7 +1598,8 @@
     // Render recent submissions for overview
     function renderRecentSubmissions() {
       const container = document.getElementById('recentSubmissions');
-      
+      if (!container) return;
+
       const allSubmissions = dashboardData.pending_submissions || [];
       
       if (allSubmissions.length === 0) {
@@ -1627,6 +1645,7 @@
 
     function renderActionItems() {
       const container = document.getElementById('actionItemsContent');
+      if (!container) return;
       if (!dashboardData) { container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>'; return; }
 
       const items = [];
