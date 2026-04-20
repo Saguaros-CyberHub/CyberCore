@@ -186,215 +186,155 @@ router.post('/:profileId/complete', authenticateToken, async (req, res) => {
 // PDF EXPORT - Professional Intake Form
 // ============================================================================
 
-// Human-readable field labels
+// Human-readable field labels (V8 - 10 sections + IG1)
 const FIELD_LABELS = {
-  // Section 1
-  company_name: 'Company Name', business_address: 'Business Address', industry_sector: 'Industry Sector',
-  num_employees: 'Number of Employees', primary_contact_name: 'Name', primary_contact_title: 'Title',
-  primary_contact_email: 'Email', primary_contact_phone: 'Phone', secondary_contact_name: 'Name',
-  secondary_contact_title: 'Title', secondary_contact_email: 'Email', secondary_contact_phone: 'Phone',
-  locations: 'Office / Operations Locations', website: 'Website',
+  // Section 1 - Organization Profile
+  company_name: 'Company Name', industry: 'Industry', employees_band: 'Employee Count',
+  revenue_band: 'Revenue Band', business_address: 'Business Address', locations: 'Locations',
+  website: 'Website',
+  primary_contact_name: 'Primary Contact Name', primary_contact_title: 'Primary Contact Title',
+  primary_contact_email: 'Primary Contact Email', primary_contact_phone: 'Primary Contact Phone',
+  secondary_contact_name: 'Secondary Contact Name', secondary_contact_title: 'Secondary Contact Title',
+  secondary_contact_email: 'Secondary Contact Email', secondary_contact_phone: 'Secondary Contact Phone',
   social_linkedin: 'LinkedIn', social_instagram: 'Instagram', social_x: 'X (Twitter)',
-  social_facebook: 'Facebook', social_tiktok: 'TikTok', social_other: 'Other',
-  products_services: 'Key Products or Services', recent_incidents: 'Recent Security Incidents or Data Breaches',
-  ongoing_concerns: 'Ongoing Cybersecurity Concerns', primary_goals: 'Primary Cybersecurity Program Goals',
-  ai_used: 'AI Usage', ai_has_policy: 'Has AI Policy', ai_no_policy: 'No AI Policy',
+  social_facebook: 'Facebook', social_tiktok: 'TikTok', social_other: 'Other Social',
+  fw_hipaa: 'HIPAA', fw_pci: 'PCI-DSS', fw_cmmc: 'CMMC', fw_sox: 'SOX',
+  fw_glba: 'GLBA', fw_gdpr: 'GDPR', fw_ferpa: 'FERPA', fw_nist: 'NIST CSF', fw_none: 'None / Unknown',
+  products_services: 'Key Products or Services',
+  service_training: 'Cybersecurity Awareness Training', service_risk_assessment: 'Risk Assessment',
+  service_osint: 'OSINT Research', service_vuln_assessment: 'Vulnerability Assessment',
+  recent_incidents: 'Recent Security Incidents', ongoing_concerns: 'Ongoing Concerns',
+  primary_goals: 'Primary Cybersecurity Goals',
+  ai_has_policy: 'Has AI Policy', ai_no_policy: 'No AI Policy',
   ai_interest_training: 'AI Awareness Training', ai_interest_risks: 'AI Risk Understanding',
   ai_interest_opportunities: 'AI Opportunity Understanding', ai_interest_policy: 'AI Policy Development',
-  // Services
-  service_training: 'Cybersecurity Awareness Training', service_risk_assessment: 'Cybersecurity Risk Assessment',
-  service_osint: 'OSINT Research', service_vuln_assessment: 'Website Vulnerability Assessment',
-  // Section 2 - Policies
-  policy_incident_response: 'Incident Response', policy_acceptable_use: 'Acceptable Use',
-  policy_remote_access: 'Remote Access', policy_network_security: 'Network Security',
-  policy_data_management: 'Data Management', policy_disaster_recovery: 'Disaster Recovery',
-  policy_employee_awareness: 'Employee Awareness', policy_data_backup: 'Data Backup',
-  policy_vendor_management: 'Vendor Management', policy_data_retention: 'Data Retention',
-  policy_email: 'Email', policy_risk_management: 'Risk Management',
-  policy_change_management: 'Change Management', policy_access_control: 'Access Control',
-  policy_password: 'Password', policy_vendor_contractor: 'Vendor / Contractor',
-  policy_byod: 'BYOD', policy_other: 'Other', policy_documents_notes: 'Policy Notes',
-  // Training
-  training_info_security: 'Information Security', training_mobile_security: 'Mobile Security',
-  training_social_engineering: 'Social Engineering', training_phishing: 'Phishing',
-  training_physical_security: 'Physical Security', training_wireless: 'Wireless',
-  training_security_awareness: 'Security Awareness', training_safe_internet: 'Safe Internet',
-  training_email_security: 'Email Security', training_other: 'Other Training',
-  // Section 3 - Data
-  data_biometric: 'Biometric', data_privacy: 'Privacy', data_health: 'Health',
-  data_business: 'Business', data_financial: 'Financial', data_intellectual_property: 'Intellectual Property',
-  data_credit_card: 'Credit Card', data_classified: 'Classified / Sensitive',
-  data_bank_account: 'Bank Account', data_trade_secrets: 'Trade Secrets',
-  data_email_addresses: 'Email Addresses', data_consumer: 'Consumer (Name/Address/Phone)',
-  data_membership: 'Membership', data_other: 'Other',
-  storage_onprem_physical: 'On-Premises (Physical)', storage_onprem_digital: 'On-Premises (Digital)',
-  storage_cloud: 'Cloud', storage_3rd_party: '3rd Party Data Center', storage_other: 'Other',
-  backup_onprem: 'On-Premises', backup_cloud: 'Cloud', backup_3rd_party: '3rd Party Data Center',
-  backup_other: 'Other', backup_unknown: 'Unknown', backup_none: 'No Backup Solution',
-  ac_role_based: 'Role-Based', ac_attribute_based: 'Attribute-Based', ac_mandatory: 'Mandatory',
-  ac_discretionary: 'Discretionary', ac_rule_based: 'Rule-Based', ac_other: 'Other',
-  backup_tests: 'Annual Backup Tests Completed', retention_followed: 'Data Retention Policy Followed',
-  access_control: 'Using Access Control',
-  // Section 4 - Network
-  net_load_balancer: 'Load Balancer', net_nac: 'NAC', net_utm: 'UTM', net_ids_ips: 'IDS/IPS',
-  net_vpn: 'VPN', net_siem: 'SIEM', net_web_filter: 'Web Filter', net_switch: 'Switch',
-  net_router: 'Router', net_wifi_ap: 'WiFi Access Point', net_modem: 'Modem', net_other: 'Other',
-  server_mail: 'Mail Server', server_dhcp: 'DHCP Server', server_web: 'Web Server',
-  server_file: 'File Server', server_database: 'Database Server', server_dns: 'DNS Server',
-  server_application: 'Application Server', server_virtual: 'Virtual Server',
-  server_cloud: 'Cloud Server', server_other: 'Other',
-  fw_stateful: 'Stateful', fw_stateless: 'Stateless', fw_ngfw: 'NGFW', fw_waf: 'WAF',
-  fw_cloud: 'Cloud', fw_packet_filtering: 'Packet Filtering',
-  ips_network: 'Network IPS', ips_host: 'Host IPS', ids_network: 'Network IDS', ids_host: 'Host IDS',
-  siem_splunk: 'Splunk', siem_qradar: 'QRadar', siem_logrhythm: 'LogRhythm', siem_other: 'Other SIEM',
-  net_edr: 'EDR', net_xdr: 'XDR', net_email_security: 'Email Security Solution',
-  password_manager_name: 'Password Manager', security_assets_list: 'Security Assets Detail',
-  // Section 5 - Wireless
-  wifi_wep: 'WEP', wifi_wps: 'WPS', wifi_wpa_personal: 'WPA Personal', wifi_wpa_enterprise: 'WPA Enterprise',
-  wifi_wpa2_personal: 'WPA2 Personal', wifi_wpa2_enterprise: 'WPA2 Enterprise',
-  wifi_wpa3_personal: 'WPA3 Personal', wifi_wpa3_enterprise: 'WPA3 Enterprise', wifi_unknown: 'Unknown',
-  // Section 6 - Endpoint
-  av_norton: 'Norton', av_mcafee: 'McAfee', av_crowdstrike: 'CrowdStrike', av_avast: 'AVAST',
-  av_bitdefender: 'Bitdefender', av_malwarebytes: 'Malwarebytes', av_sophos: 'Sophos', av_other: 'Other',
-  app_blacklist: 'Block / Blacklisting', app_whitelist: 'Allow / Whitelisting', app_list_unknown: 'Unknown',
-  // Section 7 - Compliance
-  comp_gdpr: 'GDPR', comp_sox: 'SOX', comp_ferpa: 'FERPA', comp_pci_dss: 'PCI-DSS',
-  comp_soc2: 'SOC 2', comp_glba: 'GLBA', comp_fisma: 'FISMA', comp_hipaa: 'HIPAA',
-  comp_ccpa: 'CCPA', comp_cmmc: 'CMMC', comp_other: 'Other', comp_unknown: 'Unknown',
-  vendor_compliance: 'Vendor Compliance Notes',
-  // Sections 8-15 radio fields
-  software_inventory: 'Up-to-Date Software Inventory', unauthorized_software: 'Unauthorized Software Detected & Resolved',
-  software_review: 'Software Inventory Reviewed for Compliance',
-  vuln_scanning: 'Regular Vulnerability Scanning', vuln_remediation: 'Timely Vulnerability Remediation',
-  vuln_reports: 'Scan Reports Reviewed & Acted Upon',
-  admin_roles: 'Admin Privileges Role-Based', admin_audit: 'Admin Privileges Tracked & Audited',
-  admin_revoke: 'Process to Revoke Admin Privileges',
-  secure_config_install: 'Secure Configs Applied on Install', secure_config_update: 'Configs Regularly Updated & Validated',
-  secure_config_deviations: 'Config Deviations Detected & Corrected',
-  email_filter: 'Malicious Email/Web Content Filtering', browser_settings: 'Email/Browser Security Settings Updated',
-  email_training: 'Email/Web Security Training Provided',
-  ports_disabled: 'Unnecessary Ports/Protocols Disabled', ports_review: 'Port Configs Regularly Reviewed',
-  ports_monitor: 'Port Activities Monitored & Logged',
-  scanner_nessus: 'Nessus', scanner_openvas: 'OpenVAS', scanner_other: 'Other Scanner',
-  scanner_unknown: 'Unknown', scanner_report: 'Scanner Report Details',
-  pentest_regular: 'Regular Penetration Tests', pentest_improve: 'Pentest Results Used for Improvements',
-  redteam: 'Red Team Exercises Employed',
+  // Section 2 - Network Topology
+  workstation_count: 'Desktop Count', laptop_count: 'Laptop Count', server_count: 'Server Count',
+  os_win_server: 'Windows Server', os_win_client: 'Windows Client', os_linux: 'Linux',
+  os_macos: 'macOS', os_other: 'Other OS',
+  role_dc: 'Domain Controller', role_dc_version: 'DC Version',
+  role_file: 'File Server', role_file_version: 'File Server Version',
+  role_mail: 'Mail Server', role_mail_version: 'Mail Server Version',
+  role_web: 'Web/App Server', role_web_version: 'Web Server Version',
+  role_db: 'Database Server', role_db_version: 'DB Server Version',
+  role_backup: 'Backup Server', role_backup_version: 'Backup Server Version',
+  role_print: 'Print Server', role_print_version: 'Print Server Version',
+  role_other: 'Other Server', role_other_version: 'Other Server Details',
+  role_other_notes: 'Server Notes',
+  svc_smb: 'SMB', svc_smb_version: 'SMB Version',
+  svc_rdp: 'RDP', svc_rdp_version: 'RDP Version',
+  svc_ssh: 'SSH', svc_ssh_version: 'SSH Version',
+  svc_http: 'HTTP/HTTPS', svc_http_version: 'HTTP Version',
+  svc_sql: 'SQL/Database', svc_sql_version: 'SQL Version',
+  svc_ftp: 'FTP', svc_ftp_version: 'FTP Version',
+  svc_dns: 'DNS', svc_dns_version: 'DNS Version',
+  svc_ldap: 'LDAP', svc_ldap_version: 'LDAP Version',
+  svc_vpn: 'VPN', svc_vpn_version: 'VPN Type',
+  domain_mode: 'Domain Mode', domain_name: 'Domain Name',
+  // Section 3 - Wireless
+  ssid_count: 'SSID Count', wifi_encryption: 'Wi-Fi Encryption',
+  guest_wifi: 'Guest Network', guest_isolated: 'Guest Isolated',
+  // Section 4 - Endpoint Security
+  av_vendor: 'AV / EDR Vendor', disk_encryption: 'Disk Encryption',
+  usb_policy: 'USB Policy', patch_cadence: 'Patch Cadence',
+  // Section 5 - Email & Web
+  email_provider: 'Email Provider', web_filtering: 'Web Filtering',
+  spf: 'SPF', dkim: 'DKIM', dmarc: 'DMARC',
+  // Section 6 - Account & Access
+  mfa_coverage: 'MFA Coverage', priv_count_band: 'Privileged Account Count',
+  password_manager: 'Password Manager', lockout_policy: 'Lockout Policy',
+  dormant_cleanup: 'Dormant Account Cleanup',
+  // Section 7 - Data Protection
+  backup_cadence: 'Backup Cadence', offsite_backup: 'Offsite Backup',
+  offline_backup: 'Offline Backup', encryption_at_rest: 'Encryption at Rest',
+  dlp: 'DLP', restore_test: 'Backup Restore Test',
+  // Section 8 - Vulnerability & Audit
+  vuln_scanning: 'Vulnerability Scanning', logging_coverage: 'Logging Coverage',
+  siem: 'SIEM', audit_retention: 'Audit Log Retention',
+  // Section 10 - Notes
+  free_text: 'Additional Notes',
 };
 
-// Section layout config for grouped rendering
+// Section layout config for grouped PDF rendering (V8 - 10 sections + IG1)
 const SECTION_CONFIG = {
   company_info: {
-    title: '1. Company Information',
+    title: '1. Organization Profile',
     groups: [
-      { label: 'Organization Details', fields: ['company_name', 'business_address', 'industry_sector', 'num_employees', 'locations', 'website'] },
+      { label: 'Organization Details', fields: ['company_name', 'industry', 'employees_band', 'revenue_band', 'business_address', 'locations', 'website'] },
       { label: 'Primary Contact', fields: ['primary_contact_name', 'primary_contact_title', 'primary_contact_email', 'primary_contact_phone'] },
       { label: 'Secondary Contact', fields: ['secondary_contact_name', 'secondary_contact_title', 'secondary_contact_email', 'secondary_contact_phone'] },
       { label: 'Social Media', type: 'inline', fields: ['social_linkedin', 'social_instagram', 'social_x', 'social_facebook', 'social_tiktok', 'social_other'] },
+      { label: 'Regulatory Frameworks', type: 'checklist', fields: ['fw_hipaa', 'fw_pci', 'fw_cmmc', 'fw_sox', 'fw_glba', 'fw_gdpr', 'fw_ferpa', 'fw_nist', 'fw_none'] },
       { label: 'Services Requested', type: 'checklist', fields: ['service_training', 'service_risk_assessment', 'service_osint', 'service_vuln_assessment'] },
-      { label: 'AI Usage', type: 'radio', fields: ['ai_used'] },
+      { label: 'AI Usage', type: 'radio', fields: ['ai_usage'] },
       { label: 'AI Policy', type: 'checklist', fields: ['ai_has_policy', 'ai_no_policy'] },
       { label: 'AI Interests', type: 'checklist', fields: ['ai_interest_training', 'ai_interest_risks', 'ai_interest_opportunities', 'ai_interest_policy'] },
       { label: null, type: 'textarea', fields: ['products_services', 'recent_incidents', 'ongoing_concerns', 'primary_goals'] },
     ]
   },
-  security_policies: {
-    title: '2. Security Policies and Procedures',
-    groups: [
-      { label: 'Policies in Place', type: 'checklist', fields: ['policy_incident_response', 'policy_acceptable_use', 'policy_remote_access', 'policy_network_security', 'policy_data_management', 'policy_disaster_recovery', 'policy_employee_awareness', 'policy_data_backup', 'policy_vendor_management', 'policy_data_retention', 'policy_email', 'policy_risk_management', 'policy_change_management', 'policy_access_control', 'policy_password', 'policy_vendor_contractor', 'policy_byod', 'policy_other'] },
-      { label: null, type: 'textarea', fields: ['policy_documents_notes'] },
-      { label: 'Security Training Scores (0-4)', type: 'scores', fields: ['training_info_security', 'training_mobile_security', 'training_social_engineering', 'training_phishing', 'training_physical_security', 'training_wireless', 'training_security_awareness', 'training_safe_internet', 'training_email_security', 'training_other'] },
-    ]
-  },
-  data_management: {
-    title: '3. Data and Information Management',
-    groups: [
-      { label: 'Data Types Managed', type: 'checklist', fields: ['data_biometric', 'data_privacy', 'data_health', 'data_business', 'data_financial', 'data_intellectual_property', 'data_credit_card', 'data_classified', 'data_bank_account', 'data_trade_secrets', 'data_email_addresses', 'data_consumer', 'data_membership', 'data_other'] },
-      { label: 'Data Storage', type: 'checklist', fields: ['storage_onprem_physical', 'storage_onprem_digital', 'storage_cloud', 'storage_3rd_party', 'storage_other'] },
-      { label: 'Backup Solutions', type: 'checklist', fields: ['backup_onprem', 'backup_cloud', 'backup_3rd_party', 'backup_other', 'backup_unknown', 'backup_none'] },
-      { label: 'Backup & Retention', type: 'yesno', fields: ['backup_tests', 'retention_followed'] },
-      { label: 'Access Control Methods', type: 'checklist', fields: ['ac_role_based', 'ac_attribute_based', 'ac_mandatory', 'ac_discretionary', 'ac_rule_based', 'ac_other'] },
-      { label: null, type: 'yesno', fields: ['access_control'] },
-    ]
-  },
   network_security: {
-    title: '4. Network Security and Access Control',
+    title: '2. Network Topology',
     groups: [
-      { label: 'Network Equipment', fields: ['net_load_balancer', 'net_nac', 'net_utm', 'net_ids_ips', 'net_vpn', 'net_siem', 'net_web_filter', 'net_switch', 'net_router', 'net_wifi_ap', 'net_modem', 'net_other'] },
-      { label: 'Servers', fields: ['server_mail', 'server_dhcp', 'server_web', 'server_file', 'server_database', 'server_dns', 'server_application', 'server_virtual', 'server_cloud', 'server_other'] },
-      { label: 'Firewall Types', type: 'checklist', fields: ['fw_stateful', 'fw_stateless', 'fw_ngfw', 'fw_waf', 'fw_cloud', 'fw_packet_filtering'] },
-      { label: 'IDS/IPS', type: 'checklist', fields: ['ips_network', 'ips_host', 'ids_network', 'ids_host'] },
-      { label: 'SIEM', type: 'checklist', fields: ['siem_splunk', 'siem_qradar', 'siem_logrhythm', 'siem_other'] },
-      { label: 'Additional Security Tools', fields: ['net_edr', 'net_xdr', 'net_email_security', 'password_manager_name'] },
-      { label: null, type: 'textarea', fields: ['security_assets_list'] },
+      { label: 'Device Counts', fields: ['workstation_count', 'laptop_count', 'server_count'] },
+      { label: 'Operating Systems', fields: ['os_win_server', 'os_win_client', 'os_linux', 'os_macos', 'os_other'] },
+      { label: 'Server Roles', fields: ['role_dc', 'role_dc_version', 'role_file', 'role_file_version', 'role_mail', 'role_mail_version', 'role_web', 'role_web_version', 'role_db', 'role_db_version', 'role_backup', 'role_backup_version', 'role_print', 'role_print_version', 'role_other', 'role_other_version'] },
+      { label: null, type: 'textarea', fields: ['role_other_notes'] },
+      { label: 'Exposed Services', type: 'checklist', fields: ['svc_smb', 'svc_rdp', 'svc_ssh', 'svc_http', 'svc_sql', 'svc_ftp', 'svc_dns', 'svc_ldap', 'svc_vpn'] },
+      { label: 'Domain & Network', fields: ['domain_mode', 'domain_name'] },
     ]
   },
   wireless: {
-    title: '5. Wireless Security',
+    title: '3. Wireless',
     groups: [
-      { label: 'Wireless Protocols in Use', type: 'checklist', fields: ['wifi_wep', 'wifi_wps', 'wifi_wpa_personal', 'wifi_wpa_enterprise', 'wifi_wpa2_personal', 'wifi_wpa2_enterprise', 'wifi_wpa3_personal', 'wifi_wpa3_enterprise', 'wifi_unknown'] },
+      { label: null, fields: ['ssid_count', 'wifi_encryption', 'guest_wifi', 'guest_isolated'] },
     ]
   },
   endpoint_security: {
-    title: '6. Endpoint and Application Security',
+    title: '4. Endpoint Security',
     groups: [
-      { label: 'Antivirus / Endpoint Protection', type: 'checklist', fields: ['av_norton', 'av_mcafee', 'av_crowdstrike', 'av_avast', 'av_bitdefender', 'av_malwarebytes', 'av_sophos', 'av_other'] },
-      { label: 'Application Control', type: 'checklist', fields: ['app_blacklist', 'app_whitelist', 'app_list_unknown'] },
-    ]
-  },
-  compliance: {
-    title: '7. Compliance and Regulatory Requirements',
-    groups: [
-      { label: 'Applicable Frameworks', type: 'checklist', fields: ['comp_gdpr', 'comp_sox', 'comp_ferpa', 'comp_pci_dss', 'comp_soc2', 'comp_glba', 'comp_fisma', 'comp_hipaa', 'comp_ccpa', 'comp_cmmc', 'comp_other', 'comp_unknown'] },
-      { label: null, type: 'textarea', fields: ['vendor_compliance'] },
-    ]
-  },
-  software_assets: {
-    title: '8. Inventory and Control of Software Assets',
-    groups: [
-      { label: null, type: 'yesno', fields: ['software_inventory', 'unauthorized_software', 'software_review'] },
-    ]
-  },
-  vuln_management: {
-    title: '9. Continuous Vulnerability Management',
-    groups: [
-      { label: null, type: 'yesno', fields: ['vuln_scanning', 'vuln_remediation', 'vuln_reports'] },
-    ]
-  },
-  admin_privileges: {
-    title: '10. Controlled Use of Administrative Privileges',
-    groups: [
-      { label: null, type: 'yesno', fields: ['admin_roles', 'admin_audit', 'admin_revoke'] },
-    ]
-  },
-  secure_config: {
-    title: '11. Secure Configuration for Hardware and Software',
-    groups: [
-      { label: null, type: 'yesno', fields: ['secure_config_install', 'secure_config_update', 'secure_config_deviations'] },
+      { label: null, fields: ['av_vendor', 'disk_encryption', 'usb_policy', 'patch_cadence'] },
     ]
   },
   email_web: {
-    title: '12. Email and Web Browser Protections',
+    title: '5. Email & Web',
     groups: [
-      { label: null, type: 'yesno', fields: ['email_filter', 'browser_settings', 'email_training'] },
+      { label: null, fields: ['email_provider', 'web_filtering', 'spf', 'dkim', 'dmarc'] },
     ]
   },
-  network_ports: {
-    title: '13. Limitation and Control of Network Ports',
+  admin_privileges: {
+    title: '6. Account & Access',
     groups: [
-      { label: null, type: 'yesno', fields: ['ports_disabled', 'ports_review', 'ports_monitor'] },
+      { label: null, fields: ['mfa_coverage', 'priv_count_band', 'password_manager', 'lockout_policy', 'dormant_cleanup'] },
     ]
   },
-  network_devices: {
-    title: '14. Secure Configuration for Network Devices',
+  data_management: {
+    title: '7. Data Protection',
     groups: [
-      { label: 'Vulnerability Scanners', type: 'checklist', fields: ['scanner_nessus', 'scanner_openvas', 'scanner_other', 'scanner_unknown'] },
-      { label: null, fields: ['scanner_report'] },
+      { label: null, fields: ['backup_cadence', 'offsite_backup', 'offline_backup', 'encryption_at_rest', 'dlp', 'restore_test'] },
     ]
   },
+  vuln_management: {
+    title: '8. Vulnerability & Audit',
+    groups: [
+      { label: null, fields: ['vuln_scanning', 'logging_coverage', 'siem', 'audit_retention'] },
+    ]
+  },
+  compliance: {
+    title: '9. CIS Controls IG1 Safeguards',
+    groups: [
+      { label: 'IG1 Safeguard Responses', type: 'ig1' },
+    ]
+  },
+  // Legacy sections (may be empty in V8 forms)
+  security_policies: { title: 'Security Policies (Legacy)', groups: [] },
+  software_assets: { title: 'Software Assets (Legacy)', groups: [] },
+  secure_config: { title: 'Secure Configuration (Legacy)', groups: [] },
+  network_ports: { title: 'Network Ports (Legacy)', groups: [] },
+  network_devices: { title: 'Network Devices (Legacy)', groups: [] },
   pentesting: {
-    title: '15. Penetration Tests and Red Team Exercises',
+    title: '10. Additional Notes',
     groups: [
-      { label: null, type: 'yesno', fields: ['pentest_regular', 'pentest_improve', 'redteam'] },
+      { label: null, type: 'textarea', fields: ['free_text'] },
     ]
   },
 };
@@ -569,6 +509,8 @@ function renderIntakePdf(doc, formData, companyName) {
         });
         if (col > 0) rowY += ROW_H;
         doc.y = rowY;
+      } else if (type === 'ig1') {
+        renderIG1Pdf(doc, data, pageWidth, leftMargin, ensureSpace);
       } else if (type === 'radio') {
         group.fields.forEach(f => {
           const val = data[f];
@@ -705,6 +647,56 @@ function renderScores(doc, data, fields, pageWidth, leftMargin) {
       .text(`${val}/4`, barX + barMaxWidth + 5, rowY, { width: 30 });
 
     doc.y = rowY + 14;
+  });
+}
+
+function renderIG1Pdf(doc, data, pageWidth, leftMargin, ensureSpace) {
+  // IG1 data is stored as ig1_X.X = "yes"|"partial"|"no"|"unknown" and ig1_X.X_notes = "..."
+  const ig1Keys = Object.keys(data).filter(k => /^ig1_\d+\.\d+$/.test(k)).sort((a, b) => {
+    const na = parseFloat(a.replace('ig1_', '')), nb = parseFloat(b.replace('ig1_', ''));
+    return na - nb;
+  });
+
+  if (ig1Keys.length === 0) {
+    doc.fontSize(9).font('Helvetica').fillColor(PDF_COLORS.textLight)
+      .text('No IG1 safeguard responses recorded.', leftMargin, doc.y);
+    doc.moveDown(0.3);
+    return;
+  }
+
+  ig1Keys.forEach(key => {
+    const num = key.replace('ig1_', '');
+    const val = data[key];
+    const notes = data[`${key}_notes`] || '';
+    if (!val) return;
+
+    ensureSpace(20);
+    const rowY = doc.y;
+
+    // Safeguard number
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(PDF_COLORS.textLight)
+      .text(num, leftMargin, rowY, { width: 30 });
+
+    // Status badge
+    let display, color;
+    if (val === 'yes') { display = 'YES'; color = PDF_COLORS.yes; }
+    else if (val === 'partial') { display = 'PARTIAL'; color = PDF_COLORS.unknown; }
+    else if (val === 'no') { display = 'NO'; color = PDF_COLORS.no; }
+    else { display = "DON'T KNOW"; color = PDF_COLORS.textLight; }
+
+    const badgeX = leftMargin + pageWidth - 60;
+    doc.roundedRect(badgeX, rowY - 1, 52, 12, 3).fill(color);
+    doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#ffffff')
+      .text(display, badgeX, rowY + 1, { width: 52, align: 'center' });
+
+    doc.y = rowY + 14;
+
+    if (notes) {
+      ensureSpace(16);
+      doc.fontSize(7.5).font('Helvetica').fillColor(PDF_COLORS.textLight)
+        .text(`Notes: ${notes}`, leftMargin + 30, doc.y, { width: pageWidth - 90 });
+      doc.moveDown(0.1);
+    }
   });
 }
 
