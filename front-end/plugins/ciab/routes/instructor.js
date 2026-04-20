@@ -1347,12 +1347,83 @@ function generateIntakeFormFromProfile(profile, fullProfileData) {
   // Generate realistic training scores (0-4) based on maturity
   const tScore = (base) => isLow ? Math.min(base, 1) : isHigh ? Math.min(base + 1, 4) : base;
 
+  // ---- V8 intake form field mapping (10 sections + IG1) ----
+
+  // Employee count band
+  const empBand = empCount <= 10 ? '1-10' : empCount <= 50 ? '11-50' : empCount <= 100 ? '51-100'
+    : empCount <= 250 ? '101-250' : empCount <= 500 ? '251-500' : empCount <= 1000 ? '501-1000'
+    : empCount <= 5000 ? '1001-5000' : '5000+';
+
+  // Endpoint counts from profile
+  const desktops = (endpoints.windows_desktops || 0) + (endpoints.shared_kiosks || 0);
+  const laptops = endpoints.windows_laptops || 0;
+  const serverCount = servers.length || 0;
+  const winServers = servers.filter(s => /windows server/i.test(s.os || '')).length;
+  const winClients = desktops + laptops;
+  const linuxCount = servers.filter(s => /linux|ubuntu|centos|rhel/i.test(s.os || '')).length;
+  const macCount = endpoints.macos || 0;
+
+  // Determine wifi encryption level based on maturity
+  const wifiEnc = isLow ? 'WPA2' : isHigh ? 'WPA3' : 'WPA2';
+
+  // Determine AV vendor from profile
+  const avVendor = ep.product
+    ? (['CrowdStrike Falcon','SentinelOne','Sophos','Bitdefender','Trend Micro','McAfee / Trellix','Microsoft Defender for Endpoint','Microsoft Defender (built-in)','Symantec / Broadcom','Webroot']
+        .find(v => (ep.product || '').toLowerCase().includes(v.split(' ')[0].toLowerCase())) || ep.product)
+    : (isLow ? 'Microsoft Defender (built-in)' : 'Unknown');
+
+  // Email provider detection
+  const emailProvider = saasList.some(s => /office 365|microsoft 365|o365|exchange online/i.test(s)) ? 'Microsoft 365'
+    : saasList.some(s => /google workspace|gmail/i.test(s)) ? 'Google Workspace'
+    : servers.some(s => /mail|exchange/i.test(s.role || '')) ? 'On-prem Exchange'
+    : 'Unknown';
+
+  // Domain mode detection
+  const domainMode = servers.some(s => /domain controller|dc/i.test(s.role || ''))
+    ? (delivery.includes('cloud') || saasList.some(s => /azure|entra/i.test(s)) ? 'hybrid' : 'ad')
+    : (delivery.includes('cloud') ? 'cloud_only' : 'workgroup');
+
+  // Network segments from profile
+  const vlans = (net.vlans || net.segments || []).map(v => ({
+    vlan: v.vlan_id || v.id || '',
+    cidr: v.cidr || v.subnet || '',
+    purpose: v.purpose || v.name || v.description || ''
+  }));
+
+  // Build server role mappings
+  const hasServerRole = (kw) => servers.some(s => new RegExp(kw, 'i').test(s.role || '') || new RegExp(kw, 'i').test(s.hostname || ''));
+  const serverVersion = (kw) => {
+    const s = servers.find(sv => new RegExp(kw, 'i').test(sv.role || '') || new RegExp(kw, 'i').test(sv.hostname || ''));
+    return s ? `${s.hostname} (${s.os || 'Unknown'})` : '';
+  };
+
+  // Build IG1 safeguard responses based on maturity
+  const ig1Nums = ['1.1','1.2','2.1','2.2','2.3','3.1','3.2','3.3','3.4','3.5','3.6',
+    '4.1','4.2','4.3','4.4','4.5','4.6','4.7','5.1','5.2','5.3','5.4',
+    '6.1','6.2','6.3','6.4','6.5','7.1','7.2','7.3','7.4','8.1','8.2','8.3',
+    '9.1','9.2','10.1','10.2','10.3','11.1','11.2','11.3','11.4','12.1',
+    '14.1','14.2','14.3','14.4','14.5','14.6','14.7','14.8','15.1','17.1','17.2','17.3'];
+  const ig1Responses = {};
+  ig1Nums.forEach(num => {
+    // Vary responses based on maturity: low=mostly no/unknown, med=mixed, high=mostly yes/partial
+    const rand = Math.abs((companyName.charCodeAt(0) + parseFloat(num) * 17) % 10);
+    if (isLow) {
+      ig1Responses[`ig1_${num}`] = rand < 2 ? 'yes' : rand < 4 ? 'partial' : rand < 7 ? 'no' : 'unknown';
+    } else if (isHigh) {
+      ig1Responses[`ig1_${num}`] = rand < 6 ? 'yes' : rand < 8 ? 'partial' : 'no';
+    } else {
+      ig1Responses[`ig1_${num}`] = rand < 3 ? 'yes' : rand < 6 ? 'partial' : rand < 8 ? 'no' : 'unknown';
+    }
+  });
+
   return {
+    // Section 1: Organization Profile
     company_info: {
       company_name: companyName,
+      industry: industry,
+      employees_band: empBand,
+      revenue_band: isLow ? '< $1M' : isHigh ? '$50M-$250M' : '$1M-$10M',
       business_address: addr,
-      industry_sector: industry,
-      num_employees: String(empCount),
       locations: city ? `${city} (Headquarters)${empCount > 200 ? ', Remote employees' : ''}` : '',
       website: domain ? `https://${domain}` : '',
       primary_contact_name: pc.name || '',
@@ -1365,237 +1436,161 @@ function generateIntakeFormFromProfile(profile, fullProfileData) {
       secondary_contact_phone: sc.phone || '',
       social_linkedin: domain ? `linkedin.com/company/${companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : '',
       social_instagram: '', social_x: '', social_facebook: '', social_tiktok: '', social_other: '',
+      // Regulatory frameworks (now in company_info with fw_ prefix)
+      fw_hipaa: hasComp('hipaa'),
+      fw_pci: hasComp('pci'),
+      fw_cmmc: hasComp('cmmc'),
+      fw_sox: hasComp('sox'),
+      fw_glba: hasComp('glba'),
+      fw_gdpr: hasComp('gdpr'),
+      fw_ferpa: hasComp('ferpa'),
+      fw_nist: hasComp('nist'),
+      fw_none: complianceFocus.length === 0,
       products_services: productsText,
-      recent_incidents: incidents.length > 0 ? incidents.join('; ') : 'No significant incidents reported in the past 12 months',
-      ongoing_concerns: concerns || `General concerns about ${isLow ? 'lack of visibility into threats and outdated systems' : 'maintaining security posture as the organization grows'}`,
-      primary_goals: goals,
       service_risk_assessment: true,
       service_training: true,
       service_vuln_assessment: !isLow,
       service_osint: isHigh,
-      ai_used: saasList.some(s => s.toLowerCase().includes('ai') || s.toLowerCase().includes('copilot')) ? 'yes' : 'no',
-      ai_has_policy: false, ai_no_policy: false,
+      recent_incidents: incidents.length > 0 ? incidents.join('; ') : 'No significant incidents reported in the past 12 months',
+      ongoing_concerns: concerns || `General concerns about ${isLow ? 'lack of visibility into threats and outdated systems' : 'maintaining security posture as the organization grows'}`,
+      primary_goals: goals,
+      ai_usage: saasList.some(s => s.toLowerCase().includes('ai') || s.toLowerCase().includes('copilot')) ? 'used' : 'unsure',
+      ai_has_policy: false, ai_no_policy: !isHigh,
       ai_interest_training: true, ai_interest_risks: true,
       ai_interest_opportunities: false, ai_interest_policy: false,
     },
 
-    security_policies: {
-      policy_incident_response: hasPolicy('incident'),
-      policy_acceptable_use: hasPolicy('acceptable use'),
-      policy_remote_access: hasPolicy('remote'),
-      policy_network_security: hasPolicy('network security'),
-      policy_data_management: hasPolicy('data handling') || hasPolicy('data management'),
-      policy_disaster_recovery: hasPolicy('disaster') || hasPolicy('business continuity'),
-      policy_employee_awareness: hasPolicy('training') || hasPolicy('awareness'),
-      policy_data_backup: hasPolicy('backup'),
-      policy_vendor_management: hasPolicy('vendor') || hasPolicy('third-party'),
-      policy_data_retention: hasPolicy('retention'),
-      policy_email: hasPolicy('email'),
-      policy_risk_management: hasPolicy('risk management'),
-      policy_change_management: hasPolicy('change management'),
-      policy_access_control: hasPolicy('access control'),
-      policy_password: hasPolicy('password'),
-      policy_vendor_contractor: hasPolicy('vendor') || hasPolicy('contractor'),
-      policy_byod: hasPolicy('byod') || hasPolicy('remote work'),
-      policy_other: false,
-      policy_documents_notes: gov.policy_enforcement
-        ? `${gov.policy_enforcement}. Framework: ${gov.framework || 'None specified'}.`
-        : `Security governance follows a ${gov.framework || 'informal'} approach.`,
-      training_info_security: tScore(2),
-      training_mobile_security: tScore(1),
-      training_social_engineering: tScore(2),
-      training_phishing: tScore(2),
-      training_physical_security: tScore(1),
-      training_wireless: tScore(1),
-      training_security_awareness: tScore(2),
-      training_safe_internet: tScore(1),
-      training_email_security: tScore(2),
-      training_other: 0,
-    },
-
-    data_management: {
-      data_business: true,
-      data_financial: true,
-      data_email_addresses: true,
-      data_consumer: empCount > 20,
-      data_health: hasComp('hipaa') || industry.toLowerCase().includes('health'),
-      data_credit_card: hasComp('pci') || industry.toLowerCase().includes('retail'),
-      data_intellectual_property: industry.toLowerCase().includes('tech') || industry.toLowerCase().includes('manufact'),
-      data_privacy: true,
-      data_classified: industry.toLowerCase().includes('gov') || hasComp('fisma'),
-      data_biometric: false,
-      data_bank_account: true,
-      data_trade_secrets: industry.toLowerCase().includes('tech') || industry.toLowerCase().includes('pharma'),
-      data_membership: industry.toLowerCase().includes('nonprofit') || industry.toLowerCase().includes('association'),
-      data_other: false,
-      storage_onprem_physical: delivery.includes('on-prem') || servers.length > 0,
-      storage_onprem_digital: servers.length > 0,
-      storage_cloud: delivery.includes('cloud') || saasList.length > 2,
-      storage_3rd_party: vendorDeps.length > 0,
-      storage_other: false,
-      backup_onprem: (backups.method || '').toLowerCase().includes('on-prem') || (backups.method || '').toLowerCase().includes('tape'),
-      backup_cloud: (backups.method || '').toLowerCase().includes('cloud') || (backups.method || '').toLowerCase().includes('veeam'),
-      backup_3rd_party: vendorDeps.length > 2,
-      backup_other: false,
-      backup_unknown: !backups.method,
-      backup_none: false,
-      backup_tests: backups.restore_tests ? 'yes' : (isLow ? 'no' : 'yes'),
-      retention_followed: hasPolicy('retention') ? 'yes' : (isLow ? 'no' : 'yes'),
-      ac_role_based: true,
-      ac_attribute_based: isHigh,
-      ac_mandatory: false,
-      ac_discretionary: isLow,
-      ac_rule_based: false,
-      ac_other: false,
-      access_control: 'yes',
-    },
-
+    // Section 2: Network Topology
     network_security: {
-      // Text fields for network equipment — fill with hostnames/model info from profile
-      net_load_balancer: servers.length > 5 ? `${companyName.substring(0, 3).toUpperCase()}-LB01` : '',
-      net_nac: isHigh ? 'Cisco ISE' : '',
-      net_utm: fw.vendor && fw.vendor !== 'Unknown' ? fw.vendor : '',
-      net_ids_ips: fw.vendor && fw.vendor !== 'Unknown' ? `${fw.vendor} IPS Module` : '',
-      net_vpn: remote.vpn || '',
-      net_siem: isHigh ? 'Splunk' : '',
-      net_web_filter: isHigh ? 'Barracuda Web Filter' : '',
-      net_switch: `Managed switches (${Math.max(2, Math.floor(empCount / 25))} units)`,
-      net_router: `Core router + ${Math.max(1, Math.floor(empCount / 50))} edge routers`,
-      net_wifi_ap: `${Math.max(2, Math.floor(empCount / 30))} access points`,
-      net_modem: 'ISP-provided gateway',
-      net_other: '',
-      // Server fields — use actual server data
-      server_mail: servers.find(s => /mail/i.test(s.role))?.hostname || (saasList.includes('Office 365') ? 'Exchange Online (O365)' : ''),
-      server_dhcp: servers.find(s => /dhcp/i.test(s.role))?.hostname || 'Integrated with domain controller',
-      server_web: servers.find(s => /web/i.test(s.role))?.hostname || '',
-      server_file: servers.find(s => /file/i.test(s.role))?.hostname || (saasList.some(s => /sharepoint|drive/i.test(s)) ? 'SharePoint/OneDrive' : ''),
-      server_database: servers.find(s => /db|database|sql/i.test(s.role))?.hostname || '',
-      server_dns: servers.find(s => /dns/i.test(s.role))?.hostname || 'Active Directory DNS',
-      server_application: servers.filter(s => /app|erp|crm|wms/i.test(s.role)).map(s => s.hostname).join(', ') || '',
-      server_virtual: servers.filter(s => /virtual|vmware|hyper/i.test(s.os || '')).map(s => s.hostname).join(', ') || '',
-      server_cloud: delivery.includes('cloud') ? saasList.slice(0, 3).join(', ') : '',
-      server_other: servers.filter(s => !/mail|dhcp|web|file|db|database|dns|app|erp|crm|virtual/i.test(s.role || '')).map(s => `${s.hostname} (${s.role})`).join(', ') || '',
-      // Firewall types
-      fw_stateful: true,
-      fw_stateless: false,
-      fw_ngfw: fw.vendor && fw.vendor !== 'Unknown',
-      fw_waf: servers.some(s => /web/i.test(s.role)),
-      fw_cloud: delivery.includes('cloud'),
-      fw_packet_filtering: isLow,
-      // IDS/IPS
-      ips_network: !isLow, ips_host: false,
-      ids_network: !isLow, ids_host: false,
-      // SIEM
-      siem_splunk: isHigh, siem_qradar: false, siem_logrhythm: false, siem_other: false,
-      // Additional tools
-      net_edr: ep.product || '',
-      net_xdr: isHigh && ep.product ? ep.product + ' XDR' : '',
-      net_email_security: saasList.includes('Office 365') ? 'Microsoft Defender for Office 365' : '',
-      password_manager_name: isHigh ? 'LastPass Enterprise' : '',
-      security_assets_list: [
-        ...serverLines,
-        remote.vpn ? `VPN: ${remote.vpn}${remote.mfa ? ' (MFA: ' + remote.mfa + ')' : ''}` : '',
-        ep.product ? `Endpoint Protection: ${ep.product}` : '',
-        fw.vendor && fw.vendor !== 'Unknown' ? `Firewall: ${fw.vendor}` : '',
-        backups.method ? `Backup: ${backups.method} (${backups.frequency || 'daily'})` : '',
-        `Endpoints: ${endpoints.windows_desktops || 0} desktops, ${endpoints.windows_laptops || 0} laptops, ${endpoints.macos || 0} macOS, ${endpoints.mobile || 0} mobile`,
-        saasList.length > 0 ? `SaaS: ${saasList.join(', ')}` : '',
-      ].filter(Boolean).join('\n'),
+      workstation_count: String(desktops),
+      laptop_count: String(laptops),
+      server_count: String(serverCount),
+      os_win_server: String(winServers),
+      os_win_client: String(winClients),
+      os_linux: String(linuxCount),
+      os_macos: String(macCount),
+      os_other: String(endpoints.mobile || 0),
+      // Server roles (select values: yes/no/unknown)
+      role_dc: hasServerRole('domain controller|dc') ? 'yes' : 'unknown',
+      role_dc_version: serverVersion('domain controller|dc'),
+      role_file: hasServerRole('file') ? 'yes' : (servers.length > 0 ? 'yes' : 'unknown'),
+      role_file_version: serverVersion('file'),
+      role_mail: hasServerRole('mail|exchange') ? 'yes' : (emailProvider.includes('On-prem') ? 'yes' : 'no'),
+      role_mail_version: serverVersion('mail|exchange'),
+      role_web: hasServerRole('web|app') ? 'yes' : 'no',
+      role_web_version: serverVersion('web|app'),
+      role_db: hasServerRole('db|database|sql') ? 'yes' : 'no',
+      role_db_version: serverVersion('db|database|sql'),
+      role_backup: hasServerRole('backup') ? 'yes' : (backups.method ? 'yes' : 'unknown'),
+      role_backup_version: serverVersion('backup') || (backups.method || ''),
+      role_print: 'unknown',
+      role_print_version: '',
+      role_other: servers.some(s => /erp|crm|wms/i.test(s.role || '')) ? 'yes' : 'no',
+      role_other_version: servers.filter(s => /erp|crm|wms/i.test(s.role || '')).map(s => `${s.hostname} (${s.role})`).join(', '),
+      role_other_notes: serverLines.join('\n'),
+      // Exposed services (checkboxes)
+      svc_smb: true,
+      svc_smb_version: '',
+      svc_rdp: true,
+      svc_rdp_version: '',
+      svc_ssh: linuxCount > 0,
+      svc_ssh_version: '',
+      svc_http: hasServerRole('web') || saasList.length > 0,
+      svc_http_version: '',
+      svc_sql: hasServerRole('db|database|sql'),
+      svc_sql_version: '',
+      svc_ftp: isLow,
+      svc_ftp_version: '',
+      svc_dns: true,
+      svc_dns_version: '',
+      svc_ldap: domainMode === 'ad' || domainMode === 'hybrid',
+      svc_ldap_version: '',
+      svc_vpn: !!remote.vpn,
+      svc_vpn_version: remote.vpn || '',
+      // Domain & network
+      domain_mode: domainMode,
+      domain_name: domain || `${companyName.toLowerCase().replace(/[^a-z0-9]+/g, '')}.local`,
+      // Segments
+      segments: vlans.length > 0 ? vlans : [
+        { vlan: '10', cidr: '10.10.10.0/28', purpose: 'Management' },
+        { vlan: '20', cidr: '10.10.20.0/24', purpose: 'Servers' },
+        { vlan: '30', cidr: '10.10.30.0/24', purpose: 'Workstations' },
+        { vlan: '99', cidr: '10.10.99.0/24', purpose: 'Guest' },
+      ],
     },
 
+    // Section 3: Wireless
     wireless: {
-      wifi_wep: isLow, // Deliberate weakness for low-maturity
-      wifi_wps: false,
-      wifi_wpa_personal: isLow,
-      wifi_wpa_enterprise: false,
-      wifi_wpa2_personal: !isHigh,
-      wifi_wpa2_enterprise: !isLow,
-      wifi_wpa3_personal: false,
-      wifi_wpa3_enterprise: isHigh,
-      wifi_unknown: false,
+      ssid_count: String(Math.max(1, Math.min(4, Math.floor(empCount / 40) + 1))),
+      wifi_encryption: wifiEnc,
+      guest_wifi: 'Yes',
+      guest_isolated: isLow ? 'No' : 'Yes',
     },
 
+    // Section 4: Endpoint Security
     endpoint_security: {
-      av_crowdstrike: (ep.product || '').toLowerCase().includes('crowdstrike'),
-      av_sophos: (ep.product || '').toLowerCase().includes('sophos'),
-      av_bitdefender: (ep.product || '').toLowerCase().includes('bitdefender'),
-      av_malwarebytes: (ep.product || '').toLowerCase().includes('malwarebytes'),
-      av_norton: (ep.product || '').toLowerCase().includes('norton'),
-      av_mcafee: (ep.product || '').toLowerCase().includes('mcafee'),
-      av_avast: (ep.product || '').toLowerCase().includes('avast'),
-      av_other: ep.product && !['crowdstrike','sophos','bitdefender','malwarebytes','norton','mcafee','avast']
-        .some(v => (ep.product || '').toLowerCase().includes(v)),
-      app_whitelist: isHigh,
-      app_blacklist: !isLow,
-      app_list_unknown: isLow,
+      av_vendor: avVendor,
+      disk_encryption: isLow ? 'No' : (isHigh ? 'Yes, all' : 'Some'),
+      usb_policy: isLow ? 'Allowed, no restrictions' : (isHigh ? 'Blocked entirely' : 'Allowed with encryption'),
+      patch_cadence: isLow ? 'Ad hoc / as needed' : (isHigh ? 'Automated, weekly or faster' : 'Automated, monthly'),
     },
 
-    compliance: {
-      comp_hipaa: hasComp('hipaa'),
-      comp_pci_dss: hasComp('pci'),
-      comp_gdpr: hasComp('gdpr'),
-      comp_sox: hasComp('sox'),
-      comp_ferpa: hasComp('ferpa'),
-      comp_soc2: hasComp('soc'),
-      comp_glba: hasComp('glba'),
-      comp_fisma: hasComp('fisma'),
-      comp_ccpa: hasComp('ccpa'),
-      comp_cmmc: hasComp('cmmc'),
-      comp_other: false,
-      comp_unknown: complianceFocus.length === 0,
-      vendor_compliance: vendorDeps.length > 0
-        ? `Key vendors requiring compliance: ${vendorDeps.map(v => typeof v === 'string' ? v : v.name || v.vendor || '').filter(Boolean).join(', ')}. Vendor security assessments ${isLow ? 'not currently performed' : 'conducted annually'}.`
-        : '',
-    },
-
-    software_assets: {
-      software_inventory: isLow ? 'no' : 'yes',
-      unauthorized_software: isLow ? 'no' : 'yes',
-      software_review: isLow ? 'no' : 'yes',
-    },
-
-    vuln_management: {
-      vuln_scanning: isLow ? 'no' : 'yes',
-      vuln_remediation: isLow ? 'no' : (isHigh ? 'yes' : 'partial'),
-      vuln_reports: isLow ? 'no' : 'yes',
-    },
-
-    admin_privileges: {
-      admin_roles: 'yes',
-      admin_audit: isLow ? 'no' : 'yes',
-      admin_revoke: isLow ? 'no' : 'yes',
-    },
-
-    secure_config: {
-      secure_config_install: isLow ? 'no' : 'yes',
-      secure_config_update: isLow ? 'no' : (isHigh ? 'yes' : 'no'),
-      secure_config_deviations: isLow ? 'no' : (isHigh ? 'yes' : 'no'),
-    },
-
+    // Section 5: Email & Web
     email_web: {
-      email_filter: 'yes',
-      browser_settings: isLow ? 'no' : 'yes',
-      email_training: hasPolicy('training') || hasPolicy('awareness') ? 'yes' : (isLow ? 'no' : 'yes'),
+      email_provider: emailProvider,
+      web_filtering: isLow ? 'No' : (isHigh ? 'Yes' : 'Partial'),
+      spf: isLow ? 'Unknown' : 'Yes',
+      dkim: isLow ? 'Unknown' : (isHigh ? 'Yes' : 'No'),
+      dmarc: isLow ? 'Unknown' : (isHigh ? 'Yes, enforcing' : 'No'),
     },
 
-    network_ports: {
-      ports_disabled: isLow ? 'no' : 'yes',
-      ports_review: isLow ? 'no' : (isHigh ? 'yes' : 'no'),
-      ports_monitor: isHigh ? 'yes' : 'no',
+    // Section 6: Account & Access
+    admin_privileges: {
+      mfa_coverage: isLow ? 'None' : (isHigh ? 'All users, all systems' : 'Admin accounts + email'),
+      priv_count_band: empCount <= 20 ? '1-2' : empCount <= 100 ? '3-5' : empCount <= 250 ? '6-10' : '11-25',
+      password_manager: isLow ? 'No' : (isHigh ? 'Yes, company-wide' : 'Some users'),
+      lockout_policy: isLow ? 'No' : 'Yes',
+      dormant_cleanup: isLow ? 'Never' : (isHigh ? 'Automated' : 'Ad hoc'),
     },
 
-    network_devices: {
-      scanner_nessus: !isLow,
-      scanner_openvas: isLow,
-      scanner_other: false,
-      scanner_unknown: isLow,
-      scanner_report: isLow ? '' : `Last scan: ${new Date(Date.now() - 30 * 86400000).toLocaleDateString()}. ${isHigh ? 'Monthly automated scans with quarterly manual review.' : 'Quarterly scans performed by IT team.'}`,
+    // Section 7: Data Protection
+    data_management: {
+      backup_cadence: backups.frequency === 'daily' ? 'Daily' : (isLow ? 'Weekly' : 'Daily'),
+      offsite_backup: isLow ? 'No' : 'Yes',
+      offline_backup: isLow ? 'No' : (isHigh ? 'Yes' : 'No'),
+      encryption_at_rest: isLow ? 'No' : (isHigh ? 'Yes' : 'Partial'),
+      dlp: isLow ? 'No' : (isHigh ? 'Yes' : 'No'),
+      restore_test: isLow ? 'No' : (isHigh ? 'Yes' : 'No'),
     },
 
+    // Section 8: Vulnerability & Audit
+    vuln_management: {
+      vuln_scanning: isLow ? 'None' : (isHigh ? 'Continuous / automated' : 'Quarterly'),
+      logging_coverage: isLow ? 'None / unknown' : (isHigh ? 'Centralized, everything' : 'Local only, some systems'),
+      siem: isLow ? 'No' : (isHigh ? 'Yes' : 'No'),
+      audit_retention: isLow ? 'Unknown' : (isHigh ? '1-3 years' : '30-90 days'),
+    },
+
+    // Section 9: CIS IG1 Safeguards (stored in compliance column)
+    compliance: ig1Responses,
+
+    // Legacy sections (kept for DB compatibility, empty for V8 forms)
+    security_policies: {},
+    software_assets: {},
+    secure_config: {},
+    network_ports: {},
+    network_devices: {},
+
+    // Section 10: Additional Notes (stored in pentesting column)
     pentesting: {
-      pentest_regular: isHigh ? 'yes' : 'no',
-      pentest_improve: isHigh ? 'yes' : 'no',
-      redteam: isHigh ? 'yes' : 'no',
+      free_text: [
+        `${companyName} is a ${industry.toLowerCase()} organization with ${empCount} employees.`,
+        concerns ? `Key concerns: ${concerns}.` : '',
+        incidents.length > 0 ? `Recent incidents: ${incidents.join('; ')}.` : '',
+        `Security maturity: ${isLow ? 'Low' : isHigh ? 'High' : 'Intermediate'}.`,
+        gov.framework ? `Governance framework: ${gov.framework}.` : '',
+        vendorDeps.length > 0 ? `Key vendor dependencies: ${vendorDeps.map(v => typeof v === 'string' ? v : v.name || '').filter(Boolean).join(', ')}.` : '',
+      ].filter(Boolean).join(' '),
     },
   };
 }
@@ -1808,44 +1803,212 @@ router.get('/examples/:profileId', authenticateToken, instructorOnly, async (req
 // INSTRUCTOR PACKET PDF — Examples + Intake Form
 // ============================================================================
 
+// ============================================================================
+// HTML-to-PDF structured renderer: preserves headings, bullets, tables, paragraphs
+// ============================================================================
+
+function decodeEntities(text) {
+  return (text || '')
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(n));
+}
+
+function stripTags(html) {
+  return decodeEntities((html || '').replace(/<[^>]+>/g, '').trim());
+}
+
+/**
+ * Render HTML content into a PDFKit document with proper structure.
+ * Handles: h1-h4, p, ul/ol/li, tables, br, strong/b, and plain text.
+ */
+function renderHtmlToPdf(doc, html, pageWidth, leftMargin) {
+  if (!html) return;
+  const text = String(html);
+
+  // Parse into structural blocks
+  const blocks = [];
+  // Split on block-level elements
+  const blockRegex = /<(h[1-4]|p|ul|ol|table|div|blockquote)[^>]*>([\s\S]*?)<\/\1>/gi;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = blockRegex.exec(text)) !== null) {
+    // Capture any text between blocks
+    if (match.index > lastIndex) {
+      const between = text.substring(lastIndex, match.index).trim();
+      if (between && stripTags(between)) {
+        blocks.push({ type: 'text', content: between });
+      }
+    }
+    blocks.push({ type: match[1].toLowerCase(), content: match[2] });
+    lastIndex = match.index + match[0].length;
+  }
+  // Trailing text
+  if (lastIndex < text.length) {
+    const trailing = text.substring(lastIndex).trim();
+    if (trailing && stripTags(trailing)) {
+      blocks.push({ type: 'text', content: trailing });
+    }
+  }
+
+  // If no block elements found, treat entire content as text
+  if (blocks.length === 0 && stripTags(text)) {
+    blocks.push({ type: 'text', content: text });
+  }
+
+  function ensureSpace(needed) {
+    if (doc.y + needed > doc.page.height - 60) doc.addPage();
+  }
+
+  for (const block of blocks) {
+    const clean = stripTags(block.content);
+    if (!clean && block.type !== 'table' && block.type !== 'ul' && block.type !== 'ol') continue;
+
+    switch (block.type) {
+      case 'h1':
+        ensureSpace(30);
+        doc.fontSize(13).font('Helvetica-Bold').fillColor('#1a365d')
+          .text(clean, leftMargin, doc.y, { width: pageWidth });
+        doc.moveDown(0.3);
+        break;
+
+      case 'h2':
+        ensureSpace(26);
+        doc.fontSize(11.5).font('Helvetica-Bold').fillColor('#2c5282')
+          .text(clean, leftMargin, doc.y, { width: pageWidth });
+        doc.moveDown(0.25);
+        break;
+
+      case 'h3':
+        ensureSpace(22);
+        doc.fontSize(10.5).font('Helvetica-Bold').fillColor('#2d3748')
+          .text(clean, leftMargin, doc.y, { width: pageWidth });
+        doc.moveDown(0.2);
+        break;
+
+      case 'h4':
+        ensureSpace(20);
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#4a5568')
+          .text(clean, leftMargin, doc.y, { width: pageWidth });
+        doc.moveDown(0.15);
+        break;
+
+      case 'ul':
+      case 'ol': {
+        const items = block.content.match(/<li[^>]*>([\s\S]*?)<\/li>/gi) || [];
+        items.forEach((li, idx) => {
+          const itemText = stripTags(li);
+          if (!itemText) return;
+          ensureSpace(14);
+          const bullet = block.type === 'ol' ? `${idx + 1}. ` : ' - ';
+          doc.fontSize(9.5).font('Helvetica').fillColor('#1e293b')
+            .text(`${bullet}${itemText}`, leftMargin + 10, doc.y, { width: pageWidth - 20, lineGap: 1.5 });
+          doc.moveDown(0.1);
+        });
+        doc.moveDown(0.3);
+        break;
+      }
+
+      case 'table': {
+        // Extract headers and rows
+        const headers = [];
+        const headerMatch = block.content.match(/<thead[^>]*>([\s\S]*?)<\/thead>/i);
+        if (headerMatch) {
+          const ths = headerMatch[1].match(/<th[^>]*>([\s\S]*?)<\/th>/gi) || [];
+          ths.forEach(th => headers.push(stripTags(th)));
+        }
+        // If no thead, check first row for th elements
+        if (headers.length === 0) {
+          const firstRow = block.content.match(/<tr[^>]*>([\s\S]*?)<\/tr>/i);
+          if (firstRow && /<th[^>]*>/i.test(firstRow[1])) {
+            const ths = firstRow[1].match(/<th[^>]*>([\s\S]*?)<\/th>/gi) || [];
+            ths.forEach(th => headers.push(stripTags(th)));
+          }
+        }
+
+        const rows = [];
+        const rowMatches = block.content.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+        for (const row of rowMatches) {
+          if (/<th[^>]*>/i.test(row) && !/<td[^>]*>/i.test(row)) continue;
+          const cells = [];
+          const tds = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+          tds.forEach(td => cells.push(stripTags(td)));
+          if (cells.length > 0) rows.push(cells);
+        }
+
+        if (rows.length === 0) break;
+
+        // Render table with header row highlighted
+        const colCount = Math.max(headers.length, rows[0]?.length || 1);
+        const colWidth = (pageWidth - 4) / colCount;
+
+        // Header row
+        if (headers.length > 0) {
+          ensureSpace(18);
+          const headerY = doc.y;
+          doc.rect(leftMargin, headerY, pageWidth, 16).fill('#e2e8f0');
+          headers.forEach((h, i) => {
+            doc.fontSize(8).font('Helvetica-Bold').fillColor('#1a365d')
+              .text(h, leftMargin + 4 + i * colWidth, headerY + 3, { width: colWidth - 8 });
+          });
+          doc.y = headerY + 18;
+        }
+
+        // Data rows
+        rows.forEach((cells, rowIdx) => {
+          const cellTexts = cells.map(c => c.substring(0, 120)); // Truncate long cells
+          const rowHeight = Math.max(14, ...cellTexts.map(c =>
+            doc.heightOfString(c, { width: colWidth - 8, fontSize: 8 }) + 6
+          ));
+          ensureSpace(rowHeight);
+
+          const rowY = doc.y;
+          if (rowIdx % 2 === 0) doc.rect(leftMargin, rowY, pageWidth, rowHeight).fill('#f7fafc');
+
+          cellTexts.forEach((cell, i) => {
+            doc.fontSize(8).font('Helvetica').fillColor('#2d3748')
+              .text(cell, leftMargin + 4 + i * colWidth, rowY + 3, { width: colWidth - 8 });
+          });
+          doc.y = rowY + rowHeight;
+        });
+
+        // Bottom border
+        doc.moveTo(leftMargin, doc.y).lineTo(leftMargin + pageWidth, doc.y)
+          .lineWidth(0.5).strokeColor('#cbd5e1').stroke();
+        doc.moveDown(0.4);
+        break;
+      }
+
+      case 'p':
+      case 'div':
+      case 'blockquote':
+      case 'text':
+      default: {
+        ensureSpace(14);
+        // Handle inline bold/strong
+        const plainText = block.content
+          .replace(/<br\s*\/?>/gi, '\n')
+          .replace(/<strong[^>]*>|<b[^>]*>/gi, '')
+          .replace(/<\/strong>|<\/b>/gi, '')
+          .replace(/<[^>]+>/g, '')
+          .trim();
+        const decoded = decodeEntities(plainText);
+        if (decoded) {
+          doc.fontSize(9.5).font('Helvetica').fillColor('#1e293b')
+            .text(decoded, leftMargin, doc.y, { width: pageWidth, lineGap: 2 });
+          doc.moveDown(0.3);
+        }
+        break;
+      }
+    }
+  }
+}
+
+// Legacy plain-text fallback
 function stripHtml(html) {
   if (!html) return '';
   let text = String(html);
-
-  // Convert tables to readable text: extract rows, format as "Header: Value" pairs
-  // First, try to extract table headers for context
-  text = text.replace(/<table[^>]*>([\s\S]*?)<\/table>/gi, (match, tableContent) => {
-    const headers = [];
-    const headerMatch = tableContent.match(/<thead[^>]*>([\s\S]*?)<\/thead>/i);
-    if (headerMatch) {
-      const thMatches = headerMatch[1].match(/<th[^>]*>([\s\S]*?)<\/th>/gi);
-      if (thMatches) {
-        thMatches.forEach(th => headers.push(th.replace(/<[^>]+>/g, '').trim()));
-      }
-    }
-
-    const rows = [];
-    const rowMatches = tableContent.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
-    for (const row of rowMatches) {
-      // Skip header rows
-      if (/<th[^>]*>/i.test(row) && !/<td[^>]*>/i.test(row)) continue;
-      const cells = [];
-      const cellMatches = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
-      cellMatches.forEach(td => cells.push(td.replace(/<[^>]+>/g, '').trim()));
-      if (cells.length > 0) rows.push(cells);
-    }
-
-    if (rows.length === 0) return '';
-
-    // Format: if headers exist, use "Header: Value" format per cell
-    return rows.map(cells => {
-      if (headers.length > 0) {
-        return cells.map((cell, i) => `${headers[i] || 'Column ' + (i+1)}: ${cell}`).join('  |  ');
-      }
-      return cells.join('  |  ');
-    }).join('\n') + '\n';
-  });
-
   return text
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/p>/gi, '\n')
@@ -1969,13 +2132,15 @@ router.get('/packet/:profileId/pdf', authenticateToken, instructorOnly, async (r
         const items = Array.isArray(delArr) ? delArr : [delArr];
         items.forEach((html, i) => {
           ensureSpace(30);
+          // Deliverable label with accent bar
+          const labelY = doc.y;
+          doc.rect(leftMargin, labelY, 3, 12).fill('#2c5282');
           doc.fillColor('#718096').fontSize(8).font('Helvetica-Bold')
-            .text(`DELIVERABLE ${i + 1}`, leftMargin, doc.y);
-          doc.moveDown(0.2);
-          const plainText = stripHtml(html);
-          doc.fillColor('#1e293b').fontSize(9.5).font('Helvetica')
-            .text(plainText, leftMargin, doc.y, { width: pageWidth, lineGap: 2 });
-          doc.moveDown(0.6);
+            .text(`DELIVERABLE ${i + 1}`, leftMargin + 8, labelY + 1);
+          doc.y = labelY + 16;
+          // Render HTML with structure preserved
+          renderHtmlToPdf(doc, html, pageWidth, leftMargin);
+          doc.moveDown(0.4);
         });
         doc.moveDown(0.3);
       }

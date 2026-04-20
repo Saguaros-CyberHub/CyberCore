@@ -1037,7 +1037,17 @@
         
       } catch (error) {
         console.error('Failed to load dashboard:', error);
-        Toast.error('Error', 'Failed to load instructor dashboard');
+        const msg = error?.message || error?.error || 'Unknown error';
+        if (msg.includes('403') || msg.includes('Access denied') || msg.includes('Insufficient')) {
+          Toast.error('Access Denied', 'Your account needs the instructor role. Contact an administrator.');
+        } else if (msg.includes('401') || msg.includes('Authentication')) {
+          Toast.error('Session Expired', 'Please log in again.');
+          setTimeout(() => window.location.href = '/login', 2000);
+        } else {
+          Toast.error('Error', `Failed to load instructor dashboard: ${msg}`);
+        }
+        // Initialize empty dashboard so other features still work
+        dashboardData = { total_students: 0, pending_reviews: 0, students: [], pending_submissions: [] };
       }
     }
     
@@ -1049,23 +1059,22 @@
         
         // Populate dropdowns with more identifying info
         const options = allProfiles.map(p => {
-          // Build a descriptive name from available fields
-          let displayName = p.company_name || p.name;
+          // Build a descriptive name: prefer companyName (camelCase from API), then snake_case fallback
+          let displayName = p.companyName || p.company_name || p.name;
           if (!displayName) {
-            // Fallback to other identifying fields
-            const parts = [];
-            if (p.industry) parts.push(p.industry);
-            if (p.client_type_name) parts.push(p.client_type_name);
-            if (p.difficulty) parts.push(p.difficulty);
-            displayName = parts.length > 0 ? parts.join(' - ') : `Profile ${p.id?.substring(0, 8) || 'Unknown'}`;
+            // No company name — use industry + client type
+            displayName = p.clientTypeName || p.client_type_name || p.industry || `Profile ${(p.id || '').substring(0, 8)}`;
           }
-          
-          // Add extra context
+
+          // Add extra context (industry, difficulty) but avoid repeating what's already in displayName
           const extras = [];
-          if (p.company_name && p.industry) extras.push(p.industry);
+          const ind = p.industry || '';
+          if (ind && (p.companyName || p.company_name)) extras.push(ind);
           if (p.difficulty) extras.push(p.difficulty);
-          const extraStr = extras.length > 0 ? ` (${extras.join(', ')})` : '';
-          
+          const city = p.hqCity || p.hq_city || '';
+          if (city) extras.push(city);
+          const extraStr = extras.length > 0 ? ` — ${extras.join(' | ')}` : '';
+
           return `<option value="${p.id}">${displayName}${extraStr}</option>`;
         }).join('');
         
