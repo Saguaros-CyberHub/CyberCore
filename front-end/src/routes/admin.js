@@ -921,13 +921,20 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
             await new Promise(r => setTimeout(r, 4000));
           } catch (_) {}
 
-          // Step 4: Destroy — always include force=1 so running LXC containers can be removed
+          // Step 4: Destroy — QEMU and LXC have different DELETE params:
+          //   QEMU accepts purge + skiplock (rejects force with 400 error)
+          //   LXC accepts purge + force (rejects skiplock on newer versions)
+          const primaryUrl = type === 'lxc'
+            ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+            : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
           try {
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1&skiplock=1&force=1`);
+            await proxmoxAPI('DELETE', primaryUrl);
           } catch (deleteErr) {
-            // Retry with purge + force (drop skiplock which some versions reject)
-            console.log(`[Teardown] Retry destroy ${type} ${vmid} with purge + force...`);
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1&force=1`);
+            console.log(`[Teardown] Retry destroy ${type} ${vmid} with minimal params...`);
+            const fallback = type === 'lxc'
+              ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+              : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
+            await proxmoxAPI('DELETE', fallback);
           }
 
           console.log(`[Teardown] Destroyed ${type} ${vmid} on ${node}`);
@@ -1158,6 +1165,67 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
         created_at: lane.created_at
       }));
 
+    // 8. Audit orphaned disk images across all storages.
+    //    An orphan disk = vm-<vmid>-disk-* whose VMID is in a CyberHub range but has no
+    //    live VM config anywhere in the cluster. These leak when purge=1 fails on a
+    //    multi-disk VM (common with Ceph RBD locks). We also dedupe by volid since
+    //    shared storage shows the same disk on every node.
+    const liveVmIdSet = new Set(pxVMs.map(v => v.vmid));
+    const orphanedDisks = [];
+    const seenDiskVolids = new Set();
+
+    try {
+      const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+      const nodeNames = (nodeList || []).map(n => n.node);
+
+      for (const node of nodeNames) {
+        let nodeStorages;
+        try {
+          nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node}/storage`);
+        } catch (_) { continue; }
+
+        for (const s of nodeStorages || []) {
+          if (s.content && !s.content.includes('images')) continue;
+          let contents;
+          try {
+            contents = await proxmoxAPI('GET',
+              `/api2/json/nodes/${node}/storage/${s.storage}/content?content=images`);
+          } catch (_) { continue; }
+
+          for (const item of contents || []) {
+            const match = item.volid?.match(/vm-(\d+)-disk/);
+            if (!match) continue;
+            const vmid = parseInt(match[1]);
+
+            // Only flag CyberHub-range disks (gateway 1xxxxx / challenge 6xxxxx / attack-box 7xxxxx)
+            const inRange = CYBERHUB_RANGES.some(r => vmid >= r.min && vmid <= r.max);
+            if (!inRange) continue;
+
+            // If the VM exists anywhere in the cluster, not an orphan
+            if (liveVmIdSet.has(vmid)) continue;
+
+            // Dedupe shared-storage duplicates
+            if (seenDiskVolids.has(item.volid)) continue;
+            seenDiskVolids.add(item.volid);
+
+            orphanedDisks.push({
+              node,
+              storage: s.storage,
+              volid: item.volid,
+              vmid,
+              role: CYBERHUB_RANGES.find(r => vmid >= r.min && vmid <= r.max)?.role,
+              size_bytes: item.size || 0,
+              size_gb: item.size ? (item.size / (1024 ** 3)).toFixed(2) : '0.00'
+            });
+          }
+        }
+      }
+    } catch (e) {
+      console.warn(`[Reconcile] Disk scan failed: ${e.message}`);
+    }
+
+    const orphanedDiskTotalGb = orphanedDisks.reduce((sum, d) => sum + (d.size_bytes || 0), 0) / (1024 ** 3);
+
     res.json({
       timestamp: new Date().toISOString(),
       summary: {
@@ -1170,12 +1238,15 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
         orphaned_zones: orphanedZones.length,
         sdn_vnets: pxVNets.length,
         orphaned_vnets: orphanedVNets.length,
-        deployed_groups: dbGroups.length
+        deployed_groups: dbGroups.length,
+        orphaned_disks: orphanedDisks.length,
+        orphaned_disks_total_gb: orphanedDiskTotalGb.toFixed(2)
       },
       orphaned_on_proxmox: orphanedOnProxmox,
       stale_in_db: staleInDB,
       orphaned_zones: orphanedZones,
       orphaned_vnets: orphanedVNets,
+      orphaned_disks: orphanedDisks,
       sdn_vnets: pxVNets,
       all_proxmox_cyberhub_vms: pxCyberhubVMs
     });
@@ -1231,6 +1302,29 @@ router.post('/reconcile/mark-deleted', authenticateToken, adminOnly, async (req,
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// POST /api/admin/reconcile/destroy-disk — free a single orphaned disk image
+// Called from the Proxmox Audit UI's per-row Delete button. Uses retry with backoff
+// because cfs-lock and RBD contention both produce intermittent 5xx errors.
+router.post('/reconcile/destroy-disk', authenticateToken, adminOnly, async (req, res) => {
+  const { node, storage, volid } = req.body;
+  if (!node || !storage || !volid) return res.status(400).json({ error: 'node, storage, and volid required' });
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await proxmoxAPI('DELETE',
+        `/api2/json/nodes/${node}/storage/${storage}/content/${encodeURIComponent(volid)}`);
+      console.log(`[Reconcile] Destroyed orphaned disk ${volid} on ${node}/${storage}`);
+      logActivity(req, 'destroy_orphan_disk', 'storage', `${node}/${storage}`, { volid });
+      return res.json({ ok: true, volid, node, storage });
+    } catch (e) {
+      lastErr = e;
+      if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
+    }
+  }
+  console.error(`[Reconcile] Failed to destroy disk ${volid}: ${lastErr?.message}`);
+  res.status(500).json({ error: lastErr?.message || 'Delete failed after 3 attempts' });
 });
 
 // POST /api/admin/reconcile/destroy-zone — remove an orphaned SDN zone and its VNets
@@ -2344,8 +2438,14 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     }
 
     // ── Phase 3: Delete all VMs in parallel ──
-    // Key: force=1 is REQUIRED for LXC containers that are still running (LXC refuses to delete
-    // a running container without it). Previous code's purge-only fallback left gateways orphaned.
+    // Proxmox DELETE params are type-specific:
+    //   QEMU: accepts `purge` and `skiplock` — REJECTS `force` (400 error)
+    //   LXC:  accepts `purge` and `force` — REJECTS `skiplock` on recent versions
+    // `force=1` is REQUIRED for LXC containers that are still running.
+    const buildDeleteUrl = (node, type, vmid) => type === 'lxc'
+      ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
+
     console.log(`[Group Teardown] Phase 3: Deleting ${existingVms.length} VMs...`);
     const { errors: destroyErrors } = await runBatch(existingVms, async (vm) => {
       const knownNode = vmNodeMap[vm.vmid];
@@ -2354,11 +2454,13 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       for (const node of nodesToTry) {
         try {
           try {
-            // Full params — QEMU accepts all three; LXC accepts force + purge (skiplock is ignored harmlessly on most versions)
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
+            await proxmoxAPI('DELETE', buildDeleteUrl(node, vm.type, vm.vmid));
           } catch (_) {
-            // Fallback — always include force=1 (required for running LXC) and purge=1
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&force=1`);
+            // Fallback: strip skiplock for QEMU (some older versions), keep force for LXC
+            const fallback = vm.type === 'lxc'
+              ? `/api2/json/nodes/${node}/lxc/${vm.vmid}?purge=1&force=1`
+              : `/api2/json/nodes/${node}/qemu/${vm.vmid}?purge=1`;
+            await proxmoxAPI('DELETE', fallback);
           }
           console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
           return;
@@ -2409,10 +2511,13 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
         await Promise.all(stillAlive.map(async (vm) => {
           try {
             try {
-              await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
+              await proxmoxAPI('DELETE', buildDeleteUrl(vm.node, vm.type, vm.vmid));
             } catch (_) {
-              // Always include force=1 — LXC won't delete running containers without it
-              await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1&force=1`);
+              // Fallback with type-specific params (LXC needs force; QEMU rejects force)
+              const fallback = vm.type === 'lxc'
+                ? `/api2/json/nodes/${vm.node}/lxc/${vm.vmid}?purge=1&force=1`
+                : `/api2/json/nodes/${vm.node}/qemu/${vm.vmid}?purge=1`;
+              await proxmoxAPI('DELETE', fallback);
             }
             console.log(`[Group Teardown] Retry round ${round}: destroyed ${vm.type} ${vm.vmid} on ${vm.node}`);
           } catch (e) {
@@ -2455,21 +2560,29 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     // Even with purge=1, multi-disk VMs can leak disk images when the VM config is gone but
     // individual disk cleanups failed. Query every storage on every node and free any
     // vm-<destroyed_vmid>-disk-* entries that don't have a live VM.
+    //
+    // SERIALIZED: Parallel `DELETE /storage/*/content/*` calls fight over cfs-lock
+    // (Proxmox cluster FS write lock) and RBD/Ceph rados locks, producing 500 errors
+    // like "cfs-lock 'storage-vmpool'" and "rbd error: rbd: error op...". Deletes must
+    // be serialized per-storage. We also skip duplicate volids across nodes (shared
+    // storage like Ceph RBD shows the same disk on every node — delete once).
     const destroyedVmIdSet = new Set(allVmsToDestroy.map(v => v.vmid));
     let orphanDisksSwept = 0;
     const orphanDiskErrors = [];
+    const sweptVolids = new Set();
 
     try {
-      for (const node of allNodeNames) {
+      // Pass 1: discover orphan disks (safe to do in parallel — read-only)
+      const orphanDisks = [];
+      const discoveries = await Promise.all(allNodeNames.map(async (node) => {
+        const found = [];
         let nodeStorages;
         try {
           nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node}/storage`);
-        } catch (_) { continue; }
+        } catch (_) { return found; }
 
         for (const s of nodeStorages || []) {
-          // Skip storages that don't hold VM images
           if (s.content && !s.content.includes('images')) continue;
-
           let contents;
           try {
             contents = await proxmoxAPI('GET',
@@ -2481,17 +2594,36 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
             if (!match) continue;
             const vmid = parseInt(match[1]);
             if (!destroyedVmIdSet.has(vmid)) continue;
-
-            // This disk belongs to a VM we just destroyed — sweep it
-            try {
-              await proxmoxAPI('DELETE',
-                `/api2/json/nodes/${node}/storage/${s.storage}/content/${encodeURIComponent(item.volid)}`);
-              console.log(`[Group Teardown] Swept orphaned disk: ${item.volid} on ${node}/${s.storage}`);
-              orphanDisksSwept++;
-            } catch (e) {
-              orphanDiskErrors.push(`${item.volid}: ${e.message}`);
-            }
+            found.push({ node, storage: s.storage, volid: item.volid });
           }
+        }
+        return found;
+      }));
+      for (const arr of discoveries) orphanDisks.push(...arr);
+
+      // Pass 2: delete serially — RBD/Ceph and cfs-lock contention forbid parallelism.
+      // Retry each delete up to 3 times with a short backoff to tolerate brief cfs-lock contention.
+      for (const d of orphanDisks) {
+        if (sweptVolids.has(d.volid)) continue; // shared storage: same volid on multiple nodes
+        sweptVolids.add(d.volid);
+
+        let deleted = false;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
+          try {
+            await proxmoxAPI('DELETE',
+              `/api2/json/nodes/${d.node}/storage/${d.storage}/content/${encodeURIComponent(d.volid)}`);
+            console.log(`[Group Teardown] Swept orphaned disk: ${d.volid} on ${d.node}/${d.storage}`);
+            orphanDisksSwept++;
+            deleted = true;
+          } catch (e) {
+            lastErr = e;
+            // cfs-lock and RBD contention both benefit from a short wait
+            if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
+          }
+        }
+        if (!deleted && lastErr) {
+          orphanDiskErrors.push(`${d.volid}: ${lastErr.message}`);
         }
       }
     } catch (e) {
@@ -2613,27 +2745,48 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
             size_gb: item.size ? (item.size / (1024 ** 3)).toFixed(2) : '0.00'
           };
           orphans.push(orphan);
-
-          if (!dry_run) {
-            try {
-              await proxmoxAPI('DELETE',
-                `/api2/json/nodes/${node.node}/storage/${s.storage}/content/${encodeURIComponent(item.volid)}`);
-              deleted.push(orphan);
-              console.log(`[Orphan Sweep] Deleted ${item.volid} on ${node.node}/${s.storage}`);
-            } catch (e) {
-              errors.push(`Delete ${item.volid} on ${node.node}: ${e.message}`);
-            }
-          }
         }
       }
     }
 
-    const totalBytes = orphans.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
+    // Deduplicate by volid (shared storage like Ceph RBD shows same disk on every node)
+    const dedupedOrphans = [];
+    const seenVolids = new Set();
+    for (const o of orphans) {
+      if (seenVolids.has(o.volid)) continue;
+      seenVolids.add(o.volid);
+      dedupedOrphans.push(o);
+    }
+
+    // Pass 2 — delete serially if not dry run. Ceph RBD rados locks and Proxmox cfs-lock
+    // can't tolerate parallel DELETE calls on the same storage; they produce 500 errors
+    // like "cfs-lock 'storage-vmpool' failed" and "rbd: error op...". Serial with retry works.
+    if (!dry_run) {
+      for (const o of dedupedOrphans) {
+        let ok = false;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+          try {
+            await proxmoxAPI('DELETE',
+              `/api2/json/nodes/${o.node}/storage/${o.storage}/content/${encodeURIComponent(o.volid)}`);
+            deleted.push(o);
+            console.log(`[Orphan Sweep] Deleted ${o.volid} on ${o.node}/${o.storage}`);
+            ok = true;
+          } catch (e) {
+            lastErr = e;
+            if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
+          }
+        }
+        if (!ok && lastErr) errors.push(`Delete ${o.volid} on ${o.node}: ${lastErr.message}`);
+      }
+    }
+
+    const totalBytes = dedupedOrphans.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
     const reclaimedBytes = deleted.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
 
     logActivity(req, dry_run ? 'scan_orphaned_disks' : 'sweep_orphaned_disks', 'storage',
       storageFilter || 'all',
-      { found: orphans.length, deleted: deleted.length, total_gb: (totalBytes / (1024 ** 3)).toFixed(2) }
+      { found: dedupedOrphans.length, deleted: deleted.length, total_gb: (totalBytes / (1024 ** 3)).toFixed(2) }
     );
 
     res.json({
@@ -2641,11 +2794,11 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
       dry_run,
       storage_filter: storageFilter,
       vmid_pattern: req.body?.vmid_pattern || null,
-      orphans_found: orphans.length,
+      orphans_found: dedupedOrphans.length,
       orphans_deleted: deleted.length,
       total_orphan_size_gb: (totalBytes / (1024 ** 3)).toFixed(2),
       reclaimed_size_gb: (reclaimedBytes / (1024 ** 3)).toFixed(2),
-      orphans,
+      orphans: dedupedOrphans,
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {

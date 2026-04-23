@@ -1634,7 +1634,7 @@
       try {
         const r = await api('GET', '/reconcile');
         const s = r.summary;
-        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0;
+        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0 || (s.orphaned_disks || 0) > 0;
         const statusColor = hasIssues ? '#e53e3e' : '#38a169';
         const statusLabel = hasIssues ? 'Issues Found' : 'In Sync';
 
@@ -1687,6 +1687,20 @@
             </tr>`).join('');
         }
 
+        let diskRows = '';
+        if (r.orphaned_disks?.length) {
+          diskRows = r.orphaned_disks.map(d => `
+            <tr>
+              <td><code>${d.vmid}</code></td>
+              <td>${d.role || '-'}</td>
+              <td><code style="font-size:0.75rem;">${escHtml(d.volid)}</code></td>
+              <td>${escHtml(d.node)}</td>
+              <td>${escHtml(d.storage)}</td>
+              <td style="text-align:right;">${d.size_gb} GB</td>
+              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanDisk('${escHtml(d.node)}', '${escHtml(d.storage)}', '${escHtml(d.volid)}', this)">Delete</button></td>
+            </tr>`).join('');
+        }
+
         panel.innerHTML = `
           <div style="background:var(--card-bg, white); border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid ${statusColor};">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
@@ -1720,6 +1734,10 @@
                 <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_vnets?'#d69e2e':'inherit'};">${s.orphaned_vnets}</div>
                 <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned VNets</div>
               </div>
+              <div style="text-align:center; padding:0.5rem; background:${(s.orphaned_disks||0)?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700; color:${(s.orphaned_disks||0)?'#e53e3e':'inherit'};">${s.orphaned_disks || 0}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Disks${(s.orphaned_disks_total_gb && parseFloat(s.orphaned_disks_total_gb) > 0) ? ` (${s.orphaned_disks_total_gb} GB)` : ''}</div>
+              </div>
             </div>
             ${orphanRows ? `
               <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned VMs (no DB lane)</h4>
@@ -1748,6 +1766,16 @@
               <table class="admin-table" style="font-size:0.8rem;">
                 <thead><tr><th>Lane ID</th><th>Name</th><th>VXLAN</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
                 <tbody>${staleRows}</tbody>
+              </table>` : ''}
+            ${diskRows ? `
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e; display:flex; align-items:center; justify-content:space-between;">
+                <span>Orphaned Disk Images (${r.orphaned_disks.length}, ${s.orphaned_disks_total_gb} GB total)</span>
+                <button class="btn btn-sm" style="font-size:0.7rem; padding:0.2rem 0.6rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="sweepAllOrphanDisks(this)">Sweep All</button>
+              </h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">Disk images on Proxmox storage whose parent VM no longer exists. Common after failed teardowns on multi-disk VMs. Deletes run sequentially to avoid Ceph/cfs-lock contention.</p>
+              <table class="admin-table" style="font-size:0.8rem;">
+                <thead><tr><th>VMID</th><th>Role</th><th>Volume</th><th>Node</th><th>Storage</th><th>Size</th><th>Action</th></tr></thead>
+                <tbody>${diskRows}</tbody>
               </table>` : ''}
             ${!hasIssues ? '<p style="color:#38a169; font-weight:600; margin-top:0.5rem;">All clear -- DB and Proxmox are in sync.</p>' : ''}
             <button class="btn btn-outline" style="margin-top:1rem; font-size:0.8rem;" onclick="document.getElementById('reconcileResults').style.display='none'">Dismiss</button>
@@ -1805,6 +1833,44 @@
         alert('Failed: ' + e.message);
         btn.disabled = false;
         btn.textContent = 'Delete';
+      }
+    }
+
+    async function destroyOrphanDisk(node, storage, volid, btn) {
+      if (!confirm('Delete disk image "' + volid + '"? This frees the storage and cannot be undone.')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await api('POST', '/reconcile/destroy-disk', { node, storage, volid });
+        btn.textContent = 'Deleted';
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Delete';
+      }
+    }
+
+    async function sweepAllOrphanDisks(btn) {
+      if (!confirm('Sweep ALL orphaned disks shown here? This runs serially and may take several minutes on Ceph/RBD storage.')) return;
+      btn.disabled = true;
+      btn.textContent = 'Sweeping...';
+      try {
+        // CyberHub range regex: VMIDs starting with 1, 6, or 7, exactly 6 digits
+        const result = await api('POST', '/sweep-orphaned-disks', {
+          dry_run: false,
+          vmid_pattern: '^[167][0-9]{5}$'
+        });
+        btn.textContent = `Swept ${result.orphans_deleted}/${result.orphans_found} (${result.reclaimed_size_gb} GB)`;
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+        // Re-run the audit to refresh the table
+        setTimeout(() => runReconcile(), 1500);
+      } catch (e) {
+        alert('Sweep failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Sweep All';
       }
     }
 
