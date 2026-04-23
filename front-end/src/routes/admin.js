@@ -914,24 +914,30 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
             await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { lock: '' });
           } catch (_) {}
 
-          // Step 3: Stop (ignore errors — may already be stopped or not running)
+          // Step 3: Stop (LXC does not accept `timeout` parameter — use empty body for LXC)
           try {
-            await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`);
+            const stopBody = type === 'qemu' ? { timeout: 0 } : {};
+            await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`, stopBody);
             await new Promise(r => setTimeout(r, 4000));
           } catch (_) {}
 
-          // Step 4: Destroy — try with params, then without
+          // Step 4: Destroy — always include force=1 so running LXC containers can be removed
           try {
             await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1&skiplock=1&force=1`);
           } catch (deleteErr) {
-            // Some Proxmox versions don't accept query params on DELETE — retry with just purge
-            console.log(`[Teardown] Retry destroy ${type} ${vmid} with purge only...`);
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1`);
+            // Retry with purge + force (drop skiplock which some versions reject)
+            console.log(`[Teardown] Retry destroy ${type} ${vmid} with purge + force...`);
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${type}/${vmid}?purge=1&force=1`);
           }
 
           console.log(`[Teardown] Destroyed ${type} ${vmid} on ${node}`);
           return true;
         } catch (e) {
+          // Not an error if the config is already gone on this node — try the next one
+          if (/unable to find configuration file/i.test(e.message)) {
+            console.log(`[Teardown] ${type} ${vmid} not on ${node} (no config file) — checking next node`);
+            continue;
+          }
           console.log(`[Teardown] ${type} ${vmid} not destroyable on ${node}: ${e.message}`);
           continue;
         }
@@ -2301,14 +2307,19 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { lock: '' }); } catch (_) {}
     }));
 
-    // Force-stop: use timeout=0 for immediate kill instead of graceful shutdown
+    // Force-stop: QEMU accepts timeout=0 for immediate kill; LXC does NOT accept `timeout`
+    // (LXC stop is always immediate — passing timeout causes a 400 error, silently swallowed,
+    // leaving the container running and blocking the subsequent DELETE). Pass per-type params.
     const stopTasks = [];
     await Promise.all(existingVms.map(async (vm) => {
       const node = vmNodeMap[vm.vmid];
       try {
-        const upid = await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`, { timeout: 0 });
-        if (upid) stopTasks.push({ node, upid });
-      } catch (_) {}
+        const stopBody = vm.type === 'qemu' ? { timeout: 0 } : {};
+        const upid = await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`, stopBody);
+        if (upid) stopTasks.push({ node, upid, type: vm.type, vmid: vm.vmid });
+      } catch (e) {
+        console.warn(`[Group Teardown] Stop failed for ${vm.type} ${vm.vmid} on ${node}: ${e.message}`);
+      }
     }));
 
     // Wait for stop tasks to actually complete (poll up to 30s)
@@ -2333,6 +2344,8 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     }
 
     // ── Phase 3: Delete all VMs in parallel ──
+    // Key: force=1 is REQUIRED for LXC containers that are still running (LXC refuses to delete
+    // a running container without it). Previous code's purge-only fallback left gateways orphaned.
     console.log(`[Group Teardown] Phase 3: Deleting ${existingVms.length} VMs...`);
     const { errors: destroyErrors } = await runBatch(existingVms, async (vm) => {
       const knownNode = vmNodeMap[vm.vmid];
@@ -2341,13 +2354,20 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       for (const node of nodesToTry) {
         try {
           try {
+            // Full params — QEMU accepts all three; LXC accepts force + purge (skiplock is ignored harmlessly on most versions)
             await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
           } catch (_) {
-            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1`);
+            // Fallback — always include force=1 (required for running LXC) and purge=1
+            await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}?purge=1&force=1`);
           }
           console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
           return;
         } catch (e) {
+          // "configuration file not found" just means the VM is already gone — treat as success
+          if (/unable to find configuration file/i.test(e.message) || /does not exist/i.test(e.message)) {
+            console.log(`[Group Teardown] ${vm.type} ${vm.vmid} already gone on ${node}`);
+            return;
+          }
           if (node === nodesToTry[nodesToTry.length - 1]) {
             throw new Error(`${vm.type} ${vm.vmid} (${vm.label}): failed on all nodes — ${e.message}`);
           }
@@ -2375,11 +2395,12 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
         orphanedCount = stillAlive.length;
         console.warn(`[Group Teardown] Round ${round}: ${stillAlive.length} VMs still exist — retrying...`);
 
-        // Force-stop + delete each orphan
+        // Force-stop + delete each orphan — use type-aware stop body (LXC rejects `timeout`)
         await Promise.all(stillAlive.map(async (vm) => {
           try {
             try { await proxmoxAPI('PUT', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
-            try { await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/status/stop`, { timeout: 0 }); } catch (_) {}
+            const stopBody = vm.type === 'qemu' ? { timeout: 0 } : {};
+            try { await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/status/stop`, stopBody); } catch (_) {}
           } catch (_) {}
         }));
 
@@ -2390,10 +2411,15 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
             try {
               await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1&skiplock=1&force=1`);
             } catch (_) {
-              await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1`);
+              // Always include force=1 — LXC won't delete running containers without it
+              await proxmoxAPI('DELETE', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}?purge=1&force=1`);
             }
             console.log(`[Group Teardown] Retry round ${round}: destroyed ${vm.type} ${vm.vmid} on ${vm.node}`);
           } catch (e) {
+            if (/unable to find configuration file/i.test(e.message)) {
+              console.log(`[Group Teardown] Retry round ${round}: ${vm.type} ${vm.vmid} already gone`);
+              return;
+            }
             if (round === 3) errors.push(`Orphaned VM ${vm.vmid} on ${vm.node}: ${e.message}`);
           }
         }));
@@ -2425,12 +2451,68 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
         : Promise.resolve()
     ]);
 
-    // 6. Remove group record
+    // ── Phase 6: Sweep orphaned disks for any destroyed VMIDs ──
+    // Even with purge=1, multi-disk VMs can leak disk images when the VM config is gone but
+    // individual disk cleanups failed. Query every storage on every node and free any
+    // vm-<destroyed_vmid>-disk-* entries that don't have a live VM.
+    const destroyedVmIdSet = new Set(allVmsToDestroy.map(v => v.vmid));
+    let orphanDisksSwept = 0;
+    const orphanDiskErrors = [];
+
+    try {
+      for (const node of allNodeNames) {
+        let nodeStorages;
+        try {
+          nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node}/storage`);
+        } catch (_) { continue; }
+
+        for (const s of nodeStorages || []) {
+          // Skip storages that don't hold VM images
+          if (s.content && !s.content.includes('images')) continue;
+
+          let contents;
+          try {
+            contents = await proxmoxAPI('GET',
+              `/api2/json/nodes/${node}/storage/${s.storage}/content?content=images`);
+          } catch (_) { continue; }
+
+          for (const item of contents || []) {
+            const match = item.volid?.match(/vm-(\d+)-disk/);
+            if (!match) continue;
+            const vmid = parseInt(match[1]);
+            if (!destroyedVmIdSet.has(vmid)) continue;
+
+            // This disk belongs to a VM we just destroyed — sweep it
+            try {
+              await proxmoxAPI('DELETE',
+                `/api2/json/nodes/${node}/storage/${s.storage}/content/${encodeURIComponent(item.volid)}`);
+              console.log(`[Group Teardown] Swept orphaned disk: ${item.volid} on ${node}/${s.storage}`);
+              orphanDisksSwept++;
+            } catch (e) {
+              orphanDiskErrors.push(`${item.volid}: ${e.message}`);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error(`[Group Teardown] Orphan disk sweep failed: ${e.message}`);
+      orphanDiskErrors.push(`Sweep error: ${e.message}`);
+    }
+
+    if (orphanDisksSwept > 0) {
+      console.log(`[Group Teardown] Swept ${orphanDisksSwept} orphaned disk images`);
+    }
+    if (orphanDiskErrors.length > 0) {
+      errors.push(...orphanDiskErrors.map(e => `Disk sweep: ${e}`));
+    }
+
+    // 7. Remove group record
     await query(`DELETE FROM deployed_groups WHERE id = $1`, [req.params.id]);
 
     logActivity(req, 'delete_group', 'group', req.params.id, {
       group_name: group.group_name, users_deleted: allUsers.length, lanes_deleted: laneIds.length,
-      vms_destroyed: allVmsToDestroy.length, orphaned_vms_found: orphanedCount, errors: errors.length
+      vms_destroyed: allVmsToDestroy.length, orphaned_vms_found: orphanedCount,
+      orphan_disks_swept: orphanDisksSwept, errors: errors.length
     });
 
     res.json({
@@ -2439,6 +2521,7 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       lanes_deleted: laneIds.length,
       vms_destroyed: allVmsToDestroy.length,
       orphaned_vms_retried: orphanedCount,
+      orphan_disks_swept: orphanDisksSwept,
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
@@ -2446,6 +2529,129 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
   }
 });
 
+
+// ============================================================================
+// ORPHANED DISK SWEEP
+// ============================================================================
+// Standalone cleanup for disk images whose parent VM no longer exists in the cluster.
+// This happens when teardowns partially succeed — VM config destroyed, disks leaked.
+//
+// Usage:
+//   POST /api/admin/sweep-orphaned-disks
+//   Body: {
+//     dry_run: true,                  // REQUIRED for safety on first call
+//     vmid_pattern: "^(6|1|7)\\d{5}$", // optional regex to scope what counts as a "managed" VM
+//     storage: "local-zfs"            // optional: limit to one storage name
+//   }
+//
+// Default behavior: find every vm-XXXXX-disk-Y image on every storage on every node;
+// if the VMID does NOT match a live VM in the cluster, it's an orphan. Returns a full
+// report when dry_run=true, performs deletions when dry_run=false.
+
+router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, res) => {
+  const dry_run = req.body?.dry_run !== false; // default to dry-run for safety
+  const storageFilter = req.body?.storage || null;
+  const vmidPattern = req.body?.vmid_pattern ? new RegExp(req.body.vmid_pattern) : null;
+  const orphans = [];
+  const deleted = [];
+  const errors = [];
+
+  try {
+    // 1. Enumerate live VMs across the cluster (both qemu and lxc)
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
+    const liveVmIds = new Set();
+    for (const r of resources || []) {
+      if (r.type === 'qemu' || r.type === 'lxc') {
+        if (typeof r.vmid === 'number') liveVmIds.add(r.vmid);
+      }
+    }
+
+    // 2. Enumerate nodes
+    const nodes = await proxmoxAPI('GET', '/api2/json/nodes');
+
+    // 3. Walk each node's storage
+    for (const node of nodes || []) {
+      let nodeStorages;
+      try {
+        nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node.node}/storage`);
+      } catch (e) {
+        errors.push(`List storages on ${node.node}: ${e.message}`);
+        continue;
+      }
+
+      for (const s of nodeStorages || []) {
+        if (storageFilter && s.storage !== storageFilter) continue;
+        if (s.content && !s.content.includes('images')) continue;
+
+        let contents;
+        try {
+          contents = await proxmoxAPI('GET',
+            `/api2/json/nodes/${node.node}/storage/${s.storage}/content?content=images`);
+        } catch (e) {
+          errors.push(`Content of ${s.storage} on ${node.node}: ${e.message}`);
+          continue;
+        }
+
+        for (const item of contents || []) {
+          const match = item.volid?.match(/vm-(\d+)-disk/);
+          if (!match) continue;
+          const vmid = parseInt(match[1]);
+
+          // If caller supplied a VMID regex, only consider disks whose VMID matches
+          // (lets you scope the sweep to "managed" ranges like 6xxxxx / 1xxxxx / 7xxxxx)
+          if (vmidPattern && !vmidPattern.test(String(vmid))) continue;
+
+          // If the VM is live, this disk is not an orphan
+          if (liveVmIds.has(vmid)) continue;
+
+          const orphan = {
+            node: node.node,
+            storage: s.storage,
+            volid: item.volid,
+            vmid,
+            size_bytes: item.size || 0,
+            size_gb: item.size ? (item.size / (1024 ** 3)).toFixed(2) : '0.00'
+          };
+          orphans.push(orphan);
+
+          if (!dry_run) {
+            try {
+              await proxmoxAPI('DELETE',
+                `/api2/json/nodes/${node.node}/storage/${s.storage}/content/${encodeURIComponent(item.volid)}`);
+              deleted.push(orphan);
+              console.log(`[Orphan Sweep] Deleted ${item.volid} on ${node.node}/${s.storage}`);
+            } catch (e) {
+              errors.push(`Delete ${item.volid} on ${node.node}: ${e.message}`);
+            }
+          }
+        }
+      }
+    }
+
+    const totalBytes = orphans.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
+    const reclaimedBytes = deleted.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
+
+    logActivity(req, dry_run ? 'scan_orphaned_disks' : 'sweep_orphaned_disks', 'storage',
+      storageFilter || 'all',
+      { found: orphans.length, deleted: deleted.length, total_gb: (totalBytes / (1024 ** 3)).toFixed(2) }
+    );
+
+    res.json({
+      success: true,
+      dry_run,
+      storage_filter: storageFilter,
+      vmid_pattern: req.body?.vmid_pattern || null,
+      orphans_found: orphans.length,
+      orphans_deleted: deleted.length,
+      total_orphan_size_gb: (totalBytes / (1024 ** 3)).toFixed(2),
+      reclaimed_size_gb: (reclaimedBytes / (1024 ** 3)).toFixed(2),
+      orphans,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============================================================================
 // ACTIVITY LOG

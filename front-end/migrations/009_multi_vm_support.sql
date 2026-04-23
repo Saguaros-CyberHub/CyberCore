@@ -1,0 +1,33 @@
+-- ============================================================================
+-- Migration 009: Multi-VM Environment Support
+-- No schema changes needed (JSONB columns already flexible).
+-- This migration seeds example multi-VM challenge records for testing.
+-- ============================================================================
+
+-- Example: A multi-VM "Enterprise Network" challenge with 3 VMs
+-- Uncomment and modify to match your actual template VMIDs:
+
+-- INSERT INTO crucible_challenge (challenge_id, challenge_key, name, difficulty, status, spec)
+-- VALUES (
+--   gen_random_uuid(),
+--   'enterprise-network-basic',
+--   'Enterprise Network (Basic)',
+--   'intermediate',
+--   'active',
+--   '{
+--     "vms": [
+--       {"name": "web-server", "template_vmid": 1601, "type": "qemu", "vm_offset": 600000},
+--       {"name": "db-server", "template_vmid": 1602, "type": "qemu", "vm_offset": 610000},
+--       {"name": "ad-controller", "template_vmid": 1603, "type": "qemu", "vm_offset": 620000}
+--     ],
+--     "gateway_vmid": 1692,
+--     "template_node": "cyberhub-node-5",
+--     "vxlan_block": {"start": 10000, "end": 10009}
+--   }'::jsonb
+-- ) ON CONFLICT DO NOTHING;
+
+-- NOTE: Multi-VM challenges use the spec.vms array.
+-- Single-VM challenges continue to use spec.template_vmid (backward compatible).
+-- The deploy-lane route checks for spec.vms first, falls back to spec.template_vmid.
+-- Lane config stores a "vms" array in JSONB for multi-VM, or legacy "challenge_vm_id" for single.
+-- Teardown reads config.vms[] to find all VMs to destroy, falling back to the offset scheme.

@@ -30,7 +30,6 @@ cyberhub-web-interface/
 node_modules/
 *.log
 Info/
-migrations/
 "N8N Workflow/"
 
 
