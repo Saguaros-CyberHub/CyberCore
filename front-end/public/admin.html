@@ -1696,7 +1696,7 @@
               <td>${(c.protocol || '').toUpperCase()}</td>
               <td>${escHtml(c.parent)}</td>
               <td>${c.tracked ? '<span style="color:#e53e3e;">tracked</span>' : '<span style="color:#d69e2e;">by name</span>'}</td>
-              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanGuacConn('${escHtml(c.id)}', ${JSON.stringify(c.name)}, this)">Delete</button></td>
+              <td><button class="btn btn-sm guac-conn-delete" data-conn-id="${escHtml(c.id)}" data-conn-name="${escHtml(c.name || '')}" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;">Delete</button></td>
             </tr>`).join('');
         }
 
@@ -1879,6 +1879,7 @@
       }
     }
 
+    // Delete a single orphaned Guac connection. Called from event delegation below.
     async function destroyOrphanGuacConn(id, name, btn) {
       if (!confirm('Delete Guacamole connection "' + (name || id) + '"?')) return;
       btn.disabled = true;
@@ -1896,35 +1897,45 @@
     }
 
     async function sweepAllOrphanGuacConns(btn) {
-      if (!confirm('Delete all orphaned Guac connections shown? This cannot be undone.')) return;
+      const panel = document.getElementById('reconcileResults');
+      const rowBtns = Array.from(panel?.querySelectorAll('button.guac-conn-delete') || []);
+      if (rowBtns.length === 0) { alert('No connections to sweep.'); return; }
+      if (!confirm(`Delete all ${rowBtns.length} orphaned Guac connections? This cannot be undone.`)) return;
       btn.disabled = true;
       btn.textContent = 'Sweeping...';
-      // Find every row's Delete button in this section and click them serially
-      const section = btn.closest('h4');
-      const table = section?.nextElementSibling?.nextElementSibling; // h4 → <p> → <table>
-      const rowBtns = Array.from(table?.querySelectorAll('button') || []);
       let deleted = 0;
       let failed = 0;
       for (const b of rowBtns) {
         if (b.disabled) continue;
-        // Extract the onclick args directly — simpler than intercepting confirm()
-        const m = b.getAttribute('onclick')?.match(/destroyOrphanGuacConn\('([^']+)',\s*(.+?),\s*this\)/);
-        if (!m) continue;
-        const id = m[1];
+        const id = b.dataset.connId;
+        const name = b.dataset.connName;
+        if (!id) continue;
         try {
-          await api('POST', '/reconcile/destroy-guac-connection', { id });
+          await api('POST', '/reconcile/destroy-guac-connection', { id, name });
           b.textContent = 'Deleted';
           b.style.color = '#38a169';
           b.style.borderColor = '#38a169';
           b.disabled = true;
           deleted++;
         } catch (e) {
+          console.warn(`Failed to delete Guac conn ${id}:`, e.message);
           failed++;
         }
       }
       btn.textContent = `Done (${deleted} deleted, ${failed} failed)`;
       if (deleted > 0) setTimeout(() => runReconcile(), 1500);
     }
+
+    // Event delegation: handle clicks on any `.guac-conn-delete` button inside the reconcile panel.
+    // Using data attributes + delegation avoids the HTML quote-escaping nightmare of inline onclick.
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest('button.guac-conn-delete');
+      if (!btn || btn.disabled) return;
+      const id = btn.dataset.connId;
+      const name = btn.dataset.connName || '';
+      if (!id) return;
+      destroyOrphanGuacConn(id, name, btn);
+    });
 
     async function sweepAllOrphanDisks(btn) {
       if (!confirm('Sweep ALL orphaned disks shown here? This runs serially and may take several minutes on Ceph/RBD storage.')) return;
