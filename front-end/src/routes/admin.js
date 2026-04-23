@@ -1226,6 +1226,63 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
 
     const orphanedDiskTotalGb = orphanedDisks.reduce((sum, d) => sum + (d.size_bytes || 0), 0) / (1024 ** 3);
 
+    // 9. Audit Guacamole connections.
+    //    A CyberHub connection is any RDP connection whose name matches our deploy pattern
+    //    (contains " - " and " - Kali"), OR any connection tracked in deployed_groups.config.guac_connections.
+    //    An orphan = a tracked-or-patterned connection whose parent group no longer exists
+    //    OR whose parent lane/student no longer has a lane.
+    const orphanedGuacConnections = [];
+    try {
+      const allGuacConns = await guacAPI('GET', '/connections');
+      const connList = Array.isArray(allGuacConns)
+        ? allGuacConns
+        : Object.values(allGuacConns || {});
+
+      // Known "tracked" connection IDs from all currently-deployed groups
+      const trackedConnIds = new Set();
+      for (const g of dbGroups) {
+        const gCfg = typeof g.config === 'string' ? JSON.parse(g.config) : (g.config || {});
+        for (const c of (gCfg.guac_connections || [])) {
+          if (c?.id) trackedConnIds.add(String(c.id));
+        }
+      }
+
+      // Known active Guac group identifiers
+      const activeGuacGroupIds = new Set();
+      for (const g of dbGroups) {
+        const gCfg = typeof g.config === 'string' ? JSON.parse(g.config) : (g.config || {});
+        if (gCfg.guac_group?.identifier) activeGuacGroupIds.add(String(gCfg.guac_group.identifier));
+      }
+
+      for (const c of connList) {
+        const name = c.name || '';
+        const id = String(c.identifier || c.id || '');
+        const parent = String(c.parentIdentifier || 'ROOT');
+
+        // Heuristic: CyberHub-generated connection names contain " - " and end in a VM role like "Kali", "VulnWin", etc.
+        const looksLikeCyberhub = / - .* - (Kali|VulnWin|Target|Attack|RDP)/i.test(name)
+          || trackedConnIds.has(id);
+        if (!looksLikeCyberhub) continue;
+
+        // Orphan if:
+        //   - tracked in a group but that group's row is gone, OR
+        //   - its parent connection group isn't one we still track, OR
+        //   - its parent is ROOT (reparented after cascade-less group delete)
+        const isOrphan = !activeGuacGroupIds.has(parent) || parent === 'ROOT';
+        if (isOrphan) {
+          orphanedGuacConnections.push({
+            id,
+            name,
+            protocol: c.protocol || '',
+            parent,
+            tracked: trackedConnIds.has(id)
+          });
+        }
+      }
+    } catch (e) {
+      console.warn(`[Reconcile] Guac connection scan failed: ${e.message}`);
+    }
+
     res.json({
       timestamp: new Date().toISOString(),
       summary: {
@@ -1240,13 +1297,15 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
         orphaned_vnets: orphanedVNets.length,
         deployed_groups: dbGroups.length,
         orphaned_disks: orphanedDisks.length,
-        orphaned_disks_total_gb: orphanedDiskTotalGb.toFixed(2)
+        orphaned_disks_total_gb: orphanedDiskTotalGb.toFixed(2),
+        orphaned_guac_connections: orphanedGuacConnections.length
       },
       orphaned_on_proxmox: orphanedOnProxmox,
       stale_in_db: staleInDB,
       orphaned_zones: orphanedZones,
       orphaned_vnets: orphanedVNets,
       orphaned_disks: orphanedDisks,
+      orphaned_guac_connections: orphanedGuacConnections,
       sdn_vnets: pxVNets,
       all_proxmox_cyberhub_vms: pxCyberhubVMs
     });
@@ -1316,7 +1375,8 @@ router.post('/reconcile/destroy-disk', authenticateToken, adminOnly, async (req,
       await proxmoxAPI('DELETE',
         `/api2/json/nodes/${node}/storage/${storage}/content/${encodeURIComponent(volid)}`);
       console.log(`[Reconcile] Destroyed orphaned disk ${volid} on ${node}/${storage}`);
-      logActivity(req, 'destroy_orphan_disk', 'storage', `${node}/${storage}`, { volid });
+      // entity_id in activity_log is UUID — can't use "node/storage", stash it in metadata instead
+      logActivity(req, 'destroy_orphan_disk', 'storage', null, { volid, node, storage });
       return res.json({ ok: true, volid, node, storage });
     } catch (e) {
       lastErr = e;
@@ -1325,6 +1385,21 @@ router.post('/reconcile/destroy-disk', authenticateToken, adminOnly, async (req,
   }
   console.error(`[Reconcile] Failed to destroy disk ${volid}: ${lastErr?.message}`);
   res.status(500).json({ error: lastErr?.message || 'Delete failed after 3 attempts' });
+});
+
+// POST /api/admin/reconcile/destroy-guac-connection — delete an orphaned Guac connection
+router.post('/reconcile/destroy-guac-connection', authenticateToken, adminOnly, async (req, res) => {
+  const { id, name } = req.body;
+  if (!id) return res.status(400).json({ error: 'id required' });
+  try {
+    await guacAPI('DELETE', `/connections/${encodeURIComponent(id)}`);
+    console.log(`[Reconcile] Destroyed orphaned Guac connection ${id} (${name || '?'})`);
+    logActivity(req, 'destroy_orphan_guac_connection', 'guacamole', null, { id, name });
+    res.json({ ok: true, id });
+  } catch (error) {
+    console.error(`[Reconcile] Failed to destroy Guac connection ${id}: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // POST /api/admin/reconcile/destroy-zone — remove an orphaned SDN zone and its VNets
@@ -1549,7 +1624,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
     }
 
     const groupId = uuidv4();
-    const created = { instructors: [], students: [], guac_group: null, guac_users: [], lanes: [], credentials: [] };
+    const created = { instructors: [], students: [], guac_group: null, guac_users: [], guac_connections: [], lanes: [], credentials: [] };
 
     // 1. Create Guacamole connection group
     try {
@@ -2121,6 +2196,14 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
                 if (kaliConn?.identifier) {
                   const connId = kaliConn.identifier;
+                  // Track the connection ID so teardown can delete it explicitly.
+                  // Guacamole's connectionGroup DELETE does NOT cascade to child
+                  // connections — without this they become orphans at ROOT.
+                  created.guac_connections.push({
+                    id: connId,
+                    name: `${group_name} - ${student.email.split('@')[0]} - Kali`,
+                    student_email: student.email
+                  });
                   try {
                     await guacAPI('PATCH', `/users/${encodeURIComponent(student.email)}/permissions`, [
                       { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' }
@@ -2237,6 +2320,20 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         progress.eta_at = null;
         updateProgressTiming();
         console.log(`[Group ${group_name}] All ${laneJobs.length} lane deployments complete (${progress.succeeded} succeeded, ${progress.failed} failed) in ${progress.elapsed_s}s.`);
+
+        // Persist guac_connections into deployed_groups.config so teardown can find them.
+        // The group row was inserted before lane deploy, so guac_connections was empty then.
+        try {
+          await query(
+            `UPDATE deployed_groups
+             SET config = jsonb_set(config::jsonb, '{guac_connections}', $1::jsonb, true)
+             WHERE id = $2`,
+            [JSON.stringify(created.guac_connections || []), groupId]
+          );
+          console.log(`[Group ${group_name}] Persisted ${created.guac_connections.length} Guac connection IDs to group config`);
+        } catch (e) {
+          console.warn(`[Group ${group_name}] Failed to persist guac_connections: ${e.message}`);
+        }
 
         // Clean up progress tracker after 1 hour
         setTimeout(() => { delete global._batchDeployProgress[batchId]; }, 3600000);
@@ -2551,6 +2648,12 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
         guacAPI('DELETE', `/users/${encodeURIComponent(username)}`).catch(e => errors.push(`Guac delete ${username}: ${e.message}`))
       )),
 
+      // Delete individual Guac connections FIRST — guacAPI DELETE on connectionGroup does
+      // NOT cascade to child connections; leaving this out makes them orphans at ROOT.
+      ...((config.guac_connections || []).map(conn =>
+        guacAPI('DELETE', `/connections/${encodeURIComponent(conn.id)}`).catch(e => errors.push(`Guac connection ${conn.id} (${conn.name || '?'}): ${e.message}`))
+      )),
+
       config.guac_group?.identifier
         ? guacAPI('DELETE', `/connectionGroups/${config.guac_group.identifier}`).catch(e => errors.push(`Guac group delete: ${e.message}`))
         : Promise.resolve()
@@ -2784,9 +2887,9 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
     const totalBytes = dedupedOrphans.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
     const reclaimedBytes = deleted.reduce((sum, o) => sum + (o.size_bytes || 0), 0);
 
-    logActivity(req, dry_run ? 'scan_orphaned_disks' : 'sweep_orphaned_disks', 'storage',
-      storageFilter || 'all',
-      { found: dedupedOrphans.length, deleted: deleted.length, total_gb: (totalBytes / (1024 ** 3)).toFixed(2) }
+    // entity_id is UUID in activity_log — stash storage filter in metadata instead
+    logActivity(req, dry_run ? 'scan_orphaned_disks' : 'sweep_orphaned_disks', 'storage', null,
+      { storage_filter: storageFilter || 'all', found: dedupedOrphans.length, deleted: deleted.length, total_gb: (totalBytes / (1024 ** 3)).toFixed(2) }
     );
 
     res.json({

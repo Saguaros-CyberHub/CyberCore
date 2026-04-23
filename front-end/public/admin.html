@@ -1634,7 +1634,7 @@
       try {
         const r = await api('GET', '/reconcile');
         const s = r.summary;
-        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0 || (s.orphaned_disks || 0) > 0;
+        const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0 || (s.orphaned_disks || 0) > 0 || (s.orphaned_guac_connections || 0) > 0;
         const statusColor = hasIssues ? '#e53e3e' : '#38a169';
         const statusLabel = hasIssues ? 'Issues Found' : 'In Sync';
 
@@ -1684,6 +1684,19 @@
               <td>${escHtml(v.zone)}</td>
               <td>${v.tag || '-'}</td>
               <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #d69e2e; color:#d69e2e; background:transparent;" onclick="destroyOrphanVNet('${escHtml(v.vnet)}', this)">Delete</button></td>
+            </tr>`).join('');
+        }
+
+        let guacConnRows = '';
+        if (r.orphaned_guac_connections?.length) {
+          guacConnRows = r.orphaned_guac_connections.map(c => `
+            <tr>
+              <td><code style="font-size:0.75rem;">${escHtml(c.id)}</code></td>
+              <td>${escHtml(c.name)}</td>
+              <td>${(c.protocol || '').toUpperCase()}</td>
+              <td>${escHtml(c.parent)}</td>
+              <td>${c.tracked ? '<span style="color:#e53e3e;">tracked</span>' : '<span style="color:#d69e2e;">by name</span>'}</td>
+              <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanGuacConn('${escHtml(c.id)}', ${JSON.stringify(c.name)}, this)">Delete</button></td>
             </tr>`).join('');
         }
 
@@ -1738,6 +1751,10 @@
                 <div style="font-size:1.25rem; font-weight:700; color:${(s.orphaned_disks||0)?'#e53e3e':'inherit'};">${s.orphaned_disks || 0}</div>
                 <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Disks${(s.orphaned_disks_total_gb && parseFloat(s.orphaned_disks_total_gb) > 0) ? ` (${s.orphaned_disks_total_gb} GB)` : ''}</div>
               </div>
+              <div style="text-align:center; padding:0.5rem; background:${(s.orphaned_guac_connections||0)?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+                <div style="font-size:1.25rem; font-weight:700; color:${(s.orphaned_guac_connections||0)?'#e53e3e':'inherit'};">${s.orphaned_guac_connections || 0}</div>
+                <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Guac Conns</div>
+              </div>
             </div>
             ${orphanRows ? `
               <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned VMs (no DB lane)</h4>
@@ -1776,6 +1793,16 @@
               <table class="admin-table" style="font-size:0.8rem;">
                 <thead><tr><th>VMID</th><th>Role</th><th>Volume</th><th>Node</th><th>Storage</th><th>Size</th><th>Action</th></tr></thead>
                 <tbody>${diskRows}</tbody>
+              </table>` : ''}
+            ${guacConnRows ? `
+              <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e; display:flex; align-items:center; justify-content:space-between;">
+                <span>Orphaned Guacamole Connections (${r.orphaned_guac_connections.length})</span>
+                <button class="btn btn-sm" style="font-size:0.7rem; padding:0.2rem 0.6rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="sweepAllOrphanGuacConns(this)">Sweep All</button>
+              </h4>
+              <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">CyberHub-generated Guac connections whose parent group no longer exists (reparented to ROOT after group delete didn't cascade). "tracked" = matched by ID in deployed_groups.config; "by name" = heuristic match on the connection name pattern.</p>
+              <table class="admin-table" style="font-size:0.8rem;">
+                <thead><tr><th>ID</th><th>Name</th><th>Protocol</th><th>Parent</th><th>Match</th><th>Action</th></tr></thead>
+                <tbody>${guacConnRows}</tbody>
               </table>` : ''}
             ${!hasIssues ? '<p style="color:#38a169; font-weight:600; margin-top:0.5rem;">All clear -- DB and Proxmox are in sync.</p>' : ''}
             <button class="btn btn-outline" style="margin-top:1rem; font-size:0.8rem;" onclick="document.getElementById('reconcileResults').style.display='none'">Dismiss</button>
@@ -1850,6 +1877,53 @@
         btn.disabled = false;
         btn.textContent = 'Delete';
       }
+    }
+
+    async function destroyOrphanGuacConn(id, name, btn) {
+      if (!confirm('Delete Guacamole connection "' + (name || id) + '"?')) return;
+      btn.disabled = true;
+      btn.textContent = '...';
+      try {
+        await api('POST', '/reconcile/destroy-guac-connection', { id, name });
+        btn.textContent = 'Deleted';
+        btn.style.color = '#38a169';
+        btn.style.borderColor = '#38a169';
+      } catch (e) {
+        alert('Failed: ' + e.message);
+        btn.disabled = false;
+        btn.textContent = 'Delete';
+      }
+    }
+
+    async function sweepAllOrphanGuacConns(btn) {
+      if (!confirm('Delete all orphaned Guac connections shown? This cannot be undone.')) return;
+      btn.disabled = true;
+      btn.textContent = 'Sweeping...';
+      // Find every row's Delete button in this section and click them serially
+      const section = btn.closest('h4');
+      const table = section?.nextElementSibling?.nextElementSibling; // h4 → <p> → <table>
+      const rowBtns = Array.from(table?.querySelectorAll('button') || []);
+      let deleted = 0;
+      let failed = 0;
+      for (const b of rowBtns) {
+        if (b.disabled) continue;
+        // Extract the onclick args directly — simpler than intercepting confirm()
+        const m = b.getAttribute('onclick')?.match(/destroyOrphanGuacConn\('([^']+)',\s*(.+?),\s*this\)/);
+        if (!m) continue;
+        const id = m[1];
+        try {
+          await api('POST', '/reconcile/destroy-guac-connection', { id });
+          b.textContent = 'Deleted';
+          b.style.color = '#38a169';
+          b.style.borderColor = '#38a169';
+          b.disabled = true;
+          deleted++;
+        } catch (e) {
+          failed++;
+        }
+      }
+      btn.textContent = `Done (${deleted} deleted, ${failed} failed)`;
+      if (deleted > 0) setTimeout(() => runReconcile(), 1500);
     }
 
     async function sweepAllOrphanDisks(btn) {
