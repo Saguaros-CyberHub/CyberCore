@@ -301,7 +301,7 @@
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
           <button class="tab-btn" onclick="switchTab('actlog', this)">Activity Log</button>
           <button class="tab-btn" onclick="switchTab('challenges', this)">Challenge Templates</button>
-          <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Vuln Scripts</button>
+          <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Scripts</button>
         </div>
 
         <!-- TAB: Connections -->
@@ -591,14 +591,24 @@
           <div id="challengeTemplatesList"></div>
         </div>
 
-        <!-- TAB: Vuln Scripts -->
+        <!-- TAB: Scripts -->
         <div class="tab-content" id="tab-vulnscripts">
-          <div class="action-bar">
+          <div class="action-bar" style="flex-wrap: wrap; align-items: center; gap: 0.5rem;">
             <button class="btn btn-primary" onclick="showCreateScriptModal()">+ New Script</button>
             <button class="btn btn-outline" onclick="loadVulnScripts()">Refresh</button>
             <select id="vulnScriptCategoryFilter" onchange="loadVulnScripts()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
               <option value="">All Categories</option>
             </select>
+            <!-- Type filter: baseline vs vulnerable -->
+            <div id="scriptTypeFilter" style="display: inline-flex; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; font-size: 0.8rem;">
+              <button type="button" data-type=""           class="stf-btn active" onclick="setScriptTypeFilter('')"
+                      style="background: var(--primary, #1e40af); color: #fff; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid #e2e8f0;">All</button>
+              <button type="button" data-type="baseline"   class="stf-btn" onclick="setScriptTypeFilter('baseline')"
+                      style="background: #fff; color: #166534; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid #e2e8f0;">🛡️ Baseline</button>
+              <button type="button" data-type="vulnerable" class="stf-btn" onclick="setScriptTypeFilter('vulnerable')"
+                      style="background: #fff; color: #991b1b; border: 0; padding: 0.4rem 0.8rem; cursor: pointer;">☠️ Vulnerable</button>
+            </div>
+            <span id="scriptListSummary" style="margin-left: auto; font-size: 0.8rem; color: var(--gray-500);"></span>
           </div>
           <div id="vulnScriptsList"></div>
         </div>
@@ -712,7 +722,7 @@
   <div class="modal-overlay" id="scriptEditorModal">
     <div class="modal-content" style="max-width: 700px; max-height: 90vh; overflow-y: auto;">
       <div class="modal-header">
-        <h3 id="scriptEditorTitle">New Vulnerability Script</h3>
+        <h3 id="scriptEditorTitle">New Script</h3>
         <button class="modal-close" onclick="closeModal('scriptEditorModal')">&times;</button>
       </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
@@ -720,6 +730,19 @@
         <div class="form-group"><label>Name</label><input type="text" id="scriptName" placeholder="e.g., SMB Null Session"></div>
       </div>
       <div class="form-group"><label>Description</label><textarea id="scriptDesc" rows="2" placeholder="What this script does..."></textarea></div>
+      <div class="form-group">
+        <label>Type</label>
+        <div style="display: flex; gap: 0.5rem;">
+          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid #e2e8f0; border-radius: 6px; cursor: pointer;" for="scriptTypeBaseline">
+            <input type="radio" name="scriptType" id="scriptTypeBaseline" value="baseline">
+            <span>🛡️ <strong>Baseline</strong> — deploys a service cleanly, no vulns baked in</span>
+          </label>
+          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid #e2e8f0; border-radius: 6px; cursor: pointer;" for="scriptTypeVulnerable">
+            <input type="radio" name="scriptType" id="scriptTypeVulnerable" value="vulnerable" checked>
+            <span>☠️ <strong>Vulnerable</strong> — introduces weaknesses</span>
+          </label>
+        </div>
+      </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
         <div class="form-group">
           <label>Category</label>
@@ -727,7 +750,8 @@
             <option>Initial Setup</option><option>Compile Tools</option><option>Network Services</option>
             <option>Web Applications</option><option>Web Server</option><option>User Simulation</option>
             <option>Privilege Escalation</option><option>Persistence</option><option>Defense Evasion</option>
-            <option>Data Exfiltration</option><option>Custom</option>
+            <option>Credential Access</option><option>Data Exfiltration</option><option>Composite Lab</option>
+            <option>Custom</option>
           </select>
         </div>
         <div class="form-group">
@@ -3084,14 +3108,47 @@
     // ============================================================================
 
     let cachedVulnScripts = [];
+    let scriptTypeFilterValue = '';
+
+    function setScriptTypeFilter(type) {
+      scriptTypeFilterValue = type || '';
+      document.querySelectorAll('#scriptTypeFilter .stf-btn').forEach(b => {
+        const active = (b.dataset.type || '') === scriptTypeFilterValue;
+        b.classList.toggle('active', active);
+        if (active) {
+          b.style.background = scriptTypeFilterValue === 'baseline' ? '#16a34a'
+                             : scriptTypeFilterValue === 'vulnerable' ? '#dc2626'
+                             : (getComputedStyle(document.documentElement).getPropertyValue('--primary') || '#1e40af');
+          b.style.color = '#fff';
+        } else {
+          b.style.background = '#fff';
+          b.style.color = (b.dataset.type === 'baseline') ? '#166534'
+                        : (b.dataset.type === 'vulnerable') ? '#991b1b'
+                        : 'var(--gray-700, #2d3748)';
+        }
+      });
+      loadVulnScripts();
+    }
+
+    function renderScriptTypeBadge(type) {
+      const t = (type || 'vulnerable').toLowerCase();
+      if (t === 'baseline') {
+        return `<span title="Baseline — enables a service cleanly, no vulnerabilities baked in" style="display:inline-flex;align-items:center;gap:3px;font-size:0.7rem;font-weight:600;padding:2px 7px;border-radius:10px;background:#dcfce7;color:#166534;border:1px solid #16a34a;">🛡️ Baseline</span>`;
+      }
+      return `<span title="Vulnerable — deliberately introduces weaknesses" style="display:inline-flex;align-items:center;gap:3px;font-size:0.7rem;font-weight:600;padding:2px 7px;border-radius:10px;background:#fee2e2;color:#991b1b;border:1px solid #dc2626;">☠️ Vulnerable</span>`;
+    }
 
     async function loadVulnScripts() {
       const container = document.getElementById('vulnScriptsList');
       const catFilter = document.getElementById('vulnScriptCategoryFilter')?.value || '';
+      const typeFilter = scriptTypeFilterValue;
       container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
 
       try {
-        const params = catFilter ? `?category=${encodeURIComponent(catFilter)}` : '';
+        const qs = new URLSearchParams();
+        if (catFilter)  qs.set('category', catFilter);
+        if (typeFilter) qs.set('script_type', typeFilter);
+        const params = qs.toString() ? `?${qs.toString()}` : '';
         const scripts = await api('GET', `/vuln-scripts${params}`);
         cachedVulnScripts = scripts;
 
@@ -3102,19 +3159,36 @@
         catSel.innerHTML = '<option value="">All Categories</option>' +
           categories.map(c => `<option value="${c}" ${c === currentVal ? 'selected' : ''}>${c}</option>`).join('');
 
+        // Summary line
+        const baseCount = scripts.filter(s => (s.script_type || 'vulnerable') === 'baseline').length;
+        const vulnCount = scripts.length - baseCount;
+        const summaryEl = document.getElementById('scriptListSummary');
+        if (summaryEl) {
+          summaryEl.innerHTML = `${scripts.length} total · <span style="color:#166534;font-weight:600;">${baseCount} baseline</span> · <span style="color:#991b1b;font-weight:600;">${vulnCount} vulnerable</span>`;
+        }
+
         if (scripts.length === 0) {
-          container.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--gray-500);">No scripts found. Click "+ New Script" to create one.</div>';
+          const msg = typeFilter
+            ? `No <strong>${typeFilter}</strong> scripts${catFilter ? ` in category "${escHtml(catFilter)}"` : ''}.`
+            : 'No scripts found. Click "+ New Script" to create one.';
+          container.innerHTML = `<div style="text-align: center; padding: 2rem; color: var(--gray-500);">${msg}</div>`;
           return;
         }
 
         container.innerHTML = `
           <table class="admin-table">
-            <thead><tr><th>Slug</th><th>Name</th><th>Category</th><th>OS</th><th>Difficulty</th><th>Services</th><th>Deps</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Slug</th><th>Name</th><th>Type</th><th>Category</th><th>OS</th><th>Difficulty</th><th>Services</th><th>Deps</th><th>Actions</th></tr></thead>
             <tbody>
-              ${scripts.map(s => `
-                <tr>
+              ${scripts.map(s => {
+                const isBaseline = (s.script_type || 'vulnerable') === 'baseline';
+                const rowTint = isBaseline
+                  ? 'border-left: 3px solid #16a34a;'
+                  : 'border-left: 3px solid #dc2626;';
+                return `
+                <tr style="${rowTint}">
                   <td><code style="font-size: 0.75rem;">${escHtml(s.slug)}</code></td>
-                  <td><strong>${escHtml(s.name)}</strong><br><span style="font-size: 0.75rem; color: var(--gray-500);">${escHtml((s.description || '').substring(0, 60))}</span></td>
+                  <td><strong>${escHtml(s.name)}</strong><br><span style="font-size: 0.75rem; color: var(--gray-500);">${escHtml((s.description || '').substring(0, 80))}</span></td>
+                  <td>${renderScriptTypeBadge(s.script_type)}</td>
                   <td><span class="badge badge-blue" style="font-size: 0.7rem;">${escHtml(s.category)}</span></td>
                   <td style="font-size: 0.8rem;">${s.os_target}</td>
                   <td style="font-size: 0.8rem;">${s.difficulty}</td>
@@ -3124,8 +3198,8 @@
                     <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="editVulnScript('${s.id}')">Edit</button>
                     <button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteVulnScript('${s.id}', '${escHtml(s.name)}')">Delete</button>
                   </td>
-                </tr>
-              `).join('')}
+                </tr>`;
+              }).join('')}
             </tbody>
           </table>`;
       } catch (e) {
@@ -3134,12 +3208,13 @@
     }
 
     function showCreateScriptModal() {
-      document.getElementById('scriptEditorTitle').textContent = 'New Vulnerability Script';
+      document.getElementById('scriptEditorTitle').textContent = 'New Script';
       document.getElementById('scriptEditId').value = '';
       ['scriptSlug','scriptName','scriptDesc','scriptServices','scriptDependsOn','scriptContent','scriptArgs'].forEach(id => document.getElementById(id).value = '');
       document.getElementById('scriptCategory').value = 'Network Services';
       document.getElementById('scriptOS').value = 'windows';
       document.getElementById('scriptDifficulty').value = 'intermediate';
+      document.getElementById('scriptTypeVulnerable').checked = true;
       document.getElementById('scriptEditorModal').classList.add('active');
     }
 
@@ -3154,6 +3229,8 @@
         document.getElementById('scriptCategory').value = script.category;
         document.getElementById('scriptOS').value = script.os_target;
         document.getElementById('scriptDifficulty').value = script.difficulty;
+        const type = (script.script_type || 'vulnerable').toLowerCase();
+        document.getElementById(type === 'baseline' ? 'scriptTypeBaseline' : 'scriptTypeVulnerable').checked = true;
         document.getElementById('scriptServices').value = (script.services_exposed || []).join(', ');
         document.getElementById('scriptDependsOn').value = (script.depends_on || []).join(', ');
         document.getElementById('scriptContent').value = script.script_content || '';
@@ -3164,11 +3241,13 @@
 
     async function saveVulnScript() {
       const editId = document.getElementById('scriptEditId').value;
+      const scriptTypeEl = document.querySelector('input[name=scriptType]:checked');
       const body = {
         slug: document.getElementById('scriptSlug').value.trim(),
         name: document.getElementById('scriptName').value.trim(),
         description: document.getElementById('scriptDesc').value.trim(),
         category: document.getElementById('scriptCategory').value,
+        script_type: scriptTypeEl ? scriptTypeEl.value : 'vulnerable',
         os_target: document.getElementById('scriptOS').value,
         difficulty: document.getElementById('scriptDifficulty').value,
         script_content: document.getElementById('scriptContent').value,
@@ -3335,7 +3414,7 @@
               <input type="text" value="${escHtml(vm.services)}" placeholder="22/SSH, 445/SMB, 80/HTTP" onchange="challengeVMs[${i}].services=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
             </div>
             <div>
-              <label style="font-size: 0.7rem; color: var(--gray-500);">Default Vuln Scripts (comma-sep slugs)</label>
+              <label style="font-size: 0.7rem; color: var(--gray-500);">Default Scripts (comma-sep slugs)</label>
               <input type="text" value="${escHtml(vm.default_scripts)}" placeholder="smb-config, ssh-config, life-artifacts" onchange="challengeVMs[${i}].default_scripts=this.value" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
             </div>
           </div>

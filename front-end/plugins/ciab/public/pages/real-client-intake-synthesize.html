@@ -29,12 +29,75 @@
     table.vmtbl th { color: var(--gray-500, #718096); font-weight: 600; background: var(--bg-page, #f7fafc); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
     table.vmtbl tr.phantom-row td { background: #fafafa; color: var(--gray-500, #718096); }
     table.vmtbl input[type=text], table.vmtbl select { width: 100%; padding: 4px 6px; font-size: 0.85rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 4px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
-    .scripts-cell { display: flex; flex-wrap: wrap; gap: 3px; }
-    .scripts-cell .script-pill { font-size: 10.5px; padding: 2px 6px; background: #dbeafe; border: 1px solid #3b82f6; color: #1e40af; border-radius: 9px; font-family: monospace; }
-    .scripts-cell .script-pill.missing { background: #fee2e2; border-color: #dc2626; color: #991b1b; }
-    .type-badge { display: inline-block; font-size: 9.5px; padding: 1px 5px; border-radius: 8px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; margin-left: 6px; vertical-align: middle; }
+    .scripts-cell { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+    .scripts-cell .script-pill {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: 11px; padding: 3px 6px 3px 8px;
+      background: #eff6ff; border: 1px solid #93c5fd; color: #1e3a8a;
+      border-radius: 12px; font-family: ui-monospace, SFMono-Regular, monospace;
+      line-height: 1.2;
+    }
+    .scripts-cell .script-pill.baseline   { background: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+    .scripts-cell .script-pill.vulnerable { background: #fef2f2; border-color: #fca5a5; color: #991b1b; }
+    .scripts-cell .script-pill.missing    { background: #fef2f2; border-color: #f87171; color: #7f1d1d; font-style: italic; }
+    .scripts-cell .script-pill .x {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px; margin-left: 2px;
+      border-radius: 50%; background: transparent;
+      cursor: pointer; opacity: 0.55; font-size: 13px; line-height: 1;
+      border: 0; padding: 0; color: inherit;
+    }
+    .scripts-cell .script-pill .x:hover { opacity: 1; background: rgba(0,0,0,.08); }
+    .scripts-cell .add-scripts-btn {
+      font-size: 11.5px; padding: 3px 9px;
+      border: 1px dashed var(--gray-300, #cbd5e0); background: transparent;
+      color: var(--primary, #1e40af);
+      border-radius: 12px; cursor: pointer; font-family: inherit;
+    }
+    .scripts-cell .add-scripts-btn:hover { background: var(--bg-page, #f7fafc); border-style: solid; }
+    .scripts-summary { font-size: 10.5px; color: var(--gray-500, #718096); margin-top: 4px; }
+    .scripts-summary strong { color: var(--gray-700, #2d3748); font-weight: 600; }
+
+    /* Script picker modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.55); display: none; align-items: center; justify-content: center; z-index: 1000; }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--bg-card, #fff); border-radius: 10px; width: min(720px, 92vw);
+      max-height: 85vh; display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: 0 20px 40px rgba(0,0,0,.25);
+    }
+    .modal .modal-header { padding: 14px 18px; border-bottom: 1px solid var(--gray-200, #e2e8f0); display: flex; justify-content: space-between; align-items: center; }
+    .modal .modal-header h3 { margin: 0; font-size: 1rem; }
+    .modal .modal-header .close { background: none; border: 0; font-size: 1.25rem; cursor: pointer; color: var(--gray-500, #718096); }
+    .modal .modal-toolbar { padding: 10px 18px; border-bottom: 1px solid var(--gray-200, #e2e8f0); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .modal .modal-toolbar input[type=text] { flex: 1; min-width: 180px; padding: 6px 10px; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; font-size: 0.9rem; font-family: inherit; }
+    .modal .type-filter { display: inline-flex; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; overflow: hidden; }
+    .modal .type-filter button {
+      background: var(--bg-card, #fff); border: 0; padding: 5px 10px; font-size: 0.8rem; cursor: pointer;
+      color: var(--gray-600, #4a5568); border-right: 1px solid var(--gray-200, #e2e8f0); font-family: inherit;
+    }
+    .modal .type-filter button:last-child { border-right: 0; }
+    .modal .type-filter button.active { background: var(--primary, #1e40af); color: #fff; }
+    .modal .modal-body { flex: 1; overflow-y: auto; padding: 6px 0; }
+    .modal .category-group { padding: 8px 18px 2px; }
+    .modal .category-group h4 { margin: 0 0 4px 0; font-size: 0.7rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+    .modal .script-option {
+      display: flex; align-items: flex-start; gap: 10px;
+      padding: 6px 18px; cursor: pointer; border-radius: 0;
+    }
+    .modal .script-option:hover { background: var(--bg-page, #f7fafc); }
+    .modal .script-option input[type=checkbox] { margin-top: 3px; cursor: pointer; }
+    .modal .script-option .meta { flex: 1; min-width: 0; }
+    .modal .script-option .meta .top { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .modal .script-option .meta .name { font-weight: 600; font-size: 0.85rem; }
+    .modal .script-option .meta .slug { font-family: ui-monospace, monospace; font-size: 0.75rem; color: var(--gray-500, #718096); }
+    .modal .script-option .meta .desc { font-size: 0.8rem; color: var(--gray-600, #4a5568); margin-top: 2px; line-height: 1.35; }
+    .modal .script-option .meta .badges { margin-top: 2px; display: flex; gap: 4px; flex-wrap: wrap; }
+    .modal .modal-footer { padding: 10px 18px; border-top: 1px solid var(--gray-200, #e2e8f0); display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--gray-500, #718096); }
+    .type-badge { display: inline-block; font-size: 9.5px; padding: 1px 5px; border-radius: 8px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
     .type-badge.baseline   { background: #dcfce7; color: #166534; border: 1px solid #16a34a; }
     .type-badge.vulnerable { background: #fee2e2; color: #991b1b; border: 1px solid #dc2626; }
+    .category-badge { display: inline-block; font-size: 9.5px; padding: 1px 5px; border-radius: 8px; font-weight: 600; background: var(--bg-page, #f7fafc); color: var(--gray-600, #4a5568); border: 1px solid var(--gray-200, #e2e8f0); }
     .challenge-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
     .challenge-form label { display: block; font-size: 0.75rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
     .challenge-form input, .challenge-form select, .challenge-form textarea { width: 100%; padding: 0.4rem 0.5rem; font-size: 0.9rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
@@ -70,6 +133,29 @@
     </main>
   </div>
 
+  <!-- Script picker modal (single instance, retargeted per VM) -->
+  <div class="modal-overlay" id="picker-overlay" onclick="if(event.target===this)closeScriptPicker()">
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="picker-title">
+      <div class="modal-header">
+        <h3 id="picker-title">Scripts</h3>
+        <button class="close" type="button" onclick="closeScriptPicker()" aria-label="Close">×</button>
+      </div>
+      <div class="modal-toolbar">
+        <input type="text" id="picker-search" placeholder="Search by slug, name, or description…" oninput="onPickerSearch(event)">
+        <div class="type-filter" role="group" aria-label="Filter by script type">
+          <button type="button" data-type="all" class="active" onclick="setPickerType('all')">All</button>
+          <button type="button" data-type="baseline"   onclick="setPickerType('baseline')">Baseline</button>
+          <button type="button" data-type="vulnerable" onclick="setPickerType('vulnerable')">Vulnerable</button>
+        </div>
+      </div>
+      <div class="modal-body" id="picker-body"></div>
+      <div class="modal-footer">
+        <div><span id="picker-count">0 selected</span> · changes save as you toggle</div>
+        <button class="btn btn-primary btn-sm" type="button" onclick="closeScriptPicker()">Done</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/js/app.js"></script>
   <script src="/ciab/js/ciab-api.js"></script>
   <script src="/js/layout.js"></script>
@@ -88,6 +174,12 @@
     document.addEventListener('DOMContentLoaded', async () => {
       if (!await Auth.requireAuth()) return;
       el('back-link').href = `/ciab/real-client-intake/${encodeURIComponent(intakeId)}`;
+      // Escape closes the script picker modal.
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && document.getElementById('picker-overlay').classList.contains('open')) {
+          closeScriptPicker();
+        }
+      });
       try {
         await loadCatalogs();
         await runSynthesize();
@@ -228,28 +320,24 @@
         .map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)}${t.os_version?` (${esc(t.os_version)})`:''} · vmid ${t.template_vmid}</option>`).join('')
         || catalogTemplates.map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)} · vmid ${t.template_vmid}</option>`).join('');
 
-      // Group the script dropdown: Baseline options first, then Vulnerable.
-      const byType = { baseline: [], vulnerable: [] };
-      for (const s of catalogScripts) {
-        const t = (s.script_type || 'vulnerable').toLowerCase();
-        (byType[t] || byType.vulnerable).push(s);
-      }
-      const mkOpt = (s) => {
-        const selected = (v.default_scripts || []).includes(s.slug) ? 'selected' : '';
-        return `<option value="${esc(s.slug)}" ${selected}>${esc(s.slug)} — ${esc(s.name)}</option>`;
-      };
-      const scriptOptions =
-        (byType.baseline.length   ? `<optgroup label="Baseline (prefer for intakes)">${byType.baseline.map(mkOpt).join('')}</optgroup>`   : '') +
-        (byType.vulnerable.length ? `<optgroup label="Vulnerable (inject weaknesses)">${byType.vulnerable.map(mkOpt).join('')}</optgroup>` : '');
-
-      // Look up script type for pill styling
+      // Quick lookups used by the pill renderer.
       const scriptTypeBySlug = Object.fromEntries(catalogScripts.map(s => [s.slug, (s.script_type || 'vulnerable').toLowerCase()]));
+      const scriptNameBySlug = Object.fromEntries(catalogScripts.map(s => [s.slug, s.name || s.slug]));
 
-      const scriptsDisplay = (v.default_scripts || []).map(s => {
-          const t = scriptTypeBySlug[s] || 'vulnerable';
-          return `<span class="script-pill" title="${t}">${esc(s)}<span class="type-badge ${t}">${t === 'baseline' ? 'base' : 'vuln'}</span></span>`;
-        }).join('')
-        + (v.missing_scripts || []).map(m => `<span class="script-pill missing" title="No script in catalog">${esc(m.service)}${m.version?' v'+esc(m.version):''}?</span>`).join('');
+      const pills = (v.default_scripts || []).map(slug => {
+        const t = scriptTypeBySlug[slug] || 'vulnerable';
+        const name = scriptNameBySlug[slug] || slug;
+        return `<span class="script-pill ${t}" title="${esc(name)} (${t})">${esc(slug)}<button class="x" title="Remove" onclick="removeScriptFromVm(${idx}, '${esc(slug)}')">×</button></span>`;
+      }).join('');
+      const missingPills = (v.missing_scripts || []).map(m =>
+        `<span class="script-pill missing" title="No script in catalog for this service">${esc(m.service)}${m.version?' v'+esc(m.version):''}?</span>`
+      ).join('');
+
+      const counts = { baseline: 0, vulnerable: 0 };
+      (v.default_scripts || []).forEach(slug => { counts[scriptTypeBySlug[slug] || 'vulnerable']++; });
+      const summary = (v.default_scripts || []).length
+        ? `<div class="scripts-summary"><strong>${v.default_scripts.length}</strong> assigned · <strong style="color:#166534">${counts.baseline}</strong> baseline · <strong style="color:#991b1b">${counts.vulnerable}</strong> vulnerable</div>`
+        : `<div class="scripts-summary" style="color:var(--gray-500,#718096)">No scripts assigned yet.</div>`;
 
       return `
         <tr data-idx="${idx}">
@@ -261,35 +349,175 @@
           </td>
           <td><input type="text" data-field="services" value="${esc((v.services||[]).join(', '))}" placeholder="SMB, RDP, ..."></td>
           <td>
-            <div class="scripts-cell">${scriptsDisplay}</div>
-            <select multiple size="3" data-field="default_scripts" style="margin-top:4px;">${scriptOptions}</select>
+            <div class="scripts-cell">
+              ${pills}
+              ${missingPills}
+              <button type="button" class="add-scripts-btn" onclick="openScriptPicker(${idx})">+ Add scripts</button>
+            </div>
+            ${summary}
           </td>
           <td><button class="delete-btn" title="Remove VM" onclick="removeVm(${idx})">×</button></td>
         </tr>`;
     }
 
+    // ------------------------------------------------------------------
+    // Script picker modal: state + open/close/filter handlers
+    // ------------------------------------------------------------------
+    let pickerState = { vmIndex: null, typeFilter: 'all', search: '' };
+
+    function openScriptPicker(vmIdx) {
+      pickerState = { vmIndex: vmIdx, typeFilter: 'all', search: '' };
+      document.getElementById('picker-search').value = '';
+      document.querySelectorAll('.type-filter button').forEach(b => b.classList.toggle('active', b.dataset.type === 'all'));
+      renderPickerBody();
+      const vm = synth.vms[vmIdx];
+      document.getElementById('picker-title').textContent = `Scripts for ${vm.name}`;
+      document.getElementById('picker-overlay').classList.add('open');
+    }
+
+    function closeScriptPicker() {
+      document.getElementById('picker-overlay').classList.remove('open');
+      // Preserve any pending form edits before the re-render, then repaint pills.
+      syncDomToState();
+      render();
+    }
+
+    function setPickerType(type) {
+      pickerState.typeFilter = type;
+      document.querySelectorAll('.type-filter button').forEach(b => b.classList.toggle('active', b.dataset.type === type));
+      renderPickerBody();
+    }
+
+    function onPickerSearch(e) {
+      pickerState.search = (e.target.value || '').toLowerCase();
+      renderPickerBody();
+    }
+
+    function toggleScriptSelection(slug, checked) {
+      const vm = synth.vms[pickerState.vmIndex];
+      if (!vm) return;
+      vm.default_scripts = vm.default_scripts || [];
+      const has = vm.default_scripts.includes(slug);
+      if (checked && !has)  vm.default_scripts.push(slug);
+      if (!checked && has)  vm.default_scripts = vm.default_scripts.filter(s => s !== slug);
+      // Live-update the footer count inside the open modal.
+      updatePickerFooterCount();
+    }
+
+    function removeScriptFromVm(vmIdx, slug) {
+      const vm = synth.vms[vmIdx];
+      if (!vm) return;
+      vm.default_scripts = (vm.default_scripts || []).filter(s => s !== slug);
+      render();
+    }
+
+    function updatePickerFooterCount() {
+      const vm = synth.vms[pickerState.vmIndex];
+      if (!vm) return;
+      document.getElementById('picker-count').textContent = `${(vm.default_scripts || []).length} selected`;
+    }
+
+    function renderPickerBody() {
+      const body = document.getElementById('picker-body');
+      const vm = synth.vms[pickerState.vmIndex];
+      if (!vm) { body.innerHTML = ''; return; }
+      const selected = new Set(vm.default_scripts || []);
+      const q = pickerState.search;
+      const type = pickerState.typeFilter;
+
+      // Filter catalog + group by category, baseline first within each group.
+      const filtered = catalogScripts.filter(s => {
+        if (type !== 'all' && (s.script_type || 'vulnerable').toLowerCase() !== type) return false;
+        if (!q) return true;
+        const hay = `${s.slug} ${s.name || ''} ${s.description || ''} ${s.category || ''}`.toLowerCase();
+        return hay.includes(q);
+      });
+      const byCategory = {};
+      for (const s of filtered) {
+        const cat = s.category || 'Uncategorized';
+        (byCategory[cat] ||= []).push(s);
+      }
+      // Within each category, baseline before vulnerable, then alpha by name.
+      const categories = Object.keys(byCategory).sort();
+      const typeRank = t => ((t || 'vulnerable').toLowerCase() === 'baseline' ? 0 : 1);
+      categories.forEach(c => byCategory[c].sort((a,b) =>
+        typeRank(a.script_type) - typeRank(b.script_type) || String(a.name || a.slug).localeCompare(String(b.name || b.slug))
+      ));
+
+      if (!categories.length) {
+        body.innerHTML = `<div style="padding: 30px 20px; text-align: center; color: var(--gray-500, #718096);">No scripts match this filter.</div>`;
+        updatePickerFooterCount();
+        return;
+      }
+
+      body.innerHTML = categories.map(cat => {
+        const rows = byCategory[cat].map(s => {
+          const t = (s.script_type || 'vulnerable').toLowerCase();
+          const isSelected = selected.has(s.slug);
+          return `
+            <label class="script-option">
+              <input type="checkbox" ${isSelected ? 'checked' : ''} onchange="toggleScriptSelection('${esc(s.slug)}', this.checked)">
+              <div class="meta">
+                <div class="top">
+                  <span class="name">${esc(s.name || s.slug)}</span>
+                  <span class="slug">${esc(s.slug)}</span>
+                  <span class="type-badge ${t}">${t}</span>
+                </div>
+                ${s.description ? `<div class="desc">${esc(s.description)}</div>` : ''}
+              </div>
+            </label>`;
+        }).join('');
+        return `
+          <div class="category-group">
+            <h4>${esc(cat)}</h4>
+            ${rows}
+          </div>`;
+      }).join('');
+
+      updatePickerFooterCount();
+    }
+
     function removeVm(idx) {
+      syncDomToState();
       synth.vms.splice(idx, 1);
       render();
+    }
+
+    // Capture whatever is in the form inputs back into synth.vms so a re-render
+    // doesn't blow away edits made to name/role/services/template.
+    function syncDomToState() {
+      document.querySelectorAll('#vm-tbody tr[data-idx]').forEach(tr => {
+        const idx = parseInt(tr.getAttribute('data-idx'), 10);
+        const vm = synth.vms[idx];
+        if (!vm) return;
+        const name    = tr.querySelector('[data-field=name]');
+        const role    = tr.querySelector('[data-field=role]');
+        const tmpl    = tr.querySelector('[data-field=template_vmid]');
+        const svcsEl  = tr.querySelector('[data-field=services]');
+        if (name) vm.name = name.value.trim();
+        if (role) vm.role = role.value.trim();
+        if (tmpl) vm.template_vmid = parseInt(tmpl.value, 10);
+        if (svcsEl) vm.services = svcsEl.value.split(',').map(s => s.trim()).filter(Boolean);
+      });
     }
 
     function readForm() {
       const vms = [];
       document.querySelectorAll('#vm-tbody tr[data-idx]').forEach(tr => {
+        const idx = parseInt(tr.getAttribute('data-idx'), 10);
+        const stateVm = synth.vms[idx] || {};
         const name = tr.querySelector('[data-field=name]').value.trim();
         const role = tr.querySelector('[data-field=role]').value.trim();
         const template_vmid = parseInt(tr.querySelector('[data-field=template_vmid]').value, 10);
         const servicesRaw = tr.querySelector('[data-field=services]').value;
         const services = servicesRaw.split(',').map(s => s.trim()).filter(Boolean);
-        const selectEl = tr.querySelector('[data-field=default_scripts]');
-        const default_scripts = Array.from(selectEl.selectedOptions).map(o => o.value);
         vms.push({
           name, role, template_vmid,
           os: tr.querySelector('.template-meta').textContent.trim().split(' ').slice(0, -1).join(' ') || 'Windows',
           type: 'qemu',
           vm_offset: 600000 + vms.length * 10000,
           services,
-          default_scripts
+          default_scripts: [...(stateVm.default_scripts || [])]
         });
       });
       return {
