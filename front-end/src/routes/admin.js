@@ -1936,8 +1936,12 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 pool: `${module}-pool`
               });
               if (gwCloneResult) await waitForTask(sourceNode, gwCloneResult);
+              // Wire up both NICs: wan0 -> vmbr99 (host-local uplink with DHCP/NAT),
+              // lan0 -> lane VXLAN VNet (serves 192.18.0.0/24 to lane VMs).
+              // gw= on net1 dropped: it was self-referential and blocked proper default route.
               await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+                net0: `name=wan0,bridge=vmbr99,ip=dhcp,firewall=0,type=veth`,
+                net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
               });
               gatewayResults[laneId] = { success: true };
               console.log(`[Group ${group_name}] Gateway ${gatewayVmId} cloned on ${node}`);
@@ -3499,8 +3503,10 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           description: `Challenge Network Gateway\nTemplate: ${template.name}\nLane: ${laneId}`,
         });
         if (gwResult) await waitForTask(templateNode, gwResult);
+        // wan0 -> vmbr99, lan0 -> lane VXLAN. No self-referential gw on net1.
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+          net0: `name=wan0,bridge=vmbr99,ip=dhcp,firewall=0,type=veth`,
+          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
         });
 
         // Start gateway first
