@@ -32,6 +32,9 @@
     .scripts-cell { display: flex; flex-wrap: wrap; gap: 3px; }
     .scripts-cell .script-pill { font-size: 10.5px; padding: 2px 6px; background: #dbeafe; border: 1px solid #3b82f6; color: #1e40af; border-radius: 9px; font-family: monospace; }
     .scripts-cell .script-pill.missing { background: #fee2e2; border-color: #dc2626; color: #991b1b; }
+    .type-badge { display: inline-block; font-size: 9.5px; padding: 1px 5px; border-radius: 8px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; margin-left: 6px; vertical-align: middle; }
+    .type-badge.baseline   { background: #dcfce7; color: #166534; border: 1px solid #16a34a; }
+    .type-badge.vulnerable { background: #fee2e2; color: #991b1b; border: 1px solid #dc2626; }
     .challenge-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
     .challenge-form label { display: block; font-size: 0.75rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
     .challenge-form input, .challenge-form select, .challenge-form textarea { width: 100%; padding: 0.4rem 0.5rem; font-size: 0.9rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
@@ -225,12 +228,27 @@
         .map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)}${t.os_version?` (${esc(t.os_version)})`:''} · vmid ${t.template_vmid}</option>`).join('')
         || catalogTemplates.map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)} · vmid ${t.template_vmid}</option>`).join('');
 
-      const scriptOptions = catalogScripts.map(s => {
+      // Group the script dropdown: Baseline options first, then Vulnerable.
+      const byType = { baseline: [], vulnerable: [] };
+      for (const s of catalogScripts) {
+        const t = (s.script_type || 'vulnerable').toLowerCase();
+        (byType[t] || byType.vulnerable).push(s);
+      }
+      const mkOpt = (s) => {
         const selected = (v.default_scripts || []).includes(s.slug) ? 'selected' : '';
         return `<option value="${esc(s.slug)}" ${selected}>${esc(s.slug)} — ${esc(s.name)}</option>`;
-      }).join('');
+      };
+      const scriptOptions =
+        (byType.baseline.length   ? `<optgroup label="Baseline (prefer for intakes)">${byType.baseline.map(mkOpt).join('')}</optgroup>`   : '') +
+        (byType.vulnerable.length ? `<optgroup label="Vulnerable (inject weaknesses)">${byType.vulnerable.map(mkOpt).join('')}</optgroup>` : '');
 
-      const scriptsDisplay = (v.default_scripts || []).map(s => `<span class="script-pill">${esc(s)}</span>`).join('')
+      // Look up script type for pill styling
+      const scriptTypeBySlug = Object.fromEntries(catalogScripts.map(s => [s.slug, (s.script_type || 'vulnerable').toLowerCase()]));
+
+      const scriptsDisplay = (v.default_scripts || []).map(s => {
+          const t = scriptTypeBySlug[s] || 'vulnerable';
+          return `<span class="script-pill" title="${t}">${esc(s)}<span class="type-badge ${t}">${t === 'baseline' ? 'base' : 'vuln'}</span></span>`;
+        }).join('')
         + (v.missing_scripts || []).map(m => `<span class="script-pill missing" title="No script in catalog">${esc(m.service)}${m.version?' v'+esc(m.version):''}?</span>`).join('');
 
       return `

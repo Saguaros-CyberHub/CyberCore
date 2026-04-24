@@ -23,24 +23,29 @@ const adminOnly = requireRole('admin');
 // GET /api/admin/vuln-scripts
 router.get('/vuln-scripts', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { category, os_target, difficulty, active_only } = req.query;
+    const { category, os_target, difficulty, script_type, active_only } = req.query;
     let where = [];
     let params = [];
     let idx = 1;
 
-    if (category) { where.push(`category = $${idx++}`); params.push(category); }
-    if (os_target) { where.push(`os_target = $${idx++}`); params.push(os_target); }
-    if (difficulty) { where.push(`difficulty = $${idx++}`); params.push(difficulty); }
+    if (category)    { where.push(`category = $${idx++}`);    params.push(category); }
+    if (os_target)   { where.push(`os_target = $${idx++}`);   params.push(os_target); }
+    if (difficulty)  { where.push(`difficulty = $${idx++}`);  params.push(difficulty); }
+    if (script_type) { where.push(`script_type = $${idx++}`); params.push(script_type); }
     if (active_only !== 'false') { where.push(`is_active = true`); }
 
     const whereClause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
+    // Baseline scripts sort ahead of vulnerable within each category, so the
+    // admin-facing list naturally shows the "just make it work" options first.
     const result = await query(
-      `SELECT id, slug, name, description, category, os_target, difficulty,
+      `SELECT id, slug, name, description, category, script_type, os_target, difficulty,
               services_exposed, depends_on, estimated_runtime_sec, is_active, created_at,
               LENGTH(script_content) AS script_length
        FROM vuln_scripts ${whereClause}
-       ORDER BY category, name`,
+       ORDER BY category,
+                CASE script_type WHEN 'baseline' THEN 0 WHEN 'vulnerable' THEN 1 ELSE 2 END,
+                name`,
       params
     );
     res.json(result.rows);
@@ -63,16 +68,20 @@ router.get('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res) =
 // POST /api/admin/vuln-scripts
 router.post('/vuln-scripts', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { slug, name, description, category, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, script_args } = req.body;
+    const { slug, name, description, category, script_type, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, script_args } = req.body;
     if (!slug || !name || !category || !script_content) {
       return res.status(400).json({ error: 'slug, name, category, and script_content are required' });
     }
+    const type = (script_type || 'vulnerable').toLowerCase();
+    if (!['baseline','vulnerable'].includes(type)) {
+      return res.status(400).json({ error: `script_type must be 'baseline' or 'vulnerable' (got '${script_type}')` });
+    }
 
     const result = await query(
-      `INSERT INTO vuln_scripts (slug, name, description, category, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, script_args)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO vuln_scripts (slug, name, description, category, script_type, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, script_args)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
-      [slug, name, description || null, category, os_target || 'windows', difficulty || 'intermediate',
+      [slug, name, description || null, category, type, os_target || 'windows', difficulty || 'intermediate',
        script_content, JSON.stringify(services_exposed || []), depends_on || [], estimated_runtime_sec || 60, script_args || '']
     );
     res.status(201).json(result.rows[0]);
@@ -85,17 +94,23 @@ router.post('/vuln-scripts', authenticateToken, adminOnly, async (req, res) => {
 // PUT /api/admin/vuln-scripts/:id
 router.put('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { slug, name, description, category, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, is_active, script_args } = req.body;
+    const { slug, name, description, category, script_type, os_target, difficulty, script_content, services_exposed, depends_on, estimated_runtime_sec, is_active, script_args } = req.body;
+    if (script_type !== undefined && !['baseline','vulnerable'].includes(String(script_type).toLowerCase())) {
+      return res.status(400).json({ error: `script_type must be 'baseline' or 'vulnerable' (got '${script_type}')` });
+    }
     const result = await query(
       `UPDATE vuln_scripts SET
         slug = COALESCE($2, slug), name = COALESCE($3, name), description = $4,
-        category = COALESCE($5, category), os_target = COALESCE($6, os_target),
-        difficulty = COALESCE($7, difficulty), script_content = COALESCE($8, script_content),
-        services_exposed = COALESCE($9, services_exposed), depends_on = COALESCE($10, depends_on),
-        estimated_runtime_sec = COALESCE($11, estimated_runtime_sec), is_active = COALESCE($12, is_active),
-        script_args = COALESCE($13, script_args)
+        category = COALESCE($5, category), script_type = COALESCE($6, script_type),
+        os_target = COALESCE($7, os_target),
+        difficulty = COALESCE($8, difficulty), script_content = COALESCE($9, script_content),
+        services_exposed = COALESCE($10, services_exposed), depends_on = COALESCE($11, depends_on),
+        estimated_runtime_sec = COALESCE($12, estimated_runtime_sec), is_active = COALESCE($13, is_active),
+        script_args = COALESCE($14, script_args)
        WHERE id = $1 RETURNING *`,
-      [req.params.id, slug, name, description, category, os_target, difficulty,
+      [req.params.id, slug, name, description, category,
+       script_type ? String(script_type).toLowerCase() : null,
+       os_target, difficulty,
        script_content, services_exposed ? JSON.stringify(services_exposed) : null,
        depends_on, estimated_runtime_sec, is_active, script_args]
     );

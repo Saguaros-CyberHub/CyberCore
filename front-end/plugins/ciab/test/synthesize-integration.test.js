@@ -25,13 +25,16 @@ const templates = [
   { id: 't5', os_family: 'linux',          os_name: 'Metasploitable 2',    os_version: null,    template_vmid: 1600, node: 'cyberhub-node-5', role_hints: [], preferred: false, is_active: true }
 ];
 
-// Mirrors a subset of migration 012 seed rows (the ones the resolver needs for AZ Cyber).
+// Mirrors a subset of vuln_scripts rows (post-014 migration: script_type column present).
 const scripts = [
-  { id: 's1', slug: 'init-setup',       name: 'Initial Setup',             category: 'Initial Setup',      os_target: 'windows', services_exposed: [],                 depends_on: [],             is_active: true },
-  { id: 's2', slug: 'smb-config',       name: 'SMB Shares & Null Session', category: 'Network Services',   os_target: 'windows', services_exposed: ['445/SMB'],        depends_on: ['init-setup'], is_active: true },
-  { id: 's3', slug: 'ssh-config',       name: 'OpenSSH Server',            category: 'Network Services',   os_target: 'windows', services_exposed: ['22/SSH'],         depends_on: ['init-setup'], is_active: true },
-  { id: 's4', slug: 'iis-config',       name: 'IIS Web Server',            category: 'Web Server',         os_target: 'windows', services_exposed: ['80/HTTP','443/HTTPS'], depends_on: ['init-setup'], is_active: true },
-  { id: 's5', slug: 'life-artifacts',   name: 'User Simulation',           category: 'User Simulation',    os_target: 'windows', services_exposed: [],                 depends_on: ['init-setup'], is_active: true }
+  { id: 's1', slug: 'init-setup',     name: 'Bootstrap',               category: 'Initial Setup',    script_type: 'baseline',   os_target: 'windows', services_exposed: [],                     depends_on: [],             is_active: true },
+  { id: 's2', slug: 'smb-baseline',   name: 'SMB (Standard-Secure)',   category: 'Network Services', script_type: 'baseline',   os_target: 'windows', services_exposed: ['445/SMB'],            depends_on: ['init-setup'], is_active: true },
+  { id: 's3', slug: 'smb-config',     name: 'SMB (Null Session)',      category: 'Network Services', script_type: 'vulnerable', os_target: 'windows', services_exposed: ['445/SMB'],            depends_on: ['init-setup'], is_active: true },
+  { id: 's4', slug: 'ssh-baseline',   name: 'OpenSSH (Standard)',      category: 'Network Services', script_type: 'baseline',   os_target: 'windows', services_exposed: ['22/SSH'],             depends_on: ['init-setup'], is_active: true },
+  { id: 's5', slug: 'rdp-baseline',   name: 'RDP (Standard-Secure)',   category: 'Network Services', script_type: 'baseline',   os_target: 'windows', services_exposed: ['3389/RDP'],           depends_on: ['init-setup'], is_active: true },
+  { id: 's6', slug: 'rdp-config',     name: 'RDP (NLA off)',           category: 'Network Services', script_type: 'vulnerable', os_target: 'windows', services_exposed: ['3389/RDP'],           depends_on: ['init-setup'], is_active: true },
+  { id: 's7', slug: 'iis-config',     name: 'IIS Web Server',          category: 'Web Server',       script_type: 'vulnerable', os_target: 'windows', services_exposed: ['80/HTTP','443/HTTPS'], depends_on: ['init-setup'], is_active: true },
+  { id: 's8', slug: 'life-artifacts', name: 'User Simulation',         category: 'User Simulation',  script_type: 'baseline',   os_target: 'windows', services_exposed: [],                     depends_on: ['init-setup'], is_active: true }
 ];
 
 let passed = 0;
@@ -66,6 +69,15 @@ test('4 deployable Windows 11 VMs resolved with vmid 1002', () => {
   assert.ok(specVms.every(v => v.template_vmid === 1002), `all VMs should use Windows 11 (vmid 1002): ${JSON.stringify(specVms.map(v=>v.template_vmid))}`);
 });
 
+test('resolver picks smb-baseline over smb-config (baseline preferred)', () => {
+  for (const v of specVms) {
+    assert.ok(v.default_scripts.includes('smb-baseline'),
+      `${v.name} should use smb-baseline, got: ${v.default_scripts.join(',')}`);
+    assert.ok(!v.default_scripts.includes('smb-config'),
+      `${v.name} should NOT use vulnerable smb-config; got: ${v.default_scripts.join(',')}`);
+  }
+});
+
 test('2 macOS phantoms from normalizer remain as phantoms', () => {
   const mac = normalized.phantoms.filter(p => p.os_family === 'macos');
   assert.strictEqual(mac.length, 2);
@@ -75,10 +87,10 @@ test('no extra phantoms created by template resolver (windows_client has a templ
   assert.strictEqual(extraPhantoms.length, 0);
 });
 
-test('every deployable VM gets init-setup + smb-config', () => {
+test('every deployable VM gets init-setup + smb-baseline', () => {
   for (const v of specVms) {
-    assert.ok(v.default_scripts.includes('init-setup'), `${v.name} missing init-setup`);
-    assert.ok(v.default_scripts.includes('smb-config'), `${v.name} missing smb-config`);
+    assert.ok(v.default_scripts.includes('init-setup'),   `${v.name} missing init-setup`);
+    assert.ok(v.default_scripts.includes('smb-baseline'), `${v.name} missing smb-baseline`);
   }
 });
 
@@ -92,6 +104,16 @@ test('no missing_scripts entries for AZ Cyber (SMB fully covered by catalog)', (
   for (const v of specVms) {
     assert.strictEqual(v.missing_scripts.length, 0, `${v.name} has missing scripts: ${JSON.stringify(v.missing_scripts)}`);
   }
+});
+
+test('caller opting into vulnerable type gets smb-config, not smb-baseline', () => {
+  // Simulate an admin-driven "make this a challenge lab" call with prefer_type=vulnerable.
+  const { resolveScriptsForVm } = require('../../../src/utils/vuln-script-resolver');
+  const vm = { name: 'ws01', role: 'workstation', os_family: 'windows_client', os_version: null,
+               services: ['SMB'], suggested_script_services: [{ service: 'SMB', version: null }] };
+  const { required } = resolveScriptsForVm(vm, scripts, { prefer_type: 'vulnerable' });
+  assert.ok(required.includes('smb-config'),   `should pick smb-config when admin prefers vulnerable; got: ${required.join(',')}`);
+  assert.ok(!required.includes('smb-baseline'), `should NOT pick smb-baseline when admin prefers vulnerable`);
 });
 
 test('template_match = family_only (version not specified for workstations)', () => {
@@ -147,10 +169,23 @@ test('Acme DC uses Windows Server 2022 (vmid 1000, role_hints includes dc)', () 
   assert.strictEqual(dc.template_vmid, 1000, `expected vmid 1000 for DC, got ${dc.template_vmid}`);
 });
 
-test('Acme DC gets init-setup + smb-config + ssh-config', () => {
+test('Acme DC gets init-setup + smb-baseline (baseline preferred, role-scoped services)', () => {
+  // ROLE_SERVICE_HINTS['dc'] = ['SMB','LDAP','DNS'] so SSH/RDP (endpoint-class) don't land on the DC.
   const dc = richSpec.find(v => v.role === 'dc');
-  assert.ok(dc.default_scripts.includes('init-setup'));
-  assert.ok(dc.default_scripts.includes('smb-config'));
+  assert.ok(dc.default_scripts.includes('init-setup'),   `DC missing init-setup; got: ${dc.default_scripts.join(',')}`);
+  assert.ok(dc.default_scripts.includes('smb-baseline'), `DC missing smb-baseline; got: ${dc.default_scripts.join(',')}`);
+  assert.ok(!dc.default_scripts.includes('smb-config'),  `DC should NOT pick vulnerable smb-config by default; got: ${dc.default_scripts.join(',')}`);
+});
+
+test('Acme workstations get init-setup + smb-baseline + life-artifacts (workstation-class services)', () => {
+  // workstationServices is filtered to ['SMB','RDP'] in deriveVmList; RDP is also in suggestions,
+  // so baseline-preferred resolver should pick rdp-baseline (not rdp-config).
+  const ws = richSpec.filter(v => v.role === 'workstation');
+  for (const w of ws) {
+    assert.ok(w.default_scripts.includes('smb-baseline'), `${w.name} missing smb-baseline; got: ${w.default_scripts.join(',')}`);
+    assert.ok(w.default_scripts.includes('rdp-baseline'), `${w.name} missing rdp-baseline; got: ${w.default_scripts.join(',')}`);
+    assert.ok(w.default_scripts.includes('life-artifacts'), `${w.name} missing life-artifacts`);
+  }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

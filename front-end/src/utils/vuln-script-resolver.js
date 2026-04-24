@@ -40,15 +40,20 @@ function safeParseArray(s) {
 }
 
 /**
- * Score a row against a {service, os_family} request.
- *   100 — Phase 2: exact service + version + os_version (not yet — requires new columns)
- *    80 — service match + os family match
- *    60 — service match, os_target='windows' (the common case — matches any Windows)
- *    40 — service match only (different OS family)
- *     0 — no service match (skip)
+ * Score a row against a {service, os_family, prefer_type} request.
  *
- * Init-setup / life-artifacts / defense-evasion are returned separately — they
- * have no services_exposed but are usually added alongside service scripts.
+ *   Base scores (service + OS match):
+ *     80  service match + exact OS family
+ *     60  service match + os_target='windows' (the common case)
+ *     40  service match only (different OS family)
+ *      0  no service match (skip)
+ *
+ *   Type bonus (when prefer_type is set):
+ *    +20  row.script_type === prefer_type
+ *     -5  row.script_type !== prefer_type (light demotion, doesn't zero-out)
+ *
+ * Net effect: if the caller wants 'baseline', a baseline + windows-generic
+ * row (60+20=80) beats a vulnerable + exact-family row (80-5=75).
  */
 function scoreRow(row, want) {
   if (row.is_active === false) return 0;
@@ -59,21 +64,32 @@ function scoreRow(row, want) {
 
   if (!svcs.includes(wantSvc)) return 0;
 
-  if (osTarget === wantOsTarget) return 80;
-  if (osTarget === 'windows') return 60;
-  return 40;
+  let score;
+  if (osTarget === wantOsTarget) score = 80;
+  else if (osTarget === 'windows') score = 60;
+  else score = 40;
+
+  if (want.prefer_type) {
+    const rowType = lc(row.script_type) || 'vulnerable';
+    if (rowType === lc(want.prefer_type)) score += 20;
+    else                                   score -= 5;
+  }
+
+  return score;
 }
 
 /**
- * @param {object} want      { service, version, os_family, role }
+ * @param {object} want      { service, version, os_family, role, prefer_type? }
+ *                           prefer_type defaults to 'baseline' (caller can override to 'vulnerable')
  * @param {Array}  catalog   vuln_scripts rows
- * @returns {object|null}    { slug, name, confidence, match_type, row_id } or null
+ * @returns {object|null}    { slug, name, confidence, match_type, script_type, row_id } or null
  */
 function findScript(want, catalog) {
+  const wantWithDefault = { prefer_type: 'baseline', ...want };
   let best = null;
   let bestScore = 0;
   for (const row of catalog) {
-    const s = scoreRow(row, want);
+    const s = scoreRow(row, wantWithDefault);
     if (s > bestScore) {
       bestScore = s;
       best = row;
@@ -85,6 +101,7 @@ function findScript(want, catalog) {
     name: best.name,
     confidence: bestScore,
     match_type: bestScore >= 80 ? 'exact_os' : (bestScore >= 60 ? 'windows_generic' : 'weak'),
+    script_type: best.script_type || 'vulnerable',
     row_id: best.id
   };
 }
@@ -92,16 +109,25 @@ function findScript(want, catalog) {
 /**
  * For a single VM with a set of service hints, return:
  *   { required: [slug, ...], missing: [service, ...] }
- * Always seeds 'init-setup' first (common bootstrap) if present in catalog.
+ *
+ * Always seeds the bootstrap ('init-setup') first and a user-simulation
+ * script on endpoints. Both prefer baseline variants — the bootstrap
+ * catalog may have only one option (init-setup) so prefer_type only
+ * affects ties; the simulation lookup ('life-artifacts' or 'win-life-artifacts')
+ * picks the first baseline-tagged match it finds.
+ *
+ * @param {object} opts  { prefer_type: 'baseline'|'vulnerable' }  default 'baseline'
  */
-function resolveScriptsForVm(vm, catalog) {
+function resolveScriptsForVm(vm, catalog, opts = {}) {
+  const preferType = opts.prefer_type || 'baseline';
   const required = [];
   const missing = [];
   const seen = new Set();
 
-  // Always include init-setup if available.
-  const initSetup = catalog.find(r => r.slug === 'init-setup' && r.is_active !== false);
-  if (initSetup) { required.push('init-setup'); seen.add('init-setup'); }
+  // Always include a bootstrap. Prefer init-setup; fall back to any baseline-tagged bootstrap.
+  const bootstrap = catalog.find(r => r.slug === 'init-setup' && r.is_active !== false)
+                  || catalog.find(r => lc(r.category) === 'initial setup' && lc(r.script_type) === 'baseline' && r.is_active !== false);
+  if (bootstrap) { required.push(bootstrap.slug); seen.add(bootstrap.slug); }
 
   const hints = Array.isArray(vm.suggested_script_services) ? vm.suggested_script_services : [];
   for (const h of hints) {
@@ -109,7 +135,8 @@ function resolveScriptsForVm(vm, catalog) {
       service: h.service,
       version: h.version,
       os_family: vm.os_family,
-      role: vm.role
+      role: vm.role,
+      prefer_type: preferType
     }, catalog);
     if (match && !seen.has(match.slug)) {
       required.push(match.slug);
@@ -119,11 +146,13 @@ function resolveScriptsForVm(vm, catalog) {
     }
   }
 
-  // Seed 'life-artifacts' on endpoints by default (user simulation) if present.
-  const lifeArtifacts = catalog.find(r => r.slug === 'life-artifacts' && r.is_active !== false);
-  if (lifeArtifacts && !seen.has('life-artifacts') && (vm.role === 'workstation' || vm.role === 'laptop')) {
-    required.push('life-artifacts');
-    seen.add('life-artifacts');
+  // Seed a user-simulation script on endpoints. Accept either slug convention.
+  if (vm.role === 'workstation' || vm.role === 'laptop') {
+    const sim = catalog.find(r =>
+      (r.slug === 'life-artifacts' || r.slug === 'win-life-artifacts')
+      && r.is_active !== false
+    );
+    if (sim && !seen.has(sim.slug)) { required.push(sim.slug); seen.add(sim.slug); }
   }
 
   return { required, missing };
