@@ -12,7 +12,28 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
 const rateLimit = require('express-rate-limit');
+const jwt = require('jsonwebtoken');
 const path = require('path');
+
+/**
+ * Soft-decode the JWT from Authorization header or cookie. Returns the payload
+ * if valid, null otherwise. Used by the rate-limiter's skip function to
+ * recognize authenticated admin/user roles before authenticateToken runs
+ * per-route. Never throws, never rejects — enforcement stays on route-level
+ * authenticateToken.
+ */
+function peekJwt(req) {
+  try {
+    const authHeader = req.headers.authorization;
+    const token = (authHeader && authHeader.startsWith('Bearer '))
+      ? authHeader.substring(7)
+      : (req.cookies && req.cookies.token);
+    if (!token) return null;
+    return jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
 
 // ============================================================================
 // SECURITY: Require critical secrets or generate random per-boot fallbacks
@@ -68,14 +89,38 @@ app.use(cors({
   credentials: true
 }));
 
-// Rate limiting. Default is intentionally generous because a single admin
-// session (tabbed admin page with polling + synthesize review page +
-// create-challenge flow) trivially blows through a tight cap. Login-specific
-// brute-force protection is handled by `authLimiter` below, which stays tight.
+// Trust reverse-proxy headers so req.ip reflects the real client, not the
+// proxy. Without this, every client shares one rate-limit bucket keyed by
+// the proxy's IP. Set TRUST_PROXY=false to disable if app is exposed directly.
+if (process.env.TRUST_PROXY !== 'false') {
+  app.set('trust proxy', process.env.TRUST_PROXY || 'loopback, linklocal, uniquelocal');
+}
+
+// cookieParser runs before the rate limiter so peekJwt can read the token
+// cookie. Body parsing is kept below — the limiter doesn't need it.
+app.use(cookieParser());
+
+// Rate limiting. Admins are skipped entirely (they're already trusted with
+// destructive ops, and per-admin session activity trivially blows through any
+// reasonable cap). Authenticated non-admins + unauthenticated traffic share
+// the configured cap, keyed by user ID when logged in (so proxy-collapse
+// doesn't merge everyone's buckets) and by IP otherwise. Login brute-force
+// protection is handled separately by `authLimiter` below, which stays tight.
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max:      parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 2000,
-  message:  { error: 'Too many requests, please try again later.' }
+  message:  { error: 'Too many requests, please try again later.' },
+  skip: (req) => peekJwt(req)?.role === 'admin',
+  keyGenerator: (req) => {
+    const payload = peekJwt(req);
+    return payload?.sub ? `user:${payload.sub}` : `ip:${req.ip}`;
+  },
+  handler: (req, res, next, opts) => {
+    const payload = peekJwt(req);
+    const who = payload?.sub ? `user:${payload.sub} (${payload.email || 'no-email'})` : `ip:${req.ip}`;
+    console.warn(`[RATE LIMIT] ${req.method} ${req.originalUrl} from ${who} — bucket exhausted`);
+    res.status(opts.statusCode).json(opts.message);
+  }
 });
 app.use('/api/', limiter);
 
@@ -100,7 +145,7 @@ app.use('/api/webhook', webhookLimiter);
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
+// cookieParser already applied earlier (before rate limiter)
 
 app.use(session({
   secret: process.env.SESSION_SECRET,
