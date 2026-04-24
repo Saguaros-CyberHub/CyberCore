@@ -450,9 +450,12 @@
 <section class="section" data-section="network">
   <h2>2 · Network Topology</h2>
   <div class="desc">Enough about the environment to simulate it realistically. Estimates are fine — no need to be exact.</div>
-  <div class="grid cols-3">
-    <div class="field"><label>Desktop count <span class="help-trigger" data-help="Workstation">?</span></label><input type="number" min="0" name="workstation_count" /></div>
-    <div class="field"><label>Laptop count</label><input type="number" min="0" name="laptop_count" /></div>
+  <div class="grid cols-2">
+    <div class="field">
+      <label>Endpoint count <span class="help-trigger" data-help="Workstation">?</span></label>
+      <div class="desc" style="margin:2px 0 4px 0;">Total desktops + laptops combined — count each physical device once. Must match the OS breakdown below.</div>
+      <input type="number" min="0" name="endpoint_count" />
+    </div>
     <div class="field"><label>Server count <span class="help-trigger" data-help="Server">?</span></label><input type="number" min="0" name="server_count" /></div>
   </div>
 
@@ -1008,8 +1011,21 @@
     const missing = [];
     // Name is optional — admin assigns cover name later
     const net = state.sections.network || {};
-    const hasAsset = ['workstation_count','laptop_count','server_count'].some(k => Number(net[k]) > 0);
+    const endpointCount = Number(net.endpoint_count) || 0;
+    const serverCount   = Number(net.server_count)   || 0;
+    const hasAsset = endpointCount > 0 || serverCount > 0;
     if (!hasAsset) missing.push('At least one non-zero device count in Section 2 (Network Topology)');
+
+    // Cross-check: endpoint OS totals should add up to endpoint_count.
+    const endpointOsSum =
+      (Number(net.os_count_win_client) || 0) +
+      (Number(net.os_count_linux)      || 0) +
+      (Number(net.os_count_macos)      || 0) +
+      (Number(net.os_count_other)      || 0);
+    if (endpointCount > 0 && endpointOsSum > 0 && endpointOsSum !== endpointCount) {
+      missing.push(`Endpoint count (${endpointCount}) doesn't match OS breakdown total (${endpointOsSum}). Each physical endpoint should be counted once across the OS fields.`);
+    }
+
     const ig1Answered = IG1.filter(sg => state.sections.ig1?.[`ig1_${sg.num}`]).length;
     if (ig1Answered < IG1.length) missing.push(`IG1 answers: ${ig1Answered} of ${IG1.length} safeguards answered`);
     return missing;

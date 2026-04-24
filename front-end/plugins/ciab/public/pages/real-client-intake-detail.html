@@ -133,7 +133,8 @@
     }
 
     const FIELD_LABELS = {
-      workstation_count: 'Desktops', laptop_count: 'Laptops', server_count: 'Servers',
+      endpoint_count: 'Endpoints (desktops + laptops)',
+      workstation_count: 'Desktops (legacy)', laptop_count: 'Laptops (legacy)', server_count: 'Servers',
       os_count_win_server: 'Windows Server', os_count_win_client: 'Windows Client',
       os_count_linux: 'Linux', os_count_macos: 'macOS', os_count_other: 'Other / Unknown',
       role_dc: 'Domain Controller', role_dc_version: 'DC OS/Version',
@@ -226,7 +227,7 @@
       if (it.linked_challenge_id) {
         actions.push(`<span class="pill status-linked">🎯 challenge linked</span>`);
       } else {
-        actions.push(`<a class="btn btn-primary btn-sm" href="/ciab/admin?from_intake_id=${encodeURIComponent(it.id)}&suggested_name=${encodeURIComponent(it.cover_name)}">🎯 Create Challenge</a>`);
+        actions.push(`<a class="btn btn-primary btn-sm" href="/ciab/real-client-intake/${encodeURIComponent(it.id)}/synthesize">🎯 Create Challenge</a>`);
       }
       if (it.linked_profile_id) {
         actions.push(`<a class="btn btn-outline btn-sm" href="/ciab/my-profiles">📁 View profile</a>`);
@@ -261,7 +262,7 @@
 
         <div class="card"><div class="card-header"><span class="card-title">2 · Network Topology</span></div><div class="card-body">
           <h4 style="margin-bottom:0.25rem; font-size:0.9rem;">Device Counts</h4>
-          ${kv(s.network, ['workstation_count','laptop_count','server_count'])}
+          ${kv(s.network, ['endpoint_count','workstation_count','laptop_count','server_count'])}
           <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Operating Systems</h4>
           ${kv(s.network, ['os_count_win_server','os_count_win_client','os_count_linux','os_count_macos','os_count_other'])}
           <h4 style="margin-top:1rem; margin-bottom:0.25rem; font-size:0.9rem;">Server Roles</h4>

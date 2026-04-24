@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synthesize Challenge | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .pill { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--gray-200, #e2e8f0); background: var(--bg-card, #fff); color: var(--gray-600, #4a5568); margin-right: 4px; }
+    .pill.exact       { border-color: #16a34a; color: #166534; background: #dcfce7; }
+    .pill.fuzzy_version, .pill.family_only { border-color: #d97706; color: #92400e; background: #fef3c7; }
+    .pill.weak        { border-color: #dc2626; color: #991b1b; background: #fee2e2; }
+    .pill.phantom     { border-color: var(--gray-300, #cbd5e0); color: var(--gray-600, #4a5568); background: var(--gray-100, #edf2f7); font-style: italic; }
+    .warnings-panel { border: 1px solid #f59e0b; background: #fffbeb; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
+    .warnings-panel h3 { margin: 0 0 0.4rem 0; font-size: 0.9rem; color: #92400e; }
+    .warnings-panel ul { margin: 0; padding-left: 1.25rem; font-size: 0.85rem; color: #78350f; }
+    .warnings-panel li { margin-bottom: 0.15rem; }
+    .warning-code { display: inline-block; font-family: monospace; font-size: 0.7rem; color: #78350f; background: #fef3c7; border-radius: 3px; padding: 0 4px; margin-right: 4px; }
+    .stats { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 1rem; }
+    .stat { background: var(--bg-page, #f7fafc); border: 1px solid var(--gray-200, #e2e8f0); border-radius: 8px; padding: 0.6rem 0.9rem; min-width: 120px; flex: 1; }
+    .stat .val { font-size: 1.5rem; color: var(--primary, #1e40af); font-weight: 700; line-height: 1.2; }
+    .stat .lbl { font-size: 0.7rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
+    table.vmtbl { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.85rem; }
+    table.vmtbl th, table.vmtbl td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--gray-200, #e2e8f0); vertical-align: top; }
+    table.vmtbl th { color: var(--gray-500, #718096); font-weight: 600; background: var(--bg-page, #f7fafc); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    table.vmtbl tr.phantom-row td { background: #fafafa; color: var(--gray-500, #718096); }
+    table.vmtbl input[type=text], table.vmtbl select { width: 100%; padding: 4px 6px; font-size: 0.85rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 4px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
+    .scripts-cell { display: flex; flex-wrap: wrap; gap: 3px; }
+    .scripts-cell .script-pill { font-size: 10.5px; padding: 2px 6px; background: #dbeafe; border: 1px solid #3b82f6; color: #1e40af; border-radius: 9px; font-family: monospace; }
+    .scripts-cell .script-pill.missing { background: #fee2e2; border-color: #dc2626; color: #991b1b; }
+    .challenge-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 1rem; }
+    .challenge-form label { display: block; font-size: 0.75rem; color: var(--gray-500, #718096); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 3px; }
+    .challenge-form input, .challenge-form select, .challenge-form textarea { width: 100%; padding: 0.4rem 0.5rem; font-size: 0.9rem; border: 1px solid var(--gray-200, #e2e8f0); border-radius: 6px; background: var(--bg-card, #fff); color: inherit; font-family: inherit; }
+    .challenge-form textarea { min-height: 60px; resize: vertical; }
+    .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 0.5rem; flex-wrap: wrap; }
+    .toolbar .actions { display: flex; gap: 0.5rem; }
+    .sub { color: var(--gray-500, #718096); font-size: 0.85rem; font-style: italic; }
+    .template-meta { font-size: 0.72rem; color: var(--gray-500, #718096); font-family: monospace; margin-top: 2px; }
+    .delete-btn { background: transparent; border: 0; color: #dc2626; cursor: pointer; font-size: 1rem; padding: 0 4px; }
+    .create-bar { position: sticky; bottom: 0; background: var(--bg-page, #fff); border-top: 1px solid var(--gray-200, #e2e8f0); padding: 1rem; display: flex; justify-content: space-between; align-items: center; margin: 1rem -1rem -1rem -1rem; }
+    .busy { opacity: 0.5; pointer-events: none; }
+    #status { font-size: 0.85rem; color: var(--gray-600, #4a5568); }
+    #status.err { color: #dc2626; }
+    #status.ok  { color: #166534; }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+          <a id="back-link" href="/ciab/real-client-intakes" class="btn btn-outline btn-sm">← Back to intake</a>
+        </div>
+      </header>
+
+      <div class="page-content" id="content">
+        <div class="card"><div class="card-body">Loading…</div></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/ciab/js/ciab-api.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const intakeId = location.pathname.split('/')[3];
+    let synth = null;       // last synthesize response
+    let catalogTemplates = [];
+    let catalogScripts = [];
+
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
+    }
+    function el(id) { return document.getElementById(id); }
+    function setStatus(msg, kind) { const s = el('status'); if (!s) return; s.textContent = msg || ''; s.className = kind || ''; }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      if (!await Auth.requireAuth()) return;
+      el('back-link').href = `/ciab/real-client-intake/${encodeURIComponent(intakeId)}`;
+      try {
+        await loadCatalogs();
+        await runSynthesize();
+      } catch (err) {
+        el('content').innerHTML = `<div class="card"><div class="card-body" style="color:#dc2626;">Failed to load: ${esc(err.message)}</div></div>`;
+      }
+    });
+
+    async function loadCatalogs() {
+      const [tRes, sRes] = await Promise.all([
+        fetch('/api/admin/vm-templates', { credentials: 'same-origin' }),
+        fetch('/api/admin/vuln-scripts?active_only=true', { credentials: 'same-origin' })
+      ]);
+      if (!tRes.ok) throw new Error(`vm-templates: ${tRes.status}`);
+      if (!sRes.ok) throw new Error(`vuln-scripts: ${sRes.status}`);
+      catalogTemplates = await tRes.json();
+      catalogScripts = await sRes.json();
+    }
+
+    async function runSynthesize() {
+      setStatus('Synthesizing…');
+      const res = await fetch(`/api/real-client/intake/${encodeURIComponent(intakeId)}/synthesize-challenge`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: '{}'
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || ('HTTP ' + res.status));
+      }
+      synth = await res.json();
+      render();
+      setStatus('');
+    }
+
+    function render() {
+      const d = synth;
+      document.title = `Synthesize: ${d.cover_name}`;
+
+      const warningsHtml = d.warnings.length
+        ? `<div class="warnings-panel">
+             <h3>⚠ ${d.warnings.length} warning${d.warnings.length === 1 ? '' : 's'} from synthesis</h3>
+             <ul>${d.warnings.map(w => `<li><span class="warning-code">${esc(w.code)}</span>${esc(w.msg)}</li>`).join('')}</ul>
+           </div>`
+        : `<div class="sub" style="margin-bottom:1rem;">No warnings — intake mapped cleanly.</div>`;
+
+      const vmRowsHtml = d.vms.map((v, idx) => vmRowHtml(v, idx)).join('');
+      const phantomRowsHtml = d.phantom_assets.length
+        ? d.phantom_assets.map(p => `
+            <tr class="phantom-row">
+              <td>${esc(p.hostname)}</td>
+              <td>${esc(p.role)}</td>
+              <td>${esc(p.os)} <span class="pill phantom">phantom</span></td>
+              <td colspan="3" class="sub">${esc(p.notes)}</td>
+            </tr>`).join('')
+        : '';
+
+      el('content').innerHTML = `
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">🧬 Synthesize Challenge: ${esc(d.cover_name)}</h1>
+            <div class="sub">Review the derived challenge spec below, then click <b>Create Challenge</b>.</div>
+          </div>
+        </div>
+
+        <div class="card"><div class="card-body">
+          <div class="stats">
+            <div class="stat"><div class="val">${d.stats.deployable_vms}</div><div class="lbl">Deployable VMs</div></div>
+            <div class="stat"><div class="val">${d.stats.phantoms}</div><div class="lbl">Phantom Assets</div></div>
+            <div class="stat"><div class="val">${d.stats.warnings}</div><div class="lbl">Warnings</div></div>
+            <div class="stat"><div class="val">${d.stats.total_devices_reported}</div><div class="lbl">Devices Reported</div></div>
+          </div>
+          ${warningsHtml}
+        </div></div>
+
+        <div class="card"><div class="card-header"><span class="card-title">Challenge settings</span></div>
+          <div class="card-body">
+            <div class="challenge-form">
+              <div>
+                <label>Name</label>
+                <input type="text" id="f-name" value="${esc(d.suggested_name)}">
+              </div>
+              <div>
+                <label>Challenge key</label>
+                <input type="text" id="f-key" value="${esc(d.suggested_challenge_key)}">
+              </div>
+              <div>
+                <label>Difficulty</label>
+                <select id="f-difficulty">
+                  ${['beginner','intermediate','advanced','expert','impossible'].map(x => `<option value="${x}" ${x===d.suggested_difficulty?'selected':''}>${x}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label>Max lanes</label>
+                <input type="number" id="f-lanes" min="1" max="200" value="${d.suggested_max_lanes}">
+              </div>
+              <div style="grid-column: 1 / -1;">
+                <label>Description</label>
+                <textarea id="f-description">${esc(d.suggested_description)}</textarea>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card"><div class="card-header">
+          <span class="card-title">VMs (${d.vms.length} deployable${d.phantom_assets.length ? ` + ${d.phantom_assets.length} phantom` : ''})</span>
+          <div class="toolbar" style="margin:0;">
+            <div></div>
+            <div class="actions">
+              <button class="btn btn-outline btn-sm" onclick="runSynthesize().catch(e=>setStatus(e.message,'err'))">↻ Regenerate</button>
+            </div>
+          </div>
+        </div><div class="card-body">
+          <table class="vmtbl">
+            <thead><tr>
+              <th style="width: 120px;">Name</th>
+              <th style="width: 120px;">Role</th>
+              <th style="width: 220px;">OS / Template</th>
+              <th>Services</th>
+              <th>Scripts</th>
+              <th style="width: 40px;"></th>
+            </tr></thead>
+            <tbody id="vm-tbody">${vmRowsHtml}${phantomRowsHtml}</tbody>
+          </table>
+        </div></div>
+
+        <div class="create-bar">
+          <div id="status"></div>
+          <div class="actions">
+            <button class="btn btn-primary" id="btn-create" onclick="createChallenge().catch(e=>setStatus(e.message,'err'))">🎯 Create Challenge</button>
+          </div>
+        </div>
+      `;
+    }
+
+    function vmRowHtml(v, idx) {
+      const templateOptions = catalogTemplates
+        .filter(t => t.os_family === v.os_family || !v.os_family)
+        .map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)}${t.os_version?` (${esc(t.os_version)})`:''} · vmid ${t.template_vmid}</option>`).join('')
+        || catalogTemplates.map(t => `<option value="${t.template_vmid}" ${t.template_vmid===v.template_vmid?'selected':''}>${esc(t.os_name)} · vmid ${t.template_vmid}</option>`).join('');
+
+      const scriptOptions = catalogScripts.map(s => {
+        const selected = (v.default_scripts || []).includes(s.slug) ? 'selected' : '';
+        return `<option value="${esc(s.slug)}" ${selected}>${esc(s.slug)} — ${esc(s.name)}</option>`;
+      }).join('');
+
+      const scriptsDisplay = (v.default_scripts || []).map(s => `<span class="script-pill">${esc(s)}</span>`).join('')
+        + (v.missing_scripts || []).map(m => `<span class="script-pill missing" title="No script in catalog">${esc(m.service)}${m.version?' v'+esc(m.version):''}?</span>`).join('');
+
+      return `
+        <tr data-idx="${idx}">
+          <td><input type="text" data-field="name" value="${esc(v.name)}"></td>
+          <td><input type="text" data-field="role" value="${esc(v.role)}"></td>
+          <td>
+            <select data-field="template_vmid">${templateOptions}</select>
+            <div class="template-meta">${esc(v.os)} <span class="pill ${esc(v.template_match)}">${esc(v.template_match)}</span></div>
+          </td>
+          <td><input type="text" data-field="services" value="${esc((v.services||[]).join(', '))}" placeholder="SMB, RDP, ..."></td>
+          <td>
+            <div class="scripts-cell">${scriptsDisplay}</div>
+            <select multiple size="3" data-field="default_scripts" style="margin-top:4px;">${scriptOptions}</select>
+          </td>
+          <td><button class="delete-btn" title="Remove VM" onclick="removeVm(${idx})">×</button></td>
+        </tr>`;
+    }
+
+    function removeVm(idx) {
+      synth.vms.splice(idx, 1);
+      render();
+    }
+
+    function readForm() {
+      const vms = [];
+      document.querySelectorAll('#vm-tbody tr[data-idx]').forEach(tr => {
+        const name = tr.querySelector('[data-field=name]').value.trim();
+        const role = tr.querySelector('[data-field=role]').value.trim();
+        const template_vmid = parseInt(tr.querySelector('[data-field=template_vmid]').value, 10);
+        const servicesRaw = tr.querySelector('[data-field=services]').value;
+        const services = servicesRaw.split(',').map(s => s.trim()).filter(Boolean);
+        const selectEl = tr.querySelector('[data-field=default_scripts]');
+        const default_scripts = Array.from(selectEl.selectedOptions).map(o => o.value);
+        vms.push({
+          name, role, template_vmid,
+          os: tr.querySelector('.template-meta').textContent.trim().split(' ').slice(0, -1).join(' ') || 'Windows',
+          type: 'qemu',
+          vm_offset: 600000 + vms.length * 10000,
+          services,
+          default_scripts
+        });
+      });
+      return {
+        name: el('f-name').value.trim(),
+        challenge_key: el('f-key').value.trim(),
+        description: el('f-description').value.trim(),
+        difficulty: el('f-difficulty').value,
+        max_lanes: parseInt(el('f-lanes').value, 10),
+        challenge_type: vms.length > 1 ? 'multi_vm' : 'single_vm',
+        vms
+      };
+    }
+
+    async function createChallenge() {
+      const btn = el('btn-create');
+      btn.classList.add('busy');
+      setStatus('Creating challenge (this can take ~30s — SDN zone + VNets)…');
+
+      const body = readForm();
+      if (!body.name || !body.challenge_key || !body.max_lanes) {
+        btn.classList.remove('busy');
+        return setStatus('Name, challenge key, and max lanes are required.', 'err');
+      }
+      if (!body.vms.length) {
+        btn.classList.remove('busy');
+        return setStatus('At least one deployable VM is required.', 'err');
+      }
+
+      const res = await fetch('/api/admin/create-challenge', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        btn.classList.remove('busy');
+        return setStatus(out.error || `HTTP ${res.status}`, 'err');
+      }
+
+      // Link intake → challenge
+      try {
+        await fetch(`/api/real-client/intake/${encodeURIComponent(intakeId)}/link`, {
+          method: 'PUT', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ linked_challenge_id: out.challenge_id })
+        });
+      } catch (_) { /* non-fatal; detail page will show the link */ }
+
+      setStatus(`✓ Challenge ${out.challenge_key} created (${out.vnets_created} VNets).`, 'ok');
+      setTimeout(() => { location.href = `/ciab/real-client-intake/${encodeURIComponent(intakeId)}`; }, 1200);
+    }
+  </script>
+</body>
+</html>

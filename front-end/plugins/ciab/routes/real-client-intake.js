@@ -16,6 +16,9 @@ const crypto = require('crypto');
 const { pool } = require('../utils/db');
 const { cybercoreQuery } = require('../../../src/utils/cybercore-db');
 const { buildStudentView } = require('../utils/profile-filler');
+const { normalizeIntake } = require('../utils/intake-normalizer');
+const { resolveTemplate } = require('../../../src/utils/vm-template-resolver');
+const { resolveScriptsForVm } = require('../../../src/utils/vuln-script-resolver');
 
 // IG1 safeguard list (mirrors the one embedded in the intake form HTML).
 const IG1_LIST = require('../utils/ig1-safeguards.json');
@@ -50,10 +53,11 @@ function validatePayload(payload) {
 function summarize(payload) {
   const net = payload.sections?.network || {};
   const ig1 = payload.sections?.ig1 || {};
-  const assetTotal =
-    (Number(net.workstation_count) || 0) +
-    (Number(net.laptop_count)      || 0) +
-    (Number(net.server_count)      || 0);
+  // endpoint_count is the current (v1.1) field; fall back to legacy ws+laptop for older intakes.
+  const endpointCount = Number(net.endpoint_count) > 0
+    ? Number(net.endpoint_count)
+    : (Number(net.workstation_count) || 0) + (Number(net.laptop_count) || 0);
+  const assetTotal = endpointCount + (Number(net.server_count) || 0);
   const ig1Keys = Object.keys(ig1).filter(k => k.startsWith('ig1_') && !k.endsWith('_notes'));
   const ig1Answered = ig1Keys.filter(k => ig1[k] && ig1[k] !== null).length;
   const ig1Total = 56;
@@ -324,6 +328,131 @@ router.post('/:id/generate-profile', express.json({ limit: '1mb' }), async (req,
     });
   } catch (err) {
     console.error('[real-client generate-profile]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/real-client/intake/:id/synthesize-challenge
+ * Dry-run: normalizes the intake, resolves VM templates + vuln scripts, and
+ * returns a challenge-spec JSON the admin reviews before hitting
+ * /api/admin/create-challenge. Writes nothing.
+ *
+ * Response:
+ *   {
+ *     cover_name, suggested_challenge_key, suggested_name,
+ *     vms: [{ name, role, os, os_family, template_vmid, template_match, services[], default_scripts[], missing_scripts[] }],
+ *     phantom_assets: [{ hostname, role, os, notes }],
+ *     warnings: [{ code, msg }],
+ *     stats: { deployable_vms, phantoms, warnings }
+ *   }
+ */
+router.post('/:id/synthesize-challenge', express.json(), async (req, res) => {
+  try {
+    if (!canSeeAll(req)) return res.status(403).json({ error: 'Admin/instructor only' });
+    const { id } = req.params;
+
+    const ir = await pool.query(`SELECT * FROM real_client_intakes WHERE id = $1`, [id]);
+    if (!ir.rows.length) return res.status(404).json({ error: 'Intake not found' });
+    const intake = ir.rows[0];
+    const payload = intake.payload;
+
+    // 1. Normalize intake (pure).
+    const normalized = normalizeIntake(payload);
+
+    // 2. Fetch catalogs in parallel.
+    const [templatesRes, scriptsRes] = await Promise.all([
+      pool.query(`SELECT id, os_family, os_name, os_version, template_vmid, node, role_hints, preferred, is_active, created_at
+                  FROM vm_template_catalog WHERE is_active = true`),
+      pool.query(`SELECT id, slug, name, category, os_target, difficulty, services_exposed, depends_on, is_active
+                  FROM vuln_scripts WHERE is_active = true ORDER BY category, name`)
+    ]);
+    const templates = templatesRes.rows;
+    const scripts = scriptsRes.rows;
+
+    // 3. Resolve template + scripts for every deployable VM.
+    const specVms = [];
+    const warnings = normalized.warnings.slice();
+
+    for (const vm of normalized.vms) {
+      const match = resolveTemplate({ os_family: vm.os_family, os_version: vm.os_version, role: vm.role }, templates);
+      if (!match) {
+        // No family match → demote to phantom.
+        normalized.phantoms.push({
+          name: vm.name,
+          role: vm.role,
+          os_family: vm.os_family,
+          os_version: vm.os_version,
+          reason: `no template available for os_family="${vm.os_family}" — rendered as phantom`
+        });
+        warnings.push({ code: 'template_missing', msg: `${vm.name}: no template for ${vm.os_family}${vm.os_version ? ' ' + vm.os_version : ''} — demoted to phantom.` });
+        continue;
+      }
+
+      const { required, missing } = resolveScriptsForVm(vm, scripts);
+      if (match.match_type !== 'exact') {
+        warnings.push({ code: 'template_fuzzy', msg: `${vm.name}: using ${match.os_name} (${match.match_type} match) for ${vm.os_family}${vm.os_version ? ' ' + vm.os_version : ''}.` });
+      }
+      for (const miss of missing) {
+        warnings.push({ code: 'script_missing', msg: `${vm.name}: no script for ${miss.service}${miss.version ? ' v' + miss.version : ''} on ${vm.os_family} — manual configuration or AI-gen (Phase 3) required.` });
+      }
+
+      specVms.push({
+        name: vm.name,
+        role: vm.role,
+        os: match.os_name,
+        os_family: vm.os_family,
+        template_vmid: match.template_vmid,
+        template_node: match.node,
+        template_match: match.match_type,
+        type: 'qemu',
+        vm_offset: 600000 + specVms.length * 10000,
+        services: vm.services,
+        default_scripts: required,
+        missing_scripts: missing
+      });
+    }
+
+    // 4. Phantom assets — documented but not deployed.
+    const phantomAssets = normalized.phantoms.map(p => ({
+      hostname: p.name,
+      role: p.role,
+      os: p.os_family === 'macos' ? 'macOS' : (p.os_family === 'linux' ? 'Linux' : p.os_family),
+      notes: p.reason
+    }));
+
+    // 5. Derive challenge key + name.
+    const sanitizedCover = String(normalized.cover_name)
+      .toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48);
+    const suggestedKey = sanitizedCover ? `rc-${sanitizedCover}` : `rc-intake-${String(intake.id).slice(0, 8)}`;
+
+    // 6. Difficulty heuristic — more phantoms + more missing scripts = harder.
+    const complexity = specVms.length + phantomAssets.length;
+    const difficulty = complexity <= 3 ? 'beginner' : (complexity <= 8 ? 'intermediate' : 'advanced');
+
+    return res.json({
+      intake_id: intake.id,
+      cover_name: normalized.cover_name,
+      suggested_challenge_key: suggestedKey,
+      suggested_name: normalized.cover_name,
+      suggested_difficulty: difficulty,
+      suggested_description: normalized.notes
+        ? `Real-client challenge synthesized from intake ${intake.id.slice(0, 8)}. Client notes: ${normalized.notes}`
+        : `Real-client challenge synthesized from intake ${intake.id.slice(0, 8)}.`,
+      suggested_max_lanes: 10,
+      vms: specVms,
+      phantom_assets: phantomAssets,
+      warnings,
+      stats: {
+        deployable_vms: specVms.length,
+        phantoms: phantomAssets.length,
+        warnings: warnings.length,
+        total_devices_reported: normalized.deviceTotal + normalized.serverCount
+      },
+      catalog_sizes: { vm_templates: templates.length, vuln_scripts: scripts.length }
+    });
+  } catch (err) {
+    console.error('[real-client synthesize-challenge]', err);
     res.status(500).json({ error: err.message });
   }
 });

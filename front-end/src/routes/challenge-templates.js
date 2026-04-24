@@ -116,6 +116,30 @@ router.delete('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res
   }
 });
 
+// GET /api/admin/vm-templates — list active VM templates from vm_template_catalog
+router.get('/vm-templates', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { os_family, active_only } = req.query;
+    const where = [];
+    const params = [];
+    let idx = 1;
+    if (os_family) { where.push(`os_family = $${idx++}`); params.push(os_family); }
+    if (active_only !== 'false') where.push(`is_active = true`);
+    const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+    const result = await query(
+      `SELECT id, os_family, os_name, os_version, template_vmid, node,
+              role_hints, preferred, notes, is_active, created_at
+       FROM vm_template_catalog ${whereClause}
+       ORDER BY os_family, os_name, os_version NULLS LAST`,
+      params
+    );
+    res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // GET /api/admin/vuln-scripts-categories
 router.get('/vuln-scripts-categories', authenticateToken, adminOnly, async (req, res) => {
   try {

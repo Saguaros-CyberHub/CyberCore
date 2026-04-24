@@ -29,6 +29,11 @@ router.get('/real-client-intake/:id', (req, res) => {
   res.sendFile(path.join(PAGES_DIR, 'real-client-intake-detail.html'));
 });
 
+// Dynamic page route for the synthesize-challenge review page
+router.get('/real-client-intake/:id/synthesize', (req, res) => {
+  res.sendFile(path.join(PAGES_DIR, 'real-client-intake-synthesize.html'));
+});
+
 Object.entries(pages).forEach(([route, file]) => {
   router.get(route, (req, res) => {
     res.sendFile(path.join(PAGES_DIR, file));
