@@ -592,8 +592,8 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     const templateVmid = spec.template_vmid || 1600;
     // Gateway template per module (matches N8N workflow mapping)
     // Module mapping takes priority — spec.gateway_vmid is legacy and may be stale (e.g., old 1699)
-    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-    const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
+    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 2692, forge: 1693 };
+    const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 2692;
     const templateNode = spec.template_node || 'cyberhub-node-5';
     // Select least-loaded node for deployment
     const bestNodeInfo = await selectBestNode();
@@ -1737,8 +1737,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
     // 5. Deploy lanes per student (if enabled)
     if (shouldDeployLanes) {
       const templateVmid = spec.template_vmid || 1600;
-      const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-      const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
+      const gatewayVmidByModule = { cyberlabs: 1691, crucible: 2692, forge: 1693 };
+      const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 2692;
       const templateNode = spec.template_node || 'cyberhub-node-5';
 
       // Distribute lanes across nodes (query cluster ONCE instead of per-lane)
@@ -3309,8 +3309,8 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
     }
 
     // Build the spec object compatible with the existing deploy-lane flow
-    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-    const gatewayVmid = gatewayVmidByModule[challengeModule] || 1692;
+    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 2692, forge: 1693 };
+    const gatewayVmid = gatewayVmidByModule[challengeModule] || 2692;
     const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
     const bestNodeInfo = await selectBestNode();
     const bestNode = bestNodeInfo.node;
