@@ -25,16 +25,24 @@ const templates = [
   { id: 't5', os_family: 'linux',          os_name: 'Metasploitable 2',    os_version: null,    template_vmid: 1600, node: 'cyberhub-node-5', role_hints: [], preferred: false, is_active: true }
 ];
 
-// Mirrors a subset of vuln_scripts rows (post-014 migration: script_type column present).
+// Mirrors vuln_scripts rows after migration 014 + vuln_scripts_cleaned.sql load.
+// Enough variety to exercise baseline preference, composite-lab exclusion, and
+// the newer http-baseline / mssql-baseline / ftp-baseline / dns-baseline rows.
 const scripts = [
-  { id: 's1', slug: 'init-setup',     name: 'Bootstrap',               category: 'Initial Setup',    script_type: 'baseline',   os_target: 'windows', services_exposed: [],                     depends_on: [],             is_active: true },
-  { id: 's2', slug: 'smb-baseline',   name: 'SMB (Standard-Secure)',   category: 'Network Services', script_type: 'baseline',   os_target: 'windows', services_exposed: ['445/SMB'],            depends_on: ['init-setup'], is_active: true },
-  { id: 's3', slug: 'smb-config',     name: 'SMB (Null Session)',      category: 'Network Services', script_type: 'vulnerable', os_target: 'windows', services_exposed: ['445/SMB'],            depends_on: ['init-setup'], is_active: true },
-  { id: 's4', slug: 'ssh-baseline',   name: 'OpenSSH (Standard)',      category: 'Network Services', script_type: 'baseline',   os_target: 'windows', services_exposed: ['22/SSH'],             depends_on: ['init-setup'], is_active: true },
-  { id: 's5', slug: 'rdp-baseline',   name: 'RDP (Standard-Secure)',   category: 'Network Services', script_type: 'baseline',   os_target: 'windows', services_exposed: ['3389/RDP'],           depends_on: ['init-setup'], is_active: true },
-  { id: 's6', slug: 'rdp-config',     name: 'RDP (NLA off)',           category: 'Network Services', script_type: 'vulnerable', os_target: 'windows', services_exposed: ['3389/RDP'],           depends_on: ['init-setup'], is_active: true },
-  { id: 's7', slug: 'iis-config',     name: 'IIS Web Server',          category: 'Web Server',       script_type: 'vulnerable', os_target: 'windows', services_exposed: ['80/HTTP','443/HTTPS'], depends_on: ['init-setup'], is_active: true },
-  { id: 's8', slug: 'life-artifacts', name: 'User Simulation',         category: 'User Simulation',  script_type: 'baseline',   os_target: 'windows', services_exposed: [],                     depends_on: ['init-setup'], is_active: true }
+  { id: 's1',  slug: 'init-setup',               name: 'Bootstrap',                 category: 'Initial Setup',       script_type: 'baseline',   os_target: 'windows', services_exposed: [],                                                                            depends_on: [],             is_active: true },
+  { id: 's2',  slug: 'smb-baseline',             name: 'SMB (Standard-Secure)',     category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['445/SMB'],                                                                    depends_on: ['init-setup'], is_active: true },
+  { id: 's3',  slug: 'smb-config',               name: 'SMB (Null Session)',        category: 'Network Services',    script_type: 'vulnerable', os_target: 'windows', services_exposed: ['445/SMB'],                                                                    depends_on: ['init-setup'], is_active: true },
+  { id: 's4',  slug: 'ssh-baseline',             name: 'OpenSSH (Standard)',        category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['22/SSH'],                                                                     depends_on: ['init-setup'], is_active: true },
+  { id: 's5',  slug: 'rdp-baseline',             name: 'RDP (Standard-Secure)',     category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['3389/RDP'],                                                                   depends_on: ['init-setup'], is_active: true },
+  { id: 's6',  slug: 'rdp-config',               name: 'RDP (NLA off)',             category: 'Network Services',    script_type: 'vulnerable', os_target: 'windows', services_exposed: ['3389/RDP'],                                                                   depends_on: ['init-setup'], is_active: true },
+  { id: 's7',  slug: 'http-baseline',            name: 'IIS HTTP (Standard)',       category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['80/HTTP'],                                                                    depends_on: ['init-setup'], is_active: true },
+  { id: 's8',  slug: 'iis-config',               name: 'IIS Web Server',            category: 'Web Server',          script_type: 'vulnerable', os_target: 'windows', services_exposed: ['80/HTTP','443/HTTPS'],                                                         depends_on: ['init-setup'], is_active: true },
+  { id: 's9',  slug: 'mssql-baseline',           name: 'MSSQL (Hardened)',          category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['1433/SQL'],                                                                   depends_on: ['init-setup'], is_active: true },
+  { id: 's10', slug: 'ftp-baseline',             name: 'IIS FTP (Auth + SSL)',      category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['21/FTP'],                                                                     depends_on: ['init-setup'], is_active: true },
+  { id: 's11', slug: 'ftp-anonymous',            name: 'IIS FTP (Anonymous)',       category: 'Network Services',    script_type: 'vulnerable', os_target: 'windows', services_exposed: ['21/FTP'],                                                                     depends_on: ['init-setup'], is_active: true },
+  { id: 's12', slug: 'dns-baseline',             name: 'DNS Server (Forwarder)',    category: 'Network Services',    script_type: 'baseline',   os_target: 'windows', services_exposed: ['53/DNS'],                                                                     depends_on: ['init-setup'], is_active: true },
+  { id: 's13', slug: 'life-artifacts',           name: 'User Simulation',           category: 'User Simulation',     script_type: 'baseline',   os_target: 'windows', services_exposed: [],                                                                            depends_on: ['init-setup'], is_active: true },
+  { id: 's14', slug: 'win-install-480-services', name: 'MedAlliance T1 Full Stack', category: 'Composite Lab',       script_type: 'vulnerable', os_target: 'windows', services_exposed: ['80/HTTP','8080/HealthMonitor','21/FTP','1433/SQL','5985/WinRM','3389/RDP','445/SMB'], depends_on: [],             is_active: true }
 ];
 
 let passed = 0;
@@ -186,6 +194,68 @@ test('Acme workstations get init-setup + smb-baseline + life-artifacts (workstat
     assert.ok(w.default_scripts.includes('rdp-baseline'), `${w.name} missing rdp-baseline; got: ${w.default_scripts.join(',')}`);
     assert.ok(w.default_scripts.includes('life-artifacts'), `${w.name} missing life-artifacts`);
   }
+});
+
+console.log('\nsynthesize pipeline — Testing (Healthcare) fixture with HTTP + DC');
+
+const testingFixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'intake-testing-healthcare.json'), 'utf-8'));
+const testingNorm = normalizeIntake(testingFixture);
+const testingSpec = [];
+for (const vm of testingNorm.vms) {
+  const match = resolveTemplate({ os_family: vm.os_family, os_version: vm.os_version, role: vm.role }, templates);
+  if (!match) continue;
+  const { required } = resolveScriptsForVm(vm, scripts);
+  testingSpec.push({ name: vm.name, role: vm.role, os: match.os_name, template_vmid: match.template_vmid, services: vm.services, default_scripts: required });
+}
+
+test('Testing intake produces at least 1 DC server VM (role_dc=yes, 4 servers declared)', () => {
+  const dc = testingSpec.filter(v => v.role === 'dc');
+  assert.ok(dc.length >= 1, `expected >=1 DC, got ${dc.length}`);
+});
+
+test('Testing intake workstations pick http-baseline via role-agnostic fill? (HTTP is a network-wide service but not a workstation default) — workstations do NOT get http-baseline', () => {
+  // HTTP is not in workstationServices (filtered to SMB/RDP) so workstations shouldn't pick http-baseline.
+  const ws = testingSpec.filter(v => v.role === 'workstation');
+  for (const w of ws) {
+    assert.ok(!w.default_scripts.includes('http-baseline'),
+      `${w.name} should NOT have http-baseline (HTTP is a role service, not workstation-default); got: ${w.default_scripts.join(',')}`);
+  }
+});
+
+test('NO Testing-intake VM auto-picks the composite lab script win-install-480-services', () => {
+  for (const v of testingSpec) {
+    assert.ok(!v.default_scripts.includes('win-install-480-services'),
+      `${v.name} auto-picked composite lab; scripts: ${v.default_scripts.join(',')}`);
+  }
+});
+
+console.log('\nresolver — Composite Lab exclusion');
+
+test('findScript for HTTP ignores win-install-480-services (Composite Lab) and picks http-baseline', () => {
+  const { findScript } = require('../../../src/utils/vuln-script-resolver');
+  const m = findScript({ service: 'HTTP', os_family: 'windows_server', role: 'web' }, scripts);
+  assert.ok(m, 'expected a match for HTTP');
+  assert.strictEqual(m.slug, 'http-baseline', `expected http-baseline, got ${m.slug}`);
+});
+
+test('findScript for SQL picks mssql-baseline, NOT win-install-480-services', () => {
+  const { findScript } = require('../../../src/utils/vuln-script-resolver');
+  const m = findScript({ service: 'SQL', os_family: 'windows_server', role: 'db' }, scripts);
+  assert.ok(m, 'expected a match for SQL');
+  assert.strictEqual(m.slug, 'mssql-baseline', `expected mssql-baseline, got ${m.slug}`);
+});
+
+test('findScript for FTP picks ftp-baseline, NOT ftp-anonymous (baseline preferred)', () => {
+  const { findScript } = require('../../../src/utils/vuln-script-resolver');
+  const m = findScript({ service: 'FTP', os_family: 'windows_server' }, scripts);
+  assert.strictEqual(m.slug, 'ftp-baseline');
+});
+
+test('findScript with prefer_type=vulnerable for HTTP still excludes composite lab (category block is absolute)', () => {
+  const { findScript } = require('../../../src/utils/vuln-script-resolver');
+  const m = findScript({ service: 'HTTP', os_family: 'windows_server', prefer_type: 'vulnerable' }, scripts);
+  assert.ok(m, 'expected a match');
+  assert.strictEqual(m.slug, 'iis-config', `vulnerable HTTP should pick iis-config, NOT the composite; got ${m.slug}`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

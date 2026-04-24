@@ -216,6 +216,34 @@ const NEW_SCRIPTS = [
     services_exposed: ['5986/WinRM-HTTPS'], depends_on: ['init-setup'], estimated_runtime_sec: 30, script_args: ''
   },
   {
+    slug: 'http-baseline', file: 'http-baseline.ps1',
+    name: 'IIS HTTP (Standard)',
+    description: 'Installs IIS, serves a plain corporate landing page on port 80. No vulnerable apps, no FTP, no anonymous. Clean baseline for real-client synthesis.',
+    category: 'Network Services', script_type: 'baseline', difficulty: 'beginner',
+    services_exposed: ['80/HTTP'], depends_on: ['init-setup'], estimated_runtime_sec: 120, script_args: ''
+  },
+  {
+    slug: 'mssql-baseline', file: 'mssql-baseline.ps1',
+    name: 'MSSQL (Hardened)',
+    description: 'Configures an already-installed SQL Server instance for Windows-auth only, disables SA, disables xp_cmdshell, enables TCP on 1433, opens firewall. No-ops if no MSSQL service is present.',
+    category: 'Network Services', script_type: 'baseline', difficulty: 'intermediate',
+    services_exposed: ['1433/SQL'], depends_on: ['init-setup'], estimated_runtime_sec: 60, script_args: ''
+  },
+  {
+    slug: 'ftp-baseline', file: 'ftp-baseline.ps1',
+    name: 'IIS FTP (Authenticated, SSL)',
+    description: 'IIS FTP on port 21 with anonymous disabled, basic auth required, SSL enforced on control + data channels using a self-signed cert. Counterpart to ftp-anonymous.',
+    category: 'Network Services', script_type: 'baseline', difficulty: 'intermediate',
+    services_exposed: ['21/FTP'], depends_on: ['init-setup'], estimated_runtime_sec: 180, script_args: ''
+  },
+  {
+    slug: 'dns-baseline', file: 'dns-baseline.ps1',
+    name: 'DNS Server (Forwarder)',
+    description: 'Windows Server-only: installs the DNS Server role, configures 1.1.1.1 + 8.8.8.8 forwarders with root hints, opens TCP+UDP 53. No-ops on client SKUs.',
+    category: 'Network Services', script_type: 'baseline', difficulty: 'beginner',
+    services_exposed: ['53/DNS'], depends_on: ['init-setup'], estimated_runtime_sec: 60, script_args: ''
+  },
+  {
     slug: 'rdp-config', file: 'rdp-config.ps1',
     name: 'RDP (NLA Off)',
     description: 'Enables RDP on 3389, disables NLA, drops to RDP security layer with low encryption, grants student + svcbackup access. Classic brute-force / PtH target.',

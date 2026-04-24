@@ -364,7 +364,7 @@ router.post('/:id/synthesize-challenge', express.json(), async (req, res) => {
     const [templatesRes, scriptsRes] = await Promise.all([
       pool.query(`SELECT id, os_family, os_name, os_version, template_vmid, node, role_hints, preferred, is_active, created_at
                   FROM vm_template_catalog WHERE is_active = true`),
-      pool.query(`SELECT id, slug, name, category, os_target, difficulty, services_exposed, depends_on, is_active
+      pool.query(`SELECT id, slug, name, category, script_type, os_target, difficulty, services_exposed, depends_on, is_active
                   FROM vuln_scripts WHERE is_active = true ORDER BY category, name`)
     ]);
     const templates = templatesRes.rows;

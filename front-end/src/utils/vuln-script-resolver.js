@@ -55,8 +55,16 @@ function safeParseArray(s) {
  * Net effect: if the caller wants 'baseline', a baseline + windows-generic
  * row (60+20=80) beats a vulnerable + exact-family row (80-5=75).
  */
+// Categories that should never be auto-picked by the intake synthesizer.
+// "Composite Lab" scripts deploy a whole opinionated challenge lab (multiple
+// services + deliberate weaknesses in one shot) — they are admin-driven
+// manual picks only. Admins can still add them via the script picker modal.
+const AUTO_PICK_BLOCKED_CATEGORIES = new Set(['composite lab']);
+
 function scoreRow(row, want) {
   if (row.is_active === false) return 0;
+  if (AUTO_PICK_BLOCKED_CATEGORIES.has(lc(row.category))) return 0;
+
   const wantSvc = lc(want.service);
   const wantOsTarget = familyToOsTarget(want.os_family);
   const svcs = rowServices(row);

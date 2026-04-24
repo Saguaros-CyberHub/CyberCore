@@ -1,0 +1,46 @@
+{
+  "schema_version": "1.0",
+  "cover_name": "Testing",
+  "sections": {
+    "company": {
+      "cover_name": "Testing",
+      "industry": "Healthcare",
+      "employees_band": "51-100",
+      "region": "United States",
+      "revenue_band": "$1M-$10M",
+      "frameworks": ["HIPAA", "PCI-DSS", "CMMC"]
+    },
+    "network": {
+      "workstation_count": "33",
+      "laptop_count": "12",
+      "server_count": "4",
+      "os_count_win_server": "1",
+      "os_count_win_client": "1",
+      "os_count_linux": "2",
+      "os_count_macos": "",
+      "os_count_other": "",
+      "role_dc": "yes",
+      "role_dc_version": "Server 2019",
+      "role_file": "no",
+      "role_mail": "no",
+      "role_web": "no",
+      "role_db": "no",
+      "role_backup": "no",
+      "role_print": "no",
+      "services": ["SMB", "RDP", "SSH", "HTTP"],
+      "svc_version_smb":  "SMBv3",
+      "svc_version_rdp":  "Unknown",
+      "svc_version_ssh":  "Open SSH 8.9",
+      "svc_version_http": "Apache 2.4",
+      "domain_mode": "ad"
+    },
+    "wireless": {},
+    "endpoint": {},
+    "email_web": { "email_provider": "Microsoft 365" },
+    "access": {},
+    "data": {},
+    "vuln_audit": {},
+    "ig1": {},
+    "notes": { "free_text": "Fake additional notes\nTESTING" }
+  }
+}
