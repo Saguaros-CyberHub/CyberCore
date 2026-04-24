@@ -682,9 +682,13 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
         if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
 
-        // Attach VNet to gateway (net1)
+        // Wire up gateway networking:
+        //   net0 (wan0) -> vmbr99 host-local uplink bridge (DHCP from dnsmasq, NAT to vmbr0.10)
+        //   net1 (lan0) -> lane VXLAN VNet, static 192.18.0.1/24 (serves lane VMs)
+        // Removed the self-referential gw=192.18.0.1 on net1 — net0's DHCP provides the real default route.
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,gw=192.18.0.1`
+          net0: `name=wan0,bridge=vmbr99,ip=dhcp,firewall=0,type=veth`,
+          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
         });
 
         // Start gateway first, then all challenge VMs
@@ -1466,9 +1470,14 @@ router.patch('/lanes/:id/internet', authenticateToken, adminOnly, async (req, re
 
     if (!node) return res.status(400).json({ error: 'Lane config missing node info' });
 
+    // Interface names inside the gateway LXC come from the pct config:
+    //   net0 -> name=wan0 (uplink, DHCP from vmbr99 on the Proxmox host)
+    //   net1 -> name=lan0 (lane-side, 192.18.0.1/24)
+    // Old code used eth0 / net1 which don't exist inside the container, so the
+    // rules never matched and the toggle was effectively a no-op.
     const cmd = enabled
-      ? 'iptables -t nat -C POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE; iptables -C FORWARD -i net1 -o eth0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i net1 -o eth0 -j ACCEPT; echo 1 > /proc/sys/net/ipv4/ip_forward'
-      : 'iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE 2>/dev/null; iptables -D FORWARD -i net1 -o eth0 -j ACCEPT 2>/dev/null; echo 0 > /proc/sys/net/ipv4/ip_forward';
+      ? 'iptables -t nat -C POSTROUTING -o wan0 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o wan0 -j MASQUERADE; iptables -C FORWARD -i lan0 -o wan0 -j ACCEPT 2>/dev/null || iptables -A FORWARD -i lan0 -o wan0 -j ACCEPT; iptables -C FORWARD -i wan0 -o lan0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i wan0 -o lan0 -m state --state RELATED,ESTABLISHED -j ACCEPT; echo 1 > /proc/sys/net/ipv4/ip_forward'
+      : 'iptables -t nat -D POSTROUTING -o wan0 -j MASQUERADE 2>/dev/null; iptables -D FORWARD -i lan0 -o wan0 -j ACCEPT 2>/dev/null; iptables -D FORWARD -i wan0 -o lan0 -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; echo 0 > /proc/sys/net/ipv4/ip_forward';
 
     try {
       await proxmoxAPI('POST', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/exec`, {

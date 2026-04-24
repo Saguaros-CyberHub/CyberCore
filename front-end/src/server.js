@@ -68,11 +68,14 @@ app.use(cors({
   credentials: true
 }));
 
-// Rate limiting
+// Rate limiting. Default is intentionally generous because a single admin
+// session (tabbed admin page with polling + synthesize review page +
+// create-challenge flow) trivially blows through a tight cap. Login-specific
+// brute-force protection is handled by `authLimiter` below, which stays tight.
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
-  message: { error: 'Too many requests, please try again later.' }
+  max:      parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 2000,
+  message:  { error: 'Too many requests, please try again later.' }
 });
 app.use('/api/', limiter);
 
