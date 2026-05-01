@@ -294,12 +294,18 @@ async function deployController({
   );
   if (cloneResult) await waitForTask(templateNode, cloneResult);
 
-  // Attach to the lane VNet with the deterministic MAC. The gateway's DHCP
-  // reservation will then hand this MAC the .5 IP. Use virtio (no domain
-  // join here, so e1000 isn't needed).
+  // Attach to the lane VNet with the deterministic MAC. Give the controller
+  // a STATIC IP (not DHCP) so it lands on 192.18.0.5 from boot — the gateway's
+  // firewall ACL only permits SSH from that one IP, and we'd hit a chicken-
+  // and-egg if the controller had to wait for its own DHCP reservation
+  // (which would have to be written via SSH to the gateway, which would
+  // require the controller to already have the right IP). virtio NIC is
+  // fine here (no domain-join sensitivity like the Windows VMs).
+  const controllerStaticIp = ip(INFRA_IP_OCTETS.controller);  // 192.18.0.5
   await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/config`, {
     net0: `virtio,bridge=${vnetName},macaddr=${mac}`,
-    ipconfig0: 'ip=dhcp',
+    ipconfig0: `ip=${controllerStaticIp}/24,gw=${ip(INFRA_IP_OCTETS.gateway)}`,
+    nameserver: ip(INFRA_IP_OCTETS.gateway),
     citype: 'nocloud'
   });
   // Regenerate cloud-init drive so the new hostname/network take effect on boot
