@@ -26,8 +26,15 @@
  * ============================================================================
  */
 
-// Template VMID for the GOAD ansible controller (Debian 13 LXC, baked from
-// scripts/bake-goad-controller.sh — git-clones upstream GOAD inside it)
+// QEMU guest-agent helpers for the controller VM. All exec into the
+// controller goes through the Proxmox HTTPS API — no SSH from this app.
+// The controller VM in turn SSHes into the lane gateway (192.18.0.1) to
+// write DHCP reservations, using a keypair baked into both templates.
+const { agentExec, pollExecStatus, waitForGuestAgent } = require('./script-executor');
+
+// Template VMID for the GOAD ansible controller (Debian 13 VM with
+// qemu-guest-agent, baked from scripts/bake-goad-controller-vm.sh —
+// git-clones upstream GOAD on first boot via cloud-init).
 const CONTROLLER_TEMPLATE_VMID = 1700;
 
 // Lane subnet — every GOAD lane uses 192.18.0.0/24 with gateway at .1.
@@ -227,7 +234,7 @@ function buildLaneNet0(vmSpec, vnetName, mac, nicModel) {
  * IP, emits a single dnsmasq config snippet at /etc/dnsmasq.d/lane-reservations.conf
  * inside the gateway LXC.
  */
-async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, proxmoxAPI }) {
+async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId }) {
   if (!spec?.goad?.enabled) return;
 
   const labName = spec.goad.version || DEFAULT_LAB;
@@ -249,20 +256,17 @@ async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, pro
 
   const conf = lines.join('\n') + '\n';
 
-  // pct exec writes the file inside the gateway and HUPs dnsmasq.
-  // We use a one-shot here-doc piped into `tee` so the content is delivered
-  // as stdin — no shell-quoting hazards.
-  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/exec`, {
-    command: ['/bin/sh', '-c',
-      `cat > /etc/dnsmasq.d/lane-reservations.conf <<'EOF'\n${conf}EOF\n` +
-      `rc-service dnsmasq restart || /etc/init.d/dnsmasq restart || true`
-    ]
-  });
+  // SSH to the node, write the reservations file inside the LXC, reload dnsmasq.
+  await nodeSsh.pctPushFromString(bestNode, gatewayVmId, conf, '/etc/dnsmasq.d/lane-reservations.conf');
+  await nodeSsh.pctExec(bestNode, gatewayVmId, ['/bin/sh', '-c',
+    'rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true'
+  ]);
 }
 
 /**
- * Clone GOAD controller template (1700) onto the lane VNet.
- * Sets net0 with the controller's deterministic MAC so DHCP gives it .5.
+ * Clone GOAD controller template (1700, QEMU VM with qemu-guest-agent) onto
+ * the lane VNet. Configures net0 with the controller's deterministic MAC so
+ * the gateway's DHCP reservation hands it .5, plus cloud-init for hostname.
  *
  * Returns the deployed controller VMID.
  */
@@ -275,12 +279,13 @@ async function deployController({
   const mac = macFor('controller', vxlanId);
   const hostname = `goad-ctrl-${vxlanId}`;
 
+  // Clone the QEMU template
   const cloneResult = await proxmoxAPI(
     'POST',
-    `/api2/json/nodes/${templateNode}/lxc/${CONTROLLER_TEMPLATE_VMID}/clone`,
+    `/api2/json/nodes/${templateNode}/qemu/${CONTROLLER_TEMPLATE_VMID}/clone`,
     {
       newid: controllerVmId,
-      hostname,
+      name: hostname,
       full: 1,
       target: bestNode,
       description: `GOAD controller for lane ${lane.lane_id}\nModule: ${module}\nVXLAN: ${vxlanId}`,
@@ -289,11 +294,18 @@ async function deployController({
   );
   if (cloneResult) await waitForTask(templateNode, cloneResult);
 
-  await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${controllerVmId}/config`, {
-    net0: `name=eth0,bridge=${vnetName},hwaddr=${mac},type=veth`
+  // Attach to the lane VNet with the deterministic MAC. The gateway's DHCP
+  // reservation will then hand this MAC the .5 IP. Use virtio (no domain
+  // join here, so e1000 isn't needed).
+  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/config`, {
+    net0: `virtio,bridge=${vnetName},macaddr=${mac}`,
+    ipconfig0: 'ip=dhcp',
+    citype: 'nocloud'
   });
+  // Regenerate cloud-init drive so the new hostname/network take effect on boot
+  await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/cloudinit`).catch(() => {});
 
-  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${controllerVmId}/status/start`);
+  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/status/start`);
   return controllerVmId;
 }
 
@@ -307,7 +319,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
  * they all answer (WinRM is up). Returns the IPs that responded; throws if
  * timeoutMs elapses before all are ready.
  */
-async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeoutMs = 600000 }) {
+async function waitForWinRM({ controllerVmId, bestNode, vmIPs, timeoutMs = 600000 }) {
   const deadline = Date.now() + timeoutMs;
   const pending = new Set(vmIPs);
   const ready = [];
@@ -315,21 +327,18 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
   while (pending.size > 0 && Date.now() < deadline) {
     for (const ip of [...pending]) {
       try {
-        // bash one-liner: "exec 3<>/dev/tcp/IP/5985" succeeds iff port open
-        const exec = await proxmoxAPI(
-          'POST',
-          `/api2/json/nodes/${bestNode}/lxc/${controllerVmId}/exec`,
-          {
-            command: ['/bin/bash', '-c', `timeout 3 bash -c 'exec 3<>/dev/tcp/${ip}/5985' 2>/dev/null && echo OK`]
-          }
-        );
-        if (exec && (exec.output || exec).toString().includes('OK')) {
+        // From inside the controller VM, probe the Win VM's WinRM port via
+        // qemu-guest-agent. The probe exits 0 only when TCP connect succeeds.
+        const cmd = `bash -c "timeout 3 bash -c 'exec 3<>/dev/tcp/${ip}/5985' 2>/dev/null && echo OK"`;
+        const { pid } = await agentExec(bestNode, controllerVmId, cmd);
+        const result = await pollExecStatus(bestNode, controllerVmId, pid, 10000);
+        if (result.exited && result.stdout.includes('OK')) {
           pending.delete(ip);
           ready.push(ip);
           console.log(`[GOAD] WinRM ready on ${ip}`);
         }
       } catch {
-        // ignore — will retry
+        // expected on any host that's not yet listening; will retry
       }
     }
     if (pending.size > 0) await sleep(10000);
@@ -349,7 +358,7 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
  * a comma-separated list of "vmName:ip" pairs as the second. This keeps the
  * shell script simple and supports any lab topology without per-lab args.
  */
-async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, proxmoxAPI }) {
+async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId }) {
   const goad = spec.goad || {};
   const labName = goad.version || DEFAULT_LAB;
   const adminUser = goad.admin_user || 'Administrator';
@@ -358,21 +367,32 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, proxmo
     throw new Error('spec.goad.admin_password is required');
   }
 
+  // Build HOST_MAP as pipe-separated triples "name|ip|mac" so run.sh can
+  // parse + write DHCP reservations on the gateway from inside the lane.
+  // Includes the lab VMs, the controller itself, and Kali (if requested) —
+  // every host that needs a deterministic IP from the gateway's dnsmasq.
   const macs = prepareGoadMacs(spec, vxlanId);
-  // host_map = "DC01:192.18.0.10,DC02:192.18.0.11,..."
-  const hostMap = Object.entries(macs)
-    .map(([name, info]) => `${name}:${info.static_ip}`)
-    .join(',');
+  const triples = [];
+  for (const [name, info] of Object.entries(macs)) {
+    triples.push(`${name}|${info.static_ip}|${info.mac}`);
+  }
+  triples.push(`goad-controller|${ip(INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
+  if (goad.include_kali !== false) {
+    triples.push(`kali|${ip(INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
+  }
+  const hostMap = triples.join(',');
 
-  // Long-running — give it 90 minutes max. SCCM in particular is slow.
-  const result = await proxmoxAPI(
-    'POST',
-    `/api2/json/nodes/${bestNode}/lxc/${controllerVmId}/exec`,
-    {
-      command: ['/opt/goad-light/run.sh', labName, hostMap, adminUser, adminPass],
-      'timeout': 5400
-    }
-  );
+  // Invoke the wrapper inside the controller VM via qemu-guest-agent.
+  // SCCM + full GOAD can take an hour+; give it 2h headroom.
+  // Quote the password since it can contain shell metacharacters.
+  const escapedPass = adminPass.replace(/'/g, `'\\''`);
+  const cmd = `/opt/goad-light/run.sh ${labName} ${hostMap} ${adminUser} '${escapedPass}'`;
+  const { pid } = await agentExec(bestNode, controllerVmId, cmd);
+  const result = await pollExecStatus(bestNode, controllerVmId, pid, 2 * 60 * 60 * 1000);
+  if (!result.exited) throw new Error('GOAD playbook did not finish within 2h');
+  if (result.exitcode !== 0) {
+    throw new Error(`GOAD playbook exit ${result.exitcode}\nstderr: ${result.stderr}\nstdout tail: ${result.stdout.slice(-2000)}`);
+  }
   return result;
 }
 
@@ -382,7 +402,7 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, proxmo
  */
 async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
   try {
-    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${controllerVmId}/status/stop`);
+    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/status/stop`);
   } catch (err) {
     console.warn(`[GOAD] stopController: ${err.message}`);
   }
@@ -393,11 +413,13 @@ async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
  * (and optional Kali) have been cloned + started by the normal deploy path.
  *
  * Sequence:
- *   1. writeDhcpReservations  — gateway hands out reserved IPs from now on
- *   2. deployController       — clone 1700, attach to lane, start
- *   3. waitForWinRM           — poll until all 3 Windows VMs respond on 5985
- *   4. runGoadPlaybook        — actual AD provisioning over WinRM
- *   5. stopController         — shut down the controller
+ *   1. deployController  — clone VM 1700, attach to lane VNet, start
+ *   2. waitForGuestAgent — qemu-agent ready before we exec anything
+ *   3. waitForWinRM      — poll until each Windows VM responds on 5985
+ *   4. runGoadPlaybook   — controller's run.sh writes DHCP reservations on
+ *                          the gateway (SSH from inside the lane), then
+ *                          executes the upstream playbook chain over WinRM
+ *   5. stopController    — shut down the controller
  *
  * Throws on any unrecoverable failure. Caller is responsible for catching
  * and updating lane status accordingly.
@@ -410,19 +432,26 @@ async function deployGoadLane({
 
   console.log(`[GOAD] Starting GOAD-Light provisioning for lane ${lane.lane_id} (vxlan ${vxlanId})`);
 
-  // 1. DHCP reservations on the gateway
-  await writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, proxmoxAPI });
-  console.log(`[GOAD] DHCP reservations written to gateway ${gatewayVmId}`);
+  // (DHCP reservations are now written by the controller's run.sh via SSH
+  //  into the gateway, using the keypair baked into both templates. No
+  //  orchestrator-level SSH needed.)
 
-  // 2. Deploy controller
+  // 1. Deploy controller (QEMU VM with qemu-guest-agent)
   const controllerVmId = await deployController({
     vxlanId, vnetName: vnet.vnet, bestNode, templateNode, lane, module, proxmoxAPI, waitForTask
   });
   console.log(`[GOAD] Controller deployed: VMID ${controllerVmId}`);
 
-  // Give controller + Windows VMs time to boot. Windows is slow (60-180s typical)
-  // and WinRM service starts after first boot. We poll, so an over-sleep here
-  // just shifts when polling starts — pick something modest.
+  // Wait for the controller's qemu-guest-agent to be ready before we try
+  // to exec anything inside it. Cloud-init bake in the template installs
+  // the agent and starts it on boot, but it takes ~30-60s post-power-on.
+  console.log(`[GOAD] Waiting for controller guest agent...`);
+  const agentReady = await waitForGuestAgent(bestNode, controllerVmId, 180000);
+  if (!agentReady) {
+    throw new Error(`Controller VM ${controllerVmId} guest agent never came up within 3 min`);
+  }
+
+  // Give Windows VMs more time — boot + WinRM startup is 60-180s typical.
   await sleep(60000);
 
   // 3. Wait for WinRM on every Windows VM in this lab (skip Linux)
