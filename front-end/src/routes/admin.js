@@ -21,6 +21,45 @@ const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../ut
 const adminOnly = requireRole('admin');
 
 // ============================================================================
+// LANE UPLINK CONFIG — per-module transit gateway map
+// ============================================================================
+// Each module has its own SDN VNet (named after the module) carrying a
+// dedicated /16 to a transit-gateway LXC. The transit GW NATs upward to
+// vmbr0.10 (vlan060_lab). Lane gateway LXCs attach wan0 to the module's
+// bridge and use the transit's IP as their default gateway.
+//
+//   crucible  -> bridge 'crucible',  GW 100.102.0.1, transit LXC 612 (running)
+//   cyberlabs -> bridge 'cyberlabs', GW <tbd>,        transit LXC 611 (not yet up)
+//   forge     -> bridge 'forge',     GW <tbd>,        transit LXC 613 (not yet up)
+//
+// Add cyberlabs/forge entries here when their transit GWs are live.
+const TRANSIT_BY_MODULE = {
+  crucible: { bridge: 'crucible', gateway: '100.102.0.1', subnetBase: '100.102', cidr: '/16' },
+};
+
+/**
+ * Compute the lane gateway LXC's wan0 config from the module + vxlan_id.
+ * Maps vxlan_id (uint16) deterministically into the module's /16:
+ *   high octet = (vxlan >> 8) & 0xFF, low octet = vxlan & 0xFF.
+ * For vxlan 10000 in crucible: 100.102.39.16. Unique per lane up to 65535.
+ */
+function laneUplinkConfig(module, vxlanId) {
+  const t = TRANSIT_BY_MODULE[module];
+  if (!t) {
+    throw new Error(`No transit gateway configured for module '${module}'. ` +
+      `Configured modules: ${Object.keys(TRANSIT_BY_MODULE).join(', ')}. ` +
+      `Add an entry to TRANSIT_BY_MODULE in admin.js once the transit LXC is up.`);
+  }
+  const high = (vxlanId >> 8) & 0xFF;
+  const low  = vxlanId & 0xFF;
+  return {
+    bridge: t.bridge,
+    ip:     `${t.subnetBase}.${high}.${low}${t.cidr}`,
+    gw:     t.gateway
+  };
+}
+
+// ============================================================================
 // GUACAMOLE API HELPER
 // ============================================================================
 
@@ -683,11 +722,11 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
         if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
 
         // Wire up gateway networking:
-        //   net0 (wan0) -> vmbr99 host-local uplink bridge (DHCP from dnsmasq, NAT to vmbr0.10)
+        //   net0 (wan0) -> module's transit-GW SDN VNet (static IP, GW = transit LXC)
         //   net1 (lan0) -> lane VXLAN VNet, static 192.18.0.1/24 (serves lane VMs)
-        // Removed the self-referential gw=192.18.0.1 on net1 — net0's DHCP provides the real default route.
+        const wan = laneUplinkConfig(module, vxlanId);
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: `name=wan0,bridge=vmbr99,ip=dhcp,firewall=0,type=veth`,
+          net0: `name=wan0,bridge=${wan.bridge},ip=${wan.ip},gw=${wan.gw},firewall=0,type=veth`,
           net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
         });
 
@@ -1936,11 +1975,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 pool: `${module}-pool`
               });
               if (gwCloneResult) await waitForTask(sourceNode, gwCloneResult);
-              // Wire up both NICs: wan0 -> vmbr99 (host-local uplink with DHCP/NAT),
+              // Wire up both NICs: wan0 -> module's transit-GW SDN VNet (static IP),
               // lan0 -> lane VXLAN VNet (serves 192.18.0.0/24 to lane VMs).
-              // gw= on net1 dropped: it was self-referential and blocked proper default route.
+              const wan = laneUplinkConfig(module, vxlanId);
               await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                net0: `name=wan0,bridge=vmbr99,ip=dhcp,firewall=0,type=veth`,
+                net0: `name=wan0,bridge=${wan.bridge},ip=${wan.ip},gw=${wan.gw},firewall=0,type=veth`,
                 net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
               });
               gatewayResults[laneId] = { success: true };
@@ -3503,9 +3542,10 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           description: `Challenge Network Gateway\nTemplate: ${template.name}\nLane: ${laneId}`,
         });
         if (gwResult) await waitForTask(templateNode, gwResult);
-        // wan0 -> vmbr99, lan0 -> lane VXLAN. No self-referential gw on net1.
+        // wan0 -> module's transit-GW SDN VNet, lan0 -> lane VXLAN.
+        const wan = laneUplinkConfig(challengeModule, vxlanId);
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: `name=wan0,bridge=vmbr99,ip=dhcp,firewall=0,type=veth`,
+          net0: `name=wan0,bridge=${wan.bridge},ip=${wan.ip},gw=${wan.gw},firewall=0,type=veth`,
           net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
         });
 

@@ -467,11 +467,15 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
         ? peerIps.join(',')
         : nodeList.map((_, i) => `100.100.10.${10 + i}`).join(',');
 
+      // NOTE: deliberately NOT passing ipam: 'pve'. CyberCore manages lane IP
+      // space internally (192.18.0.0/24 via dnsmasq inside each lane's gateway LXC).
+      // Setting ipam: 'pve' here makes Proxmox SDN write per-VNet config files into
+      // /etc/dnsmasq.d/ on every node, which collides with the host network's
+      // boot-time post-up hooks and has crashed clusters at reboot. Leave ipam unset.
       await proxmoxAPI('POST', '/api2/json/cluster/sdn/zones', {
         zone: finalZone,
         type: 'vxlan',
-        peers: peers,
-        ipam: 'pve'
+        peers: peers
       });
       pushStatus(`SDN zone '${finalZone}' created with peers: ${peers}`);
     } else {
