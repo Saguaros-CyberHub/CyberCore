@@ -349,7 +349,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
  * they all answer (WinRM is up). Returns the IPs that responded; throws if
  * timeoutMs elapses before all are ready.
  */
-async function waitForWinRM({ controllerVmId, bestNode, vmIPs, timeoutMs = 600000 }) {
+async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeoutMs = 600000 }) {
   const deadline = Date.now() + timeoutMs;
   const pending = new Set(vmIPs);
   const ready = [];
@@ -358,11 +358,14 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, timeoutMs = 60000
     for (const ip of [...pending]) {
       try {
         // From inside the controller VM, probe the Win VM's WinRM port via
-        // qemu-guest-agent. The probe exits 0 only when TCP connect succeeds.
-        const cmd = `bash -c "timeout 3 bash -c 'exec 3<>/dev/tcp/${ip}/5985' 2>/dev/null && echo OK"`;
-        const { pid } = await agentExec(bestNode, controllerVmId, cmd);
+        // qemu-guest-agent. Argv form so Proxmox parses each element as a
+        // separate command-line arg (single-string form fails with 596 — see
+        // agentExecArgv comment).
+        const probe = `timeout 3 bash -c 'exec 3<>/dev/tcp/${ip}/5985' 2>/dev/null && echo OK`;
+        const { pid } = await agentExecArgv(bestNode, controllerVmId,
+          ['/bin/bash', '-c', probe], proxmoxAPI);
         const result = await pollExecStatus(bestNode, controllerVmId, pid, 10000);
-        if (result.exited && result.stdout.includes('OK')) {
+        if (result.exited && (result.stdout || '').includes('OK')) {
           pending.delete(ip);
           ready.push(ip);
           console.log(`[GOAD] WinRM ready on ${ip}`);
