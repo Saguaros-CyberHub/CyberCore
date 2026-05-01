@@ -244,22 +244,38 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
     permissions: '0755'
     content: |
       #!/bin/bash
-      # Render per-lab config.json + inventory, run upstream playbook chain
-      # over WinRM. Assumes prep.sh has already been called (DHCP reservations
-      # are in place on the gateway and the Windows VMs have the right IPs).
+      # Render per-lab inventory, run upstream playbook chain over WinRM.
+      # Assumes prep.sh has already been called (DHCP reservations on gateway,
+      # Windows VMs at correct IPs).
       #
-      # Usage: run.sh LAB HOST_MAP ADMIN_USER ADMIN_PASSWORD
-      #   HOST_MAP = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
+      # Architecture: follows upstream GOAD's two-account scheme.
+      #   - Windows VM template ships with Administrator (bake-time password)
+      #   - We use Administrator ONLY for an initial 'preflight-vagrant.yml'
+      #     play that creates a 'vagrant' Administrators-group user with
+      #     password 'vagrant'.
+      #   - All subsequent plays (preflight-dns + upstream chain) connect as
+      #     vagrant/vagrant. The vagrant user is the scaffolding that survives
+      #     ad-servers.yml's password rotation of the Administrator account
+      #     (which gets rotated to lab.hosts[X].local_admin_password from
+      #     upstream's config.json — different per host, preserving PTH
+      #     teaching value).
+      #   - We do NOT patch config.json. Per-host local_admin_password and
+      #     per-domain domain_password come from upstream's data verbatim.
+      #
+      # Usage: run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD
+      #   HOST_MAP        = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
+      #   INITIAL_USER    = bake-time Administrator user, typically 'Administrator'
+      #   INITIAL_PASSWORD= bake-time Administrator password from the Win template
       set -e
       if [ \$# -lt 4 ]; then
-        echo "Usage: \$0 LAB HOST_MAP ADMIN_USER ADMIN_PASSWORD"
-        echo "  LAB         — GOAD-Light | GOAD | GOAD-Mini | NHA | SCCM | DRACARYS"
-        echo "  HOST_MAP    — comma-separated 'name|ip|mac' triples"
-        echo "  ADMIN_USER  — typically 'Administrator'"
-        echo "  ADMIN_PASSWORD — local admin password (matches Windows template)"
+        echo "Usage: \$0 LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD"
+        echo "  LAB              — GOAD-Light | GOAD | GOAD-Mini | NHA | SCCM | DRACARYS"
+        echo "  HOST_MAP         — comma-separated 'name|ip|mac' triples"
+        echo "  INITIAL_USER     — bake-time Win template admin user (typically 'Administrator')"
+        echo "  INITIAL_PASSWORD — bake-time Win template admin password"
         exit 1
       fi
-      LAB="\$1"; HOST_MAP="\$2"; ADMIN_USER="\$3"; ADMIN_PASSWORD="\$4"
+      LAB="\$1"; HOST_MAP="\$2"; INITIAL_USER="\$3"; INITIAL_PASSWORD="\$4"
 
       GOAD_ROOT=/opt/goad
       LAB_DATA="\$GOAD_ROOT/ad/\$LAB/data"
@@ -281,34 +297,68 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       RUNTIME=/var/lib/goad-run
       mkdir -p "\$RUNTIME"
 
-      # Patched config.json — set local_admin_password to ours for every host
-      python3 - <<PY > "\$RUNTIME/config.json"
-      import json
-      with open("\$LAB_DATA/config.json") as f:
-          data = json.load(f)
-      hosts = data.get("lab", {}).get("hosts", {})
-      for h in hosts.values():
-          if isinstance(h, dict):
-              h["local_admin_password"] = "\$ADMIN_PASSWORD"
-      print(json.dumps(data, indent=2))
-      PY
+      # NOTE: we deliberately do NOT modify upstream's config.json. Each host's
+      # local_admin_password and each domain's domain_password are upstream's
+      # per-host static values (e.g. dc01='8dCT-DJjgScp', dc02='NgtI75cKV+Pu').
+      # The upstream invariant lab.hosts[parent_dc].local_admin_password ==
+      # lab.domains[parent_domain].domain_password is what makes child-DC
+      # dcpromo authentication work; touching either side breaks it.
 
       # Render proxmox provider inventory ({{ip_range}} is a sed placeholder)
       sed -e "s|{{ip_range}}|\${IP_RANGE}|g" "\$LAB_PROVIDER/inventory" > "\$RUNTIME/inventory_proxmox"
 
-      # Override layer with our admin creds + dns_server
-      cat > "\$RUNTIME/inventory_overrides" <<OVR
+      # Two override files for two phases:
+      #
+      #   inventory_overrides_initial — used ONLY for preflight-vagrant.yml.
+      #     Connects as the bake-time Administrator account to create the
+      #     vagrant scaffolding user. After that one play, this inventory is
+      #     never used again.
+      #
+      #   inventory_overrides — used for everything else (preflight-dns +
+      #     full upstream chain). Connects as vagrant/vagrant. The vagrant
+      #     user persists through ad-servers.yml's password rotation of
+      #     Administrator (because ad-servers.yml only touches Administrator,
+      #     not vagrant), so WinRM keeps working all the way through.
+      #
+      # ansible_port=5985 is critical — without it pywinrm picks port based
+      # on transport defaults (which can resolve to 5986/HTTPS even when
+      # ansible_winrm_transport=ntlm is set), and our gateway only opens 5985.
+      cat > "\$RUNTIME/inventory_overrides_initial" <<INIT
       [all:vars]
-      ansible_user=\${ADMIN_USER}
-      ansible_password=\${ADMIN_PASSWORD}
+      ansible_user=\${INITIAL_USER}
+      ansible_password=\${INITIAL_PASSWORD}
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
       ansible_winrm_transport=ntlm
       ansible_winrm_server_cert_validation=ignore
       ansible_winrm_operation_timeout_sec=400
       ansible_winrm_read_timeout_sec=500
+
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      INIT
+
+      cat > "\$RUNTIME/inventory_overrides" <<OVR
+      [all:vars]
+      ansible_user=vagrant
+      ansible_password=vagrant
       ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=400
+      ansible_winrm_read_timeout_sec=500
       force_dns_server=yes
       dns_server=\${GW_IP}
       two_adapters=no
+
+      # Carve out localhost — upstream's wait*.yml playbooks target localhost
+      # for sleep tasks, but [all:vars] above would otherwise force ansible to
+      # WinRM-connect to localhost:5985 (which doesn't run WinRM here).
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
       OVR
 
       export ANSIBLE_CONFIG=\$ANSIBLE_DIR/ansible.cfg
@@ -330,8 +380,59 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         exit 1
       fi
 
+      # Build an extra-vars file (YAML for safe handling of special chars in
+      # the password). --extra-vars beats inventory vars at any level, which
+      # we need because upstream's data/inventory may try to override our
+      # connection settings via host_vars / play vars.
+      cat > "\$RUNTIME/extra_vars.yml" <<EXTRA
+      domain_name: "\$LAB"
+      data_path: "\$RUNTIME"
+      # admin_user is what upstream's plays use as the prefix for domain admin
+      # principals (admin_user@domain). After ad-parent_domain.yml promotes
+      # DC01, the domain admin account is named 'administrator' (from the
+      # local Administrator account that became the domain admin during
+      # promotion). Always lowercase 'administrator' in upstream's data.
+      admin_user: "administrator"
+      enable_http_proxy: "no"
+      # Single-NIC topology: upstream's data.yml expects a "nat_adapter" (the
+      # second NIC for outbound NAT) plus a "domain_adapter" (the lane NIC).
+      # Our Windows VMs only have one NIC, so we hardcode both to "Ethernet"
+      # (the default connection name on fresh Win Server 2019 with virtio/
+      # e1000) and force two_adapters=false. Bypasses the adapter detection
+      # logic, which has a string-vs-bool bug for single-NIC.
+      nat_adapter: "Ethernet"
+      domain_adapter: "Ethernet"
+      two_adapters: false
+      number_of_interfaces: 1
+      # Defensive defaults for vars referenced by upstream plays but missing
+      # from GOAD-Light's data/inventory. Mirrors upstream's globalsettings.ini
+      # (the canonical fallback values). Other lab variants (GOAD-Mini, full
+      # GOAD, NHA) include these in their own data/inventory; GOAD-Light's
+      # is just an upstream omission.
+      add_route: "no"
+      route_gateway: "192.18.0.1"
+      route_network: "10.0.0.0/8"
+      http_proxy: "no"
+      # DNS forwarder must be the lane gateway (192.18.0.1), NOT a public
+      # resolver. After DC promotion Windows pins DC's primary DNS to
+      # 127.0.0.1; that local DNS service then forwards externally to
+      # whatever dns_server_forwarder we set. The lane gateway's FORWARD
+      # chain only allows lan0 → 100.102.0.1:53 (the transit gateway);
+      # lan0 → 1.1.1.1:53 is dropped. Routing through 192.18.0.1's dnsmasq
+      # keeps DNS in the allowed path: dnsmasq → 100.102.0.1 → upstream.
+      dns_server_forwarder: "192.18.0.1"
+      # Keyboard layout hex codes — first one is the default. US only here;
+      # add other codes (e.g. "0000040C" for French) if needed.
+      keyboard_layouts: ["00000409"]
+      # Proxy defaults (unused since enable_http_proxy=no, but referenced)
+      proxy_ip: "x.x.x.x"
+      proxy_port: "8080"
+      ad_http_proxy: "http://x.x.x.x:8080"
+      ad_https_proxy: "http://x.x.x.x:8080"
+      EXTRA
+
+      INV_FLAGS_INITIAL="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides_initial"
       INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides"
-      EXTRA_VARS="domain_name=\$LAB data_path=\$RUNTIME admin_user=\${ADMIN_USER} enable_http_proxy=no"
 
       echo "================================================================="
       echo " GOAD provisioning: \$LAB"
@@ -340,10 +441,62 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       echo " Playbook chain: \${PLAYBOOKS}"
       echo "================================================================="
 
+      # Preflight #1: create the 'vagrant' scaffolding user on every Windows
+      # host. This connects via the bake-time Administrator account (the only
+      # account that exists at this point). After this play succeeds, ALL
+      # subsequent plays connect as vagrant/vagrant, so we never depend on
+      # the Administrator account again — and ad-servers.yml is free to
+      # rotate the Administrator password to per-host upstream values.
+      cat > "\$RUNTIME/preflight-vagrant.yml" <<PFV
+      ---
+      - name: "Preflight: create 'vagrant' scaffolding user on all Windows hosts"
+        hosts: domain
+        gather_facts: no
+        tasks:
+          - name: Ensure vagrant local user exists in Administrators
+            win_user:
+              name: vagrant
+              password: vagrant
+              state: present
+              password_never_expires: yes
+              account_disabled: no
+              groups:
+                - Administrators
+              groups_action: add
+      PFV
+      echo ""
+      echo ">>>>>>>>>>>>>>>>>>>>>> preflight-vagrant.yml <<<<<<<<<<<<<<<<<<<<<<"
+      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-vagrant.yml" --extra-vars "@\$RUNTIME/extra_vars.yml"
+
+      # Preflight #2: ensure DNS Server feature is installed on every DC.
+      # Upstream's child_domain role assumes Get-DnsServerForwarder is available
+      # immediately after the child DC's first reboot, but Install-ADDSDomain
+      # doesn't always pull in DNS-Server-Tools. Install it explicitly so the
+      # 'Configure DNS Forwarders' task doesn't blow up.
+      # Upstream's inventory groups DCs under [dc]; targeting that group catches
+      # every DC across all lab variants. Connects as vagrant (so this also
+      # validates the scaffolding user works before the long chain runs).
+      cat > "\$RUNTIME/preflight-dns.yml" <<PREFLIGHT
+      ---
+      - name: "Preflight: ensure DNS Server feature on all DCs"
+        hosts: dc
+        gather_facts: no
+        tasks:
+          - name: Install DNS Server + tools
+            win_feature:
+              name: DNS,RSAT-DNS-Server
+              include_management_tools: yes
+              state: present
+      PREFLIGHT
+      echo ""
+      echo ">>>>>>>>>>>>>>>>>>>>>> preflight-dns.yml <<<<<<<<<<<<<<<<<<<<<<"
+      ansible-playbook \$INV_FLAGS "\$RUNTIME/preflight-dns.yml" --extra-vars "@\$RUNTIME/extra_vars.yml" || \\
+        echo "WARNING: DNS preflight failed — continuing anyway, may fail later"
+
       for pb in \$PLAYBOOKS; do
         echo ""
         echo ">>>>>>>>>>>>>>>>>>>>>> \$pb <<<<<<<<<<<<<<<<<<<<<<"
-        ansible-playbook \$INV_FLAGS "\$pb" --extra-vars "\$EXTRA_VARS"
+        ansible-playbook \$INV_FLAGS "\$pb" --extra-vars "@\$RUNTIME/extra_vars.yml"
       done
 
       echo "================================================================="

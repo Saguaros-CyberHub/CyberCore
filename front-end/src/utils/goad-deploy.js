@@ -387,17 +387,28 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
  * Run /opt/goad-light/run.sh inside the controller. Blocks until the playbook
  * finishes (or fails). Returns the captured stdout/stderr.
  *
- * The wrapper inside the controller takes the lab name as the first arg and
- * a comma-separated list of "vmName:ip" pairs as the second. This keeps the
- * shell script simple and supports any lab topology without per-lab args.
+ * spec.goad.admin_user / admin_password represent the BAKE-TIME credentials
+ * of the Windows Server template (typically 'Administrator' + the password
+ * that was set when the Win VM template was built). These are used ONLY for
+ * a one-time preflight inside run.sh that creates a 'vagrant' Administrators-
+ * group user; after that, all subsequent ansible plays connect as
+ * vagrant/vagrant. The Administrator password gets rotated to per-host
+ * upstream values by ad-servers.yml without breaking WinRM, since vagrant
+ * is the connection identity from then on.
+ *
+ * Per-host local Administrator passwords (different per VM, preserving PTH
+ * teaching value) come from upstream's config.json verbatim — we no longer
+ * patch them.
  */
 async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, proxmoxAPI }) {
   const goad = spec.goad || {};
   const labName = goad.version || DEFAULT_LAB;
-  const adminUser = goad.admin_user || 'Administrator';
-  const adminPass = goad.admin_password;
-  if (!adminPass) {
-    throw new Error('spec.goad.admin_password is required');
+  // initialUser / initialPassword: bake-time Win template credentials. Used
+  // only by the run.sh preflight to bootstrap the vagrant scaffolding user.
+  const initialUser = goad.admin_user || 'Administrator';
+  const initialPass = goad.admin_password;
+  if (!initialPass) {
+    throw new Error('spec.goad.admin_password is required (bake-time Win template Administrator password)');
   }
 
   // Build HOST_MAP as pipe-separated triples "name|ip|mac" so run.sh can
@@ -419,7 +430,7 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, proxmo
   // SCCM + full GOAD can take an hour+; give it 2h headroom.
   // Use argv-form so spaces/special chars in HOST_MAP/password don't break.
   const { pid } = await agentExecArgv(bestNode, controllerVmId,
-    ['/opt/goad-light/run.sh', labName, hostMap, adminUser, adminPass],
+    ['/opt/goad-light/run.sh', labName, hostMap, initialUser, initialPass],
     proxmoxAPI);
   const result = await pollExecStatus(bestNode, controllerVmId, pid, 2 * 60 * 60 * 1000);
   if (!result.exited) throw new Error('GOAD playbook did not finish within 2h');
