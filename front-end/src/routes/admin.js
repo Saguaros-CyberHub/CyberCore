@@ -938,6 +938,13 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
     const attackBoxVmId = laneConfig.attack_box_vm_id || (ATTACK_BOX_VMID_OFFSET + vxlanId);
     vmIdsToDestroy.push({ vmid: attackBoxVmId, type: 'qemu', label: 'attack-box' });
 
+    // GOAD controller VM (200000 + vxlanId). Always include — if the lane
+    // wasn't a GOAD lane it just won't exist and gets filtered out by the
+    // cluster-resources lookup below. Prevents orphan controller configs
+    // (which block re-deploys at the same VMID with "File exists" errors).
+    const goadControllerVmId = 200000 + vxlanId;
+    vmIdsToDestroy.push({ vmid: goadControllerVmId, type: 'qemu', label: 'goad-controller' });
+
     const errors = [];
 
     // Find which node(s) the VMs are on
@@ -2576,6 +2583,11 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
 
         const attackBoxVmId = laneConfig.attack_box_vm_id || (ATTACK_BOX_VMID_OFFSET + vxlanId);
         allVmsToDestroy.push({ vmid: attackBoxVmId, type: 'qemu', label: 'attack-box', laneId: lane.lane_id });
+
+        // GOAD controller VM — always included defensively. Filtered out by
+        // cluster-resources lookup if the lane wasn't a GOAD lane.
+        const goadControllerVmId = 200000 + vxlanId;
+        allVmsToDestroy.push({ vmid: goadControllerVmId, type: 'qemu', label: 'goad-controller', laneId: lane.lane_id });
       }
     }
 
