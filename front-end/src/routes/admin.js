@@ -755,7 +755,8 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           try {
             await goadDeploy.deployGoadLane({
               lane, spec, module, vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, proxmoxAPI, waitForTask, query: cybercoreQuery
+              bestNode, templateNode, deployedVMs,
+              proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {
             console.error(`[GOAD] Provisioning failed for lane ${lane.lane_id}:`, goadErr.message);
@@ -2184,7 +2185,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 await goadDeploy.deployGoadLane({
                   lane: { lane_id: laneId },
                   spec, module, vnet, vxlanId, gatewayVmId,
-                  bestNode, templateNode,
+                  bestNode, templateNode, deployedVMs,
                   proxmoxAPI, waitForTask, query: cybercoreQuery
                 });
               } catch (goadErr) {
@@ -3618,7 +3619,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
             await goadDeploy.deployGoadLane({
               lane: { lane_id: laneId },
               spec, module: challengeModule, vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode,
+              bestNode, templateNode, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {

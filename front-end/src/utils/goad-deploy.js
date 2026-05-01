@@ -426,15 +426,13 @@ async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
  */
 async function deployGoadLane({
   lane, spec, module, vnet, vxlanId, gatewayVmId, bestNode, templateNode,
-  proxmoxAPI, waitForTask, query
+  deployedVMs, proxmoxAPI, waitForTask, query
 }) {
   if (!spec?.goad?.enabled) return null;
 
-  console.log(`[GOAD] Starting GOAD-Light provisioning for lane ${lane.lane_id} (vxlan ${vxlanId})`);
-
-  // (DHCP reservations are now written by the controller's run.sh via SSH
-  //  into the gateway, using the keypair baked into both templates. No
-  //  orchestrator-level SSH needed.)
+  const labName = spec.goad.version || DEFAULT_LAB;
+  const labDef = GOAD_LABS[labName] || GOAD_LABS[DEFAULT_LAB];
+  console.log(`[GOAD] Starting ${labName} provisioning for lane ${lane.lane_id} (vxlan ${vxlanId})`);
 
   // 1. Deploy controller (QEMU VM with qemu-guest-agent)
   const controllerVmId = await deployController({
@@ -451,13 +449,53 @@ async function deployGoadLane({
     throw new Error(`Controller VM ${controllerVmId} guest agent never came up within 3 min`);
   }
 
-  // Give Windows VMs more time — boot + WinRM startup is 60-180s typical.
-  await sleep(60000);
-
-  // 3. Wait for WinRM on every Windows VM in this lab (skip Linux)
+  // 2. Run prep.sh on the controller — writes DHCP reservations on the gateway
+  //    BEFORE the Windows VMs renew DHCP. Without this, Windows VMs sit on
+  //    whatever dynamic IPs they happened to grab at boot, and waitForWinRM
+  //    polls the wrong addresses.
   const macs = prepareGoadMacs(spec, vxlanId);
-  const labName = spec.goad.version || DEFAULT_LAB;
-  const labDef = GOAD_LABS[labName] || GOAD_LABS[DEFAULT_LAB];
+  const triples = Object.entries(macs).map(([n, i]) => `${n}|${i.static_ip}|${i.mac}`);
+  triples.push(`goad-controller|${ip(INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
+  if (spec.goad.include_kali !== false) {
+    triples.push(`kali|${ip(INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
+  }
+  const hostMap = triples.join(',');
+
+  console.log(`[GOAD] Writing DHCP reservations on gateway via prep.sh...`);
+  const escapedMap = hostMap.replace(/'/g, `'\\''`);
+  const { pid: prepPid } = await agentExec(bestNode, controllerVmId, `/opt/goad-light/prep.sh '${escapedMap}'`);
+  const prepResult = await pollExecStatus(bestNode, controllerVmId, prepPid, 60000);
+  if (!prepResult.exited || prepResult.exitcode !== 0) {
+    throw new Error(`prep.sh failed (exit ${prepResult.exitcode}): ${prepResult.stderr || prepResult.stdout}`);
+  }
+  console.log(`[GOAD] prep.sh complete — reservations active on gateway`);
+
+  // 3. Restart Windows VMs so they DHCP fresh and pick up the reserved IPs.
+  //    They were started by admin.js earlier (before reservations existed),
+  //    so they're sitting on dynamic IPs — a stop/start fixes that.
+  const winVMs = (deployedVMs || []).filter(v => {
+    if (v.type !== 'qemu') return false;
+    const labVm = labDef.vms.find(lv => lv.name === v.name);
+    return labVm && labVm.role !== 'linux';
+  });
+  if (winVMs.length > 0) {
+    console.log(`[GOAD] Restarting ${winVMs.length} Windows VM(s) to renew DHCP onto reserved IPs...`);
+    for (const vm of winVMs) {
+      try {
+        await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/stop`);
+      } catch (err) {
+        console.warn(`[GOAD] stop ${vm.vm_id} (${vm.name}): ${err.message}`);
+      }
+    }
+    await sleep(8000);  // let Proxmox finalize the stops
+    for (const vm of winVMs) {
+      await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`);
+    }
+    console.log(`[GOAD] Windows VMs restarted; waiting 60s for fresh boot + DHCP...`);
+    await sleep(60000);
+  }
+
+  // 4. Wait for WinRM on every Windows VM in this lab (skip Linux)
   const winrmIPs = labDef.vms
     .filter(v => v.role !== 'linux')                  // Linux VMs don't run WinRM
     .map(v => macs[v.name]?.static_ip)

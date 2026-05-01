@@ -190,13 +190,63 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
     content: |
       $DEPLOY_PUBKEY
 
+  # prep.sh writes DHCP reservations on the gateway. Run BEFORE the
+  # Windows VMs come up (or before they renew DHCP) so they pick up
+  # their reserved IPs. Orchestrator (admin.js / goad-deploy.js) calls
+  # this before waitForWinRM, then restarts the Windows VMs to force
+  # fresh DHCP, then runs run.sh for the actual playbook.
+  - path: /opt/goad-light/prep.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Usage: prep.sh HOST_MAP
+      #   HOST_MAP = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
+      set -e
+      if [ \$# -lt 1 ]; then
+        echo "Usage: \$0 HOST_MAP"
+        echo "  HOST_MAP — comma-separated 'name|ip|mac' triples"
+        exit 1
+      fi
+      HOST_MAP="\$1"
+
+      FIRST="\$(echo "\$HOST_MAP" | cut -d',' -f1)"
+      FIRST_IP="\$(echo "\$FIRST" | cut -d'|' -f2)"
+      IP_RANGE="\$(echo "\$FIRST_IP" | awk -F. '{print \$1"."\$2"."\$3}')"
+      GW_IP="\${IP_RANGE}.1"
+
+      RUNTIME=/var/lib/goad-run
+      mkdir -p "\$RUNTIME"
+
+      echo "[prep.sh] Writing DHCP reservations to gateway \${GW_IP}..."
+      SSH_OPTS="-i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -o ConnectTimeout=15 -o BatchMode=yes"
+      RESV_FILE="\$RUNTIME/lane-reservations.conf"
+      {
+        echo "# GOAD lane DHCP reservations — written by /opt/goad-light/prep.sh"
+        echo "\$HOST_MAP" | tr ',' '\n' | while IFS='|' read -r hname hip hmac; do
+          [ -z "\$hname" ] && continue
+          echo "dhcp-host=\$hmac,\$hip,\$hname"
+        done
+      } > "\$RESV_FILE"
+      cat "\$RESV_FILE"
+
+      # Push the reservations file + reload dnsmasq on the gateway. Also clear
+      # any existing leases so dynamic-DHCPed clients can't keep their old
+      # (wrong) IPs after a renewal — they'll be forced to re-request.
+      ssh \$SSH_OPTS root@\$GW_IP "
+        cat > /etc/dnsmasq.d/lane-reservations.conf
+        # Wipe stale leases so renewals can't return to dynamic IPs.
+        : > /var/lib/misc/dnsmasq.leases 2>/dev/null || true
+        rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
+      " < "\$RESV_FILE"
+      echo "[prep.sh] Reservations applied."
+
   - path: /opt/goad-light/run.sh
     permissions: '0755'
     content: |
       #!/bin/bash
-      # 1) SSH to lane gateway, write DHCP reservations + reload dnsmasq.
-      # 2) Render per-lab config.json + inventory.
-      # 3) Run upstream playbook chain over WinRM.
+      # Render per-lab config.json + inventory, run upstream playbook chain
+      # over WinRM. Assumes prep.sh has already been called (DHCP reservations
+      # are in place on the gateway and the Windows VMs have the right IPs).
       #
       # Usage: run.sh LAB HOST_MAP ADMIN_USER ADMIN_PASSWORD
       #   HOST_MAP = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
@@ -229,25 +279,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       GW_IP="\${IP_RANGE}.1"
 
       RUNTIME=/var/lib/goad-run
-      rm -rf "\$RUNTIME"
       mkdir -p "\$RUNTIME"
-
-      # ---- Step 1: write DHCP reservations on the gateway via SSH ----
-      echo "[run.sh] Writing DHCP reservations to gateway \${GW_IP}..."
-      SSH_OPTS="-i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -o ConnectTimeout=15 -o BatchMode=yes"
-      RESV_FILE="\$RUNTIME/lane-reservations.conf"
-      {
-        echo "# GOAD lane DHCP reservations — written by /opt/goad-light/run.sh"
-        echo "\$HOST_MAP" | tr ',' '\n' | while IFS='|' read -r hname hip hmac; do
-          [ -z "\$hname" ] && continue
-          echo "dhcp-host=\$hmac,\$hip,\$hname"
-        done
-      } > "\$RESV_FILE"
-      cat "\$RESV_FILE"
-      # Push the file and reload dnsmasq on the gateway. Try gateway service
-      # managers in order (openrc on Alpine, systemd otherwise).
-      ssh \$SSH_OPTS root@\$GW_IP "cat > /etc/dnsmasq.d/lane-reservations.conf && (rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true)" < "\$RESV_FILE"
-      echo "[run.sh] Reservations applied."
 
       # Patched config.json — set local_admin_password to ours for every host
       python3 - <<PY > "\$RUNTIME/config.json"
