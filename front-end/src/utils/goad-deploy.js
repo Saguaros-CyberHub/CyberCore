@@ -32,6 +32,30 @@
 // write DHCP reservations, using a keypair baked into both templates.
 const { agentExec, pollExecStatus, waitForGuestAgent } = require('./script-executor');
 
+/**
+ * Run an argv-style command inside a QEMU VM via the guest agent.
+ *
+ * Proxmox's agent/exec wants `command` either as a single string (executable
+ * only, no args) OR multiple `command=...` form params (executable + args).
+ * Our proxmoxAPI helper encodes objects as plain k=v, which collapses the
+ * argv into one giant "executable path with embedded spaces" → ENOENT.
+ *
+ * This wrapper builds the form body by hand with `command` repeated per
+ * argv element, then POSTs the raw string body. Returns { pid }.
+ */
+async function agentExecArgv(node, vmId, argv, proxmoxAPI) {
+  const body = argv.map(a => `command=${encodeURIComponent(a)}`).join('&');
+  const result = await proxmoxAPI(
+    'POST',
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+    body
+  );
+  if (!result?.pid) {
+    throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
+  }
+  return { pid: result.pid };
+}
+
 // Template VMID for the GOAD ansible controller (Debian 13 VM with
 // qemu-guest-agent, baked from scripts/bake-goad-controller-vm.sh —
 // git-clones upstream GOAD on first boot via cloud-init).
@@ -364,7 +388,7 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, timeoutMs = 60000
  * a comma-separated list of "vmName:ip" pairs as the second. This keeps the
  * shell script simple and supports any lab topology without per-lab args.
  */
-async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId }) {
+async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, proxmoxAPI }) {
   const goad = spec.goad || {};
   const labName = goad.version || DEFAULT_LAB;
   const adminUser = goad.admin_user || 'Administrator';
@@ -390,10 +414,10 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId }) {
 
   // Invoke the wrapper inside the controller VM via qemu-guest-agent.
   // SCCM + full GOAD can take an hour+; give it 2h headroom.
-  // Quote the password since it can contain shell metacharacters.
-  const escapedPass = adminPass.replace(/'/g, `'\\''`);
-  const cmd = `/opt/goad-light/run.sh ${labName} ${hostMap} ${adminUser} '${escapedPass}'`;
-  const { pid } = await agentExec(bestNode, controllerVmId, cmd);
+  // Use argv-form so spaces/special chars in HOST_MAP/password don't break.
+  const { pid } = await agentExecArgv(bestNode, controllerVmId,
+    ['/opt/goad-light/run.sh', labName, hostMap, adminUser, adminPass],
+    proxmoxAPI);
   const result = await pollExecStatus(bestNode, controllerVmId, pid, 2 * 60 * 60 * 1000);
   if (!result.exited) throw new Error('GOAD playbook did not finish within 2h');
   if (result.exitcode !== 0) {
@@ -468,8 +492,9 @@ async function deployGoadLane({
   const hostMap = triples.join(',');
 
   console.log(`[GOAD] Writing DHCP reservations on gateway via prep.sh...`);
-  const escapedMap = hostMap.replace(/'/g, `'\\''`);
-  const { pid: prepPid } = await agentExec(bestNode, controllerVmId, `/opt/goad-light/prep.sh '${escapedMap}'`);
+  const { pid: prepPid } = await agentExecArgv(bestNode, controllerVmId,
+    ['/opt/goad-light/prep.sh', hostMap],
+    proxmoxAPI);
   const prepResult = await pollExecStatus(bestNode, controllerVmId, prepPid, 60000);
   if (!prepResult.exited || prepResult.exitcode !== 0) {
     throw new Error(`prep.sh failed (exit ${prepResult.exitcode}): ${prepResult.stderr || prepResult.stdout}`);
