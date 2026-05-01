@@ -30,7 +30,8 @@ cyberhub-web-interface/
 node_modules/
 *.log
 Info/
-"N8N Workflow/"
+N8N Workflow/
+GOAD-main/
 
 
 # Added for install.sh

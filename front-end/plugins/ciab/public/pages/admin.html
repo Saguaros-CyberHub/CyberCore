@@ -802,6 +802,48 @@
         </div>
       </div>
 
+      <!-- GOAD (Game of Active Directory) configuration -->
+      <div style="margin-top: 1rem; padding: 0.75rem; background: #fffbeb; border: 1px solid #f6ad55; border-radius: 6px;">
+        <div style="display: flex; align-items: center; gap: 0.6rem;">
+          <input type="checkbox" id="tplGoadEnabled" onchange="onGoadToggle()" style="width: 18px; height: 18px; cursor: pointer;">
+          <label for="tplGoadEnabled" style="font-weight: 600; cursor: pointer; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</label>
+          <span style="font-size: 0.7rem; color: var(--gray-500);">Auto-deploys a 3-VM AD lab — controller LXC runs the playbook over WinRM</span>
+        </div>
+        <div id="tplGoadConfig" style="display: none; padding-top: 0.6rem; margin-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; font-size: 0.85rem; margin-bottom: 0.5rem;">
+            <div>
+              <label style="font-size: 0.75rem;">GOAD Version</label>
+              <select id="tplGoadVersion" onchange="onGoadVersionChange()" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+                <option value="GOAD-Light">Loading...</option>
+              </select>
+              <span id="tplGoadVersionDesc" style="font-size: 0.7rem; color: var(--gray-500);"></span>
+            </div>
+            <div>
+              <label style="font-size: 0.75rem;">Forest Domain</label>
+              <input type="text" id="tplGoadDomain" value="sevenkingdoms.local" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+            <div>
+              <label style="font-size: 0.75rem;">Child Subdomain</label>
+              <input type="text" id="tplGoadChild" value="north" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            </div>
+          </div>
+          <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
+            <div>
+              <label style="font-size: 0.75rem;">Administrator Password (must match template 1004)</label>
+              <input type="text" id="tplGoadPassword" value="SecureGOADP@$$123" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem; font-family: monospace;">
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.1rem;">
+              <input type="checkbox" id="tplGoadKali" checked onchange="onGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
+              <label for="tplGoadKali" style="font-size: 0.8rem; cursor: pointer;">Include Kali attack box (192.18.0.20)</label>
+            </div>
+          </div>
+          <p style="font-size: 0.7rem; color: var(--gray-500); margin-top: 0.5rem; margin-bottom: 0;">
+            Enabling this replaces the VM list below with the GOAD topology.
+            Disabling restores an empty VM list. Lane IPs (matches upstream GOAD): DC01=.10, DC02=.11, SRV02=.22, controller=.5, Kali=.20.
+          </p>
+        </div>
+      </div>
+
       <h4 style="margin: 1rem 0 0.5rem;">Virtual Machines</h4>
       <div id="tplVmList"></div>
       <button class="btn btn-sm btn-outline" onclick="addTemplateVM()" style="margin-top: 0.5rem;">+ Add VM</button>
@@ -3563,6 +3605,182 @@
     let templateVMs = [];
     let templatePhantoms = [];
 
+    // ---- GOAD helpers ----
+    // Lab catalog cached from /api/admin/goad/labs (loaded on first need).
+    let _goadCatalog = null;
+    async function loadGoadCatalog() {
+      if (_goadCatalog) return _goadCatalog;
+      try {
+        _goadCatalog = await api('GET', '/goad/labs');
+      } catch (e) {
+        console.error('Failed to load GOAD lab catalog', e);
+        // Fallback: minimal static catalog so the UI still works
+        _goadCatalog = {
+          default_lab: 'GOAD-Light',
+          labs: [{
+            key: 'GOAD-Light',
+            displayName: 'GOAD-Light (3 Win VMs)',
+            description: '',
+            vms: [
+              { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ip: '192.18.0.10', nic_model: 'e1000' },
+              { name: 'DC02',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ip: '192.18.0.11', nic_model: 'e1000' },
+              { name: 'SRV02', role: 'member', os: 'Windows Server 2019', template_vmid: 1004, ip: '192.18.0.22', nic_model: 'e1000' }
+            ]
+          }]
+        };
+      }
+      return _goadCatalog;
+    }
+
+    // Populate the version dropdown from the API catalog.
+    async function populateGoadVersionDropdown() {
+      const catalog = await loadGoadCatalog();
+      const select = document.getElementById('tplGoadVersion');
+      const previous = select.value || catalog.default_lab;
+      select.innerHTML = catalog.labs.map(l =>
+        `<option value="${l.key}">${escHtml(l.displayName)}</option>`
+      ).join('');
+      // Restore prior selection if still valid, else default
+      select.value = catalog.labs.some(l => l.key === previous) ? previous : catalog.default_lab;
+      onGoadVersionChange();
+    }
+
+    function findLab(labKey) {
+      return _goadCatalog?.labs.find(l => l.key === labKey);
+    }
+
+    // Build the VM list for a selected lab. Each lab VM is converted to
+    // our challenge-spec shape (name/role/os/template_vmid/type/vm_offset).
+    // Kali (optional) is appended after the lab VMs.
+    function buildGoadVms(labKey, includeKali) {
+      const lab = findLab(labKey);
+      if (!lab) return [];
+      const vms = lab.vms.map((v, i) => ({
+        name:          v.name,
+        role:          v.role,
+        os:            v.os,
+        template_vmid: v.template_vmid,
+        type:          'qemu',
+        vm_offset:     600000 + i * 10000,
+        default_scripts: [],
+        services:      []
+      }));
+      if (includeKali) {
+        vms.push({
+          name: 'Kali', role: 'attacker', os: 'Kali Linux',
+          template_vmid: 1699, type: 'qemu',
+          vm_offset: 600000 + vms.length * 10000,
+          default_scripts: [], services: []
+        });
+      }
+      return vms;
+    }
+
+    // Snapshot saved before GOAD overwrote templateVMs, so disabling restores the previous list.
+    let _preGoadVMs = null;
+
+    async function onGoadToggle() {
+      const enabled = document.getElementById('tplGoadEnabled').checked;
+      document.getElementById('tplGoadConfig').style.display = enabled ? 'block' : 'none';
+      if (enabled) {
+        await populateGoadVersionDropdown();
+        if (_preGoadVMs === null) _preGoadVMs = templateVMs.slice();
+        const labKey = document.getElementById('tplGoadVersion').value;
+        const includeKali = document.getElementById('tplGoadKali').checked;
+        templateVMs = buildGoadVms(labKey, includeKali);
+        renderTemplateVMs();
+        if (typeof Toast !== 'undefined') Toast.info('GOAD enabled', `VM list set to ${labKey} topology`);
+      } else {
+        if (_preGoadVMs !== null) {
+          templateVMs = _preGoadVMs;
+          _preGoadVMs = null;
+        } else {
+          templateVMs = [];
+        }
+        renderTemplateVMs();
+      }
+    }
+
+    function onGoadVersionChange() {
+      const labKey = document.getElementById('tplGoadVersion').value;
+      const lab = findLab(labKey);
+      const desc = document.getElementById('tplGoadVersionDesc');
+      if (desc && lab) desc.textContent = lab.description || '';
+      // Only re-populate VMs if GOAD is actually enabled (user actively
+      // chose a different lab via the dropdown). Otherwise just update text.
+      if (document.getElementById('tplGoadEnabled').checked) {
+        const includeKali = document.getElementById('tplGoadKali').checked;
+        templateVMs = buildGoadVms(labKey, includeKali);
+        renderTemplateVMs();
+      }
+    }
+
+    function onGoadKaliToggle() {
+      if (!document.getElementById('tplGoadEnabled').checked) return;
+      const includeKali = document.getElementById('tplGoadKali').checked;
+      const hasKali = templateVMs.some(v => v.name === 'Kali');
+      if (includeKali && !hasKali) {
+        templateVMs.push({
+          name: 'Kali', role: 'attacker', os: 'Kali Linux',
+          template_vmid: 1699, type: 'qemu',
+          vm_offset: 600000 + templateVMs.length * 10000,
+          default_scripts: [], services: []
+        });
+        renderTemplateVMs();
+      } else if (!includeKali && hasKali) {
+        templateVMs = templateVMs.filter(v => v.name !== 'Kali');
+        renderTemplateVMs();
+      }
+    }
+
+    function resetGoadFields() {
+      _preGoadVMs = null;
+      document.getElementById('tplGoadEnabled').checked = false;
+      document.getElementById('tplGoadConfig').style.display = 'none';
+      // Version dropdown — leave as-is; populateGoadVersionDropdown() picks default
+      document.getElementById('tplGoadDomain').value = 'sevenkingdoms.local';
+      document.getElementById('tplGoadChild').value = 'north';
+      document.getElementById('tplGoadPassword').value = 'SecureGOADP@$$123';
+      document.getElementById('tplGoadKali').checked = true;
+      const desc = document.getElementById('tplGoadVersionDesc');
+      if (desc) desc.textContent = '';
+    }
+
+    async function loadGoadFields(goad) {
+      if (!goad || !goad.enabled) {
+        resetGoadFields();
+        return;
+      }
+      document.getElementById('tplGoadEnabled').checked = true;
+      document.getElementById('tplGoadConfig').style.display = 'block';
+      // Populate dropdown then select the saved version
+      await populateGoadVersionDropdown();
+      const version = goad.version || (_goadCatalog?.default_lab) || 'GOAD-Light';
+      const select = document.getElementById('tplGoadVersion');
+      if ([...select.options].some(o => o.value === version)) {
+        select.value = version;
+      }
+      document.getElementById('tplGoadDomain').value   = goad.domain           || 'sevenkingdoms.local';
+      document.getElementById('tplGoadChild').value    = goad.child_subdomain  || 'north';
+      document.getElementById('tplGoadPassword').value = goad.admin_password   || 'SecureGOADP@$$123';
+      document.getElementById('tplGoadKali').checked   = goad.include_kali !== false;
+      onGoadVersionChange();  // refresh description text
+    }
+
+    // Read GOAD config from the modal back into a body-ready object (or null if disabled).
+    function readGoadFields() {
+      if (!document.getElementById('tplGoadEnabled').checked) return null;
+      return {
+        enabled:         true,
+        version:         document.getElementById('tplGoadVersion').value || (_goadCatalog?.default_lab) || 'GOAD-Light',
+        domain:          document.getElementById('tplGoadDomain').value.trim() || 'sevenkingdoms.local',
+        child_subdomain: document.getElementById('tplGoadChild').value.trim() || 'north',
+        admin_user:      'Administrator',
+        admin_password:  document.getElementById('tplGoadPassword').value || 'SecureGOADP@$$123',
+        include_kali:    document.getElementById('tplGoadKali').checked
+      };
+    }
+
     function showCreateTemplateModal() {
       document.getElementById('templateEditorTitle').textContent = 'New Challenge Template';
       document.getElementById('tplEditId').value = '';
@@ -3571,6 +3789,7 @@
       document.getElementById('tplDifficulty').value = 'intermediate';
       templateVMs = [{ name: '', role: '', os: 'Windows 11 25H2', template_vmid: '', type: 'qemu', vm_offset: 600000, default_scripts: [], services: [] }];
       templatePhantoms = [];
+      resetGoadFields();
       renderTemplateVMs();
       renderTemplatePhantoms();
       document.getElementById('templateEditorModal').classList.add('active');
@@ -3579,6 +3798,7 @@
     async function editTemplate(id) {
       try {
         const t = await api('GET', `/challenge-templates/${id}`);
+        const spec = t.spec ? (typeof t.spec === 'string' ? JSON.parse(t.spec) : t.spec) : {};
         document.getElementById('templateEditorTitle').textContent = `Edit: ${t.name}`;
         document.getElementById('tplEditId').value = id;
         document.getElementById('tplName').value = t.name;
@@ -3586,8 +3806,15 @@
         document.getElementById('tplDifficulty').value = t.difficulty;
         document.getElementById('tplModule').value = t.module || 'crucible';
         document.getElementById('tplChallengeKey').value = t.challenge_key || '';
-        templateVMs = typeof t.vm_specs === 'string' ? JSON.parse(t.vm_specs) : (t.vm_specs || []);
-        templatePhantoms = typeof t.phantom_assets === 'string' ? JSON.parse(t.phantom_assets) : (t.phantom_assets || []);
+        // Prefer spec.vms / spec.phantom_assets (where the deploy code reads from);
+        // fall back to top-level vm_specs / phantom_assets for legacy rows.
+        templateVMs = (spec.vms && spec.vms.length)
+          ? spec.vms
+          : (typeof t.vm_specs === 'string' ? JSON.parse(t.vm_specs) : (t.vm_specs || []));
+        templatePhantoms = (spec.phantom_assets && spec.phantom_assets.length)
+          ? spec.phantom_assets
+          : (typeof t.phantom_assets === 'string' ? JSON.parse(t.phantom_assets) : (t.phantom_assets || []));
+        await loadGoadFields(spec.goad);
         renderTemplateVMs();
         renderTemplatePhantoms();
         document.getElementById('templateEditorModal').classList.add('active');
@@ -3645,6 +3872,7 @@
 
     async function saveTemplate() {
       const editId = document.getElementById('tplEditId').value;
+      const goad = readGoadFields();
       const body = {
         name: document.getElementById('tplName').value.trim(),
         description: document.getElementById('tplDesc').value.trim(),
@@ -3654,6 +3882,18 @@
         vm_specs: templateVMs,
         phantom_assets: templatePhantoms
       };
+      // For PUT (editing existing crucible_challenge), the backend expects
+      // the full spec object since it overwrites spec atomically. For POST
+      // (/create-challenge), the backend reads `goad` at the top level. We
+      // include both shapes so either endpoint picks it up correctly.
+      if (goad) {
+        body.goad = goad;
+        body.spec = {
+          vms: templateVMs,
+          phantom_assets: templatePhantoms,
+          goad
+        };
+      }
 
       if (!body.name || templateVMs.length === 0) {
         Toast.warning('Missing', 'Name and at least one VM are required');

@@ -13,8 +13,34 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI } = require('../utils/proxmox');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const goadDeploy = require('../utils/goad-deploy');
 
 const adminOnly = requireRole('admin');
+
+// GET /api/admin/goad/labs — single source of truth for the admin UI's
+// GOAD version dropdown. Returns the lab catalog from goad-deploy.js.
+router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
+  res.json({
+    default_lab: goadDeploy.DEFAULT_LAB,
+    labs: Object.entries(goadDeploy.GOAD_LABS).map(([key, lab]) => ({
+      key,
+      displayName: lab.displayName,
+      description: lab.description,
+      forestRoot:  lab.forestRoot,
+      vms: lab.vms.map(v => ({
+        name:          v.name,
+        role:          v.role,
+        os:            v.os,
+        template_vmid: v.template_vmid,
+        ip:            `${goadDeploy.LANE_SUBNET}.${v.ipOctet}`,
+        nic_model:     v.nic_model
+      }))
+    })),
+    infra_ips: Object.fromEntries(
+      Object.entries(goadDeploy.INFRA_IP_OCTETS).map(([k, octet]) => [k, `${goadDeploy.LANE_SUBNET}.${octet}`])
+    )
+  });
+});
 
 // ============================================================================
 // VULNERABILITY SCRIPTS (clinic_db)
@@ -334,7 +360,8 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
   try {
     const {
       name, challenge_key, description, difficulty, zone_abbrev,
-      template_vmid, vms: vmsList, max_lanes, module, challenge_type
+      template_vmid, vms: vmsList, max_lanes, module, challenge_type,
+      goad
     } = req.body;
 
     if (!name || !challenge_key || !max_lanes) {
@@ -421,6 +448,22 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
         max_concurrent_lanes: numLanes
       }
     };
+
+    // GOAD: when goad.enabled=true, embed the GOAD config so deploy paths can
+    // detect it and run the post-clone provisioning (controller LXC + ansible
+    // playbook). Defaults match what bake-goad-controller.sh / template 1004
+    // ship with so admins can toggle this on without filling in every field.
+    if (goad && goad.enabled) {
+      spec.goad = {
+        enabled: true,
+        version:          goad.version          || 'light',
+        domain:           goad.domain           || 'sevenkingdoms.local',
+        child_subdomain:  goad.child_subdomain  || 'north',
+        admin_user:       goad.admin_user       || 'Administrator',
+        admin_password:   goad.admin_password   || 'SecureGOADP@$$123',
+        include_kali:     goad.include_kali !== false  // default true
+      };
+    }
 
     // 3. Insert challenge record into cybercore_db
     pushStatus('Inserting challenge record...');

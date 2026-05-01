@@ -17,6 +17,7 @@ const { logActivity } = require('../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../utils/script-executor');
 const { selectBestNode } = require('../utils/node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../utils/batch-deployer');
+const goadDeploy = require('../utils/goad-deploy');
 
 const adminOnly = requireRole('admin');
 
@@ -631,8 +632,8 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     const templateVmid = spec.template_vmid || 1600;
     // Gateway template per module (matches N8N workflow mapping)
     // Module mapping takes priority — spec.gateway_vmid is legacy and may be stale (e.g., old 1699)
-    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 2692, forge: 1693 };
-    const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 2692;
+    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+    const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
     const templateNode = spec.template_node || 'cyberhub-node-5';
     // Select least-loaded node for deployment
     const bestNodeInfo = await selectBestNode();
@@ -671,6 +672,9 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     // ---- Background deployment (non-blocking) ----
     (async () => {
       try {
+        // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
+        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId);
+
         // Multi-VM support: if spec.vms exists, deploy each VM; otherwise fall back to single VM
         const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
         const deployedVMs = [];
@@ -680,6 +684,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           const vmType = vmSpec.type || 'qemu';
           const vmTemplate = vmSpec.template_vmid || templateVmid;
           const vmName = vmSpec.name || challenge_key;
+          const goadMac = goadMacs[vmName]?.mac;
 
           console.log(`[Deploy] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
 
@@ -691,7 +696,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
             await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-              net1: `name=lan0,bridge=${vnet.vnet}`
+              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vnet.vnet, goadMac)
             });
           } else {
             const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
@@ -701,7 +706,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
             await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-              net0: `virtio,bridge=${vnet.vnet}`
+              net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
             });
           }
 
@@ -739,6 +744,24 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             ? `/api2/json/nodes/${vm.node}/lxc/${vm.vm_id}/status/start`
             : `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`;
           await proxmoxAPI('POST', startPath);
+        }
+
+        // GOAD provisioning (no-op for non-GOAD specs). Runs after gateway+VMs
+        // are up: writes DHCP reservations on the gateway, deploys the GOAD
+        // controller LXC (template 1700), polls WinRM, runs the playbook,
+        // then stops the controller. Any failure here is logged + marks the
+        // lane's metadata.goad.status='failed' but doesn't tear down the VMs.
+        if (spec.goad?.enabled) {
+          try {
+            await goadDeploy.deployGoadLane({
+              lane, spec, module, vnet, vxlanId, gatewayVmId,
+              bestNode, templateNode, proxmoxAPI, waitForTask, query: cybercoreQuery
+            });
+          } catch (goadErr) {
+            console.error(`[GOAD] Provisioning failed for lane ${lane.lane_id}:`, goadErr.message);
+            // Lane stays 'deploying'/'active' per existing flow; metadata.goad
+            // already records the failure for the admin UI.
+          }
         }
 
         // Run vulnerability scripts if any were selected
@@ -1776,8 +1799,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
     // 5. Deploy lanes per student (if enabled)
     if (shouldDeployLanes) {
       const templateVmid = spec.template_vmid || 1600;
-      const gatewayVmidByModule = { cyberlabs: 1691, crucible: 2692, forge: 1693 };
-      const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 2692;
+      const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+      const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
       const templateNode = spec.template_node || 'cyberhub-node-5';
 
       // Distribute lanes across nodes (query cluster ONCE instead of per-lane)
@@ -2059,6 +2082,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             const gatewayVmId = 100000 + vxlanId;
             const deployedVMs = [];
 
+            // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
+            const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId);
+
             // Clone all challenge VMs — each clone goes through the shared semaphore
             // so we never exceed MAX_CONCURRENT_CLONES across all lanes
             const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
@@ -2067,6 +2093,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               const vmTemplate = vmSpec.template_vmid || templateVmid;
               const vmName = vmSpec.name || challenge_key;
               const vmType = vmSpec.type || 'qemu';
+              const goadMac = goadMacs[vmName]?.mac;
 
               await cloneSem.run(async () => {
                 console.log(`[Group ${group_name}] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${student.email}`);
@@ -2079,7 +2106,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                   });
                   if (result) await waitForTask(templateNode, result);
                   await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-                    net1: `name=lan0,bridge=${vnet.vnet}`
+                    net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vnet.vnet, goadMac)
                   });
                 } else {
                   const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
@@ -2089,7 +2116,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                   });
                   if (result) await waitForTask(templateNode, result);
                   await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                    net0: `virtio,bridge=${vnet.vnet}`
+                    net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
                   });
                 }
               });
@@ -2145,6 +2172,24 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 ? `/api2/json/nodes/${dvm.node}/lxc/${dvm.vm_id}/status/start`
                 : `/api2/json/nodes/${dvm.node}/qemu/${dvm.vm_id}/status/start`;
               await proxmoxAPI('POST', startPath);
+            }
+
+            // GOAD provisioning (no-op for non-GOAD specs). Each lane gets its
+            // own controller clone, runs the playbook over WinRM, then stops
+            // the controller. Failures are logged + recorded in lane metadata
+            // but don't fail the whole batch deploy.
+            if (spec.goad?.enabled) {
+              progress.lanes[laneId].status = 'provisioning_goad';
+              try {
+                await goadDeploy.deployGoadLane({
+                  lane: { lane_id: laneId },
+                  spec, module, vnet, vxlanId, gatewayVmId,
+                  bestNode, templateNode,
+                  proxmoxAPI, waitForTask, query: cybercoreQuery
+                });
+              } catch (goadErr) {
+                console.error(`[Group ${group_name}] GOAD provisioning failed for ${student.email}: ${goadErr.message}`);
+              }
             }
 
             // Start attack box and create Guacamole connection
@@ -3352,8 +3397,8 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
     }
 
     // Build the spec object compatible with the existing deploy-lane flow
-    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 2692, forge: 1693 };
-    const gatewayVmid = gatewayVmidByModule[challengeModule] || 2692;
+    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+    const gatewayVmid = gatewayVmidByModule[challengeModule] || 1692;
     const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
     const bestNodeInfo = await selectBestNode();
     const bestNode = bestNodeInfo.node;
@@ -3494,12 +3539,16 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
       try {
         const deployedVMs = [];
 
+        // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
+        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId);
+
         // Clone all VMs
         for (const vmSpec of vmSpecs) {
           const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
           const vmType = vmSpec.type || 'qemu';
           const vmTemplate = vmSpec.template_vmid;
           const vmName = vmSpec.name || `vm-${vmId}`;
+          const goadMac = goadMacs[vmName]?.mac;
 
           if (!vmTemplate) {
             console.error(`[ChallengeNetwork] VM ${vmName} has no template_vmid, skipping`);
@@ -3515,7 +3564,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
             });
             if (result) await waitForTask(templateNode, result);
             await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-              net1: `name=lan0,bridge=${vnet.vnet}`
+              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vnet.vnet, goadMac)
             });
           } else {
             const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
@@ -3524,7 +3573,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
             });
             if (result) await waitForTask(templateNode, result);
             await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-              net0: `virtio,bridge=${vnet.vnet}`
+              net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
             });
           }
 
@@ -3562,6 +3611,20 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
         }
 
         console.log(`[ChallengeNetwork] All ${deployedVMs.length} VMs cloned and started`);
+
+        // GOAD provisioning (no-op for non-GOAD specs).
+        if (spec.goad?.enabled) {
+          try {
+            await goadDeploy.deployGoadLane({
+              lane: { lane_id: laneId },
+              spec, module: challengeModule, vnet, vxlanId, gatewayVmId,
+              bestNode, templateNode,
+              proxmoxAPI, waitForTask, query: cybercoreQuery
+            });
+          } catch (goadErr) {
+            console.error(`[ChallengeNetwork] GOAD provisioning failed for lane ${laneId}: ${goadErr.message}`);
+          }
+        }
 
         // Wait for guest agents on QEMU VMs, then run scripts
         await query(
