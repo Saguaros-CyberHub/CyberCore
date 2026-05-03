@@ -18,6 +18,8 @@ const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../utils/sc
 const { selectBestNode } = require('../utils/node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../utils/batch-deployer');
 const goadDeploy = require('../utils/goad-deploy');
+const nodeSsh = require('../utils/node-ssh');
+const tailscale = require('../utils/tailscale');
 
 const adminOnly = requireRole('admin');
 
@@ -150,6 +152,45 @@ function resolveLaneNetworking(subnetScheme, module, vxlanId) {
       netmask24: '255.255.255.0'
     }
   };
+}
+
+/**
+ * For v2 lanes only: mint a one-shot Tailscale auth key tagged tag:lane-<vxlanId>
+ * and append it to /etc/cybercore-gateway.env on the lane gateway. firstboot
+ * will run `tailscale up` with the key on first start, then wipe the key.
+ *
+ * No-op (and resolves silently) if:
+ *   - subnet_scheme is not 'v2', OR
+ *   - Tailscale env vars (OAuth client + tailnet) are not configured.
+ *
+ * Failure to mint/push DOES NOT fail the deploy — the lane still works,
+ * just without BYOAB tailnet access. Logged as a warning.
+ */
+async function configureLaneTailscale({ subnetScheme, bestNode, gatewayVmId, vxlanId, laneName, logTag = '[Deploy]' }) {
+  if (subnetScheme !== 'v2') return false;
+  if (!tailscale.isEnabled()) {
+    console.log(`${logTag} Tailscale env not configured — skipping BYOAB key mint for lane ${vxlanId}`);
+    return false;
+  }
+  try {
+    const { key, tags } = await tailscale.mintLaneAuthKey({ vxlanId });
+    const envFragment = tailscale.buildEnvFragment({
+      authKey:  key,
+      vxlanId,
+      tags,
+      hostname: laneName ? `lane-${vxlanId}-${laneName}`.substring(0, 63).replace(/[^a-z0-9-]/gi, '-').toLowerCase() : `lane-${vxlanId}`
+    });
+    // Append to existing env file rather than replace — preserves bake defaults.
+    await nodeSsh.pctExecWithStdin(bestNode, gatewayVmId,
+      ['/bin/sh', '-c', 'cat >> /etc/cybercore-gateway.env'],
+      envFragment
+    );
+    console.log(`${logTag} Tailscale auth key minted + pushed for lane ${vxlanId} (tags=${tags.join(',')})`);
+    return true;
+  } catch (err) {
+    console.warn(`${logTag} Tailscale config failed for lane ${vxlanId} (deploy continues): ${err.message}`);
+    return false;
+  }
 }
 
 // ============================================================================
@@ -843,6 +884,13 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
+        // v2 only: mint a Tailscale auth key + push it to the gateway BEFORE
+        // first boot, so firstboot's `tailscale up` finds it. No-op for v1
+        // and silent skip if Tailscale env is unconfigured.
+        await configureLaneTailscale({
+          subnetScheme, bestNode, gatewayVmId, vxlanId, laneName, logTag: '[Deploy]'
+        });
+
         // Start gateway first, then all challenge VMs
         await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
         await new Promise(r => setTimeout(r, 5000));
@@ -1141,6 +1189,12 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
         errors.push(`${vm.label} (${vm.type} ${vm.vmid}): could not be destroyed`);
       }
     }
+
+    // v2-only: best-effort cleanup of any tailnet device tagged for this lane.
+    // Ephemeral keys auto-remove the device when offline so this is mostly
+    // aesthetic — but eagerly deleting avoids leaving "lane-X (offline)"
+    // entries lingering in the Tailscale admin UI. Failures are swallowed.
+    await tailscale.deleteLaneDevices({ vxlanId }).catch(() => {});
 
     // Delete the lane row so the VXLAN ID is freed for reuse
     await cybercoreQuery(
@@ -2132,6 +2186,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
                 net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
               });
+              // v2 only: mint+push Tailscale auth key (silent no-op for v1)
+              await configureLaneTailscale({
+                subnetScheme, bestNode: node, gatewayVmId, vxlanId,
+                laneName: job.laneName, logTag: `[Group ${group_name}]`
+              });
               gatewayResults[laneId] = { success: true };
               console.log(`[Group ${group_name}] Gateway ${gatewayVmId} cloned on ${node}`);
             } catch (err) {
@@ -2864,6 +2923,17 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     const allUserIds = allUsers.map(u => u.id);
     const allUserEmails = allUsers.map(u => u.email);
 
+    // Best-effort Tailscale device cleanup for v2 lanes. Ephemeral keys
+    // auto-clean offline devices, but eagerly deleting keeps the tailnet
+    // admin UI tidy. Collect every torn-down lane's vxlan_id and call
+    // deleteLaneDevices in parallel with the other cleanups.
+    const torndownVxlanIds = [];
+    for (const lanes of studentLaneResults) {
+      for (const ln of lanes) {
+        if (ln.vxlan_id && ln.status !== 'deleted') torndownVxlanIds.push(ln.vxlan_id);
+      }
+    }
+
     await Promise.all([
       laneIds.length > 0
         ? cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = ANY($1)`, [laneIds]).catch(e => errors.push(`Lane cleanup: ${e.message}`))
@@ -2885,7 +2955,12 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
 
       config.guac_group?.identifier
         ? guacAPI('DELETE', `/connectionGroups/${config.guac_group.identifier}`).catch(e => errors.push(`Guac group delete: ${e.message}`))
-        : Promise.resolve()
+        : Promise.resolve(),
+
+      // Tailscale tag-based device delete (no-op if Tailscale env unset, or v1)
+      ...torndownVxlanIds.map(vxId =>
+        tailscale.deleteLaneDevices({ vxlanId: vxId }).catch(() => {})
+      )
     ]);
 
     // ── Phase 6: Sweep orphaned disks for any destroyed VMIDs ──
@@ -3740,6 +3815,11 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
           net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
           net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
+        });
+
+        // v2 only: mint+push Tailscale auth key (silent no-op for v1)
+        await configureLaneTailscale({
+          subnetScheme, bestNode, gatewayVmId, vxlanId, laneName, logTag: '[ChallengeNetwork]'
         });
 
         // Start gateway first

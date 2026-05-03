@@ -190,6 +190,45 @@ rc-service dnsmasq restart >/dev/null 2>&1 \
   || rc-service dnsmasq start >/dev/null 2>&1 \
   || true
 
+# --- Tailscale subnet router (BYOAB) ---
+# If TAILSCALE_AUTHKEY is set in /etc/cybercore-gateway.env (admin.js drops
+# it per-deploy), bring up Tailscale advertising this lane's /24 so the
+# tailnet can route to lane VMs. Tag-driven ACLs in the tailnet decide
+# which student tags can reach this lane's tag.
+#
+# tailscaled runs in userspace-networking mode (configured by the bake
+# script in /etc/conf.d/tailscaled), so no TUN device or LXC capability
+# tweaks are needed. Subnet routing still works.
+if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
+  TS_HOSTNAME="${TAILSCALE_HOSTNAME:-lane-gw-${LAN_BASE3//./-}}"
+  TS_TAGS="${TAILSCALE_TAGS:-}"
+  rc-service tailscale start >/dev/null 2>&1 \
+    || /etc/init.d/tailscale start >/dev/null 2>&1 \
+    || true
+  # Give the daemon a moment to come up before `up`
+  for _ in 1 2 3 4 5; do
+    tailscale status >/dev/null 2>&1 && break
+    sleep 1
+  done
+  TS_UP_ARGS="--authkey=${TAILSCALE_AUTHKEY} --advertise-routes=${LAN_NET} --hostname=${TS_HOSTNAME} --reset --accept-dns=false"
+  if [ -n "$TS_TAGS" ]; then
+    TS_UP_ARGS="$TS_UP_ARGS --advertise-tags=${TS_TAGS}"
+  fi
+  if tailscale up $TS_UP_ARGS >/tmp/tailscale-up.log 2>&1; then
+    # Auth succeeded — the key is now consumed (one-shot, single-use), but
+    # wipe it from /etc/cybercore-gateway.env anyway so a forensic snapshot
+    # of the rootfs after first boot doesn't contain the key string.
+    if [ -w /etc/cybercore-gateway.env ]; then
+      sed -i 's|^TAILSCALE_AUTHKEY=.*|TAILSCALE_AUTHKEY=|' /etc/cybercore-gateway.env
+    fi
+    logger -t cybercore-firstboot "tailscale up OK: hostname=${TS_HOSTNAME} routes=${LAN_NET} tags=${TS_TAGS} (key wiped)"
+  else
+    logger -t cybercore-firstboot "tailscale up FAILED — see /tmp/tailscale-up.log"
+  fi
+else
+  logger -t cybercore-firstboot "TAILSCALE_AUTHKEY not set — skipping tailscale up (BYOAB disabled for this lane)"
+fi
+
 logger -t cybercore-firstboot "rendered: lan0=${LAN_IP}/${LAN_PREFIX} net=${LAN_NET} dhcp=${DHCP_START}-${DHCP_END} controller=${CONTROLLER_IP} dns_fwd=${DNS_FORWARDER}"
 echo "[cybercore-firstboot] lan0=${LAN_IP}/${LAN_PREFIX} controller=${CONTROLLER_IP}" >&2
 FIRSTBOOT_EOF
@@ -212,6 +251,18 @@ CONTROLLER_OCTET=5
 # DHCP scope for lane VMs (excludes .1 gateway and .5 controller)
 DHCP_START_OCTET=10
 DHCP_END_OCTET=200
+
+# --- Tailscale subnet router (BYOAB) ---
+# Set TAILSCALE_AUTHKEY to enable Tailscale on this lane gateway. The
+# firstboot hook will run `tailscale up` advertising the lane's /24.
+# Generate keys at https://login.tailscale.com/admin/settings/keys —
+# pre-approved + ephemeral + tagged keys are recommended (one-shot per
+# lane, auto-cleanup on teardown).
+#
+# Leave TAILSCALE_AUTHKEY empty (default) to skip Tailscale setup.
+TAILSCALE_AUTHKEY=
+TAILSCALE_HOSTNAME=
+TAILSCALE_TAGS=
 ENV_EOF
 
 # 2c. Placeholder dnsmasq.conf — replaced at boot by firstboot once lan0
@@ -337,7 +388,46 @@ pct exec "$TMP_VMID" -- /bin/sh -c '
 pct exec "$TMP_VMID" -- /bin/sh -c "rc-update add dnsmasq default 2>/dev/null || true"
 pct exec "$TMP_VMID" -- /bin/sh -c "rc-update add local default 2>/dev/null || true"
 
-# 2g. CRITICAL: re-push the placeholder dnsmasq.conf as the absolute last
+# 2g. Install Tailscale + configure userspace-networking mode.
+#     Userspace mode means tailscaled doesn't need a TUN device — works in
+#     unprivileged Proxmox LXCs without any LXC config tweaks. Subnet
+#     routing (the BYOAB feature we want) still works in userspace mode.
+#     Tailscale is installed but NOT auto-launched here. firstboot calls
+#     `tailscale up` only when /etc/cybercore-gateway.env has a
+#     TAILSCALE_AUTHKEY set (admin.js drops one in per-deploy).
+echo "==> Installing Tailscale + configuring userspace-networking mode..."
+pct exec "$TMP_VMID" -- /bin/sh -c '
+  set -e
+  # Make sure community repo is enabled (Tailscale lives there on Alpine 3.16+;
+  # newer Alpine has it in main, but enabling community is harmless either way).
+  if ! grep -q "^http.*community" /etc/apk/repositories 2>/dev/null; then
+    # Mirror the alpine version line that already exists (use the same release)
+    MAIN_LINE="$(grep "^http.*main$" /etc/apk/repositories 2>/dev/null | head -1)"
+    if [ -n "$MAIN_LINE" ]; then
+      COMMUNITY_LINE="$(echo "$MAIN_LINE" | sed "s|/main$|/community|")"
+      echo "$COMMUNITY_LINE" >> /etc/apk/repositories
+      echo "Enabled community repo: $COMMUNITY_LINE"
+    fi
+  fi
+  apk update >/dev/null 2>&1 || true
+  if ! command -v tailscale >/dev/null 2>&1; then
+    apk add --no-cache tailscale 2>&1 | tail -5
+  else
+    echo "tailscale already installed."
+  fi
+  # Configure tailscaled to run in userspace-networking mode.
+  mkdir -p /etc/conf.d
+  cat > /etc/conf.d/tailscaled <<TSD_EOF
+# Configured by bake-lane-gateway-v2.sh.
+# Userspace mode means no TUN device needed — works in unprivileged LXC.
+# Subnet routing still works (the BYOAB use case).
+command_args="--tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state"
+TSD_EOF
+  rc-update add tailscale default 2>/dev/null || true
+  echo "Tailscale install + config complete."
+'
+
+# 2h. CRITICAL: re-push the placeholder dnsmasq.conf as the absolute last
 #     pre-shutdown step. During the temp-CT phase firstboot can get triggered
 #     (mechanism unclear — possibly OpenRC re-asserts the local runlevel
 #     after rc-update), and if it runs while lan0 still has 1692's inherited
