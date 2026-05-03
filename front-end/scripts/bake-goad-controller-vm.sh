@@ -248,17 +248,19 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # Assumes prep.sh has already been called (DHCP reservations on gateway,
       # Windows VMs at correct IPs).
       #
-      # Architecture: follows upstream GOAD's two-account scheme.
+      # Architecture: follows upstream GOAD's two-account scheme (with one
+      # tweak — see password note below).
       #   - Windows VM template ships with Administrator (bake-time password)
       #   - We use Administrator ONLY for an initial 'preflight-vagrant.yml'
-      #     play that creates a 'vagrant' Administrators-group user with
-      #     password 'vagrant'.
+      #     play that creates a 'vagrant' user in Administrators group.
       #   - All subsequent plays (preflight-dns + upstream chain) connect as
-      #     vagrant/vagrant. The vagrant user is the scaffolding that survives
-      #     ad-servers.yml's password rotation of the Administrator account
-      #     (which gets rotated to lab.hosts[X].local_admin_password from
-      #     upstream's config.json — different per host, preserving PTH
-      #     teaching value).
+      #     'vagrant' with a policy-compliant password (BootstrapPwd!1 — the
+      #     literal upstream value 'vagrant' fails Windows local password
+      #     policy: too short, no complexity, contains username substring).
+      #     The vagrant user is the scaffolding that survives ad-servers.yml's
+      #     password rotation of the Administrator account (which gets rotated
+      #     to lab.hosts[X].local_admin_password from upstream's config.json —
+      #     different per host, preserving PTH teaching value).
       #   - We do NOT patch config.json. Per-host local_admin_password and
       #     per-domain domain_password come from upstream's data verbatim.
       #
@@ -342,7 +344,11 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       cat > "\$RUNTIME/inventory_overrides" <<OVR
       [all:vars]
       ansible_user=vagrant
-      ansible_password=vagrant
+      # NOTE: Windows local password policy requires 8+ chars + 3-of-4 char
+      # classes (upper/lower/digit/symbol) and rejects passwords containing
+      # the username (case-insensitive). 'vagrant' fails on every count, so
+      # we use a policy-compliant string that doesn't contain 'vagrant'.
+      ansible_password=BootstrapPwd!1
       ansible_connection=winrm
       ansible_port=5985
       ansible_winrm_scheme=http
@@ -386,7 +392,11 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # connection settings via host_vars / play vars.
       cat > "\$RUNTIME/extra_vars.yml" <<EXTRA
       domain_name: "\$LAB"
-      data_path: "\$RUNTIME"
+      # NOTE: do NOT set data_path here. Each upstream playbook sets it via
+      # 'import_playbook: data.yml vars: data_path: "../ad/{{domain_name}}/data/"'
+      # so that data.yml's 'vars_files: {{data_path}}/config.json' loads the
+      # upstream config. --extra-vars has the highest precedence, so any value
+      # here overrides the per-playbook data_path and breaks 'lab' loading.
       # admin_user is what upstream's plays use as the prefix for domain admin
       # principals (admin_user@domain). After ad-parent_domain.yml promotes
       # DC01, the domain admin account is named 'administrator' (from the
@@ -434,6 +444,95 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       INV_FLAGS_INITIAL="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides_initial"
       INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides"
 
+      # ---------- Patch upstream's mssql role: broken win_template + bad path ----
+      # Two stacked bugs in upstream's mssql role:
+      #   (1) sql_conf.ini.MSSQL_*.j2 lives in roles/mssql/files/ but
+      #       win_template looks in templates/. Wrong location.
+      #   (2) Even after moving to templates/, win_template + ansible-core 2.20+
+      #       silently fails to render Jinja for this .ini (the {% if %} block
+      #       and {{ var }} placeholders pass through verbatim, evidenced by
+      #       Templar.do_template / set_temporary_context deprecation warnings).
+      # Fix: use Linux 'template' on the controller (which renders Jinja
+      # correctly) then 'win_copy' the rendered file to Windows.
+      MSSQL_ROLE=\$GOAD_ROOT/ansible/roles/mssql
+      if [ -d "\$MSSQL_ROLE/files" ] && ls "\$MSSQL_ROLE/files"/*.j2 >/dev/null 2>&1; then
+        echo "==> Relocating mssql .j2 templates from files/ to templates/..."
+        mkdir -p "\$MSSQL_ROLE/templates"
+        mv "\$MSSQL_ROLE/files"/*.j2 "\$MSSQL_ROLE/templates/" 2>/dev/null || true
+      fi
+      # Replace the buggy win_template task with: render locally → win_copy.
+      # NOTE: use a lambda for re.sub replacement — passing the replacement as
+      # a string makes Python's re module try to interpret backslash escapes
+      # (\s, \1, etc.) inside it, which fails when our replacement contains
+      # Windows paths like c:\\setup. The lambda returns the string verbatim.
+      if grep -q 'win_template:' "\$MSSQL_ROLE/tasks/main.yml" 2>/dev/null; then
+        echo "==> Patching mssql role: render config locally then win_copy..."
+        python3 - "\$MSSQL_ROLE/tasks/main.yml" <<'PYMSSQL'
+import re, sys
+path = sys.argv[1]
+content = open(path).read()
+old = re.compile(
+    r'- name: create the configuration file\s*\n'
+    r'\s*win_template:\s*\n'
+    r'\s*src:.*\n'
+    r'\s*dest:.*sql_conf\.ini',
+)
+NEW = """- name: create the configuration file (rendered locally)
+  ansible.builtin.template:
+    src: sql_conf.ini.{{sql_version}}.j2
+    dest: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
+  delegate_to: localhost
+
+- name: copy rendered configuration file to windows
+  ansible.windows.win_copy:
+    src: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
+    dest: c:\\\\setup\\\\mssql\\\\sql_conf.ini
+    force: yes"""
+out = old.sub(lambda m: NEW, content)
+if out != content:
+    open(path, 'w').write(out)
+    print(f"  Replaced win_template with template+win_copy in {path}", file=sys.stderr)
+else:
+    print(f"  WARNING: pattern not matched in {path} (may already be patched)", file=sys.stderr)
+PYMSSQL
+      fi
+
+      # ---------- Patch upstream's child_domain role for self-healing reboot ----
+      # After Install-ADDSDomain on DC02, the local SAM seals pending reboot —
+      # any new WinRM session as 'vagrant' gets "credentials rejected". Upstream's
+      # win_reboot task opens a fresh session for the reboot command and dies
+      # there. Fix: schedule the reboot from INSIDE the running win_powershell
+      # session (where vagrant still works), then replace win_reboot with
+      # wait_for_connection. Idempotent — sed exits 0 if pattern already gone.
+      CHILD_ROLE=\$GOAD_ROOT/ansible/roles/child_domain/tasks/main.yml
+      if [ -f "\$CHILD_ROLE" ] && grep -q 'NoRebootOnCompletion' "\$CHILD_ROLE" && \\
+         ! grep -q 'cybercore-self-reboot' "\$CHILD_ROLE"; then
+        echo "==> Patching child_domain role for post-promotion self-reboot..."
+        # Append a reboot trigger inside the same win_powershell session,
+        # right before the script exits (after Install-ADDSDomain succeeds).
+        sed -i 's|-Force -NoRebootOnCompletion|-Force -NoRebootOnCompletion\\n        # cybercore-self-reboot: schedule reboot from in-session\\n        Start-Process shutdown -ArgumentList "/r","/t","30","/f" -NoNewWindow -ErrorAction SilentlyContinue|' "\$CHILD_ROLE"
+        # Replace win_reboot with wait_for_connection (no auth needed).
+        python3 - "\$CHILD_ROLE" <<'PYREB'
+import re, sys
+path = sys.argv[1]
+content = open(path).read()
+old = re.compile(
+    r'- name:\s*Reboot\s*\n\s*win_reboot:\s*\n(?:\s*\w+:.*\n)+\s*when:\s*child_result\.changed',
+)
+new = (
+    '- name: "cybercore: wait for child DC to reboot post-promotion"\n'
+    '  ansible.builtin.wait_for_connection:\n'
+    '    delay: 60\n'
+    '    timeout: 900\n'
+    '  when: child_result.changed'
+)
+out = old.sub(new, content)
+if out != content:
+    open(path, 'w').write(out)
+    print(f"  Replaced win_reboot with wait_for_connection in {path}", file=sys.stderr)
+PYREB
+      fi
+
       echo "================================================================="
       echo " GOAD provisioning: \$LAB"
       echo " Lane subnet: \${IP_RANGE}.0/24   Gateway: \${GW_IP}"
@@ -456,7 +555,12 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
           - name: Ensure vagrant local user exists in Administrators
             win_user:
               name: vagrant
-              password: vagrant
+              # Must satisfy Windows local password policy: 8+ chars,
+              # 3-of-4 char classes, and no 'vagrant' substring (the user-
+              # name check is case-insensitive). MUST match ansible_password
+              # in inventory_overrides — these are the connection credentials
+              # for every play after this preflight.
+              password: BootstrapPwd!1
               state: present
               password_never_expires: yes
               account_disabled: no

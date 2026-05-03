@@ -61,6 +61,98 @@ function laneUplinkConfig(module, vxlanId) {
 }
 
 // ============================================================================
+// V2 LANE NETWORKING (subnet_scheme='v2')
+// ============================================================================
+// In v2, each lane gets a globally-unique /24 in 10.0.0.0/8 (no reuse via
+// VXLAN), and the lane gateway hangs directly off the lab network bridge —
+// no module transit hop. Required for Tailscale BYOAB and multi-subnet labs.
+//
+// Cloned from VMID 1694 (subnet-agnostic, baked by bake-lane-gateway-v2.sh).
+// admin.js sets net1's IP per-deploy; the LXC's firstboot hook reads lan0 at
+// boot and renders dnsmasq/iptables from it. See bake-lane-gateway-v2.sh.
+
+const V2_LANE_GATEWAY_VMID = 1694;
+const V2_LAB_NETWORK = {
+  bridge: 'vmbr0',
+  subnetBase: '100.100.60',   // OPNsense lab gateway is .1
+  gateway: '100.100.60.1',
+  cidr: '/24'
+};
+
+/**
+ * Compute v2 lane gateway WAN config from vxlan_id. WAN side hangs directly
+ * off the lab network (vmbr0) at 100.100.60.<offset>/24.
+ *
+ * Allocates from 100.100.60.10..100.100.60.249 (240 simultaneous lanes —
+ * sufficient for current scale; switch to DB-tracked allocation if we exceed).
+ * Deterministic from vxlan_id so re-deploys land on the same IP.
+ */
+function v2WanConfig(vxlanId) {
+  const offset = 10 + (vxlanId % 240);
+  return {
+    bridge: V2_LAB_NETWORK.bridge,
+    ip:     `${V2_LAB_NETWORK.subnetBase}.${offset}${V2_LAB_NETWORK.cidr}`,
+    gw:     V2_LAB_NETWORK.gateway
+  };
+}
+
+/**
+ * Compute v2 lane LAN subnet from vxlan_id.
+ * Maps uint16 vxlan_id into 10.<high>.<low>.0/24:
+ *   vxlan 10000 (0x2710) → 10.39.16.0/24
+ *   vxlan 10001 (0x2711) → 10.39.17.0/24
+ * 65536 unique lane subnets — globally unique within the cluster.
+ */
+function v2LaneSubnet(vxlanId) {
+  const high = (vxlanId >> 8) & 0xFF;
+  const low  = vxlanId & 0xFF;
+  const base3 = `10.${high}.${low}`;
+  return {
+    base3,                              // "10.39.16"
+    cidr:      `${base3}.0/24`,         // "10.39.16.0/24"
+    gatewayIp: `${base3}.1`,            // "10.39.16.1" — lane gateway's lan0
+    netmask24: '255.255.255.0'
+  };
+}
+
+/**
+ * Resolve the gateway VMID for a deploy based on subnet scheme.
+ *   v1: 1691/1692/1693 by module (existing behavior).
+ *   v2: always 1694 (subnet-agnostic, module not relevant — there's no
+ *       per-module transit gateway in v2).
+ */
+function resolveGatewayVmid(module, subnetScheme, spec) {
+  if (subnetScheme === 'v2') return V2_LANE_GATEWAY_VMID;
+  const v1Map = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
+  return v1Map[module] || (spec && spec.gateway_vmid) || 1692;
+}
+
+/**
+ * Resolve the per-lane networking config (wan + lan) based on subnet scheme.
+ * Returns: { wan: {bridge, ip, gw}, lan: {gatewayIp, cidr, base3, netmask24} }
+ *   - wan: net0 config for the lane gateway LXC
+ *   - lan: net1 config + DHCP scope info for downstream consumers (goad-deploy)
+ */
+function resolveLaneNetworking(subnetScheme, module, vxlanId) {
+  if (subnetScheme === 'v2') {
+    return {
+      wan: v2WanConfig(vxlanId),
+      lan: v2LaneSubnet(vxlanId)
+    };
+  }
+  // v1: shared 192.18.0.0/24 across all lanes (VXLAN-isolated)
+  return {
+    wan: laneUplinkConfig(module, vxlanId),
+    lan: {
+      base3:     '192.18.0',
+      cidr:      '192.18.0.0/24',
+      gatewayIp: '192.18.0.1',
+      netmask24: '255.255.255.0'
+    }
+  };
+}
+
+// ============================================================================
 // GUACAMOLE API HELPER
 // ============================================================================
 
@@ -569,7 +661,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
     // 3. Query challenge details
     const challengeResult = await cybercoreQuery(
-      `SELECT challenge_id, challenge_key, name, spec, difficulty
+      `SELECT challenge_id, challenge_key, name, spec, difficulty, subnet_scheme
        FROM ${module}_challenge
        WHERE challenge_key = $1 AND status = 'active'`,
       [challenge_key]
@@ -579,6 +671,20 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     }
     const challenge = challengeResult.rows[0];
     const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec;
+    const subnetScheme = challenge.subnet_scheme || 'v1';
+
+    // v2 + GOAD is not yet supported: goad-deploy.js still hardcodes
+    // 192.18.0.x in HOST_MAP, the controller's run.sh, and DHCP reservation
+    // logic. Refuse the combo at deploy time rather than silently breaking
+    // a long-running ansible run. (Follow-up: parameterize goad-deploy by
+    // lane subnet base + bake controller template 1700 to read the lane
+    // gateway IP from /etc/goad-lane.env.)
+    if (subnetScheme === 'v2' && spec?.goad?.enabled) {
+      return res.status(501).json({
+        error: 'v2 lane subnet is not yet compatible with GOAD challenges',
+        detail: 'GOAD playbooks still hardcode 192.18.0.0/24. Use subnet_scheme=v1 for GOAD challenges, or wait for the goad-deploy.js + controller bake follow-up.'
+      });
+    }
 
     // Pre-flight resource check (now that we know the VM count from spec)
     const specVmCount = (spec.vms || []).length || 1;
@@ -630,11 +736,12 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
     // 6. Determine template location and best node
     const templateVmid = spec.template_vmid || 1600;
-    // Gateway template per module (matches N8N workflow mapping)
-    // Module mapping takes priority — spec.gateway_vmid is legacy and may be stale (e.g., old 1699)
-    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-    const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
+    // Gateway template depends on subnet scheme:
+    //   v1 → module-specific 1691/1692/1693 (shared 192.18.0.0/24 lane subnet)
+    //   v2 → 1694 (subnet-agnostic; firstboot renders dnsmasq from per-deploy lan0 IP)
+    const gatewayVmid = resolveGatewayVmid(module, subnetScheme, spec);
     const templateNode = spec.template_node || 'cyberhub-node-5';
+    console.log(`[Deploy] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
     // Select least-loaded node for deployment
     const bestNodeInfo = await selectBestNode();
     const bestNode = bestNodeInfo.node;
@@ -726,13 +833,14 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
         if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
 
-        // Wire up gateway networking:
-        //   net0 (wan0) -> module's transit-GW SDN VNet (static IP, GW = transit LXC)
-        //   net1 (lan0) -> lane VXLAN VNet, static 192.18.0.1/24 (serves lane VMs)
-        const wan = laneUplinkConfig(module, vxlanId);
+        // Wire up gateway networking. v1 routes through the module transit
+        // gateway with a shared 192.18.0.0/24 lane subnet; v2 hangs wan0
+        // directly off the lab network bridge and gives each lane its own
+        // /24 in 10.0.0.0/8.
+        const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: `name=wan0,bridge=${wan.bridge},ip=${wan.ip},gw=${wan.gw},firewall=0,type=veth`,
-          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
+          net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
+          net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
         // Start gateway first, then all challenge VMs
@@ -1651,6 +1759,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
     let spec = null;
     let vxlanBlock = null;
     let availableVxlans = [];
+    let subnetScheme = 'v1';
     if (shouldDeployLanes) {
       // Validate module
       const modResult = await cybercoreQuery(
@@ -1663,7 +1772,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
       // Get challenge spec
       const challengeResult = await cybercoreQuery(
-        `SELECT challenge_id, challenge_key, name, spec
+        `SELECT challenge_id, challenge_key, name, spec, subnet_scheme
          FROM ${module}_challenge
          WHERE challenge_key = $1 AND status = 'active'`,
         [challenge_key]
@@ -1673,6 +1782,15 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       }
       spec = typeof challengeResult.rows[0].spec === 'string'
         ? JSON.parse(challengeResult.rows[0].spec) : challengeResult.rows[0].spec;
+      subnetScheme = challengeResult.rows[0].subnet_scheme || 'v1';
+
+      // v2 + GOAD not yet supported (see single-deploy site for full reasoning)
+      if (subnetScheme === 'v2' && spec?.goad?.enabled) {
+        return res.status(501).json({
+          error: 'v2 lane subnet is not yet compatible with GOAD challenges',
+          detail: 'GOAD playbooks still hardcode 192.18.0.0/24. Use subnet_scheme=v1 for GOAD batch deploys, or wait for the goad-deploy.js + controller bake follow-up.'
+        });
+      }
 
       // Check VXLAN capacity
       vxlanBlock = {
@@ -1807,9 +1925,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
     // 5. Deploy lanes per student (if enabled)
     if (shouldDeployLanes) {
       const templateVmid = spec.template_vmid || 1600;
-      const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-      const gatewayVmid = gatewayVmidByModule[module] || spec.gateway_vmid || 1692;
+      const gatewayVmid = resolveGatewayVmid(module, subnetScheme, spec);
       const templateNode = spec.template_node || 'cyberhub-node-5';
+      console.log(`[Group Deploy] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
 
       // Distribute lanes across nodes (query cluster ONCE instead of per-lane)
       let nodeAssignments;
@@ -2006,12 +2124,13 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 pool: `${module}-pool`
               });
               if (gwCloneResult) await waitForTask(sourceNode, gwCloneResult);
-              // Wire up both NICs: wan0 -> module's transit-GW SDN VNet (static IP),
-              // lan0 -> lane VXLAN VNet (serves 192.18.0.0/24 to lane VMs).
-              const wan = laneUplinkConfig(module, vxlanId);
+              // Wire up both NICs. Networking config is scheme-aware:
+              //   v1: wan0 → module transit GW; lan0 → 192.18.0.1/24 (shared)
+              //   v2: wan0 → lab network (vmbr0); lan0 → 10.<vxh>.<vxl>.1/24 (unique)
+              const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
               await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                net0: `name=wan0,bridge=${wan.bridge},ip=${wan.ip},gw=${wan.gw},firewall=0,type=veth`,
-                net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
+                net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
+                net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
               });
               gatewayResults[laneId] = { success: true };
               console.log(`[Group ${group_name}] Gateway ${gatewayVmId} cloned on ${node}`);
@@ -3410,9 +3529,19 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
     }
 
     // Build the spec object compatible with the existing deploy-lane flow
-    const gatewayVmidByModule = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
-    const gatewayVmid = gatewayVmidByModule[challengeModule] || 1692;
+    const subnetScheme = template.subnet_scheme || 'v1';
+
+    // v2 + GOAD not yet supported (see single-deploy site for full reasoning)
+    if (subnetScheme === 'v2' && spec?.goad?.enabled) {
+      return res.status(501).json({
+        error: 'v2 lane subnet is not yet compatible with GOAD challenges',
+        detail: 'GOAD playbooks still hardcode 192.18.0.0/24. Use subnet_scheme=v1 for GOAD challenges, or wait for the goad-deploy.js + controller bake follow-up.'
+      });
+    }
+
+    const gatewayVmid = resolveGatewayVmid(challengeModule, subnetScheme, spec);
     const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
+    console.log(`[ChallengeNetwork] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
     const bestNodeInfo = await selectBestNode();
     const bestNode = bestNodeInfo.node;
     console.log(`[ChallengeNetwork] Selected node ${bestNode} for deployment (score: ${bestNodeInfo.score})`);
@@ -3604,11 +3733,13 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           description: `Challenge Network Gateway\nTemplate: ${template.name}\nLane: ${laneId}`,
         });
         if (gwResult) await waitForTask(templateNode, gwResult);
-        // wan0 -> module's transit-GW SDN VNet, lan0 -> lane VXLAN.
-        const wan = laneUplinkConfig(challengeModule, vxlanId);
+        // Networking is scheme-aware:
+        //   v1 → wan0 via module transit; lan0 = 192.18.0.1/24 (shared)
+        //   v2 → wan0 on lab network (vmbr0); lan0 = 10.<vxh>.<vxl>.1/24 (unique)
+        const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId);
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: `name=wan0,bridge=${wan.bridge},ip=${wan.ip},gw=${wan.gw},firewall=0,type=veth`,
-          net1: `name=lan0,bridge=${vnet.vnet},ip=192.18.0.1/24,type=veth`
+          net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
+          net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
         // Start gateway first
