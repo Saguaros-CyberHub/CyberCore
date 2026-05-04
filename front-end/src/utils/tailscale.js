@@ -136,7 +136,9 @@ async function mintLaneAuthKey({ vxlanId, expirySeconds = 600, extraTags = [] })
       }
     },
     expirySeconds,
-    description: `cybercore lane ${vxlanId} (auto-minted)`
+    // Tailscale rejects descriptions with spaces, parens, or punctuation —
+    // alphanumeric + hyphens/underscores only.
+    description: `cybercore-lane-${vxlanId}`
   };
 
   const r = await fetch(`${TAILSCALE_API}/api/v2/tailnet/${encodeURIComponent(tailnet)}/keys`, {

@@ -416,14 +416,32 @@ pct exec "$TMP_VMID" -- /bin/sh -c '
     echo "tailscale already installed."
   fi
   # Configure tailscaled to run in userspace-networking mode.
-  mkdir -p /etc/conf.d
-  cat > /etc/conf.d/tailscaled <<TSD_EOF
+  # NOTE: the openrc service is named "tailscale" (not "tailscaled"), so
+  # the config goes in /etc/conf.d/tailscale (matches service name). Writing
+  # to /etc/conf.d/tailscaled is a no-op the daemon never reads, and tailscaled
+  # then tries default kernel-TUN mode, which fails in unprivileged LXC.
+  mkdir -p /etc/conf.d /var/lib/tailscale
+  cat > /etc/conf.d/tailscale <<TSD_EOF
 # Configured by bake-lane-gateway-v2.sh.
 # Userspace mode means no TUN device needed — works in unprivileged LXC.
 # Subnet routing still works (the BYOAB use case).
 command_args="--tun=userspace-networking --state=/var/lib/tailscale/tailscaled.state"
 TSD_EOF
+  # Clean up the wrong-path file from earlier bakes if it exists
+  rm -f /etc/conf.d/tailscaled
   rc-update add tailscale default 2>/dev/null || true
+
+  # Smoke-test: actually start the daemon during bake to catch config errors
+  # now instead of at deploy time. If userspace mode is broken, this fails fast.
+  rc-service tailscale restart >/dev/null 2>&1 || true
+  sleep 2
+  if rc-service tailscale status 2>&1 | grep -q "started"; then
+    echo "Tailscale daemon: started OK in userspace mode."
+    rc-service tailscale stop >/dev/null 2>&1 || true
+  else
+    echo "WARNING: tailscale daemon failed to start during bake — check /var/log/messages"
+    rc-service tailscale status 2>&1 || true
+  fi
   echo "Tailscale install + config complete."
 '
 
@@ -496,8 +514,9 @@ pct start "$VERIFY_VMID"
 
 # Give firstboot time to complete. Firstboot's wait-for-lan0-IP loop
 # alone can take up to 15s, then it renders + restarts dnsmasq (~2s).
-# 20s gives enough headroom on Ceph-backed clones.
-sleep 20
+# Bumped to 35s because Tailscale daemon startup + any failed-service
+# retries can push openrc's `local` runlevel later than 20s on cold boot.
+sleep 35
 
 echo "==> Verifying rendered config inside $VERIFY_VMID..."
 RENDERED_OK=1

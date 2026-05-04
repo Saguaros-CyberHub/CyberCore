@@ -188,7 +188,13 @@ async function configureLaneTailscale({ subnetScheme, bestNode, gatewayVmId, vxl
     console.log(`${logTag} Tailscale auth key minted + pushed for lane ${vxlanId} (tags=${tags.join(',')})`);
     return true;
   } catch (err) {
-    console.warn(`${logTag} Tailscale config failed for lane ${vxlanId} (deploy continues): ${err.message}`);
+    // Native `fetch` wraps the real error in `.cause`. Surface both so we
+    // can tell DNS failures from TLS failures from connection-refused etc.
+    const cause = err.cause ? ` (cause: ${err.cause.code || err.cause.message || err.cause})` : '';
+    console.warn(`${logTag} Tailscale config failed for lane ${vxlanId} (deploy continues): ${err.message}${cause}`);
+    if (err.cause && err.cause.stack) {
+      console.warn(`${logTag} Tailscale cause stack: ${err.cause.stack.split('\n').slice(0, 3).join(' | ')}`);
+    }
     return false;
   }
 }
