@@ -73,8 +73,12 @@ function laneUplinkConfig(module, vxlanId) {
 // boot and renders dnsmasq/iptables from it. See bake-lane-gateway-v2.sh.
 
 const V2_LANE_GATEWAY_VMID = 1694;
+// Lab network attaches to the cluster via VLAN 60 trunked on vmbr0
+// (bridge-vlan-aware yes, bridge-vids ... 60 ...). The existing module
+// transit gateway (LXC 612) uses the same pattern: bridge=vmbr0,tag=60.
 const V2_LAB_NETWORK = {
   bridge: 'vmbr0',
+  vlanTag: 60,                // VLAN 60 = lab network on this cluster
   subnetBase: '100.100.60',   // OPNsense lab gateway is .1
   gateway: '100.100.60.1',
   cidr: '/24'
@@ -82,7 +86,7 @@ const V2_LAB_NETWORK = {
 
 /**
  * Compute v2 lane gateway WAN config from vxlan_id. WAN side hangs directly
- * off the lab network (vmbr0) at 100.100.60.<offset>/24.
+ * off the lab network (vmbr0 tag=60) at 100.100.60.<offset>/24.
  *
  * Allocates from 100.100.60.10..100.100.60.249 (240 simultaneous lanes —
  * sufficient for current scale; switch to DB-tracked allocation if we exceed).
@@ -91,10 +95,29 @@ const V2_LAB_NETWORK = {
 function v2WanConfig(vxlanId) {
   const offset = 10 + (vxlanId % 240);
   return {
-    bridge: V2_LAB_NETWORK.bridge,
-    ip:     `${V2_LAB_NETWORK.subnetBase}.${offset}${V2_LAB_NETWORK.cidr}`,
-    gw:     V2_LAB_NETWORK.gateway
+    bridge:  V2_LAB_NETWORK.bridge,
+    vlanTag: V2_LAB_NETWORK.vlanTag,
+    ip:      `${V2_LAB_NETWORK.subnetBase}.${offset}${V2_LAB_NETWORK.cidr}`,
+    gw:      V2_LAB_NETWORK.gateway
   };
+}
+
+/**
+ * Render a lane gateway's net0 string from the wan config object. v2 includes
+ * a VLAN tag (lab network is tagged); v1 omits it (module transit bridge is
+ * untagged inside the SDN VNet).
+ */
+function formatLaneGatewayNet0(wan) {
+  const parts = [
+    'name=wan0',
+    `bridge=${wan.bridge}`,
+    wan.vlanTag != null ? `tag=${wan.vlanTag}` : null,
+    `ip=${wan.ip}`,
+    `gw=${wan.gw}`,
+    'firewall=0',
+    'type=veth'
+  ].filter(Boolean);
+  return parts.join(',');
 }
 
 /**
@@ -894,7 +917,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
         // /24 in 10.0.0.0/8.
         const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
+          net0: formatLaneGatewayNet0(net.wan),
           net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
@@ -2201,7 +2224,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               //   v2: wan0 → lab network (vmbr0); lan0 → 10.<vxh>.<vxl>.1/24 (unique)
               const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
               await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
+                net0: formatLaneGatewayNet0(net.wan),
                 net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
               });
               // v2 only: mint+stage Tailscale auth key (silent no-op for v1)
@@ -3834,7 +3857,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
         //   v2 → wan0 on lab network (vmbr0); lan0 = 10.<vxh>.<vxl>.1/24 (unique)
         const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId);
         await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
+          net0: formatLaneGatewayNet0(net.wan),
           net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
