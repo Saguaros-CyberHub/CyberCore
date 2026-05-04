@@ -18,7 +18,6 @@ const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../utils/sc
 const { selectBestNode } = require('../utils/node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../utils/batch-deployer');
 const goadDeploy = require('../utils/goad-deploy');
-const nodeSsh = require('../utils/node-ssh');
 const tailscale = require('../utils/tailscale');
 
 const adminOnly = requireRole('admin');
@@ -155,41 +154,50 @@ function resolveLaneNetworking(subnetScheme, module, vxlanId) {
 }
 
 /**
- * For v2 lanes only: mint a one-shot Tailscale auth key tagged tag:lane-<vxlanId>
- * and append it to /etc/cybercore-gateway.env on the lane gateway. firstboot
- * will run `tailscale up` with the key on first start, then wipe the key.
+ * For v2 lanes only: mint a one-shot Tailscale auth key tagged tag:lane and
+ * stage it in lane_bootstrap_tokens for the lane gateway to fetch on first
+ * boot via GET /api/lane-bootstrap. The orchestrator never SSHes the
+ * Proxmox node; the gateway pulls its own config over HTTP.
  *
  * No-op (and resolves silently) if:
  *   - subnet_scheme is not 'v2', OR
  *   - Tailscale env vars (OAuth client + tailnet) are not configured.
  *
- * Failure to mint/push DOES NOT fail the deploy — the lane still works,
+ * Failure to mint/store DOES NOT fail the deploy — the lane still works,
  * just without BYOAB tailnet access. Logged as a warning.
+ *
+ * `wanIp` must be the IP the lane gateway will source its bootstrap request
+ * from (i.e. the IP we set on net0). The /api/lane-bootstrap endpoint
+ * enforces request_source_ip == wan_ip.
  */
-async function configureLaneTailscale({ subnetScheme, bestNode, gatewayVmId, vxlanId, laneName, logTag = '[Deploy]' }) {
+async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, logTag = '[Deploy]' }) {
   if (subnetScheme !== 'v2') return false;
   if (!tailscale.isEnabled()) {
     console.log(`${logTag} Tailscale env not configured — skipping BYOAB key mint for lane ${vxlanId}`);
     return false;
   }
+  if (!wanIp) {
+    console.warn(`${logTag} Tailscale config skipped for lane ${vxlanId}: no wanIp passed`);
+    return false;
+  }
   try {
     const { key, tags } = await tailscale.mintLaneAuthKey({ vxlanId });
-    const envFragment = tailscale.buildEnvFragment({
-      authKey:  key,
+    const hostname = laneName
+      ? `lane-${vxlanId}-${laneName}`.substring(0, 63).replace(/[^a-z0-9-]/gi, '-').toLowerCase()
+      : `lane-${vxlanId}`;
+    await tailscale.storeLaneBootstrap({
+      cybercoreQuery,
       vxlanId,
-      tags,
-      hostname: laneName ? `lane-${vxlanId}-${laneName}`.substring(0, 63).replace(/[^a-z0-9-]/gi, '-').toLowerCase() : `lane-${vxlanId}`
+      wanIp,
+      payload: {
+        tailscale_authkey:  key,
+        tailscale_tags:     tags.join(','),
+        tailscale_hostname: hostname
+      }
     });
-    // Append to existing env file rather than replace — preserves bake defaults.
-    await nodeSsh.pctExecWithStdin(bestNode, gatewayVmId,
-      ['/bin/sh', '-c', 'cat >> /etc/cybercore-gateway.env'],
-      envFragment
-    );
-    console.log(`${logTag} Tailscale auth key minted + pushed for lane ${vxlanId} (tags=${tags.join(',')})`);
+    console.log(`${logTag} Tailscale bootstrap staged for lane ${vxlanId} (wan=${wanIp}, tags=${tags.join(',')})`);
     return true;
   } catch (err) {
-    // Native `fetch` wraps the real error in `.cause`. Surface both so we
-    // can tell DNS failures from TLS failures from connection-refused etc.
     const cause = err.cause ? ` (cause: ${err.cause.code || err.cause.message || err.cause})` : '';
     console.warn(`${logTag} Tailscale config failed for lane ${vxlanId} (deploy continues): ${err.message}${cause}`);
     if (err.cause && err.cause.stack) {
@@ -890,11 +898,15 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
-        // v2 only: mint a Tailscale auth key + push it to the gateway BEFORE
-        // first boot, so firstboot's `tailscale up` finds it. No-op for v1
-        // and silent skip if Tailscale env is unconfigured.
+        // v2 only: mint a Tailscale auth key + stage it in lane_bootstrap_tokens
+        // for the gateway to pull on first boot. No-op for v1 and silent skip
+        // if Tailscale env is unconfigured.
         await configureLaneTailscale({
-          subnetScheme, bestNode, gatewayVmId, vxlanId, laneName, logTag: '[Deploy]'
+          subnetScheme,
+          vxlanId,
+          wanIp: net.wan.ip.split('/')[0],   // strip CIDR — DB stores the IP only
+          laneName,
+          logTag: '[Deploy]'
         });
 
         // Start gateway first, then all challenge VMs
@@ -2192,10 +2204,13 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 net0: `name=wan0,bridge=${net.wan.bridge},ip=${net.wan.ip},gw=${net.wan.gw},firewall=0,type=veth`,
                 net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
               });
-              // v2 only: mint+push Tailscale auth key (silent no-op for v1)
+              // v2 only: mint+stage Tailscale auth key (silent no-op for v1)
               await configureLaneTailscale({
-                subnetScheme, bestNode: node, gatewayVmId, vxlanId,
-                laneName: job.laneName, logTag: `[Group ${group_name}]`
+                subnetScheme,
+                vxlanId,
+                wanIp: net.wan.ip.split('/')[0],
+                laneName: job.laneName,
+                logTag: `[Group ${group_name}]`
               });
               gatewayResults[laneId] = { success: true };
               console.log(`[Group ${group_name}] Gateway ${gatewayVmId} cloned on ${node}`);
@@ -3823,9 +3838,13 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
         });
 
-        // v2 only: mint+push Tailscale auth key (silent no-op for v1)
+        // v2 only: mint+stage Tailscale auth key (silent no-op for v1)
         await configureLaneTailscale({
-          subnetScheme, bestNode, gatewayVmId, vxlanId, laneName, logTag: '[ChallengeNetwork]'
+          subnetScheme,
+          vxlanId,
+          wanIp: net.wan.ip.split('/')[0],
+          laneName,
+          logTag: '[ChallengeNetwork]'
         });
 
         // Start gateway first

@@ -158,18 +158,33 @@ async function mintLaneAuthKey({ vxlanId, expirySeconds = 600, extraTags = [] })
 }
 
 /**
- * Build the env-file content that firstboot reads to call `tailscale up`.
- * Caller pushes this into the lane gateway via nodeSsh.pctPushFromString.
+ * Store the bootstrap payload in cybercore_db for the lane gateway to fetch
+ * on first boot via GET /api/lane-bootstrap. Replaces the earlier SSH-based
+ * pctPushFromString approach — keeps the orchestrator off the Proxmox node.
+ *
+ * Single row per vxlan_id (PK). Re-deploys overwrite the row, which is fine:
+ * the previous lane was torn down (or its key already consumed).
+ *
+ * @param {object} opts
+ * @param {Function} opts.cybercoreQuery — DB helper from utils/cybercore-db
+ * @param {number}   opts.vxlanId
+ * @param {string}   opts.wanIp           — IP the orchestrator expects this lane gw to call from
+ * @param {object}   opts.payload         — JSON returned to the gateway: { tailscale_authkey, tailscale_tags, tailscale_hostname }
+ * @param {number}   [opts.ttlSeconds=600]
  */
-function buildEnvFragment({ authKey, vxlanId, tags, hostname }) {
-  const lines = [
-    '# ---- Tailscale BYOAB (added by admin.js lane deploy) ----',
-    `TAILSCALE_AUTHKEY=${authKey}`,
-    `TAILSCALE_HOSTNAME=${hostname || `lane-${vxlanId}`}`,
-    `TAILSCALE_TAGS=${(tags || [`tag:lane-${vxlanId}`]).join(',')}`,
-    ''
-  ];
-  return lines.join('\n');
+async function storeLaneBootstrap({ cybercoreQuery, vxlanId, wanIp, payload, ttlSeconds = 600 }) {
+  await cybercoreQuery(
+    `INSERT INTO lane_bootstrap_tokens (vxlan_id, wan_ip, payload, expires_at)
+     VALUES ($1, $2, $3::jsonb, NOW() + ($4 || ' seconds')::interval)
+     ON CONFLICT (vxlan_id) DO UPDATE SET
+       wan_ip      = EXCLUDED.wan_ip,
+       payload     = EXCLUDED.payload,
+       created_at  = NOW(),
+       expires_at  = EXCLUDED.expires_at,
+       consumed_at = NULL,
+       consumed_by = NULL`,
+    [vxlanId, wanIp, JSON.stringify(payload), String(ttlSeconds)]
+  );
 }
 
 /**
@@ -225,6 +240,6 @@ async function deleteLaneDevices({ vxlanId, logger = console }) {
 module.exports = {
   isEnabled,
   mintLaneAuthKey,
-  buildEnvFragment,
+  storeLaneBootstrap,
   deleteLaneDevices
 };

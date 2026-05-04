@@ -52,6 +52,7 @@ const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
 const challengeTemplateRoutes = require('./routes/challenge-templates');
 const moduleRoutes = require('./routes/modules');
+const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 
 // Import plugin loader
 const pluginLoader = require('./plugin-loader');
@@ -184,6 +185,11 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', challengeTemplateRoutes);
 app.use('/api/modules', moduleRoutes);
+
+// Unauthenticated, source-IP-gated. Called by lane gateway LXCs on first boot
+// to fetch one-shot bootstrap payload (Tailscale auth key etc). See route
+// file for security model.
+app.use('/api/lane-bootstrap', laneBootstrapRoutes);
 
 // ============================================================================
 // CORE PAGE ROUTES

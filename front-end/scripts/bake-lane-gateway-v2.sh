@@ -191,43 +191,73 @@ rc-service dnsmasq restart >/dev/null 2>&1 \
   || true
 
 # --- Tailscale subnet router (BYOAB) ---
-# If TAILSCALE_AUTHKEY is set in /etc/cybercore-gateway.env (admin.js drops
-# it per-deploy), bring up Tailscale advertising this lane's /24 so the
-# tailnet can route to lane VMs. Tag-driven ACLs in the tailnet decide
-# which student tags can reach this lane's tag.
+# Pulls the per-deploy auth key from the orchestrator's HTTP bootstrap
+# endpoint. Replaces the earlier "admin.js SSHes the key in" approach —
+# the orchestrator never connects to the Proxmox node at all. The endpoint
+# (GET /api/lane-bootstrap) identifies this lane by its WAN source IP and
+# returns a single-use payload with the key, tags, and hostname.
 #
 # tailscaled runs in userspace-networking mode (configured by the bake
-# script in /etc/conf.d/tailscaled), so no TUN device or LXC capability
+# script in /etc/conf.d/tailscale), so no TUN device or LXC capability
 # tweaks are needed. Subnet routing still works.
-if [ -n "${TAILSCALE_AUTHKEY:-}" ]; then
-  TS_HOSTNAME="${TAILSCALE_HOSTNAME:-lane-gw-${LAN_BASE3//./-}}"
-  TS_TAGS="${TAILSCALE_TAGS:-}"
-  rc-service tailscale start >/dev/null 2>&1 \
-    || /etc/init.d/tailscale start >/dev/null 2>&1 \
-    || true
-  # Give the daemon a moment to come up before `up`
-  for _ in 1 2 3 4 5; do
-    tailscale status >/dev/null 2>&1 && break
-    sleep 1
-  done
-  TS_UP_ARGS="--authkey=${TAILSCALE_AUTHKEY} --advertise-routes=${LAN_NET} --hostname=${TS_HOSTNAME} --reset --accept-dns=false"
-  if [ -n "$TS_TAGS" ]; then
-    TS_UP_ARGS="$TS_UP_ARGS --advertise-tags=${TS_TAGS}"
-  fi
-  if tailscale up $TS_UP_ARGS >/tmp/tailscale-up.log 2>&1; then
-    # Auth succeeded — the key is now consumed (one-shot, single-use), but
-    # wipe it from /etc/cybercore-gateway.env anyway so a forensic snapshot
-    # of the rootfs after first boot doesn't contain the key string.
-    if [ -w /etc/cybercore-gateway.env ]; then
-      sed -i 's|^TAILSCALE_AUTHKEY=.*|TAILSCALE_AUTHKEY=|' /etc/cybercore-gateway.env
-    fi
-    logger -t cybercore-firstboot "tailscale up OK: hostname=${TS_HOSTNAME} routes=${LAN_NET} tags=${TS_TAGS} (key wiped)"
-  else
-    logger -t cybercore-firstboot "tailscale up FAILED — see /tmp/tailscale-up.log"
-  fi
+ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:3000}"
+BOOTSTRAP_PATH="/api/lane-bootstrap"
+
+# wget is preferred over curl on Alpine (smaller, always present). BusyBox wget
+# doesn't speak HTTPS by default, but http://orchestrator:3000 is on the
+# internal lab network — http is fine here. For HTTPS, install wget package
+# (apk add wget) which links against openssl/libtls.
+echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}..." >&2
+BOOTSTRAP_RESP=""
+for _ in 1 2 3 4 5; do
+  BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}" 2>/dev/null || true)"
+  [ -n "$BOOTSTRAP_RESP" ] && break
+  sleep 2
+done
+
+if [ -z "$BOOTSTRAP_RESP" ]; then
+  logger -t cybercore-firstboot "Bootstrap fetch FAILED or empty (orchestrator unreachable, no token, or network not ready) — skipping tailscale up"
+elif echo "$BOOTSTRAP_RESP" | grep -q '"error"'; then
+  logger -t cybercore-firstboot "Bootstrap returned error: $(echo "$BOOTSTRAP_RESP" | head -c 200)"
 else
-  logger -t cybercore-firstboot "TAILSCALE_AUTHKEY not set — skipping tailscale up (BYOAB disabled for this lane)"
+  # Parse JSON without jq (Alpine base doesn't ship it). The payload shape is
+  # {"tailscale_authkey":"...","tailscale_tags":"tag:lane,...","tailscale_hostname":"lane-..."}
+  # so a per-key sed is good enough — we control both ends.
+  json_field() {
+    echo "$BOOTSTRAP_RESP" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+  }
+  TS_AUTHKEY="$(json_field tailscale_authkey)"
+  TS_TAGS="$(json_field tailscale_tags)"
+  TS_HOSTNAME="$(json_field tailscale_hostname)"
+  TS_HOSTNAME="${TS_HOSTNAME:-lane-gw-${LAN_BASE3//./-}}"
+
+  if [ -n "$TS_AUTHKEY" ]; then
+    rc-service tailscale start >/dev/null 2>&1 \
+      || /etc/init.d/tailscale start >/dev/null 2>&1 \
+      || true
+    # Give the daemon a moment to come up before `up`
+    for _ in 1 2 3 4 5; do
+      tailscale status >/dev/null 2>&1 && break
+      sleep 1
+    done
+
+    TS_UP_ARGS="--authkey=${TS_AUTHKEY} --advertise-routes=${LAN_NET} --hostname=${TS_HOSTNAME} --reset --accept-dns=false"
+    if [ -n "$TS_TAGS" ]; then
+      TS_UP_ARGS="$TS_UP_ARGS --advertise-tags=${TS_TAGS}"
+    fi
+    if tailscale up $TS_UP_ARGS >/tmp/tailscale-up.log 2>&1; then
+      logger -t cybercore-firstboot "tailscale up OK: hostname=${TS_HOSTNAME} routes=${LAN_NET} tags=${TS_TAGS}"
+    else
+      logger -t cybercore-firstboot "tailscale up FAILED — see /tmp/tailscale-up.log"
+    fi
+    # Defense in depth — the key was consumed by the bootstrap endpoint
+    # (one-shot DB row), but unset the var locally anyway.
+    unset TS_AUTHKEY
+  else
+    logger -t cybercore-firstboot "Bootstrap response had no tailscale_authkey field — skipping"
+  fi
 fi
+unset BOOTSTRAP_RESP
 
 logger -t cybercore-firstboot "rendered: lan0=${LAN_IP}/${LAN_PREFIX} net=${LAN_NET} dhcp=${DHCP_START}-${DHCP_END} controller=${CONTROLLER_IP} dns_fwd=${DNS_FORWARDER}"
 echo "[cybercore-firstboot] lan0=${LAN_IP}/${LAN_PREFIX} controller=${CONTROLLER_IP}" >&2
@@ -253,16 +283,14 @@ DHCP_START_OCTET=10
 DHCP_END_OCTET=200
 
 # --- Tailscale subnet router (BYOAB) ---
-# Set TAILSCALE_AUTHKEY to enable Tailscale on this lane gateway. The
-# firstboot hook will run `tailscale up` advertising the lane's /24.
-# Generate keys at https://login.tailscale.com/admin/settings/keys —
-# pre-approved + ephemeral + tagged keys are recommended (one-shot per
-# lane, auto-cleanup on teardown).
+# The Tailscale auth key is NOT stored here. firstboot pulls it from the
+# orchestrator at boot via GET <CYBERCORE_ORCHESTRATOR_URL>/api/lane-bootstrap,
+# identified by the lane's WAN source IP. If the orchestrator is unreachable
+# or has no pending token for this lane, Tailscale setup is skipped silently
+# and the lane still works (just without BYOAB).
 #
-# Leave TAILSCALE_AUTHKEY empty (default) to skip Tailscale setup.
-TAILSCALE_AUTHKEY=
-TAILSCALE_HOSTNAME=
-TAILSCALE_TAGS=
+# Override the orchestrator URL here if it lives elsewhere:
+CYBERCORE_ORCHESTRATOR_URL=http://100.100.20.50:3000
 ENV_EOF
 
 # 2c. Placeholder dnsmasq.conf — replaced at boot by firstboot once lan0
