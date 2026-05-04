@@ -922,9 +922,17 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
               pool: `${module}-pool`
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
-            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+            // Apply per-role resources from the GOAD lab def (DC=6GiB, member=8GiB,
+            // workstation=4GiB) along with the lane net config. Non-GOAD specs
+            // skip the resource block since goadMacs[vmName] is undefined.
+            const goadVm = goadMacs[vmName];
+            const vmConfig = {
               net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
-            });
+            };
+            if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
+            if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
+            if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
+            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
           }
 
           deployedVMs.push({ vm_id: vmId, name: vmName, type: vmType, node: bestNode });
@@ -2372,9 +2380,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                     pool: `${module}-pool`
                   });
                   if (result) await waitForTask(templateNode, result);
-                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                  // Apply per-role resources alongside lane net config (mirrors
+                  // single-lane deploy at admin.js:919; non-GOAD specs are unaffected
+                  // since goadMacs[vmName] is undefined for them).
+                  const goadVm = goadMacs[vmName];
+                  const vmConfig = {
                     net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
-                  });
+                  };
+                  if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
+                  if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
+                  if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
+                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
                 }
               });
 
@@ -3856,9 +3872,15 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
               description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
             });
             if (result) await waitForTask(templateNode, result);
-            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+            // Apply per-role resources (mirrors single + group deploy paths).
+            const goadVm = goadMacs[vmName];
+            const vmConfig = {
               net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
-            });
+            };
+            if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
+            if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
+            if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
+            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
           }
 
           deployedVMs.push({

@@ -234,21 +234,34 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
     permissions: '0755'
     content: |
       #!/usr/bin/env python3
-      # Patch upstream's mssql role: replace win_template (which silently fails
-      # to render Jinja in ansible-core 2.20+) with: render locally then win_copy.
-      # NOTE: lambda passed to re.sub — passing the replacement as a plain string
-      # makes Python's re module try to interpret backslash escapes (\\s, \\1)
-      # inside it, which fails when the replacement contains Windows paths.
+      # Two patches to upstream's mssql role:
+      #
+      # (1) Replace win_template (which silently fails to render Jinja in
+      #     ansible-core 2.20+) with: render locally then win_copy. The
+      #     lambda passed to re.sub avoids Python's re module trying to
+      #     interpret backslash escapes (\\s, \\1) in the replacement when
+      #     it contains Windows paths.
+      #
+      # (2) Make the SQL Server install task tolerant of the benign
+      #     "No features were installed" exit (rc=2226323458 / 0x84B40002).
+      #     The Windows VM template (vmid 1004) ships with SQLEXPRESS
+      #     already pre-installed, so the bootstrapper has nothing to
+      #     install and bails. Subsequent role tasks (service config, db
+      #     seed, GPO for ports) still run against the pre-installed
+      #     instance and that's what makes Kerberoasting actually
+      #     exploitable end-to-end.
       import re, sys
       path = sys.argv[1]
       content = open(path).read()
-      old = re.compile(
+
+      # ---------- Patch 1: win_template -> template + win_copy ----------
+      old1 = re.compile(
           r'- name: create the configuration file\s*\n'
           r'\s*win_template:\s*\n'
           r'\s*src:.*\n'
           r'\s*dest:.*sql_conf\.ini',
       )
-      NEW = """- name: create the configuration file (rendered locally)
+      NEW1 = """- name: create the configuration file (rendered locally)
         ansible.builtin.template:
           src: sql_conf.ini.{{sql_version}}.j2
           dest: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
@@ -259,12 +272,96 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
           src: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
           dest: 'c:\\setup\\mssql\\sql_conf.ini'
           force: yes"""
-      out = old.sub(lambda m: NEW, content)
-      if out != content:
-          open(path, 'w').write(out)
-          print(f"  Replaced win_template with template+win_copy in {path}", file=sys.stderr)
+      content_v1 = old1.sub(lambda m: NEW1, content)
+      if content_v1 != content:
+          print(f"  Patch 1: replaced win_template with template+win_copy in {path}", file=sys.stderr)
       else:
-          print(f"  WARNING: pattern not matched in {path} (may already be patched)", file=sys.stderr)
+          print(f"  Patch 1: WARNING — win_template pattern not matched (may already be patched)", file=sys.stderr)
+      content = content_v1
+
+      # ---------- Patch 2: tolerate "No features were installed" ----------
+      # Match the install task by its NAME ("Install the database") rather
+      # than by command content, since upstream's setup.exe invocation may
+      # span multiple lines or use template vars (no literal "setup.exe" +
+      # "sql_conf.ini" on the same line).
+      #
+      # If the task already has its own `register:` (upstream typically
+      # registers as something like 'install_result'), reuse that name in
+      # our failed_when expression — this avoids the duplicate-mapping-key
+      # warning that would otherwise appear at task evaluation.
+      lines = content.splitlines(keepends=True)
+      task_start = None
+      for i, line in enumerate(lines):
+          if re.match(r'^[ \t]*- name:\s*Install the database\s*$', line):
+              task_start = i
+              break
+
+      if task_start is None:
+          print(f"  Patch 2: 'Install the database' task not found in {path} — skipping", file=sys.stderr)
+      else:
+          task_indent = re.match(r'^([ \t]*)-', lines[task_start]).group(1)
+          attr_indent = task_indent + '  '
+
+          # Walk down to the end of this task (next sibling at same indent,
+          # first dedented line, or EOF).
+          task_end = task_start
+          j = task_start + 1
+          while j < len(lines):
+              if re.match(rf'^{re.escape(task_indent)}-[ \t]', lines[j]):
+                  break
+              if lines[j].strip() and not lines[j].startswith((' ', '\t')):
+                  break
+              if lines[j].strip():
+                  task_end = j
+              j += 1
+
+          task_block = ''.join(lines[task_start:task_end + 1])
+          if 'cybercore-mssql-tolerate' in task_block:
+              print(f"  Patch 2: install task already tolerant (skip)", file=sys.stderr)
+          else:
+              # Detect existing `register: <var>` inside the task body and
+              # reuse the var name. Falls back to our own name if upstream
+              # doesn't register this task.
+              existing_register = None
+              for k in range(task_start + 1, task_end + 1):
+                  m = re.match(r'^\s+register:\s+(\S+)\s*$', lines[k])
+                  if m:
+                      existing_register = m.group(1)
+                      break
+
+              register_name = existing_register or 'cybercore_mssql_install'
+
+              # Detect existing failed_when — if upstream already has one,
+              # don't add a duplicate (we'd create a YAML duplicate-key error).
+              has_failed_when = any(
+                  re.match(r'^\s+failed_when:', lines[k])
+                  for k in range(task_start + 1, task_end + 1)
+              )
+
+              addition = [
+                  f"{attr_indent}# cybercore-mssql-tolerate: SQLEXPRESS already in template\n",
+              ]
+              if existing_register is None:
+                  addition.append(f"{attr_indent}register: {register_name}\n")
+              if not has_failed_when:
+                  addition.append(f"{attr_indent}failed_when:\n")
+                  addition.append(f"{attr_indent}  - {register_name}.rc not in [0, 2226323458]\n")
+                  addition.append(f"{attr_indent}  - \"'No features were installed' not in {register_name}.stdout\"\n")
+                  lines[task_end + 1:task_end + 1] = addition
+                  content = ''.join(lines)
+                  msg_register = (
+                      f"reused existing register='{existing_register}'"
+                      if existing_register else "added register"
+                  )
+                  print(f"  Patch 2: added failed_when tolerance ({msg_register})", file=sys.stderr)
+              else:
+                  # Upstream has its own failed_when — leave it alone, just
+                  # drop a marker comment so we don't keep retrying.
+                  lines[task_end + 1:task_end + 1] = addition
+                  content = ''.join(lines)
+                  print(f"  Patch 2: upstream already has failed_when; left alone (added marker)", file=sys.stderr)
+
+      open(path, 'w').write(content)
 
   - path: /opt/goad-light/patch-child-domain.py
     permissions: '0755'
@@ -870,8 +967,15 @@ VERIFY_DEV=$(rbd map ${STORAGE}/vm-${VMID}-disk-1 --id admin 2>/dev/null) || {
   VERIFY_DEV=""
 }
 if [ -n "$VERIFY_DEV" ]; then
-  sleep 1
-  partprobe "$VERIFY_DEV" 2>/dev/null || true
+  # rbd map + partprobe is racy: the device node appears before the kernel
+  # finishes re-reading the partition table. Retry until p1 surfaces (or give
+  # up after ~10s and warn).
+  for _ in 1 2 3 4 5; do
+    partprobe "$VERIFY_DEV" 2>/dev/null || true
+    udevadm settle 2>/dev/null || true
+    [ -b "${VERIFY_DEV}p1" ] && break
+    sleep 2
+  done
   VERIFY_MOUNT=$(mktemp -d)
   if mount "${VERIFY_DEV}p1" "$VERIFY_MOUNT" 2>/dev/null; then
     # /var/lib/cloud/instance is an ABSOLUTE symlink ('-> /var/lib/cloud/instances/<iid>')
@@ -902,9 +1006,13 @@ if [ -n "$VERIFY_DEV" ]; then
     umount "$VERIFY_MOUNT"
   else
     echo "WARNING: could not mount ${VERIFY_DEV}p1 — proceeding without marker check"
+    echo "         (verify manually: rbd map ${STORAGE}/vm-${VMID}-disk-1 --id admin"
+    echo "                           partprobe /dev/rbdN; mount /dev/rbdNp1 /mnt/...)"
   fi
   rmdir "$VERIFY_MOUNT" 2>/dev/null || true
-  rbd unmap "$VERIFY_DEV"
+  # rbd may have auto-released; tolerate unmap failure so set -e doesn't abort
+  # the bake before we strip cicustom + template the VM.
+  rbd unmap "$VERIFY_DEV" 2>/dev/null || true
 fi
 
 # ---------- 5. Strip the bake-time cloud-init custom config ----------

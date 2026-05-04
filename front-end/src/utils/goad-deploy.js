@@ -156,6 +156,50 @@ const INFRA_IP_OCTETS = {
   Kali:       20
 };
 
+// Per-role resource defaults applied to Windows VM clones at deploy time.
+// Template VMID 1004 ships with whatever it was baked at; admin.js calls
+// `qemu/<vmid>/config` after clone with these values so the lane VMs end up
+// correctly sized regardless of template state. Memory in MiB.
+//
+// Sizing rationale (validated against observed pressure, 2026-05-04):
+//   - DC under promotion (Install-ADDSDomain + child-domain replication)
+//     spikes to ~5.5 GiB on Server 2019. At 4 GiB the guest hit 101% and
+//     paged hard. 8 GiB cap leaves comfortable headroom for the worst
+//     5 minutes of dcpromo; balloon=4 GiB lets the host reclaim down to a
+//     normal idle DC working set (~2.5–3 GiB) once the lane stabilizes.
+//   - Member server runs SQL Express + IIS + WebDAV + WinRM. SQL install
+//     loads ~3 GiB of bootstrapper + 2 GiB DB engine concurrently with IIS
+//     install, peaking around 6.5 GiB. 10 GiB cap gives setup.exe room to
+//     actually run; balloon=6 GiB matches the active-SQL idle working set.
+//   - Workstations and DRACARYS Linux are light; 4 GiB / 2 cores is fine.
+//
+// With Proxmox balloon driver (on by default for Windows VMs), the cap is
+// the per-VM peak budget; the host only physically commits up to balloon
+// when the guest is idle. So per-lane peak ~26 GiB, idle steady-state ~13.
+//
+// Override per-VM by setting `memory`, `balloon`, or `cores` directly on the
+// vms[] entry — these defaults are applied only when the VM entry is silent.
+const ROLE_RESOURCES = {
+  dc:          { memory: 8192,  balloon: 4096, cores: 2 },
+  member:      { memory: 10240, balloon: 6144, cores: 4 },
+  workstation: { memory: 4096,  balloon: 2048, cores: 2 },
+  linux:       { memory: 4096,  balloon: 2048, cores: 2 }
+};
+
+/**
+ * Resolve memory/balloon/cores for a GOAD VM, with explicit per-VM overrides
+ * winning over role defaults. Returns null fields when neither is set, so
+ * the caller can leave Proxmox at template defaults.
+ */
+function getVmResources(vmDef) {
+  const roleDefault = ROLE_RESOURCES[vmDef?.role] || {};
+  return {
+    memory:  vmDef?.memory  ?? roleDefault.memory  ?? null,
+    balloon: vmDef?.balloon ?? roleDefault.balloon ?? null,
+    cores:   vmDef?.cores   ?? roleDefault.cores   ?? null
+  };
+}
+
 /**
  * Return the lab definition or throw if unknown.
  */
@@ -234,11 +278,19 @@ function prepareGoadMacs(spec, vxlanId, laneSubnetBase) {
     if (!vm?.name) continue;
     const labVm = byName[vm.name.toLowerCase()];
     if (!labVm) continue;
+    // Per-VM overrides on `vm` (from the challenge spec in DB) take precedence
+    // over the lab definition's own fields, which take precedence over role
+    // defaults. Lets a challenge author bump just one VM without rewriting
+    // the whole lab def.
+    const resources = getVmResources({ ...labVm, ...vm });
     out[vm.name] = {
       mac:        macForOctet(labVm.ipOctet, vxlanId),
       static_ip:  buildIp(laneSubnetBase, labVm.ipOctet),
       role:       labVm.role,
-      nic_model:  labVm.nic_model || 'e1000'
+      nic_model:  labVm.nic_model || 'e1000',
+      memory:     resources.memory,
+      balloon:    resources.balloon,
+      cores:      resources.cores
     };
   }
   return out;
@@ -633,7 +685,9 @@ module.exports = {
   GOAD_LABS,
   DEFAULT_LAB,
   INFRA_IP_OCTETS,
+  ROLE_RESOURCES,
   buildIp,
   getLab,
+  getVmResources,
   CONTROLLER_TEMPLATE_VMID
 };
