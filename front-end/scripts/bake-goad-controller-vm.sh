@@ -176,10 +176,12 @@ write_files:
       LC_ALL=C.UTF-8
 
   # SSH private key for the controller→gateway link. Used by run.sh to
-  # write DHCP reservations on the lane gateway (192.18.0.1) without the
-  # orchestrator needing any SSH access. The corresponding public key
-  # must be in the gateway template's /root/.ssh/authorized_keys (added
-  # by scripts/patch-goad-gateway-key.sh).
+  # write DHCP reservations on the lane gateway (whatever \${GW_IP} resolves
+  # to per-lane — v1: 192.18.0.1 shared, v2: 10.<vxh>.<vxl>.1 unique) without
+  # the orchestrator needing any SSH access. The corresponding public key
+  # must be in the gateway template's /root/.ssh/authorized_keys (added by
+  # scripts/patch-goad-gateway-key.sh for 1692; bake-lane-gateway-v2.sh
+  # inherits it for 1694 via the clone-from-1692 chain).
   - path: /root/.ssh/id_ed25519
     permissions: '0600'
     content: |
@@ -420,17 +422,22 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # GOAD, NHA) include these in their own data/inventory; GOAD-Light's
       # is just an upstream omission.
       add_route: "no"
-      route_gateway: "192.18.0.1"
+      # GW_IP is computed earlier in run.sh from the FIRST HOST_MAP triple's
+      # /24 base + ".1" — works for v1 (192.18.0.1) and v2 (10.<vxh>.<vxl>.1)
+      # without modification. The literal \${GW_IP} below is preserved
+      # through the cloud-init heredoc into run.sh, which expands it at
+      # runtime to whatever the lane's actual gateway IP is.
+      route_gateway: "\${GW_IP}"
       route_network: "10.0.0.0/8"
       http_proxy: "no"
-      # DNS forwarder must be the lane gateway (192.18.0.1), NOT a public
+      # DNS forwarder must be the lane gateway (\${GW_IP}), NOT a public
       # resolver. After DC promotion Windows pins DC's primary DNS to
       # 127.0.0.1; that local DNS service then forwards externally to
       # whatever dns_server_forwarder we set. The lane gateway's FORWARD
-      # chain only allows lan0 → 100.102.0.1:53 (the transit gateway);
-      # lan0 → 1.1.1.1:53 is dropped. Routing through 192.18.0.1's dnsmasq
-      # keeps DNS in the allowed path: dnsmasq → 100.102.0.1 → upstream.
-      dns_server_forwarder: "192.18.0.1"
+      # chain only allows lan0 → upstream via dnsmasq; lan0 → 1.1.1.1:53
+      # is dropped. Routing through the lane gateway's dnsmasq keeps DNS
+      # in the allowed path.
+      dns_server_forwarder: "\${GW_IP}"
       # Keyboard layout hex codes — first one is the default. US only here;
       # add other codes (e.g. "0000040C" for French) if needed.
       keyboard_layouts: ["00000409"]

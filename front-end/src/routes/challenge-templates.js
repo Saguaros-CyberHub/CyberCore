@@ -22,6 +22,11 @@ const adminOnly = requireRole('admin');
 router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
   res.json({
     default_lab: goadDeploy.DEFAULT_LAB,
+    // IPs shown here are ILLUSTRATIVE — the actual lane subnet is decided
+    // per-deploy by the challenge's subnet_scheme (v1: 192.18.0.X shared,
+    // v2: 10.<vxh>.<vxl>.X unique per lane). UI shows v1-style addresses
+    // because the last-octet pattern is the relevant invariant; the /24
+    // base is a deploy-time detail.
     labs: Object.entries(goadDeploy.GOAD_LABS).map(([key, lab]) => ({
       key,
       displayName: lab.displayName,
@@ -32,13 +37,15 @@ router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
         role:          v.role,
         os:            v.os,
         template_vmid: v.template_vmid,
-        ip:            `${goadDeploy.LANE_SUBNET}.${v.ipOctet}`,
+        ip:            goadDeploy.buildIp('192.18.0', v.ipOctet),  // illustrative
+        ip_octet:      v.ipOctet,                                  // authoritative
         nic_model:     v.nic_model
       }))
     })),
     infra_ips: Object.fromEntries(
-      Object.entries(goadDeploy.INFRA_IP_OCTETS).map(([k, octet]) => [k, `${goadDeploy.LANE_SUBNET}.${octet}`])
-    )
+      Object.entries(goadDeploy.INFRA_IP_OCTETS).map(([k, octet]) => [k, goadDeploy.buildIp('192.18.0', octet)])
+    ),
+    infra_ip_octets: goadDeploy.INFRA_IP_OCTETS  // authoritative (last-octet only)
   });
 });
 

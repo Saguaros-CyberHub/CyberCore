@@ -103,6 +103,46 @@ function v2WanConfig(vxlanId) {
 }
 
 /**
+ * Canonical hostname used for the lane gateway's Tailscale device identity.
+ *
+ * This is the string Tailscale ACLs match on — they don't see VXLAN IDs or
+ * Proxmox VMIDs, only this name. Centralizing it means the eventual switch
+ * from "vxlan-keyed" to "student-keyed" naming is a one-function change.
+ *
+ * Today's format:    `lane-<vxlanId>-<laneNameSlug>`  (e.g., lane-10001-crucible-10001)
+ * Today's ACL match: `dst: ["lane-10001-*:*"]`
+ *
+ * Future format (when per-student lanes land):
+ *                    `lane-<cohort>-<studentSlug>-<short>` (e.g., lane-fall26-alice-a3f7)
+ * Future ACL match:  `src: ["alice@..."], dst: ["lane-fall26-alice-*:*"]`
+ *                    — stable across re-deploys because it tracks identity, not vxlan_id.
+ *
+ * The helper sanitizes to hostname-safe chars (lowercase alphanumeric + hyphen),
+ * collapses runs of hyphens, trims edges, and caps at 63 chars (DNS limit).
+ *
+ * @param {object} opts
+ * @param {number} opts.vxlanId         — required today; will be optional once student fields land
+ * @param {string} [opts.laneName]      — legacy slug (e.g., "crucible-10001"). Currently the source of identity.
+ * @param {string} [opts.cohort]        — RESERVED for future student-aware naming. Unused today.
+ * @param {string} [opts.studentId]     — RESERVED for future student-aware naming. Unused today.
+ * @returns {string}
+ */
+function formatLaneHostname({ vxlanId, laneName, cohort, studentId } = {}) {
+  // When cohort+studentId are wired through (after GOAD-on-v2):
+  // if (cohort && studentId) {
+  //   const short = (vxlanId || 0).toString(16).padStart(4, '0');
+  //   return sanitize(`lane-${cohort}-${studentId}-${short}`);
+  // }
+  const raw = laneName ? `lane-${vxlanId}-${laneName}` : `lane-${vxlanId}`;
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 63);
+}
+
+/**
  * Render a lane gateway's net0 string from the wan config object. v2 includes
  * a VLAN tag (lab network is tagged); v1 omits it (module transit bridge is
  * untagged inside the SDN VNet).
@@ -205,9 +245,10 @@ async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, 
   }
   try {
     const { key, tags } = await tailscale.mintLaneAuthKey({ vxlanId });
-    const hostname = laneName
-      ? `lane-${vxlanId}-${laneName}`.substring(0, 63).replace(/[^a-z0-9-]/gi, '-').toLowerCase()
-      : `lane-${vxlanId}`;
+    // Canonical hostname goes through formatLaneHostname so the future
+    // student-aware naming switch is a one-function change. The ACL pattern
+    // we'll write today (`lane-<vxlan>-*`) keeps working until that flip.
+    const hostname = formatLaneHostname({ vxlanId, laneName });
     await tailscale.storeLaneBootstrap({
       cybercoreQuery,
       vxlanId,
@@ -751,19 +792,6 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec;
     const subnetScheme = challenge.subnet_scheme || 'v1';
 
-    // v2 + GOAD is not yet supported: goad-deploy.js still hardcodes
-    // 192.18.0.x in HOST_MAP, the controller's run.sh, and DHCP reservation
-    // logic. Refuse the combo at deploy time rather than silently breaking
-    // a long-running ansible run. (Follow-up: parameterize goad-deploy by
-    // lane subnet base + bake controller template 1700 to read the lane
-    // gateway IP from /etc/goad-lane.env.)
-    if (subnetScheme === 'v2' && spec?.goad?.enabled) {
-      return res.status(501).json({
-        error: 'v2 lane subnet is not yet compatible with GOAD challenges',
-        detail: 'GOAD playbooks still hardcode 192.18.0.0/24. Use subnet_scheme=v1 for GOAD challenges, or wait for the goad-deploy.js + controller bake follow-up.'
-      });
-    }
-
     // Pre-flight resource check (now that we know the VM count from spec)
     const specVmCount = (spec.vms || []).length || 1;
     if (!confirm) {
@@ -857,8 +885,12 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     // ---- Background deployment (non-blocking) ----
     (async () => {
       try {
+        // Lane subnet base — '192.18.0' for v1, '10.<vxh>.<vxl>' for v2. Threaded
+        // through every GOAD function so VM static IPs land in the right /24.
+        const laneSubnetBase = resolveLaneNetworking(subnetScheme, module, vxlanId).lan.base3;
+
         // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
-        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId);
+        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, laneSubnetBase);
 
         // Multi-VM support: if spec.vms exists, deploy each VM; otherwise fall back to single VM
         const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
@@ -952,7 +984,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           try {
             await goadDeploy.deployGoadLane({
               lane, spec, module, vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, deployedVMs,
+              bestNode, templateNode, laneSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {
@@ -1879,14 +1911,6 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         ? JSON.parse(challengeResult.rows[0].spec) : challengeResult.rows[0].spec;
       subnetScheme = challengeResult.rows[0].subnet_scheme || 'v1';
 
-      // v2 + GOAD not yet supported (see single-deploy site for full reasoning)
-      if (subnetScheme === 'v2' && spec?.goad?.enabled) {
-        return res.status(501).json({
-          error: 'v2 lane subnet is not yet compatible with GOAD challenges',
-          detail: 'GOAD playbooks still hardcode 192.18.0.0/24. Use subnet_scheme=v1 for GOAD batch deploys, or wait for the goad-deploy.js + controller bake follow-up.'
-        });
-      }
-
       // Check VXLAN capacity
       vxlanBlock = {
         start: spec.vxlan_block?.start ?? 10000,
@@ -2312,8 +2336,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             const gatewayVmId = 100000 + vxlanId;
             const deployedVMs = [];
 
+            // Lane subnet base — '192.18.0' for v1, '10.<vxh>.<vxl>' for v2.
+            const laneSubnetBase = resolveLaneNetworking(subnetScheme, module, vxlanId).lan.base3;
+
             // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
-            const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId);
+            const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, laneSubnetBase);
 
             // Clone all challenge VMs — each clone goes through the shared semaphore
             // so we never exceed MAX_CONCURRENT_CLONES across all lanes
@@ -2414,7 +2441,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 await goadDeploy.deployGoadLane({
                   lane: { lane_id: laneId },
                   spec, module, vnet, vxlanId, gatewayVmId,
-                  bestNode, templateNode, deployedVMs,
+                  bestNode, templateNode, laneSubnetBase, deployedVMs,
                   proxmoxAPI, waitForTask, query: cybercoreQuery
                 });
               } catch (goadErr) {
@@ -2458,7 +2485,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
               if (!kaliIp) {
                 console.warn(`[Group ${group_name}] Could not get Kali IP via guest agent — using fallback`);
-                kaliIp = '192.18.0.100';
+                // Subnet-aware fallback: .100 of whatever lane subnet this is
+                // ('192.18.0.100' for v1, '10.<vxh>.<vxl>.100' for v2).
+                kaliIp = `${laneSubnetBase}.100`;
               }
               console.log(`[Group ${group_name}] Kali IP: ${kaliIp}`);
 
@@ -3649,15 +3678,6 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
 
     // Build the spec object compatible with the existing deploy-lane flow
     const subnetScheme = template.subnet_scheme || 'v1';
-
-    // v2 + GOAD not yet supported (see single-deploy site for full reasoning)
-    if (subnetScheme === 'v2' && spec?.goad?.enabled) {
-      return res.status(501).json({
-        error: 'v2 lane subnet is not yet compatible with GOAD challenges',
-        detail: 'GOAD playbooks still hardcode 192.18.0.0/24. Use subnet_scheme=v1 for GOAD challenges, or wait for the goad-deploy.js + controller bake follow-up.'
-      });
-    }
-
     const gatewayVmid = resolveGatewayVmid(challengeModule, subnetScheme, spec);
     const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
     console.log(`[ChallengeNetwork] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
@@ -3800,8 +3820,11 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
       try {
         const deployedVMs = [];
 
+        // Lane subnet base — '192.18.0' for v1, '10.<vxh>.<vxl>' for v2.
+        const laneSubnetBase = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId).lan.base3;
+
         // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
-        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId);
+        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, laneSubnetBase);
 
         // Clone all VMs
         for (const vmSpec of vmSpecs) {
@@ -3890,7 +3913,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
             await goadDeploy.deployGoadLane({
               lane: { lane_id: laneId },
               spec, module: challengeModule, vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, deployedVMs,
+              bestNode, templateNode, laneSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {
