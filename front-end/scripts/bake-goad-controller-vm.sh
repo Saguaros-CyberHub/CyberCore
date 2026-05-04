@@ -25,6 +25,10 @@ STORAGE="vmpool"                                  # where the VM disk + cloudini
 SNIPPET_STORAGE="${SNIPPET_STORAGE:-}"            # auto-detected if empty; override to force a specific storage
 BAKE_BRIDGE="${BAKE_BRIDGE:-vmbr0}"
 BAKE_VLAN="${BAKE_VLAN:-20}"                      # bake-time VLAN for internet (set empty to disable)
+# Explicit DNS for the bake VM — avoids depending on whatever DHCP advertises
+# (FreeIPA at 100.100.20.20 has been the default and dies sometimes; OPNsense
+# Unbound at 100.100.0.1 is the orchestrator's resolver and recurses externally).
+BAKE_DNS="${BAKE_DNS:-100.100.0.1}"
 GOAD_REPO="${GOAD_REPO:-https://github.com/Orange-Cyberdefense/GOAD.git}"
 GOAD_REF="${GOAD_REF:-main}"
 MEMORY=2048
@@ -36,7 +40,7 @@ CLOUD_IMG_LOCAL="/var/lib/vz/template/iso/debian-13-genericcloud-amd64.qcow2"
 # A throwaway password baked into the template's default user. Per-clone,
 # admin.js can override via cloud-init `cipassword`. Mostly we don't log in
 # to this VM at all — qemu-guest-agent does the work.
-TEMPLATE_PASSWORD="$(openssl rand -base64 24)"
+TEMPLATE_PASSWORD="bake-debug"
 
 # ---------- 0. Sanity ----------
 if qm status $VMID >/dev/null 2>&1; then
@@ -138,6 +142,35 @@ cat > "$USERDATA_PATH" << SNIPPET
 hostname: $NAME
 manage_etc_hosts: true
 
+# Force /etc/resolv.conf to a known-good resolver. manage_resolv_conf gets
+# cloud-init to write resolv.conf in modules:config — backup if bootcmd missed.
+manage_resolv_conf: true
+resolv_conf:
+  nameservers:
+    - $BAKE_DNS
+    - 1.1.1.1
+  searchdomains: []
+  domain: ""
+
+# bootcmd MUST be fast and non-blocking. Any blocking command (e.g.,
+# `systemctl reload`) will hang cloud-init at init-local stage, since cloud-init
+# runs bootcmd synchronously with capture=False. We intentionally do NOT do:
+#   - systemctl operations  (can block on service deps at this early stage)
+#   - operations that need network  (network not fully up yet)
+# Just set the root password (debug login) and force resolv.conf (so subsequent
+# package install at modules:final can resolve hosts).
+bootcmd:
+  - [ sh, -c, 'echo "root:$TEMPLATE_PASSWORD" | chpasswd; rm -f /etc/resolv.conf; printf "nameserver $BAKE_DNS\nnameserver 1.1.1.1\n" > /etc/resolv.conf; exit 0' ]
+
+# chpasswd as defense-in-depth — if bootcmd missed for any reason, this
+# config-stage run sets it again. Plus enables ssh password auth properly.
+chpasswd:
+  list: |
+    root:$TEMPLATE_PASSWORD
+  expire: false
+ssh_pwauth: true
+disable_root: false
+
 # qemu-guest-agent ships in the genericcloud image but isn't enabled by default.
 package_update: true
 packages:
@@ -191,6 +224,71 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
     permissions: '0644'
     content: |
       $DEPLOY_PUBKEY
+
+  # ----- Python helper scripts called by run.sh -----
+  # These live in standalone files (not inline heredocs in run.sh) so the
+  # outer YAML block scalar doesn't choke on column-0 Python lines. The
+  # `content: |` block stripped by 6 spaces gives Python source at column 0
+  # — correct for module-level statements.
+  - path: /opt/goad-light/patch-mssql.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # Patch upstream's mssql role: replace win_template (which silently fails
+      # to render Jinja in ansible-core 2.20+) with: render locally then win_copy.
+      # NOTE: lambda passed to re.sub — passing the replacement as a plain string
+      # makes Python's re module try to interpret backslash escapes (\\s, \\1)
+      # inside it, which fails when the replacement contains Windows paths.
+      import re, sys
+      path = sys.argv[1]
+      content = open(path).read()
+      old = re.compile(
+          r'- name: create the configuration file\s*\n'
+          r'\s*win_template:\s*\n'
+          r'\s*src:.*\n'
+          r'\s*dest:.*sql_conf\.ini',
+      )
+      NEW = """- name: create the configuration file (rendered locally)
+        ansible.builtin.template:
+          src: sql_conf.ini.{{sql_version}}.j2
+          dest: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
+        delegate_to: localhost
+
+      - name: copy rendered configuration file to windows
+        ansible.windows.win_copy:
+          src: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
+          dest: 'c:\\setup\\mssql\\sql_conf.ini'
+          force: yes"""
+      out = old.sub(lambda m: NEW, content)
+      if out != content:
+          open(path, 'w').write(out)
+          print(f"  Replaced win_template with template+win_copy in {path}", file=sys.stderr)
+      else:
+          print(f"  WARNING: pattern not matched in {path} (may already be patched)", file=sys.stderr)
+
+  - path: /opt/goad-light/patch-child-domain.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # Replace upstream's win_reboot in child_domain role with wait_for_connection,
+      # so we don't try a fresh WinRM session while the SAM is sealed pending reboot.
+      import re, sys
+      path = sys.argv[1]
+      content = open(path).read()
+      old = re.compile(
+          r'- name:\s*Reboot\s*\n\s*win_reboot:\s*\n(?:\s*\w+:.*\n)+\s*when:\s*child_result\.changed',
+      )
+      new = (
+          '- name: "cybercore: wait for child DC to reboot post-promotion"\n'
+          '  ansible.builtin.wait_for_connection:\n'
+          '    delay: 60\n'
+          '    timeout: 900\n'
+          '  when: child_result.changed'
+      )
+      out = old.sub(new, content)
+      if out != content:
+          open(path, 'w').write(out)
+          print(f"  Replaced win_reboot with wait_for_connection in {path}", file=sys.stderr)
 
   # prep.sh writes DHCP reservations on the gateway. Run BEFORE the
   # Windows VMs come up (or before they renew DHCP) so they pick up
@@ -468,40 +566,12 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         mv "\$MSSQL_ROLE/files"/*.j2 "\$MSSQL_ROLE/templates/" 2>/dev/null || true
       fi
       # Replace the buggy win_template task with: render locally → win_copy.
-      # NOTE: use a lambda for re.sub replacement — passing the replacement as
-      # a string makes Python's re module try to interpret backslash escapes
-      # (\s, \1, etc.) inside it, which fails when our replacement contains
-      # Windows paths like c:\\setup. The lambda returns the string verbatim.
+      # The Python script lives at /opt/goad-light/patch-mssql.py (written by
+      # cloud-init at bake time). Calling it from a file avoids the YAML-vs-
+      # Python indentation conflict that breaks inline heredocs in user-data.
       if grep -q 'win_template:' "\$MSSQL_ROLE/tasks/main.yml" 2>/dev/null; then
         echo "==> Patching mssql role: render config locally then win_copy..."
-        python3 - "\$MSSQL_ROLE/tasks/main.yml" <<'PYMSSQL'
-import re, sys
-path = sys.argv[1]
-content = open(path).read()
-old = re.compile(
-    r'- name: create the configuration file\s*\n'
-    r'\s*win_template:\s*\n'
-    r'\s*src:.*\n'
-    r'\s*dest:.*sql_conf\.ini',
-)
-NEW = """- name: create the configuration file (rendered locally)
-  ansible.builtin.template:
-    src: sql_conf.ini.{{sql_version}}.j2
-    dest: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
-  delegate_to: localhost
-
-- name: copy rendered configuration file to windows
-  ansible.windows.win_copy:
-    src: "/tmp/sql_conf.ini.{{ inventory_hostname }}"
-    dest: c:\\\\setup\\\\mssql\\\\sql_conf.ini
-    force: yes"""
-out = old.sub(lambda m: NEW, content)
-if out != content:
-    open(path, 'w').write(out)
-    print(f"  Replaced win_template with template+win_copy in {path}", file=sys.stderr)
-else:
-    print(f"  WARNING: pattern not matched in {path} (may already be patched)", file=sys.stderr)
-PYMSSQL
+        python3 /opt/goad-light/patch-mssql.py "\$MSSQL_ROLE/tasks/main.yml"
       fi
 
       # ---------- Patch upstream's child_domain role for self-healing reboot ----
@@ -519,25 +589,7 @@ PYMSSQL
         # right before the script exits (after Install-ADDSDomain succeeds).
         sed -i 's|-Force -NoRebootOnCompletion|-Force -NoRebootOnCompletion\\n        # cybercore-self-reboot: schedule reboot from in-session\\n        Start-Process shutdown -ArgumentList "/r","/t","30","/f" -NoNewWindow -ErrorAction SilentlyContinue|' "\$CHILD_ROLE"
         # Replace win_reboot with wait_for_connection (no auth needed).
-        python3 - "\$CHILD_ROLE" <<'PYREB'
-import re, sys
-path = sys.argv[1]
-content = open(path).read()
-old = re.compile(
-    r'- name:\s*Reboot\s*\n\s*win_reboot:\s*\n(?:\s*\w+:.*\n)+\s*when:\s*child_result\.changed',
-)
-new = (
-    '- name: "cybercore: wait for child DC to reboot post-promotion"\n'
-    '  ansible.builtin.wait_for_connection:\n'
-    '    delay: 60\n'
-    '    timeout: 900\n'
-    '  when: child_result.changed'
-)
-out = old.sub(new, content)
-if out != content:
-    open(path, 'w').write(out)
-    print(f"  Replaced win_reboot with wait_for_connection in {path}", file=sys.stderr)
-PYREB
+        python3 /opt/goad-light/patch-child-domain.py "\$CHILD_ROLE"
       fi
 
       echo "================================================================="
@@ -546,6 +598,97 @@ PYREB
       echo " Hosts: \${HOST_MAP}"
       echo " Playbook chain: \${PLAYBOOKS}"
       echo "================================================================="
+
+      # Preflight #0: clean stale baked default route, verify egress.
+      # The Windows VM template (vmid 1004) was baked while attached to the
+      # v1 lane subnet (192.18.0.0/24) with gateway 192.18.0.1. That stale
+      # default route persists in clones even after DHCP hands out a fresh IP
+      # in the v2 subnet (10.<vxh>.<vxl>.0/24), so all internet egress dies
+      # in routing — Install-PackageProvider/NuGet bootstrap fails silently
+      # in the upstream chain ("NoMatchFoundForProvider").
+      #
+      # This preflight self-derives the correct lane gateway from each host's
+      # own IPv4 (.1 of its /24), so it works for v1 and v2 without depending
+      # on extra_vars or knowing the subnet ahead of time. Connects via the
+      # bake-time Administrator (vagrant scaffolding user doesn't exist yet).
+      # NOTE on \$ escaping: the outer cloud-init heredoc is unquoted (<< SNIPPET),
+      # so EVERY PowerShell \$var inside this YAML body must be escaped as \\\$
+      # in the bake source. After bake-time bash expansion, run.sh sees \$var.
+      # The inner heredoc terminator <<'PFN' is single-quoted so no further
+      # expansion happens at run.sh execution time — \$var lands literally in
+      # preflight-network.yml as PowerShell expects.
+      cat > "\$RUNTIME/preflight-network.yml" <<'PFN'
+      ---
+      - name: "Preflight: fix stale default route, verify egress"
+        hosts: domain
+        gather_facts: no
+        tasks:
+          - name: Compute lane gateway from host's IPv4 (.1 of /24)
+            win_shell: |
+              \$ip = (Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { \$_.IPAddress -like '10.*' -or \$_.IPAddress -like '192.*' } |
+                Where-Object { \$_.PrefixOrigin -ne 'WellKnown' } |
+                Select-Object -First 1).IPAddress
+              if (-not \$ip) { throw "no usable IPv4 address found on host" }
+              \$parts = \$ip.Split('.')
+              "\$(\$parts[0]).\$(\$parts[1]).\$(\$parts[2]).1"
+            register: lane_gw_out
+            changed_when: false
+
+          - name: Set lane_gw fact
+            set_fact:
+              lane_gw: "{{ lane_gw_out.stdout_lines[0] }}"
+
+          - name: Show computed lane gateway
+            debug:
+              msg: "Lane gateway computed as {{ lane_gw }} (from this host's IPv4 /24)"
+
+          - name: Remove stale default routes (any nexthop that isn't the lane gateway)
+            win_shell: |
+              \$expected = '{{ lane_gw }}'
+              \$stale = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { \$_.NextHop -ne \$expected -and \$_.NextHop -ne '0.0.0.0' }
+              foreach (\$r in \$stale) {
+                Write-Host "Removing stale default route via \$(\$r.NextHop) on ifIndex \$(\$r.ifIndex)"
+                Remove-NetRoute -DestinationPrefix '0.0.0.0/0' -NextHop \$r.NextHop -Confirm:\$false -ErrorAction SilentlyContinue
+              }
+              if (-not \$stale) { Write-Host "No stale default routes" }
+
+          - name: Ensure correct default route exists via the lane gateway
+            win_shell: |
+              \$expected = '{{ lane_gw }}'
+              \$exists = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                Where-Object { \$_.NextHop -eq \$expected }
+              if (-not \$exists) {
+                \$iface = Get-NetIPAddress -AddressFamily IPv4 |
+                  Where-Object { \$_.IPAddress -like '10.*' -or \$_.IPAddress -like '192.*' } |
+                  Where-Object { \$_.PrefixOrigin -ne 'WellKnown' } |
+                  Select-Object -First 1
+                Write-Host "Adding default route via \$expected on ifIndex \$(\$iface.InterfaceIndex)"
+                New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex \$iface.InterfaceIndex -NextHop \$expected -RouteMetric 0 -ErrorAction SilentlyContinue | Out-Null
+              } else {
+                Write-Host "Default route via \$expected already present"
+              }
+
+          - name: Verify outbound HTTPS to PSGallery (TLS 1.2)
+            win_shell: |
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              try {
+                (New-Object System.Net.WebClient).DownloadString('https://www.powershellgallery.com/api/v2/') | Out-Null
+                'EGRESS_OK'
+              } catch {
+                throw "Egress preflight failed (lane gateway {{ lane_gw }} unreachable to internet?): \$(\$_.Exception.Message)"
+              }
+            register: egress_test
+            changed_when: false
+
+          - name: Show egress result
+            debug:
+              msg: "{{ egress_test.stdout_lines | join(' | ') }}"
+      PFN
+      echo ""
+      echo ">>>>>>>>>>>>>>>>>>>>>> preflight-network.yml <<<<<<<<<<<<<<<<<<<<<<"
+      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-network.yml" --extra-vars "@\$RUNTIME/extra_vars.yml"
 
       # Preflight #1: create the 'vagrant' scaffolding user on every Windows
       # host. This connects via the bake-time Administrator account (the only
@@ -623,6 +766,10 @@ PYREB
       Re-bake to update.
 
 runcmd:
+  # Allow root password login (bootcmd set the password but didn't touch sshd
+  # config because systemctl reload at init-local can block). Safe here in
+  # final stage — sshd is up.
+  - [ sh, -c, 'sed -i "s/^#*PermitRootLogin.*/PermitRootLogin yes/; s/^#*PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config && systemctl reload ssh' ]
   - [ systemctl, enable, --now, qemu-guest-agent ]
   - [ systemctl, enable, ssh ]
   - [ update-locale, LANG=C.UTF-8, LC_ALL=C.UTF-8 ]
@@ -681,11 +828,13 @@ qm resize $VMID scsi0 ${DISK_GB}G || true   # idempotent: skip if already at siz
 echo "==> Adding cloud-init drive..."
 qm set $VMID --ide2 "${STORAGE}:cloudinit"
 
-# Bake-time cloud-init: default user, our snippet for the bake-only setup
+# Bake-time cloud-init: default user, our snippet for the bake-only setup.
+# --nameserver overrides whatever DHCP advertises — survives a FreeIPA outage.
 qm set $VMID \
   --ciuser root \
   --cipassword "$TEMPLATE_PASSWORD" \
   --ipconfig0 ip=dhcp \
+  --nameserver "$BAKE_DNS" \
   --cicustom "user=${SNIPPET_STORAGE}:snippets/$(basename "$USERDATA_PATH")"
 
 # ---------- 4. Boot, wait for cloud-init to finish ----------
@@ -707,6 +856,56 @@ while true; do
   fi
   sleep 10
 done
+
+# ---------- 4b. VERIFY cloud-init actually completed (not just user kill) ----------
+# The poll above only knows the VM stopped; it can't tell "power_state: poweroff
+# fired naturally after cloud-init finished" from "user `qm stop`'d a hung VM".
+# Mount the rootfs and check for the bake-complete marker (written by runcmd).
+# Without this guard, a half-baked template can ship: packages not installed,
+# /opt/goad missing, runcmd never executed.
+echo "==> Verifying cloud-init wrote the bake-complete marker..."
+VERIFY_DEV=$(rbd map ${STORAGE}/vm-${VMID}-disk-1 --id admin 2>/dev/null) || {
+  # Fallback for non-Ceph storages: just trust the stop and warn
+  echo "WARNING: could not map ${STORAGE}/vm-${VMID}-disk-1 for verification — proceeding without marker check"
+  VERIFY_DEV=""
+}
+if [ -n "$VERIFY_DEV" ]; then
+  sleep 1
+  partprobe "$VERIFY_DEV" 2>/dev/null || true
+  VERIFY_MOUNT=$(mktemp -d)
+  if mount "${VERIFY_DEV}p1" "$VERIFY_MOUNT" 2>/dev/null; then
+    # /var/lib/cloud/instance is an ABSOLUTE symlink ('-> /var/lib/cloud/instances/<iid>')
+    # that resolves against the HOST'S filesystem when accessed via $VERIFY_MOUNT,
+    # not the mounted disk's. Search the actual instance dirs instead.
+    MARKER_FOUND=$(find "$VERIFY_MOUNT/var/lib/cloud/instances/" -maxdepth 2 -name bake-complete 2>/dev/null | head -1)
+    if [ -z "$MARKER_FOUND" ]; then
+      echo ""
+      echo "==================================================================="
+      echo "  ERROR: bake-complete marker missing — cloud-init did NOT finish"
+      echo "==================================================================="
+      echo "  The VM stopped but cloud-init never reached the runcmd that writes"
+      echo "  /var/lib/cloud/instance/bake-complete. Causes:"
+      echo "    - Network hang during apt install / git clone / ansible-galaxy"
+      echo "    - User manually qm-stop'd a still-running VM"
+      echo "    - YAML parse error (unlikely if you ran the python yaml check)"
+      echo ""
+      echo "  Last 80 lines of cloud-init-output.log:"
+      tail -80 "$VERIFY_MOUNT/var/log/cloud-init-output.log" 2>/dev/null \
+        | sed 's/^/    /'
+      echo "==================================================================="
+      umount "$VERIFY_MOUNT"
+      rmdir "$VERIFY_MOUNT"
+      rbd unmap "$VERIFY_DEV"
+      exit 1
+    fi
+    echo "==> bake-complete marker present at $MARKER_FOUND — cloud-init ran to completion."
+    umount "$VERIFY_MOUNT"
+  else
+    echo "WARNING: could not mount ${VERIFY_DEV}p1 — proceeding without marker check"
+  fi
+  rmdir "$VERIFY_MOUNT" 2>/dev/null || true
+  rbd unmap "$VERIFY_DEV"
+fi
 
 # ---------- 5. Strip the bake-time cloud-init custom config ----------
 # Per-lane clones will get their OWN cloud-init config from admin.js

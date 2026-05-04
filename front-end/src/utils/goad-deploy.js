@@ -588,7 +588,7 @@ async function deployGoadLane({
     try {
       await query(
         `UPDATE cybercore_lane
-         SET metadata = COALESCE(metadata, '{}'::jsonb) || $1::jsonb,
+         SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb,
              updated_at = NOW()
          WHERE lane_id = $2`,
         [
