@@ -1,0 +1,19 @@
+{
+  "key": "cyberwiki",
+  "name": "CyberWiki",
+  "icon": "📖",
+  "description": "Community-driven wiki for procedures, playbooks, and shared knowledge",
+  "entry_url": "/cyberwiki",
+  "category": "module",
+  "color": "#06b6d4",
+  "active": true,
+  "display_order": 6,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/cyberwiki"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/cyberwiki"
+}

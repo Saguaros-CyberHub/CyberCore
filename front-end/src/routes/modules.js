@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
-const pluginLoader = require('../plugin-loader');
+const moduleLoader = require('../module-loader');
 
 // GET /api/modules — list all active modules grouped by category
 router.get('/', authenticateToken, async (req, res) => {
@@ -17,8 +17,8 @@ router.get('/', authenticateToken, async (req, res) => {
     const modules = result.rows.filter(r => r.category === 'module');
     const plugins = result.rows.filter(r => r.category === 'plugin');
 
-    // Subnav configs from loaded plugins
-    const subnavs = pluginLoader.getAllSubnavs();
+    // Subnav configs from loaded modules (includes nested plugins)
+    const subnavs = moduleLoader.getAllSubnavs();
 
     res.json({ modules, plugins, subnavs });
   } catch (error) {

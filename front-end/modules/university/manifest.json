@@ -1,0 +1,19 @@
+{
+  "key": "university",
+  "name": "Saguaros University",
+  "icon": "🎓",
+  "description": "Structured courses, digital badges, and certifications aligned with industry training paths",
+  "entry_url": "/university",
+  "category": "module",
+  "color": "#8b5cf6",
+  "active": true,
+  "display_order": 4,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/university"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/university"
+}

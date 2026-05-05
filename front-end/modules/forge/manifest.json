@@ -1,0 +1,19 @@
+{
+  "key": "forge",
+  "name": "The Forge",
+  "icon": "\u2692\ufe0f",
+  "description": "Malware analysis and sandbox environment",
+  "entry_url": "/forge/dashboard",
+  "category": "module",
+  "color": "#ed8936",
+  "active": true,
+  "display_order": 3,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/forge"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/forge"
+}

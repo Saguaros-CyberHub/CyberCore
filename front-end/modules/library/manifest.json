@@ -1,0 +1,19 @@
+{
+  "key": "library",
+  "name": "The Library",
+  "icon": "📚",
+  "description": "Indexed repository of eBooks, guides, and cybersecurity resources",
+  "entry_url": "/library",
+  "category": "module",
+  "color": "#10b981",
+  "active": true,
+  "display_order": 5,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/library"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/library"
+}

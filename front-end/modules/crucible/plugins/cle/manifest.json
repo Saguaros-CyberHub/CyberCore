@@ -1,0 +1,43 @@
+{
+    "key": "cle",
+    "name": "Cyber Learning Environment",
+    "icon": "\ud83c\udf93",
+    "description": "Instructor tools for managing class environments",
+    "entry_url": "/cle/dashboard",
+    "category": "plugin",
+    "color": "#9f7aea",
+    "active": true,
+    "display_order": 11,
+    "parent_module": "crucible",
+    "routes": [
+        {
+            "file": "routes/pages.js",
+            "mountPath": "/cle"
+        },
+        {
+            "file": "routes/api.js",
+            "mountPath": "/"
+        }
+    ],
+    "staticDir": "public",
+    "staticMountPath": "/cle",
+    "database": {
+        "name": "cyberhub_cle",
+        "migrations": "migrations"
+    },
+    "subnav": {
+        "label": "CLE",
+        "items": [
+            {
+                "label": "Dashboard",
+                "url": "/cle/dashboard",
+                "icon": "\ud83d\udcca",
+                "page": "dashboard",
+                "roles": [
+                    "instructor",
+                    "admin"
+                ]
+            }
+        ]
+    }
+}

@@ -1,9 +1,0 @@
-node_modules/
-.env
-*.log
-Info/
-N8N Workflow/
-profiles/
-vuln-assets/
-docker-compose.yml
-GOAD-main/

@@ -1,0 +1,19 @@
+{
+  "key": "wiki",
+  "name": "The Wiki",
+  "icon": "📝",
+  "description": "Repository for ISOs, malware, and executables",
+  "entry_url": "/wiki",
+  "category": "module",
+  "color": "#f59e0b",
+  "active": true,
+  "display_order": 7,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/wiki"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/wiki"
+}

@@ -1,0 +1,39 @@
+{
+    "key": "ciab",
+    "name": "Clinic-in-a-Box",
+    "icon": "\ud83c\udfe5",
+    "description": "AI-powered cyber risk assessment training",
+    "entry_url": "/ciab/dashboard",
+    "category": "plugin",
+    "color": "#48bb78",
+    "active": true,
+    "display_order": 10,
+    "parent_module": "crucible",
+    "routes": [
+        {
+            "file": "routes/pages.js",
+            "mountPath": "/ciab"
+        },
+        {
+            "file": "routes/api.js",
+            "mountPath": "/"
+        }
+    ],
+    "staticDir": "public",
+    "staticMountPath": "/ciab",
+    "database": {
+        "name": "clinic_db",
+        "migrations": "migrations"
+    },
+    "subnav": {
+        "label": "CIAB",
+        "items": [
+            {
+                "label": "Dashboard",
+                "url": "/ciab/dashboard",
+                "icon": "\ud83d\udcca",
+                "page": "dashboard"
+            }
+        ]
+    }
+}

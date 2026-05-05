@@ -11,6 +11,8 @@ const helmet = require('helmet');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
+const RedisStore = require('connect-redis').default;
+const redisClient = require('./utils/redis');
 const rateLimit = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const path = require('path');
@@ -54,8 +56,8 @@ const challengeTemplateRoutes = require('./routes/challenge-templates');
 const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 
-// Import plugin loader
-const pluginLoader = require('./plugin-loader');
+// Import loaders
+const moduleLoader = require('./module-loader');
 
 // Import middleware
 const { errorHandler } = require('./middleware/errorHandler');
@@ -149,6 +151,7 @@ app.use(express.urlencoded({ extended: true }));
 // cookieParser already applied earlier (before rate limiter)
 
 app.use(session({
+  store: new RedisStore({ client: redisClient }),
   secret: process.env.SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
@@ -241,18 +244,20 @@ app.get('/api/auth/test', authenticateToken, (req, res) => {
 });
 
 // ============================================================================
-// STARTUP — Load plugins, then start listening
+// STARTUP — Load modules and plugins, then start listening
 // ============================================================================
 
 async function start() {
   try {
-    // Load plugins from plugins/ directory
-    await pluginLoader.loadAll(app);
+    // Load modules from modules/ directory (includes nested plugins)
+    await moduleLoader.loadAll(app);
   } catch (err) {
-    console.error('Plugin loading error (non-fatal):', err.message);
+    console.error('Module loading error (non-fatal):', err.message);
   }
 
-  // 404 handler (must come after plugin routes)
+
+
+  // 404 handler (must come after all routes)
   app.use((req, res) => {
     res.status(404).json({ error: 'Not found' });
   });

@@ -1,0 +1,19 @@
+{
+  "key": "cyberlabs",
+  "name": "CyberLabs",
+  "icon": "\ud83e\uddea",
+  "description": "On-demand virtualization environments for student projects, research, and hands-on learning",
+  "entry_url": "/cyberlabs/dashboard",
+  "category": "module",
+  "color": "#4299e1",
+  "active": true,
+  "display_order": 2,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/cyberlabs"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/cyberlabs"
+}

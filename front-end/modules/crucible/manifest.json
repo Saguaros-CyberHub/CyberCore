@@ -1,0 +1,19 @@
+{
+  "key": "crucible",
+  "name": "The Crucible",
+  "icon": "\ud83d\udd25",
+  "description": "CTF-style cyber warfare range with isolated lanes, vulnerable hosts, and real-time scoring",
+  "entry_url": "/crucible/dashboard",
+  "category": "module",
+  "color": "#f56565",
+  "active": true,
+  "display_order": 1,
+  "routes": [
+    {
+      "file": "routes/index.js",
+      "mountPath": "/api/modules/crucible"
+    }
+  ],
+  "staticDir": "public",
+  "staticMountPath": "/crucible"
+}
