@@ -21,6 +21,15 @@ site.json
 *.code-workspace
 **/credentials/*
 cybercore-postgres.jsn
+node_modules/
+.env
+*.log
+Info/
+N8N Workflow/
+profiles/
+vuln-assets/
+docker-compose.yml
+GOAD-main/
 
 # Ignore the new web interface directory
 cyberhub-web-interface/
