@@ -35,17 +35,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        784,
-        160
+        1344,
+        80
       ],
-      "id": "f3b9d68e-d42e-440c-a64b-9a288db32986",
-      "name": "Create VNet",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "c12b834e-1814-47fa-91c5-3737ea89e7e7",
+      "name": "Create VNet"
     },
     {
       "parameters": {
@@ -54,10 +48,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -336,
-        80
+        224,
+        0
       ],
-      "id": "82b0dc37-6371-4425-9094-264611b7066d",
+      "id": "e245390d-2031-4162-842f-c124de84d10d",
       "name": "Transform VXLAN ID to uniqie ID"
     },
     {
@@ -67,10 +61,10 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        -560,
-        80
+        0,
+        0
       ],
-      "id": "8ee13eda-16b3-4855-a297-89d9c4437a20",
+      "id": "a784e3ca-b620-40fa-9a38-a806a0335fe2",
       "name": "When Executed by Another Workflow"
     },
     {
@@ -85,17 +79,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        -112,
-        160
+        448,
+        80
       ],
-      "id": "e491e1d3-179a-4a83-8a2e-c24b7f12d2e8",
-      "name": "Get VNet",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "9b4d3333-74ab-4b60-a26f-bf74849b0fb8",
+      "name": "Get VNet"
     },
     {
       "parameters": {
@@ -109,17 +97,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1008,
-        80
+        1568,
+        0
       ],
-      "id": "7427f75a-5f2e-402a-a4fe-36a08e85ad99",
-      "name": "Get VNet again",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "97d381a9-5a12-417d-a1fc-adaf3f2a00d2",
+      "name": "Get VNet again"
     },
     {
       "parameters": {
@@ -130,10 +112,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        112,
-        80
+        672,
+        0
       ],
-      "id": "e3429feb-25b5-4af1-8fb3-b5b11883b09c",
+      "id": "144c2665-6323-4700-8210-079b3503a936",
       "name": "Merge1"
     },
     {
@@ -143,10 +125,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        336,
-        80
+        896,
+        0
       ],
-      "id": "f57de1c5-b582-4f19-a8c7-da4a860d0eb4",
+      "id": "ab4b688a-6b0c-499e-aed5-6b54bdb985ba",
       "name": "Extract desired VNet"
     },
     {
@@ -176,10 +158,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        560,
-        80
+        1120,
+        0
       ],
-      "id": "ad942099-fc1c-4f2d-9553-489235d75267",
+      "id": "9a5a63ca-f2ff-42fa-915e-f861b0f8f2b6",
       "name": "If VNet exists"
     }
   ],
@@ -275,13 +257,7 @@
             "type": "main",
             "index": 1
           }
-        ],
-        []
-      ]
-    },
-    "Get VNet again": {
-      "main": [
-        []
+        ]
       ]
     },
     "Merge1": {
@@ -325,26 +301,28 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
     "executionOrder": "v1",
     "availableInMCP": false
   },
+  "versionId": "600fba34-f1a2-4d1d-9a79-c697d871a8d2",
   "meta": {
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "E1BwrY3N2rMffsg7",
   "tags": [
     {
-      "updatedAt": "2026-01-07T10:14:03.837Z",
-      "createdAt": "2026-01-07T10:14:03.837Z",
-      "id": "yCB505xTB8gNFQEC",
+      "updatedAt": "2026-04-11T09:15:27.244Z",
+      "createdAt": "2026-04-11T09:15:27.244Z",
+      "id": "M8eppSrucPp9Fy19",
       "name": "Proxmox SDN"
     },
     {
-      "name": "CyberCore",
-      "id": "SqxAywq1R3kw8S7M",
-      "updatedAt": "2026-01-07T10:54:17.889Z",
-      "createdAt": "2026-01-07T10:54:17.889Z"
+      "updatedAt": "2026-04-11T09:14:29.798Z",
+      "createdAt": "2026-04-11T09:14:29.798Z",
+      "id": "H8hxFu0vDnVxlk7B",
+      "name": "CyberCore"
     }
   ]
 }

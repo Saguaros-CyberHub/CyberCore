@@ -35,17 +35,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1072,
-        32
+        448,
+        80
       ],
-      "id": "26e1c068-659b-4e7e-8697-87236a2c3ce0",
-      "name": "Create VNet",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "7b97c82d-33c2-46cb-8d35-a22e5d4be13b",
+      "name": "Create VNet"
     },
     {
       "parameters": {
@@ -54,10 +48,10 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        -208,
-        368
+        -832,
+        416
       ],
-      "id": "664f3729-8da8-4ac2-a7ac-9ab8d91ba667",
+      "id": "a504b29c-233d-41fa-8e05-fc0e214cacd4",
       "name": "When Executed by Another Workflow"
     },
     {
@@ -72,17 +66,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1296,
-        -48
+        672,
+        0
       ],
-      "id": "d99cc059-0ccc-4fa6-9586-da856f4f4570",
-      "name": "Get VNet again",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "491d36c2-8954-452c-a02a-c740328cb255",
+      "name": "Get VNet again"
     },
     {
       "parameters": {
@@ -93,10 +81,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        560,
-        480
+        -64,
+        528
       ],
-      "id": "89db6cc2-42a8-496e-ae40-7b65aba149b6",
+      "id": "18b17595-6f28-40cd-970c-0844e2fd2d9f",
       "name": "Merge1"
     },
     {
@@ -106,10 +94,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        624,
-        -48
+        0,
+        0
       ],
-      "id": "85f041ad-e162-4196-ad6d-ac4cc9ac46b0",
+      "id": "b1de4efc-f558-436b-aab0-b9f3b10e57c2",
       "name": "Extract desired VNet"
     },
     {
@@ -139,10 +127,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        848,
-        -48
+        224,
+        0
       ],
-      "id": "56738645-4b03-447e-ad14-033565e370d8",
+      "id": "ab56c2f7-a526-495a-8ba5-a3de9708408e",
       "name": "If VNet exists"
     },
     {
@@ -154,10 +142,10 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        96,
-        368
+        -528,
+        416
       ],
-      "id": "7a8327d5-38fa-4bc8-8c09-a8ec4ad9592d",
+      "id": "1ef17b49-7750-43d4-80fc-8de2c9d1e6a6",
       "name": "Query lane details",
       "credentials": {
         "postgres": {
@@ -178,17 +166,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        304,
-        544
+        -320,
+        592
       ],
-      "id": "3ae8e126-af51-4c24-840a-74d5d59832f8",
-      "name": "Get Zones",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "b2b8b16a-7712-435e-b002-d0eb3c7fe5d8",
+      "name": "Get Zones"
     },
     {
       "parameters": {
@@ -197,10 +179,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        304,
-        240
+        -320,
+        288
       ],
-      "id": "54111ce7-3fbc-4dc0-99f0-78b4dab264e5",
+      "id": "6413c0b2-32bd-44c5-88fb-3990f867b5d1",
       "name": "Transform challenge_key to unique ID"
     }
   ],
@@ -270,16 +252,6 @@
             "index": 0
           }
         ]
-      ]
-    },
-    "Get VNet again": {
-      "main": [
-        []
-      ]
-    },
-    "Merge1": {
-      "main": [
-        []
       ]
     },
     "Extract desired VNet": {
@@ -355,22 +327,23 @@
     "executionOrder": "v1",
     "availableInMCP": false
   },
+  "versionId": "b16bd4e9-fdad-486c-9a8c-5006a2598048",
   "meta": {
-    "templateCredsSetupCompleted": true,
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "j8skDc6E7HvyoVaw",
   "tags": [
     {
-      "updatedAt": "2026-01-07T10:14:03.837Z",
-      "createdAt": "2026-01-07T10:14:03.837Z",
-      "id": "yCB505xTB8gNFQEC",
+      "updatedAt": "2026-04-11T09:15:27.244Z",
+      "createdAt": "2026-04-11T09:15:27.244Z",
+      "id": "M8eppSrucPp9Fy19",
       "name": "Proxmox SDN"
     },
     {
-      "name": "CyberCore",
-      "id": "SqxAywq1R3kw8S7M",
-      "updatedAt": "2026-01-07T10:54:17.889Z",
-      "createdAt": "2026-01-07T10:54:17.889Z"
+      "updatedAt": "2026-04-11T09:14:29.798Z",
+      "createdAt": "2026-04-11T09:14:29.798Z",
+      "id": "H8hxFu0vDnVxlk7B",
+      "name": "CyberCore"
     }
   ]
 }

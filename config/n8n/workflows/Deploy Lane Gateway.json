@@ -8,10 +8,10 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        592,
-        256
+        -1520,
+        80
       ],
-      "id": "4c4a4cae-455e-47d0-8731-69ffcb751aae",
+      "id": "06bd4d06-0d04-4f8d-a398-447be1f8335c",
       "name": "When Executed by Another Workflow"
     },
     {
@@ -26,17 +26,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        816,
-        464
+        -1296,
+        288
       ],
-      "id": "209c4c8d-3d4e-4184-940e-3991288d0cac",
-      "name": "Request available nodes",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "bee97b9f-2278-402c-aa59-4f8bd5dc8310",
+      "name": "Request available nodes"
     },
     {
       "parameters": {
@@ -46,10 +40,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        1040,
-        464
+        -1072,
+        288
       ],
-      "id": "fab5cb82-7e82-4cff-84db-246e28748e43",
+      "id": "79ee4ef0-72c9-4f71-81c1-2db29cdb07ac",
       "name": "Split Out"
     },
     {
@@ -69,10 +63,10 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        1264,
-        464
+        -848,
+        288
       ],
-      "id": "020b8cd6-0ccb-4807-b070-a47109a9f678",
+      "id": "38556544-4795-4650-823e-f62bcdf87dc0",
       "name": "Edit Fields1"
     },
     {
@@ -87,17 +81,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1712,
-        512
+        -400,
+        336
       ],
-      "id": "f2cee4cd-85a1-4601-94c6-1694c2c36c97",
-      "name": "HTTP Request",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "594a56fb-7029-481c-afd7-3e3e0241496f",
+      "name": "HTTP Request"
     },
     {
       "parameters": {
@@ -106,10 +94,10 @@
       "type": "n8n-nodes-base.splitInBatches",
       "typeVersion": 3,
       "position": [
-        1488,
-        464
+        -624,
+        288
       ],
-      "id": "3a7405f3-271e-4926-a379-5a6d8cdea8d7",
+      "id": "7b124d44-a155-4871-a9ee-bbf51396cc93",
       "name": "Loop Over Items"
     },
     {
@@ -121,10 +109,10 @@
       "type": "n8n-nodes-base.set",
       "typeVersion": 3.4,
       "position": [
-        2160,
-        688
+        48,
+        512
       ],
-      "id": "75c38dcf-035c-49c0-929c-cbf831b6fd7e",
+      "id": "edfd6301-31e7-4b04-84f0-0d478303f781",
       "name": "Edit Fields2"
     },
     {
@@ -134,10 +122,10 @@
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
       "position": [
-        1712,
-        304
+        -400,
+        128
       ],
-      "id": "a63bc1e4-0950-4aec-875a-7aafb681ff9a",
+      "id": "c2921a26-a49f-4d6f-83e2-d21cde593248",
       "name": "Loop error"
     },
     {
@@ -168,10 +156,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        1936,
-        512
+        -176,
+        336
       ],
-      "id": "4ba5440a-9073-4540-ad8c-6eaba11517a6",
+      "id": "7deab620-b34b-4d95-9613-702586750466",
       "name": "If template_vmid is found",
       "onError": "continueRegularOutput"
     },
@@ -183,10 +171,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        2160,
-        448
+        48,
+        272
       ],
-      "id": "33fe11dc-53a3-4201-86b8-dd06b300b5f2",
+      "id": "2578bcde-541b-494b-aa7b-a1eb5234b82e",
       "name": "Split Out1"
     },
     {
@@ -216,10 +204,10 @@
       "type": "n8n-nodes-base.filter",
       "typeVersion": 2.3,
       "position": [
-        2384,
-        448
+        272,
+        272
       ],
-      "id": "a208424c-56d6-4c2d-a991-d41e080c06be",
+      "id": "acb9dde6-5a44-4409-adc1-be1b6fb49b1d",
       "name": "Filter"
     },
     {
@@ -252,17 +240,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        2112,
-        176
+        0,
+        0
       ],
-      "id": "99cbcc5d-dfda-43b3-bc2b-5c2cce414bd7",
-      "name": "Attach network ports",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "2ac174e6-5d4f-435c-ad81-29fdbca04871",
+      "name": "Attach network ports"
     }
   ],
   "pinData": {
@@ -426,11 +408,6 @@
         ]
       ]
     },
-    "Filter": {
-      "main": [
-        []
-      ]
-    },
     "When Executed by Another Workflow": {
       "main": [
         [
@@ -453,15 +430,17 @@
     "executionOrder": "v1",
     "availableInMCP": false
   },
+  "versionId": "c0b489a2-1e1e-4677-b399-51ecf52473ea",
   "meta": {
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "J4DB1VmX40w8YSim",
   "tags": [
     {
-      "name": "Crucible",
-      "id": "yefXO66Do6YJeH8v",
-      "updatedAt": "2026-01-07T10:54:21.942Z",
-      "createdAt": "2026-01-07T10:54:21.942Z"
+      "updatedAt": "2026-04-11T09:14:05.084Z",
+      "createdAt": "2026-04-11T09:14:05.084Z",
+      "id": "w4dmLd8w3tCLBCO8",
+      "name": "Crucible"
     }
   ]
 }

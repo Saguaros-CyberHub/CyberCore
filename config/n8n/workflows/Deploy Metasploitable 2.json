@@ -32,10 +32,10 @@
       "type": "n8n-nodes-base.formTrigger",
       "typeVersion": 2.3,
       "position": [
-        0,
+        -896,
         96
       ],
-      "id": "9e198a1d-81c9-4245-98c2-cf77726a7036",
+      "id": "bc91a4fd-b299-4649-be7b-45a697054c23",
       "name": "On form submission",
       "webhookId": "f59aa75b-9549-490a-99ef-285447af86a5"
     },
@@ -46,17 +46,11 @@
       "type": "n8n-nodes-base.ssh",
       "typeVersion": 1,
       "position": [
-        448,
+        -448,
         96
       ],
-      "id": "d6ce35d8-42a8-4360-972c-0ba547cc1a53",
-      "name": "Execute a command",
-      "credentials": {
-        "sshPassword": {
-          "id": "vRj4Sx0xHFOJOBR8",
-          "name": "SSH Password account"
-        }
-      }
+      "id": "58c39e0b-cc44-428d-84a2-8e3879a73db3",
+      "name": "Execute a command"
     },
     {
       "parameters": {
@@ -65,10 +59,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        224,
+        -672,
         96
       ],
-      "id": "5fb5930b-5ed4-4d88-8261-dfc6368040a7",
+      "id": "a3457377-fe0c-4eb6-b641-214f90ed7433",
       "name": "Normalize form input"
     },
     {
@@ -78,10 +72,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        672,
+        -224,
         96
       ],
-      "id": "5e32c6c0-0184-41d6-a683-f005b76707c3",
+      "id": "80876941-3554-47f2-a246-772b84bf0fe0",
       "name": "Extract VM ID"
     },
     {
@@ -91,10 +85,10 @@
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [
-        1120,
+        224,
         0
       ],
-      "id": "f2235851-7267-46e0-8265-ddb64712e13f",
+      "id": "1e0024fb-d994-4df3-a926-044528bb3357",
       "name": "Wait",
       "webhookId": "9b988e10-f3d8-48dc-8fc3-564d938d8d9d"
     },
@@ -105,17 +99,11 @@
       "type": "n8n-nodes-base.ssh",
       "typeVersion": 1,
       "position": [
-        896,
+        0,
         0
       ],
-      "id": "a3b4d349-05fc-42c4-9116-e88f6591f502",
-      "name": "Start VM",
-      "credentials": {
-        "sshPassword": {
-          "id": "vRj4Sx0xHFOJOBR8",
-          "name": "SSH Password account"
-        }
-      }
+      "id": "e2460706-1246-42bc-a6bd-e3e283c65fe1",
+      "name": "Start VM"
     },
     {
       "parameters": {
@@ -125,17 +113,11 @@
       "type": "n8n-nodes-base.ssh",
       "typeVersion": 1,
       "position": [
-        1120,
+        224,
         192
       ],
-      "id": "3d674b67-4ac8-4ae7-977b-ef391bd65f3a",
-      "name": "Extract MAC Address",
-      "credentials": {
-        "sshPassword": {
-          "id": "vRj4Sx0xHFOJOBR8",
-          "name": "SSH Password account"
-        }
-      }
+      "id": "db36ae6e-fe02-423e-80b1-06ff592ac674",
+      "name": "Extract MAC Address"
     },
     {
       "parameters": {
@@ -144,10 +126,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1344,
+        448,
         192
       ],
-      "id": "ce983917-476c-46ac-9139-68ceb94ff230",
+      "id": "3ba465a8-7722-4f70-9616-4a61bc054257",
       "name": "Santitize Output"
     },
     {
@@ -162,27 +144,21 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1344,
+        448,
         0
       ],
-      "id": "9d91f322-6665-419a-ab1e-34dd5e9aca85",
-      "name": "HTTP Request",
-      "credentials": {
-        "httpBasicAuth": {
-          "id": "hQRrmFaLdeI43jyF",
-          "name": "OPNsense API Key"
-        }
-      }
+      "id": "e10c4b45-5879-4e39-953a-f5026c9c93c0",
+      "name": "HTTP Request"
     },
     {
       "parameters": {},
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        1568,
+        672,
         96
       ],
-      "id": "984f8f78-c8e2-474e-b4e9-96fce5405c4a",
+      "id": "e8ceadb8-5ad4-42e6-a2de-404f0bdc99fe",
       "name": "Merge"
     },
     {
@@ -195,10 +171,10 @@
       "type": "n8n-nodes-base.form",
       "typeVersion": 2.3,
       "position": [
-        2016,
+        1120,
         96
       ],
-      "id": "8421f997-60b7-43bd-868c-6e7992d86843",
+      "id": "9790e371-fa2d-4f86-ab66-614d9ff7604d",
       "name": "Return form",
       "webhookId": "5842faa7-124d-4988-9030-38af7d2c74c6"
     },
@@ -209,10 +185,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1792,
+        896,
         96
       ],
-      "id": "07e8cd5f-a806-40fb-9530-2216f3c64be5",
+      "id": "06754257-2439-4b7c-a784-17993344f3d3",
       "name": "Extract IP Address"
     }
   ],
@@ -345,26 +321,28 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "availableInMCP": false
   },
+  "versionId": "00e64d0b-d9df-4155-a751-73ee184dec40",
   "meta": {
-    "templateCredsSetupCompleted": true,
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "pG7KrbeJ89qYvH7q",
   "tags": [
     {
-      "name": "Archive",
-      "id": "Rj7cBD75qDdnVcw4",
-      "updatedAt": "2026-01-07T10:54:12.332Z",
-      "createdAt": "2026-01-07T10:54:12.332Z"
+      "updatedAt": "2026-04-11T09:15:14.328Z",
+      "createdAt": "2026-04-11T09:15:14.328Z",
+      "id": "2mlNniCN9T1pYuZh",
+      "name": "Archive"
     },
     {
-      "name": "Crucible",
-      "id": "yefXO66Do6YJeH8v",
-      "updatedAt": "2026-01-07T10:54:21.942Z",
-      "createdAt": "2026-01-07T10:54:21.942Z"
+      "updatedAt": "2026-04-11T09:14:05.084Z",
+      "createdAt": "2026-04-11T09:14:05.084Z",
+      "id": "w4dmLd8w3tCLBCO8",
+      "name": "Crucible"
     }
   ]
 }

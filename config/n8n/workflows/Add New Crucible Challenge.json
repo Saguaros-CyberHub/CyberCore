@@ -133,10 +133,10 @@
       "type": "n8n-nodes-base.formTrigger",
       "typeVersion": 2.3,
       "position": [
-        -64,
-        -128
+        0,
+        0
       ],
-      "id": "9582eee5-2898-4f26-9993-ceb2d3b749e8",
+      "id": "0b1cdf98-241d-43fe-944f-8c354f4e4d3f",
       "name": "On form submission",
       "webhookId": "b76bc7a5-b37d-4551-999b-d0edaf5e6869"
     },
@@ -147,10 +147,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        384,
-        -128
+        448,
+        0
       ],
-      "id": "86c9bfa4-0560-4543-98cc-1cf3c1bf8d13",
+      "id": "49f4dfd5-f6fe-4517-a1a8-84ac726826f8",
       "name": "Code in JavaScript"
     },
     {
@@ -338,10 +338,10 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        608,
-        -128
+        672,
+        0
       ],
-      "id": "56b7e0df-c81e-4b7a-8880-bb1914bedb1b",
+      "id": "9faef63c-d9d5-443f-aa17-b959442a3f6b",
       "name": "Insert rows in a table",
       "credentials": {
         "postgres": {
@@ -357,10 +357,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        160,
-        -128
+        224,
+        0
       ],
-      "id": "282ef8fd-49ab-4525-b9b8-849981356d1e",
+      "id": "2af2f175-c38a-4044-bf5b-df03dde529fd",
       "name": "Check if challenge zone is valid"
     },
     {
@@ -372,10 +372,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        1184,
-        -128
+        1248,
+        0
       ],
-      "id": "c2468c8b-30ed-49a8-b51a-1b5c6696d3e3",
+      "id": "a3598745-ed77-4e40-a90d-566afb239313",
       "name": "Merge1"
     },
     {
@@ -390,17 +390,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        896,
-        48
+        960,
+        176
       ],
-      "id": "d02d9c91-2213-4656-a06b-fc9bfed4ed61",
-      "name": "Get Zones",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "496ffbe7-d7aa-404c-9af9-31b7f0499e84",
+      "name": "Get Zones"
     },
     {
       "parameters": {
@@ -430,10 +424,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        1392,
-        -128
+        1456,
+        0
       ],
-      "id": "6bd89d3b-82cc-48d7-a454-820043d816f6",
+      "id": "772cb3bd-0868-47bd-aaf0-588933bc50fc",
       "name": "If"
     },
     {
@@ -462,21 +456,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1968,
-        -112
+        2032,
+        16
       ],
-      "id": "5abd01b0-af38-4f5c-afa6-1114009dad1d",
-      "name": "Create SDN zone",
-      "credentials": {
-        "httpBasicAuth": {
-          "id": "ztaa2qlrowtsjLhs",
-          "name": "Proxmox API Token"
-        },
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "7cd9bdbe-94df-440e-8f7d-ddfc78126459",
+      "name": "Create SDN zone"
     },
     {
       "parameters": {
@@ -490,21 +474,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1280,
-        176
+        1344,
+        304
       ],
-      "id": "16ca6aed-669f-4c3d-b651-8ef369195032",
-      "name": "GET node details",
-      "credentials": {
-        "httpBasicAuth": {
-          "id": "ztaa2qlrowtsjLhs",
-          "name": "Proxmox API Token"
-        },
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "a26f31a4-11a4-499f-896f-1c530b7280ab",
+      "name": "GET node details"
     },
     {
       "parameters": {
@@ -518,21 +492,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1952,
-        176
+        2016,
+        304
       ],
-      "id": "eee27a6f-2ecb-44c0-b047-324856067866",
-      "name": "GET node networking details",
-      "credentials": {
-        "httpBasicAuth": {
-          "id": "ztaa2qlrowtsjLhs",
-          "name": "Proxmox API Token"
-        },
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "b614b5d1-61bf-4401-bb37-0202f5a9f55d",
+      "name": "GET node networking details"
     },
     {
       "parameters": {
@@ -542,10 +506,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        1488,
-        176
+        1552,
+        304
       ],
-      "id": "f8089ac1-40c9-4889-aa84-e5f685d47bf5",
+      "id": "d3b4518b-bb8a-406f-80a4-5f3c32f6bcde",
       "name": "Split nodes"
     },
     {
@@ -556,10 +520,10 @@
       "type": "n8n-nodes-base.splitOut",
       "typeVersion": 1,
       "position": [
-        1696,
-        176
+        1760,
+        304
       ],
-      "id": "c71de31b-b9ef-447f-9ffd-f199023ffc93",
+      "id": "bf64a7a6-c7f5-415d-950e-97a5bf9f5e7b",
       "name": "Split node names"
     },
     {
@@ -569,10 +533,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2160,
-        176
+        2224,
+        304
       ],
-      "id": "b0c70322-a7e2-4fe0-ad46-56373f616c59",
+      "id": "06e42429-117d-43e9-9c3b-a97bbe3bb289",
       "name": "Code in JavaScript1"
     }
   ],
@@ -673,12 +637,6 @@
         ]
       ]
     },
-    "If": {
-      "main": [
-        [],
-        []
-      ]
-    },
     "GET node details": {
       "main": [
         [
@@ -724,20 +682,22 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "availableInMCP": false
   },
+  "versionId": "180ee580-2c14-439c-8960-a85d5d32abe4",
   "meta": {
-    "templateCredsSetupCompleted": true,
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "BX9lsFb5GkzPIv2I",
   "tags": [
     {
-      "name": "Crucible",
-      "id": "yefXO66Do6YJeH8v",
-      "updatedAt": "2026-01-07T10:54:21.942Z",
-      "createdAt": "2026-01-07T10:54:21.942Z"
+      "updatedAt": "2026-04-11T09:14:05.084Z",
+      "createdAt": "2026-04-11T09:14:05.084Z",
+      "id": "w4dmLd8w3tCLBCO8",
+      "name": "Crucible"
     }
   ]
 }

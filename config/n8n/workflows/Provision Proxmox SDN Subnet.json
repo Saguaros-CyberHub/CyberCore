@@ -8,10 +8,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        -432,
-        160
+        -224,
+        144
       ],
-      "id": "6ee76c59-cc1c-401a-86f4-efe4eb8a4421",
+      "id": "875b1482-49c5-4733-9f13-f7df58358434",
       "name": "Transform VXLAN ID to uniqie ID"
     },
     {
@@ -21,10 +21,10 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [
-        -656,
-        160
+        -448,
+        144
       ],
-      "id": "96730fe8-9b55-4505-a71c-fb863add6f86",
+      "id": "3ce4483e-2b1b-4f42-b5d3-a8705564b95a",
       "name": "When Executed by Another Workflow"
     },
     {
@@ -57,17 +57,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1456,
-        176
+        1664,
+        160
       ],
-      "id": "cc0908f7-e560-4aee-a951-da017ac4dc9d",
-      "name": "Create subnet",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "dcd6c7ff-d968-402a-9231-ca4dfe3d7944",
+      "name": "Create subnet"
     },
     {
       "parameters": {
@@ -97,10 +91,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        1104,
-        128
+        1312,
+        112
       ],
-      "id": "17045307-0f96-4681-8357-1fc2f621d0c8",
+      "id": "a662b439-aee4-4665-a2fe-09e457859a07",
       "name": "If subnet exists"
     },
     {
@@ -115,17 +109,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        1456,
-        32
+        1664,
+        16
       ],
-      "id": "911870b6-0fe9-4c37-ae3e-d8a959870d08",
-      "name": "Get subnet again",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "0e2d910a-52e1-45c8-864e-7a79cd95ba9b",
+      "name": "Get subnet again"
     },
     {
       "parameters": {
@@ -139,17 +127,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        -208,
-        16
+        0,
+        0
       ],
-      "id": "43bb4b81-f71e-41c6-b16a-fcc2e17e532c",
-      "name": "Get VNets",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "f3b7a5a2-dc07-4638-96f6-fc3d171df239",
+      "name": "Get VNets"
     },
     {
       "parameters": {
@@ -163,17 +145,11 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.3,
       "position": [
-        464,
-        16
+        672,
+        0
       ],
-      "id": "9bdce7ad-5ed5-4560-aec9-db85effb1b87",
-      "name": "Get subnets",
-      "credentials": {
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "9e8c43c3-2c8b-4796-8427-867c964e13d3",
+      "name": "Get subnets"
     },
     {
       "parameters": {
@@ -184,10 +160,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        16,
-        160
+        224,
+        144
       ],
-      "id": "37970245-3d94-48bd-85cc-014d750c5cae",
+      "id": "028d180a-1a7e-4b4f-8ad0-1d34d739efde",
       "name": "Merge"
     },
     {
@@ -218,10 +194,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.3,
       "position": [
-        240,
-        160
+        448,
+        144
       ],
-      "id": "6056959d-a263-4d37-aa5d-0f6cca9af67a",
+      "id": "9d9f73e6-e27c-4cf1-be55-dddc69bf3583",
       "name": "If VNet exists"
     },
     {
@@ -231,10 +207,10 @@
       "type": "n8n-nodes-base.stopAndError",
       "typeVersion": 1,
       "position": [
-        464,
-        304
+        672,
+        288
       ],
-      "id": "107ee404-537d-48f9-8d53-424769007c95",
+      "id": "696447e8-cf17-4050-81f5-285ddda16216",
       "name": "Stop and Error"
     },
     {
@@ -246,10 +222,10 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.2,
       "position": [
-        688,
-        128
+        896,
+        112
       ],
-      "id": "f6ba5f2d-d7e6-4b51-8f60-07577020c772",
+      "id": "4be598e8-f693-4e5a-aaaa-2aa9c2d59926",
       "name": "Merge1"
     },
     {
@@ -259,10 +235,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        896,
-        128
+        1104,
+        112
       ],
-      "id": "5d41891b-5185-43f9-852b-cf7d241ebe1b",
+      "id": "3e0a0d27-d5c8-4a11-85d3-e4ff60d02578",
       "name": "Code in JavaScript"
     }
   ],
@@ -375,11 +351,6 @@
         ]
       ]
     },
-    "Create subnet": {
-      "main": [
-        []
-      ]
-    },
     "Get VNets": {
       "main": [
         [
@@ -457,33 +428,30 @@
           }
         ]
       ]
-    },
-    "Get subnet again": {
-      "main": [
-        []
-      ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
     "executionOrder": "v1",
     "availableInMCP": false
   },
+  "versionId": "a826c1c9-e722-4c77-a2a8-277eefcd4f3a",
   "meta": {
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "ulUF0m5S1PxQZ0B3",
   "tags": [
     {
-      "updatedAt": "2026-01-07T10:14:03.837Z",
-      "createdAt": "2026-01-07T10:14:03.837Z",
-      "id": "yCB505xTB8gNFQEC",
+      "updatedAt": "2026-04-11T09:15:27.244Z",
+      "createdAt": "2026-04-11T09:15:27.244Z",
+      "id": "M8eppSrucPp9Fy19",
       "name": "Proxmox SDN"
     },
     {
-      "name": "CyberCore",
-      "id": "SqxAywq1R3kw8S7M",
-      "updatedAt": "2026-01-07T10:54:17.889Z",
-      "createdAt": "2026-01-07T10:54:17.889Z"
+      "updatedAt": "2026-04-11T09:14:29.798Z",
+      "createdAt": "2026-04-11T09:14:29.798Z",
+      "id": "H8hxFu0vDnVxlk7B",
+      "name": "CyberCore"
     }
   ]
 }

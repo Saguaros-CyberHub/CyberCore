@@ -47,10 +47,10 @@
       "type": "n8n-nodes-base.formTrigger",
       "typeVersion": 2.3,
       "position": [
-        0,
-        176
+        -896,
+        96
       ],
-      "id": "3f867cce-2728-4b61-848a-2b11e7cb67d7",
+      "id": "f7e1ef57-652a-45af-b7c8-f9346e1ede8a",
       "name": "On form submission",
       "webhookId": "0b35090c-aa86-474c-a127-c2b542f3b3b3"
     },
@@ -64,10 +64,10 @@
       "type": "n8n-nodes-base.form",
       "typeVersion": 2.3,
       "position": [
-        896,
-        80
+        0,
+        0
       ],
-      "id": "48c30919-3a98-4724-820a-50f60294a59c",
+      "id": "88198f58-3509-4331-a1da-747bcf91fbeb",
       "name": "Success Message",
       "webhookId": "0233c966-3837-40b7-9685-4a2fec3f57d4"
     },
@@ -81,10 +81,10 @@
       "type": "n8n-nodes-base.form",
       "typeVersion": 2.3,
       "position": [
-        896,
-        272
+        0,
+        192
       ],
-      "id": "ba0710ff-4a63-4a83-b427-9b133e707cbc",
+      "id": "335adb71-e140-48b9-83a6-c46985877343",
       "name": "Failure Message",
       "webhookId": "0233c966-3837-40b7-9685-4a2fec3f57d4"
     },
@@ -245,10 +245,10 @@
       "type": "n8n-nodes-base.postgres",
       "typeVersion": 2.6,
       "position": [
-        448,
-        176
+        -448,
+        96
       ],
-      "id": "7bb4aaba-61f5-432e-b7db-6385e8fb285c",
+      "id": "3d21a1f5-4ffc-46ea-9dec-79e4cc8184c3",
       "name": "Add user to DB",
       "credentials": {
         "postgres": {
@@ -264,10 +264,10 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        224,
-        176
+        -672,
+        96
       ],
-      "id": "68223117-392b-43ad-8d52-39c5f338a164",
+      "id": "acab9638-0a13-443e-87aa-0dd1c18a8261",
       "name": "Input validation & hashing"
     },
     {
@@ -308,10 +308,10 @@
       "type": "n8n-nodes-base.if",
       "typeVersion": 2.2,
       "position": [
-        672,
-        176
+        -224,
+        96
       ],
-      "id": "c606215b-75ff-4c20-aa71-70c02c422a07",
+      "id": "439ea379-ee22-492f-92c0-86710bea8ef4",
       "name": "If user is created successfully"
     }
   ],
@@ -369,20 +369,22 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "availableInMCP": false
   },
+  "versionId": "7c2745c2-bc46-431f-9b42-c3c8aca880b9",
   "meta": {
-    "templateCredsSetupCompleted": true,
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "I3wdUnX4VeNHYX3W",
   "tags": [
     {
-      "name": "CyberCore",
-      "id": "SqxAywq1R3kw8S7M",
-      "updatedAt": "2026-01-07T10:54:17.889Z",
-      "createdAt": "2026-01-07T10:54:17.889Z"
+      "updatedAt": "2026-04-11T09:14:29.798Z",
+      "createdAt": "2026-04-11T09:14:29.798Z",
+      "id": "H8hxFu0vDnVxlk7B",
+      "name": "CyberCore"
     }
   ]
 }

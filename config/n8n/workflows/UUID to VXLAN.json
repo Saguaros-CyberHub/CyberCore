@@ -7,9 +7,9 @@
       "typeVersion": 1,
       "position": [
         0,
-        -224
+        0
       ],
-      "id": "02dcea00-2724-4b2b-8e49-7c1f34af4880",
+      "id": "e092513e-7a4c-4851-8584-f95e03f01afb",
       "name": "When clicking ‘Execute workflow’",
       "disabled": true
     },
@@ -21,9 +21,9 @@
       "typeVersion": 2,
       "position": [
         448,
-        -128
+        96
       ],
-      "id": "e114599a-0002-48bc-97d3-3a21aec94f7c",
+      "id": "4aa5518f-ba9d-4dac-bc08-82cf3552f7cf",
       "name": "Transorm UUID to VXLAN"
     },
     {
@@ -36,9 +36,9 @@
       "typeVersion": 2.6,
       "position": [
         224,
-        -224
+        0
       ],
-      "id": "503c81b8-9256-4024-870a-1c0f9a4f475e",
+      "id": "2c79e691-db0d-4268-9a7c-ca0e8b578c3c",
       "name": "Execute a SQL query",
       "credentials": {
         "postgres": {
@@ -61,9 +61,9 @@
       "typeVersion": 1.1,
       "position": [
         224,
-        -32
+        192
       ],
-      "id": "de05a149-b48f-41e8-9ef4-d6aca1a6bb7f",
+      "id": "60cb0213-7f59-481d-b358-e86cb1819a6a",
       "name": "When Executed by Another Workflow"
     }
   ],
@@ -111,26 +111,28 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "availableInMCP": false
   },
+  "versionId": "f88cc929-6c1e-498c-99f1-d2980ec48613",
   "meta": {
-    "templateCredsSetupCompleted": true,
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "FemsznQN9MkCcVlQ",
   "tags": [
     {
-      "updatedAt": "2026-01-07T10:14:03.837Z",
-      "createdAt": "2026-01-07T10:14:03.837Z",
-      "id": "yCB505xTB8gNFQEC",
+      "updatedAt": "2026-04-11T09:15:27.244Z",
+      "createdAt": "2026-04-11T09:15:27.244Z",
+      "id": "M8eppSrucPp9Fy19",
       "name": "Proxmox SDN"
     },
     {
-      "name": "CyberCore",
-      "id": "SqxAywq1R3kw8S7M",
-      "updatedAt": "2026-01-07T10:54:17.889Z",
-      "createdAt": "2026-01-07T10:54:17.889Z"
+      "updatedAt": "2026-04-11T09:14:29.798Z",
+      "createdAt": "2026-04-11T09:14:29.798Z",
+      "id": "H8hxFu0vDnVxlk7B",
+      "name": "CyberCore"
     }
   ]
 }

@@ -7,9 +7,9 @@
       "typeVersion": 1,
       "position": [
         0,
-        32
+        192
       ],
-      "id": "11ac23d7-8c76-4a34-8eb5-bb05473d0d62",
+      "id": "cd934245-f685-495e-9f16-6acd3eca7d9c",
       "name": "When clicking ‘Execute workflow’"
     },
     {
@@ -20,9 +20,9 @@
       "typeVersion": 2,
       "position": [
         448,
-        -64
+        96
       ],
-      "id": "542e3fc2-48cb-4fea-803d-ddd7b9e11b59",
+      "id": "68f43ffa-5389-44f5-bbf0-81328c8a7657",
       "name": "Code in JavaScript"
     },
     {
@@ -33,9 +33,9 @@
       "typeVersion": 1.1,
       "position": [
         0,
-        -160
+        0
       ],
-      "id": "d0bd6295-04ee-4995-bec7-52f9027d86a0",
+      "id": "03748f10-fcec-44e1-8966-b7fde3077853",
       "name": "When Executed by Another Workflow"
     },
     {
@@ -62,9 +62,9 @@
       "typeVersion": 3.4,
       "position": [
         672,
-        -64
+        96
       ],
-      "id": "6438de3d-c677-4bcb-a4ba-77e320116961",
+      "id": "330a0bfc-ecb5-40f6-ad42-d51de6eedae1",
       "name": "Edit Fields"
     },
     {
@@ -89,20 +89,10 @@
       "typeVersion": 4.3,
       "position": [
         224,
-        -64
+        96
       ],
-      "id": "1547bdbb-9b93-4b64-98ed-2a2071ce942c",
-      "name": "GET cluster details",
-      "credentials": {
-        "httpBasicAuth": {
-          "id": "ztaa2qlrowtsjLhs",
-          "name": "Proxmox API Token"
-        },
-        "httpHeaderAuth": {
-          "id": "ZLI3QRgLUidNH8Sw",
-          "name": "Proxmox API Header Token"
-        }
-      }
+      "id": "6fb0806c-93d8-4a5e-bf50-638a8271efc2",
+      "name": "GET cluster details"
     }
   ],
   "pinData": {},
@@ -152,20 +142,22 @@
       ]
     }
   },
-  "active": true,
+  "active": false,
   "settings": {
     "executionOrder": "v1",
     "availableInMCP": false
   },
+  "versionId": "741403c4-34d6-4599-b70d-343b79c4e350",
   "meta": {
-    "instanceId": "74a39c08257f83f18c6fe30fd54fe34d53e2199e9c782bcec1e573e1930630ac"
+    "instanceId": "8bfcbc86985d5ca21643a7752bbd06bdbdf7e70892c47550807b83814d7abe58"
   },
+  "id": "1FGw1KxD6CEJkHgZ",
   "tags": [
     {
-      "name": "CyberCore",
-      "id": "SqxAywq1R3kw8S7M",
-      "updatedAt": "2026-01-07T10:54:17.889Z",
-      "createdAt": "2026-01-07T10:54:17.889Z"
+      "updatedAt": "2026-04-11T09:14:29.798Z",
+      "createdAt": "2026-04-11T09:14:29.798Z",
+      "id": "H8hxFu0vDnVxlk7B",
+      "name": "CyberCore"
     }
   ]
 }
