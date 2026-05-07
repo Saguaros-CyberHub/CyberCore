@@ -31,6 +31,9 @@ vuln-assets/
 docker-compose.yml
 GOAD-main/
 
+# clinic
+config/n8n/workflows/Clinic-in-a-Box*
+
 # Ignore the new web interface directory
 cyberhub-web-interface/
 
