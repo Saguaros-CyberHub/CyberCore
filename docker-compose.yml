@@ -2,6 +2,10 @@ networks:
   cybercore-net:
     driver: bridge
 
+volumes:
+  cybercore-redis-data:
+  cybercore-n8n-data:
+
 services:
   # ============================================================================
   # POSTGRES — Single instance hosting cybercore_db + plugin databases
@@ -45,7 +49,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
-      - ./data/redis:/data:rw,z
+      - cybercore-redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "PING"]
       interval: 10s
@@ -165,7 +169,7 @@ services:
     env_file:
       - ./config/secrets.env
     volumes:
-      - ./data/n8n:/home/node:rw,z
+      - cybercore-n8n-data:/home/node
       - ./config/n8n/init.sh:/docker-entrypoint-initn8n.sh:ro,z
       - ./config/n8n/workflows:/seed/workflows:ro,z
       - ./config/n8n/credentials:/seed/credentials:ro,z
@@ -193,80 +197,7 @@ services:
       N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
       N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: 15
       N8N_RUNNERS_LOG_LEVEL: info
-      # Python runner settings
       N8N_RUNNERS_PYTHON_RUNNER: "true"
-      # Customize launcher if needed (see ./config/n8n/task-runners.json)
-
-    networks:
-      - cybercore-net
-
-  # ============================================================================
-  # N8N WORKER — DISABLED (replaced by external task runners)
-  # ============================================================================
-  # n8n-worker:
-  #   image: docker.n8n.io/n8nio/n8n:2.1.2
-  #   container_name: cybercore-n8n-worker
-  #   restart: unless-stopped
-  #   depends_on:
-  #     postgres:
-  #       condition: service_healthy
-  #     redis:
-  #       condition: service_healthy
-  #     n8n:
-  #       condition: service_healthy
-  #   user: 0:0
-  #   environment:
-  #     N8N_USER_FOLDER: /home/node
-  #     TZ: ${TZ}
-  #     GENERIC_TIMEZONE: ${TZ}
-  #     NODE_ENV: production
-  #     N8N_HOST: 0.0.0.0
-  #     N8N_PORT: 5678
-  #     N8N_PROTOCOL: http
-  #     N8N_SECURE_COOKIE: "false"
-  #     WEBHOOK_URL: http://0.0.0.0:5678/
-  #     N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-  #     N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-  #     DB_TYPE: postgresdb
-  #     DB_POSTGRESDB_HOST: postgres
-  #     DB_POSTGRESDB_PORT: 5432
-  #     DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
-  #     DB_POSTGRESDB_USER: ${N8N_DB_USER}
-  #     DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-  #     EXECUTIONS_MODE: queue
-  #     QUEUE_BULL_REDIS_HOST: redis
-  #     QUEUE_BULL_REDIS_PORT: 6379
-  #     QUEUE_HEALTH_CHECK_ACTIVE: "true"
-  #     N8N_SKIP_DB_MIGRATIONS: "true"
-  #     N8N_RUNNERS_TASK_TIMEOUT: 1200
-  #   command: ["worker"]
-  #   env_file:
-  #     - ./config/secrets.env
-  #   volumes:
-  #     - ./data/n8n:/home/node:z
-  #     - ./config/n8n/workflows:/seed/workflows:ro,z
-  #     - ./config/n8n/credentials:/seed/credentials:ro,z
-  #     - ./config/site.json:/seed/site.json:ro,z
-  #   networks:
-  #     - cybercore-net
-
-  # ============================================================================
-  # PGADMIN — Database web interface
-  # ============================================================================
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: cybercore-pgadmin
-    restart: unless-stopped
-    depends_on:
-      - postgres
-    environment:
-      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
-      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
-      PGADMIN_LISTEN_PORT: 5050
-    ports:
-      - "0.0.0.0:5050:5050"
-    volumes:
-      - ./data/pgadmin:/var/lib/pgadmin:rw
     networks:
       - cybercore-net
 
