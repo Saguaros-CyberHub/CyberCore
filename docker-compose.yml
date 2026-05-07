@@ -24,6 +24,7 @@ services:
       - ./data/postgres:/var/lib/postgresql/data:rw,z
       - ./config/postgres/001_init_db.sql:/docker-entrypoint-initdb.d/001_init_db.sql:ro,z
       - ./config/postgres/002_init_db.sh:/docker-entrypoint-initdb.d/002_init_db.sh:ro,z
+      - ./config/postgres/003_cyberhub_modules.sql:/docker-entrypoint-initdb.d/003_cyberhub_modules.sql:ro,z
       - ./config/postgres/050_apply_modules.sh:/docker-entrypoint-initdb.d/050_apply_modules.sh:ro,z
       - ./config/postgres/modules:/docker-entrypoint-initdb.d/modules:ro,z
     shm_size: 256mb
@@ -121,7 +122,7 @@ services:
   # N8N — Workflow automation (use patched image)
   # ============================================================================
   n8n:
-    image: docker.n8n.io/n8nio/n8n:2.1.2
+    image: docker.n8n.io/n8nio/n8n:2.19.4
     container_name: cybercore-n8n
     restart: unless-stopped
     depends_on:
@@ -151,6 +152,12 @@ services:
       EXECUTIONS_MODE: queue
       QUEUE_BULL_REDIS_HOST: redis
       QUEUE_BULL_REDIS_PORT: 6379
+      # Task Runners — External Mode Configuration
+      N8N_RUNNERS_MODE: external
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
+      N8N_NATIVE_PYTHON_RUNNER: "true"
+      OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
     entrypoint: ["/bin/sh","-lc"]
     command: "/docker-entrypoint-initn8n.sh"
     ports:
@@ -171,50 +178,77 @@ services:
     networks:
       - cybercore-net
 
-  n8n-worker:
-    image: docker.n8n.io/n8nio/n8n:2.1.2
-    container_name: cybercore-n8n-worker
+  # ============================================================================
+  # N8N TASK RUNNERS — External mode sidecar (separate JS/Python execution)
+  # ============================================================================
+  n8n-runners:
+    image: n8nio/runners:2.19.4
+    container_name: cybercore-n8n-runners
     restart: unless-stopped
     depends_on:
-      postgres:
+      n8n:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    user: 0:0
     environment:
-      N8N_USER_FOLDER: /home/node
-      TZ: ${TZ}
-      GENERIC_TIMEZONE: ${TZ}
-      NODE_ENV: production
-      N8N_HOST: 0.0.0.0
-      N8N_PORT: 5678
-      N8N_PROTOCOL: http
-      N8N_SECURE_COOKIE: "false"
-      WEBHOOK_URL: http://0.0.0.0:5678/
-      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
-      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
-      DB_TYPE: postgresdb
-      DB_POSTGRESDB_HOST: postgres
-      DB_POSTGRESDB_PORT: 5432
-      DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
-      DB_POSTGRESDB_USER: ${N8N_DB_USER}
-      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
-      EXECUTIONS_MODE: queue
-      QUEUE_BULL_REDIS_HOST: redis
-      QUEUE_BULL_REDIS_PORT: 6379
-      QUEUE_HEALTH_CHECK_ACTIVE: "true"
-      N8N_SKIP_DB_MIGRATIONS: "true"
-      N8N_RUNNERS_TASK_TIMEOUT: 1200
-    command: ["worker"]
-    env_file:
-      - ./config/secrets.env
-    volumes:
-      - ./data/n8n:/home/node:z
-      - ./config/n8n/workflows:/seed/workflows:ro,z
-      - ./config/n8n/credentials:/seed/credentials:ro,z
-      - ./config/site.json:/seed/site.json:ro,z
+      N8N_RUNNERS_TASK_BROKER_URI: http://n8n:5679
+      N8N_RUNNERS_AUTH_TOKEN: ${N8N_RUNNERS_AUTH_TOKEN}
+      N8N_RUNNERS_AUTO_SHUTDOWN_TIMEOUT: 15
+      N8N_RUNNERS_LOG_LEVEL: info
+      # Python runner settings
+      N8N_RUNNERS_PYTHON_RUNNER: "true"
+      # Customize launcher if needed (see ./config/n8n/task-runners.json)
+
     networks:
       - cybercore-net
+
+  # ============================================================================
+  # N8N WORKER — DISABLED (replaced by external task runners)
+  # ============================================================================
+  # n8n-worker:
+  #   image: docker.n8n.io/n8nio/n8n:2.1.2
+  #   container_name: cybercore-n8n-worker
+  #   restart: unless-stopped
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #     n8n:
+  #       condition: service_healthy
+  #   user: 0:0
+  #   environment:
+  #     N8N_USER_FOLDER: /home/node
+  #     TZ: ${TZ}
+  #     GENERIC_TIMEZONE: ${TZ}
+  #     NODE_ENV: production
+  #     N8N_HOST: 0.0.0.0
+  #     N8N_PORT: 5678
+  #     N8N_PROTOCOL: http
+  #     N8N_SECURE_COOKIE: "false"
+  #     WEBHOOK_URL: http://0.0.0.0:5678/
+  #     N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY}
+  #     N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+  #     DB_TYPE: postgresdb
+  #     DB_POSTGRESDB_HOST: postgres
+  #     DB_POSTGRESDB_PORT: 5432
+  #     DB_POSTGRESDB_DATABASE: ${N8N_DB_NAME}
+  #     DB_POSTGRESDB_USER: ${N8N_DB_USER}
+  #     DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD}
+  #     EXECUTIONS_MODE: queue
+  #     QUEUE_BULL_REDIS_HOST: redis
+  #     QUEUE_BULL_REDIS_PORT: 6379
+  #     QUEUE_HEALTH_CHECK_ACTIVE: "true"
+  #     N8N_SKIP_DB_MIGRATIONS: "true"
+  #     N8N_RUNNERS_TASK_TIMEOUT: 1200
+  #   command: ["worker"]
+  #   env_file:
+  #     - ./config/secrets.env
+  #   volumes:
+  #     - ./data/n8n:/home/node:z
+  #     - ./config/n8n/workflows:/seed/workflows:ro,z
+  #     - ./config/n8n/credentials:/seed/credentials:ro,z
+  #     - ./config/site.json:/seed/site.json:ro,z
+  #   networks:
+  #     - cybercore-net
 
   # ============================================================================
   # PGADMIN — Database web interface
