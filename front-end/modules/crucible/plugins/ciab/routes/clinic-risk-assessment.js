@@ -74,6 +74,133 @@ router.get('/frameworks', (req, res) => {
   });
 });
 
+// GET /api/clinic-risk-assessment/pickable — landing-page picker data.
+// Returns AI profiles (for the user, or all if privileged) AND real-client
+// intakes from the unified table. Intakes already attached to a profile
+// surface that profile_id directly so the picker can deep-link.
+router.get('/pickable', async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const privileged = isPrivileged(req);
+
+    const profileSql = privileged
+      ? `SELECT id, company_name, industry, difficulty, profile_source,
+                created_at, generation_status
+         FROM profiles
+         WHERE generation_status = 'complete'
+         ORDER BY created_at DESC
+         LIMIT 200`
+      : `SELECT id, company_name, industry, difficulty, profile_source,
+                created_at, generation_status
+         FROM profiles
+         WHERE user_id = $1 AND generation_status = 'complete'
+         ORDER BY created_at DESC
+         LIMIT 200`;
+    const profileQ = privileged
+      ? await pool.query(profileSql)
+      : await pool.query(profileSql, [userId]);
+
+    // Real-client intakes from unified table. For each, surface whether it's
+    // already attached to a profile.
+    const intakeSql = privileged
+      ? `SELECT i.id, i.cover_name, i.profile_id, i.completion_percentage,
+                i.created_at, i.user_id
+         FROM intakes i
+         WHERE i.source = 'real_client'
+         ORDER BY i.created_at DESC
+         LIMIT 200`
+      : `SELECT i.id, i.cover_name, i.profile_id, i.completion_percentage,
+                i.created_at, i.user_id
+         FROM intakes i
+         WHERE i.source = 'real_client' AND i.user_id = $1
+         ORDER BY i.created_at DESC
+         LIMIT 200`;
+    const intakeQ = privileged
+      ? await pool.query(intakeSql)
+      : await pool.query(intakeSql, [userId]);
+
+    res.json({
+      ai_profiles: profileQ.rows.filter(p => p.profile_source !== 'real_intake'),
+      real_client_intakes: intakeQ.rows,
+      can_see_all: privileged,
+    });
+  } catch (err) {
+    console.error('[CRA pickable]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/clinic-risk-assessment/from-intake/:intakeId
+// Lazy-creates a thin profile from a real-client intake so the user can run
+// a risk assessment against it. The intake gets attached to the new profile
+// (its profile_id is set). Returns { profile_id } so the client can redirect.
+router.post('/from-intake/:intakeId', express.json(), async (req, res) => {
+  try {
+    const { intakeId } = req.params;
+    const userId = req.user.userId;
+
+    // Load the intake (must be real_client and not already attached).
+    const ir = await pool.query(
+      `SELECT id, user_id, cover_name, payload, profile_id, source
+       FROM intakes WHERE id = $1`,
+      [intakeId]
+    );
+    if (ir.rowCount === 0) return res.status(404).json({ error: 'Intake not found' });
+    const intake = ir.rows[0];
+
+    // Permission: owner or admin/instructor.
+    if (intake.user_id !== userId && !isPrivileged(req)) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    if (intake.source !== 'real_client') {
+      return res.status(400).json({ error: 'Only real-client intakes can be promoted via this endpoint.' });
+    }
+
+    // If already attached, return the existing profile_id (idempotent).
+    if (intake.profile_id) {
+      return res.json({ profile_id: intake.profile_id, reused: true });
+    }
+
+    // Pull a couple of fields from the intake to seed the profile.
+    const company = intake.payload?.sections?.company || {};
+    const network = intake.payload?.sections?.network || {};
+    const coverName = intake.cover_name || company.cover_name || 'Untitled Engagement';
+    const industry = company.industry || null;
+    const endpointCount = Number(network.endpoint_count) || null;
+    const frameworks = Array.isArray(company.frameworks) ? company.frameworks : [];
+
+    // Use a deterministic-ish run_id so re-creates can be traced.
+    const runId = `RC_${Date.now()}_${intakeId.slice(0, 8)}`;
+
+    const pr = await pool.query(
+      `INSERT INTO profiles
+         (user_id, run_id, client_type, company_name, industry, difficulty,
+          endpoint_count, compliance_frameworks,
+          generation_status, profile_source, source_intake_id, filler_assets)
+       VALUES
+         ($1, $2, 'real_client', $3, $4, NULL,
+          $5, $6::jsonb,
+          'complete', 'real_intake', $7, '{}'::jsonb)
+       RETURNING id`,
+      [userId, runId, coverName, industry, endpointCount,
+       JSON.stringify(frameworks), intakeId]
+    );
+    const profileId = pr.rows[0].id;
+
+    // Attach the intake to the new profile.
+    await pool.query(
+      `UPDATE intakes SET profile_id = $1, updated_at = NOW()
+       WHERE id = $2`,
+      [profileId, intakeId]
+    );
+
+    res.json({ profile_id: profileId, reused: false });
+  } catch (err) {
+    console.error('[CRA from-intake]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/clinic-risk-assessment/:profileId — full dashboard bundle for one profile.
 router.get('/:profileId', async (req, res) => {
   try {

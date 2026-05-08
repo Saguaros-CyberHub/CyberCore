@@ -68,8 +68,7 @@
 
     state.profileId = extractProfileId();
     if (!state.profileId) {
-      document.getElementById('craCompanyName').textContent = 'No profile selected';
-      document.getElementById('craSubtitle').textContent = 'Open this page from a profile card.';
+      await renderPicker();
       return;
     }
 
@@ -79,6 +78,109 @@
     document.getElementById('btnRefresh').addEventListener('click', () => loadAndRender());
 
     await loadAndRender();
+  }
+
+  // === Picker (no profileId in URL) ===
+  async function renderPicker() {
+    document.getElementById('craCompanyName').textContent = 'Open Risk Assessment';
+    document.getElementById('craSubtitle').textContent = 'Pick a profile or real-client engagement to begin.';
+    document.getElementById('btnRefresh').style.display = 'none';
+
+    // Hide tabs and tab content; we're rendering a different layout in their place.
+    document.querySelector('.cra-tabs').style.display = 'none';
+    document.querySelectorAll('.cra-pane').forEach(p => p.classList.remove('active'));
+
+    const shell = document.getElementById('craShell');
+    const pickerEl = document.createElement('div');
+    pickerEl.id = 'craPicker';
+    pickerEl.innerHTML = `
+      <div class="cra-grid cols-2" style="margin-top:8px">
+        <div class="cra-card" id="pickerAiCard">
+          <h3>AI Training Profiles</h3>
+          <p class="sub" style="color:var(--text-muted); font-size:0.85rem; margin: -4px 0 12px 0;">Generated profiles for practice. Watermarked as training samples in the deliverable.</p>
+          <div id="pickerAiList"><div class="empty-state">Loading…</div></div>
+        </div>
+        <div class="cra-card" id="pickerRealCard">
+          <h3>Real-Client Engagements</h3>
+          <p class="sub" style="color:var(--text-muted); font-size:0.85rem; margin: -4px 0 12px 0;">Uploaded intakes. Click to open the assessment — a profile will be created automatically if one isn't linked yet.</p>
+          <div id="pickerRealList"><div class="empty-state">Loading…</div></div>
+        </div>
+      </div>
+    `;
+    shell.appendChild(pickerEl);
+
+    let data;
+    try {
+      data = await api('GET', '/pickable');
+    } catch (err) {
+      pickerEl.querySelectorAll('.empty-state').forEach(el => el.textContent = 'Load failed: ' + err.message);
+      return;
+    }
+
+    renderPickerList('pickerAiList', data.ai_profiles, (p) => `
+      <div class="picker-row" data-profile="${p.id}">
+        <div class="row-main">
+          <div class="row-title">${escapeHtml(p.company_name || 'Untitled')}</div>
+          <div class="row-meta">${escapeHtml(p.industry || 'Unspecified')} · ${escapeHtml(p.difficulty || '—')} · ${new Date(p.created_at).toLocaleDateString()}</div>
+        </div>
+        <button class="btn primary">Open</button>
+      </div>
+    `, (row) => {
+      location.href = `/ciab/clinic-risk-assessment/${row.dataset.profile}`;
+    }, 'No AI profiles yet. Generate one from /ciab/generator.');
+
+    renderPickerList('pickerRealList', data.real_client_intakes, (i) => `
+      <div class="picker-row" data-intake="${i.id}" data-profile="${i.profile_id || ''}">
+        <div class="row-main">
+          <div class="row-title">${escapeHtml(i.cover_name || 'Untitled')}</div>
+          <div class="row-meta">${i.profile_id ? 'Linked' : 'No profile yet'} · ${i.completion_percentage || 0}% complete · ${new Date(i.created_at).toLocaleDateString()}</div>
+        </div>
+        <button class="btn primary">${i.profile_id ? 'Open' : 'Open & create profile'}</button>
+      </div>
+    `, async (row) => {
+      const existing = row.dataset.profile;
+      if (existing) { location.href = `/ciab/clinic-risk-assessment/${existing}`; return; }
+      // Lazy-create profile, then redirect.
+      const intakeId = row.dataset.intake;
+      const btn = row.querySelector('button');
+      btn.disabled = true; btn.textContent = 'Creating profile…';
+      try {
+        const r = await api('POST', `/from-intake/${encodeURIComponent(intakeId)}`);
+        location.href = `/ciab/clinic-risk-assessment/${r.profile_id}`;
+      } catch (err) {
+        toast('Failed: ' + err.message, 4000);
+        btn.disabled = false; btn.textContent = 'Open & create profile';
+      }
+    }, 'No real-client intakes yet. Upload one at /ciab/real-client-intake.');
+
+    // Inject styles for picker rows once.
+    if (!document.getElementById('pickerStyles')) {
+      const style = document.createElement('style');
+      style.id = 'pickerStyles';
+      style.textContent = `
+        .picker-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+        .picker-row:last-child { border-bottom: 0; }
+        .picker-row .row-title { font-weight: 600; color: var(--text-primary); }
+        .picker-row .row-meta { font-size: 0.8rem; color: var(--text-muted, #64748b); margin-top: 2px; }
+        .picker-row .btn { white-space: nowrap; }
+      `;
+      document.head.appendChild(style);
+    }
+  }
+
+  function renderPickerList(hostId, items, rowFn, onClick, emptyMsg) {
+    const host = document.getElementById(hostId);
+    if (!items || items.length === 0) {
+      host.innerHTML = `<div class="empty-state" style="padding: 24px 8px; font-size: 0.85rem;">${escapeHtml(emptyMsg)}</div>`;
+      return;
+    }
+    host.innerHTML = items.map(rowFn).join('');
+    host.querySelectorAll('.picker-row').forEach(row => {
+      row.querySelector('button').addEventListener('click', (e) => {
+        e.stopPropagation();
+        onClick(row);
+      });
+    });
   }
 
   async function loadAndRender() {
