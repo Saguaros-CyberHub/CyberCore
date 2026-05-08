@@ -26,14 +26,17 @@
         "migrations": "migrations"
     },
     "subnav": {
-        "label": "CIAB",
+        "label": "Clinic-in-a-Box",
         "items": [
-            {
-                "label": "Dashboard",
-                "url": "/ciab/dashboard",
-                "icon": "\ud83d\udcca",
-                "page": "dashboard"
-            }
+            { "label": "Dashboard",          "icon": "\ud83d\udcca", "url": "/ciab/dashboard",            "page": "dashboard" },
+            { "label": "My Profiles",        "icon": "\ud83d\udcc1", "url": "/ciab/my-profiles",          "page": "profiles" },
+            { "label": "Generate New",       "icon": "\u26a1",       "url": "/ciab/generator",            "page": "generator" },
+            { "label": "Real-Client Intakes","icon": "\ud83d\udce8", "url": "/ciab/real-client-intakes",  "page": "real-client-intakes" },
+            { "label": "Workspace",          "icon": "\ud83d\udcdd", "url": "/ciab/workspace",            "page": "workspace" },
+            { "label": "My Progress",        "icon": "\ud83d\udcc8", "url": "/ciab/progress",             "page": "progress" },
+            { "label": "Interview Sim",      "icon": "\ud83c\udfa4", "url": "/ciab/interview",            "page": "interview" },
+            { "label": "Instructor",         "icon": "\ud83d\udc68\u200d\ud83c\udfeb", "url": "/ciab/instructor", "page": "instructor", "roles": ["instructor", "admin"] },
+            { "label": "AI Assistant",       "icon": "\ud83e\udd16", "url": "#",                          "page": "ai-assistant", "onclick": "Layout.openChat(); return false;" }
         ]
     }
 }

@@ -26,18 +26,11 @@
         "migrations": "migrations"
     },
     "subnav": {
-        "label": "CLE",
+        "label": "Cyber Learning Environment",
         "items": [
-            {
-                "label": "Dashboard",
-                "url": "/cle/dashboard",
-                "icon": "\ud83d\udcca",
-                "page": "dashboard",
-                "roles": [
-                    "instructor",
-                    "admin"
-                ]
-            }
+            { "label": "Dashboard",   "icon": "\ud83d\udcca", "url": "/cle/dashboard", "page": "dashboard", "roles": ["instructor", "admin"] },
+            { "label": "Students",    "icon": "\ud83d\udc65", "url": "/cle/students",  "page": "students",  "roles": ["instructor", "admin"] },
+            { "label": "Session Log", "icon": "\ud83d\udccb", "url": "/cle/sessions",  "page": "sessions",  "roles": ["instructor", "admin"] }
         ]
     }
 }
