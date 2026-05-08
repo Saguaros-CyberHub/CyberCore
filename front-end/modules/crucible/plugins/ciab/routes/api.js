@@ -27,6 +27,7 @@ const interviewRoutes = require('./interview');
 const instructorRoutes = require('./instructor');
 const intakeFormRoutes = require('./intake-form');
 const realClientIntakeRoutes = require('./real-client-intake');
+const intakesRoutes = require('./intakes');
 
 // Mount with auth + schedule checking
 router.use('/api/profiles', authenticateToken, checkSchedule, profileRoutes);
@@ -36,5 +37,7 @@ router.use('/api/interview', authenticateToken, checkSchedule, interviewRoutes);
 router.use('/api/instructor', authenticateToken, instructorRoutes);
 router.use('/api/intake-form', authenticateToken, checkSchedule, intakeFormRoutes);
 router.use('/api/real-client/intake', authenticateToken, checkSchedule, realClientIntakeRoutes);
+// Unified intakes API (Phase 0). intakesRoutes applies authenticateToken internally.
+router.use('/api/intakes', checkSchedule, intakesRoutes);
 
 module.exports = router;

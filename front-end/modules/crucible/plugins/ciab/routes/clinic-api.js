@@ -121,7 +121,8 @@ router.post('/webhook/profile-complete', async (req, res) => {
       jsonFilename,
       htmlFilePath,
       jsonFilePath,
-      status = 'completed'
+      status = 'completed',
+      intake_v12,  // Phase 0: optional canonical intake payload from n8n. If absent, we synthesize one.
     } = req.body;
 
     // Update or insert profile
@@ -154,17 +155,87 @@ router.post('/webhook/profile-complete', async (req, res) => {
         status
       ]
     );
+    const profileId = result.rows[0]?.id;
 
-    res.json({ 
-      success: true, 
-      profileId: result.rows[0]?.id,
-      message: 'Profile saved successfully' 
+    // Phase 0: persist a v1.2 intake row alongside the profile so the unified
+    // form/dashboard can render against it from first load. If n8n shipped a
+    // structured `intake_v12` payload, prefer it; otherwise synthesize one from
+    // the profile metadata. Either way, the student can edit/extend through the
+    // unified form at /ciab/intake?profileId=…
+    if (profileId) {
+      try {
+        const payload = intake_v12 && intake_v12.sections
+          ? intake_v12
+          : synthesizeIntakeFromProfile({
+              companyName, industry, employeeCount, endpointCount,
+              complianceFrameworks: complianceFrameworks || [],
+            });
+        await query(
+          `INSERT INTO intakes
+             (user_id, profile_id, source, schema_version, cover_name, payload,
+              completion_percentage, status)
+           VALUES ($1, $2, 'ai_simulated', $3, $4, $5::jsonb, $6, 'in_progress')
+           ON CONFLICT (profile_id) WHERE profile_id IS NOT NULL DO NOTHING`,
+          [
+            userId, profileId,
+            payload.schema_version || '1.2',
+            payload.cover_name || companyName || 'Unknown Organization',
+            JSON.stringify(payload),
+            // Synthesized intakes are partial — let the student fill in the rest.
+            intake_v12 ? 30 : 15,
+          ]
+        );
+      } catch (intakeErr) {
+        // Don't fail the whole webhook if the intake insert hiccups; profile is the load-bearing artifact.
+        console.warn('[profile-complete] intake row insert skipped:', intakeErr.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      profileId,
+      message: 'Profile saved successfully'
     });
   } catch (error) {
     console.error('Webhook error:', error);
     res.status(500).json({ error: 'Failed to save profile' });
   }
 });
+
+/**
+ * Build a minimal v1.2 intake from profile metadata. Used when n8n hasn't yet
+ * been updated to emit a structured `intake_v12` block. The student fills in
+ * the rest via the unified intake form.
+ */
+function synthesizeIntakeFromProfile({ companyName, industry, employeeCount, endpointCount, complianceFrameworks }) {
+  const employees_band = bandFromCount(employeeCount);
+  return {
+    schema_version: '1.2',
+    cover_name: companyName || 'Unknown Organization',
+    sections: {
+      company: {
+        cover_name: companyName || 'Unknown Organization',
+        industry: industry || null,
+        employees_band,
+        frameworks: Array.isArray(complianceFrameworks) ? complianceFrameworks : [],
+      },
+      network: { endpoint_count: Number(endpointCount) || 0 },
+      wireless: {}, endpoint: {}, email_web: {}, access: {}, data: {}, vuln_audit: {},
+      ig1: {},
+      notes: { free_text: '' },
+    },
+  };
+}
+
+function bandFromCount(n) {
+  const x = Number(n) || 0;
+  if (x === 0)        return null;
+  if (x <= 10)        return '1-10';
+  if (x <= 50)        return '11-50';
+  if (x <= 250)       return '51-250';
+  if (x <= 1000)      return '251-1000';
+  return '1000+';
+}
 
 // ============================================================================
 // GET /api/health - Health check endpoint

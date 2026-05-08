@@ -18,6 +18,7 @@ const pages = {
   '/interview':   'interview.html',
   '/instructor':  'instructor.html',
   '/intake-form': 'intake-form.html',
+  '/intake':      'real-client-intake.html', // Unified form (Phase 0). Dual-mode: ?profileId=X auto-saves; no param = standalone upload.
   '/guide':       'guide.html',
   '/nice-framework': 'nice-framework.html',
   '/real-client-intake':        'real-client-intake.html',
