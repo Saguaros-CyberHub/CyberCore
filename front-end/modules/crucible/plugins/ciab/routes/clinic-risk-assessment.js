@@ -169,6 +169,22 @@ router.post('/from-intake/:intakeId', express.json(), async (req, res) => {
     const endpointCount = Number(network.endpoint_count) || null;
     const frameworks = Array.isArray(company.frameworks) ? company.frameworks : [];
 
+    // profiles.source_intake_id has a FK to real_client_intakes(id), not to
+    // the unified intakes table. If this intakes row was migrated from (or
+    // dual-written with) a real_client_intakes row, use that legacy id;
+    // otherwise leave it null. The intake.profile_id back-link is enough
+    // for the CRA dashboard.
+    const fullIntake = await pool.query(
+      `SELECT legacy_source_table, legacy_source_id FROM intakes WHERE id = $1`,
+      [intakeId]
+    );
+    let sourceIntakeIdForFk = null;
+    const fi = fullIntake.rows[0];
+    if (fi?.legacy_source_table === 'real_client_intakes' && fi.legacy_source_id) {
+      const rciCheck = await pool.query(`SELECT id FROM real_client_intakes WHERE id = $1`, [fi.legacy_source_id]);
+      if (rciCheck.rowCount > 0) sourceIntakeIdForFk = fi.legacy_source_id;
+    }
+
     // Use a deterministic-ish run_id so re-creates can be traced.
     const runId = `RC_${Date.now()}_${intakeId.slice(0, 8)}`;
 
@@ -183,16 +199,27 @@ router.post('/from-intake/:intakeId', express.json(), async (req, res) => {
           'complete', 'real_intake', $7, '{}'::jsonb)
        RETURNING id`,
       [userId, runId, coverName, industry, endpointCount,
-       JSON.stringify(frameworks), intakeId]
+       JSON.stringify(frameworks), sourceIntakeIdForFk]
     );
     const profileId = pr.rows[0].id;
 
-    // Attach the intake to the new profile.
+    // Attach the unified intake to the new profile (forward link).
     await pool.query(
       `UPDATE intakes SET profile_id = $1, updated_at = NOW()
        WHERE id = $2`,
       [profileId, intakeId]
     );
+
+    // Mirror the link onto the legacy real_client_intakes row too, so the
+    // existing detail/synthesize pages keep working.
+    if (sourceIntakeIdForFk) {
+      await pool.query(
+        `UPDATE real_client_intakes
+           SET linked_profile_id = $1, status = 'linked', updated_at = NOW()
+         WHERE id = $2 AND linked_profile_id IS NULL`,
+        [profileId, sourceIntakeIdForFk]
+      );
+    }
 
     res.json({ profile_id: profileId, reused: false });
   } catch (err) {
