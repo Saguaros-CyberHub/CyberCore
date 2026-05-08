@@ -136,6 +136,146 @@
       background: rgba(72,187,120,0.15);
       color: #68d391;
     }
+
+    /* ===== Dashboard Menu ===== */
+    .dashboard-menu {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border-color, #e2e8f0);
+      margin-bottom: 32px;
+      background: var(--bg-card, white);
+      margin: 0 -1.5rem 32px -1.5rem;
+      padding: 0 1.5rem;
+      flex-wrap: wrap;
+      align-items: stretch;
+    }
+
+    .dashboard-menu-item {
+      padding: 16px 20px;
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--text-secondary, #718096);
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+      background: none;
+      border: none;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dashboard-menu-item:hover {
+      color: var(--text-primary);
+      background: rgba(0,0,0,0.02);
+    }
+
+    .dashboard-menu-item.active {
+      color: var(--primary, #3182ce);
+      border-bottom-color: var(--primary, #3182ce);
+    }
+
+    /* Details/Dropdown styling */
+    .dashboard-menu-dropdown {
+      position: relative;
+    }
+
+    .dashboard-menu-dropdown > summary {
+      list-style: none;
+    }
+
+    .dashboard-menu-dropdown > summary::marker {
+      display: none;
+    }
+
+    .dashboard-menu-dropdown > summary::before {
+      content: none;
+    }
+
+    /* Chevron for dropdown items */
+    .dashboard-menu-dropdown > summary::after {
+      content: ' ▼';
+      font-size: 0.6rem;
+      transition: transform 0.2s ease;
+      display: inline-block;
+    }
+
+    .dashboard-menu-dropdown[open] > summary::after {
+      transform: rotate(-180deg);
+    }
+
+    .dashboard-submenu {
+      display: none;
+      position: absolute;
+      top: 100%;
+      left: 0;
+      background: var(--bg-card, white);
+      border-bottom: 1px solid var(--border-color, #e2e8f0);
+      border-right: 1px solid var(--border-color, #e2e8f0);
+      border-radius: 0 0 8px 0;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+      z-index: 10;
+      min-width: 180px;
+      flex-direction: column;
+    }
+
+    .dashboard-menu-dropdown[open] .dashboard-submenu {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .dashboard-submenu-item {
+      padding: 12px 20px;
+      font-size: 0.875rem;
+      color: var(--text-secondary, #718096);
+      cursor: pointer;
+      border: none;
+      background: none;
+      border-left: 3px solid transparent;
+      transition: all 0.2s ease;
+      text-align: left;
+      text-decoration: none;
+      display: block;
+      width: 100%;
+    }
+
+    .dashboard-submenu-item:hover {
+      background: rgba(0,0,0,0.04);
+      color: var(--text-primary);
+      border-left-color: var(--primary, #3182ce);
+    }
+
+    .dashboard-submenu-item.active {
+      background: rgba(49,130,206,0.08);
+      color: var(--primary, #3182ce);
+      border-left-color: var(--primary, #3182ce);
+      font-weight: 500;
+    }
+
+    [data-theme="dark"] .dashboard-menu {
+      background: var(--bg-card);
+      border-bottom-color: var(--border-color, rgba(255,255,255,0.1));
+    }
+
+    [data-theme="dark"] .dashboard-menu-item:hover {
+      background: rgba(255,255,255,0.05);
+    }
+
+    [data-theme="dark"] .dashboard-submenu {
+      background: var(--bg-card);
+      border-color: var(--border-color, rgba(255,255,255,0.1));
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+
+    [data-theme="dark"] .dashboard-submenu-item:hover {
+      background: rgba(255,255,255,0.08);
+    }
+
+    [data-theme="dark"] .dashboard-submenu-item.active {
+      background: rgba(49,130,206,0.15);
+    }
   </style>
 </head>
 <body>
@@ -155,18 +295,138 @@
       </header>
 
       <div class="page-content">
-        <div class="hub-welcome">
-          <h1 id="welcomeTitle">Welcome to CyberHub</h1>
-          <p>Select a module to get started, or explore what's available below.</p>
+        <!-- Dashboard Menu -->
+        <nav class="dashboard-menu">
+          <a href="#" class="dashboard-menu-item active" data-page="dashboard" onclick="switchDashboardTab(event, 'dashboard')">
+            <span>📊</span> Dashboard
+          </a>
+
+          <details class="dashboard-menu-dropdown">
+            <summary class="dashboard-menu-item">
+              <span>💻</span> Remote Workspaces
+            </summary>
+            <div class="dashboard-submenu">
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-myworkspaces')">My Workspaces</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-available')">Available</a>
+            </div>
+          </details>
+
+          <details class="dashboard-menu-dropdown">
+            <summary class="dashboard-menu-item">
+              <span>📚</span> Courses
+            </summary>
+            <div class="dashboard-submenu">
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'courses-enrolled')">Enrolled</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'courses-available')">Available</a>
+            </div>
+          </details>
+
+          <details class="dashboard-menu-dropdown">
+            <summary class="dashboard-menu-item">
+              <span>🎯</span> Challenges
+            </summary>
+            <div class="dashboard-submenu">
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-weekly')">Weekly Challenges</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-vuln')">Vulnerable Boxes</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-groupctf')">Group CTF</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-koth')">King of the Hill</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-redvsblue')">Red vs Blue</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-ir')">Incident Response / SOC Sim</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-events')">CTF Events</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-byoctf')">BYO CTF</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-leaderboard')">Leaderboard</a>
+            </div>
+          </details>
+
+          <a href="#" class="dashboard-menu-item" data-page="settings" onclick="switchDashboardTab(event, 'settings')">
+            <span>⚙️</span> Settings
+          </a>
+        </nav>
+
+        <div id="dashboardContent">
+          <div class="hub-welcome">
+            <h1 id="welcomeTitle">Welcome to CyberHub</h1>
+            <p>Select a module to get started, or explore what's available below.</p>
+          </div>
+
+          <div class="section-title">Modules</div>
+          <div class="module-grid" id="moduleGrid">
+            <div class="module-grid-loading">Loading modules...</div>
+          </div>
+
+          <div class="section-title" id="pluginsTitle" style="display:none">Plugins</div>
+          <div class="module-grid" id="pluginGrid"></div>
         </div>
 
-        <div class="section-title">Modules</div>
-        <div class="module-grid" id="moduleGrid">
-          <div class="module-grid-loading">Loading modules...</div>
+        <div id="workspaces-myworkspacesContent" style="display: none;">
+          <h2>My Workspaces</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
         </div>
 
-        <div class="section-title" id="pluginsTitle" style="display:none">Plugins</div>
-        <div class="module-grid" id="pluginGrid"></div>
+        <div id="workspaces-availableContent" style="display: none;">
+          <h2>Available Workspaces</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="courses-enrolledContent" style="display: none;">
+          <h2>Enrolled Courses</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="courses-availableContent" style="display: none;">
+          <h2>Available Courses</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-weeklyContent" style="display: none;">
+          <h2>Weekly Challenges</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-vulnContent" style="display: none;">
+          <h2>Vulnerable Boxes</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-groupctfContent" style="display: none;">
+          <h2>Group CTF</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-kothContent" style="display: none;">
+          <h2>King of the Hill</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-redvsblueContent" style="display: none;">
+          <h2>Red vs Blue</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-irContent" style="display: none;">
+          <h2>Incident Response / SOC Sim</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-eventsContent" style="display: none;">
+          <h2>CTF Events</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-byoctfContent" style="display: none;">
+          <h2>BYO CTF</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="challenges-leaderboardContent" style="display: none;">
+          <h2>Leaderboard</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
+
+        <div id="settingsContent" style="display: none;">
+          <h2>Settings</h2>
+          <p style="color: var(--text-secondary);">Coming Soon...</p>
+        </div>
       </div>
     </main>
   </div>
@@ -174,5 +434,43 @@
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
   <script src="/js/hub.js"></script>
+  <script>
+    // Dashboard menu tab switching
+    function switchDashboardTab(event, page) {
+      event.preventDefault();
+      
+      // Hide all content sections
+      document.querySelectorAll('[id$="Content"]').forEach(el => {
+        el.style.display = 'none';
+      });
+
+      // Remove active class from all menu items and submenu items
+      document.querySelectorAll('.dashboard-menu-item, .dashboard-submenu-item').forEach(item => {
+        item.classList.remove('active');
+      });
+
+      // Show selected content
+      const contentId = page + 'Content';
+      const contentEl = document.getElementById(contentId);
+      if (contentEl) {
+        contentEl.style.display = 'block';
+      }
+
+      // Mark active item
+      const activeItem = event.currentTarget;
+      if (activeItem) {
+        activeItem.classList.add('active');
+      }
+
+      // Close parent dropdown if clicking a submenu item
+      const parentDetails = activeItem.closest('.dashboard-menu-dropdown');
+      if (parentDetails) {
+        parentDetails.open = false;
+      }
+
+      // Scroll to top
+      document.querySelector('.page-content').scrollTop = 0;
+    }
+  </script>
 </body>
 </html>
