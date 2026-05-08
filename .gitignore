@@ -2,6 +2,9 @@
 proxmox-automated-install/
 **/data/*
 !**/data/.gitkeep
+# CIAB framework catalogs (CIS IG1, NIST CSF, etc.) — version-controlled reference data.
+!**/data/frameworks/
+!**/data/frameworks/**
 __pycache__/
 db_data/
 cookies/
