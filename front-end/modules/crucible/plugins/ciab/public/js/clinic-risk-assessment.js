@@ -16,6 +16,7 @@
     cisram: null,         // /api/cis-ram/:profileId response
     cisramExpanded: null, // currently expanded safeguard_num (only one at a time)
     cisramSaveTimers: {}, // debounced field-save timers per safeguard_num
+    cisramCollapsed: null, // Set<controlNum> of currently-collapsed controls; null until first render seeds it
   };
 
   const CSF_FN_ORDER = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
@@ -587,12 +588,27 @@
     document.getElementById('ramScored').textContent = `${totals.scored} / ${totals.total}`;
     document.getElementById('ramReasonable').textContent = `${totals.reasonable} / ${totals.total}`;
 
+    // Seed the collapsed set on first render: collapse controls that have no
+    // scored rows yet so the page isn't a wall of empty rows. Subsequent
+    // renders respect explicit user toggles in this set.
+    if (state.cisramCollapsed === null) {
+      state.cisramCollapsed = new Set(
+        (state.cisram.controls || []).filter(c => c.scored === 0).map(c => c.control)
+      );
+    }
+    // If a row is currently expanded, ensure its control is open (otherwise
+    // the drawer is invisible — confusing right after a click).
+    if (state.cisramExpanded) {
+      const ctrl = parseInt(state.cisramExpanded.split('.')[0], 10);
+      state.cisramCollapsed.delete(ctrl);
+    }
+
     host.innerHTML = (state.cisram.controls || []).map(ctrl => renderControlSection(ctrl)).join('');
     wireControlHandlers();
   }
 
   function renderControlSection(ctrl) {
-    const collapsed = ctrl.scored === 0 ? 'collapsed' : '';
+    const collapsed = state.cisramCollapsed?.has(ctrl.control) ? 'collapsed' : '';
     const rowsHtml = ctrl.rows.map(r => renderRamRow(r)).join('');
     return `
       <div class="ram-control ${collapsed}" data-control="${ctrl.control}">
@@ -713,9 +729,14 @@
   }
 
   function wireControlHandlers() {
-    // Section collapse toggles.
+    // Section collapse toggles. Persist to state so subsequent re-renders
+    // (e.g. after a row click) honor the user's choice instead of falling
+    // back to "auto-collapse if 0 scored".
     document.querySelectorAll('.ram-control-header[data-toggle]').forEach(h => {
       h.addEventListener('click', () => {
+        const ctrlNum = parseInt(h.dataset.toggle, 10);
+        if (state.cisramCollapsed.has(ctrlNum)) state.cisramCollapsed.delete(ctrlNum);
+        else state.cisramCollapsed.add(ctrlNum);
         h.parentElement.classList.toggle('collapsed');
       });
     });
