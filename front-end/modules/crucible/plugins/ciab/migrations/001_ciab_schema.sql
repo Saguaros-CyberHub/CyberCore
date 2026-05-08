@@ -418,6 +418,7 @@ CREATE TABLE IF NOT EXISTS vuln_scripts (
   name                 VARCHAR(255) NOT NULL,
   description          TEXT,
   category             VARCHAR(100) NOT NULL,
+  script_type          VARCHAR(16) NOT NULL DEFAULT 'vulnerable' CHECK (script_type IN ('baseline','vulnerable')),
   os_target            VARCHAR(50) NOT NULL DEFAULT 'windows',
   difficulty           VARCHAR(50) DEFAULT 'intermediate',
   script_content       TEXT NOT NULL,
@@ -431,6 +432,7 @@ CREATE TABLE IF NOT EXISTS vuln_scripts (
 
 CREATE INDEX IF NOT EXISTS idx_vuln_scripts_category ON vuln_scripts(category);
 CREATE INDEX IF NOT EXISTS idx_vuln_scripts_os       ON vuln_scripts(os_target);
+CREATE INDEX IF NOT EXISTS idx_vuln_scripts_type     ON vuln_scripts(script_type, is_active);
 CREATE INDEX IF NOT EXISTS idx_vuln_scripts_active   ON vuln_scripts(is_active) WHERE is_active = true;
 
 -- === Deployment Vulnerability Selections ===

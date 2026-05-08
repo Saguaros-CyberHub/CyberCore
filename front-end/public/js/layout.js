@@ -142,7 +142,7 @@ const Layout = {
     const activeSubPage = this.getActiveSubPage();
 
     // Check if we're on a legacy (non-namespaced) CIAB page
-    const legacyCiabPages = ['dashboard','profiles','generator','workspace','progress','interview','instructor','admin','intake-form','guide'];
+    const legacyCiabPages = ['dashboard','profiles','generator','workspace','progress','interview','instructor','intake-form','guide'];
     const isLegacyCiab = legacyCiabPages.includes(activeModule);
     const effectiveModule = isLegacyCiab ? 'ciab' : activeModule;
 
