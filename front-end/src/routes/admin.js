@@ -1483,10 +1483,12 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
       }));
 
     // 8. Audit orphaned disk images across all storages.
-    //    An orphan disk = vm-<vmid>-disk-* whose VMID is in a CyberHub range but has no
-    //    live VM config anywhere in the cluster. These leak when purge=1 fails on a
-    //    multi-disk VM (common with Ceph RBD locks). We also dedupe by volid since
-    //    shared storage shows the same disk on every node.
+    //    An orphan = vm-<vmid>-disk-* OR vm-<vmid>-cloudinit whose VMID is in a
+    //    CyberHub range but has no live VM config anywhere in the cluster.
+    //    These leak when purge=1 fails on a multi-disk VM (common with Ceph RBD
+    //    locks) or when a clone aborts after creating the cloudinit volume but
+    //    before creating the disk volume. We also dedupe by volid since shared
+    //    storage shows the same disk on every node.
     const liveVmIdSet = new Set(pxVMs.map(v => v.vmid));
     const orphanedDisks = [];
     const seenDiskVolids = new Set();
@@ -1510,9 +1512,10 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
           } catch (_) { continue; }
 
           for (const item of contents || []) {
-            const match = item.volid?.match(/vm-(\d+)-disk/);
+            const match = item.volid?.match(/vm-(\d+)-(disk|cloudinit)/);
             if (!match) continue;
             const vmid = parseInt(match[1]);
+            const kind = match[2]; // 'disk' or 'cloudinit'
 
             // Only flag CyberHub-range disks (gateway 1xxxxx / challenge 6xxxxx / attack-box 7xxxxx)
             const inRange = CYBERHUB_RANGES.some(r => vmid >= r.min && vmid <= r.max);
@@ -1530,6 +1533,7 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
               storage: s.storage,
               volid: item.volid,
               vmid,
+              kind,
               role: CYBERHUB_RANGES.find(r => vmid >= r.min && vmid <= r.max)?.role,
               size_bytes: item.size || 0,
               size_gb: item.size ? (item.size / (1024 ** 3)).toFixed(2) : '0.00'
@@ -3086,11 +3090,15 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
           } catch (_) { continue; }
 
           for (const item of contents || []) {
-            const match = item.volid?.match(/vm-(\d+)-disk/);
+            // Match both vm-N-disk-X and vm-N-cloudinit — purge=1 normally
+            // removes both, but the cloudinit volume can survive when a
+            // prior clone aborted before adding it to the VM config (so
+            // there's no config entry for purge to walk to).
+            const match = item.volid?.match(/vm-(\d+)-(disk|cloudinit)/);
             if (!match) continue;
             const vmid = parseInt(match[1]);
             if (!destroyedVmIdSet.has(vmid)) continue;
-            found.push({ node, storage: s.storage, volid: item.volid });
+            found.push({ node, storage: s.storage, volid: item.volid, kind: match[2] });
           }
         }
         return found;
@@ -3109,7 +3117,7 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
           try {
             await proxmoxAPI('DELETE',
               `/api2/json/nodes/${d.node}/storage/${d.storage}/content/${encodeURIComponent(d.volid)}`);
-            console.log(`[Group Teardown] Swept orphaned disk: ${d.volid} on ${d.node}/${d.storage}`);
+            console.log(`[Group Teardown] Swept orphaned ${d.kind || 'disk'}: ${d.volid} on ${d.node}/${d.storage}`);
             orphanDisksSwept++;
             deleted = true;
           } catch (e) {
