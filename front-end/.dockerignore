@@ -1,8 +1,12 @@
 node_modules
 .env
 .git
-data/
+# Anchor with leading slash so these only exclude the top-level dirs.
+# Without the slash, Docker matches any nested dir of the same name and
+# strips out plugin data/migrations dirs we actually need (e.g.
+# modules/crucible/plugins/ciab/data/frameworks).
+/data/
+/Info/
+/N8N Workflow/
+/migrations/
 *.md
-Info/
-N8N Workflow/
-migrations/
