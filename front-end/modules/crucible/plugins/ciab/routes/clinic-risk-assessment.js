@@ -513,8 +513,146 @@ function renderFindingsTable(doc, findings) {
   });
 }
 
+/**
+ * Pull the CIS RAM workbook bundle for this profile, in the same shape the
+ * frontend uses (controls grouped, rows decorated with is_reasonable). Reuses
+ * the same helpers as routes/cis-ram.js so the PDF is consistent with the UI.
+ */
+async function loadCisRamForPdf(profileId) {
+  const cisRamRoute = require('./cis-ram');
+  const a = await pool.query(`SELECT * FROM cis_ram_assessments WHERE profile_id = $1`, [profileId]);
+  if (a.rowCount === 0) return null;
+  const rowsQ = await pool.query(
+    `SELECT * FROM cis_ram_safeguards WHERE profile_id = $1 ORDER BY safeguard_num`,
+    [profileId]
+  );
+  if (rowsQ.rowCount === 0) return null;
+  const acceptable = a.rows[0].acceptable_risk_score;
+  const decorated = rowsQ.rows.map(r => cisRamRoute.decorateRow(r, acceptable));
+  return {
+    assessment: a.rows[0],
+    controls: cisRamRoute.groupByControl(decorated),
+    rows: decorated,
+  };
+}
+
+function renderCisRamRegister(doc, cisRam) {
+  if (!cisRam || !cisRam.controls || cisRam.controls.length === 0) return;
+  const ig1 = frameworks.getCisIg1();
+  const safeguardName = Object.fromEntries((ig1.safeguards || []).map(sg => [sg.num, sg.name]));
+
+  doc.addPage();
+  pdfh.renderSectionHeader(doc, 'CIS RAM v2.1 Methodology');
+  doc.fontSize(9).font('Helvetica').fillColor('#1e293b').text(
+    `This assessment uses CIS RAM v2.1 — the published Risk Assessment Method aligned with CIS Controls IG1. ` +
+    `Each safeguard is scored on Mission Impact × Obligations Impact × Likelihood (1–3 scale each). ` +
+    `Inherent risk is the product of likelihood and the higher of the two impact dimensions. ` +
+    `Treatments are "reasonable" when their residual risk score is at or below the engagement's ` +
+    `acceptable risk threshold (currently ${cisRam.assessment.acceptable_risk_score}).`,
+    { width: doc.page.width - doc.page.margins.left - doc.page.margins.right, lineGap: 2 }
+  );
+  doc.moveDown(0.6);
+
+  pdfh.renderSectionHeader(doc, 'CIS RAM Risk Register');
+  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const leftMargin = doc.page.margins.left;
+
+  for (const ctrl of cisRam.controls) {
+    pdfh.ensureSpace(doc, 26);
+    // Control band
+    doc.rect(leftMargin, doc.y, pageWidth, 16).fill('#e2e8f0');
+    doc.fontSize(9).font('Helvetica-Bold').fillColor('#1e293b')
+      .text(`Control ${ctrl.control} — ${ctrl.control_name}    (${ctrl.scored}/${ctrl.total} scored)`,
+            leftMargin + 8, doc.y - 13, { width: pageWidth - 16 });
+    doc.y += 4;
+
+    // Header row
+    pdfh.ensureSpace(doc, 14);
+    const hY = doc.y;
+    doc.fontSize(7).font('Helvetica-Bold').fillColor('#64748b')
+      .text('#',          leftMargin + 8,        hY, { width: 28 })
+      .text('Safeguard',  leftMargin + 38,       hY, { width: pageWidth - 270 })
+      .text('Asset',      leftMargin + pageWidth - 230, hY, { width: 70 })
+      .text('Inh',        leftMargin + pageWidth - 158, hY, { width: 22 })
+      .text('Res',        leftMargin + pageWidth - 132, hY, { width: 22 })
+      .text('Reas',       leftMargin + pageWidth - 106, hY, { width: 26 })
+      .text('Yr',         leftMargin + pageWidth - 76,  hY, { width: 22 })
+      .text('Status',     leftMargin + pageWidth - 50,  hY, { width: 50 });
+    doc.y = hY + 10;
+
+    // Rows
+    ctrl.rows.forEach((r, idx) => {
+      pdfh.ensureSpace(doc, 13);
+      const rowY = doc.y;
+      if (idx % 2 === 1) doc.rect(leftMargin, rowY, pageWidth, 12).fill('#f8fafc');
+      doc.fontSize(7).font('Helvetica').fillColor('#1e293b')
+        .text(r.safeguard_num,                     leftMargin + 8,        rowY + 1, { width: 28 })
+        .text(safeguardName[r.safeguard_num] || '',leftMargin + 38,       rowY + 1, { width: pageWidth - 270, ellipsis: true, lineBreak: false })
+        .text(r.asset_class || '—',                leftMargin + pageWidth - 230, rowY + 1, { width: 70, ellipsis: true, lineBreak: false })
+        .text(r.inherent_risk_score ?? '—',        leftMargin + pageWidth - 158, rowY + 1, { width: 22 })
+        .text(r.residual_risk_score ?? '—',        leftMargin + pageWidth - 132, rowY + 1, { width: 22 })
+        .text(r.is_reasonable === true ? '✓' : (r.is_reasonable === false ? '✗' : '—'),
+                                                    leftMargin + pageWidth - 106, rowY + 1, { width: 26 })
+        .text(r.implementation_year || '—',        leftMargin + pageWidth - 76,  rowY + 1, { width: 22 })
+        .text(r.status || 'open',                  leftMargin + pageWidth - 50,  rowY + 1, { width: 50 });
+      doc.y = rowY + 12;
+    });
+    doc.moveDown(0.4);
+  }
+}
+
+function renderCisRamTreatmentPlan(doc, cisRam) {
+  if (!cisRam || !cisRam.rows) return;
+  const acceptable = cisRam.assessment.acceptable_risk_score;
+  // Treatment plan = rows that aren't yet "reasonable" (residual > acceptable)
+  // OR rows with inherent above acceptable that haven't been treated, excluding accepted.
+  const items = cisRam.rows.filter(r => {
+    if (r.status === 'accepted' || r.status === 'not_applicable') return false;
+    if (r.inherent_risk_score == null) return false;
+    if (r.inherent_risk_score <= acceptable) return false;
+    return true;
+  }).sort((a, b) => (b.inherent_risk_score || 0) - (a.inherent_risk_score || 0));
+
+  if (items.length === 0) {
+    doc.addPage();
+    pdfh.renderSectionHeader(doc, 'CIS RAM Treatment Plan');
+    doc.fontSize(10).font('Helvetica').fillColor('#64748b')
+      .text('No items above the acceptable risk threshold — no treatment plan required.');
+    return;
+  }
+
+  const ig1 = frameworks.getCisIg1();
+  const safeguardName = Object.fromEntries((ig1.safeguards || []).map(sg => [sg.num, sg.name]));
+
+  doc.addPage();
+  pdfh.renderSectionHeader(doc, 'CIS RAM Treatment Plan');
+  doc.fontSize(9).font('Helvetica').fillColor('#1e293b').text(
+    `${items.length} item${items.length === 1 ? '' : 's'} require attention — sorted by descending inherent risk. ` +
+    `"Reasonable" treatments bring residual risk to ${acceptable} or below.`
+  );
+  doc.moveDown(0.5);
+
+  for (const r of items) {
+    pdfh.ensureSpace(doc, 60);
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1e3a5f')
+      .text(`${r.safeguard_num} — ${safeguardName[r.safeguard_num] || ''}`);
+    doc.fontSize(8).font('Helvetica').fillColor('#64748b')
+      .text(`Asset: ${r.asset_class || '—'}  |  Inherent ${r.inherent_risk_score ?? '—'}  →  Residual ${r.residual_risk_score ?? '—'}  ` +
+            `|  ${r.is_reasonable === true ? 'Reasonable ✓' : (r.is_reasonable === false ? 'NOT reasonable ✗' : 'No treatment scored')}` +
+            (r.implementation_year ? `  |  Target ${r.implementation_year}` : '') +
+            (r.treatment_cost ? `  |  Cost ${r.treatment_cost}` : ''));
+    doc.moveDown(0.2);
+    if (r.treatment_title || r.treatment_description) {
+      pdfh.renderTextarea(doc, 'Treatment',
+        (r.treatment_title ? r.treatment_title + '\n\n' : '') + (r.treatment_description || ''));
+    }
+    if (r.notes) pdfh.renderTextarea(doc, 'Notes', r.notes);
+    doc.moveDown(0.3);
+  }
+}
+
 function renderClinicRiskAssessmentPdf(doc, data) {
-  const { profile, intake, report, findings, cis_coverage, csf_scores, charts = {} } = data;
+  const { profile, intake, report, findings, cis_coverage, csf_scores, charts = {}, cisRam = null } = data;
   const coverName = profile.company_name || intake?.cover_name || 'Unknown Organization';
   const watermark = (intake?.source === 'ai_simulated' || profile.profile_source !== 'real_intake')
     ? 'TRAINING SAMPLE — NOT FOR CLIENT USE'
@@ -575,6 +713,10 @@ function renderClinicRiskAssessmentPdf(doc, data) {
   // --- Findings table ---
   pdfh.renderSectionHeader(doc, 'Findings — Sorted by Inherent Risk');
   renderFindingsTable(doc, findings);
+
+  // --- CIS RAM Register + Treatment Plan (Phase 2) ---
+  renderCisRamRegister(doc, cisRam);
+  renderCisRamTreatmentPlan(doc, cisRam);
 
   // --- CSF Maturity Radar page ---
   doc.addPage();
@@ -669,6 +811,13 @@ router.post('/:profileId/export', express.json({ limit: MAX_PAYLOAD_BYTES }), as
     const cis_coverage = frameworks.ig1Coverage(ig1Section);
     const csf_scores = { ...frameworks.aggregateIg1ToCsf(ig1Section), ...(report.csf_scores || {}) };
 
+    // CIS RAM bundle for the deliverable (Phase 2). Best-effort: if the
+    // tables/rows aren't there yet, the renderer skips the CIS RAM section.
+    const cisRam = await loadCisRamForPdf(profileId).catch(err => {
+      console.warn('[CRA export] CIS RAM not available:', err.message);
+      return null;
+    });
+
     const charts = req.body?.charts || {};
     // Cache chart PNGs on the report so a re-export without client charts still has them.
     if (charts && Object.keys(charts).length > 0) {
@@ -690,7 +839,7 @@ router.post('/:profileId/export', express.json({ limit: MAX_PAYLOAD_BYTES }), as
     doc.pipe(res);
     renderClinicRiskAssessmentPdf(doc, {
       profile, intake, report, findings: findingsQ.rows,
-      cis_coverage, csf_scores, charts,
+      cis_coverage, csf_scores, charts, cisRam,
     });
     doc.end();
   } catch (err) {

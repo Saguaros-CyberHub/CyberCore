@@ -13,6 +13,9 @@
     bundle: null,         // /api/clinic-risk-assessment/:profileId response
     charts: {},           // ECharts instances keyed by container id
     activeTab: 'overview',
+    cisram: null,         // /api/cis-ram/:profileId response
+    cisramExpanded: null, // currently expanded safeguard_num (only one at a time)
+    cisramSaveTimers: {}, // debounced field-save timers per safeguard_num
   };
 
   const CSF_FN_ORDER = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
@@ -191,6 +194,16 @@
       document.getElementById('craSubtitle').textContent = err.message;
       return;
     }
+    // Load CIS RAM bundle in parallel; tolerate failure (e.g. migration not applied).
+    try {
+      const ramRes = await fetch('/api/cis-ram/' + encodeURIComponent(state.profileId), {
+        credentials: 'same-origin',
+      });
+      if (ramRes.ok) state.cisram = await ramRes.json();
+      else state.cisram = null;
+    } catch (_) {
+      state.cisram = null;
+    }
     renderHeader();
     renderOverviewStats();
     renderHeatmap();
@@ -200,6 +213,7 @@
     renderFindingsTable();
     renderCsfSliders();
     renderReportFields();
+    renderCisRam();
   }
 
   // === Header ===
@@ -224,16 +238,27 @@
   function renderOverviewStats() {
     const b = state.bundle;
     const findings = b.findings || [];
-    const avgRisk = findings.length === 0 ? 0
-      : (findings.reduce((s, f) => s + (f.inherent_risk || 0), 0) / findings.length).toFixed(1);
+    const ramRows = collectScoredRamRows();
+    // Combined avg risk across CIS RAM rows (1–9 native) and free-form findings
+    // (1–5×1–5 projected to 1–9 band scale).
+    const ramRisks = ramRows.map(r => (r.likelihood || 0) * Math.max(r.mission_impact || 0, r.obligations_impact || 0));
+    const findingRisks = findings.map(f => bandTo3(f.likelihood) * bandTo3(f.impact));
+    const allRisks = [...ramRisks, ...findingRisks].filter(v => v > 0);
+    const avgRisk = allRisks.length === 0 ? '0.0'
+      : (allRisks.reduce((a, c) => a + c, 0) / allRisks.length).toFixed(1);
+    const totalRows = ramRows.length + findings.length;
+
     const csfNonZero = CSF_FN_ORDER.map(k => Number(b.csf_scores[k]) || 0).filter(v => v > 0);
     const csfAvg = csfNonZero.length === 0 ? '0.0'
       : (csfNonZero.reduce((a, c) => a + c, 0) / csfNonZero.length).toFixed(1);
+
+    const ramTotals = state.cisram?.totals || { scored: 0, total: 56, reasonable: 0 };
+
     const cards = [
-      { label: 'Findings',          value: findings.length, hint: 'in register' },
-      { label: 'Avg Inherent Risk', value: avgRisk,         hint: 'L × I, scale 1–25' },
+      { label: 'CIS RAM Scored',    value: `${ramTotals.scored} / ${ramTotals.total}`, hint: `${ramTotals.reasonable} reasonable` },
+      { label: 'Avg Inherent Risk', value: avgRisk, hint: `${totalRows} entries, scale 1–9` },
       { label: 'IG1 Coverage',      value: b.cis_coverage.score + '%', hint: `${b.cis_coverage.yes} yes · ${b.cis_coverage.partial} partial` },
-      { label: 'CSF Maturity',      value: csfAvg,          hint: `avg of ${csfNonZero.length} scored function${csfNonZero.length === 1 ? '' : 's'} (of 6), 0–5` },
+      { label: 'CSF Maturity',      value: csfAvg,  hint: `avg of ${csfNonZero.length} scored function${csfNonZero.length === 1 ? '' : 's'} (of 6), 0–5` },
     ];
     const host = document.getElementById('overviewStats');
     host.innerHTML = cards.map(c => `
@@ -261,44 +286,76 @@
     state.charts = {};
   }
 
-  // === Heat map ===
+  // Map a 1–5 likelihood/impact to a 1–3 band so free-form findings can render
+  // on the CIS RAM tri-factor heat map alongside CIS RAM rows.
+  // 1→1, 2→1, 3→2, 4→2, 5→3 — keeps "5" rare and central-skews 3.
+  function bandTo3(v) {
+    if (!v) return 0;
+    return Math.min(3, Math.ceil(v / 2));
+  }
+
+  // === Heat map (CIS RAM tri-factor: 3×3) ===
   function renderHeatmap() {
     const c = getOrInitChart('chartHeatmap');
     if (!c) return;
     const findings = state.bundle.findings || [];
-    // 5 likelihood × 5 impact; counts.
+    const ramRows = collectScoredRamRows();
+
     const grid = {};
-    for (const f of findings) {
-      if (!f.likelihood || !f.impact) continue;
-      const k = `${f.likelihood},${f.impact}`;
+    const bump = (l, i) => {
+      if (!l || !i) return;
+      const k = `${l},${i}`;
       grid[k] = (grid[k] || 0) + 1;
+    };
+    // CIS RAM rows: Likelihood × max(Mission, Obligations) — already 1–3.
+    for (const r of ramRows) {
+      const i = Math.max(r.mission_impact || 0, r.obligations_impact || 0);
+      bump(r.likelihood, i);
     }
+    // Free-form findings: project from 1–5 onto 1–3 bands.
+    for (const f of findings) {
+      bump(bandTo3(f.likelihood), bandTo3(f.impact));
+    }
+
     const data = [];
-    for (let l = 1; l <= 5; l++) {
-      for (let i = 1; i <= 5; i++) {
+    for (let l = 1; l <= 3; l++) {
+      for (let i = 1; i <= 3; i++) {
         data.push([i - 1, l - 1, grid[`${l},${i}`] || 0]);
       }
     }
+    const maxCount = Math.max(1, ...data.map(d => d[2]));
     c.setOption({
-      grid: { left: 60, right: 30, top: 30, bottom: 50 },
-      xAxis: { type: 'category', data: ['1', '2', '3', '4', '5'], name: 'Impact', nameLocation: 'middle', nameGap: 28 },
-      yAxis: { type: 'category', data: ['1', '2', '3', '4', '5'], name: 'Likelihood', nameLocation: 'middle', nameGap: 38 },
+      grid: { left: 80, right: 30, top: 30, bottom: 50 },
+      xAxis: { type: 'category', data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'], name: 'max(Mission, Obligations) Impact', nameLocation: 'middle', nameGap: 28, axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'category', data: ['1 Not Expected', '2 Foreseeable', '3 Expected'], name: 'Likelihood', nameLocation: 'middle', nameGap: 70, axisLabel: { fontSize: 10 } },
       visualMap: {
-        min: 0, max: Math.max(1, ...data.map(d => d[2])),
+        min: 0, max: maxCount,
         calculable: false, orient: 'horizontal', left: 'center', bottom: 0,
         inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] },
         textStyle: { fontSize: 10 },
       },
       tooltip: {
-        formatter: (p) => `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1}: <b>${p.value[2]}</b> finding(s)`,
+        formatter: (p) => `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1} (risk score ${(p.value[1]+1)*(p.value[0]+1)}): <b>${p.value[2]}</b> finding(s)`,
       },
       series: [{
         type: 'heatmap',
         data,
-        label: { show: true, fontSize: 11, fontWeight: 600, formatter: (p) => p.value[2] || '' },
-        itemStyle: { borderColor: '#fff', borderWidth: 1 },
+        label: { show: true, fontSize: 14, fontWeight: 600, formatter: (p) => p.value[2] || '' },
+        itemStyle: { borderColor: '#fff', borderWidth: 2 },
       }],
     }, true);
+  }
+
+  // Pull all CIS RAM safeguard rows that have been scored (have inherent risk).
+  function collectScoredRamRows() {
+    if (!state.cisram?.controls) return [];
+    const out = [];
+    for (const ctrl of state.cisram.controls) {
+      for (const r of (ctrl.rows || [])) {
+        if (r.likelihood && (r.mission_impact || r.obligations_impact)) out.push(r);
+      }
+    }
+    return out;
   }
 
   // === Radar ===
@@ -508,6 +565,265 @@
         requestAnimationFrame(resizeAllCharts);
       });
     });
+  }
+
+  // === CIS RAM Workbook ===
+  function renderCisRam() {
+    const host = document.getElementById('ramControls');
+    if (!host) return;
+    if (!state.cisram) {
+      host.innerHTML = `<div class="empty-state"><div class="big-icon">📚</div>CIS RAM data unavailable. Confirm migration 005 has been applied.</div>`;
+      return;
+    }
+
+    // Header values
+    const acceptable = state.cisram.assessment.acceptable_risk_score;
+    const acceptableInput = document.getElementById('ramAcceptable');
+    if (acceptableInput && document.activeElement !== acceptableInput) {
+      acceptableInput.value = acceptable;
+      acceptableInput.onchange = () => onAcceptableChanged(acceptableInput.value);
+    }
+    const totals = state.cisram.totals;
+    document.getElementById('ramScored').textContent = `${totals.scored} / ${totals.total}`;
+    document.getElementById('ramReasonable').textContent = `${totals.reasonable} / ${totals.total}`;
+
+    host.innerHTML = (state.cisram.controls || []).map(ctrl => renderControlSection(ctrl)).join('');
+    wireControlHandlers();
+  }
+
+  function renderControlSection(ctrl) {
+    const collapsed = ctrl.scored === 0 ? 'collapsed' : '';
+    const rowsHtml = ctrl.rows.map(r => renderRamRow(r)).join('');
+    return `
+      <div class="ram-control ${collapsed}" data-control="${ctrl.control}">
+        <div class="ram-control-header" data-toggle="${ctrl.control}">
+          <h4><span class="caret">▾</span> Control ${ctrl.control} — ${escapeHtml(ctrl.control_name)}</h4>
+          <span class="ctrl-progress">${ctrl.scored} / ${ctrl.total} scored</span>
+        </div>
+        <div class="ram-rows">${rowsHtml}</div>
+      </div>`;
+  }
+
+  function scoreClass(v) {
+    if (v == null) return 'score-empty';
+    if (v <= 2) return 'score-2';
+    if (v <= 4) return 'score-4';
+    return 'score-9';
+  }
+  function scoreBadge(v) {
+    return `<span class="score-badge ${scoreClass(v)}">${v == null ? '—' : v}</span>`;
+  }
+  function reasonableMark(row) {
+    if (row.is_reasonable === true)  return '<span title="Treatment residual ≤ acceptable" style="color:#16a34a;font-weight:700;">✓</span>';
+    if (row.is_reasonable === false) return '<span title="Treatment residual > acceptable — not yet reasonable" style="color:#dc2626;font-weight:700;">✗</span>';
+    return '<span style="color:var(--text-muted, #94a3b8);">—</span>';
+  }
+
+  function renderRamRow(r) {
+    const cat = state.cisram.safeguard_catalog[r.safeguard_num] || { name: r.safeguard_num };
+    const expanded = state.cisramExpanded === r.safeguard_num ? 'expanded' : '';
+    return `
+      <div class="ram-row ${expanded}" data-num="${escapeHtml(r.safeguard_num)}">
+        <div class="num">${escapeHtml(r.safeguard_num)}</div>
+        <div>
+          <div class="name">${escapeHtml(cat.name)}</div>
+          <div class="asset">${r.asset_class ? 'Asset: ' + escapeHtml(r.asset_class) : '<em style="color:var(--text-muted)">no asset class set</em>'}</div>
+        </div>
+        <div class="asset" style="text-align:center">${escapeHtml(r.status || 'open')}</div>
+        <div class="score" title="Inherent risk">${scoreBadge(r.inherent_risk_score)}</div>
+        <div class="score" title="Residual risk">${scoreBadge(r.residual_risk_score)}</div>
+        <div class="reasonable">${reasonableMark(r)}</div>
+      </div>
+      ${expanded ? renderDrawer(r, cat) : ''}`;
+  }
+
+  function selOpt(val, current) {
+    return `<option value="${val}" ${String(val) === String(current ?? '') ? 'selected' : ''}>${val}</option>`;
+  }
+  function impactSelect(field, current) {
+    return `<select data-field="${field}">
+      <option value="" ${current == null ? 'selected' : ''}>—</option>
+      ${selOpt(1, current)}${selOpt(2, current)}${selOpt(3, current)}
+    </select>`;
+  }
+  function statusSelect(current) {
+    const opts = ['open', 'accepted', 'mitigated', 'transferred', 'not_applicable'];
+    return `<select data-field="status">
+      ${opts.map(o => `<option value="${o}" ${o === current ? 'selected' : ''}>${o.replace('_', ' ')}</option>`).join('')}
+    </select>`;
+  }
+
+  function renderDrawer(r, cat) {
+    return `
+      <div class="ram-drawer" data-drawer="${escapeHtml(r.safeguard_num)}">
+        <div class="group-title">Safeguard ${escapeHtml(r.safeguard_num)} — ${escapeHtml(cat.name)}</div>
+        <div class="grid">
+          <div class="field">
+            <label>Asset class</label>
+            <input type="text" data-field="asset_class" value="${escapeHtml(r.asset_class || '')}" placeholder="Workstations, Servers, Data, …">
+          </div>
+          <div class="field">
+            <label>Status</label>
+            ${statusSelect(r.status)}
+          </div>
+        </div>
+
+        <div class="group-title">Inherent Risk (1=Acceptable, 2=Unacceptable, 3=Catastrophic)</div>
+        <div class="grid three">
+          <div class="field"><label>Mission impact</label>${impactSelect('mission_impact', r.mission_impact)}</div>
+          <div class="field"><label>Obligations impact</label>${impactSelect('obligations_impact', r.obligations_impact)}</div>
+          <div class="field"><label>Likelihood</label>${impactSelect('likelihood', r.likelihood)}</div>
+        </div>
+
+        <div class="group-title">Treatment Plan</div>
+        <div class="grid">
+          <div class="field"><label>Treatment safeguard #</label>
+            <input type="text" data-field="treatment_safeguard" value="${escapeHtml(r.treatment_safeguard || r.safeguard_num)}">
+          </div>
+          <div class="field"><label>Treatment cost</label>
+            <input type="text" data-field="treatment_cost" value="${escapeHtml(r.treatment_cost || '')}" placeholder="Low / Medium / $5k / …">
+          </div>
+        </div>
+        <div class="field" style="margin-top:8px"><label>Treatment title</label>
+          <input type="text" data-field="treatment_title" value="${escapeHtml(r.treatment_title || '')}" placeholder="Short label for the proposed safeguard">
+        </div>
+        <div class="field" style="margin-top:8px"><label>Treatment description</label>
+          <textarea data-field="treatment_description" rows="3" placeholder="What the client should do.">${escapeHtml(r.treatment_description || '')}</textarea>
+        </div>
+
+        <div class="group-title">Residual Risk (after treatment)</div>
+        <div class="grid three">
+          <div class="field"><label>Mission impact</label>${impactSelect('treatment_mission_impact', r.treatment_mission_impact)}</div>
+          <div class="field"><label>Obligations impact</label>${impactSelect('treatment_obligations_impact', r.treatment_obligations_impact)}</div>
+          <div class="field"><label>Likelihood</label>${impactSelect('treatment_likelihood', r.treatment_likelihood)}</div>
+        </div>
+
+        <div class="grid" style="margin-top:12px">
+          <div class="field"><label>Implementation year</label>
+            <input type="number" data-field="implementation_year" min="2024" max="2099" value="${r.implementation_year || ''}">
+          </div>
+          <div class="field"><label>Last completed</label>
+            <input type="date" data-field="last_completed_date" value="${r.last_completed_date ? String(r.last_completed_date).slice(0,10) : ''}">
+          </div>
+        </div>
+        <div class="field" style="margin-top:8px"><label>Notes</label>
+          <textarea data-field="notes" rows="2">${escapeHtml(r.notes || '')}</textarea>
+        </div>
+      </div>`;
+  }
+
+  function wireControlHandlers() {
+    // Section collapse toggles.
+    document.querySelectorAll('.ram-control-header[data-toggle]').forEach(h => {
+      h.addEventListener('click', () => {
+        h.parentElement.classList.toggle('collapsed');
+      });
+    });
+    // Row click → expand drawer (only one at a time).
+    document.querySelectorAll('.ram-row[data-num]').forEach(row => {
+      row.addEventListener('click', (e) => {
+        // Ignore clicks bubbling from drawer inputs.
+        if (e.target.closest('.ram-drawer')) return;
+        const num = row.dataset.num;
+        state.cisramExpanded = state.cisramExpanded === num ? null : num;
+        renderCisRam(); // simple rerender — drawer count is small
+      });
+    });
+    // Drawer field changes → debounced PUT.
+    document.querySelectorAll('.ram-drawer [data-field]').forEach(el => {
+      el.addEventListener('input', () => {
+        const drawer = el.closest('.ram-drawer');
+        const num = drawer.dataset.drawer;
+        scheduleRamSave(num, el.dataset.field, el.value);
+      });
+    });
+  }
+
+  function scheduleRamSave(safeguardNum, field, value) {
+    if (state.cisramSaveTimers[safeguardNum]) clearTimeout(state.cisramSaveTimers[safeguardNum].timer);
+    if (!state.cisramSaveTimers[safeguardNum]) state.cisramSaveTimers[safeguardNum] = { changes: {} };
+    state.cisramSaveTimers[safeguardNum].changes[field] = value;
+    state.cisramSaveTimers[safeguardNum].timer = setTimeout(() => {
+      const changes = state.cisramSaveTimers[safeguardNum].changes;
+      state.cisramSaveTimers[safeguardNum].changes = {};
+      saveRamRow(safeguardNum, changes);
+    }, 600);
+  }
+
+  async function saveRamRow(safeguardNum, changes) {
+    try {
+      const res = await fetch(`/api/cis-ram/${encodeURIComponent(state.profileId)}/safeguards/${encodeURIComponent(safeguardNum)}`, {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(changes),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.error || ('HTTP ' + res.status));
+      }
+      const body = await res.json();
+      // Patch local state and recompute totals/heatmap without a full reload.
+      patchLocalRamRow(body.row);
+      recomputeRamTotals();
+      // Re-render only the row + the visible totals + the heatmap (cheap).
+      renderCisRam();
+      if (state.activeTab === 'overview') {
+        renderOverviewStats();
+        renderHeatmap();
+      }
+      toast(`Saved ${safeguardNum}`);
+    } catch (err) {
+      toast(`Save ${safeguardNum} failed: ${err.message}`, 4000);
+    }
+  }
+
+  function patchLocalRamRow(updated) {
+    if (!state.cisram) return;
+    for (const ctrl of state.cisram.controls) {
+      const idx = ctrl.rows.findIndex(r => r.safeguard_num === updated.safeguard_num);
+      if (idx >= 0) ctrl.rows[idx] = updated;
+    }
+  }
+
+  function recomputeRamTotals() {
+    if (!state.cisram) return;
+    const all = state.cisram.controls.flatMap(c => c.rows);
+    const acceptable = state.cisram.assessment.acceptable_risk_score;
+    const scored = all.filter(r => r.inherent_risk_score != null).length;
+    const reasonable = all.filter(r => r.is_reasonable === true).length;
+    state.cisram.totals = {
+      total: all.length, scored, reasonable,
+      above_acceptable: all.filter(r => r.inherent_risk_score != null && r.inherent_risk_score > acceptable).length,
+    };
+    // Update per-control scored count too.
+    for (const c of state.cisram.controls) c.scored = c.rows.filter(r => r.inherent_risk_score != null).length;
+  }
+
+  async function onAcceptableChanged(rawValue) {
+    const n = parseInt(rawValue, 10);
+    if (!Number.isFinite(n) || n < 1 || n > 9) {
+      toast('Acceptable must be 1–9', 3000);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/cis-ram/${encodeURIComponent(state.profileId)}`, {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ acceptable_risk_score: n }),
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      // Reload bundle so is_reasonable flags get recomputed.
+      const bundle = await (await fetch(`/api/cis-ram/${encodeURIComponent(state.profileId)}`, { credentials: 'same-origin' })).json();
+      state.cisram = bundle;
+      renderCisRam();
+      if (state.activeTab === 'overview') {
+        renderOverviewStats();
+        renderHeatmap();
+      }
+      toast('Acceptable risk updated');
+    } catch (err) {
+      toast('Update failed: ' + err.message, 4000);
+    }
   }
 
   // === CSF maturity sliders ===

@@ -29,6 +29,7 @@ const intakeFormRoutes = require('./intake-form');
 const realClientIntakeRoutes = require('./real-client-intake');
 const intakesRoutes = require('./intakes');
 const clinicRiskAssessmentRoutes = require('./clinic-risk-assessment');
+const cisRamRoutes = require('./cis-ram');
 
 // Mount with auth + schedule checking
 router.use('/api/profiles', authenticateToken, checkSchedule, profileRoutes);
@@ -42,5 +43,7 @@ router.use('/api/real-client/intake', authenticateToken, checkSchedule, realClie
 router.use('/api/intakes', checkSchedule, intakesRoutes);
 // Clinic Risk Assessment API (Phase 1). Auth applied internally.
 router.use('/api/clinic-risk-assessment', checkSchedule, clinicRiskAssessmentRoutes);
+// CIS RAM Workbook API (Phase 2). Auth applied internally.
+router.use('/api/cis-ram', checkSchedule, cisRamRoutes);
 
 module.exports = router;

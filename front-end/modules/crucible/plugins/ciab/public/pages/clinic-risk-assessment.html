@@ -78,6 +78,42 @@
     .csf-slider-grid .name { font-weight: 600; }
     .csf-slider-grid .name .auto-pill { display: inline-block; margin-left: 6px; font-size: 0.7rem; font-weight: 400; padding: 2px 6px; border-radius: 10px; background: var(--bg-table-head, #f1f5f9); color: var(--text-muted); }
 
+    /* CIS RAM workbook */
+    .ram-control { background: var(--bg-card, white); border: 1px solid var(--border-color, #e2e8f0); border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+    .ram-control-header { padding: 12px 16px; display:flex; justify-content:space-between; align-items:center; cursor:pointer; user-select:none; background: var(--bg-table-head, #f8fafc); transition: background 0.1s; }
+    .ram-control-header:hover { background: var(--bg-hover, #f1f5f9); }
+    .ram-control-header h4 { margin: 0; font-size: 0.95rem; color: var(--text-primary); display:flex; align-items:center; gap:8px; }
+    .ram-control-header .ctrl-progress { font-size: 0.8rem; color: var(--text-muted, #64748b); }
+    .ram-control-header .caret { font-size: 0.7rem; color: var(--text-muted, #64748b); transition: transform 0.15s; }
+    .ram-control.collapsed .caret { transform: rotate(-90deg); }
+    .ram-control.collapsed .ram-rows { display: none; }
+    .ram-rows { border-top: 1px solid var(--border-color, #e2e8f0); }
+    .ram-row { display:grid; grid-template-columns: 60px 1fr 100px 60px 60px 70px; gap: 10px; padding: 10px 16px; align-items:center; border-bottom: 1px solid var(--border-color, #e2e8f0); cursor:pointer; transition: background 0.1s; }
+    .ram-row:last-child { border-bottom: 0; }
+    .ram-row:hover { background: var(--bg-hover, #f8fafc); }
+    .ram-row.expanded { background: var(--bg-hover, #f8fafc); }
+    .ram-row .num { font-weight: 600; color: var(--primary, #1e40af); font-size: 0.85rem; }
+    .ram-row .name { font-size: 0.875rem; color: var(--text-primary); }
+    .ram-row .asset { font-size: 0.8rem; color: var(--text-muted, #64748b); }
+    .ram-row .score { text-align:center; font-weight: 600; font-size: 0.85rem; }
+    .ram-row .reasonable { text-align:center; font-size:0.85rem; }
+    .ram-row .score-badge { display:inline-block; min-width:24px; padding:2px 6px; border-radius: 4px; color: white; font-weight:600; }
+    .score-1, .score-2 { background: #16a34a; }
+    .score-3, .score-4 { background: #d97706; }
+    .score-6, .score-9 { background: #dc2626; }
+    .score-empty { background: var(--gray-200, #e2e8f0); color: var(--text-muted, #64748b); }
+    .ram-drawer { padding: 16px 16px 20px 16px; background: var(--bg-card, white); border-top: 1px dashed var(--border-color, #e2e8f0); display:none; }
+    .ram-row.expanded + .ram-drawer { display: block; }
+    .ram-drawer .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+    .ram-drawer .grid.three { grid-template-columns: repeat(3, 1fr); }
+    @media (max-width: 800px) { .ram-drawer .grid, .ram-drawer .grid.three { grid-template-columns: 1fr; } }
+    .ram-drawer .field { margin-bottom: 0; }
+    .ram-drawer .field label { display:block; font-size: 0.75rem; color: var(--text-muted, #64748b); text-transform:uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+    .ram-drawer .field input, .ram-drawer .field select, .ram-drawer .field textarea { width: 100%; padding: 6px 8px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 5px; font: inherit; background: var(--bg-input, white); color: var(--text-primary); font-size: 0.875rem; }
+    .ram-drawer .field textarea { min-height: 50px; resize: vertical; }
+    .ram-drawer .group-title { font-size: 0.8rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .ram-drawer .group-title:first-child { margin-top: 0; }
+
     .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted, #64748b); }
     .empty-state .big-icon { font-size: 2.5rem; margin-bottom: 8px; }
     .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 10px 18px; border-radius: 6px; font-size: 0.875rem; z-index: 300; opacity: 0; transition: opacity 0.2s; }
@@ -116,6 +152,7 @@
           <div class="cra-tabs" role="tablist">
             <button class="cra-tab active" data-tab="overview"  role="tab">Overview</button>
             <button class="cra-tab" data-tab="register"  role="tab">Risk Register</button>
+            <button class="cra-tab" data-tab="cisram"    role="tab">CIS RAM Workbook</button>
             <button class="cra-tab" data-tab="maturity"  role="tab">Maturity &amp; Controls</button>
             <button class="cra-tab" data-tab="report"    role="tab">Report</button>
           </div>
@@ -167,6 +204,35 @@
                 <tbody id="findingsTbody"></tbody>
               </table>
             </div>
+          </div>
+
+          <!-- CIS RAM WORKBOOK -->
+          <div class="cra-pane" id="pane-cisram">
+            <div class="cra-card" style="margin-bottom:16px">
+              <div style="display:grid; grid-template-columns: 1fr auto auto auto; gap:18px; align-items:center;">
+                <div>
+                  <h3 style="margin:0 0 4px 0">CIS RAM v2.1 IG1 Workbook</h3>
+                  <p class="sub" style="color:var(--text-muted); font-size:0.85rem; margin:0;">
+                    Score each IG1 safeguard, define a treatment plan, and check if it's reasonable under your acceptable risk threshold.
+                  </p>
+                </div>
+                <div style="display:flex; flex-direction:column; align-items:flex-end;">
+                  <label style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.04em;">Acceptable Risk Score</label>
+                  <input id="ramAcceptable" type="number" min="1" max="9" step="1"
+                         style="width:60px; padding:6px 8px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; text-align:center; background:var(--bg-input, white); color:var(--text-primary);" />
+                </div>
+                <div class="cra-stat-card" style="border-left-color:#3b82f6; padding:10px 14px; margin:0;">
+                  <div class="label">Scored</div>
+                  <div class="value" id="ramScored" style="font-size:1.2rem">0 / 56</div>
+                </div>
+                <div class="cra-stat-card" style="border-left-color:#16a34a; padding:10px 14px; margin:0;">
+                  <div class="label">Reasonable</div>
+                  <div class="value" id="ramReasonable" style="font-size:1.2rem">0 / 56</div>
+                </div>
+              </div>
+            </div>
+
+            <div id="ramControls"><!-- 17 control sections rendered here --></div>
           </div>
 
           <!-- MATURITY -->

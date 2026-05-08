@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS crucible_challenge (
   -- Owning module / logical group (e.g. 'crucible', 'cyberlabs', 'forge')
   module_key    TEXT DEFAULT 'crucible',
 
+  -- Lane gateway subnet scheme this challenge uses.
+  --   v1: VMID 1692/1691/1693 lane gateway, shared 192.18.0.0/24 lane subnet,
+  --       gateway WAN through per-module transit (100.102.0.0/16). Default for
+  --       all pre-existing challenges.
+  --   v2: VMID 1694 subnet-agnostic lane gateway, unique
+  --       10.<vxlan_high>.<vxlan_low>.0/24 per lane, gateway WAN directly on
+  --       lab bridge (100.100.60.<derived>/24). Required for Tailscale BYOAB.
+  subnet_scheme VARCHAR(8) NOT NULL DEFAULT 'v1'
+                 CHECK (subnet_scheme IN ('v1', 'v2')),
+
   -- JSONB spec that defines the actual infra and scoring model.
   -- Suggested structure:
   -- {
@@ -134,6 +144,9 @@ CREATE INDEX IF NOT EXISTS crucible_challenge_type_idx
 
 CREATE INDEX IF NOT EXISTS crucible_challenge_status_idx
   ON crucible_challenge (status);
+
+CREATE INDEX IF NOT EXISTS crucible_challenge_subnet_scheme_idx
+  ON crucible_challenge (subnet_scheme);
 
 -- Optional GIN index if you plan to search by tags in metadata/spec
 CREATE INDEX IF NOT EXISTS crucible_challenge_spec_gin_idx
