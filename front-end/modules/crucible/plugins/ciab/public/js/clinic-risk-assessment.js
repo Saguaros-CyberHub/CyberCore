@@ -226,15 +226,14 @@
     const findings = b.findings || [];
     const avgRisk = findings.length === 0 ? 0
       : (findings.reduce((s, f) => s + (f.inherent_risk || 0), 0) / findings.length).toFixed(1);
-    const csfAvg = (() => {
-      const vals = CSF_FN_ORDER.map(k => Number(b.csf_scores[k]) || 0).filter(v => v > 0);
-      return vals.length === 0 ? 0 : (vals.reduce((a, c) => a + c, 0) / vals.length).toFixed(1);
-    })();
+    const csfNonZero = CSF_FN_ORDER.map(k => Number(b.csf_scores[k]) || 0).filter(v => v > 0);
+    const csfAvg = csfNonZero.length === 0 ? '0.0'
+      : (csfNonZero.reduce((a, c) => a + c, 0) / csfNonZero.length).toFixed(1);
     const cards = [
       { label: 'Findings',          value: findings.length, hint: 'in register' },
       { label: 'Avg Inherent Risk', value: avgRisk,         hint: 'L × I, scale 1–25' },
       { label: 'IG1 Coverage',      value: b.cis_coverage.score + '%', hint: `${b.cis_coverage.yes} yes · ${b.cis_coverage.partial} partial` },
-      { label: 'CSF Maturity',      value: csfAvg,          hint: 'avg of 6 functions, 0–5' },
+      { label: 'CSF Maturity',      value: csfAvg,          hint: `avg of ${csfNonZero.length} scored function${csfNonZero.length === 1 ? '' : 's'} (of 6), 0–5` },
     ];
     const host = document.getElementById('overviewStats');
     host.innerHTML = cards.map(c => `

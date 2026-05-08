@@ -141,6 +141,10 @@ function deriveVmList(normalized) {
   let wsIdx = 1;
 
   // Workstations + laptops: map proportional OS counts to VMs.
+  // Non-Windows endpoint families render as phantoms by default. The synthesize
+  // endpoint applies a substitution policy (default: macOS → Linux workstation)
+  // and accepts per-row admin overrides — so phantoms here are the *raw* state
+  // before any substitution decisions.
   const endpointFamilies = ['windows_client', 'macos', 'linux', 'other'];
   for (const fam of endpointFamilies) {
     const n = normalized.endpointCounts[fam] || 0;
@@ -153,8 +157,8 @@ function deriveVmList(normalized) {
           role: base.role,
           os_family: fam,
           os_version: base.os_version,
-          reason: fam === 'macos' ? 'no macOS template available — rendered as phantom asset'
-                : fam === 'linux' ? 'endpoint-class Linux treated as phantom (no standard desktop Linux template)'
+          reason: fam === 'macos' ? 'no macOS template available — phantom by default; can be substituted'
+                : fam === 'linux' ? 'endpoint-class Linux treated as phantom (no standard desktop Linux template) — can be substituted'
                 : 'unknown OS family — rendered as phantom asset'
         });
       } else {

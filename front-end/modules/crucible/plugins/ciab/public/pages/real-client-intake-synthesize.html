@@ -199,20 +199,44 @@
       catalogScripts = await sRes.json();
     }
 
+    // Admin's per-phantom substitution choices, accumulated across re-syntheses.
+    // Default: empty — server applies its DEFAULT_PHANTOM_POLICY. Each change
+    // here gets POSTed as `substitutions: { phantomName: subType }`.
+    let substitutionChoices = {};
+
     async function runSynthesize() {
       setStatus('Synthesizing…');
       const res = await fetch(`/api/real-client/intake/${encodeURIComponent(intakeId)}/synthesize-challenge`, {
         method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' }, body: '{}'
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ substitutions: substitutionChoices }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error || ('HTTP ' + res.status));
       }
       synth = await res.json();
+      // Seed local choices from server-applied defaults so the dropdowns
+      // reflect the policy decisions on first load.
+      if (synth.applied_substitutions) {
+        for (const [name, choice] of Object.entries(synth.applied_substitutions)) {
+          if (!(name in substitutionChoices)) substitutionChoices[name] = choice;
+        }
+      }
       render();
       setStatus('');
     }
+
+    async function onSubstitutionChange(phantomName, newChoice) {
+      substitutionChoices[phantomName] = newChoice;
+      try {
+        await runSynthesize();
+      } catch (err) {
+        setStatus('Substitution failed: ' + err.message);
+      }
+    }
+    // Expose for inline onchange handlers.
+    window.onSubstitutionChange = onSubstitutionChange;
 
     function render() {
       const d = synth;
@@ -226,14 +250,22 @@
         : `<div class="sub" style="margin-bottom:1rem;">No warnings — intake mapped cleanly.</div>`;
 
       const vmRowsHtml = d.vms.map((v, idx) => vmRowHtml(v, idx)).join('');
+      const subOptions = d.substitution_options || [{ key: 'phantom', label: 'Phantom (no VM)' }];
       const phantomRowsHtml = d.phantom_assets.length
-        ? d.phantom_assets.map(p => `
+        ? d.phantom_assets.map(p => {
+            const current = substitutionChoices[p.hostname] || 'phantom';
+            const dropdown = `<select class="phantom-sub" onchange="onSubstitutionChange('${esc(p.hostname)}', this.value)">
+              ${subOptions.map(o => `<option value="${esc(o.key)}" ${o.key === current ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+            </select>`;
+            return `
             <tr class="phantom-row">
               <td>${esc(p.hostname)}</td>
               <td>${esc(p.role)}</td>
               <td>${esc(p.os)} <span class="pill phantom">phantom</span></td>
-              <td colspan="3" class="sub">${esc(p.notes)}</td>
-            </tr>`).join('')
+              <td colspan="2" class="sub">${esc(p.notes)}</td>
+              <td>${dropdown}</td>
+            </tr>`;
+          }).join('')
         : '';
 
       el('content').innerHTML = `
@@ -339,6 +371,18 @@
         ? `<div class="scripts-summary"><strong>${v.default_scripts.length}</strong> assigned · <strong style="color:#166534">${counts.baseline}</strong> baseline · <strong style="color:#991b1b">${counts.vulnerable}</strong> vulnerable</div>`
         : `<div class="scripts-summary" style="color:var(--gray-500,#718096)">No scripts assigned yet.</div>`;
 
+      // Substituted VMs (originally a phantom os family) get a "from <orig>"
+      // badge + a dropdown to change the substitution type or revert to phantom.
+      const subOpts = (synth && synth.substitution_options) || [];
+      const subBadge = v.substituted_from
+        ? `<div class="template-meta sub" style="margin-top:4px;">
+             <span class="pill" style="background:#e0e7ff;color:#3730a3;">substituted from ${esc(v.substituted_from)}</span>
+             <select class="phantom-sub" style="margin-left:6px;font-size:11px;" onchange="onSubstitutionChange('${esc(v.name)}', this.value)">
+               ${subOpts.map(o => `<option value="${esc(o.key)}" ${o.key === (v.substitution_type || '') ? 'selected' : ''}>${esc(o.label)}</option>`).join('')}
+             </select>
+           </div>`
+        : '';
+
       return `
         <tr data-idx="${idx}">
           <td><input type="text" data-field="name" value="${esc(v.name)}"></td>
@@ -346,6 +390,7 @@
           <td>
             <select data-field="template_vmid">${templateOptions}</select>
             <div class="template-meta">${esc(v.os)} <span class="pill ${esc(v.template_match)}">${esc(v.template_match)}</span></div>
+            ${subBadge}
           </td>
           <td><input type="text" data-field="services" value="${esc((v.services||[]).join(', '))}" placeholder="SMB, RDP, ..."></td>
           <td>

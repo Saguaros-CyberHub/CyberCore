@@ -25,6 +25,85 @@ const IG1_LIST = require('../utils/ig1-safeguards.json');
 
 const SUPPORTED_SCHEMA_VERSIONS = ['1.0'];
 
+// === Phantom substitution policy ===
+// Phantoms (assets we can't deploy as a real VM) can be substituted with a
+// deployable VM of a different OS family. Each substitution type defines what
+// the resulting VM looks like; the synthesize endpoint applies a default
+// policy and accepts per-row admin overrides via req.body.substitutions.
+const PHANTOM_SUBSTITUTION_TYPES = {
+  'phantom':             { os_family: null, role: null, default_services: [], label: 'Phantom (no VM)' },
+  'linux-workstation':   { os_family: 'linux',          role: 'workstation', default_services: ['SSH'],         label: 'Linux workstation' },
+  'linux-server':        { os_family: 'linux',          role: 'server',      default_services: ['SSH'],         label: 'Linux server' },
+  'windows-workstation': { os_family: 'windows_client', role: 'workstation', default_services: ['SMB', 'RDP'],  label: 'Windows workstation' },
+  'windows-server':      { os_family: 'windows_server', role: 'server',      default_services: ['SMB', 'RDP'],  label: 'Windows server' },
+};
+
+// Default substitution per phantom os_family. macOS is auto-substituted to a
+// Linux workstation since there's no macOS template available; everything else
+// stays phantom unless the admin opts in.
+const DEFAULT_PHANTOM_POLICY = {
+  macos: 'linux-workstation',
+  linux: 'phantom',
+  other: 'phantom',
+};
+
+const LINUX_FRIENDLY_DECLARED = new Set(['SMB', 'SSH', 'HTTP', 'FTP']);
+const WINDOWS_FRIENDLY_DECLARED = new Set(['SMB', 'RDP']);
+
+/**
+ * Apply substitution decisions to the normalizer's phantom list. Mutates
+ * `normalized.vms` (adds substituted VMs) and `normalized.phantoms` (filters
+ * out the substituted ones). Returns { applied, warnings } where applied is
+ * a map { phantomName: subType } reflecting the final choice for each phantom.
+ */
+function applyPhantomSubstitutions(normalized, requestedSubs) {
+  const requested = requestedSubs && typeof requestedSubs === 'object' ? requestedSubs : {};
+  const applied = {};
+  const warnings = [];
+  const remaining = [];
+
+  for (const phantom of normalized.phantoms) {
+    const explicit = requested[phantom.name];
+    const defaultChoice = DEFAULT_PHANTOM_POLICY[phantom.os_family] || 'phantom';
+    const choice = (explicit && PHANTOM_SUBSTITUTION_TYPES[explicit]) ? explicit : defaultChoice;
+    applied[phantom.name] = choice;
+
+    const sub = PHANTOM_SUBSTITUTION_TYPES[choice];
+    if (choice === 'phantom' || !sub || !sub.os_family) {
+      remaining.push(phantom);
+      continue;
+    }
+
+    // Carry declared services that fit the substitution's OS.
+    const friendlySet = sub.os_family === 'linux' ? LINUX_FRIENDLY_DECLARED : WINDOWS_FRIENDLY_DECLARED;
+    const declared = normalized.services.filter(s => friendlySet.has(s.canonical));
+    const svcSet = new Set(declared.map(s => s.canonical));
+    sub.default_services.forEach(s => svcSet.add(s));
+    const services = Array.from(svcSet);
+
+    normalized.vms.push({
+      name: phantom.name,
+      role: sub.role,
+      os_family: sub.os_family,
+      os_version: null,
+      services,
+      suggested_script_services: services.map(c => {
+        const d = declared.find(s => s.canonical === c);
+        return { service: c, version: d?.version || null };
+      }),
+      substituted_from: phantom.os_family,
+      substitution_type: choice,
+    });
+    warnings.push({
+      code: 'phantom_substituted',
+      msg: `${phantom.name}: ${phantom.os_family || 'unknown'} → ${sub.label}${explicit ? ' (admin override)' : ' (default policy)'}`,
+    });
+  }
+
+  normalized.phantoms = remaining;
+  return { applied, warnings };
+}
+
 function isAdmin(req)      { return req.user?.role === 'admin'; }
 function isInstructor(req) { return req.user?.role === 'instructor'; }
 function canSeeAll(req)    { return isAdmin(req) || isInstructor(req); }
@@ -379,6 +458,11 @@ router.post('/:id/synthesize-challenge', express.json(), async (req, res) => {
     // 1. Normalize intake (pure).
     const normalized = normalizeIntake(payload);
 
+    // 1b. Apply phantom-substitution policy + per-row admin overrides.
+    // Body shape: { substitutions: { ws05: 'linux-workstation', ws07: 'phantom' } }
+    const subResult = applyPhantomSubstitutions(normalized, req.body?.substitutions);
+    normalized.warnings.push(...subResult.warnings);
+
     // 2. Fetch catalogs in parallel.
     const [templatesRes, scriptsRes] = await Promise.all([
       pool.query(`SELECT id, os_family, os_name, os_version, template_vmid, node, role_hints, preferred, is_active, created_at
@@ -462,6 +546,9 @@ router.post('/:id/synthesize-challenge', express.json(), async (req, res) => {
       vms: specVms,
       phantom_assets: phantomAssets,
       warnings,
+      // Substitution context the UI needs to render per-row dropdowns.
+      substitution_options: Object.entries(PHANTOM_SUBSTITUTION_TYPES).map(([key, def]) => ({ key, label: def.label })),
+      applied_substitutions: subResult.applied,
       stats: {
         deployable_vms: specVms.length,
         phantoms: phantomAssets.length,
