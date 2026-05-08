@@ -462,9 +462,17 @@ else
   rbd unmap "$VERIFY_DEV" 2>/dev/null || true
 fi
 
-# ---------- 5. Strip the bake-time cloud-init custom config ----------
-echo "==> Clearing bake-time cicustom (clones get fresh cloud-init from admin.js)..."
+# ---------- 5. Strip the bake-time cloud-init config ----------
+# Proxmox stores cloud-init params at the VM-config level (separate from the
+# cicustom snippet). They INHERIT to clones — including --nameserver, which
+# is exactly what bit us: every clone got the bake-time DNS (100.100.0.1)
+# burned into /etc/resolv.conf on first boot, with no upstream visibility.
+# Strip everything bake-specific so per-clone admin.js settings are the
+# only source of truth.
+echo "==> Clearing bake-time cicustom + cloud-init fields (nameserver/searchdomain)..."
 qm set $VMID --delete cicustom
+qm set $VMID --delete nameserver 2>/dev/null || true
+qm set $VMID --delete searchdomain 2>/dev/null || true
 qm cloudinit dump $VMID user 2>/dev/null > /dev/null || true
 
 # ---------- 6. Convert to template ----------

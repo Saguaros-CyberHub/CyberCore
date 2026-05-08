@@ -2423,10 +2423,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               });
 
               console.log(`[Group ${group_name}] Configuring cloud-init for ${attackBoxVmId} (user: ${studentUsername})...`);
+              // nameserver = lane gateway (.1 of laneSubnetBase). The lane gateway
+              // runs dnsmasq on :53 and forwards upstream. Without this explicit
+              // setting, the clone inherits the template's --nameserver field
+              // (set at bake time via BAKE_DNS=100.100.0.1), which is unreachable
+              // from inside the lane VXLAN — symptom is "Temporary failure in
+              // name resolution" on every google.com lookup.
               await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/config`, {
                 net0: `virtio,bridge=${vnet.vnet}`,
                 ciuser: studentUsername,
-                cipassword: studentPassword
+                cipassword: studentPassword,
+                nameserver: `${laneSubnetBase}.1`
               });
               await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/cloudinit`);
             })() : Promise.resolve();
