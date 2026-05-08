@@ -12,7 +12,7 @@ const { cybercorePool } = require('./utils/cybercore-db');
 
 let loadedModules = [];
 let loadedPlugins = [];
-let loadedSubnavs = [];
+let loadedSubnavs = {};
 
 /**
  * Load all modules and their plugins
@@ -82,7 +82,10 @@ async function loadAll(app) {
       // Track module
       loadedModules.push(manifest);
       if (manifest.subnav) {
-        loadedSubnavs.push(manifest.subnav);
+        loadedSubnavs[manifest.key] = {
+          label: manifest.subnav.label || manifest.name,
+          items: manifest.subnav.items || []
+        };
       }
     }
 
@@ -154,7 +157,10 @@ async function loadModulePlugins(app, moduleName, modulePath, moduleManifest) {
     // Track plugin
     loadedPlugins.push(pluginManifest);
     if (pluginManifest.subnav) {
-      loadedSubnavs.push(pluginManifest.subnav);
+      loadedSubnavs[pluginManifest.key] = {
+        label: pluginManifest.subnav.label || pluginManifest.name,
+        items: pluginManifest.subnav.items || []
+      };
     }
 
     console.log(`    ✓ Plugin loaded: ${pluginManifest.name} (${pluginManifest.key})`);
