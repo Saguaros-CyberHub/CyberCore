@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clinic Risk Assessment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .cra-shell { display: flex; flex-direction: column; gap: 16px; }
+    .cra-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+    .cra-header h1 { margin: 0 0 4px 0; font-size: 1.5rem; }
+    .cra-header .sub { color: var(--text-secondary); font-size: 0.9rem; }
+    .cra-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); margin-bottom: 16px; }
+    .cra-tab { padding: 10px 18px; cursor: pointer; border: 0; background: transparent; color: var(--text-secondary); font-size: 0.95rem; font-weight: 500; border-bottom: 2px solid transparent; }
+    .cra-tab:hover { color: var(--text-primary); }
+    .cra-tab.active { color: var(--primary, #1e40af); border-bottom-color: var(--primary, #1e40af); }
+    .cra-pane { display: none; }
+    .cra-pane.active { display: block; }
+    .cra-grid { display: grid; gap: 16px; }
+    .cra-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+    .cra-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
+    @media (max-width: 900px) { .cra-grid.cols-2, .cra-grid.cols-4 { grid-template-columns: 1fr; } }
+    .cra-stat-card { background: var(--bg-card, white); border-radius: 10px; padding: 16px 20px; border-left: 4px solid var(--accent, #3182ce); box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    .cra-stat-card .label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted, #64748b); letter-spacing: 0.04em; }
+    .cra-stat-card .value { font-size: 1.6rem; font-weight: 700; color: var(--text-primary); margin-top: 4px; }
+    .cra-stat-card .hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
+    .cra-card { background: var(--bg-card, white); border-radius: 10px; padding: 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid var(--border-color, #e2e8f0); }
+    .cra-card h3 { margin: 0 0 12px 0; font-size: 1rem; color: var(--text-primary); }
+    .cra-chart { width: 100%; height: 320px; }
+    .cra-chart.tall { height: 380px; }
+
+    /* Findings table */
+    .findings-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .findings-table th, .findings-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .findings-table th { background: var(--bg-table-head, #f8fafc); font-weight: 600; color: var(--text-secondary); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .findings-table tr:hover { background: var(--bg-hover, #f8fafc); cursor: pointer; }
+    .findings-table .risk-badge { display: inline-block; min-width: 24px; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-align: center; color: white; font-size: 0.75rem; }
+    .risk-low    { background: #16a34a; }
+    .risk-medium { background: #d97706; }
+    .risk-high   { background: #dc2626; }
+    .risk-critical { background: #7f1d1d; }
+    .status-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; }
+    .status-open       { background: #fee2e2; color: #991b1b; }
+    .status-mitigated  { background: #dcfce7; color: #166534; }
+    .status-accepted   { background: #fef3c7; color: #92400e; }
+    .status-transferred{ background: #dbeafe; color: #1e40af; }
+
+    /* Drawer for add/edit finding */
+    .drawer-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.4); z-index: 200; display: none; }
+    .drawer-backdrop.open { display: block; }
+    .drawer { position: fixed; top: 0; right: 0; height: 100vh; width: 480px; max-width: 100vw; background: var(--bg-card, white); box-shadow: -4px 0 24px rgba(15,23,42,0.15); z-index: 201; transform: translateX(100%); transition: transform 0.2s ease; overflow-y: auto; }
+    .drawer.open { transform: translateX(0); }
+    .drawer header { padding: 16px 20px; border-bottom: 1px solid var(--border-color, #e2e8f0); display: flex; justify-content: space-between; align-items: center; }
+    .drawer header h3 { margin: 0; font-size: 1.1rem; }
+    .drawer .body { padding: 20px; }
+    .drawer .field { margin-bottom: 14px; }
+    .drawer .field label { display: block; font-size: 0.85rem; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px; }
+    .drawer .field input, .drawer .field select, .drawer .field textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 6px; font: inherit; background: var(--bg-input, white); color: var(--text-primary); }
+    .drawer .field textarea { min-height: 70px; resize: vertical; }
+    .drawer .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .drawer footer { padding: 14px 20px; border-top: 1px solid var(--border-color, #e2e8f0); display: flex; justify-content: space-between; gap: 10px; }
+    .drawer .slider-row { display: flex; align-items: center; gap: 10px; }
+    .drawer .slider-row input[type=range] { flex: 1; }
+    .drawer .slider-row .val { width: 24px; text-align: center; font-weight: 600; color: var(--primary, #1e40af); }
+
+    .btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0); background: var(--bg-card, white); cursor: pointer; font: inherit; color: var(--text-primary); }
+    .btn:hover { background: var(--bg-hover, #f8fafc); }
+    .btn.primary { background: var(--primary, #1e40af); border-color: var(--primary, #1e40af); color: white; }
+    .btn.primary:hover { background: var(--primary-dark, #1e3a8a); }
+    .btn.danger { color: #dc2626; border-color: #fecaca; }
+    .btn.danger:hover { background: #fee2e2; }
+
+    .csf-slider-grid { display: grid; grid-template-columns: 120px 1fr 32px; gap: 10px; align-items: center; margin: 8px 0; }
+    .csf-slider-grid .name { font-weight: 600; }
+    .csf-slider-grid .name .auto-pill { display: inline-block; margin-left: 6px; font-size: 0.7rem; font-weight: 400; padding: 2px 6px; border-radius: 10px; background: var(--bg-table-head, #f1f5f9); color: var(--text-muted); }
+
+    .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted, #64748b); }
+    .empty-state .big-icon { font-size: 2.5rem; margin-bottom: 8px; }
+    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 10px 18px; border-radius: 6px; font-size: 0.875rem; z-index: 300; opacity: 0; transition: opacity 0.2s; }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="Layout.toggleSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <button class="menu-toggle" id="menuToggle" onclick="Layout.toggleSidebar()">
+          <span></span><span></span><span></span>
+        </button>
+        <div class="header-title">Clinic Risk Assessment</div>
+        <div class="header-actions">
+          <span class="header-user" id="headerUser"></span>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="cra-shell" id="craShell">
+          <div class="cra-header">
+            <div>
+              <h1 id="craCompanyName">Loading…</h1>
+              <div class="sub" id="craSubtitle"></div>
+            </div>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <span id="craSourceBadge" class="status-pill status-open" style="display:none"></span>
+              <button class="btn" id="btnRefresh" title="Reload data">↻</button>
+            </div>
+          </div>
+
+          <div class="cra-tabs" role="tablist">
+            <button class="cra-tab active" data-tab="overview"  role="tab">Overview</button>
+            <button class="cra-tab" data-tab="register"  role="tab">Risk Register</button>
+            <button class="cra-tab" data-tab="maturity"  role="tab">Maturity &amp; Controls</button>
+            <button class="cra-tab" data-tab="report"    role="tab">Report</button>
+          </div>
+
+          <!-- OVERVIEW -->
+          <div class="cra-pane active" id="pane-overview">
+            <div class="cra-grid cols-4" id="overviewStats"></div>
+
+            <div class="cra-grid cols-2" style="margin-top:16px">
+              <div class="cra-card">
+                <h3>Risk Heat Map (inherent)</h3>
+                <div class="cra-chart tall" id="chartHeatmap"></div>
+              </div>
+              <div class="cra-card">
+                <h3>NIST CSF 2.0 Maturity</h3>
+                <div class="cra-chart tall" id="chartRadar"></div>
+              </div>
+            </div>
+
+            <div class="cra-grid cols-2" style="margin-top:16px">
+              <div class="cra-card">
+                <h3>CIS IG1 Coverage</h3>
+                <div class="cra-chart" id="chartCis"></div>
+              </div>
+              <div class="cra-card">
+                <h3>NIST CSF Function Scores</h3>
+                <div class="cra-chart" id="chartCsf"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- RISK REGISTER -->
+          <div class="cra-pane" id="pane-register">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+              <div class="sub" id="registerCount">No findings yet.</div>
+              <button class="btn primary" id="btnAddFinding">+ Add Finding</button>
+            </div>
+            <div class="cra-card" style="padding:0; overflow-x:auto;">
+              <table class="findings-table" id="findingsTable">
+                <thead>
+                  <tr>
+                    <th>Code</th>
+                    <th>Title</th>
+                    <th>Category</th>
+                    <th>L</th><th>I</th><th>Risk</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="findingsTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- MATURITY -->
+          <div class="cra-pane" id="pane-maturity">
+            <div class="cra-card">
+              <h3>NIST CSF 2.0 Function Scores</h3>
+              <p class="sub">Pre-filled from CIS IG1 responses (auto). Drag any slider to override; the report will use your manual value.</p>
+              <div id="csfSliders"></div>
+              <div style="display:flex; gap:10px; margin-top:14px;">
+                <button class="btn primary" id="btnSaveCsf">Save CSF Scores</button>
+                <button class="btn" id="btnResetCsf" title="Clear manual overrides — use auto values">Reset to Auto</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- REPORT -->
+          <div class="cra-pane" id="pane-report">
+            <div class="cra-card">
+              <h3>Executive Summary</h3>
+              <p class="sub">Top-of-deliverable narrative. Plain text. ~1–3 paragraphs.</p>
+              <textarea id="execSummary" rows="10" style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              <div style="display:flex; gap:10px; margin-top:12px;">
+                <button class="btn primary" id="btnSaveSummary">Save Summary</button>
+                <button class="btn" id="btnFinalize">Mark Final</button>
+              </div>
+            </div>
+
+            <div class="cra-card" style="margin-top:16px;">
+              <h3>Generate PDF Report</h3>
+              <p class="sub">Embeds the live charts and findings into a branded PDF deliverable. Charts in the PDF will match what you see on the Overview tab right now.</p>
+              <button class="btn primary" id="btnExport">⬇ Export PDF</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Add/Edit finding drawer -->
+  <div class="drawer-backdrop" id="drawerBackdrop"></div>
+  <aside class="drawer" id="drawer">
+    <header>
+      <h3 id="drawerTitle">Add Finding</h3>
+      <button class="btn" id="btnCloseDrawer">✕</button>
+    </header>
+    <div class="body">
+      <input type="hidden" id="findingId">
+      <div class="field">
+        <label>Title <span style="color:#dc2626">*</span></label>
+        <input type="text" id="fTitle" placeholder="e.g., Endpoint MFA gap on remote workers">
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea id="fDescription" placeholder="What you found, where, evidence."></textarea>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Category</label>
+          <select id="fCategory">
+            <option value="">—</option>
+            <option value="technical">Technical</option>
+            <option value="process">Process</option>
+            <option value="people">People</option>
+            <option value="physical">Physical</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Status</label>
+          <select id="fStatus">
+            <option value="open">Open</option>
+            <option value="accepted">Accepted</option>
+            <option value="mitigated">Mitigated</option>
+            <option value="transferred">Transferred</option>
+          </select>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Likelihood (1–5)</label>
+          <div class="slider-row">
+            <input type="range" id="fLikelihood" min="1" max="5" value="3" step="1">
+            <span class="val" id="fLikelihoodVal">3</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>Impact (1–5)</label>
+          <div class="slider-row">
+            <input type="range" id="fImpact" min="1" max="5" value="3" step="1">
+            <span class="val" id="fImpactVal">3</span>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Recommendation</label>
+        <textarea id="fRecommendation" placeholder="What you'd advise the client to do."></textarea>
+      </div>
+      <div class="field">
+        <label>Control References (CIS / CSF)</label>
+        <input type="text" id="fControlRefs" placeholder='e.g. CIS_IG1:6.3, NIST_CSF_2_0:PR.AA'>
+        <div class="sub" style="font-size:0.75rem; color:var(--text-muted); margin-top:4px;">Comma-separated. Format: <code>FRAMEWORK:ID</code></div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn danger" id="btnDeleteFinding" style="display:none">Delete</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="btnCancelFinding">Cancel</button>
+      <button class="btn primary" id="btnSaveFinding">Save</button>
+    </footer>
+  </aside>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="/ciab/vendor/echarts.min.js"></script>
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/ciab/js/clinic-risk-assessment.js"></script>
+</body>
+</html>

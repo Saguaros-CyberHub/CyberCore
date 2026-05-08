@@ -1175,7 +1175,10 @@
       }
       setStatus('Uploading…', 'unsaved');
       try {
-        const res = await fetch('/api/intakes/upload', {
+        // Hit the legacy upload endpoint — it dual-writes to both `real_client_intakes`
+        // (so the existing detail/synthesize pages keep working) and the new
+        // unified `intakes` table (so the CRA dashboard can read from one place).
+        const res = await fetch('/api/real-client/intake/upload', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
@@ -1183,7 +1186,7 @@
         });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const body = await res.json();
-        const newId = body.intake?.id || body.intake_id;
+        const newId = body.intake_id;
         setStatus('Uploaded · intake ' + String(newId || '').slice(0,8), 'saved');
         if (newId && confirm('Uploaded. Open the intake detail page?')) {
           location.href = '/ciab/real-client-intake/' + newId;

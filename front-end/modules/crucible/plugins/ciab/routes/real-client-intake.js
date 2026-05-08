@@ -94,6 +94,25 @@ router.post('/upload', express.json({ limit: '4mb' }), async (req, res) => {
     );
 
     const row = result.rows[0];
+
+    // Phase 0 transition: mirror into unified `intakes` table so the CRA dashboard
+    // and the new GET /api/intakes endpoints see this upload too. Best-effort —
+    // legacy table write is the source of truth until pages are migrated.
+    try {
+      await pool.query(
+        `INSERT INTO intakes
+           (user_id, profile_id, source, schema_version, cover_name, payload,
+            completion_percentage, status, raw_format, raw_preview,
+            legacy_source_table, legacy_source_id, created_at, updated_at, completed_at)
+         VALUES ($1, NULL, 'real_client', $2, $3, $4::jsonb, 100, 'complete', 'json', $5,
+                 'real_client_intakes', $6, $7, $7, $7)`,
+        [userId, payload.schema_version, payload.cover_name.trim(), JSON.stringify(payload),
+         rawPreview, row.id, row.created_at]
+      );
+    } catch (mirrorErr) {
+      console.warn('[real-client intake upload] mirror to intakes failed:', mirrorErr.message);
+    }
+
     res.json({
       intake_id: row.id,
       cover_name: row.cover_name,

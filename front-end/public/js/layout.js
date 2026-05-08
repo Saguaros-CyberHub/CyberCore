@@ -82,6 +82,7 @@ const Layout = {
     if (path.includes('interview')) return 'interview';
     if (path.includes('instructor')) return 'instructor';
     if (path.includes('admin')) return 'admin';
+    if (path.includes('clinic-risk-assessment')) return 'clinic-risk-assessment';
     if (path.includes('intake-form')) return 'intake-form';
     return '';
   },

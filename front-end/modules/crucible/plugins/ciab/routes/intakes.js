@@ -210,8 +210,14 @@ router.put('/:profileId', express.json({ limit: MAX_PAYLOAD_BYTES }), async (req
     const status = completion >= 100 ? 'complete' : 'in_progress';
     const coverName = payload.cover_name || payload.sections?.company?.cover_name || null;
 
-    // Ensure a row exists, then update.
-    await getOrCreateIntakeForProfile(userId, profileId);
+    // Ensure a row exists. If the profile itself doesn't exist, surface that
+    // explicitly — it's the most common cause of a save failure.
+    const ensured = await getOrCreateIntakeForProfile(userId, profileId);
+    if (!ensured) {
+      return res.status(404).json({
+        error: `Profile ${profileId} does not exist. Open the form from a profile card or generator, not a stale URL.`,
+      });
+    }
 
     const r = await pool.query(
       `UPDATE intakes SET
@@ -226,7 +232,7 @@ router.put('/:profileId', express.json({ limit: MAX_PAYLOAD_BYTES }), async (req
        RETURNING *`,
       [JSON.stringify(payload), payload.schema_version, coverName, completion, status, profileId]
     );
-    if (r.rowCount === 0) return res.status(404).json({ error: 'Intake not found' });
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Intake row missing after lazy-create — please reload.' });
     res.json({ intake: r.rows[0], completion, status });
   } catch (err) {
     console.error('[intakes put]', err);

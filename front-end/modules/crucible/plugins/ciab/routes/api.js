@@ -28,6 +28,7 @@ const instructorRoutes = require('./instructor');
 const intakeFormRoutes = require('./intake-form');
 const realClientIntakeRoutes = require('./real-client-intake');
 const intakesRoutes = require('./intakes');
+const clinicRiskAssessmentRoutes = require('./clinic-risk-assessment');
 
 // Mount with auth + schedule checking
 router.use('/api/profiles', authenticateToken, checkSchedule, profileRoutes);
@@ -39,5 +40,7 @@ router.use('/api/intake-form', authenticateToken, checkSchedule, intakeFormRoute
 router.use('/api/real-client/intake', authenticateToken, checkSchedule, realClientIntakeRoutes);
 // Unified intakes API (Phase 0). intakesRoutes applies authenticateToken internally.
 router.use('/api/intakes', checkSchedule, intakesRoutes);
+// Clinic Risk Assessment API (Phase 1). Auth applied internally.
+router.use('/api/clinic-risk-assessment', checkSchedule, clinicRiskAssessmentRoutes);
 
 module.exports = router;
