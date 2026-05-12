@@ -5,7 +5,7 @@ const { authenticateToken } = require('../middleware/auth');
 const moduleLoader = require('../module-loader');
 
 // GET /api/modules — list all active modules grouped by category
-router.get('/', authenticateToken, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const result = await cybercoreQuery(
       `SELECT key, name, icon, description, entry_url, category, color

@@ -102,7 +102,7 @@ const Layout = {
       <div class="sidebar-header">
         <a href="/hub" class="sidebar-logo">
           <span class="icon">🛡️</span>
-          <span>CyberHub</span>
+          <span id="sidebarSiteName">CyberHub</span>
         </a>
       </div>
 
@@ -667,6 +667,56 @@ const Layout = {
         }
       }
     });
+  },
+
+  // Load and apply site name from backend
+  async loadSiteNameFromSettings() {
+    try {
+      // Skip if on admin page - admin.html handles its own site name loading
+      if (window.location.pathname.includes('/admin')) {
+        return;
+      }
+      
+      // Check if user is authenticated
+      const token = localStorage.getItem('token');
+      if (!token) {
+        return;
+      }
+
+      const response = await fetch('/api/admin/settings', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const siteName = data.site_name || 'CyberHub';
+        this.updateSiteName(siteName);
+      } else if (response.status === 403) {
+        // User is not admin - that's fine, just use default
+        return;
+      }
+    } catch (err) {
+      // Silent fail - just use default CyberHub
+      console.debug('[Layout] Could not load site name:', err.message);
+    }
+  },
+
+  // Update site name everywhere in the UI
+  updateSiteName(siteName) {
+    if (!siteName) return;
+    
+    // Update sidebar
+    const sidebarEl = document.getElementById('sidebarSiteName');
+    if (sidebarEl) sidebarEl.textContent = siteName;
+    
+    // Update page title
+    document.title = siteName;
+    
+    // Store in localStorage
+    localStorage.setItem('site_name', siteName);
   }
 };
 
@@ -675,10 +725,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // Small delay to ensure Auth is loaded
   setTimeout(() => {
     Layout.init();
+    // Load site name from localStorage (set by admin page or API)
+    const siteName = localStorage.getItem('site_name');
+    if (siteName) {
+      Layout.updateSiteName(siteName);
+    }
   }, 100);
 });
 
 // Re-update sidebar after auth check
 window.addEventListener('authReady', () => {
   Layout.injectSidebar();
+  // Refresh site name from API for authenticated users
+  Layout.loadSiteNameFromSettings();
 });

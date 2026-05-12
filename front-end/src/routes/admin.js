@@ -1835,12 +1835,29 @@ router.get('/modules', authenticateToken, adminOnly, async (req, res) => {
 router.get('/challenges/:module', authenticateToken, adminOnly, async (req, res) => {
   try {
     const mod = req.params.module.replace(/[^a-z0-9_]/gi, '');
+    const tableName = `${mod}_challenge`;
+    
+    // Check if table exists
+    const tableCheck = await cybercoreQuery(
+      `SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema = 'public' AND table_name = $1
+      )`,
+      [tableName]
+    );
+    
+    if (!tableCheck.rows[0].exists) {
+      // Table doesn't exist for this module, return empty array
+      return res.json([]);
+    }
+    
     const result = await cybercoreQuery(
-      `SELECT challenge_id, challenge_key, name, difficulty, status FROM ${mod}_challenge WHERE status = 'active' ORDER BY name`
+      `SELECT challenge_id, challenge_key, name, difficulty, status FROM ${tableName} WHERE status = 'active' ORDER BY name`
     );
     res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    // If table doesn't exist or other error, return empty array instead of 500
+    res.json([]);
   }
 });
 
@@ -4532,5 +4549,230 @@ Write-Host "File assembled: ${dest_path} ($size bytes)"
   }
 });
 
+
+// ============================================================================
+// SETTINGS
+// ============================================================================
+
+/**
+ * GET /api/admin/settings
+ * Retrieve all settings (site name, modules/plugins state)
+ */
+router.get('/settings', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    // Get site name from clinic_db.settings or default
+    let siteName = 'CyberHub';
+    try {
+      const result = await query('SELECT value FROM settings WHERE key = $1', ['site_name']);
+      if (result.rows.length > 0) {
+        siteName = result.rows[0].value;
+      }
+    } catch (err) {
+      // Table may not exist yet, use default
+      console.warn('[Settings] Could not fetch site_name:', err.message);
+    }
+
+    // Get module/plugin configuration from cybercore_db.cybercore_module
+    let modules = [];
+    try {
+      const result = await cybercoreQuery(
+        'SELECT * FROM cybercore_module WHERE parent_module IS NULL ORDER BY display_order ASC, key ASC'
+      );
+      
+      // Build modules map
+      const moduleMap = {};
+      result.rows.forEach(row => {
+        moduleMap[row.key] = {
+          key: row.key,
+          name: row.name,
+          description: row.description,
+          enabled: row.active,
+          plugins: []
+        };
+        modules.push(moduleMap[row.key]);
+      });
+
+      // Fetch and add plugins
+      const pluginResult = await cybercoreQuery(
+        'SELECT * FROM cybercore_module WHERE parent_module IS NOT NULL ORDER BY display_order ASC, key ASC'
+      );
+      pluginResult.rows.forEach(row => {
+        const parent = moduleMap[row.parent_module];
+        if (parent) {
+          parent.plugins.push({
+            key: row.key,
+            name: row.name,
+            description: row.description,
+            enabled: row.active
+          });
+        }
+      });
+    } catch (err) {
+      console.warn('[Settings] Could not fetch cybercore_module:', err.message);
+    }
+
+    res.json({ site_name: siteName, modules });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/settings/site-name
+ * Update the site display name (whitelabeling)
+ */
+router.patch('/settings/site-name', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { site_name } = req.body;
+    if (!site_name || typeof site_name !== 'string' || site_name.trim().length === 0) {
+      return res.status(400).json({ error: 'site_name must be a non-empty string' });
+    }
+
+    const cleanName = site_name.trim();
+
+    // Try to update existing settings, or insert if not exists
+    try {
+      const result = await query(
+        'UPDATE settings SET value = $1 WHERE key = $2 RETURNING id',
+        [cleanName, 'site_name']
+      );
+
+      if (result.rows.length === 0) {
+        // No existing row, insert
+        await query(
+          'INSERT INTO settings (key, value) VALUES ($1, $2)',
+          ['site_name', cleanName]
+        );
+      }
+    } catch (err) {
+      // Table may not exist, try to create and insert
+      if (err.message.includes('does not exist')) {
+        await query(`
+          CREATE TABLE IF NOT EXISTS settings (
+            id SERIAL PRIMARY KEY,
+            key VARCHAR(255) UNIQUE NOT NULL,
+            value TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          )
+        `);
+        await query(
+          'INSERT INTO settings (key, value) VALUES ($1, $2)',
+          ['site_name', cleanName]
+        );
+      } else {
+        throw err;
+      }
+    }
+
+    logActivity(req, 'settings_update', 'site_config', null, { new_value: cleanName });
+
+    res.json({ success: true, site_name: cleanName });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/settings/modules
+ * List all installed modules and plugins with their enabled state
+ */
+router.get('/settings/modules', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    let modules = [];
+
+    try {
+      // Fetch all modules (parent_module IS NULL) from cybercore_db.cybercore_module
+      const result = await cybercoreQuery(
+        'SELECT * FROM cybercore_module WHERE parent_module IS NULL ORDER BY display_order ASC, key ASC'
+      );
+
+      // Build module list
+      const moduleMap = {};
+      result.rows.forEach(row => {
+        moduleMap[row.key] = {
+          key: row.key,
+          name: row.name,
+          description: row.description,
+          enabled: row.active,
+          plugins: []
+        };
+        modules.push(moduleMap[row.key]);
+      });
+
+      // Fetch plugins and add to their parents
+      const pluginResult = await cybercoreQuery(
+        'SELECT * FROM cybercore_module WHERE parent_module IS NOT NULL ORDER BY display_order ASC, key ASC'
+      );
+      pluginResult.rows.forEach(row => {
+        if (moduleMap[row.parent_module]) {
+          moduleMap[row.parent_module].plugins.push({
+            key: row.key,
+            name: row.name,
+            description: row.description,
+            enabled: row.active
+          });
+        }
+      });
+    } catch (err) {
+      console.warn('[Settings] Could not fetch cybercore_module:', err.message);
+      // Fall back to empty list if table doesn't exist
+    }
+
+    res.json({ modules });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/settings/modules
+ * Update enabled/disabled state for modules and plugins
+ */
+router.patch('/settings/modules', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { modules, plugins } = req.body;
+
+    if (!Array.isArray(modules)) modules = [];
+    if (!Array.isArray(plugins)) plugins = [];
+
+    // Update modules
+    for (const mod of modules) {
+      if (!mod.key) continue;
+      try {
+        await cybercoreQuery(
+          'UPDATE cybercore_module SET active = $1 WHERE key = $2 AND parent_module IS NULL',
+          [mod.enabled === true, mod.key]
+        );
+      } catch (err) {
+        console.warn(`[Settings] Failed to update module ${mod.key}:`, err.message);
+      }
+    }
+
+    // Update plugins
+    for (const plugin of plugins) {
+      if (!plugin.key) continue;
+      try {
+        await cybercoreQuery(
+          'UPDATE cybercore_module SET active = $1 WHERE key = $2 AND parent_module IS NOT NULL',
+          [plugin.enabled === true, plugin.key]
+        );
+      } catch (err) {
+        console.warn(`[Settings] Failed to update plugin ${plugin.key}:`, err.message);
+      }
+    }
+
+    logActivity(req, 'settings_update', 'cybercore_module', null,
+      { modules_updated: modules.length, plugins_updated: plugins.length });
+
+    res.json({
+      success: true,
+      modules_updated: modules.length,
+      plugins_updated: plugins.length
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 module.exports = router;
