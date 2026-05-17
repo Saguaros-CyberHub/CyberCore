@@ -317,6 +317,7 @@
         <!-- TAB: Users (merged Guac + Clinic) -->
         <div class="tab-content" id="tab-users">
           <div class="action-bar">
+            <button class="btn btn-primary" onclick="showCreateCybercoreUserModal()">+ New User</button>
             <button class="btn btn-primary" onclick="showCreateUserModal()">+ New Guac User</button>
             <button class="btn btn-outline" onclick="loadMergedUsers()">Refresh</button>
           </div>
@@ -756,6 +757,52 @@
   </div>
 
   <!-- Create User Modal -->
+  <!-- CyberCore User Creation Modal -->
+  <div class="modal-overlay" id="createCybercoreUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Create New User</h3>
+        <button class="modal-close" onclick="closeModal('createCybercoreUserModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label>Username * <span style="font-size: 0.8rem; color: var(--gray-500);">(unique login name)</span></label>
+        <input type="text" id="ccUsername" placeholder="johndoe">
+      </div>
+      <div class="form-group">
+        <label>Email *</label>
+        <input type="email" id="ccEmail" placeholder="user@example.com">
+      </div>
+      <div class="form-group">
+        <label>First Name</label>
+        <input type="text" id="ccFirstName" placeholder="John">
+      </div>
+      <div class="form-group">
+        <label>Last Name</label>
+        <input type="text" id="ccLastName" placeholder="Doe">
+      </div>
+      <div class="form-group">
+        <label>Organization</label>
+        <input type="text" id="ccOrganization" placeholder="Company or School" value="Independent">
+      </div>
+      <div class="form-group">
+        <label>Role *</label>
+        <select id="ccRole" style="padding: 0.5rem; border: 1px solid #cbd5e0; border-radius: 4px; font-size: 0.9rem;">
+          <option value="user">User</option>
+          <option value="student">Student</option>
+          <option value="instructor">Instructor</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Password *</label>
+        <input type="password" id="ccPassword" placeholder="Initial password">
+      </div>
+      <div id="ccStatus"></div>
+      <button class="btn btn-primary" onclick="createCybercoreUser()">Create User</button>
+    </div>
+  </div>
+
+  <!-- Guacamole User Creation Modal -->
   <div class="modal-overlay" id="createUserModal">
     <div class="modal-content">
       <div class="modal-header">
@@ -1466,6 +1513,57 @@
         closeModal('createUserModal');
         loadUsers();
       } catch (e) { Toast.error('Error', e.message); }
+    }
+
+    function showCreateCybercoreUserModal() {
+      document.getElementById('ccUsername').value = '';
+      document.getElementById('ccEmail').value = '';
+      document.getElementById('ccFirstName').value = '';
+      document.getElementById('ccLastName').value = '';
+      document.getElementById('ccOrganization').value = 'Independent';
+      document.getElementById('ccRole').value = 'user';
+      document.getElementById('ccPassword').value = '';
+      document.getElementById('ccStatus').innerHTML = '';
+      document.getElementById('createCybercoreUserModal').classList.add('active');
+    }
+
+    async function createCybercoreUser() {
+      const username = document.getElementById('ccUsername').value.trim();
+      const email = document.getElementById('ccEmail').value.trim();
+      const firstName = document.getElementById('ccFirstName').value.trim();
+      const lastName = document.getElementById('ccLastName').value.trim();
+      const organization = document.getElementById('ccOrganization').value.trim() || 'Independent';
+      const role = document.getElementById('ccRole').value;
+      const password = document.getElementById('ccPassword').value;
+      
+      const statusEl = document.getElementById('ccStatus');
+      
+      if (!username || !email || !password) {
+        statusEl.innerHTML = '<p style="color: #e53e3e; margin-top: 0.5rem;">Username, email, and password are required</p>';
+        return;
+      }
+
+      statusEl.innerHTML = '<p style="color: var(--gray-500); margin-top: 0.5rem;">Creating user...</p>';
+
+      try {
+        const userData = {
+          username,
+          email,
+          firstName: firstName || null,
+          lastName: lastName || null,
+          organization,
+          role,
+          password
+        };
+        
+        const result = await api('POST', '/users', userData);
+        Toast.success('User Created', `"${username}" (${email}) added to system`);
+        closeModal('createCybercoreUserModal');
+        loadMergedUsers();
+      } catch (e) {
+        statusEl.innerHTML = `<p style="color: #e53e3e; margin-top: 0.5rem;">Error: ${e.message}</p>`;
+        Toast.error('Error', e.message);
+      }
     }
 
     async function deleteUser(username) {

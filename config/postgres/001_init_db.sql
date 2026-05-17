@@ -5,7 +5,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- === Groups (text key) — must come before users ===
 CREATE TABLE IF NOT EXISTS cybercore_group (
-  key         TEXT PRIMARY KEY,            -- 'cyberlabs','crucible','forge','university','library','wiki'
+  key         TEXT PRIMARY KEY,            -- 'cyberlabs','crucible','forge','university','library','wiki','archive'
   label       TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS cybercore_user_group (
 
 -- === Modules (text key) ===
 CREATE TABLE IF NOT EXISTS cybercore_module (
-  key            TEXT PRIMARY KEY,                -- 'cyberlabs','crucible','forge','university','library','wiki'
+  key            TEXT PRIMARY KEY,                -- 'cyberlabs','crucible','forge','university','library','wiki','archive'
   name           TEXT NOT NULL,
   icon           TEXT,
   description    TEXT,
@@ -201,7 +201,8 @@ INSERT INTO cybercore_module (key, name, active) VALUES
   ('forge',      'The Forge', TRUE),
   ('university', 'Saguaros University', TRUE),
   ('library',    'The Library', TRUE),
-  ('cyberwiki',  'CyberWiki', TRUE)
+  ('cyberwiki',  'CyberWiki', TRUE),
+  ('archive',    'The Archive', TRUE)
 ON CONFLICT (key) DO NOTHING;
 
 INSERT INTO cybercore_group (key, label, created_at) VALUES
@@ -210,7 +211,8 @@ INSERT INTO cybercore_group (key, label, created_at) VALUES
   ('forge',      'The Forge', now()),
   ('university', 'Saguaros University', now()),
   ('library',    'The Library', now()),
-  ('cyberwiki',  'CyberWiki', now())
+  ('cyberwiki',  'CyberWiki', now()),
+  ('archive',    'The Archive', now())
 ON CONFLICT (key) DO NOTHING;
 
 -- Global badges (module_key = NULL)

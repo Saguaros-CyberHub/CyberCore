@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Courses | Cyber Learning Environment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .course-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    .course-card { background: var(--card-bg, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-left: 4px solid #7c3aed; cursor: pointer; transition: all 0.2s; }
+    .course-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.12); transform: translateY(-2px); }
+    .course-card h3 { margin: 0 0 0.5rem; font-size: 1.1rem; }
+    .course-meta { display: flex; gap: 1rem; font-size: 0.8rem; color: var(--text-secondary); margin: 0.75rem 0; flex-wrap: wrap; }
+    .course-meta span { display: flex; align-items: center; gap: 0.3rem; }
+    .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.7rem; font-weight: 600; }
+    .badge-active { background: #d1fae5; color: #065f46; }
+    .badge-draft { background: #fef3c7; color: #92400e; }
+    .badge-archived { background: #e5e7eb; color: #4b5563; }
+
+    .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); z-index: 999; align-items: center; justify-content: center; }
+    .modal-overlay.active { display: flex; }
+    .modal { background: var(--card-bg, white); border-radius: 12px; width: 90%; max-width: 700px; max-height: 90vh; overflow-y: auto; padding: 2rem; }
+    .modal h2 { margin: 0 0 1.5rem; font-size: 1.4rem; }
+    .modal-form { display: flex; flex-direction: column; gap: 1rem; }
+    .form-group { display: flex; flex-direction: column; }
+    .form-group label { font-weight: 600; margin-bottom: 0.35rem; font-size: 0.9rem; }
+    .form-group input, .form-group textarea, .form-group select { padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
+    .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1); }
+    .form-group textarea { resize: vertical; min-height: 100px; }
+    .form-buttons { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1rem; }
+    .btn { padding: 0.6rem 1.2rem; border-radius: 6px; font-weight: 600; font-size: 0.9rem; cursor: pointer; border: none; }
+    .btn-primary { background: #7c3aed; color: white; }
+    .btn-primary:hover { background: #6d28d9; }
+    .btn-secondary { background: #f3f4f6; color: #1f2937; }
+    .btn-secondary:hover { background: #e5e7eb; }
+    .btn-danger { background: #ef4444; color: white; }
+    .btn-danger:hover { background: #dc2626; }
+
+    .course-detail { display: none; }
+    .course-detail.active { display: block; }
+    .detail-tabs { display: flex; gap: 0; border-bottom: 2px solid #e5e7eb; margin-bottom: 1.5rem; }
+    .detail-tab { padding: 0.75rem 1rem; cursor: pointer; border-bottom: 3px solid transparent; font-weight: 500; color: var(--text-secondary); }
+    .detail-tab.active { color: #7c3aed; border-bottom-color: #7c3aed; }
+    .detail-tab-pane { display: none; }
+    .detail-tab-pane.active { display: block; }
+
+    .students-table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    .students-table th { background: #f9fafb; padding: 0.75rem; text-align: left; font-weight: 600; border-bottom: 2px solid #e5e7eb; font-size: 0.9rem; }
+    .students-table td { padding: 0.75rem; border-bottom: 1px solid #e5e7eb; }
+    .students-table tbody tr:hover { background: #f9fafb; }
+    .student-actions { display: flex; gap: 0.4rem; }
+    .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.8rem; }
+    .btn-outline { background: transparent; border: 1px solid #d1d5db; color: #374151; }
+    .btn-outline:hover { background: #f3f4f6; }
+
+    .info-box { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
+    .info-box p { margin: 0; color: #1e40af; font-size: 0.9rem; }
+
+    .toast { position: fixed; bottom: 20px; right: 20px; background: #10b981; color: white; padding: 1rem 1.5rem; border-radius: 6px; z-index: 1000; }
+    .toast.error { background: #ef4444; }
+
+    .loading { color: var(--text-secondary); }
+    .empty-state { text-align: center; padding: 2rem; color: var(--text-secondary); }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
+          <h2 style="margin:0; font-size:1.1rem;">Courses Management</h2>
+        </div>
+      </header>
+      <div class="page-content">
+        <p style="color:var(--text-secondary); margin-bottom:1.5rem;">View and manage your assigned courses, sections, and student environments.</p>
+
+        <!-- Courses Grid View -->
+        <div id="coursesGridView">
+          <div id="coursesList" class="course-grid"><p class="loading">Loading courses...</p></div>
+        </div>
+
+        <!-- Course Detail View -->
+        <div id="courseDetailView" class="course-detail">
+          <div style="display: flex; align-items: center; gap: 1rem; margin-bottom: 1.5rem;">
+            <button class="btn btn-secondary" onclick="backToList()">← Back</button>
+            <h2 id="detailCourseName" style="margin: 0;"></h2>
+            <span id="detailCourseStatus" class="badge badge-active"></span>
+          </div>
+
+          <div class="detail-tabs">
+            <div class="detail-tab active" onclick="switchDetailTab('overview', this)">📋 Overview</div>
+            <div class="detail-tab" onclick="switchDetailTab('students', this)">👥 Students</div>
+            <div class="detail-tab" onclick="switchDetailTab('vm-management', this)">🖥️ VM Management</div>
+            <div class="detail-tab" onclick="switchDetailTab('vulnerable-labs', this)">⚠️ Vulnerable Labs</div>
+          </div>
+
+          <!-- Overview Tab -->
+          <div class="detail-tab-pane active" id="overview-pane">
+            <button class="btn btn-secondary" style="margin-bottom: 1rem;" onclick="editCurrentCourse()">✏️ Edit Course</button>
+            <div id="courseOverviewContent"></div>
+          </div>
+
+          <!-- Students Tab -->
+          <div class="detail-tab-pane" id="students-pane">
+            <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showAddStudentModal()">+ Add Student</button>
+            <div id="studentsContent"></div>
+          </div>
+
+          <!-- VM Management Tab -->
+          <div class="detail-tab-pane" id="vm-management-pane">
+            <div class="info-box">
+              <p>Provision workstation VMs for your students. Each student gets their own isolated VXLAN lane.</p>
+            </div>
+            <div id="vmManagementContent"></div>
+          </div>
+
+          <!-- Vulnerable Labs Tab -->
+          <div class="detail-tab-pane" id="vulnerable-labs-pane">
+            <div class="info-box">
+              <p>Deploy vulnerable machines for specific learning objectives. Students can only access their assigned labs.</p>
+            </div>
+            <div id="vulnerableLabsContent"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Edit Course Modal -->
+  <div class="modal-overlay" id="editCourseModal">
+    <div class="modal">
+      <h2>Edit Course</h2>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>Course Name</label>
+          <input type="text" id="editCourseName" placeholder="e.g., Cyber Defense Essentials">
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="editCourseDesc" placeholder="Course description and objectives..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Section/Code</label>
+          <input type="text" id="editCourseCode" placeholder="e.g., CD101-01">
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="editCourseStatus">
+            <option value="active">Active</option>
+            <option value="draft">Draft</option>
+            <option value="archived">Archived</option>
+          </select>
+        </div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeModal('editCourseModal')">Cancel</button>
+          <button class="btn btn-primary" onclick="saveEditedCourse()">Save Changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Student Modal -->
+  <div class="modal-overlay" id="addStudentModal">
+    <div class="modal">
+      <h2>Add Student to Course</h2>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>Student Email/Username</label>
+          <input type="text" id="addStudentEmail" placeholder="student@example.com">
+        </div>
+        <div class="form-group">
+          <label>Enrollment Role</label>
+          <select id="addStudentRole">
+            <option value="student">Student</option>
+            <option value="lab_assistant">Lab Assistant</option>
+          </select>
+        </div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeModal('addStudentModal')">Cancel</button>
+          <button class="btn btn-primary" onclick="saveAddedStudent()">Add Student</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Provision VM Modal -->
+  <div class="modal-overlay" id="provisionVMModal">
+    <div class="modal">
+      <h2>Provision Workstation VM</h2>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>VM Template</label>
+          <select id="provisionVMTemplate">
+            <option value="">Loading templates...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Student(s)</label>
+          <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+        </div>
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="provisionCreateLane">
+            Create separate VXLAN lane per student
+          </label>
+        </div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeModal('provisionVMModal')">Cancel</button>
+          <button class="btn btn-primary" onclick="provisionVMs()">Provision VMs</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Deploy Vulnerable Machine Modal -->
+  <div class="modal-overlay" id="deployVulnerableModal">
+    <div class="modal">
+      <h2>Deploy Vulnerable Machine</h2>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>Challenge/Lab Template</label>
+          <select id="deployLabTemplate">
+            <option value="">Loading templates...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Student(s)</label>
+          <div id="deployLabStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+        </div>
+        <div class="form-group">
+          <label>Learning Objective</label>
+          <textarea id="deployLabObjective" placeholder="Describe what students should learn..."></textarea>
+        </div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeModal('deployVulnerableModal')">Cancel</button>
+          <button class="btn btn-primary" onclick="deployVulnerableMachines()">Deploy Labs</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const TOKEN = () => localStorage.getItem('token');
+    const headers = () => ({ 'Authorization': `Bearer ${TOKEN()}`, 'Content-Type': 'application/json' });
+
+    let currentCourseId = null;
+    let currentCourseData = null;
+
+    async function api(method, path, body) {
+      const opts = { method, headers: headers() };
+      if (body) opts.body = JSON.stringify(body);
+      const res = await fetch('/api/cle' + path, opts);
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || res.statusText); }
+      return res.json();
+    }
+
+    function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+    function toast(msg, isError = false) {
+      const t = document.createElement('div');
+      t.className = 'toast' + (isError ? ' error' : '');
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 3000);
+    }
+
+    function showModal(id) { document.getElementById(id).classList.add('active'); }
+    function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+    async function loadCourses() {
+      try {
+        const data = await api('GET', '/courses');
+        const courses = data.courses || [];
+        
+        if (courses.length === 0) {
+          document.getElementById('coursesList').innerHTML = '<div class="empty-state"><p>No courses assigned. Contact your administrator.</p></div>';
+          return;
+        }
+
+        document.getElementById('coursesList').innerHTML = courses.map(c => `
+          <div class="course-card" onclick="viewCourse('${c.course_id}')">
+            <h3>${escHtml(c.course_name)}</h3>
+            <div class="course-meta">
+              <span>📅 ${escHtml(c.code || 'No code')}</span>
+              <span>👥 ${c.student_count || 0} students</span>
+              <span>🖥️ ${c.vm_count || 0} VMs</span>
+            </div>
+            <div style="margin-top: 0.75rem;">
+              <span class="badge ${c.is_active ? 'badge-active' : 'badge-archived'}">
+                ${c.is_active ? 'Active' : 'Archived'}
+              </span>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        document.getElementById('coursesList').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function viewCourse(courseId) {
+      currentCourseId = courseId;
+      try {
+        const data = await api('GET', `/courses/${courseId}`);
+        currentCourseData = data;
+        
+        document.getElementById('coursesGridView').style.display = 'none';
+        document.getElementById('courseDetailView').classList.add('active');
+
+        document.getElementById('detailCourseName').textContent = data.course_name;
+        document.getElementById('detailCourseStatus').textContent = data.is_active ? 'Active' : 'Archived';
+        document.getElementById('detailCourseStatus').className = `badge ${data.is_active ? 'badge-active' : 'badge-archived'}`;
+
+        loadCourseOverview();
+        loadStudents();
+        loadVMManagement();
+        loadVulnerableLabs();
+      } catch (e) {
+        toast('Error loading course: ' + e.message, true);
+      }
+    }
+
+    function backToList() {
+      document.getElementById('courseDetailView').classList.remove('active');
+      document.getElementById('coursesGridView').style.display = 'block';
+      currentCourseId = null;
+    }
+
+    function switchDetailTab(tabName, tabEl) {
+      document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.detail-tab-pane').forEach(p => p.classList.remove('active'));
+      tabEl.classList.add('active');
+      document.getElementById(tabName + '-pane').classList.add('active');
+    }
+
+    async function loadCourseOverview() {
+      const d = currentCourseData;
+      document.getElementById('courseOverviewContent').innerHTML = `
+        <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem;">
+          <h3 style="margin: 0 0 1rem; color: #7c3aed;">Course Information</h3>
+          <p><strong>Code:</strong> ${escHtml(d.code || 'N/A')}</p>
+          <p><strong>Description:</strong> ${escHtml(d.description || 'No description')}</p>
+          <p><strong>Created:</strong> ${d.created_at ? new Date(d.created_at).toLocaleDateString() : 'N/A'}</p>
+          <p><strong>Students Enrolled:</strong> ${d.student_count || 0}</p>
+          <p><strong>Active VMs:</strong> ${d.vm_count || 0}</p>
+        </div>
+      `;
+    }
+
+    async function loadStudents() {
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/students`);
+        const students = data.students || [];
+
+        let html = `<table class="students-table">
+          <thead><tr>
+            <th>Email/Username</th>
+            <th>Name</th>
+            <th>Role</th>
+            <th>Enrolled</th>
+            <th>Actions</th>
+          </tr></thead>
+          <tbody>`;
+
+        students.forEach(s => {
+          html += `<tr>
+            <td><code style="font-size: 0.8rem;">${escHtml(s.email)}</code></td>
+            <td>${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))}</td>
+            <td><span class="badge badge-active">${s.enrollment_role || 'Student'}</span></td>
+            <td>${s.enrolled_at ? new Date(s.enrolled_at).toLocaleDateString() : 'N/A'}</td>
+            <td class="student-actions">
+              <button class="btn btn-sm btn-outline" onclick="openGuacAccess('${escHtml(s.user_id)}')">🔗 RDP</button>
+              <button class="btn btn-sm btn-outline" onclick="removeStudent('${escHtml(s.user_id)}')">❌ Remove</button>
+            </td>
+          </tr>`;
+        });
+
+        html += `</tbody></table>`;
+        document.getElementById('studentsContent').innerHTML = html;
+      } catch (e) {
+        document.getElementById('studentsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function loadVMManagement() {
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/vms`);
+        const vms = data.vms || [];
+
+        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Provision Workstation VMs</button>`;
+
+        if (vms.length === 0) {
+          html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No workstation VMs provisioned yet.</p>';
+        } else {
+          html += `<table class="students-table">
+            <thead><tr>
+              <th>Student</th>
+              <th>VM Name</th>
+              <th>Lane ID</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>`;
+
+          vms.forEach(v => {
+            html += `<tr>
+              <td>${escHtml(v.student_email)}</td>
+              <td>${escHtml(v.vm_name)}</td>
+              <td><code style="font-size: 0.8rem;">${escHtml(v.lane_id)}</code></td>
+              <td><span class="badge ${v.status === 'active' ? 'badge-active' : 'badge-draft'}">${v.status}</span></td>
+              <td><button class="btn btn-sm btn-outline" onclick="deleteVM('${escHtml(v.vm_id)}')">Delete</button></td>
+            </tr>`;
+          });
+
+          html += `</tbody></table>`;
+        }
+
+        document.getElementById('vmManagementContent').innerHTML = html;
+      } catch (e) {
+        document.getElementById('vmManagementContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function loadVulnerableLabs() {
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/labs`);
+        const labs = data.labs || [];
+
+        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Vulnerable Lab</button>`;
+
+        if (labs.length === 0) {
+          html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No vulnerable labs deployed yet.</p>';
+        } else {
+          html += `<table class="students-table">
+            <thead><tr>
+              <th>Lab Name</th>
+              <th>Students</th>
+              <th>Objective</th>
+              <th>Deployed</th>
+              <th>Actions</th>
+            </tr></thead>
+            <tbody>`;
+
+          labs.forEach(l => {
+            html += `<tr>
+              <td>${escHtml(l.lab_name)}</td>
+              <td>${l.student_count || 0}</td>
+              <td style="font-size: 0.8rem;">${escHtml(l.objective ? l.objective.substring(0, 50) + '...' : 'N/A')}</td>
+              <td>${l.created_at ? new Date(l.created_at).toLocaleDateString() : 'N/A'}</td>
+              <td><button class="btn btn-sm btn-outline" onclick="deleteLab('${escHtml(l.lab_id)}')">Remove</button></td>
+            </tr>`;
+          });
+
+          html += `</tbody></table>`;
+        }
+
+        document.getElementById('vulnerableLabsContent').innerHTML = html;
+      } catch (e) {
+        document.getElementById('vulnerableLabsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    // Modal handlers
+    function editCurrentCourse() {
+      document.getElementById('editCourseName').value = currentCourseData.course_name;
+      document.getElementById('editCourseDesc').value = currentCourseData.description || '';
+      document.getElementById('editCourseCode').value = currentCourseData.code || '';
+      document.getElementById('editCourseStatus').value = currentCourseData.is_active ? 'active' : 'archived';
+      showModal('editCourseModal');
+    }
+
+    async function saveEditedCourse() {
+      try {
+        const courseData = {
+          course_name: document.getElementById('editCourseName').value.trim(),
+          description: document.getElementById('editCourseDesc').value.trim(),
+          code: document.getElementById('editCourseCode').value.trim(),
+          is_active: document.getElementById('editCourseStatus').value === 'active'
+        };
+
+        if (!courseData.course_name) {
+          toast('Course name is required', true);
+          return;
+        }
+
+        await api('PATCH', `/courses/${currentCourseId}`, courseData);
+        toast('Course updated successfully');
+        closeModal('editCourseModal');
+        viewCourse(currentCourseId);
+      } catch (e) {
+        toast('Error updating course: ' + e.message, true);
+      }
+    }
+
+    function showAddStudentModal() {
+      document.getElementById('addStudentEmail').value = '';
+      document.getElementById('addStudentRole').value = 'student';
+      showModal('addStudentModal');
+    }
+
+    async function saveAddedStudent() {
+      try {
+        const email = document.getElementById('addStudentEmail').value.trim();
+        if (!email) {
+          toast('Student email is required', true);
+          return;
+        }
+
+        await api('POST', `/courses/${currentCourseId}/students`, {
+          user_email: email,
+          enrollment_role: document.getElementById('addStudentRole').value
+        });
+
+        toast('Student added successfully');
+        closeModal('addStudentModal');
+        loadStudents();
+      } catch (e) {
+        toast('Error adding student: ' + e.message, true);
+      }
+    }
+
+    async function removeStudent(userId) {
+      if (!confirm('Remove this student from the course?')) return;
+      try {
+        await api('DELETE', `/courses/${currentCourseId}/students/${userId}`);
+        toast('Student removed');
+        loadStudents();
+      } catch (e) {
+        toast('Error removing student: ' + e.message, true);
+      }
+    }
+
+    function showProvisionVMModal() {
+      loadVMTemplates();
+      loadModalStudents('provisionVMStudents');
+      showModal('provisionVMModal');
+    }
+
+    async function loadVMTemplates() {
+      try {
+        const data = await api('GET', '/templates/vm');
+        const templates = data.templates || [];
+        const select = document.getElementById('provisionVMTemplate');
+        select.innerHTML = templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
+      } catch (e) {
+        toast('Error loading templates: ' + e.message, true);
+      }
+    }
+
+    async function loadModalStudents(containerId) {
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/students`);
+        const students = data.students || [];
+        const container = document.getElementById(containerId);
+        container.innerHTML = students.map(s => `
+          <label style="display: flex; align-items: center; gap: 0.5rem;">
+            <input type="checkbox" class="modal-student-select" value="${s.user_id}" data-email="${s.email}">
+            ${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})
+          </label>
+        `).join('');
+      } catch (e) {
+        toast('Error loading students: ' + e.message, true);
+      }
+    }
+
+    async function provisionVMs() {
+      try {
+        const templateId = document.getElementById('provisionVMTemplate').value;
+        const selectedStudents = Array.from(document.querySelectorAll('.modal-student-select:checked')).map(c => c.value);
+
+        if (!templateId || selectedStudents.length === 0) {
+          toast('Select template and at least one student', true);
+          return;
+        }
+
+        const createLane = document.getElementById('provisionCreateLane').checked;
+
+        await api('POST', `/courses/${currentCourseId}/provision-vms`, {
+          template_id: templateId,
+          student_ids: selectedStudents,
+          create_separate_lanes: createLane
+        });
+
+        toast('VM provisioning started');
+        closeModal('provisionVMModal');
+        loadVMManagement();
+      } catch (e) {
+        toast('Error provisioning VMs: ' + e.message, true);
+      }
+    }
+
+    function showDeployVulnerableModal() {
+      loadVulnerableTemplates();
+      loadModalStudents('deployLabStudents');
+      showModal('deployVulnerableModal');
+    }
+
+    async function loadVulnerableTemplates() {
+      try {
+        const data = await api('GET', '/templates/vulnerable');
+        const templates = data.templates || [];
+        const select = document.getElementById('deployLabTemplate');
+        select.innerHTML = templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
+      } catch (e) {
+        toast('Error loading templates: ' + e.message, true);
+      }
+    }
+
+    async function deployVulnerableMachines() {
+      try {
+        const templateId = document.getElementById('deployLabTemplate').value;
+        const selectedStudents = Array.from(document.querySelectorAll('.modal-student-select:checked')).map(c => c.value);
+        const objective = document.getElementById('deployLabObjective').value.trim();
+
+        if (!templateId || selectedStudents.length === 0) {
+          toast('Select template and at least one student', true);
+          return;
+        }
+
+        await api('POST', `/courses/${currentCourseId}/deploy-labs`, {
+          template_id: templateId,
+          student_ids: selectedStudents,
+          learning_objective: objective
+        });
+
+        toast('Lab deployment started');
+        closeModal('deployVulnerableModal');
+        loadVulnerableLabs();
+      } catch (e) {
+        toast('Error deploying labs: ' + e.message, true);
+      }
+    }
+
+    async function openGuacAccess(userId) {
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/students/${userId}/guac/token`);
+        // Open RDP session in new window with readonly token
+        window.open(`/guac/?token=${data.guac_token}&readonly=true`, '_blank');
+        toast('Guacamole session opened (read-only)');
+      } catch (e) {
+        toast('Error accessing Guacamole: ' + e.message, true);
+      }
+    }
+
+    async function deleteVM(vmId) {
+      if (!confirm('Delete this VM?')) return;
+      try {
+        await api('DELETE', `/courses/${currentCourseId}/vms/${vmId}`);
+        toast('VM deleted');
+        loadVMManagement();
+      } catch (e) {
+        toast('Error deleting VM: ' + e.message, true);
+      }
+    }
+
+    async function deleteLab(labId) {
+      if (!confirm('Remove this lab deployment?')) return;
+      try {
+        await api('DELETE', `/courses/${currentCourseId}/labs/${labId}`);
+        toast('Lab removed');
+        loadVulnerableLabs();
+      } catch (e) {
+        toast('Error removing lab: ' + e.message, true);
+      }
+    }
+
+    // Initialize on page load
+    document.addEventListener('DOMContentLoaded', async () => {
+      const isLoggedIn = await Auth.requireAuth();
+      if (!isLoggedIn) return;
+      Layout.init('cle');
+      loadCourses();
+    });
+  </script>
+</body>
+</html>

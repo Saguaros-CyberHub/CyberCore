@@ -40,13 +40,13 @@
         <p style="color:var(--text-secondary); margin-bottom:1.5rem;">Manage your class environments, students, and VM access.</p>
 
         <div class="cle-stats" id="statsRow">
-          <div class="stat-card"><div class="val" id="statGroups">-</div><div class="lbl">My Groups</div></div>
-          <div class="stat-card"><div class="val" id="statStudents">-</div><div class="lbl">Students</div></div>
-          <div class="stat-card"><div class="val" id="statLanes">-</div><div class="lbl">Active Lanes</div></div>
+          <div class="stat-card"><div class="val" id="statCourses">-</div><div class="lbl">My Courses</div></div>
+          <div class="stat-card"><div class="val" id="statStudents">-</div><div class="lbl">Total Students</div></div>
+          <div class="stat-card"><div class="val" id="statMaterials">-</div><div class="lbl">Course Materials</div></div>
           <div class="stat-card"><div class="val" id="statSessions">-</div><div class="lbl">Sessions (7d)</div></div>
         </div>
 
-        <h2 style="font-size:1.1rem; font-weight:600; margin-bottom:0.75rem;">My Groups</h2>
+        <h2 style="font-size:1.1rem; font-weight:600; margin-bottom:0.75rem;">My Courses</h2>
         <div id="groupsList"><p style="color:var(--text-secondary);">Loading...</p></div>
       </div>
     </main>
@@ -70,14 +70,20 @@
 
     async function loadDashboard() {
       try {
-        const data = await api('GET', '/students');
-        const groups = data.groups || [];
-        const students = data.students || [];
-        const activeLanes = students.filter(s => s.lane?.status === 'active').length;
+        const coursesData = await api('GET', '/courses');
+        const courses = coursesData.courses || [];
+        let totalStudents = 0;
+        let totalMaterials = 0;
 
-        document.getElementById('statGroups').textContent = groups.length;
-        document.getElementById('statStudents').textContent = students.length;
-        document.getElementById('statLanes').textContent = activeLanes;
+        // Calculate total students and materials
+        for (const course of courses) {
+          totalStudents += course.student_count || 0;
+          totalMaterials += course.material_count || 0;
+        }
+
+        document.getElementById('statCourses').textContent = courses.length;
+        document.getElementById('statStudents').textContent = totalStudents;
+        document.getElementById('statMaterials').textContent = totalMaterials;
 
         // Try session count
         try {
@@ -87,30 +93,25 @@
           document.getElementById('statSessions').textContent = '-';
         }
 
-        if (groups.length === 0) {
-          document.getElementById('groupsList').innerHTML = '<p style="color:var(--text-secondary);">No groups found. Ask an admin to add you as an instructor to a deployed group.</p>';
+        if (courses.length === 0) {
+          document.getElementById('groupsList').innerHTML = '<p style="color:var(--text-secondary);">No courses found. Create your first course to get started.</p>';
           return;
         }
 
-        document.getElementById('groupsList').innerHTML = groups.map(g => {
-          const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
-          const groupStudents = students.filter(s => s.group_id === g.id);
-          const activeCount = groupStudents.filter(s => s.lane?.status === 'active').length;
-          return `
-            <div class="group-card">
-              <h3>${escHtml(g.group_name)}</h3>
-              <div class="group-meta">
-                <span>👥 ${groupStudents.length} students</span>
-                <span>🖥️ ${activeCount} active lanes</span>
-                <span>📅 Created ${new Date(g.created_at).toLocaleDateString()}</span>
-                ${cfg.challenge_key ? `<span>🎯 ${escHtml(cfg.challenge_key)}</span>` : ''}
-              </div>
-              <div class="quick-links">
-                <a href="/cle/students?group=${g.id}">Manage Students</a>
-                <a href="/cle/sessions">Session Log</a>
-              </div>
-            </div>`;
-        }).join('');
+        document.getElementById('groupsList').innerHTML = courses.map(c => `
+          <div class="group-card">
+            <h3>${escHtml(c.course_name)}</h3>
+            <div class="group-meta">
+              <span>📝 ${escHtml(c.code || 'No code')}</span>
+              <span>👥 ${c.student_count || 0} students</span>
+              <span>📚 ${c.material_count || 0} materials</span>
+              <span>📅 Created ${new Date(c.created_at).toLocaleDateString()}</span>
+            </div>
+            <div class="quick-links">
+              <a href="/cle/courses#course=${c.course_id}">View Course</a>
+              <a href="/cle/sessions">Session Log</a>
+            </div>
+          </div>`);
       } catch (e) {
         document.getElementById('groupsList').innerHTML = `<p style="color:#e53e3e;">Error: ${escHtml(e.message)}</p>`;
       }

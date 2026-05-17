@@ -4775,4 +4775,78 @@ router.patch('/settings/modules', authenticateToken, adminOnly, async (req, res)
   }
 });
 
+// ============================================================================
+// USER MANAGEMENT
+// ============================================================================
+
+/**
+ * POST /api/users — Create a new cybercore user
+ * Requires: username, email, password, role
+ * Optional: firstName, lastName, organization
+ */
+router.post('/users', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { username, email, firstName, lastName, organization, role, password } = req.body;
+
+    // Validation
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: 'username, email, and password are required' });
+    }
+
+    if (!['user', 'student', 'instructor', 'admin'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    // Check if user already exists by username
+    const existingUser = await cybercoreQuery(
+      'SELECT user_id FROM cybercore_user WHERE LOWER(username) = LOWER($1)',
+      [username]
+    );
+
+    if (existingUser.rows.length > 0) {
+      return res.status(409).json({ error: 'User with this username already exists' });
+    }
+
+    // Check if email already exists
+    const existingEmail = await cybercoreQuery(
+      'SELECT user_id FROM cybercore_user WHERE LOWER(email) = LOWER($1)',
+      [email]
+    );
+
+    if (existingEmail.rows.length > 0) {
+      return res.status(409).json({ error: 'User with this email already exists' });
+    }
+
+    // Hash password
+    const passwordHash = bcrypt.hashSync(password, 10);
+
+    // Create user
+    const result = await cybercoreQuery(
+      `INSERT INTO cybercore_user
+       (username, email, first_name, last_name, organization, role, password_hash, password_alg, status, active, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'bcrypt', 'active', TRUE, NOW(), NOW())
+       RETURNING user_id, username, email, first_name, last_name, role`,
+      [username, email, firstName || null, lastName || null, organization || 'Independent', role, passwordHash]
+    );
+
+    const newUser = result.rows[0];
+
+    // Log activity
+    logActivity(req, 'user_created', 'cybercore_user', newUser.user_id, {
+      username: newUser.username,
+      email: newUser.email,
+      role: newUser.role
+    });
+
+    res.status(201).json({
+      success: true,
+      user: newUser,
+      message: `User "${username}" created successfully`
+    });
+  } catch (error) {
+    console.error('[Users] Create error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 module.exports = router;

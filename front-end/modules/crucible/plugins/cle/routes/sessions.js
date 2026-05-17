@@ -7,7 +7,7 @@
 const express = require('express');
 const router = express.Router();
 
-const { query } = require('../../../../../src/utils/db');
+const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 
 let guacDbQuery;
@@ -22,16 +22,32 @@ try {
 // ============================================================================
 
 async function getInstructorStudentEmails(userId, userRole) {
-  const result = await query(`SELECT id, config FROM deployed_groups`);
-  const emails = new Set();
+  // Get all courses the instructor teaches
+  const coursesResult = await query(`
+    SELECT course_id FROM cle_course
+    WHERE instructor_id = $1 OR $2 = 'admin'
+  `, [userId, userRole]);
 
-  for (const g of result.rows) {
-    const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
-    if (userRole === 'admin' || (cfg.instructors || []).some(i => i.id === userId)) {
-      (cfg.students || []).forEach(s => { if (s.email) emails.add(s.email); });
-    }
-  }
-  return Array.from(emails);
+  if (coursesResult.rows.length === 0) return [];
+
+  const courseIds = coursesResult.rows.map(r => r.course_id);
+
+  // Get all enrolled students across those courses
+  const enrollmentsResult = await query(`
+    SELECT DISTINCT user_id FROM cle_course_enrollment
+    WHERE course_id = ANY($1) AND status = 'active'
+  `, [courseIds]);
+
+  // Get email addresses for those students
+  const userIds = enrollmentsResult.rows.map(r => r.user_id);
+  if (userIds.length === 0) return [];
+
+  const emailsResult = await cybercoreQuery(`
+    SELECT DISTINCT email FROM cybercore_user
+    WHERE user_id = ANY($1)
+  `, [userIds]);
+
+  return emailsResult.rows.map(r => r.email);
 }
 
 // ============================================================================

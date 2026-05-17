@@ -11,6 +11,7 @@ const PAGES_DIR = path.join(__dirname, '../public/pages');
 
 const pages = {
   '/dashboard': 'dashboard.html',
+  '/courses':   'courses.html',
   '/students':  'students.html',
   '/sessions':  'sessions.html'
 };

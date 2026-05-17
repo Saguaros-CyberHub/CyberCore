@@ -22,15 +22,16 @@
     "staticDir": "public",
     "staticMountPath": "/cle",
     "database": {
-        "name": "cyberhub_cle",
+        "name": "cle_db",
         "migrations": "migrations"
     },
     "subnav": {
         "label": "Cyber Learning Environment",
         "items": [
-            { "label": "Dashboard",   "icon": "\ud83d\udcca", "url": "/cle/dashboard", "page": "dashboard", "roles": ["instructor", "admin"] },
-            { "label": "Students",    "icon": "\ud83d\udc65", "url": "/cle/students",  "page": "students",  "roles": ["instructor", "admin"] },
-            { "label": "Session Log", "icon": "\ud83d\udccb", "url": "/cle/sessions",  "page": "sessions",  "roles": ["instructor", "admin"] }
+            { "label": "Instructor Dashboard", "icon": "\ud83d\udcca", "url": "/cle/dashboard", "page": "dashboard", "roles": ["instructor", "admin"] },
+            { "label": "Courses",             "icon": "\ud83d\udcd1", "url": "/cle/courses",   "page": "courses",   "roles": ["instructor", "admin"] },
+            { "label": "Students",            "icon": "\ud83d\udc65", "url": "/cle/students",  "page": "students",  "roles": ["instructor", "admin"] },
+            { "label": "Session Log",         "icon": "\ud83d\udccb", "url": "/cle/sessions",  "page": "sessions",  "roles": ["instructor", "admin"] }
         ]
     }
 }

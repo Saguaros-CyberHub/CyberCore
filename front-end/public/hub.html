@@ -435,6 +435,24 @@
   <script src="/js/layout.js"></script>
   <script src="/js/hub.js"></script>
   <script>
+    // Auto-close other dropdowns when one is opened
+    document.addEventListener('DOMContentLoaded', function() {
+      const dropdowns = document.querySelectorAll('.dashboard-menu-dropdown');
+      
+      dropdowns.forEach(dropdown => {
+        dropdown.addEventListener('toggle', function(event) {
+          if (this.open) {
+            // Close all other dropdowns
+            dropdowns.forEach(other => {
+              if (other !== this) {
+                other.open = false;
+              }
+            });
+          }
+        });
+      });
+    });
+
     // Dashboard menu tab switching
     function switchDashboardTab(event, page) {
       event.preventDefault();

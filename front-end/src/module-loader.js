@@ -227,9 +227,11 @@ async function provisionDatabase(manifest, moduleOrPluginPath) {
     // Inject pool into the db utility module
     const dbUtilPath = path.join(moduleOrPluginPath, 'utils', 'db.js');
     if (fs.existsSync(dbUtilPath)) {
-      // Clear the require cache to ensure fresh import
-      delete require.cache[require.resolve(dbUtilPath)];
-      
+      // NOTE: Do NOT clear the require cache before requiring db.js
+      // When we require it here and call setPool(), the cache will hold this instance.
+      // When routes are required later and they require db.js, they'll get the same
+      // cached instance with the pool already set. Clearing the cache would cause
+      // routes to get a fresh instance without the pool set.
       const dbUtil = require(dbUtilPath);
       if (typeof dbUtil.setPool === 'function') {
         dbUtil.setPool(dbPool);
