@@ -119,6 +119,14 @@ services:
       # Rate Limiting
       RATE_LIMIT_WINDOW_MS: 900000
       RATE_LIMIT_MAX_REQUESTS: 100
+    # External DNS so api.tailscale.com (and any other public hostnames the
+    # orchestrator hits) resolve. Lab DNS at 100.100.0.1 doesn't recurse to
+    # the public internet, so fetch() throws EAI_AGAIN on Tailscale calls
+    # without an internet-capable resolver in front. Order matters: Docker
+    # tries entries top-to-bottom.
+    dns:
+      - 1.1.1.1
+      - 100.100.0.1
     ports:
       - "0.0.0.0:3000:3000"
     volumes:
