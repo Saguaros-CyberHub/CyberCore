@@ -510,41 +510,88 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   }
   const hostMap = triples.join(',');
 
-  // Invoke the wrapper inside the controller VM via qemu-guest-agent.
+  // Invoke run.sh inside the controller via qemu-guest-agent.
   //
-  // IMPORTANT: The QEMU guest agent buffers ALL stdout/stderr from agent/exec
-  // in memory until guest-exec-status is called. Ansible playbooks produce
-  // megabytes of output and the buffer (typically 64KB) fills, blocking the
-  // playbook on stdio writes. From the orchestrator's perspective, the PID
-  // stays "running" indefinitely while it's actually deadlocked.
+  // Two failure modes in earlier revisions:
+  //   1. QGA buffers stdout/stderr in memory and Ansible's MB of output
+  //      fills the buffer, deadlocking the playbook on stdio writes.
+  //   2. QGA loses track of long-running processes (SIGCHLD/reaping races):
+  //      the process dies but guest-exec-status keeps reporting exited=false
+  //      forever. pollExecStatus then waits the full 2h ceiling.
   //
-  // Fix: wrap run.sh in a bash that redirects all output to a log file inside
-  // the controller. Agent only sees the wrapper bash's (empty) output, so
-  // the buffer stays clear. The log file is available for live tailing via
-  // a separate agent/exec call and for error reporting on failure.
+  // Robust pattern:
+  //   - Detach run.sh from QGA entirely (nohup setsid + background +
+  //     /dev/null fds). QGA's exec returns immediately, and we don't care
+  //     about its tracking after that.
+  //   - run.sh's stdout/stderr → log file. Tail-on-failure for error context.
+  //   - When run.sh exits, write its exit code to a sentinel file.
+  //   - Poll for the sentinel via short-lived guest-exec calls (those work
+  //     reliably; QGA only loses track of LONG-running processes).
   //
   // SCCM + full GOAD can take an hour+; give it 2h headroom.
   const logPath = `/var/log/goad-run-${vxlanId}.log`;
+  const donePath = `/var/log/goad-done-${vxlanId}.txt`;
   const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-  const wrappedCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)} > ${logPath} 2>&1`;
-  const { pid } = await agentExecArgv(bestNode, controllerVmId,
+
+  // Outer detach: nohup ignores SIGHUP, setsid creates new session, &
+  // backgrounds, </dev/null </dev/null 2>&1 close inherited fds so the
+  // wrapper bash QGA started can exit cleanly without dragging children.
+  // Inner sh -c runs the playbook + records exit code atomically.
+  const innerCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)} > ${logPath} 2>&1; echo \\$? > ${donePath}`;
+  const wrappedCmd = `rm -f ${donePath}; nohup setsid sh -c "${innerCmd}" </dev/null >/dev/null 2>&1 &`;
+
+  // Fire-and-forget — we don't care about this PID's status afterward.
+  await agentExecArgv(bestNode, controllerVmId,
     ['/bin/bash', '-c', wrappedCmd],
     proxmoxAPI);
-  const result = await pollExecStatus(bestNode, controllerVmId, pid, 2 * 60 * 60 * 1000);
-  if (!result.exited) throw new Error(`GOAD playbook did not finish within 2h — last log lines at ${logPath} inside controller ${controllerVmId}`);
-  if (result.exitcode !== 0) {
-    // Fetch the tail of the log file for an actionable error message — the
-    // wrapper bash captured no stdout/stderr, so result.stderr is empty.
-    let logTail = '';
-    try {
-      const tailPid = await agentExecArgv(bestNode, controllerVmId,
-        ['/bin/bash', '-c', `tail -100 ${logPath}`], proxmoxAPI);
-      const tailResult = await pollExecStatus(bestNode, controllerVmId, tailPid.pid, 10000);
-      logTail = tailResult.stdout || '';
-    } catch { /* best-effort */ }
-    throw new Error(`GOAD playbook exit ${result.exitcode}\nlog tail:\n${logTail.slice(-2000)}`);
+
+  // Helper: read a file via a fresh short-lived guest-exec.
+  async function readFile(path, timeoutMs = 10000) {
+    const { pid: p } = await agentExecArgv(bestNode, controllerVmId,
+      ['/bin/sh', '-c', `[ -f ${path} ] && cat ${path} || echo __MISSING__`],
+      proxmoxAPI);
+    const r = await pollExecStatus(bestNode, controllerVmId, p, timeoutMs);
+    return (r.stdout || '').trim();
   }
-  return result;
+
+  // Poll the sentinel every 15s until it appears or we hit 2h.
+  const deadlineMs = Date.now() + 2 * 60 * 60 * 1000;
+  let exitcode = null;
+  while (Date.now() < deadlineMs) {
+    await sleep(15000);
+    try {
+      const content = await readFile(donePath);
+      if (content && content !== '__MISSING__') {
+        exitcode = parseInt(content, 10);
+        if (Number.isNaN(exitcode)) {
+          throw new Error(`Unexpected sentinel content in ${donePath}: ${content}`);
+        }
+        break;
+      }
+    } catch {
+      // transient guest-exec failure — keep polling
+    }
+  }
+
+  if (exitcode === null) {
+    throw new Error(`GOAD playbook did not finish within 2h — log at ${logPath} on controller ${controllerVmId}`);
+  }
+
+  if (exitcode !== 0) {
+    let logTail = '';
+    try { logTail = await readFile(`__tail__ ${logPath}`, 10000); } catch {}
+    if (!logTail || logTail === '__MISSING__') {
+      try {
+        const { pid: tp } = await agentExecArgv(bestNode, controllerVmId,
+          ['/bin/sh', '-c', `tail -100 ${logPath}`], proxmoxAPI);
+        const tr = await pollExecStatus(bestNode, controllerVmId, tp, 10000);
+        logTail = tr.stdout || '';
+      } catch {}
+    }
+    throw new Error(`GOAD playbook exit ${exitcode}\nlog tail:\n${logTail.slice(-2000)}`);
+  }
+
+  return { exited: true, exitcode: 0, stdout: '', stderr: '' };
 }
 
 /**
