@@ -110,6 +110,26 @@
       document.getElementById('headerUser').textContent = Auth.getUser()?.email || '';
       Layout.init();
 
+      // Load site config for branding
+      let siteName = 'CyberHub';
+      try {
+        const response = await fetch('/api/site-config');
+        const config = await response.json();
+        siteName = config.site_name || 'CyberHub';
+        
+        // Update favicon if available
+        if (config.site_favicon_url) {
+          const favicon = document.querySelector("link[rel='icon']") || document.createElement('link');
+          favicon.rel = 'icon';
+          favicon.href = config.site_favicon_url;
+          if (!document.querySelector("link[rel='icon']")) {
+            document.head.appendChild(favicon);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load site config:', err);
+      }
+
       // Determine which module from the URL path
       const moduleKey = window.location.pathname.split('/').filter(Boolean)[0];
 
@@ -123,7 +143,7 @@
         });
 
         if (mod) {
-          document.title = `${mod.name} | CyberHub`;
+          document.title = `${mod.name} | ${siteName}`;
           document.getElementById('headerTitle').textContent = mod.name;
           document.getElementById('placeholderIcon').textContent = mod.icon || '';
           document.getElementById('placeholderTitle').textContent = mod.name;

@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Course Builder | Cyber Learning Environment</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .course-builder-container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 1rem;
+    }
+    
+    .page-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .btn {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+    
+    .btn-primary {
+      background: #7c3aed;
+      color: white;
+    }
+    
+    .btn-primary:hover {
+      background: #6d28d9;
+    }
+    
+    .btn-secondary {
+      background: #e2e8f0;
+      color: #4a5568;
+    }
+    
+    .btn-secondary:hover {
+      background: #cbd5e0;
+    }
+    
+    .btn-danger {
+      background: #ef4444;
+      color: white;
+    }
+    
+    .btn-danger:hover {
+      background: #dc2626;
+    }
+    
+    .form-group {
+      margin-bottom: 1rem;
+    }
+    
+    .form-group label {
+      display: block;
+      margin-bottom: 0.5rem;
+      font-weight: 500;
+      color: var(--text-primary);
+    }
+    
+    .form-control {
+      width: 100%;
+      padding: 0.5rem;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      background: var(--bg-input);
+      color: var(--text-primary);
+    }
+    
+    .form-control:focus {
+      outline: none;
+      border-color: #7c3aed;
+    }
+    
+    .form-row {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+    
+    .form-row .form-group {
+      flex: 1;
+    }
+    
+    .course-card {
+      background: var(--card-bg);
+      border-radius: 12px;
+      padding: 1.5rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+      margin-bottom: 1rem;
+      border-left: 4px solid #7c3aed;
+    }
+    
+    .course-card h3 {
+      margin: 0 0 0.5rem;
+      font-size: 1.2rem;
+    }
+    
+    .course-meta {
+      display: flex;
+      gap: 1rem;
+      font-size: 0.875rem;
+      color: var(--text-secondary);
+      margin: 0.75rem 0;
+      flex-wrap: wrap;
+    }
+    
+    .course-meta span {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    
+    .course-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+    
+    .course-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1rem;
+      margin-bottom: 2rem;
+    }
+    
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      z-index: 1000;
+    }
+    
+    .modal-overlay.active {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .modal {
+      background: var(--bg-card);
+      border-radius: 12px;
+      padding: 1.5rem;
+      width: 90%;
+      max-width: 600px;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+    }
+    
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    
+    .modal-header h2 {
+      margin: 0;
+      font-size: 1.25rem;
+    }
+    
+    .modal-form {
+      margin-bottom: 1.5rem;
+    }
+    
+    .modal-buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 0.5rem;
+    }
+    
+    .loading {
+      color: var(--text-secondary);
+      text-align: center;
+      padding: 2rem;
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 2rem;
+      color: var(--text-secondary);
+    }
+    
+    .badge {
+      padding: 0.25rem 0.75rem;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    
+    .badge-active {
+      background: #c6f6d5;
+      color: #276749;
+    }
+    
+    .badge-archived {
+      background: #f0f0f0;
+      color: #6b7280;
+    }
+    
+    .section-title {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin: 1.5rem 0 1rem;
+      color: var(--text-primary);
+    }
+    
+    .instructor-select {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 1rem;
+    }
+    
+    .instructor-select select {
+      flex: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
+          <h2 style="margin:0; font-size:1.1rem;">Course Builder</h2>
+        </div>
+      </header>
+      <div class="page-content course-builder-container">
+        <div class="page-header">
+          <h1>Course Management</h1>
+          <button class="btn btn-primary" onclick="showCreateCourseModal()">+ Create New Course</button>
+        </div>
+        
+        <div id="coursesList">
+          <p class="loading">Loading courses...</p>
+        </div>
+        
+        <!-- Create Course Modal -->
+        <div class="modal-overlay" id="createCourseModal">
+          <div class="modal">
+            <div class="modal-header">
+              <h2>Create New Course</h2>
+            </div>
+            <div class="modal-form">
+              <div class="form-group">
+                <label>Course Name</label>
+                <input type="text" id="createCourseName" class="form-control" placeholder="e.g., Cyber Defense Essentials">
+              </div>
+              <div class="form-group">
+                <label>Description</label>
+                <textarea id="createCourseDesc" class="form-control" placeholder="Course description and objectives..."></textarea>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Course Code</label>
+                  <input type="text" id="createCourseCode" class="form-control" placeholder="e.g., CD101-01">
+                </div>
+                <div class="form-group">
+                  <label>Status</label>
+                  <select id="createCourseStatus" class="form-control">
+                    <option value="true">Active</option>
+                    <option value="false">Inactive</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Instructor</label>
+                <select id="createCourseInstructor" class="form-control">
+                  <option value="">Select an instructor</option>
+                </select>
+              </div>
+            </div>
+            <div class="modal-buttons">
+              <button class="btn btn-secondary" onclick="closeModal('createCourseModal')">Cancel</button>
+              <button class="btn btn-primary" onclick="createCourse()">Create Course</button>
+            </div>
+          </div>
+        </div>
+        
+        <!-- Edit Course Modal -->
+        <div class="modal-overlay" id="editCourseModal">
+          <div class="modal">
+            <div class="modal-header">
+              <h2>Edit Course</h2>
+            </div>
+            <div class="modal-form">
+              <input type="hidden" id="editCourseId">
+              <div class="form-group">
+                <label>Course Name</label>
+                <input type="text" id="editCourseName" class="form-control" placeholder="e.g., Cyber Defense Essentials">
+              </div>
+              <div class="form-group">
+                <label>Description</label>
+                <textarea id="editCourseDesc" class="form-control" placeholder="Course description and objectives..."></textarea>
+              </div>
+              <div class="form-row">
+                <div class="form-group">
+                  <label>Course Code</label>
+                  <input type="text" id="editCourseCode" class="form-control" placeholder="e.g., CD101-01">
+                </div>
+                <div class="form-group">
+                  <label>Status</label>
+                  <select id="editCourseStatus" class="form-control">
+                    <option value="true">Active</option>
+                    <option value="false">Inactive</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Instructor</label>
+                <select id="editCourseInstructor" class="form-control">
+                  <option value="">Select an instructor</option>
+                </select>
+              </div>
+            </div>
+            <div class="modal-buttons">
+              <button class="btn btn-secondary" onclick="closeModal('editCourseModal')">Cancel</button>
+              <button class="btn btn-primary" onclick="updateCourse()">Save Changes</button>
+              <button class="btn btn-danger" onclick="deleteCourse()">Delete Course</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    let currentCourseId = null;
+    let instructors = [];
+
+    // Sidebar toggle function
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebarOverlay');
+      if (sidebar) sidebar.classList.toggle('open');
+      if (overlay) overlay.classList.toggle('open');
+    }
+
+    // API wrapper function for CLE endpoints
+    async function api(method, endpoint, body = null) {
+      const url = `/api/cle${endpoint}`;
+      const options = {
+        method: method,
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      };
+      
+      if (body) {
+        options.body = JSON.stringify(body);
+      }
+      
+      const response = await fetch(url, options);
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error || `API error: ${response.status}`);
+      }
+      
+      return data;
+    }
+
+    // Initialize the page
+    document.addEventListener('DOMContentLoaded', async () => {
+      const isLoggedIn = await Auth.requireAuth();
+      if (!isLoggedIn) return;
+      Layout.init('cle');
+      loadCourses();
+      loadInstructors();
+    });
+
+    async function loadCourses() {
+      try {
+        const data = await api('GET', '/courses');
+        const courses = data.courses || [];
+        
+        if (courses.length === 0) {
+          document.getElementById('coursesList').innerHTML = '<div class="empty-state"><p>No courses found. Create your first course!</p></div>';
+          return;
+        }
+
+        document.getElementById('coursesList').innerHTML = courses.map(course => `
+          <div class="course-card">
+            <h3>${escHtml(course.course_name)}</h3>
+            <div class="course-meta">
+              <span>📅 ${escHtml(course.code || 'No code')}</span>
+              <span>👥 ${course.student_count || 0} students</span>
+              <span>🖥️ ${course.vm_count || 0} VMs</span>
+            </div>
+            <div style="margin-top: 0.75rem;">
+              <span class="badge ${course.is_active ? 'badge-active' : 'badge-archived'}">
+                ${course.is_active ? 'Active' : 'Archived'}
+              </span>
+            </div>
+            <div class="course-actions">
+              <button class="btn btn-secondary" onclick="editCourse('${course.course_id}')">Edit</button>
+              <button class="btn btn-danger" onclick="confirmDelete('${course.course_id}', '${course.course_name}')">Delete</button>
+            </div>
+          </div>
+        `).join('');
+      } catch (e) {
+        document.getElementById('coursesList').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function loadInstructors() {
+      try {
+        const data = await api('GET', '/students/instructors');
+        instructors = data.instructors || [];
+        const select = document.getElementById('createCourseInstructor');
+        select.innerHTML = '<option value="">Select an instructor</option>' + 
+          instructors.map(instructor => 
+            `<option value="${instructor.user_id}">${escHtml(instructor.email)} (${escHtml((instructor.first_name || '') + ' ' + (instructor.last_name || ''))})</option>`
+          ).join('');
+        
+        // Also update the edit modal
+        const editSelect = document.getElementById('editCourseInstructor');
+        editSelect.innerHTML = '<option value="">Select an instructor</option>' + 
+          instructors.map(instructor => 
+            `<option value="${instructor.user_id}">${escHtml(instructor.email)} (${escHtml((instructor.first_name || '') + ' ' + (instructor.last_name || ''))})</option>`
+          ).join('');
+      } catch (e) {
+        console.error('Error loading instructors:', e.message);
+      }
+    }
+
+    function showCreateCourseModal() {
+      document.getElementById('createCourseModal').classList.add('active');
+    }
+
+    function closeModal(modalId) {
+      document.getElementById(modalId).classList.remove('active');
+    }
+
+    async function createCourse() {
+      try {
+        const courseName = document.getElementById('createCourseName').value.trim();
+        const description = document.getElementById('createCourseDesc').value.trim();
+        const code = document.getElementById('createCourseCode').value.trim();
+        const status = document.getElementById('createCourseStatus').value === 'true';
+        const instructorId = document.getElementById('createCourseInstructor').value;
+
+        if (!courseName) {
+          toast('Please enter a course name', true);
+          return;
+        }
+
+        const response = await api('POST', '/courses', {
+          course_name: courseName,
+          description: description,
+          code: code,
+          instructor_id: instructorId,
+          is_active: status
+        });
+
+        toast('Course created successfully!');
+        closeModal('createCourseModal');
+        document.getElementById('createCourseName').value = '';
+        document.getElementById('createCourseDesc').value = '';
+        document.getElementById('createCourseCode').value = '';
+        document.getElementById('createCourseInstructor').value = '';
+        loadCourses();
+      } catch (e) {
+        toast('Error creating course: ' + e.message, true);
+      }
+    }
+
+    function editCourse(courseId) {
+      // Load course details
+      api('GET', `/courses/${courseId}`)
+        .then(data => {
+          document.getElementById('editCourseId').value = courseId;
+          document.getElementById('editCourseName').value = data.course_name || '';
+          document.getElementById('editCourseDesc').value = data.description || '';
+          document.getElementById('editCourseCode').value = data.code || '';
+          document.getElementById('editCourseStatus').value = data.is_active ? 'true' : 'false';
+          document.getElementById('editCourseInstructor').value = data.instructor_id || '';
+          
+          document.getElementById('editCourseModal').classList.add('active');
+        })
+        .catch(e => {
+          toast('Error loading course: ' + e.message, true);
+        });
+    }
+
+    async function updateCourse() {
+      try {
+        const courseId = document.getElementById('editCourseId').value;
+        const courseName = document.getElementById('editCourseName').value.trim();
+        const description = document.getElementById('editCourseDesc').value.trim();
+        const code = document.getElementById('editCourseCode').value.trim();
+        const status = document.getElementById('editCourseStatus').value === 'true';
+        const instructorId = document.getElementById('editCourseInstructor').value;
+
+        if (!courseName) {
+          toast('Please enter a course name', true);
+          return;
+        }
+
+        const response = await api('PATCH', `/courses/${courseId}`, {
+          course_name: courseName,
+          description: description,
+          code: code,
+          instructor_id: instructorId,
+          is_active: status
+        });
+
+        toast('Course updated successfully!');
+        closeModal('editCourseModal');
+        loadCourses();
+      } catch (e) {
+        toast('Error updating course: ' + e.message, true);
+      }
+    }
+
+    async function deleteCourse() {
+      if (!confirm('Are you sure you want to delete this course? This action cannot be undone.')) {
+        return;
+      }
+      
+      try {
+        const courseId = document.getElementById('editCourseId').value;
+        await api('DELETE', `/courses/${courseId}`);
+        toast('Course deleted successfully!');
+        closeModal('editCourseModal');
+        loadCourses();
+      } catch (e) {
+        toast('Error deleting course: ' + e.message, true);
+      }
+    }
+
+    function confirmDelete(courseId, courseName) {
+      if (confirm(`Are you sure you want to delete the course "${courseName}"? This action cannot be undone.`)) {
+        api('DELETE', `/courses/${courseId}`)
+          .then(() => {
+            toast('Course deleted successfully!');
+            loadCourses();
+          })
+          .catch(e => {
+            toast('Error deleting course: ' + e.message, true);
+          });
+      }
+    }
+
+    function escHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function toast(msg, isError = false) {
+      const t = document.createElement('div');
+      t.className = 'toast' + (isError ? ' error' : '');
+      t.textContent = msg;
+      document.body.appendChild(t);
+      setTimeout(() => t.remove(), 3000);
+    }
+  </script>
+</body>
+</html>

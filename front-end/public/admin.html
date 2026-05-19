@@ -658,12 +658,32 @@
             <!-- Website Customization -->
             <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
               <h3 style="margin: 0 0 0.5rem;">Website Customization</h3>
-              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">Customize the displayed name of this CyberHub instance (whitelabeling).</p>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">Customize your CyberHub instance branding (whitelabeling).</p>
+              
               <div class="form-group">
-                <label>Site Display Name</label>
+                <label>Site Display Name *</label>
                 <input type="text" id="settingsSiteName" placeholder="e.g., CyberHub, My Lab, etc." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem;">
-                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">This name appears in the header and page title. Default: "CyberHub"</p>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Appears in headers, page titles, and welcome messages. Default: "CyberHub"</p>
               </div>
+              
+              <div class="form-group">
+                <label>Logo URL</label>
+                <input type="text" id="settingsSiteLogo" placeholder="https://example.com/logo.png" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem;">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Logo image URL (shown in header)</p>
+              </div>
+              
+              <div class="form-group">
+                <label>Favicon URL</label>
+                <input type="text" id="settingsSiteFavicon" placeholder="https://example.com/favicon.ico" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem;">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Favicon URL (shown in browser tabs)</p>
+              </div>
+              
+              <div class="form-group">
+                <label>Site Description</label>
+                <textarea id="settingsSiteDesc" placeholder="Enter site description..." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem; min-height: 80px;"></textarea>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Meta description for search engines</p>
+              </div>
+              
               <button class="btn btn-primary" onclick="saveSiteSettings()" style="width: 100%; margin-top: 1rem;">Save Changes</button>
               <div id="siteSettingsStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
             </div>
@@ -4839,13 +4859,23 @@
       try {
         const data = await api('GET', '/settings');
         const siteName = data.site_name || 'CyberHub';
+        const logoUrl = data.site_logo_url || '';
+        const faviconUrl = data.site_favicon_url || '';
+        const description = data.site_description || '';
         
         // Update everywhere via Layout
         Layout.updateSiteName(siteName + ' Administration');
         
-        // Pre-fill the input field
-        const input = document.getElementById('settingsSiteName');
-        if (input) input.value = siteName;
+        // Pre-fill the input fields
+        const nameInput = document.getElementById('settingsSiteName');
+        const logoInput = document.getElementById('settingsSiteLogo');
+        const faviconInput = document.getElementById('settingsSiteFavicon');
+        const descInput = document.getElementById('settingsSiteDesc');
+        
+        if (nameInput) nameInput.value = siteName;
+        if (logoInput) logoInput.value = logoUrl;
+        if (faviconInput) faviconInput.value = faviconUrl;
+        if (descInput) descInput.value = description;
       } catch (e) {
         console.warn('[Settings] Could not load site settings:', e.message);
       }
@@ -4853,6 +4883,9 @@
 
     async function saveSiteSettings() {
       const siteName = document.getElementById('settingsSiteName').value.trim();
+      const logoUrl = document.getElementById('settingsSiteLogo').value.trim();
+      const faviconUrl = document.getElementById('settingsSiteFavicon').value.trim();
+      const description = document.getElementById('settingsSiteDesc').value.trim();
       const status = document.getElementById('siteSettingsStatus');
 
       if (!siteName) {
@@ -4863,7 +4896,12 @@
       status.innerHTML = '<strong style="color: var(--gray-500);">Saving...</strong>';
 
       try {
-        const data = await api('PATCH', '/settings/site-name', { site_name: siteName });
+        const data = await api('PATCH', '/settings/site-config', { 
+          site_name: siteName,
+          site_logo_url: logoUrl || null,
+          site_favicon_url: faviconUrl || null,
+          site_description: description || null
+        });
         
         // Update everywhere via Layout
         Layout.updateSiteName(siteName + ' Administration');
@@ -4872,7 +4910,7 @@
         document.getElementById('pageTitle').textContent = siteName + ' Administration';
         
         status.innerHTML = `<strong style="color: #38a169;">✓ Saved successfully</strong>`;
-        Toast.success('Settings Saved', `Site name updated to "${siteName}"`);
+        Toast.success('Settings Saved', `Site configured successfully`);
       } catch (e) {
         status.innerHTML = `<strong style="color: #e53e3e;">Error:</strong> ${escHtml(e.message)}`;
         Toast.error('Save Failed', e.message);

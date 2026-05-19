@@ -33,28 +33,121 @@ router.get('/', async (req, res) => {
     const courseIds = coursesResult.rows.map(r => r.course_id);
 
     // Get all students enrolled in those courses
-    const studentsResult = await query(`
+    // Step 1: Get enrollments from cle_db
+    const enrollmentsResult = await query(`
       SELECT DISTINCT
         e.user_id,
         e.course_id,
         e.enrollment_role,
         e.status,
         e.enrolled_at,
-        u.email,
-        u.first_name,
-        u.last_name,
         COUNT(DISTINCT v.assignment_id) AS vm_count
       FROM cle_course_enrollment e
-      JOIN cybercore_user u ON e.user_id = u.user_id
       LEFT JOIN cle_user_vm_assignment v ON e.user_id = v.user_id AND e.course_id = v.course_id
       WHERE e.course_id = ANY($1)
-      GROUP BY e.user_id, e.course_id, e.enrollment_role, e.status, e.enrolled_at, u.email, u.first_name, u.last_name
+      GROUP BY e.user_id, e.course_id, e.enrollment_role, e.status, e.enrolled_at
       ORDER BY e.enrolled_at DESC
     `, [courseIds]);
 
-    res.json({ students: studentsResult.rows });
+    // Step 2: Get user details from cybercore_db
+    const userIds = [...new Set(enrollmentsResult.rows.map(r => r.user_id))];
+    let userMap = {};
+    if (userIds.length > 0) {
+      const usersResult = await cybercoreQuery(`
+        SELECT user_id, email, first_name, last_name
+        FROM cybercore_user
+        WHERE user_id = ANY($1)
+      `, [userIds]);
+      usersResult.rows.forEach(u => {
+        userMap[u.user_id] = u;
+      });
+    }
+
+    // Step 3: Merge user data with enrollments
+    const students = enrollmentsResult.rows.map(e => ({
+      user_id: e.user_id,
+      course_id: e.course_id,
+      email: userMap[e.user_id]?.email || 'unknown',
+      first_name: userMap[e.user_id]?.first_name || '',
+      last_name: userMap[e.user_id]?.last_name || '',
+      enrollment_role: e.enrollment_role,
+      status: e.status,
+      enrolled_at: e.enrolled_at,
+      vm_count: e.vm_count
+    }));
+
+    res.json({ students });
   } catch (error) {
     console.error('[CLE] Get students error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
+// LIST AVAILABLE STUDENTS TO ADD TO COURSE
+// ============================================================================
+
+// GET /available — list all students not yet actively enrolled in a specific course
+router.get('/available/:courseId', async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    
+    // Get all users who are students/lab assistants
+    const allUsersResult = await cybercoreQuery(`
+      SELECT 
+        user_id,
+        email,
+        first_name,
+        last_name,
+        role
+      FROM cybercore_user 
+      WHERE role IN ('student', 'lab_assistant', 'guest')
+      ORDER BY last_name, first_name
+    `);
+
+    // Get users with ACTIVE enrollments in this course
+    // Students with 'dropped', 'deleted', or 'completed' status can be re-added
+    const enrolledResult = await query(`
+      SELECT DISTINCT user_id FROM cle_course_enrollment
+      WHERE course_id = $1 AND status = 'active'
+    `, [courseId]);
+
+    const enrolledIds = new Set(enrolledResult.rows.map(r => r.user_id));
+
+    // Filter out only actively enrolled users
+    const availableStudents = allUsersResult.rows.filter(u => !enrolledIds.has(u.user_id));
+
+    res.json({ students: availableStudents });
+  } catch (error) {
+    console.error('[CLE] Get available students error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
+// LIST ALL INSTRUCTORS (for course builder)
+// ============================================================================
+
+// GET /instructors — list all instructors (admin only)
+router.get('/instructors', async (req, res) => {
+  try {
+    // Get all users with instructor role or admin role
+    const instructorsResult = await cybercoreQuery(`
+      SELECT 
+        user_id,
+        email,
+        first_name,
+        last_name,
+        role,
+        organization
+      FROM cybercore_user 
+      WHERE role IN ('instructor', 'admin')
+      ORDER BY last_name, first_name
+    `);
+
+    res.json({ instructors: instructorsResult.rows });
+  } catch (error) {
+    console.error('[CLE] Get instructors error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

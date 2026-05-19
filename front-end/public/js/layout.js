@@ -84,6 +84,11 @@ const Layout = {
     if (path.includes('admin')) return 'admin';
     if (path.includes('clinic-risk-assessment')) return 'clinic-risk-assessment';
     if (path.includes('intake-form')) return 'intake-form';
+    // CLE pages
+    if (path.includes('courses')) return 'courses';
+    if (path.includes('students')) return 'students';
+    if (path.includes('sessions')) return 'sessions';
+    if (path.includes('builder')) return 'builder';
     return '';
   },
 

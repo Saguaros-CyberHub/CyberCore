@@ -31,25 +31,48 @@ router.get('/', instructorOnly, async (req, res) => {
     }
 
     // Get enrolled students with VM assignments
-    const studentsResult = await query(`
+    // Step 1: Get enrollments and VM counts from cle_db
+    const enrollmentsResult = await query(`
       SELECT
-        u.user_id,
-        u.email,
-        u.first_name,
-        u.last_name,
+        e.user_id,
         e.enrollment_role,
         e.enrolled_at,
         e.status,
         COUNT(DISTINCT v.vm_instance_id) AS vm_count
       FROM cle_course_enrollment e
-      JOIN cybercore_user u ON e.user_id = u.user_id
       LEFT JOIN cle_user_vm_assignment v ON e.user_id = v.user_id AND e.course_id = v.course_id
       WHERE e.course_id = $1 AND e.status = 'active'
-      GROUP BY u.user_id, e.enrollment_role, e.enrolled_at, e.status
+      GROUP BY e.user_id, e.enrollment_role, e.enrolled_at, e.status
       ORDER BY e.enrolled_at DESC
     `, [courseId]);
 
-    res.json({ students: studentsResult.rows });
+    // Step 2: Get user details from cybercore_db for all user_ids
+    const userIds = enrollmentsResult.rows.map(r => r.user_id);
+    let userMap = {};
+    if (userIds.length > 0) {
+      const usersResult = await cybercoreQuery(`
+        SELECT user_id, email, first_name, last_name
+        FROM cybercore_user
+        WHERE user_id = ANY($1)
+      `, [userIds]);
+      usersResult.rows.forEach(u => {
+        userMap[u.user_id] = u;
+      });
+    }
+
+    // Step 3: Merge user data with enrollments
+    const students = enrollmentsResult.rows.map(e => ({
+      user_id: e.user_id,
+      email: userMap[e.user_id]?.email || 'unknown',
+      first_name: userMap[e.user_id]?.first_name || '',
+      last_name: userMap[e.user_id]?.last_name || '',
+      enrollment_role: e.enrollment_role,
+      enrolled_at: e.enrolled_at,
+      status: e.status,
+      vm_count: e.vm_count
+    }));
+
+    res.json({ students });
   } catch (error) {
     console.error('[CLE] Get students error:', error.message);
     res.status(500).json({ error: error.message });

@@ -247,8 +247,41 @@ app.get('/api/auth/test', authenticateToken, (req, res) => {
 // STARTUP — Load modules and plugins, then start listening
 // ============================================================================
 
+/**
+ * Initialize the settings table in clinic_db if it doesn't exist
+ */
+async function initializeSettingsTable() {
+  try {
+    const { query } = require('./utils/db');
+    
+    // Create table if it doesn't exist
+    await query(`
+      CREATE TABLE IF NOT EXISTS settings (
+        key VARCHAR(255) PRIMARY KEY,
+        value TEXT,
+        description TEXT,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+      )
+    `);
+
+    // Insert default settings if they don't exist
+    await query(`
+      INSERT INTO settings (key, value, description) VALUES 
+        ('site_name', 'CyberHub', 'The display name of the CyberHub instance')
+      ON CONFLICT (key) DO NOTHING
+    `);
+
+    console.log('✅ Settings table initialized');
+  } catch (err) {
+    console.warn('⚠️  Could not initialize settings table:', err.message);
+  }
+}
+
 async function start() {
   try {
+    // Initialize settings table in clinic_db if it doesn't exist
+    await initializeSettingsTable();
+    
     // Load modules from modules/ directory (includes nested plugins)
     await moduleLoader.loadAll(app);
   } catch (err) {

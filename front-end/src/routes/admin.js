@@ -4845,16 +4845,23 @@ Write-Host "File assembled: ${dest_path} ($size bytes)"
  */
 router.get('/settings', authenticateToken, adminOnly, async (req, res) => {
   try {
-    // Get site name from clinic_db.settings or default
+    // Get site settings from cybercore_db.cybercore_site_settings or defaults
     let siteName = 'CyberHub';
+    let siteLogoUrl = null;
+    let siteFaviconUrl = null;
+    let siteDescription = null;
+    
     try {
-      const result = await query('SELECT value FROM settings WHERE key = $1', ['site_name']);
-      if (result.rows.length > 0) {
-        siteName = result.rows[0].value;
-      }
+      const result = await cybercoreQuery('SELECT key, value FROM cybercore_site_settings');
+      result.rows.forEach(row => {
+        if (row.key === 'site_name') siteName = row.value;
+        if (row.key === 'site_logo_url') siteLogoUrl = row.value;
+        if (row.key === 'site_favicon_url') siteFaviconUrl = row.value;
+        if (row.key === 'site_description') siteDescription = row.value;
+      });
     } catch (err) {
-      // Table may not exist yet, use default
-      console.warn('[Settings] Could not fetch site_name:', err.message);
+      // Table may not exist yet, use defaults
+      console.warn('[Settings] Could not fetch site settings:', err.message);
     }
 
     // Get module/plugin configuration from cybercore_db.cybercore_module
@@ -4896,63 +4903,107 @@ router.get('/settings', authenticateToken, adminOnly, async (req, res) => {
       console.warn('[Settings] Could not fetch cybercore_module:', err.message);
     }
 
-    res.json({ site_name: siteName, modules });
+    res.json({ site_name: siteName, site_logo_url: siteLogoUrl, site_favicon_url: siteFaviconUrl, site_description: siteDescription, modules });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * PATCH /api/admin/settings/site-name
- * Update the site display name (whitelabeling)
+ * PATCH /api/admin/settings/site-config
+ * Update site branding configuration (name, logo, favicon, description)
  */
-router.patch('/settings/site-name', authenticateToken, adminOnly, async (req, res) => {
+router.patch('/settings/site-config', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { site_name } = req.body;
+    const { site_name, site_logo_url, site_favicon_url, site_description } = req.body;
+
+    // Validate site_name
     if (!site_name || typeof site_name !== 'string' || site_name.trim().length === 0) {
       return res.status(400).json({ error: 'site_name must be a non-empty string' });
     }
 
-    const cleanName = site_name.trim();
-
-    // Try to update existing settings, or insert if not exists
+    // Ensure table exists
     try {
-      const result = await query(
-        'UPDATE settings SET value = $1 WHERE key = $2 RETURNING id',
-        [cleanName, 'site_name']
-      );
-
-      if (result.rows.length === 0) {
-        // No existing row, insert
-        await query(
-          'INSERT INTO settings (key, value) VALUES ($1, $2)',
-          ['site_name', cleanName]
-        );
-      }
+      await cybercoreQuery(`
+        CREATE TABLE IF NOT EXISTS cybercore_site_settings (
+          key VARCHAR(255) PRIMARY KEY,
+          value TEXT NOT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
     } catch (err) {
-      // Table may not exist, try to create and insert
-      if (err.message.includes('does not exist')) {
-        await query(`
-          CREATE TABLE IF NOT EXISTS settings (
-            id SERIAL PRIMARY KEY,
-            key VARCHAR(255) UNIQUE NOT NULL,
-            value TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-          )
-        `);
-        await query(
-          'INSERT INTO settings (key, value) VALUES ($1, $2)',
-          ['site_name', cleanName]
+      console.warn('[Settings] Could not create table:', err.message);
+    }
+
+    // Update all settings
+    const updates = [
+      { key: 'site_name', value: site_name.trim() },
+      { key: 'site_logo_url', value: site_logo_url || null },
+      { key: 'site_favicon_url', value: site_favicon_url || null },
+      { key: 'site_description', value: site_description || null }
+    ];
+
+    for (const setting of updates) {
+      try {
+        // Try to update
+        const result = await cybercoreQuery(
+          'UPDATE cybercore_site_settings SET value = $1, updated_at = NOW() WHERE key = $2 RETURNING key',
+          [setting.value, setting.key]
         );
-      } else {
-        throw err;
+
+        // If no rows updated, insert
+        if (result.rows.length === 0) {
+          await cybercoreQuery(
+            'INSERT INTO cybercore_site_settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()',
+            [setting.key, setting.value]
+          );
+        }
+      } catch (err) {
+        console.warn(`[Settings] Could not update ${setting.key}:`, err.message);
       }
     }
 
-    logActivity(req, 'settings_update', 'site_config', null, { new_value: cleanName });
+    logActivity(req, 'settings_update', 'site_config', null, { site_name, logo_url: site_logo_url, favicon_url: site_favicon_url });
 
-    res.json({ success: true, site_name: cleanName });
+    res.json({ 
+      success: true, 
+      site_name: site_name.trim(),
+      site_logo_url: site_logo_url || null,
+      site_favicon_url: site_favicon_url || null,
+      site_description: site_description || null
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /api/site-config
+ * Public endpoint to get site branding (no auth required)
+ */
+router.get('/site-config', async (req, res) => {
+  try {
+    let siteConfig = {
+      site_name: 'CyberHub',
+      site_logo_url: null,
+      site_favicon_url: null,
+      site_description: null
+    };
+
+    try {
+      const result = await cybercoreQuery('SELECT key, value FROM cybercore_site_settings');
+      result.rows.forEach(row => {
+        if (row.key === 'site_name') siteConfig.site_name = row.value;
+        if (row.key === 'site_logo_url') siteConfig.site_logo_url = row.value;
+        if (row.key === 'site_favicon_url') siteConfig.site_favicon_url = row.value;
+        if (row.key === 'site_description') siteConfig.site_description = row.value;
+      });
+    } catch (err) {
+      console.warn('[Site Config] Could not fetch settings:', err.message);
+    }
+
+    res.json(siteConfig);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -30,6 +30,7 @@ services:
       - ./config/postgres/001_init_db.sql:/docker-entrypoint-initdb.d/001_init_db.sql:ro,z
       - ./config/postgres/002_init_db.sh:/docker-entrypoint-initdb.d/002_init_db.sh:ro,z
       - ./config/postgres/003_cyberhub_modules.sql:/docker-entrypoint-initdb.d/003_cyberhub_modules.sql:ro,z
+      - ./config/postgres/004_site_settings.sql:/docker-entrypoint-initdb.d/004_site_settings.sql:ro,z
       - ./config/postgres/050_apply_modules.sh:/docker-entrypoint-initdb.d/050_apply_modules.sh:ro,z
       - ./config/postgres/modules:/docker-entrypoint-initdb.d/modules:ro,z
     shm_size: 256mb

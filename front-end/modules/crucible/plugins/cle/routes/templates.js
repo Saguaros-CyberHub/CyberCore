@@ -19,14 +19,12 @@ router.get('/vm', instructorOnly, async (req, res) => {
       SELECT
         template_id,
         name,
-        description,
-        os_type,
-        disk_size,
-        memory_mb,
-        cpu_cores,
-        is_active
+        role,
+        default_runtime_min,
+        metadata,
+        active
       FROM cybercore_vm_template
-      WHERE is_active = TRUE
+      WHERE active = TRUE
       ORDER BY name ASC
     `);
 
@@ -42,22 +40,9 @@ router.get('/vm', instructorOnly, async (req, res) => {
  */
 router.get('/vulnerable', instructorOnly, async (req, res) => {
   try {
-    const templatesResult = await cybercoreQuery(`
-      SELECT
-        template_id,
-        name,
-        description,
-        learning_objective,
-        difficulty_level,
-        estimated_duration,
-        tags,
-        is_active
-      FROM cybercore_challenge_template
-      WHERE is_active = TRUE AND category = 'vulnerable'
-      ORDER BY name ASC
-    `);
-
-    res.json({ templates: templatesResult.rows });
+    // For now, return empty list as cybercore_challenge_template table doesn't exist
+    // This will be implemented when the challenge template system is set up
+    res.json({ templates: [] });
   } catch (error) {
     console.error('[CLE] Get vulnerable templates error:', error.message);
     res.status(500).json({ error: error.message });

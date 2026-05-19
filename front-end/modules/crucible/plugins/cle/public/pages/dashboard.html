@@ -77,8 +77,8 @@
 
         // Calculate total students and materials
         for (const course of courses) {
-          totalStudents += course.student_count || 0;
-          totalMaterials += course.material_count || 0;
+          totalStudents += parseInt(course.student_count) || 0;
+          totalMaterials += parseInt(course.material_count) || 0;
         }
 
         document.getElementById('statCourses').textContent = courses.length;
@@ -111,7 +111,7 @@
               <a href="/cle/courses#course=${c.course_id}">View Course</a>
               <a href="/cle/sessions">Session Log</a>
             </div>
-          </div>`);
+          </div>`).join('');
       } catch (e) {
         document.getElementById('groupsList').innerHTML = `<p style="color:#e53e3e;">Error: ${escHtml(e.message)}</p>`;
       }

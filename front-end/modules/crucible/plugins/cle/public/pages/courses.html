@@ -10,7 +10,43 @@
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
   <style>
-    .course-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    /* Two-column layout: courses list + filters */
+    .courses-container { display: flex; gap: 2rem; height: calc(100vh - 200px); }
+    .courses-list-section { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .courses-filter-section { width: 280px; display: flex; flex-direction: column; gap: 1rem; }
+
+    /* Scrollable courses list */
+    .courses-scroll { flex: 1; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 12px; padding: 1rem; background: var(--card-bg, white); }
+    .course-item { 
+      padding: 1rem; 
+      margin-bottom: 0.75rem; 
+      border-left: 4px solid #7c3aed; 
+      background: var(--bg-hover, #f9fafb); 
+      border-radius: 8px; 
+      cursor: pointer; 
+      transition: all 0.2s;
+    }
+    .course-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); transform: translateX(4px); }
+    .course-item.active { background: #ede9fe; border-left-color: #6d28d9; }
+    .course-item h4 { margin: 0 0 0.25rem; font-size: 0.95rem; color: #1f2937; }
+    .course-item-meta { display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--text-secondary); }
+    .course-item-code { font-weight: 500; }
+
+    /* Filter section */
+    .filter-panel { background: var(--card-bg, white); border-radius: 12px; padding: 1.25rem; border: 1px solid #e5e7eb; }
+    .filter-title { font-weight: 600; margin-bottom: 1rem; font-size: 0.9rem; text-transform: uppercase; color: #6b7280; }
+    .search-box { position: relative; margin-bottom: 1rem; }
+    .search-box input { width: 100%; padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
+    .search-box input:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1); }
+    .filter-group { margin-bottom: 1.5rem; }
+    .filter-checkbox { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; cursor: pointer; font-size: 0.9rem; }
+    .filter-checkbox input { cursor: pointer; }
+    .filter-badge { display: inline-block; background: #dbeafe; color: #0c4a6e; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-left: 0.5rem; }
+
+    /* Empty state for scrollable list */
+    .courses-scroll .empty-state { text-align: center; padding: 2rem 1rem; font-size: 0.9rem; }
+
+    .course-grid { display: none; }
     .course-card { background: var(--card-bg, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-left: 4px solid #7c3aed; cursor: pointer; transition: all 0.2s; }
     .course-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.12); transform: translateY(-2px); }
     .course-card h3 { margin: 0 0 0.5rem; font-size: 1.1rem; }
@@ -65,6 +101,18 @@
 
     .loading { color: var(--text-secondary); }
     .empty-state { text-align: center; padding: 2rem; color: var(--text-secondary); }
+
+    /* Responsive Design */
+    @media (max-width: 1024px) {
+      .courses-container { height: calc(100vh - 250px); }
+      .courses-filter-section { width: 240px; }
+    }
+
+    @media (max-width: 768px) {
+      .courses-container { flex-direction: column; gap: 1rem; height: auto; }
+      .courses-filter-section { width: 100%; }
+      .courses-scroll { max-height: 400px; }
+    }
   </style>
 </head>
 <body>
@@ -80,9 +128,55 @@
       <div class="page-content">
         <p style="color:var(--text-secondary); margin-bottom:1.5rem;">View and manage your assigned courses, sections, and student environments.</p>
 
-        <!-- Courses Grid View -->
+        <!-- Courses List + Filters View -->
         <div id="coursesGridView">
-          <div id="coursesList" class="course-grid"><p class="loading">Loading courses...</p></div>
+          <div class="courses-container">
+            <!-- Courses List (Scrollable) -->
+            <div class="courses-list-section">
+              <div class="courses-scroll" id="coursesList">
+                <p class="loading">Loading courses...</p>
+              </div>
+            </div>
+
+            <!-- Filters Panel -->
+            <div class="courses-filter-section">
+              <!-- New Course Button (Admin Only) -->
+              <div id="adminNewCourseBtnPanel" style="display: none;">
+                <button class="btn btn-primary" onclick="showModal('createCourseModal')" style="width: 100%;">+ New Course</button>
+              </div>
+
+              <!-- Search Filter -->
+              <div class="filter-panel">
+                <div class="filter-title">Search</div>
+                <div class="search-box">
+                  <input type="text" id="courseSearchInput" placeholder="Search courses..." onkeyup="applyFilters()">
+                </div>
+              </div>
+
+              <!-- Status Filter -->
+              <div class="filter-panel">
+                <div class="filter-title">Status</div>
+                <div class="filter-group">
+                  <label class="filter-checkbox">
+                    <input type="checkbox" id="filterActive" checked onchange="applyFilters()">
+                    <span>Active <span class="filter-badge" id="activeCount">0</span></span>
+                  </label>
+                  <label class="filter-checkbox">
+                    <input type="checkbox" id="filterInactive" onchange="applyFilters()">
+                    <span>Inactive <span class="filter-badge" id="inactiveCount">0</span></span>
+                  </label>
+                </div>
+              </div>
+
+              <!-- Instructor Filter -->
+              <div class="filter-panel" id="instructorFilterPanel" style="display: none;">
+                <div class="filter-title">Instructor</div>
+                <div class="filter-group" id="instructorFilterGroup">
+                  <!-- Populated by JavaScript -->
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Course Detail View -->
@@ -132,6 +226,44 @@
     </main>
   </div>
 
+  <!-- Create Course Modal -->
+  <div class="modal-overlay" id="createCourseModal">
+    <div class="modal">
+      <h2>Create New Course</h2>
+      <div class="modal-form">
+        <div class="form-group">
+          <label>Course Name *</label>
+          <input type="text" id="createCourseName" placeholder="e.g., Cyber Defense Essentials">
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="createCourseDesc" placeholder="Course description and objectives..."></textarea>
+        </div>
+        <div class="form-group">
+          <label>Section/Code</label>
+          <input type="text" id="createCourseCode" placeholder="e.g., CD101-01">
+        </div>
+        <div class="form-group">
+          <label>Instructor *</label>
+          <select id="createCourseInstructor" required>
+            <option value="">Select an instructor...</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Status</label>
+          <select id="createCourseStatus">
+            <option value="true">Active</option>
+            <option value="false">Draft</option>
+          </select>
+        </div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeModal('createCourseModal')">Cancel</button>
+          <button class="btn btn-primary" onclick="createCourse()">Create Course</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Edit Course Modal -->
   <div class="modal-overlay" id="editCourseModal">
     <div class="modal">
@@ -150,11 +282,16 @@
           <input type="text" id="editCourseCode" placeholder="e.g., CD101-01">
         </div>
         <div class="form-group">
+          <label>Instructor *</label>
+          <select id="editCourseInstructor" required>
+            <option value="">Select an instructor...</option>
+          </select>
+        </div>
+        <div class="form-group">
           <label>Status</label>
           <select id="editCourseStatus">
-            <option value="active">Active</option>
-            <option value="draft">Draft</option>
-            <option value="archived">Archived</option>
+            <option value="true">Active</option>
+            <option value="false">Draft</option>
           </select>
         </div>
         <div class="form-buttons">
@@ -171,8 +308,14 @@
       <h2>Add Student to Course</h2>
       <div class="modal-form">
         <div class="form-group">
-          <label>Student Email/Username</label>
-          <input type="text" id="addStudentEmail" placeholder="student@example.com">
+          <label>Search Students</label>
+          <input type="text" id="studentSearchInput" placeholder="Search by name or email..." onkeyup="filterStudentDropdown()">
+        </div>
+        <div class="form-group">
+          <label>Select Student *</label>
+          <select id="addStudentSelect" required>
+            <option value="">-- Loading students --</option>
+          </select>
         </div>
         <div class="form-group">
           <label>Enrollment Role</label>
@@ -275,34 +418,108 @@
     function showModal(id) { document.getElementById(id).classList.add('active'); }
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
 
+    let allCourses = [];
+    let allInstructors = [];
+
     async function loadCourses() {
       try {
-        const data = await api('GET', '/courses');
-        const courses = data.courses || [];
+        // Show admin button if user is admin
+        if (Auth && Auth.user && Auth.user.role === 'admin') {
+          document.getElementById('adminNewCourseBtnPanel').style.display = 'block';
+          loadInstructors();
+        }
         
-        if (courses.length === 0) {
-          document.getElementById('coursesList').innerHTML = '<div class="empty-state"><p>No courses assigned. Contact your administrator.</p></div>';
-          return;
+        const data = await api('GET', '/courses');
+        allCourses = data.courses || [];
+        
+        // Build instructor filter
+        if (Auth && Auth.user && Auth.user.role === 'admin' && allCourses.length > 0) {
+          const instructorIds = [...new Set(allCourses.map(c => c.instructor_id).filter(Boolean))];
+          if (instructorIds.length > 0) {
+            const filterPanel = document.getElementById('instructorFilterPanel');
+            filterPanel.style.display = 'block';
+            // Filter will be populated with instructor names when available
+          }
         }
 
-        document.getElementById('coursesList').innerHTML = courses.map(c => `
-          <div class="course-card" onclick="viewCourse('${c.course_id}')">
-            <h3>${escHtml(c.course_name)}</h3>
-            <div class="course-meta">
-              <span>📅 ${escHtml(c.code || 'No code')}</span>
-              <span>👥 ${c.student_count || 0} students</span>
-              <span>🖥️ ${c.vm_count || 0} VMs</span>
-            </div>
-            <div style="margin-top: 0.75rem;">
-              <span class="badge ${c.is_active ? 'badge-active' : 'badge-archived'}">
-                ${c.is_active ? 'Active' : 'Archived'}
-              </span>
-            </div>
-          </div>
-        `).join('');
+        // Update filter counts
+        updateFilterCounts();
+        
+        // Render courses
+        renderCoursesList();
       } catch (e) {
         document.getElementById('coursesList').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
+    }
+
+    function updateFilterCounts() {
+      const activeCourses = allCourses.filter(c => c.is_active).length;
+      const inactiveCourses = allCourses.filter(c => !c.is_active).length;
+      document.getElementById('activeCount').textContent = activeCourses;
+      document.getElementById('inactiveCount').textContent = inactiveCourses;
+    }
+
+    function renderCoursesList() {
+      const coursesList = document.getElementById('coursesList');
+      
+      if (allCourses.length === 0) {
+        coursesList.innerHTML = '<div class="empty-state"><p>No courses assigned. Contact your administrator.</p></div>';
+        return;
+      }
+
+      coursesList.innerHTML = allCourses.map(c => `
+        <div class="course-item" onclick="selectCourse('${c.course_id}', this)">
+          <h4>${escHtml(c.course_name)}</h4>
+          <div class="course-item-meta">
+            <span class="course-item-code">${escHtml(c.code || 'No code')}</span>
+            <span>👥 ${c.student_count || 0} | 🖥️ ${c.vm_count || 0}</span>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function selectCourse(courseId, element) {
+      // Remove active class from all items
+      document.querySelectorAll('.course-item').forEach(item => item.classList.remove('active'));
+      // Add active class to clicked item
+      element.classList.add('active');
+      // View the course
+      viewCourse(courseId);
+    }
+
+    function applyFilters() {
+      const searchTerm = document.getElementById('courseSearchInput').value.toLowerCase();
+      const filterActive = document.getElementById('filterActive').checked;
+      const filterInactive = document.getElementById('filterInactive').checked;
+
+      const filtered = allCourses.filter(course => {
+        // Search filter
+        const matchesSearch = !searchTerm || 
+          course.course_name.toLowerCase().includes(searchTerm) ||
+          (course.code && course.code.toLowerCase().includes(searchTerm));
+
+        // Status filter
+        const statusMatches = (course.is_active && filterActive) || (!course.is_active && filterInactive);
+
+        return matchesSearch && statusMatches;
+      });
+
+      // Render filtered courses
+      const coursesList = document.getElementById('coursesList');
+      if (filtered.length === 0) {
+        coursesList.innerHTML = '<div class="empty-state"><p>No courses match your filters.</p></div>';
+        return;
+      }
+
+      coursesList.innerHTML = filtered.map(c => `
+        <div class="course-item" onclick="selectCourse('${c.course_id}', this)">
+          <h4>${escHtml(c.course_name)}</h4>
+          <div class="course-item-meta">
+            <span class="course-item-code">${escHtml(c.code || 'No code')}</span>
+            <span>👥 ${c.student_count || 0} | 🖥️ ${c.vm_count || 0}</span>
+          </div>
+        </div>
+      `).join('');
     }
 
     async function viewCourse(courseId) {
@@ -330,7 +547,15 @@
     function backToList() {
       document.getElementById('courseDetailView').classList.remove('active');
       document.getElementById('coursesGridView').style.display = 'block';
+      document.querySelectorAll('.course-item').forEach(item => item.classList.remove('active'));
       currentCourseId = null;
+    }
+
+    function toggleSidebar() {
+      const sidebar = document.getElementById('sidebar');
+      const overlay = document.getElementById('sidebarOverlay');
+      if (sidebar) sidebar.classList.toggle('open');
+      if (overlay) overlay.classList.toggle('open');
     }
 
     function switchDetailTab(tabName, tabEl) {
@@ -338,6 +563,64 @@
       document.querySelectorAll('.detail-tab-pane').forEach(p => p.classList.remove('active'));
       tabEl.classList.add('active');
       document.getElementById(tabName + '-pane').classList.add('active');
+    }
+
+    async function loadInstructors() {
+      try {
+        const data = await api('GET', '/students/instructors');
+        const instructors = data.instructors || [];
+        const select = document.getElementById('createCourseInstructor');
+        const editSelect = document.getElementById('editCourseInstructor');
+        
+        const html = '<option value="">-- Select an instructor --</option>' + 
+          instructors.map(i => `<option value="${i.user_id}">${escHtml(i.email)}</option>`).join('');
+        
+        if (select) select.innerHTML = html;
+        if (editSelect) editSelect.innerHTML = html;
+        
+        allInstructors = instructors;
+      } catch (e) {
+        console.error('Error loading instructors:', e.message);
+      }
+    }
+
+    async function createCourse() {
+      try {
+        const courseName = document.getElementById('createCourseName').value.trim();
+        const description = document.getElementById('createCourseDesc').value.trim();
+        const code = document.getElementById('createCourseCode').value.trim();
+        const instructorId = document.getElementById('createCourseInstructor').value;
+        const isActive = document.getElementById('createCourseStatus').value === 'true';
+
+        if (!courseName) {
+          toast('Please enter a course name', true);
+          return;
+        }
+
+        if (!instructorId) {
+          toast('Please select an instructor', true);
+          return;
+        }
+
+        await api('POST', '/courses', {
+          course_name: courseName,
+          description: description || null,
+          code: code || null,
+          instructor_id: instructorId,
+          is_active: isActive
+        });
+
+        toast('Course created successfully!');
+        closeModal('createCourseModal');
+        document.getElementById('createCourseName').value = '';
+        document.getElementById('createCourseDesc').value = '';
+        document.getElementById('createCourseCode').value = '';
+        document.getElementById('createCourseInstructor').value = '';
+        document.getElementById('createCourseStatus').value = 'true';
+        loadCourses();
+      } catch (e) {
+        toast('Error creating course: ' + e.message, true);
+      }
     }
 
     async function loadCourseOverview() {
@@ -472,7 +755,8 @@
       document.getElementById('editCourseName').value = currentCourseData.course_name;
       document.getElementById('editCourseDesc').value = currentCourseData.description || '';
       document.getElementById('editCourseCode').value = currentCourseData.code || '';
-      document.getElementById('editCourseStatus').value = currentCourseData.is_active ? 'active' : 'archived';
+      document.getElementById('editCourseInstructor').value = currentCourseData.instructor_id || '';
+      document.getElementById('editCourseStatus').value = currentCourseData.is_active ? 'true' : 'false';
       showModal('editCourseModal');
     }
 
@@ -480,13 +764,19 @@
       try {
         const courseData = {
           course_name: document.getElementById('editCourseName').value.trim(),
-          description: document.getElementById('editCourseDesc').value.trim(),
-          code: document.getElementById('editCourseCode').value.trim(),
-          is_active: document.getElementById('editCourseStatus').value === 'active'
+          description: document.getElementById('editCourseDesc').value.trim() || null,
+          code: document.getElementById('editCourseCode').value.trim() || null,
+          instructor_id: document.getElementById('editCourseInstructor').value,
+          is_active: document.getElementById('editCourseStatus').value === 'true'
         };
 
         if (!courseData.course_name) {
           toast('Course name is required', true);
+          return;
+        }
+
+        if (!courseData.instructor_id) {
+          toast('Please select an instructor', true);
           return;
         }
 
@@ -500,21 +790,69 @@
     }
 
     function showAddStudentModal() {
-      document.getElementById('addStudentEmail').value = '';
+      document.getElementById('studentSearchInput').value = '';
+      document.getElementById('addStudentSelect').value = '';
       document.getElementById('addStudentRole').value = 'student';
+      loadAvailableStudents();
       showModal('addStudentModal');
+    }
+
+    let allAvailableStudents = [];
+
+    async function loadAvailableStudents() {
+      try {
+        const data = await api('GET', `/students/available/${currentCourseId}`);
+        allAvailableStudents = data.students || [];
+        
+        const select = document.getElementById('addStudentSelect');
+        if (allAvailableStudents.length === 0) {
+          select.innerHTML = '<option value="">-- No available students --</option>';
+          return;
+        }
+
+        select.innerHTML = '<option value="">-- Select a student --</option>' + 
+          allAvailableStudents.map(s => `<option value="${s.user_id}">${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})</option>`).join('');
+      } catch (e) {
+        console.error('Error loading available students:', e.message);
+        document.getElementById('addStudentSelect').innerHTML = '<option value="">Error loading students</option>';
+      }
+    }
+
+    function filterStudentDropdown() {
+      const searchTerm = document.getElementById('studentSearchInput').value.toLowerCase();
+      const select = document.getElementById('addStudentSelect');
+      
+      const filtered = allAvailableStudents.filter(s => {
+        const fullName = ((s.first_name || '') + ' ' + (s.last_name || '')).toLowerCase();
+        const email = (s.email || '').toLowerCase();
+        return searchTerm === '' || email.includes(searchTerm) || fullName.includes(searchTerm);
+      });
+
+      if (filtered.length === 0) {
+        select.innerHTML = '<option value="">-- No matching students --</option>';
+        return;
+      }
+
+      select.innerHTML = '<option value="">-- Select a student --</option>' + 
+        filtered.map(s => `<option value="${s.user_id}">${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})</option>`).join('');
     }
 
     async function saveAddedStudent() {
       try {
-        const email = document.getElementById('addStudentEmail').value.trim();
-        if (!email) {
-          toast('Student email is required', true);
+        const userId = document.getElementById('addStudentSelect').value;
+        if (!userId) {
+          toast('Please select a student', true);
+          return;
+        }
+
+        const selectedStudent = allAvailableStudents.find(s => s.user_id === userId);
+        if (!selectedStudent) {
+          toast('Invalid student selection', true);
           return;
         }
 
         await api('POST', `/courses/${currentCourseId}/students`, {
-          user_email: email,
+          user_email: selectedStudent.email,
           enrollment_role: document.getElementById('addStudentRole').value
         });
 

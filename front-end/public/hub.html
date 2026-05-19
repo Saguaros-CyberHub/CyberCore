@@ -435,8 +435,46 @@
   <script src="/js/layout.js"></script>
   <script src="/js/hub.js"></script>
   <script>
+    // Load site configuration and update UI
+    async function loadSiteConfig() {
+      try {
+        const response = await fetch('/api/site-config');
+        const config = await response.json();
+        
+        // Update header title
+        const headerTitle = document.querySelector('.header-title');
+        if (headerTitle) {
+          headerTitle.textContent = config.site_name || 'CyberHub';
+        }
+        
+        // Update page title
+        document.title = config.site_name || 'CyberHub';
+        
+        // Update welcome title
+        const welcomeTitle = document.getElementById('welcomeTitle');
+        if (welcomeTitle) {
+          welcomeTitle.textContent = `Welcome to ${config.site_name || 'CyberHub'}`;
+        }
+        
+        // Update favicon if available
+        if (config.site_favicon_url) {
+          const favicon = document.querySelector("link[rel='icon']") || document.createElement('link');
+          favicon.rel = 'icon';
+          favicon.href = config.site_favicon_url;
+          if (!document.querySelector("link[rel='icon']")) {
+            document.head.appendChild(favicon);
+          }
+        }
+      } catch (err) {
+        console.warn('Could not load site configuration:', err);
+      }
+    }
+
     // Auto-close other dropdowns when one is opened
     document.addEventListener('DOMContentLoaded', function() {
+      // Load site config first
+      loadSiteConfig();
+
       const dropdowns = document.querySelectorAll('.dashboard-menu-dropdown');
       
       dropdowns.forEach(dropdown => {
