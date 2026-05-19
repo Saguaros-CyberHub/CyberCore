@@ -511,15 +511,38 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   const hostMap = triples.join(',');
 
   // Invoke the wrapper inside the controller VM via qemu-guest-agent.
+  //
+  // IMPORTANT: The QEMU guest agent buffers ALL stdout/stderr from agent/exec
+  // in memory until guest-exec-status is called. Ansible playbooks produce
+  // megabytes of output and the buffer (typically 64KB) fills, blocking the
+  // playbook on stdio writes. From the orchestrator's perspective, the PID
+  // stays "running" indefinitely while it's actually deadlocked.
+  //
+  // Fix: wrap run.sh in a bash that redirects all output to a log file inside
+  // the controller. Agent only sees the wrapper bash's (empty) output, so
+  // the buffer stays clear. The log file is available for live tailing via
+  // a separate agent/exec call and for error reporting on failure.
+  //
   // SCCM + full GOAD can take an hour+; give it 2h headroom.
-  // Use argv-form so spaces/special chars in HOST_MAP/password don't break.
+  const logPath = `/var/log/goad-run-${vxlanId}.log`;
+  const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+  const wrappedCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)} > ${logPath} 2>&1`;
   const { pid } = await agentExecArgv(bestNode, controllerVmId,
-    ['/opt/goad-light/run.sh', labName, hostMap, initialUser, initialPass],
+    ['/bin/bash', '-c', wrappedCmd],
     proxmoxAPI);
   const result = await pollExecStatus(bestNode, controllerVmId, pid, 2 * 60 * 60 * 1000);
-  if (!result.exited) throw new Error('GOAD playbook did not finish within 2h');
+  if (!result.exited) throw new Error(`GOAD playbook did not finish within 2h — last log lines at ${logPath} inside controller ${controllerVmId}`);
   if (result.exitcode !== 0) {
-    throw new Error(`GOAD playbook exit ${result.exitcode}\nstderr: ${result.stderr}\nstdout tail: ${result.stdout.slice(-2000)}`);
+    // Fetch the tail of the log file for an actionable error message — the
+    // wrapper bash captured no stdout/stderr, so result.stderr is empty.
+    let logTail = '';
+    try {
+      const tailPid = await agentExecArgv(bestNode, controllerVmId,
+        ['/bin/bash', '-c', `tail -100 ${logPath}`], proxmoxAPI);
+      const tailResult = await pollExecStatus(bestNode, controllerVmId, tailPid.pid, 10000);
+      logTail = tailResult.stdout || '';
+    } catch { /* best-effort */ }
+    throw new Error(`GOAD playbook exit ${result.exitcode}\nlog tail:\n${logTail.slice(-2000)}`);
   }
   return result;
 }
