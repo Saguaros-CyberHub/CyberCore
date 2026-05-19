@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign In | Clinic-in-a-Box</title>
+  <title>Sign In | CyberHub</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/auth.css">
@@ -13,8 +13,8 @@
     <div class="auth-card">
       <div class="auth-header">
         <div class="auth-logo">🏥</div>
-        <h1>Clinic-in-a-Box</h1>
-        <p>Cyber Risk Assessment Training Platform</p>
+        <h1 id="siteName">CyberHub</h1>
+        <p id="siteDescription">Cyber Risk Assessment Training Platform</p>
       </div>
       
       <div class="auth-body">
@@ -47,7 +47,36 @@
 
   <script src="/js/app.js"></script>
   <script>
+    // Load site configuration (branding)
+    async function loadSiteConfig() {
+      try {
+        const response = await fetch('/api/site-config');
+        if (response.ok) {
+          const config = await response.json();
+          if (config.site_name) {
+            document.getElementById('siteName').textContent = config.site_name;
+            document.title = `Sign In | ${config.site_name}`;
+          }
+          if (config.site_description) {
+            document.getElementById('siteDescription').textContent = config.site_description;
+          }
+          if (config.site_favicon_url) {
+            const link = document.querySelector("link[rel='icon']") || document.createElement('link');
+            link.rel = 'icon';
+            link.href = config.site_favicon_url;
+            if (!document.querySelector("link[rel='icon']")) {
+              document.head.appendChild(link);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Login] Could not load site config:', e.message);
+      }
+    }
+
     document.addEventListener('DOMContentLoaded', () => {
+      loadSiteConfig();
+      
       const form = document.getElementById('loginForm');
       const submitBtn = document.getElementById('submitBtn');
       const errorAlert = document.getElementById('errorAlert');
