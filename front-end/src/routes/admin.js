@@ -19,6 +19,7 @@ const { selectBestNode } = require('../utils/node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../utils/batch-deployer');
 const goadDeploy = require('../utils/goad-deploy');
 const tailscale = require('../utils/tailscale');
+const attachedModules = require('../utils/attached-modules');
 
 const adminOnly = requireRole('admin');
 
@@ -659,6 +660,80 @@ async function waitForTask(node, upid, timeoutMs = 120000) {
   throw new Error('Proxmox task timed out');
 }
 
+/**
+ * Forcefully destroy a Proxmox VM or LXC: removes protection, unlocks,
+ * stops, then deletes with purge. Tries `knownNode` first; if not provided,
+ * iterates all cluster nodes (handles ghost configs from failed clones).
+ *
+ * Returns true on successful destroy, false if the VMID couldn't be
+ * destroyed on any node (typically because it's already gone).
+ *
+ * Used by:
+ *   - DELETE /api/admin/lanes/:id      (whole-lane teardown)
+ *   - DELETE /api/admin/lanes/:id/modules/:miid (per-module detach)
+ *   - reconcile destroy-vm endpoint
+ */
+async function forceDestroyVM(vmid, type, knownNode) {
+  const nodes = knownNode ? [knownNode] : [];
+  if (nodes.length === 0) {
+    try {
+      const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+      for (const n of nodeList) nodes.push(n.node);
+    } catch (e) {
+      nodes.push('cyberhub-node-5'); // fallback
+    }
+  }
+
+  for (const node of nodes) {
+    try {
+      // Step 1: Remove protection (PUT for both qemu and lxc)
+      try {
+        await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { protection: 0 });
+        console.log(`[Teardown] Removed protection from ${type} ${vmid} on ${node}`);
+      } catch (_) {}
+
+      // Step 2: Unlock if locked
+      try {
+        await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { lock: '' });
+      } catch (_) {}
+
+      // Step 3: Stop (LXC does not accept `timeout` parameter — use empty body for LXC)
+      try {
+        const stopBody = type === 'qemu' ? { timeout: 0 } : {};
+        await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`, stopBody);
+        await new Promise(r => setTimeout(r, 4000));
+      } catch (_) {}
+
+      // Step 4: Destroy — QEMU and LXC have different DELETE params:
+      //   QEMU accepts purge + skiplock (rejects force with 400 error)
+      //   LXC accepts purge + force (rejects skiplock on newer versions)
+      const primaryUrl = type === 'lxc'
+        ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+        : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
+      try {
+        await proxmoxAPI('DELETE', primaryUrl);
+      } catch (deleteErr) {
+        console.log(`[Teardown] Retry destroy ${type} ${vmid} with minimal params...`);
+        const fallback = type === 'lxc'
+          ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
+          : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
+        await proxmoxAPI('DELETE', fallback);
+      }
+
+      console.log(`[Teardown] Destroyed ${type} ${vmid} on ${node}`);
+      return true;
+    } catch (e) {
+      if (/unable to find configuration file/i.test(e.message)) {
+        console.log(`[Teardown] ${type} ${vmid} not on ${node} (no config file) — checking next node`);
+        continue;
+      }
+      console.log(`[Teardown] ${type} ${vmid} not destroyable on ${node}: ${e.message}`);
+      continue;
+    }
+  }
+  return false;
+}
+
 
 // ============================================================================
 // CLUSTER HEALTH & DEPLOYMENT GUARDS
@@ -1071,7 +1146,12 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           node: bestNode,
           challenge_key: challenge_key,
           module,
-          vms: deployedVMs
+          vms: deployedVMs,
+          // Persisted so attach-module knows the subnet without re-deriving
+          // (the original challenge spec may change post-deploy).
+          subnet_scheme: subnetScheme,
+          lane_subnet_base: laneSubnetBase,
+          vnet: vnet.vnet
         });
         await cybercoreQuery(
           `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
@@ -1182,6 +1262,21 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
     const goadControllerVmId = 200000 + vxlanId;
     vmIdsToDestroy.push({ vmid: goadControllerVmId, type: 'qemu', label: 'goad-controller' });
 
+    // Attached-module VMs (if any) — destroyed along with the rest of the lane.
+    // Per-module DHCP files don't need explicit cleanup here since the whole
+    // gateway LXC is going away.
+    if (Array.isArray(laneConfig.attached_modules)) {
+      for (const mod of laneConfig.attached_modules) {
+        for (const vm of (mod.vms || [])) {
+          vmIdsToDestroy.push({
+            vmid: vm.vm_id,
+            type: vm.type || 'qemu',
+            label: `attached:${mod.challenge_key}:${vm.name}`
+          });
+        }
+      }
+    }
+
     const errors = [];
 
     // Find which node(s) the VMs are on
@@ -1198,72 +1293,7 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
       errors.push(`Could not query cluster resources: ${e.message}`);
     }
 
-    // Helper: forcefully destroy a VM/LXC — removes protection, stops, purges
-    async function forceDestroyVM(vmid, type, knownNode) {
-      // type: 'qemu' or 'lxc'
-      const nodes = knownNode ? [knownNode] : [];
-      // If not found in resources, try all nodes (handles ghost configs from failed clones)
-      if (nodes.length === 0) {
-        try {
-          const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
-          for (const n of nodeList) nodes.push(n.node);
-        } catch (e) {
-          nodes.push('cyberhub-node-5'); // fallback
-        }
-      }
-
-      for (const node of nodes) {
-        try {
-          // Step 1: Remove protection (PUT for both qemu and lxc)
-          try {
-            await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { protection: 0 });
-            console.log(`[Teardown] Removed protection from ${type} ${vmid} on ${node}`);
-          } catch (_) {}
-
-          // Step 2: Unlock if locked
-          try {
-            await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { lock: '' });
-          } catch (_) {}
-
-          // Step 3: Stop (LXC does not accept `timeout` parameter — use empty body for LXC)
-          try {
-            const stopBody = type === 'qemu' ? { timeout: 0 } : {};
-            await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`, stopBody);
-            await new Promise(r => setTimeout(r, 4000));
-          } catch (_) {}
-
-          // Step 4: Destroy — QEMU and LXC have different DELETE params:
-          //   QEMU accepts purge + skiplock (rejects force with 400 error)
-          //   LXC accepts purge + force (rejects skiplock on newer versions)
-          const primaryUrl = type === 'lxc'
-            ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
-            : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
-          try {
-            await proxmoxAPI('DELETE', primaryUrl);
-          } catch (deleteErr) {
-            console.log(`[Teardown] Retry destroy ${type} ${vmid} with minimal params...`);
-            const fallback = type === 'lxc'
-              ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
-              : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
-            await proxmoxAPI('DELETE', fallback);
-          }
-
-          console.log(`[Teardown] Destroyed ${type} ${vmid} on ${node}`);
-          return true;
-        } catch (e) {
-          // Not an error if the config is already gone on this node — try the next one
-          if (/unable to find configuration file/i.test(e.message)) {
-            console.log(`[Teardown] ${type} ${vmid} not on ${node} (no config file) — checking next node`);
-            continue;
-          }
-          console.log(`[Teardown] ${type} ${vmid} not destroyable on ${node}: ${e.message}`);
-          continue;
-        }
-      }
-      return false;
-    }
-
-    // Destroy all VMs in the lane (multi-VM aware)
+    // Destroy all VMs in the lane (multi-VM aware) — forceDestroyVM is module-scope.
     for (const vm of vmIdsToDestroy) {
       const destroyed = await forceDestroyVM(vm.vmid, vm.type, vmNodes[vm.vmid]);
       if (!destroyed && vmNodes[vm.vmid]) {
@@ -1289,6 +1319,241 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
       success: true,
       lane_id: lane.lane_id,
       vxlan_id: vxlanId,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
+// ATTACHED MODULES — graft additional VMs onto an already-running lane
+// ============================================================================
+// Used for week-of-course content delivery: GOAD stays up as the persistent
+// base, and the instructor attaches/detaches single-purpose VMs (DVWA,
+// Juice Shop, etc.) as the curriculum moves through topics.
+//
+// Storage: attached modules live in cybercore_lane.config.attached_modules
+// (JSONB array). No schema migration — config is JSONB already.
+//
+// VMID range: 800000-899999 (see attached-modules.js for encoding).
+
+// GET /api/admin/lanes/:laneId/modules — list attached modules on a lane
+router.get('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, name, status, config FROM cybercore_lane WHERE lane_id = $1`,
+      [req.params.laneId]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+    const lane = result.rows[0];
+    const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+    res.json({
+      lane_id: lane.lane_id,
+      attached_modules: Array.isArray(cfg.attached_modules) ? cfg.attached_modules : []
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/lanes/:laneId/modules — attach a module's VMs to a lane
+//
+// Body: { challenge_key, module }
+//   - challenge_key: row in <module>_challenge with spec.attachable === true
+//   - module:        which <module>_challenge table to look in (e.g. 'crucible')
+//
+// Responds 202 immediately and runs the clone+start in the background. Poll
+// GET /api/admin/lanes/:laneId/modules to watch for the new entry.
+router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, res) => {
+  const { challenge_key, module } = req.body || {};
+  if (!challenge_key || !module) {
+    return res.status(400).json({ error: 'challenge_key and module required' });
+  }
+
+  try {
+    // 1. Verify lane exists and is active.
+    const laneResult = await cybercoreQuery(
+      `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key
+       FROM cybercore_lane WHERE lane_id = $1`,
+      [req.params.laneId]
+    );
+    if (laneResult.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+    const lane = laneResult.rows[0];
+    if (lane.status !== 'active') {
+      return res.status(409).json({ error: `Lane is not active (status=${lane.status})` });
+    }
+    const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+
+    // 2. Verify module is installed (same gate as deploy-lane).
+    const modResult = await cybercoreQuery(
+      `SELECT EXISTS (SELECT 1 FROM cybercore_module WHERE key = $1) AS is_installed`,
+      [module]
+    );
+    if (!modResult.rows[0].is_installed) {
+      return res.status(400).json({ error: `Module '${module}' is not installed` });
+    }
+
+    // 3. Look up the challenge spec, enforce attachable flag.
+    const challengeResult = await cybercoreQuery(
+      `SELECT challenge_id, challenge_key, name, spec, subnet_scheme
+       FROM ${module}_challenge
+       WHERE challenge_key = $1 AND status = 'active'`,
+      [challenge_key]
+    );
+    if (challengeResult.rows.length === 0) {
+      return res.status(404).json({ error: `Challenge '${challenge_key}' not found or not active` });
+    }
+    const challenge = challengeResult.rows[0];
+    const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec;
+    if (!spec || spec.attachable !== true) {
+      return res.status(400).json({ error: `Challenge '${challenge_key}' is not attachable (spec.attachable must be true)` });
+    }
+
+    // 4. Resolve lane networking — base subnet + VNet name come from the
+    //    LANE's subnet_scheme, not the attached module's. Attached VMs sit on
+    //    the same VXLAN as the base lane.
+    const laneSubnetScheme = laneConfig.subnet_scheme
+      || (laneConfig.lane_subnet_base?.startsWith('10.') ? 'v2' : 'v1');
+    const laneModule = lane.module_key || laneConfig.module || module;
+    const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id);
+    const laneSubnetBase = net.lan.base3;
+    const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+    const vnet = vnets.find(v => v.tag === lane.vxlan_id);
+    if (!vnet) {
+      return res.status(503).json({ error: `No VNet found with tag ${lane.vxlan_id} in Proxmox SDN` });
+    }
+
+    // 5. Resolve gateway VMID + node from the lane config.
+    const gatewayVmId = laneConfig.gateway_vm_id || (100000 + lane.vxlan_id);
+    const bestNode = laneConfig.node;
+    const templateNode = spec.template_node || 'cyberhub-node-5';
+    if (!bestNode) {
+      return res.status(500).json({ error: 'Lane config missing node — cannot place attached VMs' });
+    }
+
+    // Respond immediately. Background task does the actual cloning.
+    res.status(202).json({
+      success: true,
+      lane_id: lane.lane_id,
+      challenge_key,
+      status: 'attaching',
+      message: 'Attach started. Poll GET /api/admin/lanes/:laneId/modules to watch for completion.'
+    });
+
+    logActivity(req, 'attach_module', 'lane', lane.lane_id, { challenge_key, module });
+
+    // ---- Background attach ----
+    (async () => {
+      try {
+        const instance = await attachedModules.attachModuleToLane({
+          lane, laneConfig, challenge, spec, module: laneModule,
+          laneSubnetBase, vnetName: vnet.vnet, bestNode, templateNode, gatewayVmId,
+          proxmoxAPI, waitForTask
+        });
+
+        // Persist the new instance into cybercore_lane.config.attached_modules.
+        // Re-read the lane row inside this txn to avoid clobbering a concurrent
+        // edit (e.g. another attach landing at the same time).
+        await cybercoreQuery('BEGIN');
+        try {
+          const cur = await cybercoreQuery(
+            `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
+            [lane.lane_id]
+          );
+          const curCfg = typeof cur.rows[0].config === 'string'
+            ? JSON.parse(cur.rows[0].config || '{}')
+            : (cur.rows[0].config || {});
+          const list = Array.isArray(curCfg.attached_modules) ? curCfg.attached_modules : [];
+          list.push(instance);
+          curCfg.attached_modules = list;
+          await cybercoreQuery(
+            `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+            [lane.lane_id, JSON.stringify(curCfg)]
+          );
+          await cybercoreQuery('COMMIT');
+        } catch (txErr) {
+          await cybercoreQuery('ROLLBACK').catch(() => {});
+          throw txErr;
+        }
+        console.log(`[Attach] Module ${challenge_key} attached to lane ${lane.lane_id} as ${instance.module_instance_id}`);
+      } catch (err) {
+        console.error(`[Attach] Failed to attach ${challenge_key} to lane ${lane.lane_id}: ${err.message}`);
+      }
+    })();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/admin/lanes/:laneId/modules/:moduleInstanceId — detach a module
+//
+// Stops + destroys the VMs in that module instance, removes its DHCP file,
+// and updates cybercore_lane.config to drop the entry. Other attached
+// modules and the base lane are untouched.
+router.delete('/lanes/:laneId/modules/:moduleInstanceId', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { laneId, moduleInstanceId } = req.params;
+    const laneResult = await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, name, status, config FROM cybercore_lane WHERE lane_id = $1`,
+      [laneId]
+    );
+    if (laneResult.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+    const lane = laneResult.rows[0];
+    const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+    const list = Array.isArray(laneConfig.attached_modules) ? laneConfig.attached_modules : [];
+    const instance = list.find(m => m.module_instance_id === moduleInstanceId);
+    if (!instance) return res.status(404).json({ error: 'Attached module instance not found on this lane' });
+
+    const gatewayVmId = laneConfig.gateway_vm_id || (100000 + lane.vxlan_id);
+    const bestNode = laneConfig.node || (instance.vms?.[0]?.node);
+    if (!bestNode) {
+      return res.status(500).json({ error: 'Lane config missing node — cannot destroy attached VMs' });
+    }
+
+    const { destroyed, errors } = await attachedModules.detachModuleFromLane({
+      moduleInstance: instance,
+      bestNode,
+      gatewayVmId,
+      proxmoxAPI,
+      forceDestroyVM
+    });
+
+    // Persist the removal of this instance from config.attached_modules.
+    await cybercoreQuery('BEGIN');
+    try {
+      const cur = await cybercoreQuery(
+        `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
+        [laneId]
+      );
+      const curCfg = typeof cur.rows[0].config === 'string'
+        ? JSON.parse(cur.rows[0].config || '{}')
+        : (cur.rows[0].config || {});
+      curCfg.attached_modules = (curCfg.attached_modules || [])
+        .filter(m => m.module_instance_id !== moduleInstanceId);
+      await cybercoreQuery(
+        `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+        [laneId, JSON.stringify(curCfg)]
+      );
+      await cybercoreQuery('COMMIT');
+    } catch (txErr) {
+      await cybercoreQuery('ROLLBACK').catch(() => {});
+      throw txErr;
+    }
+
+    logActivity(req, 'detach_module', 'lane', laneId, {
+      module_instance_id: moduleInstanceId,
+      challenge_key: instance.challenge_key,
+      destroyed_count: destroyed.length,
+      error_count: errors.length
+    });
+
+    res.json({
+      success: true,
+      lane_id: laneId,
+      module_instance_id: moduleInstanceId,
+      challenge_key: instance.challenge_key,
+      destroyed,
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
@@ -1390,6 +1655,16 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
       if (cfg.attack_box_vm_id) vmIds.push(cfg.attack_box_vm_id);
       else if (cfg.attack_box) vmIds.push(700000 + vxlan);
 
+      // Attached-module VMs (cfg.attached_modules[].vms[].vm_id) — these are
+      // grafted onto the lane at runtime via /api/admin/lanes/:id/modules.
+      if (Array.isArray(cfg.attached_modules)) {
+        for (const mod of cfg.attached_modules) {
+          for (const vm of (mod.vms || [])) {
+            if (vm.vm_id) vmIds.push(vm.vm_id);
+          }
+        }
+      }
+
       vmIds.forEach(id => {
         dbExpectedVmIds.add(id);
         laneVmMap[id] = { lane_id: lane.lane_id, name: lane.name, vxlan_id: vxlan, status: lane.status };
@@ -1439,8 +1714,12 @@ router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
     // 7. Build set of VM IDs that match CyberHub ID ranges on Proxmox
     const CYBERHUB_RANGES = [
       { min: 100000, max: 199999, role: 'gateway' },
+      { min: 200000, max: 299999, role: 'goad_controller' },
       { min: 600000, max: 699999, role: 'challenge' },
-      { min: 700000, max: 799999, role: 'attack_box' }
+      { min: 700000, max: 799999, role: 'attack_box' },
+      { min: attachedModules.ATTACHED_VMID_BASE,
+        max: attachedModules.ATTACHED_VMID_BASE + (attachedModules.ATTACHED_MAX_SLOTS * attachedModules.ATTACHED_VMID_STEP) - 1,
+        role: 'attached_module' }
     ];
     const pxCyberhubVMs = pxVMs.filter(vm =>
       CYBERHUB_RANGES.some(r => vm.vmid >= r.min && vm.vmid <= r.max)
@@ -1852,9 +2131,15 @@ router.get('/challenges/:module', authenticateToken, adminOnly, async (req, res)
     }
     
     const result = await cybercoreQuery(
-      `SELECT challenge_id, challenge_key, name, difficulty, status FROM ${tableName} WHERE status = 'active' ORDER BY name`
+      `SELECT challenge_id, challenge_key, name, difficulty, status, spec FROM ${tableName} WHERE status = 'active' ORDER BY name`
     );
-    res.json(result.rows);
+    // Surface a top-level `attachable` boolean so the admin UI can filter
+    // without parsing the JSONB spec client-side every row.
+    const rows = result.rows.map(r => {
+      const spec = typeof r.spec === 'string' ? (() => { try { return JSON.parse(r.spec || '{}'); } catch { return {}; } })() : (r.spec || {});
+      return { ...r, spec, attachable: spec.attachable === true };
+    });
+    res.json(rows);
   } catch (error) {
     // If table doesn't exist or other error, return empty array instead of 500
     res.json([]);

@@ -1835,6 +1835,7 @@
                         <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" onclick="showRunScriptModal('${l.lane_id}', '${escHtml(l.name || '')}')">Run Script</button>
                         <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #805ad5; border-color: #805ad5;" onclick="showGenerateChallengeProfileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Generate Profile</button>
                         <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #d69e2e; border-color: #d69e2e;" onclick="showPushFileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Push File</button>
+                        <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #319795; border-color: #319795;" onclick="showModulesModal('${l.lane_id}', '${escHtml(l.name || '')}')">Modules${Array.isArray(cfg.attached_modules) && cfg.attached_modules.length > 0 ? ` (${cfg.attached_modules.length})` : ''}</button>
                       ` : ''}
                       ${l.status !== 'deleted' ? `<button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" data-lane-id="${l.lane_id}" data-lane-name="${escHtml(l.name || '')}" onclick="deleteLane(this.dataset.laneId, this.dataset.laneName)">Delete</button>` : '—'}
                     </td>
@@ -2605,6 +2606,183 @@
         status.innerHTML = `<strong style="color: #e53e3e;">Error:</strong> ${escHtml(e.message)}`;
         Toast.error('Failed', e.message);
       }
+    }
+
+    // ============================================================================
+    // ATTACHED MODULES — graft / remove single-purpose VMs on a running lane
+    // ============================================================================
+    // Reuses #permissionsModal as the modal container (same pattern as
+    // Push File / Run Script). The modal shows currently attached modules
+    // with per-module Detach buttons + a dropdown of attachable challenges
+    // with an Attach button.
+
+    async function showModulesModal(laneId, laneName) {
+      const body = document.getElementById('permissionsBody');
+      document.getElementById('permUsername').textContent = `Modules — ${laneName}`;
+      const mc = document.querySelector('#permissionsModal .modal-content');
+      mc.style.maxWidth = '720px';
+      document.getElementById('permissionsModal').classList.add('active');
+
+      body.innerHTML = `
+        <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+          Graft an additional VM onto this lane (e.g., DVWA, Juice Shop) without redeploying.
+          Attached VMs sit on the same VXLAN so the Kali attack box can reach them at the lane subnet.
+        </p>
+        <div id="modulesAttachedSection" style="margin-bottom: 1.5rem;">
+          <h4 style="margin: 0 0 0.5rem 0; color: var(--gray-700); font-size: 0.95rem;">Currently attached</h4>
+          <div id="modulesAttachedList" style="color: var(--gray-500); font-size: 0.85rem;">Loading...</div>
+        </div>
+        <div>
+          <h4 style="margin: 0 0 0.5rem 0; color: var(--gray-700); font-size: 0.95rem;">Attach a new module</h4>
+          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.5rem; align-items: end;">
+            <div class="form-group" style="margin: 0;">
+              <label style="font-size: 0.8rem;">Challenge (attachable only)</label>
+              <select id="moduleAttachSelect" style="width: 100%;">
+                <option value="">Loading...</option>
+              </select>
+            </div>
+            <button id="moduleAttachBtn" class="btn btn-primary" style="height: fit-content;" onclick="attachModule('${laneId}', '${escHtml(laneName)}')">Attach</button>
+          </div>
+          <div id="moduleAttachStatus" style="margin-top: 0.5rem; font-size: 0.85rem;"></div>
+        </div>`;
+
+      await loadModulesIntoModal(laneId);
+    }
+
+    /**
+     * Refresh the modal body with current state:
+     *   - Attached list from GET /lanes/:id/modules
+     *   - Attachable challenges from GET /challenges/crucible (filtered by attachable flag)
+     */
+    async function loadModulesIntoModal(laneId) {
+      const attachedDiv = document.getElementById('modulesAttachedList');
+      const select = document.getElementById('moduleAttachSelect');
+
+      // 1. Attached modules on this lane
+      try {
+        const data = await api('GET', `/lanes/${laneId}/modules`);
+        const attached = Array.isArray(data.attached_modules) ? data.attached_modules : [];
+        if (attached.length === 0) {
+          attachedDiv.innerHTML = '<em style="color: var(--gray-400);">No modules attached.</em>';
+        } else {
+          attachedDiv.innerHTML = `
+            <table style="width: 100%; font-size: 0.85rem; border-collapse: collapse;">
+              <thead>
+                <tr style="border-bottom: 1px solid var(--gray-200);">
+                  <th style="text-align: left; padding: 0.4rem 0.5rem;">Challenge</th>
+                  <th style="text-align: left; padding: 0.4rem 0.5rem;">VMs</th>
+                  <th style="text-align: left; padding: 0.4rem 0.5rem;">Attached</th>
+                  <th style="text-align: right; padding: 0.4rem 0.5rem;">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${attached.map(m => {
+                  const vms = (m.vms || []).map(v => `${escHtml(v.name)}@${escHtml(v.ip || '?')}`).join(', ');
+                  const when = m.attached_at ? new Date(m.attached_at).toLocaleString() : '—';
+                  return `
+                    <tr style="border-bottom: 1px solid var(--gray-100);">
+                      <td style="padding: 0.4rem 0.5rem;"><strong>${escHtml(m.challenge_key)}</strong></td>
+                      <td style="padding: 0.4rem 0.5rem; font-family: monospace; font-size: 0.75rem;">${vms || '—'}</td>
+                      <td style="padding: 0.4rem 0.5rem; color: var(--gray-500); font-size: 0.75rem;">${escHtml(when)}</td>
+                      <td style="padding: 0.4rem 0.5rem; text-align: right;">
+                        <button class="btn btn-sm" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;"
+                          onclick="detachModule('${laneId}', '${escHtml(m.module_instance_id)}', '${escHtml(m.challenge_key)}')">
+                          Detach
+                        </button>
+                      </td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table>`;
+        }
+      } catch (e) {
+        attachedDiv.innerHTML = `<span style="color: #e53e3e;">Error loading attached modules: ${escHtml(e.message)}</span>`;
+      }
+
+      // 2. Attachable challenges. We probe the crucible module (where attachable
+      //    challenges currently live); the endpoint returns an empty array if
+      //    the table doesn't exist or no challenges qualify.
+      try {
+        const challenges = await api('GET', '/challenges/crucible');
+        const attachable = (challenges || []).filter(c => c.attachable === true);
+        if (attachable.length === 0) {
+          select.innerHTML = '<option value="">No attachable challenges found</option>';
+          document.getElementById('moduleAttachBtn').disabled = true;
+        } else {
+          select.innerHTML = attachable
+            .map(c => `<option value="${escHtml(c.challenge_key)}">${escHtml(c.name)} (${escHtml(c.challenge_key)})</option>`)
+            .join('');
+          document.getElementById('moduleAttachBtn').disabled = false;
+        }
+      } catch (e) {
+        select.innerHTML = `<option value="">Error: ${escHtml(e.message)}</option>`;
+        document.getElementById('moduleAttachBtn').disabled = true;
+      }
+    }
+
+    async function attachModule(laneId, laneName) {
+      const select = document.getElementById('moduleAttachSelect');
+      const status = document.getElementById('moduleAttachStatus');
+      const challenge_key = select.value;
+      if (!challenge_key) {
+        Toast.warning('Pick a challenge', 'Select an attachable challenge first.');
+        return;
+      }
+      status.innerHTML = '<strong style="color: var(--gray-500);">Attaching... (clone runs in background, takes 30–60s)</strong>';
+      try {
+        const data = await api('POST', `/lanes/${laneId}/modules`, { challenge_key, module: 'crucible' });
+        Toast.success('Attach Started', `${challenge_key} attaching to lane ${laneName}`);
+        status.innerHTML = `<strong style="color: #38a169;">${escHtml(data.message || 'Attach started')}</strong>`;
+        // Poll for completion — the new entry appears in attached_modules once
+        // the background task finishes the clone + DHCP write.
+        pollModulesUntilSettled(laneId, challenge_key);
+      } catch (e) {
+        status.innerHTML = `<strong style="color: #e53e3e;">Attach failed:</strong> ${escHtml(e.message)}`;
+        Toast.error('Attach Failed', e.message);
+      }
+    }
+
+    async function detachModule(laneId, moduleInstanceId, challengeKey) {
+      if (!confirm(`Detach module "${challengeKey}" from this lane?\n\nThe attached VMs will be STOPPED and DESTROYED. The rest of the lane is untouched.`)) return;
+      try {
+        const data = await api('DELETE', `/lanes/${laneId}/modules/${moduleInstanceId}`);
+        Toast.success('Detached', `${challengeKey} removed (${(data.destroyed || []).length} VM(s) destroyed)`);
+        if (data.errors) {
+          console.warn('Detach partial errors:', data.errors);
+          Toast.warning('Partial Errors', `${data.errors.length} non-critical cleanup error(s)`);
+        }
+        await loadModulesIntoModal(laneId);
+        loadLanes();
+      } catch (e) {
+        Toast.error('Detach Failed', e.message);
+      }
+    }
+
+    /**
+     * Poll GET /lanes/:id/modules until either the named challenge_key shows
+     * up in attached_modules (success) or we exceed the budget (timeout).
+     * Refreshes the modal on each tick so the user sees progress.
+     */
+    async function pollModulesUntilSettled(laneId, challengeKey) {
+      const deadline = Date.now() + 5 * 60 * 1000; // 5 min ceiling
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+          const data = await api('GET', `/lanes/${laneId}/modules`);
+          const found = (data.attached_modules || []).some(m => m.challenge_key === challengeKey);
+          // Refresh modal if it's still open (user may have closed it).
+          if (document.getElementById('permissionsModal').classList.contains('active') &&
+              document.getElementById('modulesAttachedList')) {
+            await loadModulesIntoModal(laneId);
+          }
+          if (found) {
+            Toast.success('Attach Complete', `${challengeKey} is now reachable on the lane subnet`);
+            loadLanes();
+            return;
+          }
+        } catch (_) { /* keep polling on transient errors */ }
+      }
+      Toast.warning('Attach Slow', `${challengeKey} still not visible after 5 min — check server logs`);
     }
 
     async function showGenerateChallengeProfileModal(laneId, laneName) {

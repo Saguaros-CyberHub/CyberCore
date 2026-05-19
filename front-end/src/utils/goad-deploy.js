@@ -161,29 +161,39 @@ const INFRA_IP_OCTETS = {
 // `qemu/<vmid>/config` after clone with these values so the lane VMs end up
 // correctly sized regardless of template state. Memory in MiB.
 //
-// Sizing rationale (validated against observed pressure, 2026-05-04):
-//   - DC under promotion (Install-ADDSDomain + child-domain replication)
-//     spikes to ~5.5 GiB on Server 2019. At 4 GiB the guest hit 101% and
-//     paged hard. 8 GiB cap leaves comfortable headroom for the worst
-//     5 minutes of dcpromo; balloon=4 GiB lets the host reclaim down to a
-//     normal idle DC working set (~2.5–3 GiB) once the lane stabilizes.
-//   - Member server runs SQL Express + IIS + WebDAV + WinRM. SQL install
-//     loads ~3 GiB of bootstrapper + 2 GiB DB engine concurrently with IIS
-//     install, peaking around 6.5 GiB. 10 GiB cap gives setup.exe room to
-//     actually run; balloon=6 GiB matches the active-SQL idle working set.
-//   - Workstations and DRACARYS Linux are light; 4 GiB / 2 cores is fine.
+// Sizing rationale (revised 2026-05-19 — Tier 2 / generous):
+//   GOAD's playbook is serialized at the stage level (DC1 → DC2 → member →
+//   workstation), so wall-clock deploy time is dominated by the slowest VM
+//   in each stage. The single largest task is the SQL Express install on
+//   the member server (~8–12 min). Beyond a point, throwing more resources
+//   at the DCs is wasted heat — dcpromo's database initialization is
+//   fundamentally serial. The member absorbs more.
 //
-// With Proxmox balloon driver (on by default for Windows VMs), the cap is
-// the per-VM peak budget; the host only physically commits up to balloon
-// when the guest is idle. So per-lane peak ~26 GiB, idle steady-state ~13.
+//   - DC: 12 GiB / 6 cores. dcpromo peaks ~5.5 GiB; 12 GiB gives generous
+//     headroom + Windows file cache room. 6 cores buys ~10–15% over 4 on
+//     the parallel role install steps; past 6 returns are flat.
+//   - Member: 24 GiB / 10 cores. SQL Server Express install + IIS + WinRM
+//     in parallel. SQL setup.exe spawns concurrent installer threads and
+//     benefits materially from 10 cores; SQL buffer pool happily takes
+//     12+ GiB during database create. balloon=14336 lets host reclaim
+//     ~10 GiB once SQL stabilizes at idle.
+//   - Workstation + DRACARYS Linux: 8 GiB / 6 cores. Light workload but
+//     6 cores keeps domain join + GPO apply from queuing behind other
+//     WinRM sessions on the same node.
+//
+// With Proxmox balloon driver (on for Windows VMs), `memory` is the per-VM
+// peak budget; the host only physically commits up to `balloon` once the
+// guest goes idle. So per-lane GOAD-Light (2 DC + 1 member):
+//   Peak: 2*12 + 1*24 = 48 GiB
+//   Idle: 2*6  + 1*14 = 26 GiB
 //
 // Override per-VM by setting `memory`, `balloon`, or `cores` directly on the
 // vms[] entry — these defaults are applied only when the VM entry is silent.
 const ROLE_RESOURCES = {
-  dc:          { memory: 8192,  balloon: 4096, cores: 2 },
-  member:      { memory: 10240, balloon: 6144, cores: 4 },
-  workstation: { memory: 4096,  balloon: 2048, cores: 2 },
-  linux:       { memory: 4096,  balloon: 2048, cores: 2 }
+  dc:          { memory: 12288, balloon: 6144,  cores: 6  },
+  member:      { memory: 24576, balloon: 14336, cores: 10 },
+  workstation: { memory: 8192,  balloon: 4096,  cores: 6  },
+  linux:       { memory: 8192,  balloon: 4096,  cores: 6  }
 };
 
 /**
@@ -413,8 +423,15 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
  * From inside the controller, TCP-poll port 5985 on each Windows VM until
  * they all answer (WinRM is up). Returns the IPs that responded; throws if
  * timeoutMs elapses before all are ready.
+ *
+ * Default 30 min: the Windows VMs go through Windows boot + cloud-init style
+ * first-boot config + WinRM startup. With Tier 2 sizing (more cores/memory =
+ * more first-boot device enumeration), the worst case observed is ~15 min;
+ * 30 min gives comfortable headroom without pushing the per-lane deploy
+ * envelope. Raise the cap if you regularly see "WinRM did not come up"
+ * errors despite the lane being healthy after teardown.
  */
-async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeoutMs = 600000 }) {
+async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeoutMs = 1800000 }) {
   const deadline = Date.now() + timeoutMs;
   const pending = new Set(vmIPs);
   const ready = [];

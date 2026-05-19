@@ -32,7 +32,7 @@ STORAGE=${STORAGE:-vmpool}                          # where the VM disk + cloudi
 SNIPPET_STORAGE="${SNIPPET_STORAGE:-}"              # auto-detected if empty
 BAKE_BRIDGE="${BAKE_BRIDGE:-vmbr0}"
 BAKE_VLAN="${BAKE_VLAN:-20}"                        # bake-time VLAN for internet (set empty to disable)
-BAKE_DNS="${BAKE_DNS:-100.100.0.1}"                 # OPNsense Unbound; falls back to 1.1.1.1 inside the VM
+BAKE_DNS="${BAKE_DNS:-100.100.0.1}"                 # OPNsense Unbound — the lab firewall blocks outbound :53 to public resolvers from the bake-time VLAN, so this is the only DNS that works during bake. The value is cleared from the template before seal (truncate /etc/resolv.conf + qm set --delete nameserver), so clones never inherit it.
 MEMORY=${MEMORY:-4096}
 CORES=${CORES:-2}
 DISK_GB=${DISK_GB:-32}
@@ -155,10 +155,17 @@ mkdir -p "$(dirname "$USERDATA_PATH")"
 # We pre-build the full shell command so the heredoc below can embed it as a
 # single string — avoids the trap where ${VAR:+...} expands to empty inside
 # the YAML and produces invalid `sh -c ' || true'` for the minimal toolset.
+# DPKG_CONF: pass these on every apt invocation that runs from runcmd —
+# without them dpkg prompts on conffile conflicts (e.g., /etc/xrdp/startwm.sh
+# from write_files), reads EOF from closed stdin, and the install errors
+# out leaving the package half-configured. cloud-init's packages: does
+# this for us automatically; runcmd does not.
+DPKG_CONF='-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold'
+
 case "$KALI_TOOLSET" in
   minimal) TOOLSET_RUNCMD='echo "minimal toolset: skipping metapackage install"' ;;
-  default) TOOLSET_RUNCMD='DEBIAN_FRONTEND=noninteractive apt-get install -y kali-linux-default || true' ;;
-  large)   TOOLSET_RUNCMD='DEBIAN_FRONTEND=noninteractive apt-get install -y kali-linux-large || true' ;;
+  default) TOOLSET_RUNCMD="DEBIAN_FRONTEND=noninteractive apt-get install -y $DPKG_CONF kali-linux-default || true" ;;
+  large)   TOOLSET_RUNCMD="DEBIAN_FRONTEND=noninteractive apt-get install -y $DPKG_CONF kali-linux-large || true" ;;
   *)       echo "ERROR: KALI_TOOLSET must be minimal|default|large (got: $KALI_TOOLSET)" >&2; exit 1 ;;
 esac
 
@@ -168,12 +175,13 @@ hostname: $NAME
 manage_etc_hosts: true
 
 # IMPORTANT: do NOT set manage_resolv_conf / resolv_conf here. Those persist
-# DNS state to disk so every clone inherits bake-time DNS (100.100.0.1, only
-# reachable from the bake-time VLAN). Lane clones need DHCP-provided DNS
-# from the lane gateway's dnsmasq. Use bootcmd (transient) only, then nuke
-# /etc/resolv.conf in runcmd before sealing so DHCP fills it on clone boot.
+# DNS state to disk so every clone inherits the bake-time DNS server, which
+# is only reachable from the bake-time VLAN. Lane clones need DHCP-provided
+# DNS from the lane gateway's dnsmasq. Use bootcmd (transient) only, then
+# nuke /etc/resolv.conf in runcmd before sealing so DHCP fills it on clone
+# boot.
 bootcmd:
-  - [ sh, -c, 'rm -f /etc/resolv.conf; printf "nameserver $BAKE_DNS\nnameserver 1.1.1.1\n" > /etc/resolv.conf; exit 0' ]
+  - [ sh, -c, 'rm -f /etc/resolv.conf; printf "nameserver $BAKE_DNS\n" > /etc/resolv.conf; exit 0' ]
 
 users:
   - name: $TEMPLATE_USER
@@ -196,6 +204,14 @@ timezone: America/Phoenix
 
 package_update: true
 package_upgrade: false
+# cloud-init's packages: invokes apt with --force-confdef + --force-confold,
+# which auto-resolves conffile conflicts (keeps the version write_files
+# wrote). Don't try to "harden" this with an extra apt-get install in
+# runcmd — that runs without those flags and dpkg will prompt forever on
+# /etc/xrdp/startwm.sh, leaving xrdp half-configured and not listening.
+# Keep package names current with Kali rolling: policykit-1 → polkitd,
+# dnsutils → bind9-dnsutils (transitional packages can disappear at any
+# weekly snapshot).
 packages:
   - qemu-guest-agent
   - openssh-server
@@ -204,13 +220,18 @@ packages:
   - xorgxrdp
   - libjpeg62-turbo
   - dbus-x11
-  - policykit-1
+  - polkitd
   - sudo
   - curl
   - wget
   - vim
   - net-tools
-  - dnsutils
+  - bind9-dnsutils
+  # resolvconf wires dhclient → /etc/resolv.conf (option 6 from DHCP, plus
+  # the dns-nameservers field cloud-init writes into /etc/network/interfaces).
+  # Without it, /etc/resolv.conf stays empty on lane clones even though IP
+  # and routing work.
+  - resolvconf
   - ca-certificates
 
 write_files:
@@ -257,6 +278,10 @@ write_files:
 runcmd:
   # Install the Kali toolset metapackage (separate from cloud-init 'packages:'
   # so the failure mode is isolated; toolset install can take 20+ minutes).
+  # Pass --force-confdef + --force-confold so dpkg auto-resolves conffile
+  # conflicts the same way cloud-init's packages: step does — keeps any
+  # files write_files wrote (e.g., /etc/xrdp/startwm.sh) and skips the
+  # interactive prompt that would otherwise hang the install.
   - [ sh, -c, '$TOOLSET_RUNCMD' ]
 
   # Disable the graphical display manager — templates are headless on the
@@ -295,11 +320,24 @@ runcmd:
   # /var/lib/cloud/instances/<iid>/bake-complete which gets wiped.
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 
-  # Empty /etc/resolv.conf so the template doesn't ship with bake-time DNS
-  # baked in. DHCP on the lane (gateway dnsmasq @ 192.18.0.1) repopulates it
-  # on first boot of each clone. If you don't do this, every clone inherits
-  # 100.100.0.1 which is unreachable from inside the lane VXLAN.
-  - [ sh, -c, 'truncate -s 0 /etc/resolv.conf' ]
+  # Reset /etc/resolv.conf to its proper symlink form so the template
+  # doesn't ship with bake-time DNS baked in. resolvconf's postinst sets
+  # /etc/resolv.conf as a symlink to /run/resolvconf/resolv.conf — but
+  # bootcmd's `printf "nameserver $BAKE_DNS\n" > /etc/resolv.conf` followed
+  # by anything that opens that path with O_TRUNC will replace the symlink
+  # with a regular file. After that, resolvconf still tracks DHCP-provided
+  # DNS internally but has nowhere to publish it, so /etc/resolv.conf stays
+  # empty on every clone (the precise bug we hit).
+  #
+  # Removing and re-symlinking restores resolvconf's view of the world.
+  # /run is tmpfs so the target gets recreated on each boot anyway.
+  - [ sh, -c, 'rm -f /etc/resolv.conf; ln -s ../run/resolvconf/resolv.conf /etc/resolv.conf' ]
+
+  # Preserve cloud-init logs in /etc/ before clean wipes them. The host-side
+  # verifier reads /etc/cybercore-cloud-init.log when a bake fails, so we
+  # have something to look at when packages: silently fails (apt+DNS issues
+  # are otherwise invisible after clean).
+  - [ sh, -c, 'cp /var/log/cloud-init-output.log /etc/cybercore-cloud-init.log 2>/dev/null || true' ]
 
   # Drop cached cloud-init state + network configs so the per-clone cidata
   # drive is the sole source of truth on next boot. cloud-init clean removes
@@ -444,7 +482,13 @@ else
       echo "==================================================================="
       echo "  Last 80 lines of cloud-init-output.log inside the VM:"
       echo "==================================================================="
-      tail -80 "$VERIFY_MOUNT/var/log/cloud-init-output.log" 2>/dev/null | sed 's/^/    /'
+      # /var/log/cloud-init-output.log gets wiped by `cloud-init clean --logs`
+      # at the end of bake-time runcmd, so the runcmd preserves it at
+      # /etc/cybercore-cloud-init.log. Try the preserved copy first, fall
+      # back to the canonical location for legacy templates without the copy.
+      LOG_FILE="$VERIFY_MOUNT/etc/cybercore-cloud-init.log"
+      [ -f "$LOG_FILE" ] || LOG_FILE="$VERIFY_MOUNT/var/log/cloud-init-output.log"
+      tail -80 "$LOG_FILE" 2>/dev/null | sed 's/^/    /' || echo "    (no cloud-init log captured)"
       umount "$VERIFY_MOUNT"
       rmdir "$VERIFY_MOUNT"
       rbd unmap "$VERIFY_DEV" 2>/dev/null || true
@@ -465,10 +509,10 @@ fi
 # ---------- 5. Strip the bake-time cloud-init config ----------
 # Proxmox stores cloud-init params at the VM-config level (separate from the
 # cicustom snippet). They INHERIT to clones — including --nameserver, which
-# is exactly what bit us: every clone got the bake-time DNS (100.100.0.1)
-# burned into /etc/resolv.conf on first boot, with no upstream visibility.
-# Strip everything bake-specific so per-clone admin.js settings are the
-# only source of truth.
+# is exactly what bit us: every clone got the bake-time DNS burned into
+# /etc/resolv.conf on first boot, with no upstream visibility. Strip
+# everything bake-specific so per-clone admin.js settings are the only
+# source of truth.
 echo "==> Clearing bake-time cicustom + cloud-init fields (nameserver/searchdomain)..."
 qm set $VMID --delete cicustom
 qm set $VMID --delete nameserver 2>/dev/null || true
