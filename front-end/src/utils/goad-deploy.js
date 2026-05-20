@@ -62,9 +62,10 @@ async function agentExecArgv(node, vmId, argv, proxmoxAPI) {
 const CONTROLLER_TEMPLATE_VMID = 1700;
 
 // Lane subnet — provided per-deploy by the caller (admin.js v1: '192.18.0'
-// shared, admin.js v2: '10.<vxh>.<vxl>' unique per lane). Last octets per
-// role stay anchored to upstream GOAD's Proxmox provider inventories so
-// upstream playbooks work unmodified.
+// shared, v2: '10.<vxh>.<vxl>' unique per lane, v3: the INTERNAL segment's
+// '10.<vxh|0x80>.<vxl>' — GOAD always lives on the internal subnet in v3).
+// Last octets per role stay anchored to upstream GOAD's Proxmox provider
+// inventories so upstream playbooks work unmodified.
 //
 // All IP construction goes through buildIp(base3, octet) so adding a new
 // callsite forces the caller to pass the lane's base — no hidden global.
@@ -628,7 +629,7 @@ async function deployGoadLane({
 }) {
   if (!spec?.goad?.enabled) return null;
   if (!laneSubnetBase) {
-    throw new Error('deployGoadLane: laneSubnetBase is required (admin.js should pass net.lan.base3 — works for both v1 "192.18.0" and v2 "10.<vxh>.<vxl>")');
+    throw new Error('deployGoadLane: laneSubnetBase is required (admin.js passes the lane subnet — net.lan.base3 for v1/v2, net.lanInt.base3 for v3 segmented lanes)');
   }
 
   const labName = spec.goad.version || DEFAULT_LAB;

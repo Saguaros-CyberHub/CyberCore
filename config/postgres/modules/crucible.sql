@@ -84,8 +84,11 @@ CREATE TABLE IF NOT EXISTS crucible_challenge (
   --   v2: VMID 1694 subnet-agnostic lane gateway, unique
   --       10.<vxlan_high>.<vxlan_low>.0/24 per lane, gateway WAN directly on
   --       lab bridge (100.100.60.<derived>/24). Required for Tailscale BYOAB.
+  --   v3: VMID 1695 segmented gateway (wan0 + ext0 + int0). Two SDN VNets per
+  --       lane — external (Kali/BYOD) and internal (GOAD AD) — with the gateway
+  --       firewall-blocking traffic between them. Forces a DMZ-pivot attack path.
   subnet_scheme VARCHAR(8) NOT NULL DEFAULT 'v1'
-                 CHECK (subnet_scheme IN ('v1', 'v2')),
+                 CHECK (subnet_scheme IN ('v1', 'v2', 'v3')),
 
   -- JSONB spec that defines the actual infra and scoring model.
   -- Suggested structure:

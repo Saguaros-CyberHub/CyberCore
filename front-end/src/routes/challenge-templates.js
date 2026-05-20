@@ -368,7 +368,7 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
     const {
       name, challenge_key, description, difficulty, zone_abbrev,
       template_vmid, vms: vmsList, max_lanes, module, challenge_type,
-      goad
+      goad, subnet_scheme
     } = req.body;
 
     if (!name || !challenge_key || !max_lanes) {
@@ -389,6 +389,14 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
     }
 
     const moduleKey = (module || 'crucible').toLowerCase();
+
+    // subnet_scheme: v1/v2 = single-subnet lanes; v3 = segmented "DMZ" lanes
+    // (two SDN VNets per lane). Defaults to v1 for back-compat.
+    const subnetScheme = ['v1', 'v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v1';
+    // A v3 lane's internal VNet uses tag = (vxlanId + this offset).
+    // MUST match V3_INTERNAL_TAG_OFFSET in front-end/src/routes/admin.js.
+    const V3_INTERNAL_TAG_OFFSET = 4000000;
+
     const numLanes = parseInt(max_lanes);
     if (numLanes < 1 || numLanes > 200) {
       return res.status(400).json({ error: 'max_lanes must be between 1 and 200' });
@@ -475,10 +483,10 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
     // 3. Insert challenge record into cybercore_db
     pushStatus('Inserting challenge record...');
     const insertResult = await cybercoreQuery(
-      `INSERT INTO crucible_challenge (challenge_key, name, description, difficulty, spec, status)
-       VALUES ($1, $2, $3, $4, $5::jsonb, 'active')
+      `INSERT INTO crucible_challenge (challenge_key, name, description, difficulty, spec, status, subnet_scheme)
+       VALUES ($1, $2, $3, $4, $5::jsonb, 'active', $6)
        RETURNING challenge_id, challenge_key`,
-      [challenge_key, name, description || null, difficultyInt, JSON.stringify(spec)]
+      [challenge_key, name, description || null, difficultyInt, JSON.stringify(spec), subnetScheme]
     );
     const challengeId = insertResult.rows[0].challenge_id;
     pushStatus(`Challenge created: ${challengeId}`);
@@ -532,8 +540,10 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
       pushStatus(`SDN zone '${finalZone}' already exists`);
     }
 
-    // 5. Create VNets for each VXLAN ID in the block
-    pushStatus(`Creating ${numLanes} VNets...`);
+    // 5. Create VNets for each VXLAN ID in the block.
+    // v1/v2: one VNet per lane. v3: two per lane — external (tag=vxlanId) and
+    // internal (tag=vxlanId+offset) — so the segmented gateway can bridge them.
+    pushStatus(`Creating ${numLanes} lane(s) of VNets (${subnetScheme})...`);
     let vnetsCreated = 0;
 
     // Base-20 encode helper for VNet naming (matches N8N workflow)
@@ -550,27 +560,33 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
     }
 
     for (let vxlanId = vxlanStart; vxlanId <= vxlanEnd; vxlanId++) {
-      const alias = encodeBase20(vxlanId);
-      const vnetName = alias; // 8-char unique name
+      // v3 lanes get a second (internal) VNet at the offset tag.
+      const tags = subnetScheme === 'v3'
+        ? [vxlanId, vxlanId + V3_INTERNAL_TAG_OFFSET]
+        : [vxlanId];
 
-      try {
-        await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
-          vnet: vnetName,
-          zone: finalZone,
-          tag: vxlanId,
-          alias: `${finalZone}-vnet-${vxlanId}`
-        });
-        vnetsCreated++;
-      } catch (e) {
-        // VNet may already exist
-        if (!e.message.includes('already exists')) {
-          pushStatus(`Warning: VNet ${vnetName} (tag ${vxlanId}): ${e.message}`);
+      for (const tag of tags) {
+        const vnetName = encodeBase20(tag); // 8-char unique name
+
+        try {
+          await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
+            vnet: vnetName,
+            zone: finalZone,
+            tag,
+            alias: `${finalZone}-vnet-${tag}`
+          });
+          vnetsCreated++;
+        } catch (e) {
+          // VNet may already exist
+          if (!e.message.includes('already exists')) {
+            pushStatus(`Warning: VNet ${vnetName} (tag ${tag}): ${e.message}`);
+          }
         }
-      }
 
-      // Rate limit: Proxmox can get overwhelmed with rapid API calls
-      if (vnetsCreated % 10 === 0 && vnetsCreated > 0) {
-        await new Promise(r => setTimeout(r, 500));
+        // Rate limit: Proxmox can get overwhelmed with rapid API calls
+        if (vnetsCreated % 10 === 0 && vnetsCreated > 0) {
+          await new Promise(r => setTimeout(r, 500));
+        }
       }
     }
     pushStatus(`${vnetsCreated} VNets created`);

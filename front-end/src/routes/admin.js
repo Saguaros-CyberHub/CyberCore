@@ -74,6 +74,15 @@ function laneUplinkConfig(module, vxlanId) {
 // boot and renders dnsmasq/iptables from it. See bake-lane-gateway-v2.sh.
 
 const V2_LANE_GATEWAY_VMID = 1694;
+// v3 (subnet_scheme='v3') — segmented "DMZ" lane: two SDN VNets per lane
+// (external + internal) routed by a 3-NIC gateway (wan0 + ext0 + int0) baked
+// as VMID 1695 by bake-lane-gateway-v3.sh.
+const V3_LANE_GATEWAY_VMID = 1695;
+// A v3 lane's internal VNet uses VXLAN tag = (external vxlanId + this offset).
+// Keeps internal tags (~4.01M) clear of the 10000-range challenge blocks and
+// well inside the 24-bit VXLAN id space, so a v3 lane consumes no extra
+// challenge-block capacity (it just allocates a second VNet at the offset tag).
+const V3_INTERNAL_TAG_OFFSET = 4000000;
 // Lab network attaches to the cluster via VLAN 60 trunked on vmbr0
 // (bridge-vlan-aware yes, bridge-vids ... 60 ...). The existing module
 // transit gateway (LXC 612) uses the same pattern: bridge=vmbr0,tag=60.
@@ -181,24 +190,60 @@ function v2LaneSubnet(vxlanId) {
 }
 
 /**
+ * Compute a v3 lane's INTERNAL LAN subnet from the EXTERNAL vxlan_id.
+ * The internal /24 mirrors the external v2-style 10.<high>.<low>.0/24 but with
+ * the high bit of the second octet set, so it can never collide with any
+ * external subnet (which always has high < 128 for these vxlan ids):
+ *   vxlan 10000 (0x2710) → external 10.39.16.0/24, internal 10.167.16.0/24
+ * MUST derive from the external vxlanId (not the offset internal VNet tag), and
+ * the external vxlanId must be <= 32767 so (high | 0x80) stays a single octet.
+ */
+function v3InternalSubnet(vxlanId) {
+  if (vxlanId > 32767) {
+    throw new Error(`v3InternalSubnet: vxlanId ${vxlanId} exceeds 32767 — ` +
+      `the internal-subnet high-bit scheme would overflow the second octet`);
+  }
+  const high = ((vxlanId >> 8) & 0xFF) | 0x80;
+  const low  = vxlanId & 0xFF;
+  const base3 = `10.${high}.${low}`;
+  return {
+    base3,                              // "10.167.16"
+    cidr:      `${base3}.0/24`,         // "10.167.16.0/24"
+    gatewayIp: `${base3}.1`,            // "10.167.16.1" — lane gateway's int0
+    netmask24: '255.255.255.0'
+  };
+}
+
+/**
  * Resolve the gateway VMID for a deploy based on subnet scheme.
  *   v1: 1691/1692/1693 by module (existing behavior).
  *   v2: always 1694 (subnet-agnostic, module not relevant — there's no
  *       per-module transit gateway in v2).
  */
 function resolveGatewayVmid(module, subnetScheme, spec) {
+  if (subnetScheme === 'v3') return V3_LANE_GATEWAY_VMID;
   if (subnetScheme === 'v2') return V2_LANE_GATEWAY_VMID;
   const v1Map = { cyberlabs: 1691, crucible: 1692, forge: 1693 };
   return v1Map[module] || (spec && spec.gateway_vmid) || 1692;
 }
 
 /**
- * Resolve the per-lane networking config (wan + lan) based on subnet scheme.
- * Returns: { wan: {bridge, ip, gw}, lan: {gatewayIp, cidr, base3, netmask24} }
- *   - wan: net0 config for the lane gateway LXC
- *   - lan: net1 config + DHCP scope info for downstream consumers (goad-deploy)
+ * Resolve the per-lane networking config based on subnet scheme.
+ *   - v1/v2: { wan, lan }            — single LAN subnet
+ *   - v3:    { wan, lanExt, lanInt } — segmented; external + internal subnets
+ *            (`lan` is deliberately omitted for v3 so any stale `.lan` access
+ *            throws instead of silently using a wrong subnet)
+ * `wan` is the net0 config for the lane gateway LXC; the lan objects carry
+ * DHCP scope info for downstream consumers (goad-deploy).
  */
 function resolveLaneNetworking(subnetScheme, module, vxlanId) {
+  if (subnetScheme === 'v3') {
+    return {
+      wan:    v2WanConfig(vxlanId),       // same lab-network uplink as v2
+      lanExt: v2LaneSubnet(vxlanId),      // external segment (Kali + BYOD)
+      lanInt: v3InternalSubnet(vxlanId)   // internal segment (GOAD AD)
+    };
+  }
   if (subnetScheme === 'v2') {
     return {
       wan: v2WanConfig(vxlanId),
@@ -235,7 +280,7 @@ function resolveLaneNetworking(subnetScheme, module, vxlanId) {
  * enforces request_source_ip == wan_ip.
  */
 async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, logTag = '[Deploy]' }) {
-  if (subnetScheme !== 'v2') return false;
+  if (subnetScheme !== 'v2' && subnetScheme !== 'v3') return false;
   if (!tailscale.isEnabled()) {
     console.log(`${logTag} Tailscale env not configured — skipping BYOAB key mint for lane ${vxlanId}`);
     return false;
@@ -908,11 +953,21 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     }
     const vxlanId = vxlanResult.rows[0].vxlan_id;
 
-    // 5. Find the VNet matching this VXLAN tag from Proxmox SDN
+    // 5. Find the VNet(s) matching this VXLAN tag from Proxmox SDN.
+    // v3 lanes have TWO VNets: external (tag=vxlanId) and internal
+    // (tag=vxlanId+offset). v1/v2 have a single VNet.
     const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
     const vnet = vnets.find(v => v.tag === vxlanId);
     if (!vnet) {
       return res.status(503).json({ error: `No VNet found with tag ${vxlanId} in Proxmox SDN` });
+    }
+    let vnetInt = null;
+    if (subnetScheme === 'v3') {
+      const intTag = vxlanId + V3_INTERNAL_TAG_OFFSET;
+      vnetInt = vnets.find(v => v.tag === intTag);
+      if (!vnetInt) {
+        return res.status(503).json({ error: `No internal VNet found with tag ${intTag} for v3 lane (segmented topology needs both VNets)` });
+      }
     }
 
     // 6. Determine template location and best node
@@ -960,12 +1015,21 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     // ---- Background deployment (non-blocking) ----
     (async () => {
       try {
-        // Lane subnet base — '192.18.0' for v1, '10.<vxh>.<vxl>' for v2. Threaded
-        // through every GOAD function so VM static IPs land in the right /24.
-        const laneSubnetBase = resolveLaneNetworking(subnetScheme, module, vxlanId).lan.base3;
+        // Per-lane networking. v1/v2: one subnet. v3: segmented — an external
+        // subnet (Kali / Tailscale BYOD / attached modules) and an internal
+        // subnet (GOAD AD VMs), bridged by a dual-homed DMZ host.
+        const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+        const isV3 = subnetScheme === 'v3';
+        const vnetExtName = vnet.vnet;
+        const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
+        // laneSubnetBase = the external/attacker subnet (also where attached
+        // modules land). goadSubnetBase = where GOAD AD VMs + controller live.
+        // For v1/v2 the two are identical (single flat subnet).
+        const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
+        const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
 
         // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
-        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, laneSubnetBase);
+        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, goadSubnetBase);
 
         // Multi-VM support: if spec.vms exists, deploy each VM; otherwise fall back to single VM
         const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
@@ -977,6 +1041,12 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           const vmTemplate = vmSpec.template_vmid || templateVmid;
           const vmName = vmSpec.name || challenge_key;
           const goadMac = goadMacs[vmName]?.mac;
+          const isGoadVm = !!goadMacs[vmName];
+          const isDmz = vmSpec.role === 'dmz';
+          // Which VNet this VM attaches to. v1/v2: the single lane VNet. v3:
+          // GOAD VMs → internal; the dmz host → both (handled in the qemu
+          // branch below); everything else → external.
+          const vmVnet = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
 
           console.log(`[Deploy] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
 
@@ -988,7 +1058,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
             await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vnet.vnet, goadMac)
+              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac)
             });
           } else {
             const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
@@ -997,17 +1067,37 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
               pool: `${module}-pool`
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
-            // Apply per-role resources from the GOAD lab def (DC=6GiB, member=8GiB,
-            // workstation=4GiB) along with the lane net config. Non-GOAD specs
-            // skip the resource block since goadMacs[vmName] is undefined.
-            const goadVm = goadMacs[vmName];
-            const vmConfig = {
-              net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
-            };
-            if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
-            if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
-            if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
-            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+
+            if (isV3 && isDmz) {
+              // v3 DMZ pivot: dual-homed. First attach both NICs (net0 on the
+              // external VNet, net1 on the internal VNet) so ipconfig1 has a
+              // net1 to bind to, then push the cloud-init static config —
+              // .50 on each subnet, default route via the external gateway.
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                net0: `virtio,bridge=${vnetExtName}`,
+                net1: `virtio,bridge=${vnetIntName}`
+              });
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                ipconfig0:  `ip=${net.lanExt.base3}.50/24,gw=${net.lanExt.gatewayIp}`,
+                ipconfig1:  `ip=${net.lanInt.base3}.50/24`,
+                nameserver: net.lanExt.gatewayIp,
+                citype:     'nocloud'
+              });
+              // Regenerate the cloud-init drive so the dual static-IP config applies.
+              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+            } else {
+              // Apply per-role resources from the GOAD lab def (DC=6GiB,
+              // member=8GiB, workstation=4GiB) along with the lane net config.
+              // Non-GOAD specs skip the resource block (goadMacs[vmName] undef).
+              const goadVm = goadMacs[vmName];
+              const vmConfig = {
+                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac)
+              };
+              if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
+              if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
+              if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+            }
           }
 
           deployedVMs.push({ vm_id: vmId, name: vmName, type: vmType, node: bestNode });
@@ -1026,15 +1116,23 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
         if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
 
-        // Wire up gateway networking. v1 routes through the module transit
-        // gateway with a shared 192.18.0.0/24 lane subnet; v2 hangs wan0
-        // directly off the lab network bridge and gives each lane its own
-        // /24 in 10.0.0.0/8.
-        const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
-        await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: formatLaneGatewayNet0(net.wan),
-          net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
-        });
+        // Wire up gateway networking (`net` resolved above). v1 routes through
+        // the module transit gateway with a shared 192.18.0.0/24 lane subnet;
+        // v2 hangs wan0 off the lab bridge with a per-lane /24; v3 is a 3-NIC
+        // segmented gateway — wan0 + ext0 + int0 — routing both lane subnets to
+        // the internet but firewall-blocking traffic between ext0 and int0.
+        if (isV3) {
+          await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+            net0: formatLaneGatewayNet0(net.wan),
+            net1: `name=ext0,bridge=${vnetExtName},ip=${net.lanExt.gatewayIp}/24,type=veth`,
+            net2: `name=int0,bridge=${vnetIntName},ip=${net.lanInt.gatewayIp}/24,type=veth`
+          });
+        } else {
+          await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+            net0: formatLaneGatewayNet0(net.wan),
+            net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
+          });
+        }
 
         // v2 only: mint a Tailscale auth key + stage it in lane_bootstrap_tokens
         // for the gateway to pull on first boot. No-op for v1 and silent skip
@@ -1066,8 +1164,8 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
         if (spec.goad?.enabled) {
           try {
             await goadDeploy.deployGoadLane({
-              lane, spec, module, vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, laneSubnetBase, deployedVMs,
+              lane, spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
+              bestNode, templateNode, laneSubnetBase: goadSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {
@@ -1151,7 +1249,14 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           // (the original challenge spec may change post-deploy).
           subnet_scheme: subnetScheme,
           lane_subnet_base: laneSubnetBase,
-          vnet: vnet.vnet
+          vnet: vnet.vnet,
+          // v3 segmented lanes also carry an internal (GOAD) segment. The
+          // external lane_subnet_base/vnet above stay attacker-side so attached
+          // modules land there.
+          ...(isV3 ? {
+            vnet_internal: vnetIntName,
+            lane_subnet_internal: goadSubnetBase
+          } : {})
         });
         await cybercoreQuery(
           `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
@@ -1417,7 +1522,9 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
       || (laneConfig.lane_subnet_base?.startsWith('10.') ? 'v2' : 'v1');
     const laneModule = lane.module_key || laneConfig.module || module;
     const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id);
-    const laneSubnetBase = net.lan.base3;
+    // v3 lanes have no single `.lan` — attached modules land on the external
+    // segment (its VNet tag === vxlan_id, so the lookup below still resolves it).
+    const laneSubnetBase = (net.lanExt || net.lan).base3;
     const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
     const vnet = vnets.find(v => v.tag === lane.vxlan_id);
     if (!vnet) {
@@ -2391,6 +2498,14 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           console.warn(`No VNet for VXLAN ${vxlanId}, skipping lane for ${student.email}`);
           continue;
         }
+        // v3 segmented lanes also need the internal VNet (tag = vxlanId + offset).
+        const vnetInt = subnetScheme === 'v3'
+          ? vnets.find(v => v.tag === vxlanId + V3_INTERNAL_TAG_OFFSET)
+          : null;
+        if (subnetScheme === 'v3' && !vnetInt) {
+          console.warn(`No internal VNet for VXLAN ${vxlanId} (v3), skipping lane for ${student.email}`);
+          continue;
+        }
 
         try {
           // Sync student to cybercore_user (upsert by username to handle re-deploys)
@@ -2428,7 +2543,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           );
           const laneId = laneInsert.rows[0].lane_id;
           created.lanes.push({ lane_id: laneId, student_email: student.email, vxlan_id: vxlanId });
-          laneJobs.push({ laneId, student, vxlanId, vnet, laneName, targetNode: nodeAssignments[i] });
+          laneJobs.push({ laneId, student, vxlanId, vnet, vnetInt, laneName, targetNode: nodeAssignments[i] });
         } catch (err) {
           console.error(`Failed to create lane record for ${student.email}:`, err.message);
         }
@@ -2544,7 +2659,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           const sourceNode = node === templateNode ? templateNode : node;
 
           for (const job of jobs) {
-            const { laneId, student, vxlanId, vnet } = job;
+            const { laneId, student, vxlanId, vnet, vnetInt } = job;
             const gatewayVmId = 100000 + vxlanId;
             try {
               console.log(`[Group ${group_name}] Cloning gateway LXC ${localTemplateId}@${sourceNode} → ${gatewayVmId} for ${student.email}`);
@@ -2557,14 +2672,23 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 pool: `${module}-pool`
               });
               if (gwCloneResult) await waitForTask(sourceNode, gwCloneResult);
-              // Wire up both NICs. Networking config is scheme-aware:
+              // Wire up gateway NICs. Scheme-aware:
               //   v1: wan0 → module transit GW; lan0 → 192.18.0.1/24 (shared)
               //   v2: wan0 → lab network (vmbr0); lan0 → 10.<vxh>.<vxl>.1/24 (unique)
+              //   v3: wan0 + ext0 + int0 — segmented gateway, ext0<->int0 blocked
               const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
-              await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                net0: formatLaneGatewayNet0(net.wan),
-                net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
-              });
+              if (subnetScheme === 'v3') {
+                await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
+                  net0: formatLaneGatewayNet0(net.wan),
+                  net1: `name=ext0,bridge=${vnet.vnet},ip=${net.lanExt.gatewayIp}/24,type=veth`,
+                  net2: `name=int0,bridge=${vnetInt.vnet},ip=${net.lanInt.gatewayIp}/24,type=veth`
+                });
+              } else {
+                await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
+                  net0: formatLaneGatewayNet0(net.wan),
+                  net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
+                });
+              }
               // v2 only: mint+stage Tailscale auth key (silent no-op for v1)
               await configureLaneTailscale({
                 subnetScheme,
@@ -2610,7 +2734,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         console.log(`[Group ${group_name}] Phase 2: Cloning challenge VMs and Kali in parallel (concurrency: ${concurrency})...`);
 
         const { results, errors } = await runBatch(laneJobs, async (job) => {
-          const { laneId, student, vxlanId, vnet, targetNode } = job;
+          const { laneId, student, vxlanId, vnet, vnetInt, targetNode } = job;
           const bestNode = targetNode;
 
           // Skip if gateway failed for this lane
@@ -2650,11 +2774,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             const gatewayVmId = 100000 + vxlanId;
             const deployedVMs = [];
 
-            // Lane subnet base — '192.18.0' for v1, '10.<vxh>.<vxl>' for v2.
-            const laneSubnetBase = resolveLaneNetworking(subnetScheme, module, vxlanId).lan.base3;
+            // Per-lane networking. v1/v2: one subnet. v3: external (Kali) +
+            // internal (GOAD) segments, bridged by a dual-homed DMZ host.
+            const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+            const isV3 = subnetScheme === 'v3';
+            const vnetExtName = vnet.vnet;
+            const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
+            const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
+            const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
 
             // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
-            const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, laneSubnetBase);
+            const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, goadSubnetBase);
 
             // Clone all challenge VMs — each clone goes through the shared semaphore
             // so we never exceed MAX_CONCURRENT_CLONES across all lanes
@@ -2665,6 +2795,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               const vmName = vmSpec.name || challenge_key;
               const vmType = vmSpec.type || 'qemu';
               const goadMac = goadMacs[vmName]?.mac;
+              const isGoadVm = !!goadMacs[vmName];
+              const isDmz = vmSpec.role === 'dmz';
+              // v3: GOAD VMs → internal VNet; dmz host → both (qemu branch);
+              // everything else → external. v1/v2: the single lane VNet.
+              const vmVnet = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
 
               await cloneSem.run(async () => {
                 console.log(`[Group ${group_name}] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${student.email}`);
@@ -2677,7 +2812,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                   });
                   if (result) await waitForTask(templateNode, result);
                   await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-                    net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vnet.vnet, goadMac)
+                    net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac)
                   });
                 } else {
                   const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
@@ -2686,17 +2821,32 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                     pool: `${module}-pool`
                   });
                   if (result) await waitForTask(templateNode, result);
-                  // Apply per-role resources alongside lane net config (mirrors
-                  // single-lane deploy at admin.js:919; non-GOAD specs are unaffected
-                  // since goadMacs[vmName] is undefined for them).
-                  const goadVm = goadMacs[vmName];
-                  const vmConfig = {
-                    net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
-                  };
-                  if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
-                  if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
-                  if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
-                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+                  if (isV3 && isDmz) {
+                    // v3 DMZ pivot: dual-homed. Both NICs first (so ipconfig1
+                    // has a net1), then cloud-init static .50 on each subnet.
+                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                      net0: `virtio,bridge=${vnetExtName}`,
+                      net1: `virtio,bridge=${vnetIntName}`
+                    });
+                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                      ipconfig0:  `ip=${net.lanExt.base3}.50/24,gw=${net.lanExt.gatewayIp}`,
+                      ipconfig1:  `ip=${net.lanInt.base3}.50/24`,
+                      nameserver: net.lanExt.gatewayIp,
+                      citype:     'nocloud'
+                    });
+                    await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+                  } else {
+                    // Apply per-role resources alongside lane net config.
+                    // Non-GOAD specs are unaffected (goadMacs[vmName] undefined).
+                    const goadVm = goadMacs[vmName];
+                    const vmConfig = {
+                      net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac)
+                    };
+                    if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
+                    if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
+                    if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
+                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+                  }
                 }
               });
 
@@ -2769,8 +2919,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               try {
                 await goadDeploy.deployGoadLane({
                   lane: { lane_id: laneId },
-                  spec, module, vnet, vxlanId, gatewayVmId,
-                  bestNode, templateNode, laneSubnetBase, deployedVMs,
+                  spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
+                  bestNode, templateNode, laneSubnetBase: goadSubnetBase, deployedVMs,
                   proxmoxAPI, waitForTask, query: cybercoreQuery
                 });
               } catch (goadErr) {
@@ -2956,7 +3106,16 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               module,
               group_id: groupId,
               group_name,
-              vms: deployedVMs
+              vms: deployedVMs,
+              // Persisted so attach-module / teardown know the lane's network
+              // shape without re-deriving from the (mutable) challenge spec.
+              subnet_scheme: subnetScheme,
+              lane_subnet_base: laneSubnetBase,
+              vnet: vnetExtName,
+              ...(isV3 ? {
+                vnet_internal: vnetIntName,
+                lane_subnet_internal: goadSubnetBase
+              } : {})
             };
             await cybercoreQuery(
               `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
@@ -4011,6 +4170,13 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
 
     // Build the spec object compatible with the existing deploy-lane flow
     const subnetScheme = template.subnet_scheme || 'v1';
+    // v3 segmented lanes are not yet wired into this deploy path.
+    if (subnetScheme === 'v3') {
+      return res.status(400).json({
+        error: 'v3 (segmented "DMZ") challenges are not yet supported by this deploy path. ' +
+               'Deploy v3 lanes via POST /api/admin/deploy-lane.'
+      });
+    }
     const gatewayVmid = resolveGatewayVmid(challengeModule, subnetScheme, spec);
     const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
     console.log(`[ChallengeNetwork] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
