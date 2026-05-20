@@ -59,7 +59,7 @@ deploy/          nginx site config + PHP-FPM pool config
 | **SSRF** | SaguaroBot's "dataset integrity check" (`/api/verify.php`) fetches any URL. |
 | Steal admin session | SSRF `http://127.0.0.1/api/internal/provision.php` → response leaks an `admin_session` token. |
 | Admin access | Set cookie `admin_session=<token>` → `/admin/` authorises. |
-| **RCE** | `/admin/storage.php` ("Cloud Storage") only checks the client `Content-Type`. Upload a `.php` webshell with `Content-Type: image/png`. It lands in `/uploads/` where PHP-FPM executes it. |
+| **RCE** | `/admin/storage.php` ("Cloud Storage") validates only the *last* file extension — `shell.php` is rejected, but `shell.php.jpg` passes (last ext `.jpg`). nginx runs PHP on any path *containing* `.php` (`location ~ \.php`) and PHP-FPM's `security.limit_extensions` is widened, so the double-extension webshell executes from `/uploads/`. |
 | shellpop | Browse the webshell → reverse shell as `saguarobot`. |
 | LinPE → root | `linpeas` surfaces: SUID `/usr/bin/find`; world-writable root cron `/opt/saguaro/datasync.sh`; `sudo NOPASSWD tar` for `dvalmont` (creds in `/opt/saguaro/research-notes.txt`). |
 
@@ -67,7 +67,7 @@ deploy/          nginx site config + PHP-FPM pool config
 
 Portal accounts — unsalted SHA-256 of rockyou-wordlist words, so the
 sqlmap-dumped `users` table cracks with `hashcat -m 1400` + rockyou.txt:
-- `dr.prickle` / `arizona` — admin role
+- `dr.wagner` / `arizona` — admin role
 - `rgreen` / `cactus` — researcher
 - `dvalmont` / `sunshine` — researcher (also a Linux user on the box)
 

@@ -7,32 +7,36 @@ $msg = null;
 $err = null;
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
-    $f = $_FILES['file'];
+    $f    = $_FILES['file'];
+    $name = basename($f['name']);
 
-    // "Cloud Storage" — cactus imagery is meant to be the only thing uploaded.
+    // "Cloud Storage" accepts cactus imagery only.
     //
-    // *** VULNERABILITY: unrestricted file upload ***
-    // The only check is the MIME type, taken from $_FILES['file']['type'] —
-    // that value is the client-supplied Content-Type header and is trivially
-    // spoofable. There is no extension check, no content sniffing, and the
-    // file keeps its original name. A PHP file sent with an image
-    // Content-Type lands in /uploads/ where nginx + PHP-FPM will execute it.
-    $allowedTypes = ['image/svg+xml', 'image/png', 'image/jpeg', 'image/gif'];
+    // *** VULNERABILITY: file-upload extension-filter bypass ***
+    // The upload is validated by the file's LAST extension only. That blocks
+    // a naive `shell.php`, but the file keeps its full original name, so a
+    // double-extension upload such as `shell.php.jpg` passes the check (its
+    // last extension is `.jpg`). It lands in /uploads/, where the
+    // deliberately misconfigured nginx (`location ~ \.php`, not anchored
+    // with `$`) routes any path *containing* ".php" to PHP-FPM — whose
+    // `security.limit_extensions` has been widened to allow it — and the
+    // webshell executes.
+    $allowedExt = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'];
+    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
 
     if ($f['error'] !== UPLOAD_ERR_OK) {
         $err = 'Upload failed (error code ' . $f['error'] . ').';
-    } elseif (!in_array($f['type'], $allowedTypes, true)) {
-        $err = 'Only cactus images may be uploaded to Cloud Storage.';
+    } elseif (!in_array($ext, $allowedExt, true)) {
+        $err = 'Only image files (jpg, jpeg, png, gif, svg, webp) may be '
+             . 'uploaded to Cloud Storage.';
     } else {
-        $name = basename($f['name']);
         $dest = UPLOAD_DIR . '/' . $name;
         if (move_uploaded_file($f['tmp_name'], $dest)) {
-            $admin = 'admin';
             $stmt = $pdo->prepare(
                 'INSERT INTO uploads (filename, original_name, uploaded_by)
                  VALUES (?, ?, ?)'
             );
-            $stmt->execute([$name, $f['name'], $admin]);
+            $stmt->execute([$name, $f['name'], 'admin']);
             $msg = 'Uploaded to Cloud Storage: ' . htmlspecialchars($name);
         } else {
             $err = 'Could not store the uploaded file.';

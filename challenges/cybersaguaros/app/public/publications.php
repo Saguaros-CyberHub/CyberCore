@@ -4,16 +4,16 @@ render_header('Publications', '/publications.php');
 
 $papers = [
     ['Cyber-Algorithmic Growth Curves for Carnegiea gigantea',
-     'Prickle, P. &amp; Green, R.', 2025,
+     'Wagner, P. &amp; Green, R.', 2025,
      'A regression pipeline that fits multi-decade saguaro growth from sparse telemetry.'],
     ['SaguaroNet: Spine-Density Classification from Field Imagery',
      'Valmont, D.', 2025,
      'A convolutional classifier for estimating spine density and plant age.'],
     ['Frost-Stress Signatures in Thermal Saguaro Imagery',
-     'Green, R. &amp; Prickle, P.', 2024,
+     'Green, R. &amp; Wagner, P.', 2024,
      'Detecting and grading winter frost-stress events across the study grid.'],
     ['Bloom-Timing Prediction under Monsoon Variability',
-     'Prickle, P.', 2024,
+     'Wagner, P.', 2024,
      'Forecasting bloom onset from soil-moisture and temperature telemetry.'],
 ];
 ?>

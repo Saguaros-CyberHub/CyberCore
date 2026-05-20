@@ -30,7 +30,7 @@ if (str_contains($msg, 'bloom')) {
 }
 if (str_contains($msg, 'admin') || str_contains($msg, 'login')
     || str_contains($msg, 'password')) {
-    reply("Portal accounts are managed by Dr. Prickle. I can't help with "
+    reply("Portal accounts are managed by Dr. Wagner. I can't help with "
         . "account access — but I can verify datasets for you any time.");
 }
 if (str_contains($msg, 'hello') || str_contains($msg, 'hi')) {

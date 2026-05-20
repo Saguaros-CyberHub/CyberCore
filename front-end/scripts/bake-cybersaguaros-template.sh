@@ -257,7 +257,7 @@ runcmd:
   - [ sh, -c, 'code=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/); [ "\$code" = "200" ] && echo "SITE_HTTP=yes" >> /etc/cybercore-bake.env || echo "SITE_HTTP=no (\$code)" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'code=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/api/verify.php); [ "\$code" = "400" ] && echo "SSRF_ENDPOINT=yes" >> /etc/cybercore-bake.env || echo "SSRF_ENDPOINT=no (\$code)" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'curl -s http://127.0.0.1/api/internal/provision.php | grep -q admin_session && echo "INTERNAL_OK=yes" >> /etc/cybercore-bake.env || echo "INTERNAL_OK=no" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, 'printf "%s" "<?php echo 92837465;" > /var/www/cybersaguaros/public/uploads/baketest.php; out=\$(curl -s http://127.0.0.1/uploads/baketest.php); rm -f /var/www/cybersaguaros/public/uploads/baketest.php; echo "\$out" | grep -q 92837465 && echo "UPLOAD_EXEC=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_EXEC=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'printf "%s" "<?php echo 92837465;" > /var/www/cybersaguaros/public/uploads/baketest.php.jpg; out=\$(curl -s http://127.0.0.1/uploads/baketest.php.jpg); rm -f /var/www/cybersaguaros/public/uploads/baketest.php.jpg; echo "\$out" | grep -q 92837465 && echo "UPLOAD_EXEC=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_EXEC=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'stat -c "%a" /usr/bin/find | grep -qE "^[46]" && echo "SUID_FIND=yes" >> /etc/cybercore-bake.env || echo "SUID_FIND=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, '[ -f /etc/cron.d/saguaro-datasync ] && [ -w /opt/saguaro/datasync.sh ] && echo "CRON_ARTIFACT=yes" >> /etc/cybercore-bake.env || echo "CRON_ARTIFACT=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, '[ -f /etc/sudoers.d/dvalmont-tar ] && echo "SUDO_TAR=yes" >> /etc/cybercore-bake.env || echo "SUDO_TAR=no" >> /etc/cybercore-bake.env' ]
@@ -421,9 +421,9 @@ echo ""
 echo "==================================================================="
 echo "  CyberSaguaros template $VMID baked successfully"
 echo "==================================================================="
-echo "  Portal admin:  dr.prickle / Sunset-Saguaro-2026"
+echo "  Portal admin:  dr.wagner / arizona"
 echo "  Linux foothold: saguarobot (PHP-FPM pool user)"
-echo "  Privesc user:  dvalmont / Desert-Bloom-77  (sudo NOPASSWD tar)"
+echo "  Privesc user:  dvalmont / sunshine  (sudo NOPASSWD tar)"
 echo "  Reach via:     http://<lane-subnet>.<ip_octet>/"
 echo "  Attach with:   POST /api/admin/lanes/<laneId>/modules"
 echo "                 { \"challenge_key\": \"cybersaguaros-ssrf\", \"module\": \"crucible\" }"

@@ -22,7 +22,7 @@ render_header('About', '/about.php');
   <p>The portal is maintained by our research staff. Dataset submissions and
      integrity checks are handled by <strong>SaguaroBot</strong>, our automated
      research assistant. For portal access issues, contact the site
-     administrator, Dr. Patricia Prickle.</p>
+     administrator, Dr. Paul Wagner.</p>
 
   <h2>Contact</h2>
   <p>Sonoran Desert Field Station &middot; cybersaguaros.local</p>
