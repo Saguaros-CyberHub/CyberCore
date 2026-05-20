@@ -36,5 +36,6 @@ function render_header(string $title, string $active = ''): void {
 function render_footer(): void {
     echo '</main><footer><small>&copy; 2026 CyberSaguaros Research Group &middot; '
        . 'Sonoran Desert Field Station &middot; cybersaguaros.local</small></footer>';
+    require __DIR__ . '/chatwidget.php';   // floating SaguaroBot widget
     echo '</body></html>';
 }

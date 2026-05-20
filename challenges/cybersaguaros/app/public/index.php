@@ -5,6 +5,18 @@ require_once __DIR__ . '/../includes/db.php';
 $datasets = $pdo->query('SELECT name, description FROM datasets ORDER BY id DESC LIMIT 3')
                 ->fetchAll();
 
+// Pull a few gallery thumbnails for the homepage strip.
+$thumbs = [];
+$galleryDir = __DIR__ . '/assets/gallery';
+if (is_dir($galleryDir)) {
+    foreach (scandir($galleryDir) ?: [] as $f) {
+        if (preg_match('/\.(svg|png|jpe?g|gif|webp)$/i', $f)) {
+            $thumbs[] = $f;
+        }
+    }
+}
+$thumbs = array_slice($thumbs, 0, 4);
+
 render_header('Home', '/');
 ?>
 <section class="hero fullbleed">
@@ -18,45 +30,61 @@ render_header('Home', '/');
   </div>
 </section>
 
-<section>
-  <h2>Latest datasets</h2>
-  <div class="cards">
-    <?php foreach ($datasets as $d): ?>
-      <article class="card">
-        <h3><?= htmlspecialchars($d['name']) ?></h3>
-        <p><?= htmlspecialchars($d['description']) ?></p>
-      </article>
-    <?php endforeach; ?>
-  </div>
-</section>
-
-<section class="band fullbleed">
+<section class="fullbleed band-sand">
   <div class="wrap">
-    <h2>What we do</h2>
+    <h2>Latest datasets</h2>
     <div class="cards">
-      <article class="card plain">
-        <h3>Instrument</h3>
-        <p>Low-power telemetry on 240+ saguaros across the Sonoran study grid.</p>
-      </article>
-      <article class="card plain">
-        <h3>Model</h3>
-        <p>Spine-density and growth-stage classifiers trained on field imagery.</p>
-      </article>
-      <article class="card plain">
-        <h3>Predict</h3>
-        <p>The cyber-algorithmic regression pipeline forecasts bloom and growth.</p>
-      </article>
-      <article class="card plain">
-        <h3>Publish</h3>
-        <p>Open datasets released for the wider desert-ecology community.</p>
-      </article>
+      <?php foreach ($datasets as $d): ?>
+        <article class="card">
+          <h3><?= htmlspecialchars($d['name']) ?></h3>
+          <p><?= htmlspecialchars($d['description']) ?></p>
+        </article>
+      <?php endforeach; ?>
     </div>
   </div>
 </section>
 
-<section>
-  <h2>Field gallery</h2>
-  <p>Cactus imagery contributed by field researchers and the public — browse
-     the <a href="/gallery.php">CyberSaguaros gallery</a>.</p>
+<section class="fullbleed band-deep">
+  <div class="wrap">
+    <h2>What we do</h2>
+    <div class="cards">
+      <article class="card plain"><h3>Instrument</h3>
+        <p>Low-power telemetry on 240+ saguaros across the Sonoran study grid.</p></article>
+      <article class="card plain"><h3>Model</h3>
+        <p>Spine-density and growth-stage classifiers trained on field imagery.</p></article>
+      <article class="card plain"><h3>Predict</h3>
+        <p>The cyber-algorithmic regression pipeline forecasts bloom and growth.</p></article>
+      <article class="card plain"><h3>Publish</h3>
+        <p>Open datasets released for the wider desert-ecology community.</p></article>
+    </div>
+  </div>
+</section>
+
+<section class="fullbleed band-sand">
+  <div class="wrap">
+    <h2>Field gallery</h2>
+    <p>Saguaro imagery contributed by field researchers across the Sonoran
+       study grid.</p>
+    <?php if ($thumbs): ?>
+      <div class="gallery">
+        <?php foreach ($thumbs as $t): ?>
+          <figure><a href="/gallery.php">
+            <img src="/assets/gallery/<?= rawurlencode($t) ?>" alt="Saguaro"
+                 loading="lazy">
+          </a></figure>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+    <p><a class="btn" href="/gallery.php">Browse the full gallery</a></p>
+  </div>
+</section>
+
+<section class="fullbleed band-green">
+  <div class="wrap center">
+    <h2>Open desert science</h2>
+    <p>CyberSaguaros publishes its datasets and methods for the wider
+       desert-ecology community — slow science, made queryable.</p>
+    <p><a class="btn" href="/publications.php">Read our publications</a></p>
+  </div>
 </section>
 <?php render_footer(); ?>
