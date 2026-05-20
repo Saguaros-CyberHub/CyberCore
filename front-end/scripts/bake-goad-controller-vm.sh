@@ -29,7 +29,9 @@ BAKE_VLAN="${BAKE_VLAN:-20}"                      # bake-time VLAN for internet 
 # (FreeIPA at 100.100.20.20 has been the default and dies sometimes; OPNsense
 # Unbound at 100.100.0.1 is the orchestrator's resolver and recurses externally).
 BAKE_DNS="${BAKE_DNS:-100.100.0.1}"
-GOAD_REPO="${GOAD_REPO:-https://github.com/Orange-Cyberdefense/GOAD.git}"
+# CyberSaguaros fork of GOAD — carries the re-themed GOAD-Light lab data
+# (ad/GOAD-Light/). Override with GOAD_REPO=... to bake from a different repo.
+GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
 GOAD_REF="${GOAD_REF:-main}"
 MEMORY=2048
 CORES=2

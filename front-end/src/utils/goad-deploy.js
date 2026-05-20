@@ -87,7 +87,7 @@ const GOAD_LABS = {
   'GOAD-Light': {
     displayName:  'GOAD-Light (3 Win VMs, 2 domains)',
     description:  'Lighter GOAD without Essos forest. Recommended starter.',
-    forestRoot:   'sevenkingdoms.local',
+    forestRoot:   'cybersaguaros.local',
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
       { name: 'DC02',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 11, nic_model: 'e1000' },

@@ -22,7 +22,8 @@ STORAGE="vmpool"
 TEMPLATE_STORAGE="${TEMPLATE_STORAGE:-cephfs}"   # override with env if templates live elsewhere
 BAKE_BRIDGE="${BAKE_BRIDGE:-vmbr0}"              # bridge for the bake-time uplink (needs internet)
 BAKE_VLAN="${BAKE_VLAN:-20}"                     # VLAN tag on $BAKE_BRIDGE (set empty to disable: BAKE_VLAN= )
-GOAD_REPO="${GOAD_REPO:-https://github.com/Orange-Cyberdefense/GOAD.git}"
+# CyberSaguaros fork of GOAD — carries the re-themed GOAD-Light lab data.
+GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
 GOAD_REF="${GOAD_REF:-main}"                      # branch/tag/commit to pin
 MEMORY=2048                                       # bumped: upstream playbooks + roles use more RAM
 CORES=2
@@ -345,8 +346,8 @@ inventory and runs `main.yml`.
 
 ## Re-bake source of truth
 This template is rebuilt from `front-end/scripts/bake-goad-controller.sh`,
-which git-clones upstream GOAD at bake time (default
-https://github.com/Orange-Cyberdefense/GOAD.git, branch `main`).
+which git-clones the CyberSaguaros GOAD fork at bake time (default
+https://github.com/joshmp087/GOAD.git, branch `main`).
 Override with `GOAD_REPO=...` and/or `GOAD_REF=<branch|tag|sha>`.
 EOF
 

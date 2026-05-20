@@ -228,7 +228,7 @@ write_files:
       TODO
       ----
       * migrate /opt/backup.sh to use the new fileserver (talk to jdoe re: SMB creds)
-      * the lab DC is dc01.sevenkingdoms.local — kerberos works from this box once
+      * the lab DC is dc01.cybersaguaros.local — kerberos works from this box once
         DNS is pointed at it
       * remember to remove /etc/sudoers.d/devops-backup after the tar workflow
         is replaced (Ana asked twice already)

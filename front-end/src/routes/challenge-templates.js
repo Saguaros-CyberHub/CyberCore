@@ -464,8 +464,8 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
       spec.goad = {
         enabled: true,
         version:          goad.version          || 'light',
-        domain:           goad.domain           || 'sevenkingdoms.local',
-        child_subdomain:  goad.child_subdomain  || 'north',
+        domain:           goad.domain           || 'cybersaguaros.local',
+        child_subdomain:  goad.child_subdomain  || 'marketing',
         admin_user:       goad.admin_user       || 'Administrator',
         admin_password:   goad.admin_password   || 'SecureGOADP@$$123',
         include_kali:     goad.include_kali !== false  // default true
