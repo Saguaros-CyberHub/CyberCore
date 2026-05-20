@@ -1,0 +1,3 @@
+# CyberSaguaros gallery uploads land here.
+# nginx serves this directory AND PHP-FPM executes .php within it — the
+# deliberate misconfiguration that turns the file-upload bypass into RCE.
