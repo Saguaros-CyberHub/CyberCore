@@ -38,12 +38,24 @@ app/db/          schema.sql + seed.sql
 deploy/          nginx site config + PHP-FPM pool config
 ```
 
+## Assets
+
+- **Logo** — the header shows `app/public/assets/logo.png` (the real
+  transparent CyberSaguaros logo). Until that file is committed, it falls
+  back to the shipped placeholder `assets/logo.svg`. Commit the real
+  `logo.png` to the repo before baking — the template clones from GitHub.
+- **Gallery** — `gallery.php` auto-lists every image in `assets/gallery/`
+  (curated) and `public/uploads/` (contributed). The repo ships stylised
+  SVG saguaro scenes as defaults; drop real saguaro photos (e.g. from
+  cactiguide.com, genus *Carnegiea*) into `app/public/assets/gallery/` and
+  they appear automatically — no DB or code change.
+
 ## Intended solve path
 
 | Stage | Action |
 |-------|--------|
 | Recon | `/etc/hosts`: `cybersaguaros.local` → lane IP. `ffuf` finds `/chat`, `/gallery`, `/admin`, `/api/`. |
-| SQLi (secondary) | `/research.php?q=` is injectable — `sqlmap` dumps `users` (SHA-256, crackable). |
+| SQLi (secondary) | `/research.php?q=` is injectable — `sqlmap` dumps `users`. Hashes are unsalted SHA-256 of rockyou words; `hashcat -m 1400` + rockyou.txt cracks them. |
 | **SSRF** | SaguaroBot's "dataset integrity check" (`/api/verify.php`) fetches any URL. |
 | Steal admin session | SSRF `http://127.0.0.1/api/internal/provision.php` → response leaks an `admin_session` token. |
 | Admin access | Set cookie `admin_session=<token>` → `/admin/` authorises. |
@@ -53,14 +65,15 @@ deploy/          nginx site config + PHP-FPM pool config
 
 ## Credential / artifact reference (instructors)
 
-Portal accounts (SHA-256, unsalted — crackable):
-- `dr.prickle` / `Sunset-Saguaro-2026` — admin role
-- `rgreen` / `cactus123` — researcher
-- `dvalmont` / `Desert-Bloom-77` — researcher (also a Linux user on the box)
+Portal accounts — unsalted SHA-256 of rockyou-wordlist words, so the
+sqlmap-dumped `users` table cracks with `hashcat -m 1400` + rockyou.txt:
+- `dr.prickle` / `arizona` — admin role
+- `rgreen` / `cactus` — researcher
+- `dvalmont` / `sunshine` — researcher (also a Linux user on the box)
 
 Linux:
 - `saguarobot` — PHP-FPM pool user; the webshell/reverse-shell foothold.
-- `dvalmont` / `Desert-Bloom-77` — has `sudo NOPASSWD: /usr/bin/tar`.
+- `dvalmont` / `sunshine` — has `sudo NOPASSWD: /usr/bin/tar`.
 - LinPE artifacts planted by the bake script:
   - SUID `/usr/bin/find`
   - `/opt/saguaro/datasync.sh` (0777) run every minute by root cron

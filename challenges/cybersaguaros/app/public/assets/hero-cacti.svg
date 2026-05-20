@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" width="720" height="360">
+  <!-- Saguaro silhouettes for the CyberSaguaros hero band. Rendered faintly
+       beneath the translucent green gradient overlay. -->
+  <g fill="none" stroke="#1f3a25" stroke-linecap="round" stroke-linejoin="round">
+    <!-- tall saguaro -->
+    <g stroke-width="46">
+      <path d="M560 350 V70"/>
+    </g>
+    <g stroke-width="32">
+      <path d="M560 210 L498 210 L498 132"/>
+      <path d="M560 170 L626 170 L626 104"/>
+    </g>
+    <!-- medium saguaro -->
+    <g stroke-width="40">
+      <path d="M408 350 V150"/>
+    </g>
+    <g stroke-width="28">
+      <path d="M408 250 L356 250 L356 188"/>
+      <path d="M408 224 L462 224 L462 170"/>
+    </g>
+    <!-- short saguaro -->
+    <g stroke-width="34">
+      <path d="M664 350 V214"/>
+    </g>
+    <g stroke-width="24">
+      <path d="M664 286 L620 286 L620 244"/>
+    </g>
+  </g>
+</svg>

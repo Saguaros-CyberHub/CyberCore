@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6c7682"/><stop offset="0.6" stop-color="#9aa3ac"/>
+      <stop offset="1" stop-color="#c2b79e"/>
+    </linearGradient>
+    <g id="sag" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <path stroke-width="26" d="M0 0 V-150"/>
+      <path stroke-width="17" d="M0 -78 L-32 -78 L-32 -118"/>
+      <path stroke-width="17" d="M0 -58 L34 -58 L34 -104"/>
+    </g>
+  </defs>
+  <rect width="400" height="300" fill="url(#sky)"/>
+  <ellipse cx="150" cy="74" rx="84" ry="34" fill="#55606c"/>
+  <ellipse cx="250" cy="90" rx="70" ry="28" fill="#48515c"/>
+  <g stroke="#9fb8cf" stroke-width="2.4" stroke-linecap="round" opacity="0.75">
+    <path d="M120 116 L112 150"/><path d="M168 120 L160 158"/>
+    <path d="M214 126 L206 162"/><path d="M262 122 L254 156"/>
+  </g>
+  <path d="M0 252 Q140 240 260 256 T400 252 V300 H0 Z" fill="#7c6b4e"/>
+  <use href="#sag" transform="translate(150 258)" stroke="#3f7a4e"/>
+  <use href="#sag" transform="translate(258 260) scale(0.7)" stroke="#356844"/>
+</svg>

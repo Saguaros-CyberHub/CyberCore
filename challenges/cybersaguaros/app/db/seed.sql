@@ -2,18 +2,19 @@
 -- CyberSaguaros Research Portal — seed data
 -- ============================================================================
 -- Passwords are stored as plain SHA-256 (no salt) — deliberately weak so the
--- sqlmap-dumped `users` table is crackable (the "Password Crack" lesson).
---   dr.prickle / Sunset-Saguaro-2026   (admin)
---   rgreen     / cactus123             (researcher)
---   dvalmont   / Desert-Bloom-77       (researcher; also a Linux user on the box)
+-- sqlmap-dumped `users` table is crackable. Every password is a word from the
+-- rockyou wordlist, so `hashcat -m 1400` / `john` with rockyou.txt cracks them:
+--   dr.prickle / arizona    (admin)
+--   rgreen     / cactus     (researcher)
+--   dvalmont   / sunshine   (researcher; also the dvalmont Linux user on the box)
 -- ============================================================================
 
 INSERT INTO users (username, password_hash, display_name, email, role) VALUES
-  ('dr.prickle', 'f7c6f7656143553a7faf08aa883a3ba997038893d2ec709c67cfc1e94d6c8a31',
+  ('dr.prickle', '054da1e8bc1cb20b4504d603ca6154d353cedb698909503733343bb3f22161c1',
      'Dr. Patricia Prickle', 'p.prickle@cybersaguaros.local', 'admin'),
-  ('rgreen', 'fbf9f17a2a5027ac6c9b6f4fcf1c0a69a4354fa73ccad9340ad0338206bd83c3',
+  ('rgreen', 'caaeac3184e90c7f8587d692f03105bfe111982ab663ed6c6e1d0237eb3420f2',
      'Reggie Green', 'r.green@cybersaguaros.local', 'researcher'),
-  ('dvalmont', '790d9738afc1701c0df0626259c36d725054cfbe337cb497791a9692f3dffd54',
+  ('dvalmont', 'a941a4c4fd0c01cddef61b8be963bf4c1e2b0811c037ce3f1835fddf6ef6c223',
      'Desmond Valmont', 'd.valmont@cybersaguaros.local', 'researcher');
 
 INSERT INTO datasets (name, description, owner_id, dataset_url, verified) VALUES

@@ -11,10 +11,11 @@
 #   -> admin panel -> file-upload webshell (weak Content-Type filter) -> RCE
 #   as `saguarobot` -> Linux privesc to root.
 #
-# App source is BUNDLED in the CyberCore repo at challenges/cybersaguaros/.
-# This script must be run from inside a CyberCore checkout (it lives in the
-# repo). It tars that directory, base64-embeds it in the cloud-init payload,
-# and the VM unpacks it on first boot — so the VM itself needs no repo access.
+# App source lives in the CyberCore repo at challenges/cybersaguaros/. The VM
+# git-clones it from GitHub on first boot (bake time) and the result is sealed
+# into the template — lane clones never need repo access. Override the repo
+# with CHALLENGE_REPO_URL / CHALLENGE_REPO_REF; set CHALLENGE_REPO_TOKEN if the
+# repo is private.
 #
 # Companion to:
 #   - bake-dvwa-template.sh        (sibling attached-module template, 1702)
@@ -39,12 +40,21 @@ DISK_GB=${DISK_GB:-12}
 CLOUD_IMG_URL="${CLOUD_IMG_URL:-https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2}"
 CLOUD_IMG_LOCAL="/var/lib/vz/template/iso/debian-13-generic-amd64.qcow2"
 
+# App source — git-cloned into the VM at bake time. CHALLENGE_REPO_TOKEN is
+# only needed if the repo is private; if set it is spliced into the clone URL.
+CHALLENGE_REPO_URL="${CHALLENGE_REPO_URL:-https://github.com/Saguaros-CyberHub/CyberCore.git}"
+CHALLENGE_REPO_REF="${CHALLENGE_REPO_REF:-main}"
+CHALLENGE_REPO_TOKEN="${CHALLENGE_REPO_TOKEN:-}"
+
 # Linux accounts on the box.
 #   saguarobot — PHP-FPM pool user; the webshell / reverse-shell foothold.
 #   dvalmont   — researcher; has sudo NOPASSWD on tar (GTFObins privesc).
 #   root       — bake-debug password for instructor inspection.
 SAGUAROBOT_PASSWORD="${SAGUAROBOT_PASSWORD:-bake-debug-bot}"
-DVALMONT_PASSWORD="Desert-Bloom-77"
+# dvalmont's password is a rockyou word — it is also the SHA-256 hash in the
+# portal `users` table (crackable via the SQLi dump). Keep this in sync with
+# the dvalmont hash in challenges/cybersaguaros/app/db/seed.sql.
+DVALMONT_PASSWORD="sunshine"
 ROOT_PASSWORD="${ROOT_PASSWORD:-bake-debug}"
 
 # Must match DB_PASS in challenges/cybersaguaros/app/includes/config.php.
@@ -60,14 +70,11 @@ if pct status $VMID >/dev/null 2>&1; then
   exit 1
 fi
 
-# Locate the bundled app source relative to this script.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-CHALLENGE_DIR="$REPO_ROOT/challenges/cybersaguaros"
-if [ ! -d "$CHALLENGE_DIR/app" ]; then
-  echo "ERROR: app source not found at $CHALLENGE_DIR/app" >&2
-  echo "       Run this script from inside a CyberCore checkout." >&2
-  exit 1
+# Effective clone URL — splice in the token for a private repo.
+if [ -n "$CHALLENGE_REPO_TOKEN" ]; then
+  CLONE_URL="https://${CHALLENGE_REPO_TOKEN}@${CHALLENGE_REPO_URL#https://}"
+else
+  CLONE_URL="$CHALLENGE_REPO_URL"
 fi
 
 pick_snippet_storage() {
@@ -90,7 +97,7 @@ pick_snippet_storage() {
 
 SNIPPET_STORAGE=$(pick_snippet_storage)
 echo "==> Snippet storage: $SNIPPET_STORAGE"
-echo "==> App source:      $CHALLENGE_DIR"
+echo "==> App source:      git $CHALLENGE_REPO_URL ($CHALLENGE_REPO_REF)"
 echo "==> Bake-time NIC:   bridge=$BAKE_BRIDGE${BAKE_VLAN:+ vlan=$BAKE_VLAN}"
 
 # ---------- 1. Download cloud image (cached) ----------
@@ -101,12 +108,6 @@ if [ ! -f "$CLOUD_IMG_LOCAL" ]; then
   mv "${CLOUD_IMG_LOCAL}.tmp" "$CLOUD_IMG_LOCAL"
 fi
 echo "==> Cloud image: $CLOUD_IMG_LOCAL"
-
-# ---------- 1b. Pack the app source into a base64 blob ----------
-# tar the whole challenges/cybersaguaros dir (app/ + deploy/ + README.md);
-# the VM unpacks it under /opt/cybersaguaros-src on first boot.
-echo "==> Packing app source into the cloud-init payload..."
-APP_B64="$(tar czf - -C "$REPO_ROOT/challenges" cybersaguaros | base64 -w 76 | sed 's/^/      /')"
 
 # ---------- 2. Build cloud-init user-data ----------
 USERDATA_FILE="cybersaguaros-template-bake-${VMID}.yml"
@@ -157,6 +158,7 @@ packages:
   - ca-certificates
   - resolvconf
   - cron
+  - git
   - nginx
   - mariadb-server
   - php-fpm
@@ -167,13 +169,6 @@ packages:
   - php-mbstring
 
 write_files:
-  # The bundled CyberSaguaros app source, base64-packed at bake time.
-  - path: /tmp/cybersaguaros-src.tar.gz
-    encoding: b64
-    permissions: '0600'
-    content: |
-$APP_B64
-
   # ---- LinPE artifact: world-writable cron script run as root ----
   - path: /etc/cron.d/saguaro-datasync
     permissions: '0644'
@@ -217,17 +212,17 @@ runcmd:
   # ---- Restore bake-time DNS (resolvconf re-symlinks /etc/resolv.conf) ----
   - [ sh, -c, 'rm -f /etc/resolv.conf; printf "nameserver $BAKE_DNS\n" > /etc/resolv.conf' ]
 
-  # ---- Unpack the bundled app ----
-  - [ sh, -c, 'mkdir -p /opt/cybersaguaros-src && tar xzf /tmp/cybersaguaros-src.tar.gz -C /opt/cybersaguaros-src' ]
-  - [ sh, -c, 'mkdir -p /var/www/cybersaguaros && cp -r /opt/cybersaguaros-src/cybersaguaros/app/. /var/www/cybersaguaros/' ]
+  # ---- Fetch the app from the CyberCore repo (shallow clone) ----
+  - [ sh, -c, 'git clone --depth 1 --branch $CHALLENGE_REPO_REF $CLONE_URL /opt/cybersaguaros-src' ]
+  - [ sh, -c, 'mkdir -p /var/www/cybersaguaros && cp -r /opt/cybersaguaros-src/challenges/cybersaguaros/app/. /var/www/cybersaguaros/' ]
 
   # ---- nginx site ----
-  - [ sh, -c, 'cp /opt/cybersaguaros-src/cybersaguaros/deploy/nginx-cybersaguaros.conf /etc/nginx/sites-available/cybersaguaros' ]
+  - [ sh, -c, 'cp /opt/cybersaguaros-src/challenges/cybersaguaros/deploy/nginx-cybersaguaros.conf /etc/nginx/sites-available/cybersaguaros' ]
   - [ sh, -c, 'ln -sf /etc/nginx/sites-available/cybersaguaros /etc/nginx/sites-enabled/cybersaguaros' ]
   - [ sh, -c, 'rm -f /etc/nginx/sites-enabled/default' ]
 
   # ---- PHP-FPM pool (version-detected) running as saguarobot ----
-  - [ sh, -c, 'PHPVER=\$(ls /etc/php/ | head -1); cp /opt/cybersaguaros-src/cybersaguaros/deploy/php-fpm-pool.conf /etc/php/\$PHPVER/fpm/pool.d/cybersaguaros.conf' ]
+  - [ sh, -c, 'PHPVER=\$(ls /etc/php/ | head -1); cp /opt/cybersaguaros-src/challenges/cybersaguaros/deploy/php-fpm-pool.conf /etc/php/\$PHPVER/fpm/pool.d/cybersaguaros.conf' ]
 
   # ---- MariaDB: database, app user, schema + seed ----
   - [ systemctl, enable, mariadb ]
@@ -269,7 +264,8 @@ runcmd:
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 
   # ---- Cleanup ----
-  - [ sh, -c, 'rm -f /tmp/cybersaguaros-src.tar.gz' ]
+  # Drop the clone (token may be in its remote URL) before sealing.
+  - [ sh, -c, 'rm -rf /opt/cybersaguaros-src' ]
   - [ sh, -c, 'rm -f /etc/resolv.conf; ln -s ../run/resolvconf/resolv.conf /etc/resolv.conf' ]
   - [ sh, -c, 'cp /var/log/cloud-init-output.log /etc/cybercore-cloud-init.log 2>/dev/null || true' ]
   - [ sh, -c, 'rm -f /etc/netplan/50-cloud-init.yaml /etc/network/interfaces.d/50-cloud-init 2>/dev/null || true' ]

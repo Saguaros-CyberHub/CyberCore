@@ -7,13 +7,15 @@ $datasets = $pdo->query('SELECT name, description FROM datasets ORDER BY id DESC
 
 render_header('Home', '/');
 ?>
-<section class="hero">
-  <h1>Applying cyber algorithms to the desert's slowest scientists.</h1>
-  <p>The CyberSaguaros Research Group instruments, models, and predicts the
-     life of the saguaro cactus. Our pipelines turn decades of slow growth into
-     fast, queryable science.</p>
-  <p><a class="btn" href="/research.php">Explore the research</a>
-     <a class="btn ghost" href="/chat.php">Ask SaguaroBot</a></p>
+<section class="hero fullbleed">
+  <div class="wrap">
+    <h1>Applying cyber algorithms to the desert's slowest scientists.</h1>
+    <p>The CyberSaguaros Research Group instruments, models, and predicts the
+       life of the saguaro cactus. Our pipelines turn decades of slow growth
+       into fast, queryable science.</p>
+    <p><a class="btn" href="/research.php">Explore the research</a>
+       <a class="btn ghost" href="/gallery.php">Open the gallery</a></p>
+  </div>
 </section>
 
 <section>
@@ -28,20 +30,33 @@ render_header('Home', '/');
   </div>
 </section>
 
-<section class="split">
-  <div>
-    <h2>SaguaroBot</h2>
-    <p>Our research assistant answers questions about the project and will
-       <strong>verify the integrity of any dataset you submit</strong> — just
-       give it a URL and it fetches the file to check it. Visiting researchers
-       use it constantly.</p>
-    <p><a href="/chat.php">Open SaguaroBot &rarr;</a></p>
+<section class="band fullbleed">
+  <div class="wrap">
+    <h2>What we do</h2>
+    <div class="cards">
+      <article class="card plain">
+        <h3>Instrument</h3>
+        <p>Low-power telemetry on 240+ saguaros across the Sonoran study grid.</p>
+      </article>
+      <article class="card plain">
+        <h3>Model</h3>
+        <p>Spine-density and growth-stage classifiers trained on field imagery.</p>
+      </article>
+      <article class="card plain">
+        <h3>Predict</h3>
+        <p>The cyber-algorithmic regression pipeline forecasts bloom and growth.</p>
+      </article>
+      <article class="card plain">
+        <h3>Publish</h3>
+        <p>Open datasets released for the wider desert-ecology community.</p>
+      </article>
+    </div>
   </div>
-  <div>
-    <h2>Field gallery</h2>
-    <p>Cactus imagery contributed by field researchers and the public.
-       Browse the <a href="/gallery.php">gallery</a> or, if you have a
-       researcher account, sign in to contribute.</p>
-  </div>
+</section>
+
+<section>
+  <h2>Field gallery</h2>
+  <p>Cactus imagery contributed by field researchers and the public — browse
+     the <a href="/gallery.php">CyberSaguaros gallery</a>.</p>
 </section>
 <?php render_footer(); ?>
