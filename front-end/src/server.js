@@ -295,11 +295,11 @@ async function initializeSettingsTable() {
 
 async function start() {
   try {
-    // Initialize settings table in clinic_db if it doesn't exist
-    await initializeSettingsTable();
-    
-    // Load modules from modules/ directory (includes nested plugins)
+    // Load modules first — plugins create their databases (e.g. clinic_db)
     await moduleLoader.loadAll(app);
+
+    // Initialize settings table after plugins have created their databases
+    await initializeSettingsTable();
   } catch (err) {
     console.error('Module loading error (non-fatal):', err.message);
   }
