@@ -21,6 +21,8 @@ services:
       POSTGRES_USER: ${CORE_DB_USER}
       POSTGRES_PASSWORD: ${CORE_DB_PASSWORD}
       POSTGRES_DB: ${CORE_DB_NAME}
+      CORE_DB_USER: ${CORE_DB_USER}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD}
       ENABLED_MODULES: ${CORE_ENABLED_MODULES}
       N8N_DB_USER: ${N8N_DB_USER}
       N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
@@ -36,6 +38,7 @@ services:
       - ./config/postgres/002_init_db.sh:/docker-entrypoint-initdb.d/002_init_db.sh:ro,z
       - ./config/postgres/003_cyberhub_modules.sql:/docker-entrypoint-initdb.d/003_cyberhub_modules.sql:ro,z
       - ./config/postgres/004_site_settings.sql:/docker-entrypoint-initdb.d/004_site_settings.sql:ro,z
+      - ./config/postgres/005_admin_user.sh:/docker-entrypoint-initdb.d/005_admin_user.sh:ro,z
       - ./config/postgres/010_guacamole.sh:/docker-entrypoint-initdb.d/010_guacamole.sh:ro,z
       - ./config/postgres/050_apply_modules.sh:/docker-entrypoint-initdb.d/050_apply_modules.sh:ro,z
       - ./config/postgres/modules:/docker-entrypoint-initdb.d/modules:ro,z

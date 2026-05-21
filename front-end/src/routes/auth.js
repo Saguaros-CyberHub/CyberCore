@@ -100,16 +100,13 @@ router.post('/register', registerValidation, async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 12);
     const userId = uuidv4();
 
-    const countResult = await cybercoreQuery('SELECT COUNT(*) FROM cybercore_user');
-    const role = parseInt(countResult.rows[0].count, 10) === 0 ? 'admin' : 'user';
-
     // Insert into cybercore_user
     const result = await cybercoreQuery(
       `INSERT INTO cybercore_user
         (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
        RETURNING user_id, email, first_name, last_name, role, organization, created_at`,
-      [userId, email, email, passwordHash, 'bcrypt', firstName, lastName, organization || 'Independent', role, false]
+      [userId, email, email, passwordHash, 'bcrypt', firstName, lastName, organization || 'Independent', 'student', false]
     );
 
     const user = result.rows[0];
