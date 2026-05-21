@@ -17,7 +17,7 @@
     # origin, satisfying Guacamole's X-Frame-Options: SAMEORIGIN header.
     # Caddy upgrades WebSocket connections automatically.
     # ------------------------------------------------------------------
-    handle /guacamole/* {
+    handle /guacamole* {
         reverse_proxy guacamole:8080
     }
 
