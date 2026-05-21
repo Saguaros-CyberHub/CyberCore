@@ -19,6 +19,13 @@
 # dual-homed DMZ host, but never the GOAD subnet directly: they must exploit
 # the DMZ host and pivot through it.
 #
+# Tailscale runs in KERNEL networking mode here (the v2 template uses
+# userspace mode). Kernel mode gives the gateway a real tailscale0 device,
+# which is required both for subnet routing INTO the lane and for lane
+# hosts to initiate connections back OUT into the Tailnet — e.g. a reverse
+# shell from a lane host to a BYOD attacker laptop. This needs /dev/net/tun
+# in the container; admin.js adds the passthrough at deploy time.
+#
 # This script does NOT modify 1694 — v1/v2 lanes keep working untouched.
 # Challenges using subnet_scheme='v3' clone 1695.
 #
@@ -65,6 +72,16 @@ for vid in "$TMP_VMID" "$VERIFY_VMID"; do
     exit 1
   fi
 done
+
+# The v3 gateway runs Tailscale in kernel mode and therefore needs
+# /dev/net/tun passed into its CT. The `lxc.mount.entry` bind-mount added
+# later requires the tun device to exist on THIS node first.
+modprobe tun 2>/dev/null || true
+if [ ! -e /dev/net/tun ]; then
+  echo "ERROR: /dev/net/tun missing on this node and 'modprobe tun' failed." >&2
+  echo "       Load the tun module, then re-run." >&2
+  exit 1
+fi
 
 # ---------- 1. Clone 1694 -> temp ----------
 echo "==> Cloning $SRC_VMID -> $TMP_VMID..."
@@ -181,29 +198,74 @@ mkdir -p /etc/dnsmasq.d
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
 # --- iptables ---
-# Strip any stale CyberCore-tagged rules so re-runs stay clean.
-iptables-save | grep -vE 'GOAD-CONTROLLER-SSH|CYBERCORE-SEG' | iptables-restore || true
+# IMPORTANT: the lane-gateway template ships with `-P INPUT DROP` /
+# `-P FORWARD DROP` and every allow-rule hard-keyed to the v1/v2 interface
+# name `lan0`. v3's lane NICs are `ext0`/`int0`, so none of the baked rules
+# match — without the rules below the gateway silently DROPs the lane's
+# DHCP/DNS (INPUT) and all of its internet traffic (FORWARD). We add an
+# explicit, comment-tagged rule set for ext0/int0; the dead lan0 rules are
+# left in place (harmless — no lan0 exists to match them).
+#
+# Strip any stale CyberCore-tagged rules first so re-runs stay clean.
+iptables-save | grep -vE 'GOAD-CONTROLLER-SSH|CYBERCORE-SEG|CYBERCORE-V3' | iptables-restore || true
 
-# 1. Allow the GOAD controller (internal .CONTROLLER_OCTET) to SSH the
-#    gateway over int0 — it writes DHCP reservations there.
+# 1. INPUT — let lane VMs reach the gateway's own services (DHCP, DNS, NTP,
+#    ping) on BOTH segments. Without the DHCP rule, `-P INPUT DROP` eats
+#    every DHCPDISCOVER and lane VMs never get an address.
+for LANIF in ext0 int0; do
+  iptables -A INPUT -i "$LANIF" -p udp --dport 67:68 -m comment --comment "CYBERCORE-V3" -j ACCEPT
+  iptables -A INPUT -i "$LANIF" -p udp --dport 53    -m comment --comment "CYBERCORE-V3" -j ACCEPT
+  iptables -A INPUT -i "$LANIF" -p tcp --dport 53    -m comment --comment "CYBERCORE-V3" -j ACCEPT
+  iptables -A INPUT -i "$LANIF" -p udp --dport 123   -m comment --comment "CYBERCORE-V3" -j ACCEPT
+  iptables -A INPUT -i "$LANIF" -p icmp              -m comment --comment "CYBERCORE-V3" -j ACCEPT
+done
+
+# 2. INPUT — the GOAD controller (internal .CONTROLLER_OCTET) SSHes the
+#    gateway over int0 to write DHCP reservations.
 iptables -I INPUT -i int0 -s "${CONTROLLER_IP}" -p tcp --dport 22 \
   -m comment --comment "GOAD-CONTROLLER-SSH" -j ACCEPT
 
-# 2. SEGMENTATION — drop all traffic between the external and internal
-#    segments. This is the v3 attack-path enforcement: Kali (ext0) reaches
-#    the internet and the dual-homed DMZ host, but never the GOAD subnet
-#    (int0) directly. The pivot is done at the application layer (a Ligolo
-#    agent on the DMZ host), which is not affected by these FORWARD rules.
+# 3. FORWARD — return traffic, then both segments out to the internet.
+#    `-P FORWARD DROP` is the default, so these explicit accepts are required.
+iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "CYBERCORE-V3" -j ACCEPT
+iptables -A FORWARD -i ext0 -o wan0 -m comment --comment "CYBERCORE-V3" -j ACCEPT
+iptables -A FORWARD -i int0 -o wan0 -m comment --comment "CYBERCORE-V3" -j ACCEPT
+
+# 3a. FORWARD — let the EXTERNAL segment reach the Tailnet. This is what
+#     lets a lane host on ext0 call back to a BYOD attacker laptop over
+#     Tailscale (reverse shells / callbacks). int0 deliberately gets NO
+#     such rule: the internal GOAD subnet must still pivot through the DMZ
+#     host. Return traffic is covered by the RELATED,ESTABLISHED accept
+#     above. tailscale0 does not exist yet at this point in firstboot —
+#     iptables accepts rules naming a not-yet-present interface, and the
+#     rule starts matching once tailscaled brings the device up below.
+iptables -A FORWARD -i ext0 -o tailscale0 -m comment --comment "CYBERCORE-V3" -j ACCEPT
+
+# 4. FORWARD SEGMENTATION — drop all traffic between the external and
+#    internal segments. Inserted at the TOP of FORWARD so it wins over the
+#    accepts above. This is the v3 attack-path enforcement: Kali (ext0)
+#    reaches the internet and the dual-homed DMZ host, but never the GOAD
+#    subnet (int0) directly. The Ligolo pivot is application-layer through
+#    the DMZ host's own NICs, so it is unaffected by these FORWARD rules.
 iptables -I FORWARD -i ext0 -o int0 -m comment --comment "CYBERCORE-SEG" -j DROP
 iptables -I FORWARD -i int0 -o ext0 -m comment --comment "CYBERCORE-SEG" -j DROP
 
-# 3. NAT both lane subnets out wan0 (FORWARD policy is ACCEPT, so ext0/int0
-#    -> wan0 is allowed; only the ext0<->int0 DROP rules above restrict it).
+# 5. NAT both lane subnets out wan0.
 for NET in "$EXT_NET" "$INT_NET"; do
   if ! iptables -t nat -C POSTROUTING -s "$NET" -o wan0 -j MASQUERADE 2>/dev/null; then
     iptables -t nat -A POSTROUTING -s "$NET" -o wan0 -j MASQUERADE
   fi
 done
+
+# 5a. NAT the EXTERNAL segment out tailscale0 too. Tailscale only SNATs
+#     Tailnet->subnet traffic; subnet->Tailnet is NOT masqueraded by
+#     Tailscale, so a lane host's reverse shell would egress tailscale0
+#     with its private source IP and the BYOD laptop would have no route
+#     back. Masquerading to the gateway's own Tailnet IP makes it look
+#     like an ordinary peer connection. int0 is intentionally excluded.
+if ! iptables -t nat -C POSTROUTING -s "$EXT_NET" -o tailscale0 -j MASQUERADE 2>/dev/null; then
+  iptables -t nat -A POSTROUTING -s "$EXT_NET" -o tailscale0 -j MASQUERADE
+fi
 
 mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules-save
@@ -306,6 +368,24 @@ interface=lo
 bind-interfaces
 PLACEHOLDER_EOF
 
+# 2d. Tailscale conf — force KERNEL networking mode. The v2 template ships
+#     /etc/conf.d/tailscale with `--tun=userspace-networking`; that mode has
+#     no tailscale0 device, so the kernel cannot route or forward packets
+#     into the Tailnet (subnet routing AND reverse shells from lane hosts
+#     both silently fail). v3 drops the flag; tailscaled creates tailscale0
+#     once /dev/net/tun is present (passed through to the CT — see step 3).
+cat > "$STAGING/conf.d-tailscale" <<'TSCONF_EOF'
+# /etc/conf.d/tailscale
+# Configured by bake-lane-gateway-v3.sh.
+# KERNEL networking mode: tailscaled creates the tailscale0 TUN device.
+# Required both for subnet routing INTO the lane and for lane hosts to
+# initiate connections back into the Tailnet (e.g. a reverse shell to a
+# BYOD attacker laptop). The container must have /dev/net/tun passed
+# through; the v3 bake script appends the lxc.* passthrough to 1695's
+# config so every clone inherits it.
+command_args="--state=/var/lib/tailscale/tailscaled.state"
+TSCONF_EOF
+
 echo "==> Pushing v3 firstboot script..."
 pct push "$TMP_VMID" "$STAGING/00-cybercore-firstboot.start" /etc/local.d/00-cybercore-firstboot.start --perms 0755
 
@@ -315,7 +395,10 @@ pct push "$TMP_VMID" "$STAGING/cybercore-gateway.env" /etc/cybercore-gateway.env
 echo "==> Pushing placeholder /etc/dnsmasq.conf..."
 pct push "$TMP_VMID" "$STAGING/dnsmasq.conf.placeholder" /etc/dnsmasq.conf --perms 0644
 
-# 2d. Rework /etc/network/interfaces: rename the inherited lan0 stanza to
+echo "==> Pushing /etc/conf.d/tailscale (kernel networking mode)..."
+pct push "$TMP_VMID" "$STAGING/conf.d-tailscale" /etc/conf.d/tailscale --perms 0644
+
+# 2e. Rework /etc/network/interfaces: rename the inherited lan0 stanza to
 #     ext0 and add an int0 stanza, both `inet manual` so Proxmox's per-deploy
 #     netN IP is the only source of truth (firstboot reads the live IPs).
 echo "==> Reworking /etc/network/interfaces for ext0 + int0..."
@@ -349,7 +432,7 @@ FRESH_EOF
   echo "-----------"
 '
 
-# 2e. Re-push the placeholder dnsmasq.conf as the last pre-shutdown step so
+# 2f. Re-push the placeholder dnsmasq.conf as the last pre-shutdown step so
 #     1695 never ships a stale render (mirrors the v2 bake precaution).
 echo "==> Re-pushing placeholder dnsmasq.conf..."
 pct push "$TMP_VMID" "$STAGING/dnsmasq.conf.placeholder" /etc/dnsmasq.conf --perms 0644
@@ -387,9 +470,25 @@ pct set "$NEW_VMID" --net0 'name=wan0,bridge=vmbr0,ip=dhcp,firewall=0,type=veth'
 pct set "$NEW_VMID" --net1 'name=ext0,bridge=vmbr0,type=veth'
 pct set "$NEW_VMID" --net2 'name=int0,bridge=vmbr0,type=veth'
 
+# Pass /dev/net/tun through to the CT so Tailscale runs in kernel mode and
+# creates a real tailscale0 device. Raw lxc.* keys cannot be set via
+# `pct set` or the Proxmox API, so they are appended to the config file
+# directly. `pct clone` copies them into every per-lane clone of 1695, so
+# admin.js needs no change — the passthrough is inherited automatically.
+echo "==> Adding /dev/net/tun passthrough to 1695's config..."
+GW_CONF="/etc/pve/lxc/${NEW_VMID}.conf"
+if ! grep -q 'dev/net/tun' "$GW_CONF"; then
+  cat >> "$GW_CONF" <<'TUNCONF_EOF'
+lxc.cgroup2.devices.allow: c 10:200 rwm
+lxc.mount.entry: /dev/net/tun dev/net/tun none bind,create=file
+TUNCONF_EOF
+fi
+
 pct set "$NEW_VMID" --description "CyberCore lane gateway v3 — segmented DMZ topology.
 3 NICs: wan0 (uplink) + ext0 (external/attacker) + int0 (internal/GOAD).
 Firstboot renders dnsmasq + NAT + ext0<->int0 DROP from the live NIC IPs.
+Tailscale runs in kernel mode (/dev/net/tun passed through); ext0 can reach
+the Tailnet (reverse shells to BYOD), int0 deliberately cannot.
 Built from $SRC_VMID by bake-lane-gateway-v3.sh."
 
 pct set "$NEW_VMID" --template 1
@@ -429,6 +528,20 @@ pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i int0 -o ext0 -m co
   || { echo "FAIL: int0->ext0 segmentation DROP rule missing"; RENDERED_OK=0; }
 pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C INPUT -i int0 -s 10.199.0.5 -p tcp --dport 22 -m comment --comment GOAD-CONTROLLER-SSH -j ACCEPT" 2>/dev/null \
   || { echo "FAIL: controller ACCEPT rule missing for 10.199.0.5"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C INPUT -i int0 -p udp --dport 67:68 -m comment --comment CYBERCORE-V3 -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: int0 DHCP INPUT-accept rule missing (lane VMs can't get an IP)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C INPUT -i ext0 -p udp --dport 67:68 -m comment --comment CYBERCORE-V3 -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: ext0 DHCP INPUT-accept rule missing (lane VMs can't get an IP)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i int0 -o wan0 -m comment --comment CYBERCORE-V3 -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: int0->wan0 FORWARD-accept rule missing (no internet for the lane)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i ext0 -o tailscale0 -m comment --comment CYBERCORE-V3 -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: ext0->tailscale0 FORWARD-accept rule missing (no Tailnet callbacks/reverse shells)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -t nat -C POSTROUTING -s 10.99.0.0/24 -o tailscale0 -j MASQUERADE" 2>/dev/null \
+  || { echo "FAIL: ext0->tailscale0 NAT MASQUERADE rule missing"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "! grep -q userspace-networking /etc/conf.d/tailscale" 2>/dev/null \
+  || { echo "FAIL: /etc/conf.d/tailscale still forces Tailscale userspace mode"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "test -c /dev/net/tun" 2>/dev/null \
+  || { echo "FAIL: /dev/net/tun not present in CT (TUN passthrough did not survive clone)"; RENDERED_OK=0; }
 
 pct stop "$VERIFY_VMID"
 pct destroy "$VERIFY_VMID" --purge
@@ -443,6 +556,8 @@ if [ "$RENDERED_OK" = "1" ]; then
   echo "    - NAT MASQUERADE      both subnets -> wan0"
   echo "    - segmentation        ext0<->int0 FORWARD DROP"
   echo "    - controller ACCEPT   10.199.0.5 -> int0:22"
+  echo "    - tailnet egress      ext0 -> tailscale0 ACCEPT + MASQUERADE"
+  echo "    - tailscale mode      kernel (/dev/net/tun passed through to the CT)"
   echo ""
   echo "  Used automatically by admin.js for subnet_scheme='v3' challenges."
   echo "==================================================================="
