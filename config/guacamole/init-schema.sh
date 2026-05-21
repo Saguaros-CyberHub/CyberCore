@@ -12,8 +12,8 @@ GUAC_VERSION="${GUAC_VERSION:-1.5.5}"
 SCHEMA_BASE="https://raw.githubusercontent.com/apache/guacamole-client/${GUAC_VERSION}/extensions/guacamole-auth-jdbc/modules/guacamole-auth-jdbc-postgresql/schema"
 
 echo ">>> [guacamole-init] Fetching schema for Guacamole ${GUAC_VERSION}..."
-wget -qO /tmp/001-create-schema.sql      "${SCHEMA_BASE}/001-create-schema.sql"
-wget -qO /tmp/002-create-admin-user.sql  "${SCHEMA_BASE}/002-create-admin-user.sql"
+curl -fsSL -o /tmp/001-create-schema.sql     "${SCHEMA_BASE}/001-create-schema.sql"
+curl -fsSL -o /tmp/002-create-admin-user.sql "${SCHEMA_BASE}/002-create-admin-user.sql"
 
 echo ">>> [guacamole-init] Applying schema to ${GUAC_DB_NAME} on ${GUAC_DB_HOST}..."
 

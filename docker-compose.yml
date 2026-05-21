@@ -240,7 +240,7 @@ services:
     depends_on:
       - postgres
     ports:
-      - "0.0.0.0:8080:8080"
+      - "0.0.0.0:8181:8080"
     networks:
       - cybercore-net
 
