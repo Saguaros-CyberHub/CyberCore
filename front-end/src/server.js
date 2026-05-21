@@ -55,6 +55,7 @@ const adminRoutes = require('./routes/admin');
 const challengeTemplateRoutes = require('./routes/challenge-templates');
 const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
+const guacSessionRoutes = require('./routes/guac-sessions');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -69,6 +70,19 @@ const PORT = process.env.PORT || 3000;
 // SECURITY MIDDLEWARE
 // ============================================================================
 
+// Build frame-src to allow Guacamole embedding. Same-origin proxy paths
+// (e.g. "/guac") are already covered by 'self'. Only add an explicit origin
+// when GUAC_PUBLIC_BASE_URL is a full cross-origin URL.
+const guacPublicBase = (process.env.GUAC_PUBLIC_BASE_URL || '').trim();
+const frameSrcDirective = ["'self'"];
+if (guacPublicBase.startsWith('http')) {
+  try {
+    frameSrcDirective.push(new URL(guacPublicBase).origin);
+  } catch {
+    // Malformed URL — ignore; 'self' remains
+  }
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -79,6 +93,7 @@ app.use(helmet({
       scriptSrcAttr: ["'unsafe-inline'"],
       imgSrc: ["'self'", "data:", "blob:"],
       connectSrc: ["'self'", "http://localhost:5678", "ws://localhost:5678"],
+      frameSrc: frameSrcDirective,
       upgradeInsecureRequests: null
     }
   },
@@ -188,6 +203,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', challengeTemplateRoutes);
 app.use('/api/modules', moduleRoutes);
+app.use('/api/dashboard', guacSessionRoutes);
 
 // Unauthenticated, source-IP-gated. Called by lane gateway LXCs on first boot
 // to fetch one-shot bootstrap payload (Tailscale auth key etc). See route

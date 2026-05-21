@@ -109,6 +109,19 @@ const API = {
     async list() {
       return API.request('/modules');
     }
+  },
+
+  // Dashboard — VM workspaces & Guacamole sessions
+  dashboard: {
+    async listVms() {
+      return API.request('/dashboard/vms');
+    },
+
+    async requestGuacSession(vmId) {
+      return API.request(`/dashboard/vms/${encodeURIComponent(vmId)}/guac-session`, {
+        method: 'POST'
+      });
+    }
   }
 };
 

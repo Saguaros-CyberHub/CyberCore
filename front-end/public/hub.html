@@ -276,6 +276,203 @@
     [data-theme="dark"] .dashboard-submenu-item.active {
       background: rgba(49,130,206,0.15);
     }
+
+    /* ===== VM List (My Workspaces) ===== */
+    .vml-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+      margin-bottom: 8px;
+    }
+
+    .vml-loading, .vml-empty, .vml-error {
+      grid-column: 1 / -1;
+      padding: 48px 24px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    .vml-empty-icon { font-size: 2.5rem; display: block; margin-bottom: 12px; }
+    .vml-error { color: #e53e3e; }
+
+    .vml-card {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      padding: 18px 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      border: 1px solid var(--border-color, #e2e8f0);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    [data-theme="dark"] .vml-card {
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    .vml-card-header {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .vml-vm-icon {
+      font-size: 1.5rem;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+
+    .vml-vm-name {
+      font-weight: 600;
+      font-size: 0.975rem;
+      color: var(--text-primary);
+      margin-bottom: 6px;
+    }
+
+    .vml-vm-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      align-items: center;
+    }
+
+    .vml-badge {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    .vml-badge-on      { background: #c6f6d5; color: #276749; }
+    .vml-badge-off     { background: #fed7d7; color: #9b2c2c; }
+    .vml-badge-idle    { background: #feebc8; color: #7b341e; }
+    .vml-badge-unknown { background: var(--gray-100, #f7fafc); color: var(--text-muted); }
+
+    [data-theme="dark"] .vml-badge-on     { background: rgba(72,187,120,0.15); color: #68d391; }
+    [data-theme="dark"] .vml-badge-off    { background: rgba(252,129,129,0.15); color: #fc8181; }
+    [data-theme="dark"] .vml-badge-idle   { background: rgba(246,173,85,0.15);  color: #f6ad55; }
+    [data-theme="dark"] .vml-badge-unknown { background: rgba(255,255,255,0.06); color: var(--text-muted); }
+
+    .vml-module-tag {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      background: var(--gray-100, #f7fafc);
+      padding: 2px 8px;
+      border-radius: 10px;
+    }
+    [data-theme="dark"] .vml-module-tag { background: rgba(255,255,255,0.07); }
+
+    .vml-card-actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .vml-launch-btn {
+      background: var(--primary, #3182ce);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .vml-launch-btn:hover:not(:disabled) { background: #2b6cb0; }
+    .vml-launch-btn:disabled {
+      background: var(--gray-100, #edf2f7);
+      color: var(--text-muted);
+      cursor: not-allowed;
+    }
+    [data-theme="dark"] .vml-launch-btn:disabled { background: rgba(255,255,255,0.07); }
+
+    .vml-no-console {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    /* ===== VM Console Panel ===== */
+    .vmc-panel {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      border: 1px solid var(--border-color, #e2e8f0);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+
+    [data-theme="dark"] .vmc-panel {
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+
+    .vmc-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 16px;
+      background: var(--gray-100, #f7fafc);
+      border-bottom: 1px solid var(--border-color, #e2e8f0);
+    }
+
+    [data-theme="dark"] .vmc-toolbar {
+      background: rgba(255,255,255,0.04);
+    }
+
+    .vmc-title {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    .vmc-close-btn {
+      background: none;
+      border: 1px solid var(--border-color, #e2e8f0);
+      border-radius: 6px;
+      padding: 4px 10px;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .vmc-close-btn:hover { background: #fed7d7; color: #9b2c2c; border-color: #fc8181; }
+
+    .vmc-body {
+      min-height: 120px;
+    }
+
+    .vmc-center {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 48px 24px;
+    }
+
+    .vmc-iframe-wrap { line-height: 0; }
+
+    .vmc-iframe {
+      width: 100%;
+      height: 680px;
+      border: none;
+      display: block;
+    }
+
+    .vmc-spinner {
+      width: 36px;
+      height: 36px;
+      border: 3px solid var(--border-color, #e2e8f0);
+      border-top-color: var(--primary, #3182ce);
+      border-radius: 50%;
+      animation: vmc-spin 0.8s linear infinite;
+    }
+    @keyframes vmc-spin { to { transform: rotate(360deg); } }
+
+    .vmc-status-text { color: var(--text-secondary); font-size: 0.9rem; }
+
+    .vmc-error-icon { font-size: 2rem; }
+    .vmc-error-msg  { color: var(--text-secondary); text-align: center; max-width: 400px; margin: 0; }
   </style>
 </head>
 <body>
@@ -359,8 +556,12 @@
         </div>
 
         <div id="workspaces-myworkspacesContent" style="display: none;">
-          <h2>My Workspaces</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
+          <div class="hub-welcome" style="margin-bottom:20px">
+            <h1>My Workspaces</h1>
+            <p>VMs and workstations assigned to your account. Click <strong>Open Console</strong> to connect.</p>
+          </div>
+          <div id="vmList" class="vml-list"></div>
+          <div id="vmConsoleContainer" style="display:none; margin-top:24px;"></div>
         </div>
 
         <div id="workspaces-availableContent" style="display: none;">
@@ -434,6 +635,7 @@
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
   <script src="/js/hub.js"></script>
+  <script src="/js/vm-console.js"></script>
   <script>
     // Load site configuration and update UI
     async function loadSiteConfig() {
@@ -492,9 +694,16 @@
     });
 
     // Dashboard menu tab switching
+    let _vmListLoaded = false;
+
     function switchDashboardTab(event, page) {
       event.preventDefault();
-      
+
+      // Close any open console when navigating away from workspaces
+      if (page !== 'workspaces-myworkspaces' && typeof VmConsole !== 'undefined') {
+        VmConsole.close();
+      }
+
       // Hide all content sections
       document.querySelectorAll('[id$="Content"]').forEach(el => {
         el.style.display = 'none';
@@ -522,6 +731,15 @@
       const parentDetails = activeItem.closest('.dashboard-menu-dropdown');
       if (parentDetails) {
         parentDetails.open = false;
+      }
+
+      // Lazy-load VM list the first time the workspaces tab is opened
+      if (page === 'workspaces-myworkspaces' && !_vmListLoaded && typeof VmWorkspaces !== 'undefined') {
+        _vmListLoaded = true;
+        VmWorkspaces.render(
+          document.getElementById('vmList'),
+          'vmConsoleContainer'
+        );
       }
 
       // Scroll to top

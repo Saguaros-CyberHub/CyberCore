@@ -1,0 +1,30 @@
+# =============================================================================
+# CyberHub — Caddy Reverse Proxy
+# =============================================================================
+# CYBERHUB_HOST controls the mode:
+#
+#   yourdomain.example.edu   — HTTPS with automatic Let's Encrypt certificate
+#   :80                      — HTTP only, no certificate (offline / LAN mode)
+#
+# Set CYBERHUB_HOST in your .env file. See docs/offline-mode.md to disable HTTPS.
+# =============================================================================
+
+{$CYBERHUB_HOST} {
+
+    # ------------------------------------------------------------------
+    # Guacamole remote console
+    # Proxied at /guacamole/ so the browser and Guacamole share the same
+    # origin, satisfying Guacamole's X-Frame-Options: SAMEORIGIN header.
+    # Caddy upgrades WebSocket connections automatically.
+    # ------------------------------------------------------------------
+    handle /guacamole/* {
+        reverse_proxy guacamole:8080
+    }
+
+    # ------------------------------------------------------------------
+    # CyberHub application
+    # ------------------------------------------------------------------
+    handle {
+        reverse_proxy app:3000
+    }
+}
