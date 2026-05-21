@@ -271,9 +271,9 @@ services:
       GUAC_DB_HOST: postgres
       GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
       GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
-      GUAC_VERSION: "1.5.5"
     volumes:
       - ./config/guacamole/init-schema.sh:/init-schema.sh:ro,z
+      - ./config/guacamole:/schema:ro,z
     entrypoint: ["/bin/sh", "/init-schema.sh"]
     networks:
       - cybercore-net
