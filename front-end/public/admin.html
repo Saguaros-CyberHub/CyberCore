@@ -575,6 +575,19 @@
               </div>
             </div>
 
+            <!-- Network topology (subnet scheme) -->
+            <div class="form-group" style="margin-top: 0.25rem;">
+              <label>Network Topology</label>
+              <select id="newChalSubnetScheme" onchange="onChalSubnetSchemeChange()">
+                <option value="v1" selected>v1 — shared flat subnet (192.18.0.0/24, legacy)</option>
+                <option value="v2">v2 — per-lane flat subnet (10.x.x.0/24, Tailscale BYOD)</option>
+                <option value="v3">v3 — segmented "DMZ" (external + internal, forced pivot)</option>
+              </select>
+              <p id="chalSubnetSchemeDesc" style="font-size: 0.72rem; color: var(--gray-500); margin: 0.35rem 0 0 0;">
+                All lane VMs share one flat subnet. Legacy scheme — kept for in-flight classes.
+              </p>
+            </div>
+
             <!-- GOAD configuration card -->
             <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 1rem; margin-top: 0.75rem; background: #fffbeb;">
               <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
@@ -4190,6 +4203,19 @@
       if (cfg) cfg.style.display = 'none';
     }
 
+    // Network-topology selector — updates the helper text under the dropdown.
+    function onChalSubnetSchemeChange() {
+      const sel = document.getElementById('newChalSubnetScheme');
+      const desc = document.getElementById('chalSubnetSchemeDesc');
+      if (!sel || !desc) return;
+      const text = {
+        v1: 'All lane VMs share one flat subnet. Legacy scheme — kept for in-flight classes.',
+        v2: 'Each lane gets its own /24 (10.x.x.0/24). Required for Tailscale BYOD access.',
+        v3: 'Two subnets per lane — external (Kali/BYOD) and internal (GOAD AD) — with the gateway firewall-blocking traffic between them. Give one VM the role "dmz": it becomes the dual-homed pivot the attacker must exploit to reach the internal network.'
+      };
+      desc.textContent = text[sel.value] || text.v1;
+    }
+
     async function createChallenge() {
       const name = document.getElementById('newChalName').value.trim();
       const challenge_key = document.getElementById('newChalKey').value.trim();
@@ -4199,6 +4225,7 @@
       const max_lanes = document.getElementById('newChalMaxLanes').value;
       const difficulty = document.getElementById('newChalDiff').value;
       const module = document.getElementById('newChalModule').value;
+      const subnet_scheme = document.getElementById('newChalSubnetScheme').value;
       const goad = readChalGoadFields();
       const status = document.getElementById('createChallengeStatus');
 
@@ -4232,7 +4259,7 @@
       try {
         const body = {
           name, challenge_key, description, zone_abbrev,
-          vms, max_lanes, difficulty, module,
+          vms, max_lanes, difficulty, module, subnet_scheme,
           challenge_type: vms.length > 1 ? 'multi_vm' : 'single_vm'
         };
         if (goad) body.goad = goad;

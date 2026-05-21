@@ -4170,13 +4170,6 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
 
     // Build the spec object compatible with the existing deploy-lane flow
     const subnetScheme = template.subnet_scheme || 'v1';
-    // v3 segmented lanes are not yet wired into this deploy path.
-    if (subnetScheme === 'v3') {
-      return res.status(400).json({
-        error: 'v3 (segmented "DMZ") challenges are not yet supported by this deploy path. ' +
-               'Deploy v3 lanes via POST /api/admin/deploy-lane.'
-      });
-    }
     const gatewayVmid = resolveGatewayVmid(challengeModule, subnetScheme, spec);
     const templateNode = vmSpecs[0]?.template_node || 'cyberhub-node-5';
     console.log(`[ChallengeNetwork] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
@@ -4262,6 +4255,20 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
       console.log(`[ChallengeNetwork] SDN infrastructure created: zone=${zoneAbbrev}, vnet=${vnet.vnet}`);
     }
 
+    // v3 segmented lanes need the internal VNet too (created at challenge-create
+    // time alongside the external one). Don't auto-create it here — a v3
+    // challenge must be made via /create-challenge so both VNets exist.
+    let vnetInt = null;
+    if (subnetScheme === 'v3') {
+      vnetInt = vnets.find(v => v.tag === vxlanId + V3_INTERNAL_TAG_OFFSET);
+      if (!vnetInt) {
+        return res.status(503).json({
+          error: `v3 internal VNet (tag ${vxlanId + V3_INTERNAL_TAG_OFFSET}) not found — ` +
+                 `create the v3 challenge via /create-challenge first so both VNets exist.`
+        });
+      }
+    }
+
     // Verify user exists in cybercore_user
     const userResult = await cybercoreQuery(
       `SELECT user_id, email, first_name, last_name, role FROM cybercore_user WHERE user_id = $1`, [userId]
@@ -4319,11 +4326,16 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
       try {
         const deployedVMs = [];
 
-        // Lane subnet base — '192.18.0' for v1, '10.<vxh>.<vxl>' for v2.
-        const laneSubnetBase = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId).lan.base3;
+        // Per-lane networking. v1/v2: one subnet. v3: external + internal.
+        const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId);
+        const isV3 = subnetScheme === 'v3';
+        const vnetExtName = vnet.vnet;
+        const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
+        const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
+        const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
 
         // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
-        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, laneSubnetBase);
+        const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, goadSubnetBase);
 
         // Clone all VMs
         for (const vmSpec of vmSpecs) {
@@ -4332,6 +4344,10 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           const vmTemplate = vmSpec.template_vmid;
           const vmName = vmSpec.name || `vm-${vmId}`;
           const goadMac = goadMacs[vmName]?.mac;
+          const isGoadVm = !!goadMacs[vmName];
+          const isDmz = vmSpec.role === 'dmz';
+          // v3: GOAD VMs → internal VNet; dmz host → both; else → external.
+          const vmVnet = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
 
           if (!vmTemplate) {
             console.error(`[ChallengeNetwork] VM ${vmName} has no template_vmid, skipping`);
@@ -4347,7 +4363,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
             });
             if (result) await waitForTask(templateNode, result);
             await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vnet.vnet, goadMac)
+              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac)
             });
           } else {
             const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
@@ -4355,15 +4371,31 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
               description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
             });
             if (result) await waitForTask(templateNode, result);
-            // Apply per-role resources (mirrors single + group deploy paths).
-            const goadVm = goadMacs[vmName];
-            const vmConfig = {
-              net0: goadDeploy.buildLaneNet0(vmSpec, vnet.vnet, goadMac)
-            };
-            if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
-            if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
-            if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
-            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+            if (isV3 && isDmz) {
+              // v3 DMZ pivot: dual-homed (both NICs first, then cloud-init
+              // static .50 on each subnet — default route via external).
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                net0: `virtio,bridge=${vnetExtName}`,
+                net1: `virtio,bridge=${vnetIntName}`
+              });
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                ipconfig0:  `ip=${net.lanExt.base3}.50/24,gw=${net.lanExt.gatewayIp}`,
+                ipconfig1:  `ip=${net.lanInt.base3}.50/24`,
+                nameserver: net.lanExt.gatewayIp,
+                citype:     'nocloud'
+              });
+              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+            } else {
+              // Apply per-role resources (mirrors single + group deploy paths).
+              const goadVm = goadMacs[vmName];
+              const vmConfig = {
+                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac)
+              };
+              if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
+              if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
+              if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+            }
           }
 
           deployedVMs.push({
@@ -4383,11 +4415,19 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
         // Networking is scheme-aware:
         //   v1 → wan0 via module transit; lan0 = 192.18.0.1/24 (shared)
         //   v2 → wan0 on lab network (vmbr0); lan0 = 10.<vxh>.<vxl>.1/24 (unique)
-        const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId);
-        await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
-          net0: formatLaneGatewayNet0(net.wan),
-          net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
-        });
+        // `net` resolved above. v3 gateway is 3-NIC: wan0 + ext0 + int0.
+        if (isV3) {
+          await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+            net0: formatLaneGatewayNet0(net.wan),
+            net1: `name=ext0,bridge=${vnetExtName},ip=${net.lanExt.gatewayIp}/24,type=veth`,
+            net2: `name=int0,bridge=${vnetIntName},ip=${net.lanInt.gatewayIp}/24,type=veth`
+          });
+        } else {
+          await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
+            net0: formatLaneGatewayNet0(net.wan),
+            net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
+          });
+        }
 
         // v2 only: mint+stage Tailscale auth key (silent no-op for v1)
         await configureLaneTailscale({
@@ -4417,8 +4457,8 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           try {
             await goadDeploy.deployGoadLane({
               lane: { lane_id: laneId },
-              spec, module: challengeModule, vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, laneSubnetBase, deployedVMs,
+              spec, module: challengeModule, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
+              bestNode, templateNode, laneSubnetBase: goadSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {
@@ -4478,7 +4518,14 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
           module: challengeModule,
           gateway_vm_id: gatewayVmId,
           node: bestNode,
-          vms: deployedVMs
+          vms: deployedVMs,
+          subnet_scheme: subnetScheme,
+          lane_subnet_base: laneSubnetBase,
+          vnet: vnetExtName,
+          ...(isV3 ? {
+            vnet_internal: vnetIntName,
+            lane_subnet_internal: goadSubnetBase
+          } : {})
         });
 
         await cybercoreQuery(
