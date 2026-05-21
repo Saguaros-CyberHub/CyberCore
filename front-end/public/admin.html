@@ -604,18 +604,18 @@
                     </select>
                   </div>
                   <div class="form-group" style="margin: 0;">
-                    <label style="font-size: 0.75rem;">Forest Domain</label>
-                    <input type="text" id="chalGoadDomain" value="sevenkingdoms.local" style="font-size: 0.85rem;">
+                    <label style="font-size: 0.75rem;">Forest Domain (read-only)</label>
+                    <input type="text" id="chalGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
                   </div>
                   <div class="form-group" style="margin: 0;">
-                    <label style="font-size: 0.75rem;">Child Subdomain</label>
-                    <input type="text" id="chalGoadChild" value="north" style="font-size: 0.85rem;">
+                    <label style="font-size: 0.75rem;">Child Subdomain (read-only)</label>
+                    <input type="text" id="chalGoadChild" value="marketing" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
                   </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem;">
                   <div class="form-group" style="margin: 0;">
-                    <label style="font-size: 0.75rem;">Local Administrator Password (must match Windows template)</label>
-                    <input type="text" id="chalGoadPassword" value="SecureGOADP@$$123" style="font-size: 0.85rem; font-family: monospace;">
+                    <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
+                    <input type="text" id="chalGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
                   </div>
                   <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.3rem;">
                     <input type="checkbox" id="chalGoadKali" checked onchange="onChalGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
@@ -965,18 +965,18 @@
               </select>
             </div>
             <div class="form-group" style="margin: 0;">
-              <label style="font-size: 0.75rem;">Forest Domain</label>
-              <input type="text" id="tplGoadDomain" value="sevenkingdoms.local" style="font-size: 0.85rem;">
+              <label style="font-size: 0.75rem;">Forest Domain (read-only)</label>
+              <input type="text" id="tplGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
             </div>
             <div class="form-group" style="margin: 0;">
-              <label style="font-size: 0.75rem;">Child Subdomain</label>
-              <input type="text" id="tplGoadChild" value="north" style="font-size: 0.85rem;">
+              <label style="font-size: 0.75rem;">Child Subdomain (read-only)</label>
+              <input type="text" id="tplGoadChild" value="marketing" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
             </div>
           </div>
           <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem;">
             <div class="form-group" style="margin: 0;">
-              <label style="font-size: 0.75rem;">Local Administrator Password (must match Windows template)</label>
-              <input type="text" id="tplGoadPassword" value="SecureGOADP@$$123" style="font-size: 0.85rem; font-family: monospace;">
+              <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
+              <input type="text" id="tplGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.3rem;">
               <input type="checkbox" id="tplGoadKali" checked onchange="onTplGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
@@ -4188,10 +4188,10 @@
       return {
         enabled:         true,
         version:         document.getElementById('chalGoadVersion').value || 'GOAD-Light',
-        domain:          document.getElementById('chalGoadDomain').value.trim() || 'sevenkingdoms.local',
-        child_subdomain: document.getElementById('chalGoadChild').value.trim() || 'north',
+        domain:          document.getElementById('chalGoadDomain').value.trim() || 'cybersaguaros.local',
+        child_subdomain: document.getElementById('chalGoadChild').value.trim() || 'marketing',
         admin_user:      'Administrator',
-        admin_password:  document.getElementById('chalGoadPassword').value || 'SecureGOADP@$$123',
+        admin_password:  document.getElementById('chalGoadPassword').value || 'vagrant',
         include_kali:    document.getElementById('chalGoadKali').checked
       };
     }
@@ -4440,10 +4440,10 @@
       return {
         enabled:         true,
         version:         document.getElementById('tplGoadVersion').value || (_goadCatalog?.default_lab) || 'GOAD-Light',
-        domain:          document.getElementById('tplGoadDomain').value.trim() || 'sevenkingdoms.local',
-        child_subdomain: document.getElementById('tplGoadChild').value.trim() || 'north',
+        domain:          document.getElementById('tplGoadDomain').value.trim() || 'cybersaguaros.local',
+        child_subdomain: document.getElementById('tplGoadChild').value.trim() || 'marketing',
         admin_user:      'Administrator',
-        admin_password:  document.getElementById('tplGoadPassword').value || 'SecureGOADP@$$123',
+        admin_password:  document.getElementById('tplGoadPassword').value || 'vagrant',
         include_kali:    document.getElementById('tplGoadKali').checked
       };
     }
@@ -4464,9 +4464,9 @@
       const select = document.getElementById('tplGoadVersion');
       const version = goad.version || (_goadCatalog?.default_lab) || 'GOAD-Light';
       if ([...select.options].some(o => o.value === version)) select.value = version;
-      document.getElementById('tplGoadDomain').value   = goad.domain          || 'sevenkingdoms.local';
-      document.getElementById('tplGoadChild').value    = goad.child_subdomain || 'north';
-      document.getElementById('tplGoadPassword').value = goad.admin_password  || 'SecureGOADP@$$123';
+      // Forest domain / child subdomain / local-admin password are read-only —
+      // they reflect the GOAD fork + Windows template, not per-challenge values.
+      // Leave the static read-only fields as-is; only version + Kali are editable.
       document.getElementById('tplGoadKali').checked   = goad.include_kali !== false;
       onTplGoadVersionChange();
     }

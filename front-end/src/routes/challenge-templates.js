@@ -475,7 +475,7 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
         domain:           goad.domain           || 'cybersaguaros.local',
         child_subdomain:  goad.child_subdomain  || 'marketing',
         admin_user:       goad.admin_user       || 'Administrator',
-        admin_password:   goad.admin_password   || 'SecureGOADP@$$123',
+        admin_password:   goad.admin_password   || 'vagrant',
         include_kali:     goad.include_kali !== false  // default true
       };
     }
