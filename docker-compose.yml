@@ -297,7 +297,7 @@ services:
       POSTGRESQL_HOSTNAME: postgres
       POSTGRESQL_PORT: 5432
       POSTGRESQL_DATABASE: ${GUAC_DB_NAME:-guacamole_db}
-      POSTGRESQL_USERNAME: ${GUAC_DB_USER:-guacamole_user}
+      POSTGRESQL_USER: ${GUAC_DB_USER:-guacamole_user}
       POSTGRESQL_PASSWORD: ${GUAC_DB_PASSWORD}
     networks:
       - cybercore-net
