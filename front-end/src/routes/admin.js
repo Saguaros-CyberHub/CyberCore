@@ -1091,7 +1091,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
               // Non-GOAD specs skip the resource block (goadMacs[vmName] undef).
               const goadVm = goadMacs[vmName];
               const vmConfig = {
-                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac)
+                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model)
               };
               if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
               if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
@@ -2840,7 +2840,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                     // Non-GOAD specs are unaffected (goadMacs[vmName] undefined).
                     const goadVm = goadMacs[vmName];
                     const vmConfig = {
-                      net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac)
+                      net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model)
                     };
                     if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
                     if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
@@ -4389,7 +4389,7 @@ router.post('/deploy-challenge-network', authenticateToken, adminOnly, async (re
               // Apply per-role resources (mirrors single + group deploy paths).
               const goadVm = goadMacs[vmName];
               const vmConfig = {
-                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac)
+                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model)
               };
               if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
               if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;

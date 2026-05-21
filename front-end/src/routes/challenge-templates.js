@@ -596,6 +596,37 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
     await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
     pushStatus('SDN reloaded');
 
+    // 6b. The SDN apply above is ASYNCHRONOUS — Proxmox returns immediately but
+    // the VNet bridges materialize on the nodes over the following seconds
+    // (longer the more VNets; a v3 challenge creates 2 per lane, so a 100-lane
+    // v3 challenge applies 200 VXLAN bridges). Poll until the LAST-created
+    // VNet(s) actually show up as interfaces, so a lane deploy that starts
+    // right after doesn't hit `bridge '<vnet>' does not exist`.
+    pushStatus('Waiting for SDN to materialize VNet bridges...');
+    try {
+      const checkNodes = await proxmoxAPI('GET', '/api2/json/nodes');
+      const checkNode = (checkNodes || [])[0] && (checkNodes || [])[0].node;
+      if (checkNode) {
+        const sampleVnets = [encodeBase20(vxlanEnd)];
+        if (subnetScheme === 'v3') {
+          sampleVnets.push(encodeBase20(vxlanEnd + V3_INTERNAL_TAG_OFFSET));
+        }
+        const deadline = Date.now() + 240000;   // 4 min cap
+        let allUp = false;
+        while (Date.now() < deadline) {
+          const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${checkNode}/network`);
+          const names = new Set((ifaces || []).map(i => i.iface));
+          if (sampleVnets.every(v => names.has(v))) { allUp = true; break; }
+          await new Promise(r => setTimeout(r, 4000));
+        }
+        pushStatus(allUp
+          ? `SDN VNet bridges are up on ${checkNode}.`
+          : 'WARNING: SDN bridges not confirmed within 4 min — run Datacenter → SDN → Apply and verify before deploying lanes.');
+      }
+    } catch (e) {
+      pushStatus(`SDN bridge readiness check skipped: ${e.message}`);
+    }
+
     // 7. Update challenge with final VXLAN block (in case it wasn't set during insert)
     await cybercoreQuery(
       `UPDATE crucible_challenge SET
