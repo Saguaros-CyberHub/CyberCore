@@ -10,6 +10,7 @@ set -e
 
 : "${CORE_DB_USER:?Missing CORE_DB_USER}"
 : "${CORE_DB_PASSWORD:?Missing CORE_DB_PASSWORD}"
+: "${ADMIN_EMAIL:?Missing ADMIN_EMAIL}"
 
 POSTGRES_USER="${POSTGRES_USER:?Missing POSTGRES_USER}"
 POSTGRES_DB="${POSTGRES_DB:?Missing POSTGRES_DB}"
@@ -17,8 +18,9 @@ POSTGRES_DB="${POSTGRES_DB:?Missing POSTGRES_DB}"
 # Escape single quotes for SQL string literal safety
 USERNAME_SQL=$(printf "%s" "$CORE_DB_USER"     | sed "s/'/''/g")
 PASSWORD_SQL=$(printf "%s" "$CORE_DB_PASSWORD" | sed "s/'/''/g")
+EMAIL_SQL=$(printf "%s"    "$ADMIN_EMAIL"      | sed "s/'/''/g")
 
-echo ">>> [005_admin_user] Seeding default admin user (${CORE_DB_USER})..."
+echo ">>> [005_admin_user] Seeding default admin user (${ADMIN_EMAIL})..."
 
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
   INSERT INTO cybercore_user (
@@ -28,7 +30,7 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
   )
   SELECT
     '${USERNAME_SQL}',
-    '${USERNAME_SQL}',
+    '${EMAIL_SQL}',
     'Admin',
     'User',
     'CyberHub',
