@@ -54,14 +54,14 @@ deploy/          nginx site config + PHP-FPM pool config
 
 | Stage | Action |
 |-------|--------|
-| Recon | `/etc/hosts`: `cybersaguaros.local` → lane IP. `ffuf` finds `/chat`, `/gallery`, `/admin`, `/api/`. |
+| Recon | `/etc/hosts`: `cybersaguaros.local` → lane IP. `ffuf` finds `/chat`, `/gallery`, `/admin`, `/api/`. `/robots.txt` discloses the SaguaroBot endpoint `/api/verify.php`. |
 | SQLi (secondary) | `/research.php?q=` is injectable — `sqlmap` dumps `users`. Hashes are unsalted SHA-256 of rockyou words; `hashcat -m 1400` + rockyou.txt cracks them. |
 | **SSRF** | SaguaroBot's "dataset integrity check" (`/api/verify.php`) fetches any URL. |
 | Steal admin session | SSRF `http://127.0.0.1/api/internal/provision.php` → response leaks an `admin_session` token. |
 | Admin access | Set cookie `admin_session=<token>` → `/admin/` authorises. |
 | **RCE** | `/admin/storage.php` ("Cloud Storage") validates only the *last* file extension — `shell.php` is rejected, but `shell.php.jpg` passes (last ext `.jpg`). nginx runs PHP on any path *containing* `.php` (`location ~ \.php`) and PHP-FPM's `security.limit_extensions` is widened, so the double-extension webshell executes from `/uploads/`. |
 | shellpop | Browse the webshell → reverse shell as `saguarobot`. |
-| LinPE → root | `linpeas` surfaces: SUID `/usr/bin/find`; world-writable root cron `/opt/saguaro/datasync.sh`; `sudo NOPASSWD tar` for `dvalmont` (creds in `/opt/saguaro/research-notes.txt`). |
+| LinPE → root | `sudo -l` (surfaced by `linpeas`) shows `saguarobot` may run `/usr/bin/python3` as root, NOPASSWD. Escalate: `sudo python3 -c 'import os; os.execl("/bin/sh","sh")'`. |
 
 ## Credential / artifact reference (instructors)
 
@@ -69,15 +69,16 @@ Portal accounts — unsalted SHA-256 of rockyou-wordlist words, so the
 sqlmap-dumped `users` table cracks with `hashcat -m 1400` + rockyou.txt:
 - `dr.wagner` / `arizona` — admin role
 - `rgreen` / `cactus` — researcher
-- `dvalmont` / `sunshine` — researcher (also a Linux user on the box)
+- `dvalmont` / `sunshine` — researcher (also an ordinary Linux user on the box)
 
 Linux:
 - `saguarobot` — PHP-FPM pool user; the webshell/reverse-shell foothold.
-- `dvalmont` / `sunshine` — has `sudo NOPASSWD: /usr/bin/tar`.
-- LinPE artifacts planted by the bake script:
-  - SUID `/usr/bin/find`
-  - `/opt/saguaro/datasync.sh` (0777) run every minute by root cron
-  - `/opt/saguaro/research-notes.txt` — `dvalmont` password + AD-pivot hint
+- `dvalmont` / `sunshine` — ordinary login, no sudo (portal/SQLi flavour only).
+- Bake-script artifacts:
+  - `/etc/sudoers.d/saguarobot-python` — `saguarobot` may run `/usr/bin/python3`
+    as root (NOPASSWD). The only privesc path; `linpeas` / `sudo -l` surfaces it.
+    Escalate: `sudo python3 -c 'import os; os.execl("/bin/sh","sh")'`
+  - `/opt/saguaro/research-notes.txt` — DB app creds + AD-pivot hint
 
 The bot/SSRF is reachable without any login — the researcher login + SQLi is a
 secondary recon path, not on the critical line.

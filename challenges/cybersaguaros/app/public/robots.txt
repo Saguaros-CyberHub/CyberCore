@@ -1,0 +1,7 @@
+# CyberSaguaros Research Portal — crawler policy
+#
+# SaguaroBot automation and staff areas. Public search crawlers should
+# not index these paths.
+User-agent: *
+Disallow: /admin/
+Disallow: /api/verify.php

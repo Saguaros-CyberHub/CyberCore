@@ -48,7 +48,8 @@ CHALLENGE_REPO_TOKEN="${CHALLENGE_REPO_TOKEN:-}"
 
 # Linux accounts on the box.
 #   saguarobot — PHP-FPM pool user; the webshell / reverse-shell foothold.
-#   dvalmont   — researcher; has sudo NOPASSWD on tar (GTFObins privesc).
+#                Privesc to root via `sudo python3` (GTFObins) — the only path.
+#   dvalmont   — researcher; ordinary login, no sudo (portal/SQLi flavour only).
 #   root       — bake-debug password for instructor inspection.
 SAGUAROBOT_PASSWORD="${SAGUAROBOT_PASSWORD:-bake-debug-bot}"
 # dvalmont's password is a rockyou word — it is also the SHA-256 hash in the
@@ -159,6 +160,8 @@ packages:
   - resolvconf
   - cron
   - git
+  - sudo
+  - python3
   - nginx
   - mariadb-server
   - php-fpm
@@ -169,37 +172,23 @@ packages:
   - php-mbstring
 
 write_files:
-  # ---- LinPE artifact: world-writable cron script run as root ----
-  - path: /etc/cron.d/saguaro-datasync
-    permissions: '0644'
+  # ---- LinPE artifact: sudo NOPASSWD python3 for saguarobot (GTFObins) ----
+  # saguarobot's ONLY path to root. `linpeas` / `sudo -l` surface it; escalate:
+  #   sudo python3 -c 'import os; os.execl("/bin/sh", "sh")'
+  - path: /etc/sudoers.d/saguarobot-python
+    permissions: '0440'
     content: |
-      # CyberSaguaros dataset sync — runs every minute as root.
-      * * * * * root /opt/saguaro/datasync.sh >/dev/null 2>&1
+      saguarobot ALL=(root) NOPASSWD: /usr/bin/python3
 
-  - path: /opt/saguaro/datasync.sh
-    permissions: '0777'
-    content: |
-      #!/bin/bash
-      # Placeholder dataset sync job. TODO: wire to the field station mirror.
-      :
-
-  # ---- LinPE artifact: planted research notes (creds + AD-pivot hint) ----
+  # ---- Flavour artifact: planted research notes (DB creds + AD-pivot hint) ----
   - path: /opt/saguaro/research-notes.txt
     permissions: '0644'
     content: |
       CyberSaguaros field station — research notes
       --------------------------------------------
       * portal DB app user: saguaro_app / $DB_APP_PASSWORD
-      * my workstation login (dvalmont): $DVALMONT_PASSWORD
-      * dvalmont can run 'sudo tar' on this box for the nightly archive job.
       * TODO: migrate the backup job to the internal domain. The lab DC is
         dc01.cybersaguaros.local; a Ligolo agent on 10.0.0.0/24 reaches it.
-
-  # ---- LinPE artifact: sudo NOPASSWD tar for dvalmont (GTFObins) ----
-  - path: /etc/sudoers.d/dvalmont-tar
-    permissions: '0440'
-    content: |
-      dvalmont ALL=(root) NOPASSWD: /usr/bin/tar
 
   - path: /etc/cybercore-bake.env
     permissions: '0644'
@@ -233,6 +222,11 @@ runcmd:
   - [ sh, -c, 'mysql -e "FLUSH PRIVILEGES;"' ]
   - [ sh, -c, 'mysql cybersaguaros < /var/www/cybersaguaros/db/schema.sql' ]
   - [ sh, -c, 'mysql cybersaguaros < /var/www/cybersaguaros/db/seed.sql' ]
+  # Drop the SQL files from the deployed app dir once the DB is seeded. They
+  # are not needed at runtime, sit outside the nginx webroot anyway, and
+  # seed.sql's password hashes otherwise surface as noise in post-exploitation
+  # tooling (linpeas file/hash scans).
+  - [ sh, -c, 'rm -rf /var/www/cybersaguaros/db' ]
 
   # ---- Permissions ----
   # App owned by root; only the uploads dir is writable by the PHP-FPM user
@@ -240,9 +234,6 @@ runcmd:
   - [ sh, -c, 'chown -R root:root /var/www/cybersaguaros' ]
   - [ sh, -c, 'chown -R saguarobot:saguarobot /var/www/cybersaguaros/public/uploads' ]
   - [ sh, -c, 'chmod 755 /var/www/cybersaguaros/public/uploads' ]
-
-  # ---- LinPE artifact: SUID find ----
-  - [ sh, -c, 'chmod u+s /usr/bin/find' ]
 
   # ---- Enable + start services ----
   - [ systemctl, enable, qemu-guest-agent ]
@@ -258,9 +249,7 @@ runcmd:
   - [ sh, -c, 'code=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/api/verify.php); [ "\$code" = "400" ] && echo "SSRF_ENDPOINT=yes" >> /etc/cybercore-bake.env || echo "SSRF_ENDPOINT=no (\$code)" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'curl -s http://127.0.0.1/api/internal/provision.php | grep -q admin_session && echo "INTERNAL_OK=yes" >> /etc/cybercore-bake.env || echo "INTERNAL_OK=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'printf "%s" "<?php echo 92837465;" > /var/www/cybersaguaros/public/uploads/baketest.php.jpg; out=\$(curl -s http://127.0.0.1/uploads/baketest.php.jpg); rm -f /var/www/cybersaguaros/public/uploads/baketest.php.jpg; echo "\$out" | grep -q 92837465 && echo "UPLOAD_EXEC=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_EXEC=no" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, 'stat -c "%a" /usr/bin/find | grep -qE "^[46]" && echo "SUID_FIND=yes" >> /etc/cybercore-bake.env || echo "SUID_FIND=no" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, '[ -f /etc/cron.d/saguaro-datasync ] && [ -w /opt/saguaro/datasync.sh ] && echo "CRON_ARTIFACT=yes" >> /etc/cybercore-bake.env || echo "CRON_ARTIFACT=no" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, '[ -f /etc/sudoers.d/dvalmont-tar ] && echo "SUDO_TAR=yes" >> /etc/cybercore-bake.env || echo "SUDO_TAR=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, '[ -f /etc/sudoers.d/saguarobot-python ] && command -v python3 >/dev/null 2>&1 && echo "SUDO_PYTHON=yes" >> /etc/cybercore-bake.env || echo "SUDO_PYTHON=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 
   # ---- Cleanup ----
@@ -358,27 +347,21 @@ else
       SSRF_EP=$(get SSRF_ENDPOINT)
       INTERNAL_OK=$(get INTERNAL_OK)
       UPLOAD_EXEC=$(get UPLOAD_EXEC)
-      SUID_FIND=$(get SUID_FIND)
-      CRON_ART=$(get CRON_ARTIFACT)
-      SUDO_TAR=$(get SUDO_TAR)
+      SUDO_PYTHON=$(get SUDO_PYTHON)
       echo "    bake complete:     ${BAKE_COMPLETE:-no}"
       echo "    :80 listening:     ${PORT_80:-unknown}"
       echo "    site HTTP 200:     ${SITE_HTTP:-unknown}"
       echo "    SSRF endpoint:     ${SSRF_EP:-unknown}"
       echo "    internal API:      ${INTERNAL_OK:-unknown}"
       echo "    uploads exec PHP:  ${UPLOAD_EXEC:-unknown}"
-      echo "    SUID find:         ${SUID_FIND:-unknown}"
-      echo "    cron artifact:     ${CRON_ART:-unknown}"
-      echo "    sudo tar artifact: ${SUDO_TAR:-unknown}"
+      echo "    sudo python privesc: ${SUDO_PYTHON:-unknown}"
       [ "$BAKE_COMPLETE" != "yes" ] && { echo "ERROR: runcmd did not complete"; FAIL=1; }
       [ "$PORT_80" != "yes" ]      && { echo "ERROR: :80 not listening"; FAIL=1; }
       [ "$SITE_HTTP" != "yes" ]    && { echo "ERROR: portal not serving HTTP 200"; FAIL=1; }
       [ "$SSRF_EP" != "yes" ]      && { echo "ERROR: SSRF verify endpoint not responding"; FAIL=1; }
       [ "$INTERNAL_OK" != "yes" ]  && { echo "ERROR: internal provisioning API not working"; FAIL=1; }
       [ "$UPLOAD_EXEC" != "yes" ]  && { echo "ERROR: uploads dir does not execute PHP (RCE path broken)"; FAIL=1; }
-      [ "$SUID_FIND" != "yes" ]    && { echo "ERROR: SUID find artifact missing"; FAIL=1; }
-      [ "$CRON_ART" != "yes" ]     && { echo "ERROR: cron artifact missing"; FAIL=1; }
-      [ "$SUDO_TAR" != "yes" ]     && { echo "ERROR: sudo tar artifact missing"; FAIL=1; }
+      [ "$SUDO_PYTHON" != "yes" ]  && { echo "ERROR: sudo python3 privesc artifact missing"; FAIL=1; }
     else
       echo "ERROR: /etc/cybercore-bake.env not found"
       FAIL=1
@@ -421,10 +404,10 @@ echo ""
 echo "==================================================================="
 echo "  CyberSaguaros template $VMID baked successfully"
 echo "==================================================================="
-echo "  Portal admin:  dr.wagner / arizona"
+echo "  Portal admin:   dr.wagner / arizona"
 echo "  Linux foothold: saguarobot (PHP-FPM pool user)"
-echo "  Privesc user:  dvalmont / sunshine  (sudo NOPASSWD tar)"
-echo "  Reach via:     http://<lane-subnet>.<ip_octet>/"
+echo "  Privesc:        saguarobot -> root via 'sudo python3' (GTFObins)"
+echo "  Reach via:      http://<lane-subnet>.<ip_octet>/"
 echo "  Attach with:   POST /api/admin/lanes/<laneId>/modules"
 echo "                 { \"challenge_key\": \"cybersaguaros-ssrf\", \"module\": \"crucible\" }"
 echo "==================================================================="
