@@ -26,10 +26,74 @@ let GROUPS_POLL_TIMER = null;
 // ─── Tabs ───────────────────────────────────────────────────────────────────
 
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+  // Top-level tabs only (skip the nested subtabs which use data-subtab)
+  document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === `tab-${name}`));
   if (name === 'existing') refreshProfiles();
   if (name === 'groups')   refreshGroups();
+}
+
+// Subtabs inside Tab 1 (Basic / Organization / Technical / Advanced / Lane Deployment)
+function switchSubTab(name) {
+  document.querySelectorAll('.tab[data-subtab]').forEach(t => t.classList.toggle('active', t.dataset.subtab === name));
+  document.querySelectorAll('.subtab-content').forEach(c => {
+    c.style.display = (c.id === `subtab-${name}`) ? '' : 'none';
+  });
+}
+
+// ─── Client-type → industry list (mirrors generator.html CLIENT_TYPES) ─────
+const CLIENT_TYPE_INDUSTRIES = {
+  SMB: [
+    'Regional Logistics & Warehousing', 'Mid-size Dental Group', 'Light Manufacturing',
+    'Professional Services Firm', 'Retail Chain (Regional)'
+  ],
+  NonProfit: ['Community Health Center', 'Social Services Agency'],
+  Utility_IT_OT: ['Municipal Water/Wastewater', 'Rural Electric Cooperative'],
+  K12: ['Rural School District', 'Suburban School District']
+};
+const CLIENT_TYPE_DEFAULTS = {
+  SMB:           { emp:[25,200],  stak:[5,8],  end:[20,90],  fw:[5,15],  weak:[3,8]  },
+  NonProfit:     { emp:[10,100],  stak:[4,7],  end:[15,60],  fw:[3,10],  weak:[3,6]  },
+  Utility_IT_OT: { emp:[50,500],  stak:[6,12], end:[50,300], fw:[15,50], weak:[5,12] },
+  K12:           { emp:[100,2000],stak:[5,10], end:[200,5000],fw:[10,30],weak:[4,10] }
+};
+
+function onClientTypeChange() {
+  const type = document.getElementById('gen-client-type').value;
+  const industries = CLIENT_TYPE_INDUSTRIES[type] || [];
+  const dropdown = document.getElementById('gen-industry');
+  dropdown.innerHTML = '<option value="">🎲 Random (recommended)</option>' +
+    industries.map(i => `<option value="${i}">${i}</option>`).join('');
+
+  // Update default ranges to match the client type's typical scale
+  const d = CLIENT_TYPE_DEFAULTS[type];
+  if (d) {
+    const setIf = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    setIf('gen-emp-min',  d.emp[0]);   setIf('gen-emp-max',  d.emp[1]);
+    setIf('gen-stak-min', d.stak[0]);  setIf('gen-stak-max', d.stak[1]);
+    setIf('gen-end-min',  d.end[0]);   setIf('gen-end-max',  d.end[1]);
+    setIf('gen-fw-min',   d.fw[0]);    setIf('gen-fw-max',   d.fw[1]);
+    setIf('gen-weak-min', d.weak[0]);  setIf('gen-weak-max', d.weak[1]);
+  }
+}
+
+function onDifficultyChange() {
+  // Weakness range follows difficulty (admin can still override after)
+  const diff = document.getElementById('gen-difficulty').value;
+  const weakDefaults = { beginner:[3,5], intermediate:[3,8], advanced:[6,12] };
+  const d = weakDefaults[diff];
+  if (d) {
+    document.getElementById('gen-weak-min').value = d[0];
+    document.getElementById('gen-weak-max').value = d[1];
+  }
+}
+
+// Keep max_students >= num_lanes so the form doesn't submit an invalid combo.
+// If admin bumps num_lanes above current max_students, bump max_students too.
+function syncMaxStudents() {
+  const numLanes = parseInt(document.getElementById('gen-num-lanes').value, 10) || 0;
+  const maxStud = parseInt(document.getElementById('gen-max-students').value, 10) || 0;
+  if (numLanes > maxStud) document.getElementById('gen-max-students').value = numLanes;
 }
 
 // ─── HTTP helpers ───────────────────────────────────────────────────────────
@@ -63,20 +127,65 @@ function clearBanner(elId) {
 // ─── TAB 1: Generate + Deploy ──────────────────────────────────────────────
 
 async function generateAndDeploy() {
-  const vulnAppEnabled = document.getElementById('gen-vuln-app').checked;
-  const payload = {
-    client_type: document.getElementById('gen-client-type').value,
-    difficulty:  document.getElementById('gen-difficulty').value,
-    industry:    document.getElementById('gen-industry').value || undefined,
-    employees:   parseInt(document.getElementById('gen-employees').value, 10) || undefined,
-    num_lanes:   parseInt(document.getElementById('gen-num-lanes').value, 10),
-    group_name:  document.getElementById('gen-group-name').value || undefined,
-    subnet_scheme: document.getElementById('gen-subnet-scheme').value,
-    attack_boxes: document.getElementById('gen-attack-boxes').checked,
-    vuln_app: { enabled: vulnAppEnabled, delivery_mode: 'docker' }
+  // ─── Helpers to safely read form fields ──────────────────────────────────
+  const $ = id => document.getElementById(id);
+  const valStr = id => { const v = $(id)?.value?.trim(); return v ? v : undefined; };
+  const valInt = id => { const v = parseInt($(id)?.value, 10); return Number.isFinite(v) ? v : undefined; };
+  const valFloat = id => { const v = parseFloat($(id)?.value); return Number.isFinite(v) ? v : undefined; };
+  const range = (minId, maxId) => {
+    const min = valInt(minId), max = valInt(maxId);
+    if (min == null && max == null) return undefined;
+    return { min: min ?? max, max: max ?? min };
   };
 
-  renderBanner('gen-result', 'info', '⏳ Generating profile via N8N… this can take 1–2 minutes. Don\'t close this tab.');
+  const empRange = range('gen-emp-min', 'gen-emp-max');
+  const payload = {
+    // Basic
+    client_type: valStr('gen-client-type'),
+    difficulty:  valStr('gen-difficulty'),
+    industry:    valStr('gen-industry'),
+
+    // Organization
+    company_name: valStr('gen-company-name'),
+    domain:       valStr('gen-domain'),
+    hq_city:      valStr('gen-hq-city'),
+    maturity:     valStr('gen-maturity'),
+    employees:    empRange,
+    stakeholder_count: range('gen-stak-min', 'gen-stak-max'),
+    framework:    valStr('gen-framework'),
+
+    // Technical
+    delivery:        valStr('gen-delivery'),
+    endpoint_range:  range('gen-end-min', 'gen-end-max'),
+    firewall_rules_range: range('gen-fw-min', 'gen-fw-max'),
+    weakness_range:  range('gen-weak-min', 'gen-weak-max'),
+
+    // Advanced
+    cooperation:  valStr('gen-cooperation'),
+    scaffolding:  valStr('gen-scaffolding'),
+    est_hours:    valInt('gen-est-hours'),
+    llmModel:     valStr('gen-llm-model'),
+    temperature:  valFloat('gen-temperature'),
+    custom_seed:  valStr('gen-custom-seed'),
+
+    // Lane deployment
+    num_lanes:    valInt('gen-num-lanes'),
+    max_students: valInt('gen-max-students'),
+    group_name:   valStr('gen-group-name'),
+    subnet_scheme: valStr('gen-subnet-scheme') || 'v2',
+    attack_boxes: $('gen-attack-boxes').checked,
+    vuln_app: {
+      enabled: $('gen-vuln-app').checked,
+      delivery_mode: $('gen-vuln-app-dedicated').checked ? 'standalone_vm' : 'docker'
+    }
+  };
+
+  if (!payload.num_lanes || payload.num_lanes < 1) {
+    renderBanner('gen-result', 'error', 'Number of lanes must be at least 1.');
+    return;
+  }
+
+  renderBanner('gen-result', 'info', '⏳ Generating profile via Claude (4 parallel calls)… this typically takes 30–90 seconds. Don\'t close this tab.');
 
   try {
     const result = await apiCall('/profiles/generate-and-deploy', { method: 'POST', body: payload });
@@ -171,8 +280,42 @@ async function loadProfileById(id) {
     document.getElementById('asset-selection-card').style.display = '';
     document.getElementById('dep-group-name').placeholder =
       `${(profile.companyName || profile.company_name || 'profile').replace(/\s/g,'-').toLowerCase()}-${new Date().toISOString().slice(0,10)}`;
+
+    // Show this profile's VXLAN reservation status (if any)
+    await loadReservationStatus(id);
   } catch (err) {
     renderBanner('profile-load-result', 'error', `❌ ${err.message}`);
+  }
+}
+
+async function loadReservationStatus(profileId) {
+  const el = document.getElementById('dep-reservation-status');
+  if (!el) return;
+  try {
+    const r = await apiCall(`/profile-deploy/profiles/${profileId}/reservation`);
+    if (r.reserved) {
+      // Lock the max_students field — reservation is already set
+      const maxStudInput = document.getElementById('dep-max-students');
+      maxStudInput.value = r.max_students;
+      maxStudInput.disabled = true;
+      el.innerHTML = `<div class="status-banner info">
+        🔒 Profile reservation: <strong>${r.slots_used}/${r.max_students}</strong> slots used —
+        VXLAN range <code>${r.vxlan_range_start}-${r.vxlan_range_end}</code>,
+        challenge <code>${(r.challenge_key||'').slice(0,40)}</code>.
+        Max students locked. <strong>${r.slots_free}</strong> free slot${r.slots_free===1?'':'s'} for new lanes.
+      </div>`;
+    } else {
+      const maxStudInput = document.getElementById('dep-max-students');
+      maxStudInput.disabled = false;
+      const win = r.search_window || { min: 10100, max: 65535 };
+      el.innerHTML = `<div class="status-banner info">
+        🆕 No reservation yet — first deploy will carve a <strong id="rsv-preview-max">${maxStudInput.value}</strong>-slot VXLAN block
+        out of the first free gap in <code>${win.min}-${win.max}</code> (same mechanism as challenge templates).
+        Max students locks at that value once set.
+      </div>`;
+    }
+  } catch (err) {
+    el.innerHTML = '';
   }
 }
 
@@ -230,6 +373,7 @@ async function runDeploy() {
   const payload = {
     profile_id: CURRENT_PROFILE.id,
     num_lanes: parseInt(document.getElementById('dep-num-lanes').value, 10),
+    max_students: parseInt(document.getElementById('dep-max-students').value, 10),
     group_name: document.getElementById('dep-group-name').value || undefined,
     attack_boxes: document.getElementById('dep-attack-boxes').checked,
     subnet_scheme: document.getElementById('dep-subnet-scheme').value,
@@ -301,6 +445,7 @@ function renderGroups(groups) {
         </div>
         <div style="display:flex; gap:0.5rem;">
           <button class="btn btn-secondary btn-small" onclick="loadGroupDetail('${g.id}')">Details</button>
+          <button class="btn btn-secondary btn-small" onclick="promptAddLanes('${g.id}','${g.profile_id || ''}','${escapeHtml(g.group_name)}')">+ Add lanes</button>
           <button class="btn btn-danger btn-small" onclick="teardownGroup('${g.id}', '${escapeHtml(g.group_name)}')">Tear down</button>
         </div>
       </div>
@@ -367,6 +512,38 @@ async function loadGroupDetail(groupId) {
   }
 }
 
+async function promptAddLanes(groupId, profileId, groupName) {
+  // Fetch the profile's current reservation so we know how many slots are free
+  let free = null, max = null;
+  if (profileId) {
+    try {
+      const r = await apiCall(`/profile-deploy/profiles/${profileId}/reservation`);
+      if (r.reserved) { free = r.slots_free; max = r.max_students; }
+    } catch (_) { /* fall through to plain prompt */ }
+  }
+  const promptMsg = free != null
+    ? `Add how many lanes to "${groupName}"?  (${free}/${max} slots free in the profile's reservation)`
+    : `Add how many lanes to "${groupName}"?`;
+  const answer = window.prompt(promptMsg, '1');
+  if (answer == null) return;
+  const count = parseInt(answer, 10);
+  if (!Number.isFinite(count) || count < 1) return;
+  if (free != null && count > free) {
+    alert(`Cannot add ${count} — only ${free} slot${free===1?'':'s'} free in the profile's reservation.`);
+    return;
+  }
+  try {
+    const result = await apiCall(`/profile-deploy/groups/${groupId}/add-lanes`, {
+      method: 'POST', body: { count }
+    });
+    alert(`✅ Added ${result.added} lane${result.added===1?'':'s'} to ${groupName}. Now ${result.total_lanes_now} total.`);
+    refreshGroups();
+    setTimeout(() => loadGroupDetail(groupId), 1000);
+  } catch (err) {
+    alert(`Add-lanes failed: ${err.message}`);
+  }
+}
+
 async function retryLane(groupId, laneId) {
   try {
     await apiCall(`/profile-deploy/groups/${groupId}/retry/${laneId}`, { method: 'POST' });
@@ -408,5 +585,6 @@ document.addEventListener('DOMContentLoaded', async () => {
       return;
     }
   }
-  // Default tab is "generate" — no auto-fetch needed.
+  // Populate the industry dropdown for the default client type (SMB)
+  if (typeof onClientTypeChange === 'function') onClientTypeChange();
 });

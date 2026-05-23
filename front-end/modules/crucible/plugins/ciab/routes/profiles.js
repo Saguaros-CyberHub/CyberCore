@@ -1530,13 +1530,31 @@ router.delete('/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user.userId;
-    
+
+    // Free the per-profile crucible_challenge reservation in cybercore_db
+    // BEFORE deleting the profile row (so we still have the pointer). Safe
+    // if the profile never had one — deleteProfileChallenge is a no-op then.
+    try {
+      const { deleteProfileChallenge } = require('../utils/lane-deploy');
+      const role = req.user.role;
+      // Verify ownership/admin first so we don't free someone else's reservation
+      const owned = await pool.query(
+        role === 'admin' ? `SELECT id FROM profiles WHERE id=$1` : `SELECT id FROM profiles WHERE id=$1 AND user_id=$2`,
+        role === 'admin' ? [id] : [id, userId]
+      );
+      if (owned.rows.length > 0) {
+        await deleteProfileChallenge(id);
+      }
+    } catch (cleanupErr) {
+      console.warn(`[profiles DELETE] Challenge cleanup for ${id} failed: ${cleanupErr.message} — continuing with profile delete`);
+    }
+
     const result = await pool.query(`
       DELETE FROM profiles
       WHERE id = $1 AND user_id = $2
       RETURNING id, company_name
     `, [id, userId]);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Profile not found' });
     }

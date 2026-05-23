@@ -111,67 +111,235 @@
         <div class="tab-content active" id="tab-generate">
           <div class="card">
             <h3>Generate a new profile + deploy lanes in one step</h3>
-            <p class="muted">Calls the existing N8N profile-generation workflow, then immediately deploys lanes from the result.
-               You can tweak the asset selection after the profile is generated, on Tab 2.</p>
+            <p class="muted">Same field set as the user-facing <strong>Generate New</strong> page,
+               plus lane-deployment options at the bottom. Fields you leave blank get sensible defaults
+               based on client type + difficulty. You can fine-tune asset selection on Tab 2 after generation.</p>
 
-            <div class="form-row three">
-              <div>
-                <label>Client type</label>
-                <select id="gen-client-type">
-                  <option value="SMB">SMB</option>
-                  <option value="NonProfit">NonProfit</option>
-                  <option value="Utility_IT_OT">Utility (IT/OT)</option>
-                  <option value="K12">K-12</option>
-                </select>
-              </div>
-              <div>
-                <label>Difficulty</label>
-                <select id="gen-difficulty">
-                  <option value="beginner">Beginner</option>
-                  <option value="intermediate" selected>Intermediate</option>
-                  <option value="advanced">Advanced</option>
-                </select>
-              </div>
-              <div>
-                <label>Industry</label>
-                <input type="text" id="gen-industry" placeholder="e.g. healthcare, retail" />
+            <!-- Inner config tabs mirror the user-facing generator -->
+            <div class="tabs" style="margin-top:0.5rem">
+              <div class="tab active" data-subtab="basic" onclick="switchSubTab('basic')">Basic</div>
+              <div class="tab" data-subtab="org" onclick="switchSubTab('org')">Organization</div>
+              <div class="tab" data-subtab="tech" onclick="switchSubTab('tech')">Technical</div>
+              <div class="tab" data-subtab="advanced" onclick="switchSubTab('advanced')">Advanced</div>
+              <div class="tab" data-subtab="lanes" onclick="switchSubTab('lanes')">Lane Deployment</div>
+            </div>
+
+            <!-- BASIC SUBTAB -->
+            <div class="subtab-content active" id="subtab-basic">
+              <div class="form-row three">
+                <div>
+                  <label>Client type</label>
+                  <select id="gen-client-type" onchange="onClientTypeChange()">
+                    <option value="SMB">Small-Medium Business</option>
+                    <option value="NonProfit">Non-Profit Organization</option>
+                    <option value="Utility_IT_OT">Utility Company (IT/OT)</option>
+                    <option value="K12">K-12 School District</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Difficulty</label>
+                  <select id="gen-difficulty" onchange="onDifficultyChange()">
+                    <option value="beginner">Beginner (Group 1)</option>
+                    <option value="intermediate" selected>Intermediate (Group 2)</option>
+                    <option value="advanced">Advanced (Group 3)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Industry</label>
+                  <select id="gen-industry">
+                    <option value="">🎲 Random (recommended)</option>
+                  </select>
+                </div>
               </div>
             </div>
 
-            <div class="form-row three">
-              <div>
-                <label>Employees</label>
-                <input type="number" id="gen-employees" placeholder="50" min="1" />
+            <!-- ORGANIZATION SUBTAB -->
+            <div class="subtab-content" id="subtab-org" style="display:none">
+              <div class="form-row three">
+                <div>
+                  <label>Company name (optional)</label>
+                  <input type="text" id="gen-company-name" placeholder="Auto-generated" />
+                </div>
+                <div>
+                  <label>Domain (optional)</label>
+                  <input type="text" id="gen-domain" placeholder="Auto-generated" />
+                </div>
+                <div>
+                  <label>HQ city (optional)</label>
+                  <input type="text" id="gen-hq-city" placeholder="Auto-generated" />
+                </div>
               </div>
-              <div>
-                <label>Group name (optional)</label>
-                <input type="text" id="gen-group-name" placeholder="Mon-AM-CIAB-101" />
+              <div class="form-row three">
+                <div>
+                  <label>IT maturity</label>
+                  <select id="gen-maturity">
+                    <option value="">Auto (by client type)</option>
+                    <option value="Very Low">Very Low</option>
+                    <option value="Low">Low</option>
+                    <option value="Intermediate">Intermediate</option>
+                    <option value="High">High</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Employees (min – max)</label>
+                  <div style="display:flex;gap:0.4rem;align-items:center">
+                    <input type="number" id="gen-emp-min" value="25" min="10" max="5000" />
+                    <span class="muted">to</span>
+                    <input type="number" id="gen-emp-max" value="200" min="10" max="5000" />
+                  </div>
+                </div>
+                <div>
+                  <label>Stakeholder count (min – max)</label>
+                  <div style="display:flex;gap:0.4rem;align-items:center">
+                    <input type="number" id="gen-stak-min" value="5" min="3" max="20" />
+                    <span class="muted">to</span>
+                    <input type="number" id="gen-stak-max" value="8" min="3" max="20" />
+                  </div>
+                </div>
               </div>
-              <div>
-                <label>Number of lanes</label>
-                <input type="number" id="gen-num-lanes" value="3" min="1" max="20" />
+              <div class="form-row">
+                <div>
+                  <label>Compliance framework</label>
+                  <select id="gen-framework">
+                    <option value="">Auto (industry-specific)</option>
+                    <option value="HIPAA">HIPAA (Healthcare)</option>
+                    <option value="PCI-DSS">PCI-DSS (Payment Cards)</option>
+                    <option value="FERPA">FERPA (Education)</option>
+                    <option value="SOC 2">SOC 2 (Service Organizations)</option>
+                    <option value="NIST CSF">NIST Cybersecurity Framework</option>
+                    <option value="CIS Controls">CIS Critical Security Controls</option>
+                    <option value="NERC CIP">NERC CIP (Electric Utilities)</option>
+                    <option value="None">None / Minimal</option>
+                  </select>
+                </div>
               </div>
             </div>
 
-            <div class="form-row three">
-              <div>
-                <label>Subnet scheme</label>
-                <select id="gen-subnet-scheme">
-                  <option value="v2" selected>v2 (10.x.x.x — recommended)</option>
-                  <option value="v3">v3 (segmented DMZ — advanced)</option>
-                </select>
+            <!-- TECHNICAL SUBTAB -->
+            <div class="subtab-content" id="subtab-tech" style="display:none">
+              <div class="form-row">
+                <div>
+                  <label>IT delivery model</label>
+                  <select id="gen-delivery">
+                    <option value="">Auto (by client type / maturity)</option>
+                    <option value="On-Prem Heavy">On-Premises Heavy</option>
+                    <option value="Hybrid (On-Prem + M365)">Hybrid (On-Prem + M365)</option>
+                    <option value="Mostly Cloud (M365 + SaaS)">Mostly Cloud (M365 + SaaS)</option>
+                    <option value="Cloud-First (Google Workspace)">Cloud-First (Google Workspace)</option>
+                    <option value="Air-Gapped OT + IT">Air-Gapped OT + IT (Utilities)</option>
+                  </select>
+                </div>
               </div>
-              <div>
-                <label>&nbsp;</label>
-                <label><input type="checkbox" id="gen-attack-boxes" checked /> Deploy Kali attack box per lane</label>
-              </div>
-              <div>
-                <label>&nbsp;</label>
-                <label><input type="checkbox" id="gen-vuln-app" checked /> Generate AI vulnerable web app</label>
+              <div class="form-row three">
+                <div>
+                  <label>Endpoint count (min – max)</label>
+                  <div style="display:flex;gap:0.4rem;align-items:center">
+                    <input type="number" id="gen-end-min" value="20" min="5" max="5000" />
+                    <span class="muted">to</span>
+                    <input type="number" id="gen-end-max" value="90" min="5" max="5000" />
+                  </div>
+                </div>
+                <div>
+                  <label>Firewall rules (min – max)</label>
+                  <div style="display:flex;gap:0.4rem;align-items:center">
+                    <input type="number" id="gen-fw-min" value="5" min="3" max="100" />
+                    <span class="muted">to</span>
+                    <input type="number" id="gen-fw-max" value="15" min="3" max="100" />
+                  </div>
+                </div>
+                <div>
+                  <label>Deliberate weaknesses (min – max)</label>
+                  <div style="display:flex;gap:0.4rem;align-items:center">
+                    <input type="number" id="gen-weak-min" value="3" min="2" max="30" />
+                    <span class="muted">to</span>
+                    <input type="number" id="gen-weak-max" value="8" min="2" max="30" />
+                  </div>
+                </div>
               </div>
             </div>
 
-            <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+            <!-- ADVANCED SUBTAB -->
+            <div class="subtab-content" id="subtab-advanced" style="display:none">
+              <div class="form-row three">
+                <div>
+                  <label>Stakeholder cooperation</label>
+                  <select id="gen-cooperation">
+                    <option value="">Auto (by difficulty)</option>
+                    <option value="high">High (very helpful)</option>
+                    <option value="moderate">Moderate (realistic)</option>
+                    <option value="varied">Varied (mixed)</option>
+                    <option value="low">Low (challenging)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Scaffolding level</label>
+                  <select id="gen-scaffolding">
+                    <option value="">Auto (by difficulty)</option>
+                    <option value="extensive">Extensive (high support)</option>
+                    <option value="moderate">Moderate (guided)</option>
+                    <option value="minimal">Minimal (independent)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Estimated hours</label>
+                  <input type="number" id="gen-est-hours" min="2" max="40" placeholder="Auto" />
+                </div>
+              </div>
+              <div class="form-row three">
+                <div>
+                  <label>LLM model</label>
+                  <select id="gen-llm-model">
+                    <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (recommended)</option>
+                    <option value="claude-haiku-4-5">Claude Haiku 4.5 (faster/cheaper)</option>
+                    <option value="claude-opus-4-1">Claude Opus 4.1 (highest quality)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>Temperature (0.0 – 1.0)</label>
+                  <input type="number" id="gen-temperature" value="0.7" min="0" max="1" step="0.1" />
+                </div>
+                <div>
+                  <label>Custom seed (reproducible runs)</label>
+                  <input type="text" id="gen-custom-seed" placeholder="Random" />
+                </div>
+              </div>
+            </div>
+
+            <!-- LANE DEPLOYMENT SUBTAB -->
+            <div class="subtab-content" id="subtab-lanes" style="display:none">
+              <div class="form-row three">
+                <div>
+                  <label>Number of lanes (deploy now)</label>
+                  <input type="number" id="gen-num-lanes" value="3" min="1" max="100" oninput="syncMaxStudents()" />
+                </div>
+                <div>
+                  <label>Max students (VXLAN reservation)</label>
+                  <input type="number" id="gen-max-students" value="25" min="1" max="200" />
+                  <div class="muted" style="font-size:0.8em">Total VXLAN slots reserved for this profile, just like a challenge's vxlan_block.
+                    Locked once set — to grow it, delete the profile and re-create. Min = number of lanes.</div>
+                </div>
+                <div>
+                  <label>Group name (optional)</label>
+                  <input type="text" id="gen-group-name" placeholder="Mon-AM-CIAB-101" />
+                </div>
+              </div>
+              <div class="form-row three">
+                <div>
+                  <label>Subnet scheme</label>
+                  <select id="gen-subnet-scheme">
+                    <option value="v2" selected>v2 (10.x.x.x — recommended)</option>
+                    <option value="v3">v3 (segmented DMZ — advanced)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="form-row three">
+                <div><label>&nbsp;</label><label><input type="checkbox" id="gen-attack-boxes" checked /> Deploy Kali per lane</label></div>
+                <div><label>&nbsp;</label><label><input type="checkbox" id="gen-vuln-app" checked /> Generate AI vulnerable web app</label></div>
+                <div><label>&nbsp;</label><label><input type="checkbox" id="gen-vuln-app-dedicated" /> Force dedicated VM for vuln app</label></div>
+              </div>
+            </div>
+
+            <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1rem; border-top:1px solid var(--gray-200); padding-top:1rem;">
               <button class="btn btn-primary" onclick="generateAndDeploy()">Generate + Deploy</button>
             </div>
             <div id="gen-result"></div>
@@ -212,15 +380,26 @@
               </table>
             </div>
 
+            <!-- Reservation status banner — populated when a profile is loaded -->
+            <div id="dep-reservation-status" style="margin-top:1rem"></div>
+
             <div class="form-row three" style="margin-top:1rem;">
               <div>
-                <label>Number of lanes</label>
-                <input type="number" id="dep-num-lanes" value="3" min="1" max="20" />
+                <label>Number of lanes (deploy now)</label>
+                <input type="number" id="dep-num-lanes" value="3" min="1" max="100" />
+              </div>
+              <div>
+                <label>Max students (only if new profile)</label>
+                <input type="number" id="dep-max-students" value="25" min="1" max="200" />
+                <div class="muted" style="font-size:0.8em">Locked once profile is deployed.
+                  If profile already has a reservation, this field is ignored — existing reservation will be reused.</div>
               </div>
               <div>
                 <label>Group name (optional)</label>
                 <input type="text" id="dep-group-name" placeholder="default = company-date" />
               </div>
+            </div>
+            <div class="form-row three">
               <div>
                 <label>Subnet scheme</label>
                 <select id="dep-subnet-scheme">

@@ -17,6 +17,7 @@
 const { pool, query } = require('./db');
 const { isWebServer } = require('./profile-to-spec');
 const llm = require('../../../../../src/utils/llm-client');
+const { generateVulnApp: generateVulnAppMultistage } = require('../ai/vuln-app');
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -44,17 +45,21 @@ async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker' }
   const targetHostname = webServer ? webServer.hostname : null;
   const effectiveMode = webServer ? preferMode : 'standalone_vm';
 
-  // Try inline LLM generation first
+  // Try the multi-stage pipeline first (concept → per-file fan-out → install).
+  // Falls back to the hardcoded template if Claude is unreachable or the
+  // pipeline blows up (caught broadly because we don't want a vuln-app
+  // failure to take down the whole lane deploy — the lane is still useful
+  // without the app).
   let generated = null;
   let source = 'fallback';
   if (process.env.ANTHROPIC_API_KEY) {
     try {
-      generated = await generateVulnAppWithClaude({
-        profile, webServer, targetHostname, deliveryMode: effectiveMode, llmModel
+      generated = await generateVulnAppMultistage({
+        profile, webServer, deliveryMode: effectiveMode, llmModel
       });
-      source = 'claude';
+      source = 'claude_multistage';
     } catch (err) {
-      console.warn(`[CIAB VulnApp] Claude generation failed for profile ${profile.id}: ${err.message} — falling back to hardcoded template`);
+      console.warn(`[CIAB VulnApp] Multi-stage generation failed for profile ${profile.id}: ${err.message} — falling back to hardcoded template`);
     }
   } else {
     console.warn(`[CIAB VulnApp] ANTHROPIC_API_KEY not set — using hardcoded template`);
@@ -76,7 +81,7 @@ async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker' }
       generated.dockerfile || null,
       JSON.stringify(generated.source_tree || {}),
       generated.install_script,
-      source === 'claude' ? (llmModel || llm.DEFAULT_MODEL) : null,
+      source.startsWith('claude') ? (llmModel || llm.DEFAULT_MODEL) : null,
       JSON.stringify({ ...(generated.generation_meta || {}), source })
     ]
   );

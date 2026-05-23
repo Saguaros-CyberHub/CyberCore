@@ -45,6 +45,14 @@ const {
 const TEMP_GW_TEMPLATE_BASE = 169200; // 169200, 169201, ... — per-node temp copies
 const DEFAULT_CONCURRENCY = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 6;
 
+// VXLAN search bounds for CIAB profile challenges. Each profile gets a
+// contiguous block sized exactly to max_students, placed wherever there's a
+// free gap inside this window. Same mechanism as crucible challenge templates —
+// no special CIAB-only carve-out. Conservative default starts at 10100 (above
+// the seeded crucible-base 10000-10009) and stops at the 16-bit boundary.
+const VXLAN_SEARCH_MIN = parseInt(process.env.CIAB_VXLAN_SEARCH_MIN, 10) || 10100;
+const VXLAN_SEARCH_MAX = parseInt(process.env.CIAB_VXLAN_SEARCH_MAX, 10) || 65535;
+
 // ─── Progress tracking ─────────────────────────────────────────────────────
 // In-process tracker keyed by group_id. Separate namespace from admin.js's
 // _batchDeployProgress so CIAB and instructor flows don't collide.
@@ -107,6 +115,169 @@ async function allocateVxlanIds(vxlanBlock, count) {
     [vxlanBlock.start, vxlanBlock.end, count]
   );
   return result.rows.map(r => r.vxlan_id);
+}
+
+// ─── Per-profile crucible_challenge reservation ────────────────────────────
+/**
+ * Each CIAB profile that has been deployed owns ONE crucible_challenge row in
+ * cybercore_db, keyed deterministically by `challenge_key = 'ciab-profile-<id>'`.
+ * The challenge's spec.vxlan_block IS the reservation — sized exactly to
+ * max_students, placed wherever there's a free gap. Identical mechanism to
+ * how crucible challenge templates work — no parallel reservation system, no
+ * CIAB-side migration needed.
+ *
+ * Idempotent: if the challenge exists, return its existing vxlan_block.
+ * Otherwise carve a fresh `requestedMax`-sized slice from the first free gap
+ * in [VXLAN_SEARCH_MIN, VXLAN_SEARCH_MAX], create the challenge row, return.
+ *
+ * @param {object} args
+ * @param {string} args.profileId
+ * @param {number} args.requestedMax       max_students if no reservation exists
+ * @param {string} args.companyName        used for the challenge display name
+ * @param {object} args.spec               vm spec (from synthesizer) — only
+ *                                         used when CREATING a new challenge.
+ *                                         Existing challenges keep their spec.
+ * @param {string} args.subnetScheme
+ * @returns {Promise<{challenge_id, challenge_key, vxlan_block, max_students, was_existing, spec}>}
+ */
+async function getOrCreateProfileChallenge({ profileId, requestedMax, companyName, spec, subnetScheme = 'v2' }) {
+  if (!profileId) throw new Error('getOrCreateProfileChallenge: profileId required');
+  const challengeKey = `ciab-profile-${profileId.slice(0, 8)}`;
+
+  // 1. Idempotent lookup — does this profile already have a challenge?
+  const chRes = await cybercoreQuery(
+    `SELECT challenge_id, challenge_key, spec FROM crucible_challenge WHERE challenge_key = $1`,
+    [challengeKey]
+  );
+  if (chRes.rows.length > 0) {
+    const ch = chRes.rows[0];
+    const existingSpec = typeof ch.spec === 'string' ? JSON.parse(ch.spec) : ch.spec;
+    const block = existingSpec.vxlan_block || {};
+    const blockSize = (block.end != null && block.start != null) ? (block.end - block.start + 1) : null;
+    return {
+      challenge_id: ch.challenge_id,
+      challenge_key: ch.challenge_key,
+      vxlan_block: block,
+      max_students: blockSize,                // derived from the spec — no separate column
+      was_existing: true,
+      spec: existingSpec
+    };
+  }
+
+  // 2. New — validate requestedMax and find a free gap
+  if (!Number.isFinite(requestedMax) || requestedMax < 1) {
+    throw new Error(`requestedMax must be >= 1 (got ${requestedMax})`);
+  }
+  const searchSize = VXLAN_SEARCH_MAX - VXLAN_SEARCH_MIN + 1;
+  if (requestedMax > searchSize) {
+    throw new Error(`requestedMax ${requestedMax} exceeds VXLAN search window ${searchSize}`);
+  }
+
+  // 3. Walk every existing challenge's vxlan_block + every live cybercore_lane's
+  //    vxlan_id (lanes spawned outside any vxlan_block convention still take IDs).
+  //    Single ordered list of forbidden intervals; first big-enough gap wins.
+  const blockRes = await cybercoreQuery(
+    `SELECT challenge_key,
+            (spec->'vxlan_block'->>'start')::int AS start,
+            (spec->'vxlan_block'->>'end')::int   AS end
+       FROM crucible_challenge
+      WHERE spec ? 'vxlan_block'
+        AND status != 'deleted'
+        AND (spec->'vxlan_block'->>'start') IS NOT NULL`
+  );
+  const intervals = blockRes.rows
+    .filter(r => Number.isFinite(r.end) && r.end >= VXLAN_SEARCH_MIN && r.start <= VXLAN_SEARCH_MAX)
+    .map(r => ({ start: Math.max(r.start, VXLAN_SEARCH_MIN), end: Math.min(r.end, VXLAN_SEARCH_MAX) }))
+    .sort((a, b) => a.start - b.start);
+
+  let cursor = VXLAN_SEARCH_MIN;
+  let slot = null;
+  for (const r of intervals) {
+    if (cursor + requestedMax - 1 < r.start) {
+      slot = { start: cursor, end: cursor + requestedMax - 1 };
+      break;
+    }
+    if (r.end + 1 > cursor) cursor = r.end + 1;
+  }
+  if (!slot && cursor + requestedMax - 1 <= VXLAN_SEARCH_MAX) {
+    slot = { start: cursor, end: cursor + requestedMax - 1 };
+  }
+  if (!slot) {
+    throw new Error(
+      `Cannot reserve ${requestedMax} contiguous VXLAN IDs in search window ${VXLAN_SEARCH_MIN}-${VXLAN_SEARCH_MAX} — ` +
+      `${intervals.length} existing challenge blocks. Bump CIAB_VXLAN_SEARCH_MAX or pick a smaller max_students.`
+    );
+  }
+
+  // 4. Create the crucible_challenge row in cybercore_db with this block
+  const challengeName = `CIAB Profile: ${companyName || profileId.slice(0, 8)}`;
+  const finalSpec = { ...(spec || {}), vxlan_block: slot };
+
+  const chInsert = await cybercoreQuery(
+    `INSERT INTO crucible_challenge
+       (challenge_key, name, description, challenge_type, difficulty, module_key, spec, subnet_scheme, status)
+     VALUES ($1, $2, $3, 'multi_vm', 'intermediate', 'crucible', $4::jsonb, $5, 'active')
+     RETURNING challenge_id, challenge_key`,
+    [
+      challengeKey, challengeName,
+      `CIAB profile-derived challenge (auto-managed). Profile ID: ${profileId}`,
+      JSON.stringify(finalSpec), subnetScheme
+    ]
+  );
+  const challenge = chInsert.rows[0];
+
+  console.log(`[CIAB Reservation] Profile ${profileId.slice(0,8)} → challenge ${challenge.challenge_id.slice(0,8)} (${challengeKey}), VXLAN ${slot.start}-${slot.end} (${requestedMax} slots)`);
+
+  return {
+    challenge_id: challenge.challenge_id,
+    challenge_key: challenge.challenge_key,
+    vxlan_block: slot,
+    max_students: requestedMax,
+    was_existing: false,
+    spec: finalSpec
+  };
+}
+
+/**
+ * Delete a profile's challenge from cybercore_db. NO-OP if the profile never
+ * had one. Lookup is by deterministic challenge_key — no profile-side state.
+ */
+async function deleteProfileChallenge(profileId) {
+  const challengeKey = `ciab-profile-${profileId.slice(0, 8)}`;
+  const result = await cybercoreQuery(
+    `DELETE FROM crucible_challenge WHERE challenge_key = $1 RETURNING challenge_id`,
+    [challengeKey]
+  );
+  if (result.rows.length === 0) return { deleted: false, reason: 'no_challenge' };
+  console.log(`[CIAB Reservation] Released profile ${profileId.slice(0,8)} challenge ${result.rows[0].challenge_id.slice(0,8)}`);
+  return { deleted: true, challenge_id: result.rows[0].challenge_id };
+}
+
+/**
+ * Lookup helper: returns the profile's challenge + reservation info without
+ * creating one. Returns null if no challenge exists.
+ */
+async function findProfileChallenge(profileId) {
+  const challengeKey = `ciab-profile-${profileId.slice(0, 8)}`;
+  const chRes = await cybercoreQuery(
+    `SELECT challenge_id, challenge_key, created_at, spec,
+            (spec->'vxlan_block'->>'start')::int AS vxlan_start,
+            (spec->'vxlan_block'->>'end')::int   AS vxlan_end
+       FROM crucible_challenge WHERE challenge_key = $1`,
+    [challengeKey]
+  );
+  if (chRes.rows.length === 0) return null;
+  const ch = chRes.rows[0];
+  const blockSize = (ch.vxlan_end != null && ch.vxlan_start != null)
+    ? (ch.vxlan_end - ch.vxlan_start + 1) : null;
+  return {
+    challenge_id: ch.challenge_id,
+    challenge_key: ch.challenge_key,
+    created_at: ch.created_at,
+    spec: typeof ch.spec === 'string' ? JSON.parse(ch.spec) : ch.spec,
+    vxlan_block: { start: ch.vxlan_start, end: ch.vxlan_end },
+    max_students: blockSize
+  };
 }
 
 // ─── Look up VNet(s) by VXLAN tag ──────────────────────────────────────────
@@ -765,8 +936,13 @@ module.exports = {
   deployOneLaneFromSpec,
   teardownLane,
   allocateVxlanIds,
+  getOrCreateProfileChallenge,
+  deleteProfileChallenge,
+  findProfileChallenge,
   resolveVnets,
   getProgress,
   installVulnAppOnVM,
-  collectVmIp
+  collectVmIp,
+  VXLAN_SEARCH_MIN,
+  VXLAN_SEARCH_MAX
 };

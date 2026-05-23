@@ -77,48 +77,105 @@ const CLIENT_TYPE_TEMPLATES = {
   }
 };
 
-function buildConfig({ client_type, industry, difficulty, maturity, delivery, employees, custom_config }) {
+function buildConfig({
+  client_type, industry, difficulty, maturity, delivery, employees,
+  // Extended fields (match user-facing generator form)
+  company_name, domain, hq_city,
+  framework,
+  stakeholder_count,
+  endpoint_count, endpoint_range,
+  firewall_rules_range,
+  weakness_range,
+  cooperation, scaffolding,
+  est_hours,
+  custom_seed,
+  custom_config
+} = {}) {
   const tmpl = CLIENT_TYPE_TEMPLATES[client_type] || CLIENT_TYPE_TEMPLATES.SMB;
   const chosenIndustry = industry || tmpl.industries[0];
-  const empCount = employees || (custom_config?.employee_count) || 50;
-  const empRange = typeof empCount === 'object' ? empCount : { min: empCount, max: empCount };
 
-  const runId = `RUN_${Date.now().toString(36).toUpperCase()}_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+  // employees can be a number, a {min,max}, or {min,max} via custom_config
+  const empSource = employees ?? custom_config?.employees ?? 50;
+  const empRange = (typeof empSource === 'object' && empSource !== null && 'min' in empSource)
+    ? empSource
+    : { min: empSource, max: empSource };
 
-  // Pick a public IP from RFC 5737 documentation range so it's never a real one
+  // Stakeholder count: range or single
+  const stakSource = stakeholder_count ?? custom_config?.stakeholder_count ?? 5;
+  const stakRange = (typeof stakSource === 'object' && stakSource !== null && 'min' in stakSource)
+    ? stakSource
+    : { min: stakSource, max: stakSource };
+
+  // Endpoint range default ~1.2x avg employees if not specified
+  const avgEmp = Math.floor((empRange.min + empRange.max) / 2);
+  const endpointRangeFinal = endpoint_range
+    || custom_config?.endpoint_range
+    || { min: Math.max(5, Math.floor(avgEmp * 0.8)), max: Math.max(20, Math.floor(avgEmp * 1.5)) };
+  const endpointCountFinal = endpoint_count
+    || custom_config?.endpoint_count
+    || Math.floor((endpointRangeFinal.min + endpointRangeFinal.max) / 2);
+
+  // RunId — honor custom seed if user supplied one
+  const seedToken = custom_seed
+    ? `RUN_${String(custom_seed).replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 24)}`
+    : `RUN_${Date.now().toString(36).toUpperCase()}_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+  // Compliance list — if admin picked a specific framework, prepend it; else use industry defaults
+  const complianceList = framework && framework !== 'None'
+    ? [framework, ...tmpl.compliance.filter(c => c !== framework)]
+    : (framework === 'None' ? [] : tmpl.compliance);
+
+  // Public IP from RFC 5737 documentation range — never a real address
   const publicIp = `203.0.113.${10 + Math.floor(Math.random() * 240)}`;
+
+  // Organization overrides — admin can set company name / domain / hq city explicitly
+  const orgOverrides = {
+    ...(custom_config?.organization_overrides || {}),
+    ...(company_name ? { company_name } : {}),
+    ...(domain ? { domain_public: domain } : {}),
+    ...(hq_city ? { hq_city } : {})
+  };
+
+  // Difficulty-driven defaults for cooperation / weakness counts — admin can override
+  const defaultCoop = difficulty === 'beginner' ? 'high' : difficulty === 'advanced' ? 'low' : 'moderate';
+  const defaultWeakRange = difficulty === 'beginner' ? { min: 3, max: 5 }
+                        : difficulty === 'advanced' ? { min: 6, max: 12 }
+                        : { min: 3, max: 8 };
 
   return {
     config: {
       clientType: client_type || 'SMB',
       clientTypeName: tmpl.clientTypeName,
-      organization_overrides: custom_config?.organization_overrides || {},
+      organization_overrides: orgOverrides,
       challenge_network: custom_config?.challenge_network || null,
       network: { requiredSubnets: custom_config?.required_subnets || ['Management', 'Servers', 'Workstations', 'Guest'] }
     },
     seed: {
-      run_id: runId,
+      run_id: seedToken,
       template: {
         industry: chosenIndustry,
         naics_hint: tmpl.naics_hint,
         risks: tmpl.risks,
-        compliance: tmpl.compliance,
+        compliance: complianceList,
         criticalSystems: tmpl.criticalSystems
       },
       employees: empRange,
-      endpoint_count: custom_config?.endpoint_count || Math.floor(empCount * 1.2),
-      endpoint_range: custom_config?.endpoint_range,
-      stakeholder_count: custom_config?.stakeholder_count || 5,
+      endpoint_count: endpointCountFinal,
+      endpoint_range: endpointRangeFinal,
+      stakeholder_count: stakRange.max,                   // upper-bound used by prompts; range used by validators
+      stakeholder_range: stakRange,
       maturity: maturity || 'Intermediate',
       delivery: delivery || 'Hybrid',
       difficulty: difficulty || 'intermediate',
+      scaffolding: scaffolding || null,
+      est_hours: est_hours || null,
       public_ip: publicIp,
-      firewall_rules_range: { min: 8, max: 20 },
-      weakness_range: { min: 3, max: 8 },
+      firewall_rules_range: firewall_rules_range || custom_config?.firewall_rules_range || { min: 8, max: 20 },
+      weakness_range: weakness_range || custom_config?.weakness_range || defaultWeakRange,
       difficulty_settings: {
-        stakeholder_cooperation: difficulty === 'beginner' ? 'high' : difficulty === 'advanced' ? 'low' : 'moderate',
-        stakeholder_count: { min: 5, max: 8 },
-        deliberate_weaknesses: { min: 3, max: 8 }
+        stakeholder_cooperation: cooperation || defaultCoop,
+        stakeholder_count: stakRange,
+        deliberate_weaknesses: weakness_range || defaultWeakRange
       }
     }
   };
