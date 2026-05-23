@@ -174,15 +174,19 @@ const mockClient = {
 };
 llm._setClientForTest(mockClient);
 
-// Stub fs writes (don't pollute the profiles directory)
+// Stub fs writes (don't pollute the profiles directory). Also stub statSync
+// so the orchestrator's post-write verification (added for the JSON-not-found
+// fix) sees a non-empty file even though writeFileSync was a no-op.
 const fs = require('fs');
 const realWrite = fs.writeFileSync;
+const realMkdir = fs.mkdirSync;
+const realExists = fs.existsSync;
+const realStat = fs.statSync;
 const writtenFiles = [];
 fs.writeFileSync = (file, content) => { writtenFiles.push({ file, size: content.length }); };
-const realMkdir = fs.mkdirSync;
 fs.mkdirSync = () => {};
-const realExists = fs.existsSync;
 fs.existsSync = () => true;
+fs.statSync = () => ({ size: 1024, isFile: () => true });
 
 // ─── Run the pipeline ──────────────────────────────────────────────────────
 
@@ -227,10 +231,16 @@ const { generateProfile, buildConfig, combineProfile } = require('../ai/profile'
     assert.strictEqual(callIndex, 4, `expected 4 LLM calls, got ${callIndex}`);
   });
 
-  await test('wrote a JSON file under profiles/', () => {
-    assert.strictEqual(writtenFiles.length, 1);
-    assert.match(writtenFiles[0].file, /client_profile_RUN_.*\.json$/);
-    assert.ok(writtenFiles[0].size > 100, 'JSON should not be empty');
+  await test('wrote a JSON + HTML file under profiles/', () => {
+    assert.strictEqual(writtenFiles.length, 2, `expected JSON + HTML, got ${writtenFiles.length}`);
+    const jsonFile = writtenFiles.find(f => f.file.endsWith('.json'));
+    const htmlFile = writtenFiles.find(f => f.file.endsWith('.html'));
+    assert.ok(jsonFile, 'expected a .json file written');
+    assert.ok(htmlFile, 'expected a .html file written');
+    assert.match(jsonFile.file, /client_profile_RUN_.*\.json$/);
+    assert.match(htmlFile.file, /client_profile_RUN_.*\.html$/);
+    assert.ok(jsonFile.size > 100, 'JSON should not be empty');
+    assert.ok(htmlFile.size > 500, 'HTML should be substantial');
   });
 
   await test('inserted a profiles row', () => {
@@ -265,6 +275,7 @@ const { generateProfile, buildConfig, combineProfile } = require('../ai/profile'
   fs.writeFileSync = realWrite;
   fs.mkdirSync = realMkdir;
   fs.existsSync = realExists;
+  fs.statSync = realStat;
 
   process.exit(failed === 0 ? 0 : 1);
 })();

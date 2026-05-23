@@ -394,6 +394,19 @@ function escapeHtml(s) {
 }
 
 // ─── boot ──────────────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+  // Trigger Auth.check() → fires 'authReady' → layout.js re-injects the
+  // sidebar with the real user/role (so the Admin badge + name show up).
+  // Without this, layout renders with Auth.user=null and the footer shows
+  // "User / Student" with no Admin button.
+  if (typeof Auth !== 'undefined' && Auth.requireAuth) {
+    if (!await Auth.requireAuth()) return;
+    const user = Auth.getUser();
+    if (user && user.role !== 'admin') {
+      if (typeof Toast !== 'undefined') Toast.error('Access Denied', 'Admin role required for this page.');
+      window.location.href = '/ciab/dashboard';
+      return;
+    }
+  }
   // Default tab is "generate" — no auto-fetch needed.
 });

@@ -38,6 +38,7 @@ const {
   validateNetwork,
   validateThreat
 } = require('./validators');
+const { renderProfileHtml } = require('./render');
 
 // ─── Client-type templates (analog of N8N P0/E0 template tables) ──────────
 
@@ -314,24 +315,55 @@ async function generateProfile(args) {
     employeeCount
   });
 
-  // Write JSON to disk
+  // Write JSON + HTML to disk
   const profilesDir = path.join(process.cwd(), 'profiles');
-  if (!fs.existsSync(profilesDir)) fs.mkdirSync(profilesDir, { recursive: true });
+  if (!fs.existsSync(profilesDir)) {
+    fs.mkdirSync(profilesDir, { recursive: true });
+    console.log(`📁 [ai/profile] Created profiles dir: ${profilesDir}`);
+  }
   const safeName = (combined.student_view.quick.company_name || 'profile').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-  const filename = `client_profile_${seed.run_id}_${safeName.slice(0, 24)}.json`;
-  const filePath = path.join(profilesDir, filename);
-  const relPath = path.join('profiles', filename).replace(/\\/g, '/');
-  fs.writeFileSync(filePath, JSON.stringify(combined, null, 2));
+  const baseName = `client_profile_${seed.run_id}_${safeName.slice(0, 24)}`;
+  const jsonFilename = `${baseName}.json`;
+  const htmlFilename = `${baseName}.html`;
+  const jsonFilePath = path.join(profilesDir, jsonFilename);
+  const htmlFilePath = path.join(profilesDir, htmlFilename);
+
+  // Store paths with leading slash so <a href> resolves from the site root
+  // (the profiles dir is served by Express at /profiles/* in server.js).
+  // Without the leading /, links from /ciab/my-profiles resolve as
+  // /ciab/profiles/... which hits a 404.
+  const jsonRelPath = '/' + path.join('profiles', jsonFilename).replace(/\\/g, '/');
+  const htmlRelPath = '/' + path.join('profiles', htmlFilename).replace(/\\/g, '/');
+
+  fs.writeFileSync(jsonFilePath, JSON.stringify(combined, null, 2));
+  try {
+    fs.writeFileSync(htmlFilePath, renderProfileHtml(combined));
+  } catch (htmlErr) {
+    console.warn(`⚠️  [ai/profile] HTML render failed (JSON saved): ${htmlErr.message}`);
+  }
+
+  // Verify both writes actually landed on disk — catches volume-mount issues
+  // where process.cwd() doesn't resolve to the host-mounted profiles dir.
+  const jsonStat = fs.existsSync(jsonFilePath) ? fs.statSync(jsonFilePath) : null;
+  const htmlStat = fs.existsSync(htmlFilePath) ? fs.statSync(htmlFilePath) : null;
+  if (!jsonStat || jsonStat.size === 0) {
+    console.error(`❌ [ai/profile] JSON write reported success but file is missing or empty: ${jsonFilePath}`);
+  } else {
+    console.log(`💾 [ai/profile] Wrote JSON ${jsonFilePath} (${jsonStat.size} bytes) → DB path ${jsonRelPath}`);
+  }
+  if (htmlStat && htmlStat.size > 0) {
+    console.log(`💾 [ai/profile] Wrote HTML ${htmlFilePath} (${htmlStat.size} bytes) → DB path ${htmlRelPath}`);
+  }
 
   // Insert profiles row
   const org = combined.student_view.raw.threats.organization || {};
   const insert = await pool.query(`
     INSERT INTO profiles
       (user_id, company_name, client_type, industry, difficulty,
-       hq_city, employee_count, json_file_path, run_id,
+       hq_city, employee_count, json_file_path, html_file_path, run_id,
        generation_status, profile_type, compliance_frameworks, key_risks, critical_systems)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'complete', 'standard', $10, $11, $12)
-    RETURNING id, company_name, client_type, industry, difficulty, created_at, run_id, json_file_path
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'complete', 'standard', $11, $12, $13)
+    RETURNING id, company_name, client_type, industry, difficulty, created_at, run_id, json_file_path, html_file_path
   `, [
     user_id,
     org.company_name || 'Generated Profile',
@@ -340,7 +372,8 @@ async function generateProfile(args) {
     seed.difficulty,
     org.hq_city || null,
     org.employees_total || employeeCount,
-    relPath,
+    jsonRelPath,
+    htmlStat && htmlStat.size > 0 ? htmlRelPath : null,
     seed.run_id,
     JSON.stringify(seed.template.compliance),
     JSON.stringify(seed.template.risks),
