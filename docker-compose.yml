@@ -145,6 +145,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
+      - ./config/site.json:/config/site.json:ro
       - ./front-end/plugins:/app/plugins:rw
       - ./front-end/profiles:/app/profiles:rw
       - ./front-end/vuln-assets:/app/vuln-assets:ro
