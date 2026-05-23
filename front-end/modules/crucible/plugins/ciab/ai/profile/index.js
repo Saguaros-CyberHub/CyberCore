@@ -33,7 +33,7 @@ const {
   buildNetworkSummary,
   buildFlavorBundle
 } = require('./prompts');
-const { buildPrefilledIntake } = require('../../utils/profile-to-intake');
+const { buildPrefilledIntake, buildIntakeV11Payload } = require('../../utils/profile-to-intake');
 const {
   validateOrg,
   validateIt,
@@ -304,14 +304,22 @@ function combineProfile({ orgPayload, itPayload, netPayload, threatPayload, conf
  * @returns {Promise<object>} profiles row { id, company_name, run_id, json_file_path, ... }
  */
 async function generateProfile(args) {
-  const { user_id, llmModel, temperature, ...rest } = args;
+  const { user_id, llmModel, temperature, onProgress, ...rest } = args;
   if (!user_id) throw new Error('generateProfile: user_id required');
 
   const { config, seed } = buildConfig(rest);
   const employeeCount = pickEmployeeCount(seed);
   const labelBase = `profile:${seed.run_id.slice(-6)}`;
 
+  const reportStep = (step, percent, message) => {
+    if (typeof onProgress === 'function') {
+      try { onProgress({ step, percent, message, run_id: seed.run_id }); }
+      catch (e) { console.warn('[ai/profile] onProgress callback threw:', e.message); }
+    }
+  };
+
   console.log(`🚀 [ai/profile] Generating ${config.clientType} profile for user ${user_id} (run ${seed.run_id})`);
+  reportStep('start', 5, 'Starting generation…');
 
   // Stage 1: A + B + C in parallel (D needs network output).
   // Higher temperatures + per-branch flavor anchors (vendor, hostname theme,
@@ -319,6 +327,7 @@ async function generateProfile(args) {
   // user prompt break Claude's convergence on identical-looking profiles.
   // The deterministic company name + stakeholder names handle the most
   // visible duplication; flavor anchors break the rest.
+  reportStep('branches_parallel', 15, 'Generating organization, IT environment, and network in parallel…');
   const branchTemp = temperature ?? 0.9;
   const orgTemp    = Math.min(1, branchTemp + 0.05);
   const stage1 = await llm.generateParallel([
@@ -338,6 +347,8 @@ async function generateProfile(args) {
   if (!itResult.ok)  throw new Error(`IT branch failed: ${itResult.error.message}`);
   if (!netResult.ok) throw new Error(`Network branch failed: ${netResult.error.message}`);
 
+  reportStep('branches_done', 55, 'Organization, IT, and network ready — validating…');
+
   const orgPayload = orgResult.value.value;
   const itPayload  = itResult.value.value;
   const netPayload = netResult.value.value;
@@ -351,6 +362,7 @@ async function generateProfile(args) {
   }
 
   // Stage 2: D (threats) — depends on network output
+  reportStep('threats', 65, 'Generating threat scenarios + MITRE attack chains…');
   const networkSummary = buildNetworkSummary(netV.payload);
   const threatPromptObj = buildThreatPrompt({ config, seed, networkSummary });
   const threatResult = await llm.generateJson({
@@ -370,6 +382,8 @@ async function generateProfile(args) {
   const tpV = validateThreat(threatPayload, { networkAssets: netV.payload?.network?.assets });
   for (const w of tpV.warnings) console.warn(`⚠️  [ai/profile] ${w}`);
 
+  reportStep('combining', 80, 'Combining branches into student + instructor views…');
+
   // Combine
   const combined = combineProfile({
     orgPayload: orgV.payload,
@@ -381,9 +395,12 @@ async function generateProfile(args) {
     employeeCount
   });
 
-  // Build pre-filled intake form (V8 schema) — purely deterministic mapping
-  // from the AI profile + flavor anchors + IG1 derivation. Students get a
-  // populated form to verify/edit instead of starting from a blank slate.
+  // Build pre-filled intake form (V8 schema) + v1.1 intake payload — both
+  // are purely deterministic mappings from the AI profile + flavor anchors
+  // + IG1 derivation. Students get a populated intake AND a populated risk
+  // assessment baseline instead of starting from blank.
+  reportStep('intake_prefill', 88, 'Building pre-filled intake form + IG1 baseline…');
+  let intakeV11 = null;
   try {
     const flavor = buildFlavorBundle(seed.run_id, seed.stakeholder_count || 5);
     const prefillPayloads = {
@@ -399,11 +416,13 @@ async function generateProfile(args) {
       run_id:          seed.run_id
     };
     combined.prefilled_intake_form = buildPrefilledIntake(prefillPayloads);
+    intakeV11 = buildIntakeV11Payload(prefillPayloads);
     console.log(`📝 [ai/profile] Pre-filled intake form: ${combined.prefilled_intake_form._meta.ig1_coverage_pct}% IG1 coverage (${combined.prefilled_intake_form._meta.ig1_totals.yes}/${combined.prefilled_intake_form._meta.ig1_totals.partial}/${combined.prefilled_intake_form._meta.ig1_totals.no} yes/partial/no)`);
   } catch (prefillErr) {
     console.warn(`⚠️  [ai/profile] Intake prefill failed (continuing without): ${prefillErr.message}`);
   }
 
+  reportStep('writing_files', 92, 'Writing JSON + HTML deliverables…');
   // Write JSON + HTML to disk
   const profilesDir = path.join(process.cwd(), 'profiles');
   if (!fs.existsSync(profilesDir)) {
@@ -479,6 +498,33 @@ async function generateProfile(args) {
   ]);
 
   const profileRow = insert.rows[0];
+
+  // Seed the unified `intakes` row so the Clinic Risk Assessment + intake
+  // normalizer immediately see the pre-filled IG1 baseline. Source =
+  // 'ai_simulated' (vs 'real_client' for uploaded intakes). Best-effort:
+  // a failure here logs but does NOT roll back the profile.
+  if (intakeV11) {
+    try {
+      reportStep('seeding_intake', 97, 'Seeding risk-assessment intake (IG1 baseline)…');
+      await pool.query(`
+        INSERT INTO intakes (
+          user_id, profile_id, source, schema_version, cover_name,
+          payload, completion_percentage, status, completed_at
+        ) VALUES ($1, $2, 'ai_simulated', '1.1', $3, $4::jsonb, $5, 'complete', NOW())
+        ON CONFLICT (profile_id) WHERE profile_id IS NOT NULL DO NOTHING
+      `, [
+        user_id, profileRow.id,
+        intakeV11.cover_name,
+        JSON.stringify(intakeV11),
+        intakeV11._meta?.ig1_coverage_pct ?? 60
+      ]);
+      console.log(`📋 [ai/profile] Seeded intakes row for risk assessment`);
+    } catch (intakeErr) {
+      console.warn(`⚠️  [ai/profile] Intake seed failed (profile still created): ${intakeErr.message}`);
+    }
+  }
+
+  reportStep('complete', 100, 'Profile generated successfully');
   console.log(`✅ [ai/profile] Profile ${profileRow.id} created (${org.company_name}, ${seed.run_id})`);
   return profileRow;
 }

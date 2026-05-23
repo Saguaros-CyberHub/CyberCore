@@ -799,30 +799,43 @@
         include_diagram: document.getElementById('includeDiagram').checked
       };
 
-      // Progress simulation
-      let progress = 10;
-      const interval = setInterval(() => {
-        progress = Math.min(progress + Math.random() * 15, 90);
-        fill.style.width = `${progress}%`;
-        status.textContent = progress < 30 ? 'Building organization profile...' : 
-                            progress < 50 ? 'Creating network architecture...' : 
-                            progress < 70 ? 'Generating threat scenarios...' : 
-                            'Finalizing documents...';
-      }, 2000);
+      // Real progress: tag the request with a progress_id, poll the server
+      // every 1.2s for actual step + percent updates while generation runs.
+      const progressId = (crypto.randomUUID ? crypto.randomUUID()
+        : Date.now().toString(36) + Math.random().toString(36).slice(2));
+      config.progress_id = progressId;
+
+      const token = localStorage.getItem('cyberCore_token') || '';
+      const pollUrl = `/api/profiles/run-status/${progressId}`;
+      let polling = true;
+      const poll = async () => {
+        if (!polling) return;
+        try {
+          const r = await fetch(pollUrl, { headers: { 'Authorization': 'Bearer ' + token } });
+          if (r.ok) {
+            const s = await r.json();
+            fill.style.width = `${Math.max(s.percent || 0, 1)}%`;
+            status.textContent = s.message || s.step || 'Working…';
+            if (s.step === 'complete' || s.step === 'error') return;  // done; the await below resolves
+          }
+        } catch (e) { /* transient — keep polling */ }
+        setTimeout(poll, 1200);
+      };
+      poll();
 
       try {
         const result = await API.generate(config);
-        clearInterval(interval);
+        polling = false;
         fill.style.width = '100%';
         status.textContent = 'Profile generated successfully!';
         Toast.success('Success', 'Profile generated successfully!');
-        
+
         setTimeout(() => {
           window.location.href = '/ciab/my-profiles';
         }, 1500);
-        
+
       } catch (error) {
-        clearInterval(interval);
+        polling = false;
         fill.style.width = '0%';
         bar.style.display = 'none';
         status.textContent = `Error: ${error.message}`;

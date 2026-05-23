@@ -342,4 +342,144 @@ function buildPrefilledIntake(combinedPayloads) {
   };
 }
 
-module.exports = { buildPrefilledIntake };
+// ─── v1.1 intake payload (for the unified `intakes` table) ──────────────────
+// The Clinic Risk Assessment tool reads from this shape: shorter section
+// names (company, network, endpoint, ...), each holding flat key/value
+// fields. The `sections.ig1` block uses the same `ig1_X.X` keys that
+// frameworks.ig1Coverage() expects.
+
+function bandFromCount(n) { return employeesToBand(n); }
+
+function frameworkListToV11(complianceList) {
+  return (complianceList || []).map(s => {
+    const c = String(s).toLowerCase();
+    if (c.includes('hipaa')) return 'HIPAA';
+    if (c.includes('pci'))   return 'PCI-DSS';
+    if (c.includes('cmmc'))  return 'CMMC';
+    if (c.includes('sox'))   return 'SOX';
+    if (c.includes('glba'))  return 'GLBA';
+    if (c.includes('gdpr'))  return 'GDPR';
+    if (c.includes('ferpa')) return 'FERPA';
+    if (c.includes('nist'))  return 'NIST CSF';
+    return s;
+  });
+}
+
+function v11NetworkSection(it, net, org) {
+  const ep = it?.endpoints || {};
+  const servers = it?.servers || [];
+  const winLaptops  = ep.windows_laptops || 0;
+  const winDesktops = ep.windows_desktops || 0;
+  const macos       = ep.macos || 0;
+  const totalDesktops = winDesktops + (ep.shared_kiosks || 0);
+  const totalLaptops  = winLaptops + macos;
+
+  const findServer = (re) => servers.find(s =>
+    re.test(String(s.role || '')) || re.test(String(s.function || '')) || re.test(String(s.hostname || ''))
+  );
+  const yesNo = (s) => s ? 'yes' : 'no';
+
+  const dc      = findServer(/dc|domain|active.?directory/i);
+  const file    = findServer(/file|fs[-_]|share/i);
+  const mail    = findServer(/mail|exchange|smtp/i);
+  const web     = findServer(/web|app|http/i);
+  const db      = findServer(/sql|db|database|postgres|mysql/i);
+  const backup  = findServer(/backup|veeam|bak/i);
+  const printer = findServer(/print/i);
+
+  const segments = (net?.subnets || []).map(s => ({
+    name: s.name, cidr: s.cidr, purpose: s.purpose, trust_level: s.trust_level
+  }));
+
+  const services = [];
+  if (file || dc)                                services.push('SMB');
+  if (servers.some(s => /Windows/i.test(s.os))) services.push('RDP');
+  if (servers.some(s => /Linux|Ubuntu|Debian/i.test(s.os))) services.push('SSH');
+  if (web)                                       services.push('HTTP');
+  if (db)                                        services.push('SQL');
+  if (dc)                                        services.push('DNS', 'LDAP');
+  if (it?.remote_access?.vpn && it.remote_access.vpn !== 'None') services.push('VPN');
+
+  return {
+    workstation_count: String(totalDesktops),
+    laptop_count:      String(totalLaptops),
+    server_count:      String(servers.length),
+    endpoint_count:    String((winDesktops + winLaptops + macos + (ep.shared_kiosks || 0))),
+    os_count_win_server: String(servers.filter(s => /Windows Server/i.test(s.os || '')).length),
+    os_count_win_client: String(winDesktops + winLaptops),
+    os_count_linux:      String(servers.filter(s => /Linux|Ubuntu|Debian|Red ?Hat|CentOS/i.test(s.os || '')).length),
+    os_count_macos:      String(macos),
+    os_count_other:      '0',
+    role_dc:      yesNo(dc),     role_dc_version: dc?.os || '',
+    role_file:    yesNo(file),   role_file_version: file?.os || '',
+    role_mail:    yesNo(mail),   role_mail_version: mail?.os || '',
+    role_web:     yesNo(web),    role_web_version: web?.os || '',
+    role_db:      yesNo(db),     role_db_version: db?.os || '',
+    role_backup:  yesNo(backup), role_backup_version: backup?.os || '',
+    role_print:   yesNo(printer),role_print_version: printer?.os || '',
+    services,
+    svc_version_smb:  '',  svc_version_rdp:  '',  svc_version_ssh:  '',
+    svc_version_http: '',  svc_version_sql:  '',  svc_version_dns:  '',
+    svc_version_ldap: '',  svc_version_vpn:  '',
+    domain_mode:  dc ? 'AD' : 'workgroup',
+    domain_cover: org?.domain_public ? String(org.domain_public).replace(/^https?:\/\//, '').replace(/\/.*$/, '') : '',
+    segments
+  };
+}
+
+/**
+ * Build the v1.1 intake payload that the Clinic Risk Assessment + intake
+ * normalizer read from. Embeds the same IG1 answers as the V8 form prefill
+ * so both UI paths show the same baseline.
+ */
+function buildIntakeV11Payload(combinedPayloads) {
+  const org = combinedPayloads?.organization || {};
+  const it  = combinedPayloads?.it_environment || {};
+  const net = combinedPayloads?.network || {};
+  const tp  = combinedPayloads?.threat_profile || null;
+  const complianceList = combinedPayloads?.compliance_frameworks || [];
+  const vendorFlavor   = combinedPayloads?.vendor_flavor || '';
+  const runId          = combinedPayloads?.run_id || '';
+
+  const ig1Result = deriveIg1Baseline(combinedPayloads, runId);
+  const endpoint  = buildEndpointSection(it, vendorFlavor);
+  const email     = buildEmailSection(it, it?.saas, vendorFlavor);
+  const access    = buildAccessSection(it);
+  const data      = buildDataSection(it);
+  const va        = buildVulnAuditSection(it, net);
+  const wireless  = buildWirelessSection();
+
+  return {
+    cover_name: org.company_name || 'Generated Profile',
+    sections: {
+      company: {
+        cover_name:     org.company_name || '',
+        industry:       org.industry || '',
+        employees_band: bandFromCount(org.employees_total),
+        region:         org.hq_city || '',
+        revenue_band:   revenueToBand(org.annual_revenue_range) || '',
+        frameworks:     frameworkListToV11(complianceList)
+      },
+      network:    v11NetworkSection(it, net, org),
+      endpoint:   endpoint,
+      email_web:  email,
+      access:     access,
+      data:       data,
+      vuln_audit: va,
+      wireless:   wireless,
+      ig1:        ig1Result.answers,
+      notes:      { free_text: tp?.top_threats?.length
+        ? `Top threats from initial profile review: ${tp.top_threats.slice(0, 5).join('; ')}.`
+        : ''
+      }
+    },
+    _meta: {
+      generated_at:    new Date().toISOString(),
+      source:          'ai_profile_prefill_v11',
+      ig1_coverage_pct: ig1Result.coverage_pct,
+      ig1_totals:      ig1Result.totals
+    }
+  };
+}
+
+module.exports = { buildPrefilledIntake, buildIntakeV11Payload };

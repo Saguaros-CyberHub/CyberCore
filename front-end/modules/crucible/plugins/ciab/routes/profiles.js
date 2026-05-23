@@ -305,6 +305,35 @@ router.get('/', authenticateToken, async (req, res) => {
 // generate-and-deploy endpoint (and other internal callers) don't change.
 const { generateProfile } = require('../ai/profile');
 
+// ─── In-memory generation progress tracker ─────────────────────────────────
+// Client sends `progress_id` with the generate request; while the server
+// works through the phases (org/it/network/threats/combining/writing/intake),
+// it pushes step + percent + message updates into this map. The client polls
+// /api/profiles/run-status/:progressId every ~1s to render an honest
+// progress bar instead of a faked timer. Entries TTL after 10 min.
+const PROGRESS_TTL_MS = 10 * 60 * 1000;
+if (!global._aiProfileProgress) global._aiProfileProgress = new Map();
+function setProgress(progressId, patch) {
+  if (!progressId) return;
+  const prev = global._aiProfileProgress.get(progressId) || { startedAt: Date.now() };
+  global._aiProfileProgress.set(progressId, { ...prev, ...patch, updatedAt: Date.now() });
+}
+function getProgress(progressId) {
+  return progressId ? global._aiProfileProgress.get(progressId) || null : null;
+}
+// Periodic cleanup — cheap walk every 5 min
+if (!global._aiProfileProgressGC) {
+  global._aiProfileProgressGC = setInterval(() => {
+    const now = Date.now();
+    for (const [k, v] of global._aiProfileProgress.entries()) {
+      if (now - (v.updatedAt || v.startedAt || 0) > PROGRESS_TTL_MS) {
+        global._aiProfileProgress.delete(k);
+      }
+    }
+  }, 5 * 60 * 1000);
+  global._aiProfileProgressGC.unref?.();
+}
+
 async function callInlineGenerateProfile({
   userId,
   client_type = 'SMB',
@@ -315,7 +344,8 @@ async function callInlineGenerateProfile({
   employees,
   llmModel,
   temperature,
-  custom_config = {}
+  custom_config = {},
+  progress_id          // optional — when provided, server pushes step updates under this key
 } = {}) {
   const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12'];
   const validDifficulties = ['beginner', 'intermediate', 'advanced'];
@@ -326,10 +356,17 @@ async function callInlineGenerateProfile({
     throw Object.assign(new Error('Invalid difficulty'), { statusCode: 400 });
   }
 
+  if (progress_id) {
+    setProgress(progress_id, { step: 'queued', percent: 1, message: 'Queued…' });
+  }
+
   return generateProfile({
     user_id: userId,
     client_type, industry, difficulty, maturity, delivery, employees,
-    llmModel, temperature, custom_config
+    llmModel, temperature, custom_config,
+    onProgress: progress_id
+      ? (ev) => setProgress(progress_id, { step: ev.step, percent: ev.percent, message: ev.message, run_id: ev.run_id })
+      : undefined
   });
 }
 
@@ -338,13 +375,37 @@ const callN8nGenerateProfile = callInlineGenerateProfile;
 
 // POST /api/profiles/generate — thin wrapper around callInlineGenerateProfile
 router.post('/generate', authenticateToken, async (req, res) => {
+  const progressId = req.body?.progress_id || null;
   try {
     const profile = await callInlineGenerateProfile({ userId: req.user.userId, ...req.body });
+    if (progressId) {
+      setProgress(progressId, { step: 'complete', percent: 100, message: 'Profile generated successfully', profile_id: profile.id });
+    }
     res.json({ success: true, message: 'Profile generated successfully', profile: toCamelCase(profile) });
   } catch (err) {
     console.error('❌ Error generating profile:', err.message);
+    if (progressId) {
+      setProgress(progressId, { step: 'error', percent: 100, message: `Error: ${err.message}`, error: err.message });
+    }
     res.status(err.statusCode || 500).json({ error: err.message });
   }
+});
+
+// GET /api/profiles/run-status/:progressId — poll the in-memory tracker.
+// Returns { step, percent, message, run_id?, profile_id?, error? } or 404.
+router.get('/run-status/:progressId', authenticateToken, (req, res) => {
+  const entry = getProgress(req.params.progressId);
+  if (!entry) return res.status(404).json({ error: 'No progress entry for that id (expired or never started)' });
+  res.json({
+    step:        entry.step || 'unknown',
+    percent:     entry.percent || 0,
+    message:     entry.message || '',
+    run_id:      entry.run_id || null,
+    profile_id:  entry.profile_id || null,
+    error:       entry.error || null,
+    started_at:  entry.startedAt || null,
+    updated_at:  entry.updatedAt || null
+  });
 });
 
 // ─── Admin: upload an existing profile JSON ─────────────────────────────────
