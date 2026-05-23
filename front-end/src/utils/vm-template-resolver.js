@@ -12,6 +12,8 @@
  *   4. phantom (no family match — return null, caller renders as phantom asset)
  */
 
+const { getDefaultTemplateNode } = require('./site-config');
+
 function lc(v) {
   return String(v || '').trim().toLowerCase();
 }
@@ -78,7 +80,7 @@ function formatMatch(row, match_type) {
   if (!row) return null;
   return {
     template_vmid: row.template_vmid,
-    node: row.node || 'cyberhub-node-5',
+    node: row.node || getDefaultTemplateNode(),
     os_name: row.os_name,
     os_version: row.os_version,
     match_type,

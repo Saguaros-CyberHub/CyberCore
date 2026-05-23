@@ -1,4 +1,11 @@
 #!/bin/bash
+# Work in progress
+# Needs:
+# - Better error handling (try/catch around each step, with rollback if possible)
+# - More robust schema migration handling (track applied migrations, handle failures gracefully)
+# - Health checks for all services (not just Postgres)
+# - Stores a full backup (including volumes) before updating in /tmp, with easy restore option upon failure
+
 set -euo pipefail
 
 cd /opt/CyberCore

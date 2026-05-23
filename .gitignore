@@ -33,7 +33,7 @@ profiles/
 vuln-assets/
 docker-compose.yml
 GOAD-main/
-
+logs/*
 # clinic
 config/n8n/workflows/Clinic-in-a-Box*
 

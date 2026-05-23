@@ -278,3 +278,86 @@ LEFT JOIN latest_allocations la ON la.resource_id = r.resource_id
 LEFT JOIN cybercore_user u ON la.user_id = u.user_id
 WHERE r.type = 'vm'
   AND r.module_key = 'crucible';
+
+-- ============================================================================
+-- VM Template Catalog
+-- Maps OS family/version strings → Proxmox template VMIDs so the synthesizer
+-- can auto-pick templates. `node` is nullable — populated at runtime by
+-- POST /api/admin/vm-templates/sync-nodes, never hardcoded here.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS vm_template_catalog (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  os_family     VARCHAR(32)  NOT NULL,   -- 'windows_server','windows_client','linux','macos','network'
+  os_name       VARCHAR(128) NOT NULL,   -- 'Windows Server 2022','Windows 11','Ubuntu 22.04'
+  os_version    VARCHAR(64),             -- '2022','11','22.04' — null = any version
+  template_vmid INTEGER      NOT NULL,
+  node          VARCHAR(64),             -- populated by sync-nodes, never seeded
+  role_hints    TEXT[]       NOT NULL DEFAULT '{}',
+  preferred     BOOLEAN      NOT NULL DEFAULT true,
+  notes         TEXT,
+  is_active     BOOLEAN      NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vmtc_family ON vm_template_catalog(os_family, is_active);
+CREATE INDEX IF NOT EXISTS idx_vmtc_active ON vm_template_catalog(is_active);
+
+-- Seed: VMID + OS identity only. Node resolved at runtime via sync-nodes.
+INSERT INTO vm_template_catalog (os_family, os_name, os_version, template_vmid, role_hints, notes) VALUES
+  ('windows_server', 'Windows Server 2022', '2022', 1000, '{dc,file,web,mail,backup,print}', 'windows-server-2022-template'),
+  ('linux',          'Rocky Linux',         NULL,   1001, '{web,file,db}',                   'rocky-linux-template'),
+  ('windows_client', 'Windows 11',          '25H2', 1002, '{}',                              'windows-25h2-template'),
+  ('linux',          'Ubuntu',              NULL,   1003, '{web}',                           'Ubuntu-Template'),
+  ('linux',          'Metasploitable 2',    NULL,   1600, '{}',                              'Metasploitable-2-Template — admin-select only')
+ON CONFLICT DO NOTHING;
+
+UPDATE vm_template_catalog SET preferred = false WHERE template_vmid = 1600;
+
+-- ============================================================================
+-- Attachable lab challenge seeds
+-- Consumed by POST /api/admin/lanes/:id/modules. Templates must be baked
+-- on a Proxmox node before these rows can deploy. node is resolved at runtime.
+-- ============================================================================
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'juice-shop-v1',
+  'OWASP Juice Shop',
+  'Modern vulnerable web app (Node/Angular). Covers JWT, NoSQLi, SSRF, prototype pollution, and ~95 other web bugs.',
+  'single_vm', 2, 'crucible',
+  '{"attachable":true,"vms":[{"name":"juice-shop","template_vmid":1701,"type":"qemu","role":"web"}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'dvwa-v1',
+  'DVWA + Linux PE',
+  'Damn Vulnerable Web Application on Debian 13. Three shell-yielding modules with Linux privesc primitives baked in.',
+  'single_vm', 1, 'crucible',
+  '{"attachable":true,"vms":[{"name":"dvwa","template_vmid":1702,"type":"qemu","role":"web"}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'cybersaguaros-ssrf',
+  'CyberSaguaros — SSRF Research Portal',
+  'Custom vulnerable web app. SSRF chain → localhost admin API → session mint → upload filter bypass → PHP webshell → Linux privesc.',
+  'single_vm', 3, 'crucible',
+  '{"attachable":true,"vms":[{"name":"cybersaguaros","template_vmid":1703,"type":"qemu","role":"web"}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
