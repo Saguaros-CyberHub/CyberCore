@@ -354,15 +354,48 @@ async function runPreview() {
       body: {
         profile_id: CURRENT_PROFILE.id,
         num_lanes: parseInt(document.getElementById('dep-num-lanes').value, 10),
-        attack_boxes: document.getElementById('dep-attack-boxes').checked
+        attack_boxes: document.getElementById('dep-attack-boxes').checked,
+        vuln_app_enabled: document.getElementById('dep-vuln-app').checked
       }
     });
     const s = data.summary || {};
     const banner = data.canProceed ? 'success' : 'error';
+
+    // Compose the headline VM line (existing behavior).
+    const headline =
+      `<strong>${s.new_vms}</strong> new VMs (${s.vms_per_lane}/lane × ${s.num_lanes}).
+       Currently <strong>${s.current_vms}</strong> running. Servers in profile: ${data.profile_asset_summary?.servers}.`;
+
+    // Cost block — render details if present.
+    const ce = data.cost_estimate;
+    let costHtml = '';
+    if (ce) {
+      const t = ce.totals;
+      const usd = t.llm_total_usd;
+      const usdLabel = usd === 0 ? 'Free (local model)'
+        : usd < 0.01 ? '< $0.01'
+        : `$${usd.toFixed(2)}`;
+      const components = ce.components.map(c =>
+        `<li><strong>${c.component === 'vuln_app_generation' ? 'Vuln-app generation' : c.component}</strong> — ${c.description}
+          → ${c.input_tokens.toLocaleString()} in / ${c.output_tokens.toLocaleString()} out → <strong>$${c.total_usd.toFixed(2)}</strong></li>`
+      ).join('');
+      const cachedNote = t.vuln_app_already_cached
+        ? '<em style="color:#38a169;">Vuln-app already generated for this profile — reusing cached source (no LLM cost).</em>'
+        : (components ? '' : '<em>No LLM calls needed — vuln-app disabled.</em>');
+      costHtml = `
+        <div style="margin-top:0.75rem; padding:0.75rem; background:#f8fafc; border-left:3px solid #1e40af; border-radius:4px;">
+          <div style="font-weight:700; margin-bottom:0.35rem;">
+            Estimated cost: ${usdLabel} &nbsp;·&nbsp;
+            Total VMs: ${t.vms.total} (${t.vms.per_lane}/lane) &nbsp;·&nbsp;
+            Est. deploy time: ~${t.estimated_deploy_minutes} min
+          </div>
+          ${components ? `<ul style="margin:0.25rem 0 0.5rem 1.25rem; padding:0; font-size:0.9em;">${components}</ul>` : ''}
+          ${cachedNote}
+        </div>`;
+    }
+
     renderBanner('preview-result', banner,
-      `Preview: <strong>${s.new_vms}</strong> new VMs (${s.vms_per_lane}/lane × ${s.num_lanes}).
-       Currently <strong>${s.current_vms}</strong> running. Servers in profile: ${data.profile_asset_summary?.servers}.
-       ${data.errors.length ? '<br>⚠ ' + data.errors.join('; ') : ''}`);
+      headline + (data.errors.length ? '<br>⚠ ' + data.errors.join('; ') : '') + costHtml);
   } catch (err) {
     renderBanner('preview-result', 'error', `❌ ${err.message}`);
   }

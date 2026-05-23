@@ -223,6 +223,109 @@ function pickN(list, count, hashFn) {
   return out;
 }
 
+// ─── Server hardware pools (used by the deterministic roster) ──────────────
+const SERVER_HARDWARE = [
+  { make: 'HPE',     model: 'ProLiant DL360 Gen10 Plus' },
+  { make: 'HPE',     model: 'ProLiant DL380 Gen11' },
+  { make: 'Dell',    model: 'PowerEdge R650' },
+  { make: 'Dell',    model: 'PowerEdge R750xs' },
+  { make: 'Dell',    model: 'PowerEdge T550' },
+  { make: 'Lenovo',  model: 'ThinkSystem SR650 V2' },
+  { make: 'Lenovo',  model: 'ThinkSystem SR630 V3' },
+  { make: 'Supermicro', model: 'SYS-1029U-TR4' },
+  { make: 'Cisco',   model: 'UCS C220 M6' }
+];
+
+// Hostname-theme renderers — each takes a `prefix` (e.g. 'dc', 'fs', 'web')
+// and an index, returns a themed hostname.
+const HOSTNAME_RENDERERS = {
+  'numbered classic (dc-01, fs-01, app-erp-01, sql-01)':
+    (prefix, i) => `${prefix}-${String(i).padStart(2, '0')}`,
+  'department-prefixed (acct-srv-01, hr-app-01, ops-db-01, sales-fs-01)':
+    (prefix, i, ctx) => `${ctx.dept || 'corp'}-${prefix}-${String(i).padStart(2, '0')}`,
+  'site-coded short-3 (sea-fs-01, dal-dc-01, nyc-app-01, hou-sql-01)':
+    (prefix, i, ctx) => `${ctx.site || 'hq'}-${prefix}-${String(i).padStart(2, '0')}`,
+  'project-codename (mercury-fs, apollo-dc, gemini-app, atlas-db)':
+    (prefix, i, ctx) => `${ctx.codenames[(i - 1) % ctx.codenames.length]}-${prefix}-${String(i).padStart(2, '0')}`,
+  'role + tier (web-tier-01, db-tier-01, app-tier-01, mid-tier-01)':
+    (prefix, i) => `${prefix}-tier-${String(i).padStart(2, '0')}`,
+  'function-noun (billing-svr, ticket-svr, dms-svr, archive-svr)':
+    (prefix, i) => `${prefix}-svr-${String(i).padStart(2, '0')}`,
+  'mythological (zeus-dc, hermes-mail, athena-app, hades-bak)':
+    (prefix, i, ctx) => `${ctx.mythos[(i - 1) % ctx.mythos.length]}-${prefix}-${String(i).padStart(2, '0')}`,
+  'planet/star (jupiter-dc, saturn-fs, vega-app, polaris-sql)':
+    (prefix, i, ctx) => `${ctx.planets[(i - 1) % ctx.planets.length]}-${prefix}-${String(i).padStart(2, '0')}`
+};
+const CODENAME_POOLS = {
+  codenames: ['mercury', 'apollo', 'gemini', 'atlas', 'orion', 'titan', 'pegasus', 'phoenix'],
+  mythos:    ['zeus', 'hermes', 'athena', 'hades', 'apollo', 'odin', 'thor', 'freya'],
+  planets:   ['jupiter', 'saturn', 'vega', 'polaris', 'sirius', 'rigel', 'altair', 'antares']
+};
+
+const SERVER_OS_POOL = [
+  'Windows Server 2019 Standard 10.0.17763.5122',
+  'Windows Server 2022 Standard 10.0.20348.2113',
+  'Windows Server 2019 Datacenter 10.0.17763.5122',
+  'Ubuntu Server 22.04.3 LTS',
+  'Ubuntu Server 20.04.6 LTS',
+  'Red Hat Enterprise Linux 8.8',
+  'Debian 12.4 Bookworm'
+];
+
+// Build a deterministic server roster. ALWAYS includes web-01 so every
+// company has a public-facing web server for the vuln-app pipeline.
+// Other roles (dc, fs, sql, etc.) are picked based on client_type +
+// employee_count so a 25-person firm doesn't get 12 servers.
+function buildServerRoster(runId, opts = {}) {
+  const { clientType = 'SMB', employeeCount = 50, hostnameTheme = 'numbered classic (dc-01, fs-01, app-erp-01, sql-01)' } = opts;
+  const h = (salt) => hashStr(runId, salt);
+  const renderer = HOSTNAME_RENDERERS[hostnameTheme] || HOSTNAME_RENDERERS['numbered classic (dc-01, fs-01, app-erp-01, sql-01)'];
+  const ctx = { ...CODENAME_POOLS, site: ['sea','dal','nyc','hou','chi','phx','atl','den'][h('site') % 8], dept: 'corp' };
+
+  // Decide which roles this company has based on size + type
+  const roles = [];
+  roles.push({ prefix: 'dc',    role_label: 'Domain Controller',          function: 'Primary Active Directory domain controller and DNS server',           windows: true });
+  if (employeeCount >= 60) {
+    roles.push({ prefix: 'dc',  role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover and load balancing',                     windows: true });
+  }
+  roles.push({ prefix: 'fs',    role_label: 'File Server',                 function: 'Primary file share for all departments including project files',     windows: true });
+  // Web is MANDATORY — every company gets one (the vuln-app pipeline deploys to it).
+  roles.push({ prefix: 'web',   role_label: 'Web / App Server',            function: 'Internal web portal — used by staff for daily operations',           windows: false });
+  if (clientType !== 'NonProfit') {
+    roles.push({ prefix: 'sql', role_label: 'Database Server',             function: 'SQL Server backing the line-of-business application',                windows: true });
+  }
+  if (employeeCount >= 40) {
+    roles.push({ prefix: 'app', role_label: 'Application Server',          function: 'Hosts the line-of-business / practice management application',       windows: true });
+  }
+  if (employeeCount >= 50) {
+    roles.push({ prefix: 'rds', role_label: 'Remote Desktop Gateway',      function: 'RDS gateway for after-hours and remote staff access',                windows: true });
+  }
+  roles.push({ prefix: 'bak',   role_label: 'Backup Server',               function: 'Local backup target with offsite replication',                       windows: false });
+
+  // Number duplicates per prefix
+  const prefixCount = {};
+  return roles.map(r => {
+    prefixCount[r.prefix] = (prefixCount[r.prefix] || 0) + 1;
+    const idx = prefixCount[r.prefix];
+    const hostname = renderer(r.prefix, idx, ctx);
+    const hw = SERVER_HARDWARE[h('hw' + hostname) % SERVER_HARDWARE.length];
+    const osPool = r.windows
+      ? SERVER_OS_POOL.filter(s => s.startsWith('Windows'))
+      : SERVER_OS_POOL;
+    const os = osPool[h('os' + hostname) % osPool.length];
+    return {
+      hostname,
+      role: r.role_label,
+      role_short: r.prefix,
+      os,
+      function: r.function,
+      make: hw.make,
+      model: hw.model,
+      critical: r.prefix === 'dc' || r.prefix === 'fs' || r.prefix === 'sql' || r.prefix === 'app' || r.prefix === 'web'
+    };
+  });
+}
+
 /**
  * Build the per-run flavor packet. All anchors hashed from run_id with
  * different salts → independent random choice per dimension, but
@@ -415,7 +518,7 @@ Required output schema:
   "it_environment": {
     "delivery": "<Cloud|On-Prem|Hybrid>",
     "endpoints": { "windows_laptops": int, "windows_desktops": int, "shared_kiosks": int, "macos": int, "mobile": int },
-    "servers": [ { "hostname": "string", "os": "fully versioned string e.g. Windows Server 2019 Standard 10.0.17763", "role": "string" } ],
+    "servers": [ { "hostname": "string", "os": "fully versioned string e.g. Windows Server 2019 Standard 10.0.17763", "role": "string", "make": "string e.g. HPE / Dell / Lenovo", "model": "string e.g. ProLiant DL360 Gen10 Plus", "function": "1 sentence describing what this server does day-to-day" } ],
     "saas": [ { "name": "string", "category": "string", "sso_enabled": bool, "mfa": bool, "data_sensitivity": "Low|Medium|High" } ],
     "endpoint_protection": { "product": "string", "managed": bool, "edr_enabled": bool, "coverage_percent": int },
     "patch_management": { "method": "<WSUS|Intune|Manual|Third-party>", "frequency": "<Daily|Weekly|Monthly|Ad-hoc>", "compliance_rate": int },
@@ -450,6 +553,12 @@ REALISM RULES (this is a training profile for student risk assessments — accur
 - saas[].data_sensitivity should be realistic (CRM with customer data = High, internal wiki = Low).`;
 
   const flavor = buildFlavorBundle(seed.run_id);
+  const roster = buildServerRoster(seed.run_id, {
+    clientType: config.clientType, employeeCount, hostnameTheme: flavor.hostname_theme
+  });
+  const rosterBlock = roster.map(s =>
+    `  - hostname: "${s.hostname}", role: "${s.role}", make: "${s.make}", model: "${s.model}", os: "${s.os}", function: "${s.function}"`
+  ).join('\n');
 
   const userPrompt = `Generate the IT environment.
 
@@ -470,7 +579,11 @@ REQUIRED PRODUCT ANCHORS — use these specific products (do NOT substitute):
   endpoint_protection.product: ${flavor.edr_product}
   backups.method-product: ${flavor.backup_product}
 
-Other vendor/product choices (firewall, VPN, SaaS apps) should be CONSISTENT with the vendor ecosystem above — e.g. a Microsoft-heavy shop uses Microsoft 365 + OneDrive, an Apple-heavy shop uses Jamf + iCloud, a Cisco shop uses Webex + Cisco AnyConnect. AVOID always defaulting to the same SaaS lineup (Slack + Zoom + Google Drive). Pick a SaaS bundle that fits the anchored ecosystem.`;
+Other vendor/product choices (firewall, VPN, SaaS apps) should be CONSISTENT with the vendor ecosystem above — e.g. a Microsoft-heavy shop uses Microsoft 365 + OneDrive, an Apple-heavy shop uses Jamf + iCloud, a Cisco shop uses Webex + Cisco AnyConnect. AVOID always defaulting to the same SaaS lineup (Slack + Zoom + Google Drive). Pick a SaaS bundle that fits the anchored ecosystem.
+
+REQUIRED SERVERS — your servers[] array MUST be EXACTLY this list, in this order, with these exact hostnames + make + model + os. You may write a more interesting function string per server but keep hostname/make/model/os/role verbatim:
+${rosterBlock}
+Do NOT add extra servers. Do NOT rename them. Do NOT omit any.`;
 
   return { systemPrompt, userPrompt };
 }
@@ -487,16 +600,24 @@ function buildNetworkPrompt({ config, seed }) {
   const fwRulesMax = Math.min(seed.firewall_rules_range?.max || 25, 25);
   const weaknessMin = seed.weakness_range?.min || 3;
   const weaknessMax = seed.weakness_range?.max || 8;
+  const employeeCount = seed.employees?.max || seed.employees?.min || seed.endpoint_count || 50;
+
+  // Build the SAME roster used by the IT branch so both branches produce
+  // identical server lists. Without this they invent independent server
+  // names and the IT/Assets/Network-Diagram tabs disagree.
+  const _flavor = buildFlavorBundle(seed.run_id);
+  const roster = buildServerRoster(seed.run_id, {
+    clientType: config.clientType, employeeCount, hostnameTheme: _flavor.hostname_theme
+  });
 
   // Challenge network mode — forces real VM IPs to be used as-is
   const cnData = config?.challenge_network;
   const isChallenge = cnData?.is_challenge === true;
   const realAssets = cnData?.real_assets || [];
   let challengeSection = '';
-  let serversBlock = `- dc-01 (Domain Controller)
-- file-server-01 (File Server)
-- app-server-01 (Application Server)
-- backup-server-01 (Backup Server)`;
+  let serversBlock = roster.map(s =>
+    `- ${s.hostname} (${s.role}, ${s.make} ${s.model}, ${s.os})`
+  ).join('\n');
 
   if (isChallenge && realAssets.length > 0) {
     const firstIp = realAssets[0].ip;
@@ -575,8 +696,9 @@ CORE INFRASTRUCTURE (in Management subnet):
 - firewall (e.g. fw-01)
 - switch-core (e.g. sw-core-01)
 
-SERVERS (in Servers subnet):
+SERVERS (in Servers subnet) — your assets[] entries with role="server" MUST be EXACTLY this list, in this order, with these exact hostnames + os. The function field can be expanded but hostnames/os are verbatim:
 ${serversBlock}
+Do NOT add extra servers. Do NOT rename. Do NOT omit. Assign sequential IPs within the Servers subnet starting at .10.
 ${otSection}
 
 WORKSTATIONS (Workstations subnet):
@@ -706,6 +828,7 @@ module.exports = {
   generateCompanyName,
   pickNamingSeed,
   buildFlavorBundle,
+  buildServerRoster,
   NAMING_SEEDS,
   SUFFIX_POOLS,
   VENDOR_FLAVORS,

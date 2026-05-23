@@ -28,6 +28,7 @@ const { buildDeployPreview } = require('../../../../../src/middleware/deployment
 
 const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
 const { getOrGenerateVulnApp } = require('../utils/vuln-app-generator');
+const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator');
 const {
   deployProfileLanesBatch,
   deployOneLaneFromSpec,
@@ -335,7 +336,11 @@ async function runProfileDeploy(opts) {
 // POST /api/profile-deploy/preview — pre-flight resource estimate
 router.post('/preview', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { profile_id, num_lanes = 1, attack_boxes = true } = req.body;
+    const {
+      profile_id, num_lanes = 1, attack_boxes = true,
+      vuln_app_enabled = true,
+      model_id = DEFAULT_MODEL
+    } = req.body;
     if (!profile_id) return res.status(400).json({ error: 'profile_id required' });
 
     const { assets } = await loadProfileForDeploy(profile_id);
@@ -348,13 +353,35 @@ router.post('/preview', authenticateToken, adminOnly, async (req, res) => {
       proxmoxAPI,
       cybercoreQuery
     });
+
+    // Has this profile's vuln-app already been generated? If so, the deploy
+    // won't re-run the LLM pipeline — cost is just infra.
+    let vulnAppCached = false;
+    try {
+      const cached = await query(
+        `SELECT 1 FROM ciab_profile_vuln_apps WHERE profile_id = $1 LIMIT 1`,
+        [profile_id]
+      );
+      vulnAppCached = cached.rowCount > 0;
+    } catch (_) { /* table missing in test envs — assume not cached */ }
+
+    const cost = estimateDeployCost({
+      modelId: model_id,
+      vulnAppEnabled: !!vuln_app_enabled,
+      vulnAppAlreadyCached: vulnAppCached,
+      numLanes: parseInt(num_lanes) || 1,
+      vmsPerLane: Math.max(serverCount, 1),
+      attackBoxes: !!attack_boxes
+    });
+
     res.json({
       ...preview,
       profile_asset_summary: {
         total: assets.length,
         servers: serverCount,
         will_deploy: serverCount
-      }
+      },
+      cost_estimate: cost
     });
   } catch (err) {
     res.status(err.statusCode || 500).json({ error: err.message });

@@ -616,10 +616,14 @@
     // =========================================================================
     // COST ESTIMATION
     // =========================================================================
-    // Profile generation uses ~3 LLM calls (org, IT, network branches).
-    // Typical token usage: ~4K input + ~6K output per branch = ~12K in + ~18K out total.
-    // Prices per 1M tokens (as of 2025):
+    // Source of truth: ciab/utils/cost-estimator.js (Node module).
+    // Token numbers below are measured from real generation runs (Anthropic
+    // console activity logs, 2026-05-23). Profile gen runs 4 LLM calls:
+    // org + IT + network + threats. Measured ~7.9K in / ~14.5K out; we round
+    // up ~10% to ~9K / ~16K so the preview is a conservative ceiling.
     const MODEL_INFO = {
+      'claude-opus-4-7':        { label: 'Claude Opus 4.7',    input: 15.00, output: 75.00, provider: 'anthropic' },
+      'claude-sonnet-4-6':      { label: 'Claude Sonnet 4.6',  input: 3.00,  output: 15.00, provider: 'anthropic' },
       'claude-sonnet-4-5':      { label: 'Claude Sonnet 4.5',  input: 3.00,  output: 15.00, provider: 'anthropic' },
       'claude-haiku-4-5':       { label: 'Claude Haiku 4.5',   input: 0.80,  output: 4.00,  provider: 'anthropic' },
       'gemini-2.5-flash':       { label: 'Gemini 2.5 Flash',   input: 0.15,  output: 0.60,  provider: 'google' },
@@ -628,8 +632,8 @@
       'qwen2.5:7b-instruct':    { label: 'Qwen 2.5 7B',        input: 0,     output: 0,     provider: 'ollama' },
       'llama3.2':               { label: 'Llama 3.2',           input: 0,     output: 0,     provider: 'ollama' }
     };
-    const EST_INPUT_TOKENS = 12000;
-    const EST_OUTPUT_TOKENS = 18000;
+    const EST_INPUT_TOKENS = 9000;
+    const EST_OUTPUT_TOKENS = 16000;
 
     function updateCostEstimate() {
       const model = document.getElementById('llmModel').value;
@@ -805,20 +809,17 @@
         : Date.now().toString(36) + Math.random().toString(36).slice(2));
       config.progress_id = progressId;
 
-      const token = localStorage.getItem('cyberCore_token') || '';
-      const pollUrl = `/api/profiles/run-status/${progressId}`;
       let polling = true;
       const poll = async () => {
         if (!polling) return;
         try {
-          const r = await fetch(pollUrl, { headers: { 'Authorization': 'Bearer ' + token } });
-          if (r.ok) {
-            const s = await r.json();
+          const s = await API.request(`/profiles/run-status/${progressId}`);
+          if (s) {
             fill.style.width = `${Math.max(s.percent || 0, 1)}%`;
             status.textContent = s.message || s.step || 'Working…';
-            if (s.step === 'complete' || s.step === 'error') return;  // done; the await below resolves
+            if (s.step === 'complete' || s.step === 'error') return;
           }
-        } catch (e) { /* transient — keep polling */ }
+        } catch (e) { /* 404 before server starts processing, or transient — keep polling */ }
         setTimeout(poll, 1200);
       };
       poll();
