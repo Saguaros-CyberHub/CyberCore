@@ -330,6 +330,17 @@ else
 fi
 unset BOOTSTRAP_RESP
 
+# --- Lab-range carve-out for kernel-mode Tailscale ---
+# Tailscale's kernel-mode `ts-input` chain DROPs any packet from
+# 100.64.0.0/10 arriving on a non-tailscale0 interface (its CGNAT
+# anti-spoof rule). The CyberCore lab is addressed in 100.100.0.0/16,
+# which sits INSIDE 100.64.0.0/10 — so replies from lab infra (the DNS
+# forwarder, the orchestrator) arriving on wan0 get dropped and dnsmasq
+# can never resolve upstream. Re-accept the lab range on wan0. This MUST
+# run after `tailscale up`: Tailscale inserts `-j ts-input` at INPUT
+# position 1, so ours is inserted at position 1 last, to sit above it.
+iptables -I INPUT 1 -i wan0 -s 100.100.0.0/16 -m comment --comment "CYBERCORE-V3" -j ACCEPT
+
 logger -t cybercore-firstboot "rendered v3: ext0=${EXT_IP}/${EXT_PREFIX} int0=${INT_IP}/${INT_PREFIX} controller=${CONTROLLER_IP}"
 echo "[cybercore-firstboot] v3: ext0=${EXT_IP} int0=${INT_IP} controller=${CONTROLLER_IP}" >&2
 FIRSTBOOT_EOF
@@ -542,6 +553,8 @@ pct exec "$VERIFY_VMID" -- /bin/sh -c "! grep -q userspace-networking /etc/conf.
   || { echo "FAIL: /etc/conf.d/tailscale still forces Tailscale userspace mode"; RENDERED_OK=0; }
 pct exec "$VERIFY_VMID" -- /bin/sh -c "test -c /dev/net/tun" 2>/dev/null \
   || { echo "FAIL: /dev/net/tun not present in CT (TUN passthrough did not survive clone)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C INPUT -i wan0 -s 100.100.0.0/16 -m comment --comment CYBERCORE-V3 -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: lab-range carve-out missing (Tailscale ts-input would drop lab DNS replies)"; RENDERED_OK=0; }
 
 pct stop "$VERIFY_VMID"
 pct destroy "$VERIFY_VMID" --purge
@@ -558,6 +571,7 @@ if [ "$RENDERED_OK" = "1" ]; then
   echo "    - controller ACCEPT   10.199.0.5 -> int0:22"
   echo "    - tailnet egress      ext0 -> tailscale0 ACCEPT + MASQUERADE"
   echo "    - tailscale mode      kernel (/dev/net/tun passed through to the CT)"
+  echo "    - lab carve-out       wan0 100.100.0.0/16 ACCEPT above ts-input"
   echo ""
   echo "  Used automatically by admin.js for subnet_scheme='v3' challenges."
   echo "==================================================================="

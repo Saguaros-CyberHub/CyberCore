@@ -473,7 +473,7 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
         enabled: true,
         version:          goad.version          || 'light',
         domain:           goad.domain           || 'cybersaguaros.local',
-        child_subdomain:  goad.child_subdomain  || 'marketing',
+        child_subdomain:  goad.child_subdomain  || 'tumamoc',
         admin_user:       goad.admin_user       || 'Administrator',
         admin_password:   goad.admin_password   || 'vagrant',
         include_kali:     goad.include_kali !== false  // default true

@@ -173,7 +173,7 @@ packages:
 
 write_files:
   # ---- LinPE artifact: sudo NOPASSWD python3 for saguarobot (GTFObins) ----
-  # saguarobot's ONLY path to root. `linpeas` / `sudo -l` surface it; escalate:
+  # saguarobot's ONLY path to root. linpeas / sudo -l surface it; escalate:
   #   sudo python3 -c 'import os; os.execl("/bin/sh", "sh")'
   - path: /etc/sudoers.d/saguarobot-python
     permissions: '0440'
