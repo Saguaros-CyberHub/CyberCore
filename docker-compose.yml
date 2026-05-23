@@ -6,6 +6,8 @@ volumes:
   cybercore-redis-data:
   cybercore-n8n-data:
   cybercore-postgres-data:
+  cybercore-caddy-data:
+  cybercore-caddy-config:
 
 services:
   # ============================================================================
@@ -19,10 +21,16 @@ services:
       POSTGRES_USER: ${CORE_DB_USER}
       POSTGRES_PASSWORD: ${CORE_DB_PASSWORD}
       POSTGRES_DB: ${CORE_DB_NAME}
+      CORE_DB_USER: ${CORE_DB_USER}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD}
+      ADMIN_EMAIL: ${ADMIN_EMAIL}
       ENABLED_MODULES: ${CORE_ENABLED_MODULES}
       N8N_DB_USER: ${N8N_DB_USER}
       N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
       N8N_DB_NAME: ${N8N_DB_NAME}
+      GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
+      GUAC_DB_PASSWORD: ${GUAC_DB_PASSWORD}
+      GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
     ports:
       - "0.0.0.0:5432:5432"
     volumes:
@@ -31,6 +39,8 @@ services:
       - ./config/postgres/002_init_db.sh:/docker-entrypoint-initdb.d/002_init_db.sh:ro,z
       - ./config/postgres/003_cyberhub_modules.sql:/docker-entrypoint-initdb.d/003_cyberhub_modules.sql:ro,z
       - ./config/postgres/004_site_settings.sql:/docker-entrypoint-initdb.d/004_site_settings.sql:ro,z
+      - ./config/postgres/005_admin_user.sh:/docker-entrypoint-initdb.d/005_admin_user.sh:ro,z
+      - ./config/postgres/010_guacamole.sh:/docker-entrypoint-initdb.d/010_guacamole.sh:ro,z
       - ./config/postgres/050_apply_modules.sh:/docker-entrypoint-initdb.d/050_apply_modules.sh:ro,z
       - ./config/postgres/modules:/docker-entrypoint-initdb.d/modules:ro,z
     shm_size: 256mb
@@ -74,6 +84,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      guacamole:
+        condition: service_started
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -103,11 +115,17 @@ services:
       N8N_CHAT_WEBHOOK: ${N8N_CHAT_WEBHOOK}
       N8N_DEPLOY_LANE_WEBHOOK: ${N8N_DEPLOY_LANE_WEBHOOK}
       N8N_TEARDOWN_LANE_WEBHOOK: ${N8N_TEARDOWN_LANE_WEBHOOK}
-      # Guacamole
-      GUAC_API_URL: ${GUAC_API_URL}
+      # Guacamole — internal service, always points to compose container
+      GUAC_ENABLED: "true"
+      GUAC_PUBLIC_BASE_URL: /guacamole
+      GUAC_API_URL: http://guacamole:8080/guacamole
       GUAC_ADMIN_USER: ${GUAC_ADMIN_USER}
       GUAC_ADMIN_PASSWORD: ${GUAC_ADMIN_PASSWORD}
       GUAC_DATASOURCE: postgresql
+      GUAC_DB_HOST: postgres
+      GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
+      GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
+      GUAC_DB_PASSWORD: ${GUAC_DB_PASSWORD}
       # Proxmox
       PROXMOX_API_URL: ${PROXMOX_API_URL}
       PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}
@@ -129,7 +147,7 @@ services:
       - 1.1.1.1
       - 100.100.0.1
     ports:
-      - "0.0.0.0:3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - ./front-end/plugins:/app/plugins:rw
       - ./front-end/profiles:/app/profiles:rw
@@ -226,7 +244,91 @@ services:
     depends_on:
       - postgres
     ports:
-      - "0.0.0.0:8080:8080"
+      - "0.0.0.0:8181:8080"
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # GUACD — Guacamole proxy daemon (speaks RDP/VNC/SSH, never exposed)
+  # ============================================================================
+  guacd:
+    image: guacamole/guacd:1.5.5
+    container_name: cybercore-guacd
+    restart: unless-stopped
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # GUACAMOLE INIT — One-shot job: downloads and applies the Guacamole
+  # PostgreSQL schema against the already-created guacamole_db. Skips
+  # gracefully if tables already exist. Runs before guacamole starts.
+  # ============================================================================
+  guacamole-init:
+    image: postgres:17
+    container_name: cybercore-guacamole-init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${GUAC_DB_PASSWORD}
+      GUAC_DB_HOST: postgres
+      GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
+      GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
+    volumes:
+      - ./config/guacamole/init-schema.sh:/init-schema.sh:ro,z
+      - ./config/guacamole:/schema:ro,z
+    entrypoint: ["/bin/sh", "/init-schema.sh"]
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # GUACAMOLE — Web app / clientless remote desktop gateway
+  # Not exposed directly — accessed through Caddy at /guacamole/
+  # ============================================================================
+  guacamole:
+    image: guacamole/guacamole:1.5.5
+    container_name: cybercore-guacamole
+    restart: unless-stopped
+    depends_on:
+      guacd:
+        condition: service_started
+      guacamole-init:
+        condition: service_completed_successfully
+    environment:
+      GUACD_HOSTNAME: guacd
+      GUACD_PORT: 4822
+      POSTGRESQL_HOSTNAME: postgres
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_DATABASE: ${GUAC_DB_NAME:-guacamole_db}
+      POSTGRESQL_USER: ${GUAC_DB_USER:-guacamole_user}
+      POSTGRESQL_PASSWORD: ${GUAC_DB_PASSWORD}
+    networks:
+      - cybercore-net
+
+  # ============================================================================
+  # CADDY — Reverse proxy and automatic HTTPS
+  # Routes / → app:3000 and /guacamole/* → guacamole:8080
+  # Set CYBERHUB_HOST=yourdomain.example.edu for auto-HTTPS via Let's Encrypt.
+  # Set CYBERHUB_HOST=:80 to disable HTTPS (offline / LAN mode).
+  # ============================================================================
+  caddy:
+    image: caddy:2-alpine
+    container_name: cybercore-caddy
+    restart: unless-stopped
+    depends_on:
+      - app
+      - guacamole
+    environment:
+      CYBERHUB_HOST: ${CYBERHUB_HOST}
+    ports:
+      - "0.0.0.0:80:80"
+      - "0.0.0.0:443:443"
+      - "0.0.0.0:443:443/udp"
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro,z
+      - cybercore-caddy-data:/data
+      - cybercore-caddy-config:/config
     networks:
       - cybercore-net
 

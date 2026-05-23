@@ -126,9 +126,11 @@ async function loadModulePlugins(app, moduleName, modulePath, moduleManifest) {
     // Set parent module reference
     pluginManifest.parent_module = moduleName;
 
+    console.log(`    ✓ Plugin: ${pluginManifest.name} (${pluginManifest.key})`);
+
     // Provision database if defined
     if (pluginManifest.database) {
-      await provisionDatabase(pluginManifest, pluginPath);
+      await provisionDatabase(pluginManifest, pluginPath, '      ');
     }
 
     // Register plugin in database
@@ -162,8 +164,6 @@ async function loadModulePlugins(app, moduleName, modulePath, moduleManifest) {
         items: pluginManifest.subnav.items || []
       };
     }
-
-    console.log(`    ✓ Plugin loaded: ${pluginManifest.name} (${pluginManifest.key})`);
   }
 
   return pluginNames.length;
@@ -172,30 +172,27 @@ async function loadModulePlugins(app, moduleName, modulePath, moduleManifest) {
 /**
  * Provision database for module/plugin and inject pool into db utility
  */
-async function provisionDatabase(manifest, moduleOrPluginPath) {
+async function provisionDatabase(manifest, moduleOrPluginPath, prefix = '    ') {
   const dbName = manifest.database.name;
   const migrationsDir = path.join(moduleOrPluginPath, manifest.database.migrations);
 
   try {
-    // Create database if it doesn't exist
     const client = await cybercorePool.connect();
-    
+
     try {
-      // Check if database exists
       const result = await client.query(
         `SELECT 1 FROM pg_database WHERE datname = $1`,
         [dbName]
       );
-      
+
       if (result.rows.length === 0) {
         await client.query(`CREATE DATABASE ${dbName}`);
-        console.log(`    ✓ Created database: ${dbName}`);
+        console.log(`${prefix}✓ Created database: ${dbName}`);
       }
     } finally {
       client.release();
     }
 
-    // Create connection pool for this database
     const dbPool = new Pool({
       host: process.env.DB_HOST || process.env.CYBERCORE_DB_HOST || 'localhost',
       port: parseInt(process.env.DB_PORT || process.env.CYBERCORE_DB_PORT) || 5432,
@@ -207,7 +204,6 @@ async function provisionDatabase(manifest, moduleOrPluginPath) {
       connectionTimeoutMillis: 5000,
     });
 
-    // Run migrations if they exist
     if (fs.existsSync(migrationsDir)) {
       const migrationFiles = fs.readdirSync(migrationsDir)
         .filter(f => f.endsWith('.sql'))
@@ -217,30 +213,24 @@ async function provisionDatabase(manifest, moduleOrPluginPath) {
         const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
         try {
           await dbPool.query(sql);
-          console.log(`    ✓ Migration: ${file}`);
+          console.log(`${prefix}✓ Migration: ${file}`);
         } catch (err) {
-          console.warn(`    ⚠️  Migration ${file}: ${err.message}`);
+          console.warn(`${prefix}⚠️  Migration ${file}: ${err.message}`);
         }
       }
     }
 
-    // Inject pool into the db utility module
     const dbUtilPath = path.join(moduleOrPluginPath, 'utils', 'db.js');
     if (fs.existsSync(dbUtilPath)) {
-      // NOTE: Do NOT clear the require cache before requiring db.js
-      // When we require it here and call setPool(), the cache will hold this instance.
-      // When routes are required later and they require db.js, they'll get the same
-      // cached instance with the pool already set. Clearing the cache would cause
-      // routes to get a fresh instance without the pool set.
       const dbUtil = require(dbUtilPath);
       if (typeof dbUtil.setPool === 'function') {
         dbUtil.setPool(dbPool);
-        console.log(`    ✓ Database pool injected for: ${dbName}`);
+        console.log(`${prefix}✓ Database pool injected for: ${dbName}`);
       }
     }
 
   } catch (error) {
-    console.warn(`  ⚠️  Database provisioning for ${dbName}: ${error.message}`);
+    console.warn(`${prefix}⚠️  Database provisioning for ${dbName}: ${error.message}`);
   }
 }
 
