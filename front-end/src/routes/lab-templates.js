@@ -4,6 +4,7 @@
  * ============================================================================
  * vuln_scripts → clinic_db (query)
  * crucible_challenge → cybercore_db (cybercoreQuery)
+ * vm_template_catalog → cybercore_db (cybercoreQuery)
  * deployment_vuln_selections → clinic_db (query)
  */
 
@@ -12,6 +13,7 @@ const router = express.Router();
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI } = require('../utils/proxmox');
+const { getDefaultTemplateNode } = require('../utils/site-config');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const goadDeploy = require('../utils/goad-deploy');
 
@@ -175,7 +177,7 @@ router.get('/vm-templates', authenticateToken, adminOnly, async (req, res) => {
     if (active_only !== 'false') where.push(`is_active = true`);
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
-    const result = await query(
+    const result = await cybercoreQuery(
       `SELECT id, os_family, os_name, os_version, template_vmid, node,
               role_hints, preferred, notes, is_active, created_at
        FROM vm_template_catalog ${whereClause}
@@ -183,6 +185,48 @@ router.get('/vm-templates', authenticateToken, adminOnly, async (req, res) => {
       params
     );
     res.json(result.rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/vm-templates/sync-nodes
+// Queries live Proxmox cluster resources and writes the actual node for every
+// template VMID back into vm_template_catalog. Safe to call repeatedly.
+router.post('/vm-templates/sync-nodes', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const [catalogResult, resources] = await Promise.all([
+      cybercoreQuery(`SELECT id, template_vmid, node FROM vm_template_catalog`),
+      proxmoxAPI('GET', '/api2/json/cluster/resources')
+    ]);
+
+    const vmMap = {};
+    for (const r of resources) {
+      if (r.type === 'qemu' || r.type === 'lxc') vmMap[Number(r.vmid)] = r.node;
+    }
+
+    const updated = [];
+    const unchanged = [];
+    const not_found = [];
+
+    for (const row of catalogResult.rows) {
+      const liveNode = vmMap[Number(row.template_vmid)];
+      if (!liveNode) {
+        not_found.push(row.template_vmid);
+        continue;
+      }
+      if (liveNode !== row.node) {
+        await cybercoreQuery(
+          `UPDATE vm_template_catalog SET node = $1 WHERE id = $2`,
+          [liveNode, row.id]
+        );
+        updated.push({ vmid: row.template_vmid, from: row.node, to: liveNode });
+      } else {
+        unchanged.push(row.template_vmid);
+      }
+    }
+
+    res.json({ updated, unchanged, not_found });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -205,8 +249,8 @@ router.get('/vuln-scripts-categories', authenticateToken, adminOnly, async (req,
 // CHALLENGE MANAGEMENT (crucible_challenge in cybercore_db)
 // ============================================================================
 
-// GET /api/admin/challenge-templates — list challenges as "templates"
-router.get('/challenge-templates', authenticateToken, adminOnly, async (req, res) => {
+// GET /api/admin/lab-templates — list challenges as "templates"
+router.get('/lab-templates', authenticateToken, adminOnly, async (req, res) => {
   try {
     const { module } = req.query;
     const mod = (module || 'crucible').replace(/[^a-z0-9_]/gi, '');
@@ -234,8 +278,8 @@ router.get('/challenge-templates', authenticateToken, adminOnly, async (req, res
   }
 });
 
-// GET /api/admin/challenge-templates/:id
-router.get('/challenge-templates/:id', authenticateToken, adminOnly, async (req, res) => {
+// GET /api/admin/lab-templates/:id
+router.get('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
     const result = await cybercoreQuery(
       `SELECT * FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]
@@ -247,8 +291,8 @@ router.get('/challenge-templates/:id', authenticateToken, adminOnly, async (req,
   }
 });
 
-// PUT /api/admin/challenge-templates/:id — update challenge spec (add VMs, phantom assets, vuln defaults)
-router.put('/challenge-templates/:id', authenticateToken, adminOnly, async (req, res) => {
+// PUT /api/admin/lab-templates/:id — update challenge spec (add VMs, phantom assets, vuln defaults)
+router.put('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
     const { name, description, difficulty, spec } = req.body;
 
@@ -272,8 +316,8 @@ router.put('/challenge-templates/:id', authenticateToken, adminOnly, async (req,
 });
 
 
-// DELETE /api/admin/challenge-templates/:id — delete challenge + clean up SDN
-router.delete('/challenge-templates/:id', authenticateToken, adminOnly, async (req, res) => {
+// DELETE /api/admin/lab-templates/:id — delete challenge + clean up SDN
+router.delete('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
     // Get challenge info
     const chalResult = await cybercoreQuery(
@@ -362,8 +406,8 @@ router.delete('/challenge-templates/:id', authenticateToken, adminOnly, async (r
 // CREATE CHALLENGE (DB + SDN Zone + VNets — replaces N8N workflow)
 // ============================================================================
 
-// POST /api/admin/create-challenge — full challenge creation with SDN infrastructure
-router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) => {
+// POST /api/admin/create-lab — full challenge creation with SDN infrastructure
+router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
   try {
     const {
       name, challenge_key, description, difficulty, zone_abbrev,
@@ -456,7 +500,7 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
     const spec = {
       zone: { abbrev: resolvedZone },
       template_vmid: specVMs[0].template_vmid, // backward compat for single-VM deploy
-      template_node: 'cyberhub-node-5',
+      template_node: getDefaultTemplateNode(),
       vxlan_block: { start: vxlanStart, end: vxlanEnd },
       vms: specVMs,
       limits: {
@@ -662,8 +706,8 @@ router.post('/create-challenge', authenticateToken, adminOnly, async (req, res) 
 // DEPLOYMENT STATUS (deployment_vuln_selections in clinic_db)
 // ============================================================================
 
-// GET /api/admin/challenge-networks/:laneId/status
-router.get('/challenge-networks/:laneId/status', authenticateToken, adminOnly, async (req, res) => {
+// GET /api/admin/lab-networks/:laneId/status
+router.get('/lab-networks/:laneId/status', authenticateToken, adminOnly, async (req, res) => {
   try {
     const result = await query(
       `SELECT * FROM deployment_vuln_selections WHERE lane_id = $1 ORDER BY created_at DESC LIMIT 1`,

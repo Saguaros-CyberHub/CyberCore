@@ -33,6 +33,7 @@
       font-size: 1.3rem;
     }
     .stat-icon.guac { background: linear-gradient(135deg, #38a169, #2f855a); }
+    .stat-icon.proxmox { background: linear-gradient(135deg, #e8692a, #c0511a); }
     .stat-icon.conn { background: linear-gradient(135deg, #4299e1, #3182ce); }
     .stat-icon.users { background: linear-gradient(135deg, #9f7aea, #805ad5); }
     .stat-icon.active { background: linear-gradient(135deg, #ed8936, #dd6b20); }
@@ -251,6 +252,13 @@
             <div class="stat-content">
               <h3 id="guacStatusText" style="font-size: 1rem;">Checking...</h3>
               <p>Guacamole API</p>
+            </div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon proxmox"><span id="proxmoxStatusIcon">⏳</span></div>
+            <div class="stat-content">
+              <h3 id="proxmoxStatusText" style="font-size: 1rem;">Checking...</h3>
+              <p>Proxmox API</p>
             </div>
           </div>
           <div class="stat-card">
@@ -1066,6 +1074,22 @@
         document.getElementById('guacStatusText').textContent = 'Offline';
         document.getElementById('guacStatusText').style.color = '#e53e3e';
         Toast.error('Guacamole Unreachable', e.message);
+        return false;
+      }
+    }
+
+    async function checkProxmoxStatus() {
+      try {
+        await api('GET', '/proxmox/status');
+        document.getElementById('proxmoxStatusIcon').textContent = '✅';
+        document.getElementById('proxmoxStatusText').textContent = 'Connected';
+        document.getElementById('proxmoxStatusText').style.color = '#38a169';
+        return true;
+      } catch (e) {
+        document.getElementById('proxmoxStatusIcon').textContent = '❌';
+        document.getElementById('proxmoxStatusText').textContent = 'Offline';
+        document.getElementById('proxmoxStatusText').style.color = '#e53e3e';
+        Toast.error('Proxmox Unreachable', e.message);
         return false;
       }
     }
@@ -2499,7 +2523,7 @@
           return;
         }
 
-        const fullChallenge = await api('GET', `/challenge-templates/${challenge.challenge_id}`);
+        const fullChallenge = await api('GET', `/lab-templates/${challenge.challenge_id}`);
         const spec = typeof fullChallenge.spec === 'string' ? JSON.parse(fullChallenge.spec) : (fullChallenge.spec || {});
         const vms = (spec.vms || []).length > 0
           ? spec.vms
@@ -2536,7 +2560,7 @@
         }
 
         // Get full challenge details with spec
-        const fullChallenge = await api('GET', `/challenge-templates/${challenge.challenge_id}`);
+        const fullChallenge = await api('GET', `/lab-templates/${challenge.challenge_id}`);
         const rawSpec = fullChallenge.spec;
         const spec = typeof rawSpec === 'string' ? JSON.parse(rawSpec) : (rawSpec || {});
         const vms = (spec.vms || []).length > 0
@@ -2929,7 +2953,7 @@
       status.innerHTML = '<strong style="color: var(--gray-500);">Sending to N8N for AI generation... This may take 1-3 minutes.</strong>';
 
       try {
-        const data = await api('POST', `/challenge-networks/${laneId}/generate-profile`, {
+        const data = await api('POST', `/lab-networks/${laneId}/generate-profile`, {
           client_type, industry, difficulty, company_name, llm_model
         });
 
@@ -3021,7 +3045,7 @@
       let sentCount = 0;
       for (const s of selected) {
         try {
-          await api('POST', `/challenge-networks/${laneId}/run-script`, { vm_name: s.vm_name, script_slug: s.script_slug });
+          await api('POST', `/lab-networks/${laneId}/run-script`, { vm_name: s.vm_name, script_slug: s.script_slug });
           sentCount++;
           updateExecStatus(s.vm_name, s.script_slug, 'sent', '#4299e1');
         } catch (e) {
@@ -3084,7 +3108,7 @@
       for (let i = 0; i < 600 && remaining.size > 0; i++) {
         await new Promise(r => setTimeout(r, 5000));
         try {
-          const data = await api('GET', `/challenge-networks/${laneId}/status`);
+          const data = await api('GET', `/lab-networks/${laneId}/status`);
           const entries = data.selected_scripts || [];
 
           for (const s of scripts) {
@@ -4263,7 +4287,7 @@
           challenge_type: vms.length > 1 ? 'multi_vm' : 'single_vm'
         };
         if (goad) body.goad = goad;
-        const data = await api('POST', '/create-challenge', body);
+        const data = await api('POST', '/create-lab', body);
 
         status.innerHTML = `
           <strong style="color: #38a169;">Challenge created!</strong><br>
@@ -4313,7 +4337,7 @@
     async function deleteChallenge(id, name) {
       if (!confirm(`Delete challenge "${name}"?\n\nThis will also remove the SDN zone and VNets from Proxmox.\n\nActive lanes using this challenge will NOT be affected.`)) return;
       try {
-        const data = await api('DELETE', `/challenge-templates/${id}`);
+        const data = await api('DELETE', `/lab-templates/${id}`);
         Toast.success('Deleted', `Challenge "${name}" deleted${data.vnets_removed ? ` (${data.vnets_removed} VNets removed)` : ''}`);
         loadChallengeTemplates();
         loadModulesAndChallenges();
@@ -4325,7 +4349,7 @@
       container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
 
       try {
-        const templates = await api('GET', '/challenge-templates');
+        const templates = await api('GET', '/lab-templates');
         cachedTemplates = templates;
 
         if (templates.length === 0) {
@@ -4487,7 +4511,7 @@
 
     async function editTemplate(id) {
       try {
-        const t = await api('GET', `/challenge-templates/${id}`);
+        const t = await api('GET', `/lab-templates/${id}`);
         const spec = t.spec ? (typeof t.spec === 'string' ? JSON.parse(t.spec) : t.spec) : {};
         document.getElementById('templateEditorTitle').textContent = `Edit: ${t.name}`;
         document.getElementById('tplEditId').value = id;
@@ -4570,7 +4594,7 @@
         vm_specs: templateVMs,
         phantom_assets: templatePhantoms
       };
-      // POST /create-challenge reads goad at the top level. PUT /challenge-templates/:id
+      // POST /create-lab reads goad at the top level. PUT /lab-templates/:id
       // overwrites the spec atomically, so embed there too.
       if (goad) {
         body.goad = goad;
@@ -4584,10 +4608,10 @@
 
       try {
         if (editId) {
-          await api('PUT', `/challenge-templates/${editId}`, body);
+          await api('PUT', `/lab-templates/${editId}`, body);
           Toast.success('Updated', `Template "${body.name}" updated`);
         } else {
-          await api('POST', '/challenge-templates', body);
+          await api('POST', '/lab-templates', body);
           Toast.success('Created', `Template "${body.name}" created`);
         }
         closeModal('templateEditorModal');
@@ -4598,7 +4622,7 @@
     async function deleteTemplate(id, name) {
       if (!confirm(`Deactivate template "${name}"?`)) return;
       try {
-        await api('DELETE', `/challenge-templates/${id}`);
+        await api('DELETE', `/lab-templates/${id}`);
         Toast.success('Deleted', `Template "${name}" deactivated`);
         loadChallengeTemplates();
       } catch (e) { Toast.error('Error', e.message); }
@@ -4620,7 +4644,7 @@
       }
 
       try {
-        const template = await api('GET', `/challenge-templates/${tplId}`);
+        const template = await api('GET', `/lab-templates/${tplId}`);
         const vmSpecs = typeof template.vm_specs === 'string' ? JSON.parse(template.vm_specs) : template.vm_specs;
         const allScripts = cachedVulnScripts.length > 0 ? cachedVulnScripts : await api('GET', '/vuln-scripts');
 
@@ -4673,7 +4697,7 @@
 
       try {
         // Step 1: preview
-        const preview = await api('POST', '/deploy-challenge-network', {
+        const preview = await api('POST', '/deploy-lab-network', {
           template_id: tplId, selected_scripts: selected
         });
 
@@ -4713,7 +4737,7 @@
         };
         if (userInput) body.user_id = userInput;
 
-        const data = await api('POST', '/deploy-challenge-network', body);
+        const data = await api('POST', '/deploy-lab-network', body);
         status.innerHTML = `
           <strong style="color: #38a169;">Challenge network deploying!</strong><br>
           Lane: <code>${data.lane_id}</code> | VXLAN: ${data.vxlan_id} | VMs: ${data.vm_count} | Scripts: ${data.scripts_count}<br>
@@ -4735,7 +4759,7 @@
 
     async function pollChallengeStatus(laneId) {
       try {
-        const data = await api('GET', `/challenge-networks/${laneId}/status`);
+        const data = await api('GET', `/lab-networks/${laneId}/status`);
         const s = data.script_summary;
         let statusHtml = `<strong>Status: ${data.status}</strong> | Scripts: ${s.completed}/${s.total} complete`;
         if (s.running > 0) statusHtml += ` | ${s.running} running`;
@@ -4757,7 +4781,7 @@
 
       try {
         Toast.info('Generating', 'Creating challenge network profile...');
-        const data = await api('POST', `/challenge-networks/${laneId}/generate-profile`, {
+        const data = await api('POST', `/lab-networks/${laneId}/generate-profile`, {
           industry, difficulty, client_type: 'SMB'
         });
         Toast.success('Profile Generated', `${data.assets_included} assets (${data.real_vms} real VMs + ${data.phantom_hosts} phantom)`);
@@ -4765,6 +4789,7 @@
     }
 
     async function refreshAll() {
+      checkProxmoxStatus();
       const online = await checkGuacStatus();
       if (online) {
         loadConnections();

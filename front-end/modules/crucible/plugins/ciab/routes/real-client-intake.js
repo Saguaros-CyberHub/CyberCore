@@ -434,7 +434,7 @@ router.post('/:id/generate-profile', express.json({ limit: '1mb' }), async (req,
  * POST /api/real-client/intake/:id/synthesize-challenge
  * Dry-run: normalizes the intake, resolves VM templates + vuln scripts, and
  * returns a challenge-spec JSON the admin reviews before hitting
- * /api/admin/create-challenge. Writes nothing.
+ * /api/admin/create-lab. Writes nothing.
  *
  * Response:
  *   {

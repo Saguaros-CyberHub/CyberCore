@@ -190,7 +190,10 @@ CREATE TABLE IF NOT EXISTS cybercore_lane (
 CREATE INDEX IF NOT EXISTS idx_cybercore_lane_event ON cybercore_lane (event_id);
 CREATE INDEX IF NOT EXISTS idx_cybercore_lane_user ON cybercore_lane (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_event_user ON cybercore_lane (event_id, user_id);
-CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_vxlan ON cybercore_lane (vxlan_id) WHERE vxlan_id IS NOT NULL;
+-- Partial: error/deleted lanes release their vxlan_id so retries don't collide.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_vxlan_active
+  ON cybercore_lane(vxlan_id)
+  WHERE vxlan_id IS NOT NULL AND status NOT IN ('error', 'deleted');
 
 -- === Core seeds (modules, groups, global badges) ===
 BEGIN;
@@ -222,3 +225,49 @@ INSERT INTO cybercore_badge (key, name, description, module_key, icon_url, activ
 ON CONFLICT (key) DO NOTHING;
 
 COMMIT;
+
+-- === Deployed groups (admin batch-deploy tracking) ===
+CREATE TABLE IF NOT EXISTS deployed_groups (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_name VARCHAR(255) NOT NULL,
+  config     JSONB NOT NULL DEFAULT '{}',
+  created_by UUID REFERENCES cybercore_user(user_id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_deployed_groups_name ON deployed_groups(group_name);
+
+-- === Account access schedules (time-gated group accounts) ===
+CREATE TABLE IF NOT EXISTS account_schedules (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  group_id       UUID NOT NULL REFERENCES deployed_groups(id) ON DELETE CASCADE,
+  active_days    INTEGER[] NOT NULL DEFAULT '{1,2,3,4,5}',  -- 0=Sun … 6=Sat
+  active_start   TIME NOT NULL DEFAULT '08:00',
+  active_end     TIME NOT NULL DEFAULT '17:00',
+  timezone       VARCHAR(50) NOT NULL DEFAULT 'America/Phoenix',
+  override_active BOOLEAN DEFAULT NULL,  -- NULL=use schedule, true=force on, false=force off
+  override_by    UUID REFERENCES cybercore_user(user_id),
+  override_at    TIMESTAMPTZ,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_account_schedules_group
+  ON account_schedules(group_id);
+CREATE INDEX IF NOT EXISTS idx_account_schedules_override
+  ON account_schedules(override_active) WHERE override_active IS NOT NULL;
+
+-- === Lane bootstrap tokens (v2 pull-bootstrap, one-shot) ===
+CREATE TABLE IF NOT EXISTS lane_bootstrap_tokens (
+  vxlan_id    INTEGER PRIMARY KEY,
+  wan_ip      INET    NOT NULL,
+  payload     JSONB   NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  consumed_at TIMESTAMPTZ,
+  consumed_by INET
+);
+CREATE INDEX IF NOT EXISTS idx_lane_bootstrap_tokens_wan_ip
+  ON lane_bootstrap_tokens(wan_ip) WHERE consumed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_lane_bootstrap_tokens_expires
+  ON lane_bootstrap_tokens(expires_at);
+COMMENT ON TABLE lane_bootstrap_tokens IS
+  'Single-use bootstrap payloads delivered to lane gateways on first boot via GET /api/lane-bootstrap.';

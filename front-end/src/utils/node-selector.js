@@ -7,13 +7,7 @@
  */
 
 const { proxmoxAPI } = require('./proxmox');
-
-// Minimum free resources to be eligible
-const MIN_FREE_MEM_GB = 8;
-const MIN_FREE_DISK_GB = 20;
-
-// Scoring weights (lower score = better)
-const WEIGHTS = { cpu: 0.35, mem: 0.55, disk: 0.10 };
+const { getSchedulingConfig } = require('./site-config');
 
 function clamp01(x) {
   if (!Number.isFinite(x)) return 1;
@@ -30,6 +24,8 @@ async function selectBestNode() {
   if (!Array.isArray(resources)) {
     throw new Error('Failed to get cluster resources');
   }
+
+  const { min_free_mem_gb, min_free_disk_gb, node_score_weights: WEIGHTS } = getSchedulingConfig();
 
   // Normalize node data
   const nodes = resources
@@ -54,8 +50,8 @@ async function selectBestNode() {
     });
 
   // Filter eligible nodes
-  const minFreeMem = MIN_FREE_MEM_GB * 1024 ** 3;
-  const minFreeDisk = MIN_FREE_DISK_GB * 1024 ** 3;
+  const minFreeMem  = min_free_mem_gb  * 1024 ** 3;
+  const minFreeDisk = min_free_disk_gb * 1024 ** 3;
 
   const eligible = nodes.filter(n =>
     n.mem_free_bytes >= minFreeMem &&

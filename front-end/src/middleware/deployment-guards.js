@@ -5,10 +5,13 @@
  * ============================================================================
  */
 
-// Thresholds from environment (or sensible defaults)
-const MAX_NODE_MEMORY_PCT = parseInt(process.env.MAX_NODE_MEMORY_PCT) || 80;
+const { getSchedulingConfig } = require('../utils/site-config');
+
+// Safety thresholds (env-var overrideable policy)
+const MAX_NODE_MEMORY_PCT  = parseInt(process.env.MAX_NODE_MEMORY_PCT)  || 80;
 const MAX_NODE_STORAGE_PCT = parseInt(process.env.MAX_NODE_STORAGE_PCT) || 90;
-const MAX_CONCURRENT_DEPLOYS = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 3;
+// Concurrency limit — source of truth is site.json; env var still overrides for ops flexibility
+const MAX_CONCURRENT_DEPLOYS = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || getSchedulingConfig().max_concurrent_lanes;
 
 /**
  * Fetch cluster resource summary from Proxmox

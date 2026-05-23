@@ -52,7 +52,7 @@ if (!process.env.SESSION_SECRET) {
 // Import core routes
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
-const challengeTemplateRoutes = require('./routes/challenge-templates');
+const labTemplateRoutes = require('./routes/lab-templates');
 const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 const guacSessionRoutes = require('./routes/guac-sessions');
@@ -201,7 +201,7 @@ app.use('/vuln-assets', (req, res, next) => {
 
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/admin', challengeTemplateRoutes);
+app.use('/api/admin', labTemplateRoutes);
 app.use('/api/modules', moduleRoutes);
 app.use('/api/dashboard', guacSessionRoutes);
 
@@ -293,6 +293,36 @@ async function initializeSettingsTable() {
   }
 }
 
+async function syncVmTemplateNodes() {
+  try {
+    const { cybercoreQuery } = require('./utils/cybercore-db');
+    const { proxmoxAPI } = require('./utils/proxmox');
+
+    const [catalogResult, resources] = await Promise.all([
+      cybercoreQuery(`SELECT id, template_vmid, node FROM vm_template_catalog`),
+      proxmoxAPI('GET', '/api2/json/cluster/resources')
+    ]);
+
+    const vmMap = {};
+    for (const r of resources) {
+      if (r.type === 'qemu' || r.type === 'lxc') vmMap[Number(r.vmid)] = r.node;
+    }
+
+    let updatedCount = 0;
+    for (const row of catalogResult.rows) {
+      const liveNode = vmMap[Number(row.template_vmid)];
+      if (liveNode && liveNode !== row.node) {
+        await cybercoreQuery(`UPDATE vm_template_catalog SET node = $1 WHERE id = $2`, [liveNode, row.id]);
+        console.log(`[TemplateSync] VMID ${row.template_vmid}: ${row.node ?? 'null'} → ${liveNode}`);
+        updatedCount++;
+      }
+    }
+    console.log(`✅ VM template node sync complete (${updatedCount} updated, ${catalogResult.rows.length} total)`);
+  } catch (err) {
+    console.warn('⚠️  VM template node sync failed (non-fatal):', err.message);
+  }
+}
+
 async function start() {
   try {
     // Load modules first — plugins create their databases (e.g. clinic_db)
@@ -300,6 +330,9 @@ async function start() {
 
     // Initialize settings table after plugins have created their databases
     await initializeSettingsTable();
+
+    // Sync template node locations from live Proxmox cluster
+    await syncVmTemplateNodes();
   } catch (err) {
     console.error('Module loading error (non-fatal):', err.message);
   }
@@ -319,10 +352,10 @@ async function start() {
 +---------------------------------------------------------------+
 |               CYBERHUB SERVER STARTED                         |
 +---------------------------------------------------------------+
-|  Server:     http://localhost:${PORT}                             |
-|  Hub:        http://localhost:${PORT}/hub                         |
-|  Login:      http://localhost:${PORT}/login                       |
-|  Environment: ${process.env.NODE_ENV || 'development'}                                |
+|  Server:     http://localhost                                 |
+|  Hub:        http://localhost/hub                             |
+|  Login:      http://localhost/login                           |
+|  Environment: ${process.env.NODE_ENV || 'development'}                                      |
 +---------------------------------------------------------------+
     `);
   });

@@ -7,8 +7,9 @@
  * ============================================================================
  */
 
-const MAX_CONCURRENT_LANES = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 5;
-const MAX_CONCURRENT_CLONES = parseInt(process.env.MAX_CONCURRENT_CLONES) || 4;
+const { getSchedulingConfig } = require('./site-config');
+
+const { max_concurrent_lanes: MAX_CONCURRENT_LANES, max_concurrent_clones: MAX_CONCURRENT_CLONES } = getSchedulingConfig();
 
 /**
  * Semaphore — limits concurrent access to a shared resource.
@@ -122,8 +123,8 @@ async function distributeAcrossNodes(proxmoxAPI, numLanes) {
     throw new Error('Failed to get cluster resources for batch distribution');
   }
 
-  const MIN_FREE_MEM_GB = 8;
-  const minFreeMem = MIN_FREE_MEM_GB * 1024 ** 3;
+  const { min_free_mem_gb, node_score_weights: W } = getSchedulingConfig();
+  const minFreeMem = min_free_mem_gb * 1024 ** 3;
 
   // Score nodes (lower = more capacity)
   const nodes = resources
@@ -140,7 +141,7 @@ async function distributeAcrossNodes(proxmoxAPI, numLanes) {
       return {
         node: n.node,
         memFree,
-        score: (cpuFrac * 0.35) + (memFrac * 0.55),
+        score: (cpuFrac * W.cpu) + (memFrac * W.mem),
         eligible: memFree >= minFreeMem
       };
     })
