@@ -51,7 +51,9 @@ OUTPUT FORMAT — strict JSON only, no markdown fences:
 
 HARD CONSTRAINTS — every design MUST:
 1. Theme the entire app to the client company (industry, name, plausible internal-tool purpose). NOT generic DVWA.
-2. Have 5–10 pages total, with at least 2 public-facing and at least 1 admin-only.
+2. Have 4–7 pages total, with at least 2 public-facing and at least 1 admin-only.
+   (Fewer pages = faster generation + fits inside Tier-1 LLM rate limits. Make each
+   page do MORE rather than cramming everything into 10 thin pages.)
 3. Have a 3–5 stage attack chain. Each stage MUST yield concrete progress (flag, credential, file, shell).
 4. PICK VULN TYPES OUTSIDE THE OWASP TOP-10 CORE WHEN POSSIBLE. Encourage variety. Examples — pick freely, don't reuse the same chain across companies:
    - SSTI (Jinja2, Twig, Handlebars), XXE in XML uploaders, deserialization (PHP unserialize, Python pickle, Node serialize), prototype pollution

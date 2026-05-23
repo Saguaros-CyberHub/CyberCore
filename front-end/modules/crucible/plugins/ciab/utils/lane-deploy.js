@@ -176,13 +176,15 @@ async function getOrCreateProfileChallenge({ profileId, requestedMax, companyNam
   // 3. Walk every existing challenge's vxlan_block + every live cybercore_lane's
   //    vxlan_id (lanes spawned outside any vxlan_block convention still take IDs).
   //    Single ordered list of forbidden intervals; first big-enough gap wins.
+  // status enum: draft | active | retired | archived. Only 'active' challenges
+  // are holding live reservations; the others have been pulled from rotation.
   const blockRes = await cybercoreQuery(
     `SELECT challenge_key,
             (spec->'vxlan_block'->>'start')::int AS start,
             (spec->'vxlan_block'->>'end')::int   AS end
        FROM crucible_challenge
       WHERE spec ? 'vxlan_block'
-        AND status != 'deleted'
+        AND status = 'active'
         AND (spec->'vxlan_block'->>'start') IS NOT NULL`
   );
   const intervals = blockRes.rows
