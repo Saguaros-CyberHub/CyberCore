@@ -1,0 +1,714 @@
+/**
+ * lane-deploy.js — Per-lane Proxmox orchestrator for CIAB profile-driven batches
+ * ============================================================================
+ * Modeled on front-end/src/routes/admin.js /deploy-group (lines 2266-3200) but
+ * stripped down for the CIAB classroom case:
+ *   - No instructor/student users (admin owns every lane)
+ *   - v2 only by default (subnet-agnostic 10.x.x.x lanes — what CIAB servers
+ *     actually live on). v3 is honored if the spec passes it but no GOAD.
+ *   - No attached-modules / no use_webhook mode
+ *   - Vuln-app installer runs as a post-clone step on its target VM
+ *
+ * Phases match admin.js for the LXC-lock workaround:
+ *   1a — Replicate gateway template (1694 by default) to each unique target node
+ *   1b — Clone N gateway LXCs in parallel from node-local copies
+ *   1c — Delete temp template copies
+ *   2  — Clone challenge VMs (+ optional Kali) in parallel via runBatch
+ *
+ * Per-lane Proxmox failures don't crash the batch — they get recorded in
+ * ciab_profile_lane_jobs.status='error' so the UI's Retry button can re-run
+ * the single failed lane via deployOneLaneFromSpec().
+ */
+
+const { pool, query } = require('./db');
+const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { proxmoxAPI, waitForTask } = require('../../../../../src/utils/proxmox');
+const { waitForGuestAgent, executeScriptsOnVM, guestFileWrite, guestWriteLargeText, agentExec, pollExecStatus, getVMIPs } = require('../../../../../src/utils/script-executor');
+const { selectBestNode } = require('../../../../../src/utils/node-selector');
+const { runBatch, createCloneSemaphore, distributeAcrossNodes } = require('../../../../../src/utils/batch-deployer');
+const { guacAPI } = require('../../../../../src/utils/guacamole');
+
+const {
+  V2_LANE_GATEWAY_VMID,
+  V3_LANE_GATEWAY_VMID,
+  V3_INTERNAL_TAG_OFFSET,
+  ATTACK_BOX_VMID_OFFSET,
+  KALI_TEMPLATE_VMID,
+  resolveGatewayVmid,
+  resolveLaneNetworking,
+  formatLaneGatewayNet0,
+  formatLaneHostname,
+  configureLaneTailscale,
+  forceDestroyVM
+} = require('./lane-networking');
+
+const TEMP_GW_TEMPLATE_BASE = 169200; // 169200, 169201, ... — per-node temp copies
+const DEFAULT_CONCURRENCY = parseInt(process.env.MAX_CONCURRENT_DEPLOYS) || 6;
+
+// ─── Progress tracking ─────────────────────────────────────────────────────
+// In-process tracker keyed by group_id. Separate namespace from admin.js's
+// _batchDeployProgress so CIAB and instructor flows don't collide.
+function getProgress(groupId) {
+  if (!global._ciabProfileLaneProgress) global._ciabProfileLaneProgress = {};
+  return global._ciabProfileLaneProgress[groupId] || null;
+}
+
+function initProgress(groupId, total, groupName) {
+  if (!global._ciabProfileLaneProgress) global._ciabProfileLaneProgress = {};
+  global._ciabProfileLaneProgress[groupId] = {
+    group_id: groupId,
+    group_name: groupName,
+    total,
+    completed: 0,
+    succeeded: 0,
+    failed: 0,
+    phase: 'preparing',
+    phase_detail: '',
+    started_at: new Date().toISOString(),
+    finished_at: null,
+    elapsed_s: 0,
+    avg_lane_s: null,
+    eta_s: null,
+    eta_at: null,
+    lanes: {},
+    _laneTimes: [],
+    _startMs: Date.now()
+  };
+  return global._ciabProfileLaneProgress[groupId];
+}
+
+function updateTiming(progress, concurrency) {
+  const now = Date.now();
+  progress.elapsed_s = Math.round((now - progress._startMs) / 1000);
+  if (progress._laneTimes.length > 0) {
+    const avgMs = progress._laneTimes.reduce((a, b) => a + b, 0) / progress._laneTimes.length;
+    progress.avg_lane_s = Math.round(avgMs / 1000);
+    const remaining = progress.total - progress.completed;
+    const etaMs = (remaining / concurrency) * avgMs;
+    progress.eta_s = Math.round(etaMs / 1000);
+    progress.eta_at = new Date(now + etaMs).toISOString();
+  }
+}
+
+// ─── VXLAN allocation ──────────────────────────────────────────────────────
+async function allocateVxlanIds(vxlanBlock, count) {
+  const result = await cybercoreQuery(
+    `WITH used AS (
+       SELECT DISTINCT vxlan_id FROM cybercore_lane
+       WHERE vxlan_id IS NOT NULL
+         AND vxlan_id BETWEEN $1 AND $2
+         AND status NOT IN ('error','deleted')
+     )
+     SELECT gs AS vxlan_id
+     FROM generate_series($1::int, $2::int) AS gs
+     LEFT JOIN used u ON u.vxlan_id = gs
+     WHERE u.vxlan_id IS NULL
+     ORDER BY gs LIMIT $3`,
+    [vxlanBlock.start, vxlanBlock.end, count]
+  );
+  return result.rows.map(r => r.vxlan_id);
+}
+
+// ─── Look up VNet(s) by VXLAN tag ──────────────────────────────────────────
+async function resolveVnets(vxlanId, subnetScheme) {
+  const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+  const vnet = vnets.find(v => v.tag === vxlanId);
+  if (!vnet) {
+    throw new Error(`No Proxmox SDN VNet with tag ${vxlanId} — provision a challenge zone first`);
+  }
+  let vnetInt = null;
+  if (subnetScheme === 'v3') {
+    const intTag = vxlanId + V3_INTERNAL_TAG_OFFSET;
+    vnetInt = vnets.find(v => v.tag === intTag);
+    if (!vnetInt) {
+      throw new Error(`v3 lane needs internal VNet with tag ${intTag} too`);
+    }
+  }
+  return { vnet, vnetInt };
+}
+
+// ─── Phase 1a — gateway template replication (LXC lock workaround) ────────
+async function replicateGatewayTemplates({ gatewayVmid, templateNode, uniqueNodes, groupName }) {
+  const tempIds = {};
+  let counter = 0;
+  for (const node of uniqueNodes) {
+    if (node === templateNode) {
+      tempIds[node] = gatewayVmid;
+      continue;
+    }
+    const tempId = TEMP_GW_TEMPLATE_BASE + counter++;
+    try {
+      const cloneRes = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+        newid: tempId,
+        hostname: `gw-template-temp-${node}`,
+        full: 1,
+        target: node,
+        description: `Temp gateway template for CIAB profile-deploy (group: ${groupName})`
+      });
+      if (cloneRes) await waitForTask(templateNode, cloneRes);
+      tempIds[node] = tempId;
+    } catch (err) {
+      console.warn(`[CIAB Deploy ${groupName}] Failed to replicate gateway to ${node}: ${err.message} — falling back to original`);
+      tempIds[node] = gatewayVmid;
+    }
+  }
+  return tempIds;
+}
+
+// ─── Phase 1b — clone N gateway LXCs ───────────────────────────────────────
+async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, vnetByLaneId, vnetIntByLaneId, groupName, templateNode }) {
+  const lanesByNode = {};
+  for (const job of laneJobs) {
+    if (!lanesByNode[job.targetNode]) lanesByNode[job.targetNode] = [];
+    lanesByNode[job.targetNode].push(job);
+  }
+  const results = {};
+
+  await Promise.all(Object.entries(lanesByNode).map(async ([node, jobs]) => {
+    const localTemplateId = tempTemplateIds[node];
+    const sourceNode = node === templateNode ? templateNode : node;
+    for (const job of jobs) {
+      const { laneId, vxlanId, laneName } = job;
+      const gatewayVmId = 100000 + vxlanId;
+      const vnet = vnetByLaneId[laneId];
+      const vnetInt = vnetIntByLaneId[laneId];
+      try {
+        const cloneRes = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/lxc/${localTemplateId}/clone`, {
+          newid: gatewayVmId,
+          hostname: `${laneName}-gw`.substring(0, 63).toLowerCase(),
+          full: 1,
+          target: node,
+          description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}`
+        });
+        if (cloneRes) await waitForTask(sourceNode, cloneRes);
+
+        const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+        if (subnetScheme === 'v3') {
+          await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
+            net0: formatLaneGatewayNet0(net.wan),
+            net1: `name=ext0,bridge=${vnet.vnet},ip=${net.lanExt.gatewayIp}/24,type=veth`,
+            net2: `name=int0,bridge=${vnetInt.vnet},ip=${net.lanInt.gatewayIp}/24,type=veth`
+          });
+        } else {
+          await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
+            net0: formatLaneGatewayNet0(net.wan),
+            net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
+          });
+        }
+
+        await configureLaneTailscale({
+          subnetScheme,
+          vxlanId,
+          wanIp: net.wan.ip.split('/')[0],
+          laneName,
+          logTag: `[CIAB Deploy ${groupName}]`
+        });
+
+        results[laneId] = { success: true, gatewayVmId };
+      } catch (err) {
+        console.error(`[CIAB Deploy ${groupName}] Gateway clone failed for lane ${laneId}: ${err.message}`);
+        results[laneId] = { success: false, error: err.message };
+      }
+    }
+  }));
+
+  return results;
+}
+
+// ─── Phase 1c — delete temp template copies ────────────────────────────────
+async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupName) {
+  const toDelete = Object.entries(tempTemplateIds)
+    .filter(([_, id]) => id !== originalGatewayVmid)
+    .map(([node, id]) => ({ node, id }));
+  await Promise.all(toDelete.map(async ({ node, id }) => {
+    try {
+      await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/lxc/${id}?purge=1&force=1`);
+    } catch (e) {
+      console.warn(`[CIAB Deploy ${groupName}] Could not delete temp template ${id} on ${node}: ${e.message}`);
+    }
+  }));
+}
+
+// ─── Vuln-app installer execution ──────────────────────────────────────────
+// Writes source_tree files via QEMU guest agent, then runs install_script.
+async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }) {
+  if (!vulnAppInstall) return { success: true, skipped: true };
+  const { mode, install_script, source_tree, dockerfile } = vulnAppInstall;
+
+  const targetDir = mode === 'docker' ? '/opt/vuln-app' : '/var/www/html';
+  console.log(`${logTag} Installing vuln app on ${vmName} (mode=${mode}, dir=${targetDir})`);
+
+  try {
+    await agentExec(node, vmId, `mkdir -p ${targetDir}`);
+
+    if (source_tree && typeof source_tree === 'object') {
+      for (const [relPath, content] of Object.entries(source_tree)) {
+        const safePath = relPath.replace(/\.\./g, '').replace(/^\/+/, '');
+        const fullPath = `${targetDir}/${safePath}`;
+        const writer = content.length > 8000 ? guestWriteLargeText : guestFileWrite;
+        await writer(node, vmId, fullPath, content);
+      }
+    }
+    if (dockerfile && mode === 'docker') {
+      await guestFileWrite(node, vmId, `${targetDir}/Dockerfile`, dockerfile);
+    }
+
+    // Run install_script inline via agentExec → poll until exit
+    const exec = await agentExec(node, vmId, install_script);
+    const pid = exec && (exec.pid || (exec.result && exec.result.pid));
+    if (pid) {
+      const result = await pollExecStatus(node, vmId, pid, 15 * 60 * 1000);
+      if (result && result['exit-code'] !== 0) {
+        return { success: false, error: `install_script exited ${result['exit-code']}`, stderr: result['err-data'] || null };
+      }
+    }
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// ─── Post-clone vuln_scripts execution ─────────────────────────────────────
+async function runPostCloneScripts({ node, vmId, vmName, scriptSlugs, logTag }) {
+  if (!scriptSlugs || scriptSlugs.length === 0) return { ran: 0 };
+  const rows = await cybercoreQuery(
+    `SELECT slug, script_content, os_target, depends_on, script_args
+     FROM vuln_scripts WHERE slug = ANY($1) AND is_active = true`,
+    [scriptSlugs]
+  );
+  if (rows.rows.length === 0) return { ran: 0 };
+
+  // executeScriptsOnVM expects a deploymentId for status logging. Use the
+  // lane_id as a string — admin.js does the same when wiring up deploys.
+  const deploymentId = `ciab-lane-${vmId}`;
+  await executeScriptsOnVM(node, vmId, vmName, rows.rows, deploymentId);
+  console.log(`${logTag} Ran ${rows.rows.length} post-clone scripts on ${vmName}`);
+  return { ran: rows.rows.length };
+}
+
+// ─── Collect deployed VM IPs via guest agent ───────────────────────────────
+async function collectVmIp(node, vmId, attempts = 10, intervalMs = 5000) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const data = await proxmoxAPI('GET', `/api2/json/nodes/${node}/qemu/${vmId}/agent/network-get-interfaces`);
+      const ifaces = data.result || data || [];
+      for (const iface of ifaces) {
+        if (iface.name === 'lo') continue;
+        for (const addr of (iface['ip-addresses'] || [])) {
+          if (addr['ip-address-type'] === 'ipv4' && !addr['ip-address'].startsWith('127.')) {
+            return addr['ip-address'];
+          }
+        }
+      }
+    } catch (_) {}
+    if (i < attempts - 1) await new Promise(r => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
+// ─── Single-lane deploy (called by batch + retry endpoint) ─────────────────
+async function deployOneLaneFromSpec({
+  laneId, jobId, spec, vxlanId, vnet, vnetInt, gatewayVmId, targetNode, templateNode,
+  groupId, groupName, vulnAppInstall, attackBoxes, subnetScheme, module, cloneSem,
+  progress
+}) {
+  const logTag = `[CIAB Deploy ${groupName}]`;
+  const isV3 = subnetScheme === 'v3';
+  const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+  const vnetExtName = vnet.vnet;
+  const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
+  const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
+
+  const startedAt = Date.now();
+  await query(
+    `UPDATE ciab_profile_lane_jobs SET status='cloning', started_at=NOW(), target_node=$2 WHERE id=$1`,
+    [jobId, targetNode]
+  );
+  if (progress) progress.lanes[laneId] = { status: 'cloning', node: targetNode, vxlan: vxlanId, _startedAt: startedAt };
+
+  const deployedVMs = [];
+  const allVmIds = [gatewayVmId];
+
+  try {
+    // ── Clone challenge VMs in parallel via the shared semaphore ────────
+    const clonePromises = (spec.vms || []).map(async (vmSpec) => {
+      const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
+      allVmIds.push(vmId);
+      const vmType = vmSpec.type || 'qemu';
+      const vmName = vmSpec.name;
+      const sourceNode = vmSpec.template_node || templateNode;
+
+      await cloneSem.run(async () => {
+        if (vmType === 'lxc') {
+          const r = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/lxc/${vmSpec.template_vmid}/clone`, {
+            newid: vmId,
+            hostname: `${vmName}-${vxlanId}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(),
+            full: 1, target: targetNode,
+            description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}\nVM: ${vmName}`
+          });
+          if (r) await waitForTask(sourceNode, r);
+          await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/lxc/${vmId}/config`, {
+            net1: `name=eth0,bridge=${vnetExtName},type=veth`
+          });
+        } else {
+          const r = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/qemu/${vmSpec.template_vmid}/clone`, {
+            newid: vmId,
+            name: `${vmName}-${vxlanId}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(),
+            full: 1, target: targetNode,
+            description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}\nVM: ${vmName}`
+          });
+          if (r) await waitForTask(sourceNode, r);
+          await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, {
+            net0: `virtio,bridge=${vnetExtName}`
+          });
+        }
+      });
+
+      return { vm_id: vmId, name: vmName, type: vmType, node: targetNode,
+               role: vmSpec.role, services: vmSpec.services || [],
+               post_clone_scripts: vmSpec.post_clone_scripts || [] };
+    });
+
+    // ── Kali attack box ─────────────────────────────────────────────────
+    const attackBoxVmId = attackBoxes ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null;
+    if (attackBoxVmId) allVmIds.push(attackBoxVmId);
+
+    const kaliPromise = attackBoxVmId ? (async () => {
+      await cloneSem.run(async () => {
+        const r = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${KALI_TEMPLATE_VMID}/clone`, {
+          newid: attackBoxVmId,
+          name: `kali-${vxlanId}`,
+          full: 1, target: targetNode,
+          description: `CIAB Attack Box\nGroup: ${groupName}\nLane: ${laneId}`
+        });
+        if (r) await waitForTask(templateNode, r);
+      });
+      await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/qemu/${attackBoxVmId}/config`, {
+        net0: `virtio,bridge=${vnetExtName}`,
+        nameserver: `${laneSubnetBase}.1`
+      });
+      await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/qemu/${attackBoxVmId}/cloudinit`).catch(() => {});
+    })() : Promise.resolve();
+
+    await query(`UPDATE ciab_profile_lane_jobs SET vm_ids=$2 WHERE id=$1`, [jobId, allVmIds]);
+    const [clonedVMs] = await Promise.all([Promise.all(clonePromises), kaliPromise]);
+    deployedVMs.push(...clonedVMs);
+
+    // ── Start gateway, then all VMs ─────────────────────────────────────
+    await query(`UPDATE ciab_profile_lane_jobs SET status='firstboot', phase_detail='Starting VMs' WHERE id=$1`, [jobId]);
+    if (progress) progress.lanes[laneId].status = 'starting';
+
+    await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/status/start`);
+    await new Promise(r => setTimeout(r, 5000));
+    for (const dvm of deployedVMs) {
+      const startPath = dvm.type === 'lxc'
+        ? `/api2/json/nodes/${dvm.node}/lxc/${dvm.vm_id}/status/start`
+        : `/api2/json/nodes/${dvm.node}/qemu/${dvm.vm_id}/status/start`;
+      await proxmoxAPI('POST', startPath);
+    }
+    if (attackBoxVmId) {
+      await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${attackBoxVmId}/status/start`);
+    }
+
+    // ── Wait for guest agents + run post-clone scripts + install vuln app ──
+    if (progress) progress.lanes[laneId].status = 'configuring';
+
+    for (const dvm of deployedVMs) {
+      if (dvm.type !== 'qemu') continue;
+      const ready = await waitForGuestAgent(dvm.node, dvm.vm_id, 240000);
+      if (!ready) {
+        console.warn(`${logTag} Guest agent did not come up on ${dvm.name} — skipping scripts`);
+        continue;
+      }
+
+      // Per-VM post_clone_scripts (from synthesizer)
+      if (Array.isArray(dvm.post_clone_scripts) && dvm.post_clone_scripts.length > 0) {
+        await runPostCloneScripts({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
+                                    scriptSlugs: dvm.post_clone_scripts, logTag }).catch(err => {
+          console.warn(`${logTag} post-clone scripts failed on ${dvm.name}: ${err.message}`);
+        });
+      }
+
+      // Vuln-app install (only on the matched target VM)
+      if (vulnAppInstall && vulnAppInstall.target_vm === dvm.name) {
+        const appResult = await installVulnAppOnVM({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
+                                                     vulnAppInstall, logTag });
+        if (!appResult.success && !appResult.skipped) {
+          console.warn(`${logTag} Vuln app install failed on ${dvm.name}: ${appResult.error}`);
+        }
+      }
+
+      // Collect IP + write back into ciab_profile_lane_groups.lane_ip_writeback
+      const ip = await collectVmIp(dvm.node, dvm.vm_id, 6, 4000);
+      if (ip) {
+        dvm.ip = ip;
+        await query(
+          `UPDATE ciab_profile_lane_groups
+           SET lane_ip_writeback = jsonb_set(
+             COALESCE(lane_ip_writeback, '{}'::jsonb),
+             ARRAY[$2::text, $3::text],
+             to_jsonb($4::text),
+             true
+           ), updated_at = NOW()
+           WHERE id = $1`,
+          [groupId, dvm.name, laneId, ip]
+        );
+      }
+    }
+
+    // ── Optional: create Guacamole connection for the Kali box ─────────
+    let kaliIp = null;
+    if (attackBoxVmId) {
+      kaliIp = await collectVmIp(targetNode, attackBoxVmId, 6, 4000);
+      if (kaliIp) {
+        try {
+          await guacAPI('POST', '/connections', {
+            name: `${groupName} - lane${vxlanId} - Kali`,
+            protocol: 'rdp',
+            parentIdentifier: 'ROOT',
+            parameters: {
+              hostname: kaliIp, port: '3389',
+              username: 'kali', password: 'kali',
+              security: 'any', 'ignore-cert': 'true',
+              'enable-wallpaper': 'true', 'enable-font-smoothing': 'true',
+              'color-depth': '24', 'resize-method': 'display-update'
+            },
+            attributes: { 'max-connections': '4', 'max-connections-per-user': '2' }
+          });
+        } catch (gErr) {
+          console.warn(`${logTag} Guac connection failed for lane ${vxlanId}: ${gErr.message}`);
+        }
+      }
+    }
+
+    // ── Update cybercore_lane with the deployed config ──────────────────
+    const activeConfig = {
+      challenge_vm_id: deployedVMs[0]?.vm_id,
+      gateway_vm_id: gatewayVmId,
+      attack_box_vm_id: attackBoxVmId,
+      node: targetNode,
+      module,
+      group_id: groupId,
+      group_name: groupName,
+      profile_lane_group: true,
+      vms: deployedVMs,
+      subnet_scheme: subnetScheme,
+      lane_subnet_base: laneSubnetBase,
+      vnet: vnetExtName,
+      ...(isV3 ? { vnet_internal: vnetIntName, lane_subnet_internal: net.lanInt.base3 } : {})
+    };
+    await cybercoreQuery(
+      `UPDATE cybercore_lane SET status='active', config=$2::jsonb, updated_at=NOW() WHERE lane_id=$1`,
+      [laneId, JSON.stringify(activeConfig)]
+    );
+
+    await query(
+      `UPDATE ciab_profile_lane_jobs SET status='active', phase_detail='Deployed', finished_at=NOW() WHERE id=$1`,
+      [jobId]
+    );
+
+    if (progress) {
+      progress.lanes[laneId].status = 'active';
+      if (progress.lanes[laneId]._startedAt) {
+        progress._laneTimes.push(Date.now() - progress.lanes[laneId]._startedAt);
+      }
+    }
+
+    return { success: true, laneId, vxlanId, vmIds: allVmIds };
+  } catch (err) {
+    await query(
+      `UPDATE ciab_profile_lane_jobs SET status='error', error_msg=$2, finished_at=NOW() WHERE id=$1`,
+      [jobId, err.message]
+    );
+    await cybercoreQuery(
+      `UPDATE cybercore_lane SET status='error', config = COALESCE(config,'{}'::jsonb) || $2::jsonb, updated_at=NOW() WHERE lane_id=$1`,
+      [laneId, JSON.stringify({ error: err.message })]
+    ).catch(() => {});
+    if (progress) progress.lanes[laneId] = { ...(progress.lanes[laneId] || {}), status: 'error', error: err.message };
+    throw err;
+  }
+}
+
+// ─── Batch entrypoint ─────────────────────────────────────────────────────
+/**
+ * @param {object} args
+ * @param {string} args.groupId
+ * @param {string} args.groupName
+ * @param {object} args.spec                 from synthesizeSpecFromProfile
+ * @param {Array}  args.laneAllocations      [{ laneId, jobId, vxlanId }]
+ * @param {string} args.subnetScheme         default 'v2'
+ * @param {string} args.module               'ciab'
+ * @param {boolean}args.attackBoxes
+ * @param {object} [args.vulnAppInstall]     from spec.vuln_app_install
+ * @returns {Promise<{succeeded, failed, errors}>}
+ */
+async function deployProfileLanesBatch({
+  groupId, groupName, spec, laneAllocations,
+  subnetScheme = 'v2', module: moduleKey = 'ciab',
+  attackBoxes = true, vulnAppInstall = null
+}) {
+  const templateNode = spec.template_node || 'cyberhub-node-5';
+  const gatewayVmid = resolveGatewayVmid(moduleKey, subnetScheme, spec);
+  const concurrency = DEFAULT_CONCURRENCY;
+  const cloneSem = createCloneSemaphore();
+  const progress = initProgress(groupId, laneAllocations.length, groupName);
+
+  // ── Resolve VNets (must already exist via SDN provisioning) ────────────
+  const vnetByLaneId = {};
+  const vnetIntByLaneId = {};
+  for (const a of laneAllocations) {
+    try {
+      const { vnet, vnetInt } = await resolveVnets(a.vxlanId, subnetScheme);
+      vnetByLaneId[a.laneId] = vnet;
+      vnetIntByLaneId[a.laneId] = vnetInt;
+    } catch (err) {
+      await query(`UPDATE ciab_profile_lane_jobs SET status='error', error_msg=$2 WHERE id=$1`,
+                  [a.jobId, err.message]);
+    }
+  }
+  const validAllocations = laneAllocations.filter(a => vnetByLaneId[a.laneId]);
+
+  // ── Distribute lanes across cluster nodes ──────────────────────────────
+  let nodeAssignments;
+  try {
+    nodeAssignments = await distributeAcrossNodes(proxmoxAPI, validAllocations.length);
+  } catch (err) {
+    console.warn(`[CIAB Deploy ${groupName}] distributeAcrossNodes failed: ${err.message} — falling back to best-node-per-lane`);
+    const best = await selectBestNode();
+    nodeAssignments = validAllocations.map(() => best.node);
+  }
+  const laneJobs = validAllocations.map((a, i) => ({
+    laneId: a.laneId,
+    jobId: a.jobId,
+    vxlanId: a.vxlanId,
+    laneName: formatLaneHostname({ vxlanId: a.vxlanId, laneName: `ciab-${groupName}` }),
+    targetNode: nodeAssignments[i] || 'cyberhub-node-5'
+  }));
+
+  // ── Phase 1: gateway template replication + parallel clone ─────────────
+  progress.phase = 'gateway';
+  progress.phase_detail = 'Replicating gateway template';
+  const uniqueNodes = [...new Set(laneJobs.map(j => j.targetNode))];
+  const tempTemplateIds = await replicateGatewayTemplates({
+    gatewayVmid, templateNode, uniqueNodes, groupName
+  });
+
+  progress.phase_detail = `Cloning ${laneJobs.length} gateways`;
+  const gatewayResults = await cloneGateways({
+    laneJobs, tempTemplateIds, subnetScheme, module: moduleKey,
+    vnetByLaneId, vnetIntByLaneId, groupName, templateNode
+  });
+
+  await cleanupTempTemplates(tempTemplateIds, gatewayVmid, groupName);
+
+  // Mark lanes whose gateway clone failed as error before Phase 2
+  for (const job of laneJobs) {
+    if (!gatewayResults[job.laneId]?.success) {
+      await query(
+        `UPDATE ciab_profile_lane_jobs SET status='error', error_msg=$2 WHERE id=$1`,
+        [job.jobId, `Gateway clone failed: ${gatewayResults[job.laneId]?.error || 'unknown'}`]
+      );
+    }
+  }
+  const deployableJobs = laneJobs.filter(j => gatewayResults[j.laneId]?.success);
+
+  // ── Phase 2: per-lane VM clones + firstboot + IP writeback ─────────────
+  progress.phase = 'deploying';
+  progress.phase_detail = `Deploying ${deployableJobs.length} lanes (max ${concurrency} concurrent)`;
+
+  const { results, errors } = await runBatch(deployableJobs, async (job) => {
+    return await deployOneLaneFromSpec({
+      laneId: job.laneId,
+      jobId: job.jobId,
+      spec,
+      vxlanId: job.vxlanId,
+      vnet: vnetByLaneId[job.laneId],
+      vnetInt: vnetIntByLaneId[job.laneId],
+      gatewayVmId: gatewayResults[job.laneId].gatewayVmId,
+      targetNode: job.targetNode,
+      templateNode,
+      groupId,
+      groupName,
+      vulnAppInstall,
+      attackBoxes,
+      subnetScheme,
+      module: moduleKey,
+      cloneSem,
+      progress
+    });
+  }, {
+    concurrency,
+    onProgress: (completed, total, _job, result) => {
+      progress.completed = completed;
+      if (result && result.success) progress.succeeded++;
+      else progress.failed++;
+      updateTiming(progress, concurrency);
+    }
+  });
+
+  // ── Finalize group status ──────────────────────────────────────────────
+  const totalFailed = (laneJobs.length - deployableJobs.length) + progress.failed;
+  let finalStatus;
+  if (totalFailed === 0) finalStatus = 'active';
+  else if (totalFailed === laneJobs.length) finalStatus = 'error';
+  else finalStatus = 'partial';
+
+  await query(
+    `UPDATE ciab_profile_lane_groups SET status=$2, updated_at=NOW() WHERE id=$1`,
+    [groupId, finalStatus]
+  );
+
+  progress.phase = 'complete';
+  progress.phase_detail = `${progress.succeeded} succeeded, ${totalFailed} failed`;
+  progress.finished_at = new Date().toISOString();
+  progress.eta_s = 0;
+  progress.eta_at = null;
+  updateTiming(progress, concurrency);
+
+  // GC progress after 1h
+  setTimeout(() => {
+    if (global._ciabProfileLaneProgress) delete global._ciabProfileLaneProgress[groupId];
+  }, 3600000);
+
+  return { succeeded: progress.succeeded, failed: totalFailed, errors };
+}
+
+// ─── Teardown a single lane (used by group DELETE + per-lane retry cleanup) ──
+async function teardownLane({ laneId, vmIds }) {
+  const errors = [];
+
+  // Look up where VMs live (best effort)
+  let nodeMap = {};
+  try {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    for (const r of resources) {
+      if (vmIds && vmIds.includes(r.vmid)) nodeMap[r.vmid] = r.node;
+    }
+  } catch (e) {
+    errors.push(`cluster/resources lookup failed: ${e.message}`);
+  }
+
+  for (const vmid of (vmIds || [])) {
+    // Try LXC first if vmid is in the gateway range (100000-199999), else qemu
+    const type = (vmid >= 100000 && vmid < 200000) ? 'lxc' : 'qemu';
+    try {
+      await forceDestroyVM(vmid, type, nodeMap[vmid]);
+    } catch (e) {
+      errors.push(`destroy ${type} ${vmid}: ${e.message}`);
+    }
+  }
+
+  await cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id=$1`, [laneId]).catch(() => {});
+  return { errors };
+}
+
+module.exports = {
+  deployProfileLanesBatch,
+  deployOneLaneFromSpec,
+  teardownLane,
+  allocateVxlanIds,
+  resolveVnets,
+  getProgress,
+  installVulnAppOnVM,
+  collectVmIp
+};

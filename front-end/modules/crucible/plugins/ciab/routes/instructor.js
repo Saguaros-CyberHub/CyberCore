@@ -60,8 +60,10 @@ router.get('/generation-status/:profileId', authenticateToken, instructorOnly, (
   }
 });
 
-// POST /api/instructor/store-example — Called by N8N E4 node to store answer key parts
-// Secured via JWT — N8N passes through a service token minted by the generate-examples route
+// POST /api/instructor/store-example — DEPRECATED.
+// Previously called by N8N's E4 node to write generated answer-key parts back.
+// As of the N8N removal, ai/examples writes directly to assessment_progress.
+// Kept callable for one release in case any external integration still posts here.
 router.post('/store-example', authenticateToken, async (req, res) => {
   try {
     const { user_id, profile_id, part_number, part_name, content, output_option } = req.body;
@@ -635,303 +637,9 @@ function getDefaultRubric() {
   };
 }
 
-// ============================================================================
-// DOCUMENT GENERATOR FUNCTIONS
-// ============================================================================
 
-function generateNessusXml(profileData, companyName, domain) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  const assets = profileData.assets || [];
-  const weaknesses = profileData.weaknesses || [];
-  
-  // Get servers and critical assets
-  const scanTargets = assets.filter(a => 
-    a.role === 'server' || a.role === 'network' || a.critical
-  ).slice(0, 15);
-  
-  // If no assets, create some defaults
-  if (scanTargets.length === 0) {
-    scanTargets.push(
-      { hostname: 'dc-01', ip: '10.0.0.10', os: 'Windows Server 2019', role: 'server' },
-      { hostname: 'file-server-01', ip: '10.0.0.20', os: 'Windows Server 2019', role: 'server' },
-      { hostname: 'app-server-01', ip: '10.0.0.30', os: 'Windows Server 2019', role: 'server' }
-    );
-  }
-
-  let xml = `<?xml version="1.0"?>
-<NessusClientData_v2>
-  <Policy>
-    <policyName>Clinic-in-a-Box Security Scan</policyName>
-    <policyComments>Generated scan for ${companyName}</policyComments>
-  </Policy>
-  <Report name="${companyName} Security Assessment" xmlns:cm="http://www.nessus.org/cm">
-`;
-
-  scanTargets.forEach((asset, idx) => {
-    const ip = asset.ip || `10.0.0.${idx + 10}`;
-    const hostname = asset.hostname || `host-${idx}`;
-    const os = asset.os || 'Windows Server 2019';
-    
-    xml += `    <ReportHost name="${ip}">
-      <HostProperties>
-        <tag name="HOST_START">${new Date().toUTCString()}</tag>
-        <tag name="HOST_END">${new Date().toUTCString()}</tag>
-        <tag name="operating-system">${os}</tag>
-        <tag name="host-ip">${ip}</tag>
-        <tag name="host-fqdn">${hostname}.${domain}</tag>
-        <tag name="netbios-name">${hostname.toUpperCase()}</tag>
-      </HostProperties>
-      <ReportItem port="445" svc_name="cifs" protocol="tcp" severity="2" pluginID="10264" pluginName="Microsoft Windows SMB Shares Enumeration" pluginFamily="Windows">
-        <description>By connecting to the remote host, Nessus was able to enumerate the SMB shares.</description>
-        <solution>Ensure that only authorized users can access SMB shares.</solution>
-        <synopsis>It is possible to enumerate shares on the remote host.</synopsis>
-        <plugin_output>The following shares were found on ${hostname}:
-  - C$ (ADMIN)
-  - ADMIN$ (ADMIN)
-  - IPC$</plugin_output>
-        <risk_factor>Medium</risk_factor>
-        <cvss_base_score>5.0</cvss_base_score>
-      </ReportItem>
-      <ReportItem port="3389" svc_name="msrdp" protocol="tcp" severity="1" pluginID="58453" pluginName="RDP (Remote Desktop Protocol) Enabled" pluginFamily="Windows">
-        <description>The remote Windows host has Remote Desktop Protocol (RDP) enabled.</description>
-        <solution>Disable RDP if not required. If RDP is required, ensure proper authentication.</solution>
-        <synopsis>Remote Desktop Protocol is enabled on this host.</synopsis>
-        <plugin_output>RDP is enabled on port 3389/tcp.</plugin_output>
-        <risk_factor>Low</risk_factor>
-        <cvss_base_score>2.6</cvss_base_score>
-      </ReportItem>
-      <ReportItem port="443" svc_name="www" protocol="tcp" severity="2" pluginID="97833" pluginName="SSL/TLS Weak Cipher Suites Supported" pluginFamily="General">
-        <description>The remote host supports SSL cipher suites using weak encryption.</description>
-        <solution>Reconfigure the affected application to avoid weak ciphers.</solution>
-        <synopsis>The remote service supports weak SSL ciphers.</synopsis>
-        <plugin_output>Weak ciphers detected:
-  TLS_RSA_WITH_3DES_EDE_CBC_SHA</plugin_output>
-        <risk_factor>Medium</risk_factor>
-        <cvss_base_score>5.0</cvss_base_score>
-      </ReportItem>
-      <ReportItem port="445" svc_name="cifs" protocol="tcp" severity="4" pluginID="97994" pluginName="MS17-010: Security Update for Microsoft Windows SMB Server" pluginFamily="Windows : Microsoft Bulletins">
-        <description>The remote Windows host is missing security update MS17-010 (EternalBlue).</description>
-        <solution>Apply the MS17-010 patches and disable SMBv1.</solution>
-        <synopsis>The remote host is affected by multiple remote code execution vulnerabilities.</synopsis>
-        <plugin_output>SMBv1 is enabled on this host.
-MS17-010 patches have not been applied.</plugin_output>
-        <risk_factor>Critical</risk_factor>
-        <cvss_base_score>9.3</cvss_base_score>
-        <cve>CVE-2017-0144</cve>
-      </ReportItem>
-      <ReportItem port="0" svc_name="general" protocol="tcp" severity="0" pluginID="19506" pluginName="Nessus Scan Information" pluginFamily="Settings">
-        <description>This plugin displays information about the Nessus scan.</description>
-        <solution>n/a</solution>
-        <synopsis>Information about this scan.</synopsis>
-        <plugin_output>Nessus version: 10.6.2
-Plugin feed version: 202601150000
-Scanner IP: 192.168.1.100
-Scan type: Normal</plugin_output>
-        <risk_factor>None</risk_factor>
-      </ReportItem>
-    </ReportHost>
-`;
-  });
-
-  xml += `  </Report>
-</NessusClientData_v2>`;
-
-  return xml;
-}
-
-function generateZapHtml(profileData, companyName, domain) {
-  const timestamp = new Date().toISOString();
-  
-  const html = `<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>ZAP Scanning Report - ${companyName}</title>
-  <style>
-    body { font-family: 'Segoe UI', Tahoma, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-    .container { max-width: 1200px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-    h1 { color: #333; border-bottom: 3px solid #ff6600; padding-bottom: 15px; }
-    .summary { display: flex; gap: 20px; margin: 20px 0; }
-    .summary-card { flex: 1; padding: 20px; border-radius: 8px; text-align: center; }
-    .summary-card .count { font-size: 36px; font-weight: bold; }
-    .high { background: #ffebee; color: #c62828; }
-    .medium { background: #fff3e0; color: #ef6c00; }
-    .low { background: #e3f2fd; color: #1565c0; }
-    .alert { margin: 20px 0; padding: 20px; border-left: 4px solid; background: #fafafa; border-radius: 0 8px 8px 0; }
-    .alert-high { border-color: #c62828; }
-    .alert-medium { border-color: #ef6c00; }
-    .alert-low { border-color: #1565c0; }
-    .url { background: #263238; color: #4caf50; padding: 10px; border-radius: 4px; font-family: monospace; margin: 10px 0; }
-    table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-    th { background: #f5f5f5; }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>🕷️ OWASP ZAP Web Application Security Report</h1>
-    
-    <table>
-      <tr><th>Target</th><td>https://${domain}</td></tr>
-      <tr><th>Organization</th><td>${companyName}</td></tr>
-      <tr><th>Scan Date</th><td>${timestamp}</td></tr>
-      <tr><th>ZAP Version</th><td>2.14.0</td></tr>
-    </table>
-    
-    <h2>Summary of Alerts</h2>
-    <div class="summary">
-      <div class="summary-card high"><div class="count">3</div><div>High</div></div>
-      <div class="summary-card medium"><div class="count">8</div><div>Medium</div></div>
-      <div class="summary-card low"><div class="count">15</div><div>Low</div></div>
-    </div>
-    
-    <h2>Alert Details</h2>
-    
-    <div class="alert alert-high">
-      <h3>🔴 Cross Site Scripting (Reflected)</h3>
-      <p><strong>Risk:</strong> High | <strong>Confidence:</strong> Medium | <strong>CWE ID:</strong> 79</p>
-      <p>Cross-site Scripting (XSS) is an attack technique that involves echoing attacker-supplied code into a user's browser instance.</p>
-      <div class="url">https://${domain}/search?q=&lt;script&gt;alert(1)&lt;/script&gt;</div>
-      <p><strong>Solution:</strong> Validate all input and encode all output.</p>
-    </div>
-    
-    <div class="alert alert-high">
-      <h3>🔴 SQL Injection</h3>
-      <p><strong>Risk:</strong> High | <strong>Confidence:</strong> Medium | <strong>CWE ID:</strong> 89</p>
-      <p>SQL injection may be possible. The page results were successfully manipulated using boolean conditions.</p>
-      <div class="url">https://${domain}/api/users?id=1' OR '1'='1</div>
-      <p><strong>Solution:</strong> Use parameterized queries (prepared statements).</p>
-    </div>
-    
-    <div class="alert alert-medium">
-      <h3>🟠 Missing Anti-clickjacking Header</h3>
-      <p><strong>Risk:</strong> Medium | <strong>Confidence:</strong> Medium | <strong>CWE ID:</strong> 1021</p>
-      <p>The response does not include X-Frame-Options to protect against ClickJacking attacks.</p>
-      <div class="url">https://${domain}/</div>
-      <p><strong>Solution:</strong> Set the X-Frame-Options header on all web pages.</p>
-    </div>
-    
-    <div class="alert alert-medium">
-      <h3>🟠 Content Security Policy (CSP) Header Not Set</h3>
-      <p><strong>Risk:</strong> Medium | <strong>Confidence:</strong> High | <strong>CWE ID:</strong> 693</p>
-      <p>Content Security Policy helps detect and mitigate XSS and data injection attacks.</p>
-      <div class="url">https://${domain}/</div>
-      <p><strong>Solution:</strong> Configure your web server to set the Content-Security-Policy header.</p>
-    </div>
-    
-    <div class="alert alert-medium">
-      <h3>🟠 Absence of Anti-CSRF Tokens</h3>
-      <p><strong>Risk:</strong> Medium | <strong>Confidence:</strong> Low | <strong>CWE ID:</strong> 352</p>
-      <p>No Anti-CSRF tokens were found in HTML submission forms.</p>
-      <div class="url">https://${domain}/settings</div>
-      <p><strong>Solution:</strong> Use a vetted library that implements anti-CSRF tokens.</p>
-    </div>
-    
-    <div class="alert alert-low">
-      <h3>🔵 X-Content-Type-Options Header Missing</h3>
-      <p><strong>Risk:</strong> Low | <strong>Confidence:</strong> Medium | <strong>CWE ID:</strong> 693</p>
-      <p>The Anti-MIME-Sniffing header X-Content-Type-Options was not set to 'nosniff'.</p>
-      <div class="url">https://${domain}/</div>
-      <p><strong>Solution:</strong> Set the X-Content-Type-Options header to 'nosniff'.</p>
-    </div>
-    
-    <div class="alert alert-low">
-      <h3>🔵 Server Leaks Version Information</h3>
-      <p><strong>Risk:</strong> Low | <strong>Confidence:</strong> High | <strong>CWE ID:</strong> 200</p>
-      <p>The web server is leaking version information via the Server HTTP response header.</p>
-      <div class="url">Server: Microsoft-IIS/10.0</div>
-      <p><strong>Solution:</strong> Configure the server to suppress version information.</p>
-    </div>
-    
-    <div style="margin-top: 40px; padding: 20px; background: #fafafa; text-align: center; color: #888;">
-      <p>Generated by OWASP ZAP for Clinic-in-a-Box Training</p>
-      <p style="font-size: 12px;">This is a simulated scan for educational purposes only.</p>
-    </div>
-  </div>
-</body>
-</html>`;
-
-  return html;
-}
-
-function generateNmapXml(profileData, companyName, domain) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  const assets = profileData.assets || [];
-  
-  const scanTargets = assets.filter(a => 
-    a.role === 'server' || a.role === 'network'
-  ).slice(0, 10);
-  
-  if (scanTargets.length === 0) {
-    scanTargets.push(
-      { hostname: 'dc-01', ip: '10.0.0.10', os: 'Windows Server 2019', role: 'server' },
-      { hostname: 'file-server-01', ip: '10.0.0.20', os: 'Windows Server 2019', role: 'server' },
-      { hostname: 'fw-01', ip: '10.0.0.1', os: 'Palo Alto PAN-OS', role: 'network' }
-    );
-  }
-
-  let xml = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nmaprun>
-<nmaprun scanner="nmap" args="nmap -sV -sC -O -oX scan.xml" start="${timestamp}" version="7.94" xmloutputversion="1.05">
-  <scaninfo type="syn" protocol="tcp" numservices="1000" services="1-1000"/>
-  <verbose level="0"/>
-  <debugging level="0"/>
-`;
-
-  scanTargets.forEach((asset, idx) => {
-    const ip = asset.ip || `10.0.0.${idx + 10}`;
-    const hostname = asset.hostname || `host-${idx}`;
-    const os = asset.os || 'Windows Server 2019';
-    const isServer = asset.role === 'server';
-    
-    xml += `  <host starttime="${timestamp}" endtime="${timestamp + 5}">
-    <status state="up" reason="syn-ack" reason_ttl="64"/>
-    <address addr="${ip}" addrtype="ipv4"/>
-    <hostnames>
-      <hostname name="${hostname}.${domain}" type="PTR"/>
-    </hostnames>
-    <ports>
-      <port protocol="tcp" portid="22">
-        <state state="open" reason="syn-ack"/>
-        <service name="ssh" product="OpenSSH" version="8.2p1"/>
-      </port>
-      <port protocol="tcp" portid="80">
-        <state state="${isServer ? 'open' : 'closed'}" reason="syn-ack"/>
-        <service name="http" product="Microsoft IIS httpd" version="10.0"/>
-      </port>
-      <port protocol="tcp" portid="443">
-        <state state="open" reason="syn-ack"/>
-        <service name="ssl/http" product="Microsoft IIS httpd" version="10.0"/>
-      </port>
-      <port protocol="tcp" portid="445">
-        <state state="open" reason="syn-ack"/>
-        <service name="microsoft-ds" product="Microsoft Windows Server"/>
-      </port>
-      <port protocol="tcp" portid="3389">
-        <state state="open" reason="syn-ack"/>
-        <service name="ms-wbt-server" product="Microsoft Terminal Services"/>
-      </port>
-    </ports>
-    <os>
-      <osmatch name="${os}" accuracy="96">
-        <osclass type="server" vendor="Microsoft" osfamily="Windows" osgen="2019" accuracy="96"/>
-      </osmatch>
-    </os>
-    <uptime seconds="${Math.floor(Math.random() * 1000000 + 100000)}" lastboot="2026-01-01T00:00:00"/>
-  </host>
-`;
-  });
-
-  xml += `  <runstats>
-    <finished time="${timestamp + 30}" timestr="${new Date().toUTCString()}" summary="Nmap done; ${scanTargets.length} IP addresses scanned" elapsed="30.5" exit="success"/>
-    <hosts up="${scanTargets.length}" down="0" total="${scanTargets.length}"/>
-  </runstats>
-</nmaprun>`;
-
-  return xml;
-}
-
-// POST /api/instructor/generate-documents - Generate security scan documents via N8N
+// POST /api/instructor/generate-documents - Generate security scan documents (NMAP/NESSUS/ZAP)
+// Uses ai/scan-documents — deterministic, profile-driven, no LLM call.
 router.post('/generate-documents', authenticateToken, instructorOnly, async (req, res) => {
   try {
     const { profile_id, documents = ['nessus', 'zap', 'nmap'] } = req.body;
@@ -1049,46 +757,30 @@ router.post('/generate-documents', authenticateToken, instructorOnly, async (req
       weaknesses: deliberateWeaknesses.length || 0
     });
 
-    // Call N8N webhook to generate documents
-    const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_DOCUMENT_GENERATOR_WEBHOOK}`;
-    console.log('🔗 Calling N8N webhook:', n8nUrl);
-
-    const n8nPayload = {
-      profile_id: profile_id,
-      company_name: companyName,
-      industry: profile.industry,
-      profile_data: profileData,
-      documents: documents,
-      instructor_id: instructorId
+    // Generate documents inline (profile-driven; replaces N8N webhook).
+    // Output traces back to profile.assets[].services so real `nmap` against
+    // the deployed lane matches the fake scan exactly.
+    const { generateScanDocuments } = require('../ai/scan-documents');
+    const domain = orgData?.domain_public || profile.industry?.toLowerCase()?.replace(/\s+/g, '') + '.local' || 'corp.local';
+    const scanProfileData = {
+      ...profileData,
+      assets: networkData.assets || []
     };
-
-    const n8nResponse = await fetch(n8nUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(n8nPayload)
+    const generated = generateScanDocuments({
+      profileData: scanProfileData,
+      companyName,
+      domain,
+      types: documents
     });
 
-    if (!n8nResponse.ok) {
-      const errorText = await n8nResponse.text();
-      console.error('❌ N8N webhook failed:', errorText);
-      throw new Error(`N8N webhook failed: ${n8nResponse.status} ${errorText}`);
-    }
-
-    const n8nData = await n8nResponse.json();
-    console.log('✅ N8N response received:', JSON.stringify({
-      success: n8nData.success,
-      documentCount: n8nData.documents?.length || 0,
-      documentTypes: n8nData.documents?.map(d => d.type) || []
-    }));
+    console.log(`📄 Generated ${generated.length} scan documents inline:`, generated.map(d => `${d.type} (${d.content.length}b)`).join(', '));
 
     // Store the generated documents in database
     const generatedDocs = [];
 
-    if (n8nData.documents) {
-      console.log(`📝 Processing ${n8nData.documents.length} documents from N8N...`);
-      for (const doc of n8nData.documents) {
+    {
+      console.log(`📝 Processing ${generated.length} documents...`);
+      for (const doc of generated) {
         console.log(`  → Saving ${doc.type} document: ${doc.filename} (${doc.content?.length || 0} bytes)`);
         try {
           await query(`
@@ -1134,7 +826,7 @@ router.post('/generate-documents', authenticateToken, instructorOnly, async (req
       success: true,
       documents: generatedDocs,
       generated_at: new Date().toISOString(),
-      n8n_response: n8nData
+      source: 'inline'
     });
 
   } catch (error) {
@@ -1686,84 +1378,66 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
 
     setJobActive(instructorId, profile_id, model);
 
-    // Fire N8N webhook — don't wait for response.
-    // N8N will generate all parts and store them via E4 → POST /api/instructor/store-example
-    const n8nUrl = `${process.env.N8N_BASE_URL}${process.env.N8N_EXAMPLES_WEBHOOK || '/webhook-test/generate-examples'}`;
-    console.log('[Examples] Firing N8N (fire-and-forget):', n8nUrl);
+    // Inline generation (background, fire-and-forget).
+    const { generateExamples } = require('../ai/examples');
+    console.log(`[Examples] Starting inline generation for ${partsToGenerate.length} parts (background)`);
 
-    // Mint a service JWT for N8N webhook auth + E4 store-example auth
-    const serviceToken = jwt.sign(
-      { userId: instructorId, role: 'instructor', service: 'example-generator' },
-      process.env.JWT_SECRET,
-      { expiresIn: '30m' }
-    );
-
-    fetch(n8nUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${serviceToken}`
-      },
-      body: JSON.stringify({
-        profile_id,
-        user_id: instructorId,
-        service_token: serviceToken,
-        profile_context: profileContext,
-        parts: partsToGenerate,
-        part_definitions: PART_DEFINITIONS,
-        model: model || undefined
-      })
-    }).then(async (resp) => {
-      if (!resp.ok) {
-        console.error(`[Examples] N8N webhook returned ${resp.status}:`, await resp.text().catch(() => ''));
-      } else {
-        console.log('[Examples] N8N webhook accepted, generation + DB storage handled by N8N pipeline');
-      }
-      // Also generate intake form locally (fast, no LLM needed)
+    setImmediate(async () => {
       try {
-        const intakeData = generateIntakeFormFromProfile(profile, fullProfileData);
-        const V72_SECTIONS = [
-          'company_info', 'security_policies', 'data_management', 'network_security',
-          'wireless', 'endpoint_security', 'compliance', 'software_assets',
-          'vuln_management', 'admin_privileges', 'secure_config', 'email_web',
-          'network_ports', 'network_devices', 'pentesting'
-        ];
-        await query(`
-          INSERT INTO intake_form_responses
-            (user_id, profile_id, status, completion_percentage,
-             company_info, security_policies, data_management, network_security,
-             wireless, endpoint_security, compliance, software_assets,
-             vuln_management, admin_privileges, secure_config, email_web,
-             network_ports, network_devices, pentesting, started_at, completed_at)
-          VALUES ($1, $2, 'complete', 100,
-             $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
-          ON CONFLICT (user_id, profile_id)
-          DO UPDATE SET
-             status = 'complete', completion_percentage = 100,
-             company_info = EXCLUDED.company_info, security_policies = EXCLUDED.security_policies,
-             data_management = EXCLUDED.data_management, network_security = EXCLUDED.network_security,
-             wireless = EXCLUDED.wireless, endpoint_security = EXCLUDED.endpoint_security,
-             compliance = EXCLUDED.compliance, software_assets = EXCLUDED.software_assets,
-             vuln_management = EXCLUDED.vuln_management, admin_privileges = EXCLUDED.admin_privileges,
-             secure_config = EXCLUDED.secure_config, email_web = EXCLUDED.email_web,
-             network_ports = EXCLUDED.network_ports, network_devices = EXCLUDED.network_devices,
-             pentesting = EXCLUDED.pentesting, completed_at = NOW(), updated_at = NOW()
-        `, [instructorId, profile_id, ...V72_SECTIONS.map(s => JSON.stringify(intakeData[s] || {}))]);
-        console.log('[Examples] Intake form generated and stored');
-      } catch (intakeErr) {
-        console.error('[Examples] Failed to store intake form:', intakeErr.message);
+        await generateExamples({
+          profileId: profile_id,
+          userId: instructorId,
+          profileContext,
+          parts: partsToGenerate,
+          partDefinitions: PART_DEFINITIONS,
+          model
+        });
+        // Also generate intake form locally (fast, no LLM needed)
+        try {
+          const intakeData = generateIntakeFormFromProfile(profile, fullProfileData);
+          const V72_SECTIONS = [
+            'company_info', 'security_policies', 'data_management', 'network_security',
+            'wireless', 'endpoint_security', 'compliance', 'software_assets',
+            'vuln_management', 'admin_privileges', 'secure_config', 'email_web',
+            'network_ports', 'network_devices', 'pentesting'
+          ];
+          await query(`
+            INSERT INTO intake_form_responses
+              (user_id, profile_id, status, completion_percentage,
+               company_info, security_policies, data_management, network_security,
+               wireless, endpoint_security, compliance, software_assets,
+               vuln_management, admin_privileges, secure_config, email_web,
+               network_ports, network_devices, pentesting, started_at, completed_at)
+            VALUES ($1, $2, 'complete', 100,
+               $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())
+            ON CONFLICT (user_id, profile_id)
+            DO UPDATE SET
+               status = 'complete', completion_percentage = 100,
+               company_info = EXCLUDED.company_info, security_policies = EXCLUDED.security_policies,
+               data_management = EXCLUDED.data_management, network_security = EXCLUDED.network_security,
+               wireless = EXCLUDED.wireless, endpoint_security = EXCLUDED.endpoint_security,
+               compliance = EXCLUDED.compliance, software_assets = EXCLUDED.software_assets,
+               vuln_management = EXCLUDED.vuln_management, admin_privileges = EXCLUDED.admin_privileges,
+               secure_config = EXCLUDED.secure_config, email_web = EXCLUDED.email_web,
+               network_ports = EXCLUDED.network_ports, network_devices = EXCLUDED.network_devices,
+               pentesting = EXCLUDED.pentesting, completed_at = NOW(), updated_at = NOW()
+          `, [instructorId, profile_id, ...V72_SECTIONS.map(s => JSON.stringify(intakeData[s] || {}))]);
+          console.log('[Examples] Intake form generated and stored');
+        } catch (intakeErr) {
+          console.error('[Examples] Failed to store intake form:', intakeErr.message);
+        }
+      } catch (err) {
+        console.error('[Examples] Background generation failed:', err.message);
+      } finally {
+        setJobComplete(instructorId, profile_id);
       }
-      setJobComplete(instructorId, profile_id);
-    }).catch((err) => {
-      console.error('[Examples] N8N fire-and-forget failed:', err.message);
-      setJobComplete(instructorId, profile_id);
     });
 
     res.json({
       success: true,
       status: 'generating',
       profile_id,
-      message: `Answer key generation started for ${partsToGenerate.length} parts. N8N will store results directly. You can leave this page.`
+      message: `Answer key generation started for ${partsToGenerate.length} parts (inline Claude, no N8N). You can leave this page.`
     });
 
   } catch (error) {

@@ -37,6 +37,7 @@
             { "label": "My Progress",        "icon": "\ud83d\udcc8", "url": "/ciab/progress",             "page": "progress" },
             { "label": "Interview Sim",      "icon": "\ud83c\udfa4", "url": "/ciab/interview",            "page": "interview" },
             { "label": "Instructor",         "icon": "\ud83d\udc68\u200d\ud83c\udfeb", "url": "/ciab/instructor", "page": "instructor", "roles": ["instructor", "admin"] },
+            { "label": "Admin: Deploy Lanes","icon": "\ud83d\ude80", "url": "/ciab/admin-profile-lanes",   "page": "admin-profile-lanes", "roles": ["admin"] },
             { "label": "AI Assistant",       "icon": "\ud83e\udd16", "url": "#",                          "page": "ai-assistant", "onclick": "Layout.openChat(); return false;" }
         ]
     }

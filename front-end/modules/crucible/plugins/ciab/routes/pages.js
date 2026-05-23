@@ -23,6 +23,7 @@ const pages = {
   '/nice-framework': 'nice-framework.html',
   '/real-client-intake':        'real-client-intake.html',
   '/real-client-intakes':       'real-client-intakes.html',
+  '/admin-profile-lanes':       'admin-profile-lanes.html',
 };
 
 // Dynamic page route for viewing a specific real-client intake

@@ -106,15 +106,11 @@ services:
       JWT_EXPIRES_IN: 7d
       SESSION_SECRET: ${SESSION_SECRET}
       COOKIE_SECURE: "false"
-      # N8N
-      N8N_BASE_URL: ${N8N_BASE_URL}
-      N8N_GENERATE_WEBHOOK: ${N8N_GENERATE_WEBHOOK}
-      N8N_DOCUMENT_GENERATOR_WEBHOOK: ${N8N_DOCUMENT_GENERATOR_WEBHOOK}
-      N8N_POLICY_WEBHOOK_URL: ${N8N_POLICY_WEBHOOK_URL}
-      N8N_EXAMPLES_WEBHOOK: ${N8N_EXAMPLES_WEBHOOK}
-      N8N_CHAT_WEBHOOK: ${N8N_CHAT_WEBHOOK}
-      N8N_DEPLOY_LANE_WEBHOOK: ${N8N_DEPLOY_LANE_WEBHOOK}
-      N8N_TEARDOWN_LANE_WEBHOOK: ${N8N_TEARDOWN_LANE_WEBHOOK}
+      # Anthropic API — replaces every former N8N webhook (profile gen, policy gen,
+      # examples, chat, interview, vuln-app). See front-end/src/utils/llm-client.js.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-4-5}
+      LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-6}
       # Guacamole — internal service, always points to compose container
       GUAC_ENABLED: "true"
       GUAC_PUBLIC_BASE_URL: /guacamole
@@ -156,7 +152,14 @@ services:
       - cybercore-net
 
   # ============================================================================
-  # N8N — Workflow automation (use patched image)
+  # N8N — Workflow automation (kept available, not currently called by app code)
+  # ============================================================================
+  # NOTE: As of the N8N removal migration, NO front-end route calls these
+  # webhooks anymore — all AI generation runs inline via @anthropic-ai/sdk
+  # (see front-end/src/utils/llm-client.js). The service is left here so it
+  # remains an option for future automation needs. The original seed mounts
+  # (config/n8n/{init.sh,workflows,credentials}) were deleted with the
+  # migration; uncomment + repopulate them if you want auto-imported flows.
   # ============================================================================
   n8n:
     image: docker.n8n.io/n8nio/n8n:2.19.4
@@ -195,18 +198,20 @@ services:
       N8N_RUNNERS_BROKER_LISTEN_ADDRESS: 0.0.0.0
       N8N_NATIVE_PYTHON_RUNNER: "true"
       OFFLOAD_MANUAL_EXECUTIONS_TO_WORKERS: "true"
-    entrypoint: ["/bin/sh","-lc"]
-    command: "/docker-entrypoint-initn8n.sh"
+    # Default n8n entrypoint — the original `/docker-entrypoint-initn8n.sh`
+    # script that seeded workflows/credentials lived under ./config/n8n/ and
+    # was removed in the migration. If you want auto-seeded flows again,
+    # restore config/n8n/init.sh and re-add the entrypoint+command lines.
     ports:
       - "0.0.0.0:5678:5678"
-    env_file:
-      - ./config/secrets.env
     volumes:
       - cybercore-n8n-data:/home/node
-      - ./config/n8n/init.sh:/docker-entrypoint-initn8n.sh:ro,z
-      - ./config/n8n/workflows:/seed/workflows:ro,z
-      - ./config/n8n/credentials:/seed/credentials:ro,z
-      - ./config/site.json:/seed/site.json:ro,z
+      # The following mounts were removed in the N8N removal migration —
+      # uncomment + restore the source files in ./config/n8n/ to use them:
+      # - ./config/n8n/init.sh:/docker-entrypoint-initn8n.sh:ro,z
+      # - ./config/n8n/workflows:/seed/workflows:ro,z
+      # - ./config/n8n/credentials:/seed/credentials:ro,z
+      # - ./config/site.json:/seed/site.json:ro,z
     healthcheck:
       test: ["CMD", "node", "-e", "require('http').get('http://0.0.0.0:5678/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 15s

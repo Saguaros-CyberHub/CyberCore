@@ -367,8 +367,10 @@ router.get('/stakeholders/:profileId', authenticateToken, async (req, res) => {
 });
 
 // ============================================================================
-// AI RESPONSE GENERATION - N8N with Ollama fallback
+// AI RESPONSE GENERATION — inline Claude (replaces N8N + Ollama fallback paths)
 // ============================================================================
+const llm = require('../../../../../src/utils/llm-client');
+
 async function generateResponse(respondent, allStakeholders, orgContext, transcript, userMessage) {
   const conversationHistory = transcript.slice(-10).map(t => ({
     role: t.role === 'student' ? 'user' : 'assistant',
@@ -379,54 +381,25 @@ async function generateResponse(respondent, allStakeholders, orgContext, transcr
 
   const systemPrompt = buildSystemPrompt(respondent, allStakeholders, orgContext);
 
-  // Try N8N first
-  const n8nUrl = `${process.env.N8N_BASE_URL || 'http://localhost:5678'}${process.env.N8N_INTERVIEW_WEBHOOK || '/webhook-test/interview-chat'}`;
   try {
-    const n8nResp = await fetch(n8nUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system_prompt: systemPrompt,
-        messages: conversationHistory,
-        user_message: userMessage,
-        stakeholder_name: respondent.name,
-        stakeholder_role: respondent.role
-      }),
-      signal: AbortSignal.timeout(30000)
+    const { text } = await llm.generate({
+      // The system prompt embeds respondent-specific data — only the rule
+      // boilerplate is reusable for caching, and we'd need to refactor
+      // buildSystemPrompt to split static/dynamic to use cachedSystem. For
+      // now, pass system as a plain string (no caching) — interview latency
+      // is dominated by output tokens anyway.
+      system: systemPrompt,
+      messages: [
+        ...conversationHistory,
+        { role: 'user', content: userMessage }
+      ],
+      max_tokens: 256,         // 2–3 sentences per the prompt rules
+      temperature: 0.7,
+      label: `interview:${respondent.name?.slice(0, 12)}`
     });
-
-    if (n8nResp.ok) {
-      const n8nData = await n8nResp.json();
-      const reply = (Array.isArray(n8nData) ? n8nData[0] : n8nData);
-      const text = reply.response || reply.output || reply.text || reply.message;
-      if (text) {
-        return text.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
-      }
-    }
-  } catch (n8nErr) {
-    console.log('[Interview] N8N unavailable, trying Ollama fallback:', n8nErr.message);
-  }
-
-  // Ollama fallback
-  try {
-    const ollamaUrl = process.env.OLLAMA_URL || 'http://localhost:11434/api/chat';
-    const ollamaResp = await fetch(ollamaUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: process.env.OLLAMA_MODEL || 'llama3.2',
-        messages: [{ role: 'system', content: systemPrompt }, ...conversationHistory, { role: 'user', content: userMessage }],
-        stream: false,
-        options: { temperature: 0.7, num_predict: 100 }
-      }),
-      signal: AbortSignal.timeout(60000)
-    });
-
-    const data = await ollamaResp.json();
-    const content = data.message?.content || '';
-    return content.replace(/<think>[\s\S]*?<\/think>/g, '').trim() || fallbackResponse(respondent);
-  } catch (ollamaErr) {
-    console.error('[Interview] Ollama also unavailable:', ollamaErr.message);
+    return (text || '').replace(/<think>[\s\S]*?<\/think>/g, '').trim() || fallbackResponse(respondent);
+  } catch (err) {
+    console.error('[Interview] Claude call failed, using hardcoded fallback:', err.message);
     return fallbackResponse(respondent);
   }
 }

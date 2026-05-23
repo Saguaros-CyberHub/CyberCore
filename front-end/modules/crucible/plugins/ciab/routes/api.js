@@ -30,6 +30,7 @@ const realClientIntakeRoutes = require('./real-client-intake');
 const intakesRoutes = require('./intakes');
 const clinicRiskAssessmentRoutes = require('./clinic-risk-assessment');
 const cisRamRoutes = require('./cis-ram');
+const profileDeployRoutes = require('./profile-deploy');
 
 // Mount with auth + schedule checking
 router.use('/api/profiles', authenticateToken, checkSchedule, profileRoutes);
@@ -45,5 +46,7 @@ router.use('/api/intakes', checkSchedule, intakesRoutes);
 router.use('/api/clinic-risk-assessment', checkSchedule, clinicRiskAssessmentRoutes);
 // CIS RAM Workbook API (Phase 2). Auth applied internally.
 router.use('/api/cis-ram', checkSchedule, cisRamRoutes);
+// Admin-only: deploy N cybercore lanes from a single CIAB profile. Auth applied internally.
+router.use('/api/profile-deploy', checkSchedule, profileDeployRoutes);
 
 module.exports = router;

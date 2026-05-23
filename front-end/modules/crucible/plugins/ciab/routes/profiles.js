@@ -10,8 +10,11 @@ const express = require('express');
 const router = express.Router();
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { pool } = require('../utils/db');
-const { authenticateToken } = require('../../../../../src/middleware/auth');
+const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
+
+const adminOnly = requireRole('admin');
 // Policy generation is handled by the N8N Policy Generator workflow
 // Template fallback available at: require('../../installed-plugins/crucible-plugins/ciab/utils/policy-templates')
 
@@ -297,127 +300,159 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/profiles/generate - Trigger N8N workflow to generate profile
+// ─── Inline Profile Generation Helper ──────────────────────────────────────
+// Replaces the old N8N webhook call. Same signature so admin's
+// generate-and-deploy endpoint (and other internal callers) don't change.
+const { generateProfile } = require('../ai/profile');
+
+async function callInlineGenerateProfile({
+  userId,
+  client_type = 'SMB',
+  industry,
+  difficulty = 'intermediate',
+  maturity,
+  delivery,
+  employees,
+  llmModel,
+  temperature,
+  custom_config = {}
+} = {}) {
+  const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12'];
+  const validDifficulties = ['beginner', 'intermediate', 'advanced'];
+  if (!validClientTypes.includes(client_type)) {
+    throw Object.assign(new Error('Invalid client_type'), { statusCode: 400 });
+  }
+  if (!validDifficulties.includes(difficulty)) {
+    throw Object.assign(new Error('Invalid difficulty'), { statusCode: 400 });
+  }
+
+  return generateProfile({
+    user_id: userId,
+    client_type, industry, difficulty, maturity, delivery, employees,
+    llmModel, temperature, custom_config
+  });
+}
+
+// Backward-compatible alias (any external file that imported the old name still works)
+const callN8nGenerateProfile = callInlineGenerateProfile;
+
+// POST /api/profiles/generate — thin wrapper around callInlineGenerateProfile
 router.post('/generate', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
-    const {
-      client_type = 'SMB',
-      industry,
-      difficulty = 'intermediate',
-      maturity,
-      delivery,
-      employees,
-      llmModel,
-      temperature,
-      custom_config = {}
-    } = req.body;
-    
-    console.log('🚀 Generating profile for user:', userId);
-    console.log('   Config:', { client_type, industry, difficulty, maturity, delivery, employees });
-    
-    // Validate inputs
-    const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12'];
-    const validDifficulties = ['beginner', 'intermediate', 'advanced'];
-    
-    if (!validClientTypes.includes(client_type)) {
-      return res.status(400).json({ error: 'Invalid client_type' });
-    }
-    
-    if (!validDifficulties.includes(difficulty)) {
-      return res.status(400).json({ error: 'Invalid difficulty' });
-    }
-    
-    // Build N8N webhook payload
-    const webhookPayload = {
-      user_id: userId,
-      client_type,
-      industry,
-      difficulty,
-      maturity,
-      delivery,
-      employees,
-      llmModel: llmModel || undefined,
-      temperature: temperature || undefined,
-      ...custom_config
-    };
-    
-    // Get N8N webhook URL from environment
-    const n8nWebhookUrl = process.env.N8N_WEBHOOK_URL || 'http://localhost:5678/webhook/generate-profile';
-    
-    console.log('📡 Calling N8N webhook:', n8nWebhookUrl);
-    
-    // Call N8N workflow
-    const n8nResponse = await fetch(n8nWebhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(webhookPayload),
-      signal: AbortSignal.timeout(120000) // 2 minute timeout
-    });
-    
-    if (!n8nResponse.ok) {
-      console.error('❌ N8N webhook failed:', n8nResponse.status, n8nResponse.statusText);
-      const errorText = await n8nResponse.text();
-      console.error('   Error details:', errorText);
-      return res.status(500).json({ 
-        error: 'Profile generation failed',
-        details: errorText
-      });
-    }
-    
-    const n8nResult = await n8nResponse.json();
-    console.log('✅ N8N workflow completed');
-    
-    // The N8N workflow should have created the profile in the database
-    if (n8nResult.success && n8nResult.profile_id) {
-      // Fetch the created profile
-      const profileResult = await pool.query(`
-        SELECT
-          id,
-          company_name,
-          client_type,
-          industry,
-          difficulty,
-          created_at,
-          run_id,
-          html_file_path,
-          json_file_path
-        FROM profiles
-        WHERE id = $1 AND user_id = $2
-      `, [n8nResult.profile_id, userId]);
-
-      if (profileResult.rows.length > 0) {
-        const createdProfile = profileResult.rows[0];
-        console.log('✅ Profile created successfully:', createdProfile.id);
-
-        // Policy documents are generated on-demand via the N8N Policy Generator workflow
-        // (triggered by the "Generate Policies" button on the student dashboard)
-
-        return res.json({
-          success: true,
-          message: 'Profile generated successfully',
-          profile: toCamelCase(createdProfile)
-        });
-      }
-    }
-    
-    // If we get here, something went wrong
-    console.error('⚠️ N8N completed but profile not found in database');
-    res.status(500).json({ 
-      error: 'Profile generation completed but profile not found',
-      n8n_response: n8nResult
-    });
-    
-  } catch (error) {
-    console.error('❌ Error generating profile:', error);
-    res.status(500).json({ 
-      error: 'Failed to generate profile',
-      details: error.message 
-    });
+    const profile = await callInlineGenerateProfile({ userId: req.user.userId, ...req.body });
+    res.json({ success: true, message: 'Profile generated successfully', profile: toCamelCase(profile) });
+  } catch (err) {
+    console.error('❌ Error generating profile:', err.message);
+    res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
+
+// ─── Admin: upload an existing profile JSON ─────────────────────────────────
+// Multipart NOT used — admin POSTs raw JSON as body so we don't depend on
+// multer (not currently in deps). Validates shape, writes to profiles/, then
+// inserts a row so the admin can deploy from it.
+router.post('/upload', authenticateToken, adminOnly, express.json({ limit: '20mb' }), async (req, res) => {
+  try {
+    const json = req.body && (Array.isArray(req.body) ? req.body[0] : req.body);
+    const assets = json?.student_view?.raw?.threats?.network?.assets || json?.assets;
+    if (!Array.isArray(assets) || assets.length === 0) {
+      return res.status(400).json({
+        error: 'Invalid profile JSON: expected student_view.raw.threats.network.assets[] (or top-level assets[])'
+      });
+    }
+
+    const meta = json?.student_view?.meta || {};
+    const quick = json?.student_view?.quick || {};
+    const orgInfo = json?.student_view?.raw?.threats?.organization || {};
+
+    const runId = `UPLOAD_${Date.now().toString(36).toUpperCase()}_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const profilesDir = path.join(process.cwd(), 'profiles');
+    if (!fs.existsSync(profilesDir)) fs.mkdirSync(profilesDir, { recursive: true });
+
+    const fileName = `admin_uploaded_${runId}.json`;
+    const fullPath = path.join(profilesDir, fileName);
+    const relPath = path.join('profiles', fileName).replace(/\\/g, '/');
+    fs.writeFileSync(fullPath, JSON.stringify(json, null, 2));
+
+    const insert = await pool.query(`
+      INSERT INTO profiles (user_id, company_name, client_type, industry, difficulty,
+                            json_file_path, run_id, generation_status, profile_type)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'complete', 'admin_uploaded')
+      RETURNING id, company_name, run_id, json_file_path, created_at
+    `, [
+      req.user.userId,
+      quick.company_name || orgInfo.company_name || meta.cover_name || 'Uploaded Profile',
+      'SMB',
+      orgInfo.industry || quick.industry || null,
+      meta.difficulty || 'intermediate',
+      relPath,
+      runId
+    ]);
+
+    res.status(201).json({
+      success: true,
+      message: 'Profile uploaded',
+      profile: toCamelCase(insert.rows[0]),
+      asset_count: assets.length
+    });
+  } catch (err) {
+    console.error('❌ Profile upload failed:', err.message);
+    res.status(500).json({ error: 'Profile upload failed', details: err.message });
+  }
+});
+
+// ─── Admin: one-step generate + deploy ──────────────────────────────────────
+// Generates a profile via N8N, then immediately calls runProfileDeploy() from
+// the profile-deploy route module. Returns both profile_id and group_id so
+// the UI can switch straight into the lane-group status view.
+router.post('/generate-and-deploy', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const {
+      num_lanes,
+      group_name,
+      attack_boxes,
+      subnet_scheme,
+      asset_selection,
+      vuln_app,
+      ...generateParams
+    } = req.body || {};
+
+    if (!Number.isFinite(parseInt(num_lanes, 10)) || parseInt(num_lanes, 10) < 1) {
+      return res.status(400).json({ error: 'num_lanes (>=1) required' });
+    }
+
+    const profile = await callN8nGenerateProfile({ userId: req.user.userId, ...generateParams });
+
+    // Lazy-require profile-deploy to avoid a circular dependency at module load.
+    const { runProfileDeploy } = require('./profile-deploy');
+    const deployResult = await runProfileDeploy({
+      profileId: profile.id,
+      userId: req.user.userId,
+      numLanes: parseInt(num_lanes, 10),
+      groupName: group_name,
+      attackBoxes: attack_boxes !== false,
+      subnetScheme: subnet_scheme || 'v2',
+      assetSelection: asset_selection,
+      vulnAppOpts: vuln_app || {}
+    });
+
+    res.status(202).json({
+      success: true,
+      profile: toCamelCase(profile),
+      deploy: deployResult
+    });
+  } catch (err) {
+    console.error('❌ generate-and-deploy failed:', err.message);
+    const status = err.statusCode || 500;
+    const body = { error: err.message };
+    if (err.n8n_response) body.n8n_response = err.n8n_response;
+    if (err.template_misses) body.template_misses = err.template_misses;
+    if (err.service_gaps) body.service_gaps = err.service_gaps;
+    res.status(status).json(body);
+  }
+});
+
+// (callN8nGenerateProfile is exported below, after `module.exports = router`)
 
 // ============================================================================
 // PARAMETERIZED ROUTES (MUST BE AFTER SPECIFIC ROUTES)
@@ -514,7 +549,8 @@ router.get('/:id/policies/:slug', authenticateToken, async (req, res) => {
   }
 });
 
-// POST /api/profiles/:id/policies/generate - Generate (or regenerate) policies via N8N workflow
+// POST /api/profiles/:id/policies/generate - Generate (or regenerate) policies via inline Claude
+const { generatePolicies } = require('../ai/policy');
 router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -546,38 +582,14 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Profile JSON file not found — cannot generate policies' });
     }
 
-    // Call the N8N Policy Generator workflow
-    const n8nPolicyUrl = process.env.N8N_POLICY_WEBHOOK_URL || 'http://localhost:5678/webhook-test/generate-policies';
-    console.log(`📋 [policies/generate] Calling N8N at ${n8nPolicyUrl}...`);
-
-    const n8nResponse = await fetch(n8nPolicyUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        profile_id: id,
-        user_id: userId,
-        profile_data: profileJson,
-        difficulty: profile.difficulty,
-        model: model || undefined,
-      }),
-      signal: AbortSignal.timeout(600000) // 10 minute timeout (LLM generation is slow)
+    const result = await generatePolicies({
+      profileJson,
+      difficulty: profile.difficulty,
+      model,
+      profileId: id
     });
 
-    console.log(`📋 [policies/generate] N8N responded: status=${n8nResponse.status}`);
-
-    if (!n8nResponse.ok) {
-      const errorText = await n8nResponse.text();
-      console.error('❌ N8N policy webhook failed:', n8nResponse.status, errorText);
-      return res.status(500).json({ error: 'Policy generation workflow failed', details: errorText });
-    }
-
-    const n8nResult = await n8nResponse.json();
-    console.log(`📋 [policies/generate] N8N result type=${typeof n8nResult}, isArray=${Array.isArray(n8nResult)}`);
-    // N8N returns array — get the first item
-    const result = Array.isArray(n8nResult) ? n8nResult[0] : n8nResult;
-    console.log(`📋 [policies/generate] Parsed result: success=${result.success}, policies=${result.policies?.length || 0}`);
-
-    if (!result.success || !result.policies || result.policies.length === 0) {
+    if (!result.policies || result.policies.length === 0) {
       return res.json({
         success: true,
         message: result.message || 'No policies generated (policies_present may be empty)',
@@ -585,7 +597,7 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
       });
     }
 
-    // Store policies in generated_documents (non-blocking — don't fail the request if DB insert fails)
+    // Persist into generated_documents (non-blocking on DB failure — still return the result)
     const safeName = (profile.company_name || 'profile').replace(/[^a-z0-9]/gi, '_').toLowerCase();
     try {
       await pool.query(`
@@ -603,15 +615,14 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
       console.log(`📋 [policies/generate] Stored ${result.total_count} policies in DB`);
     } catch (dbError) {
       console.error('⚠️ [policies/generate] DB insert failed (policies still generated):', dbError.message);
-      // Continue — return policies even if DB storage fails
     }
 
-    console.log(`📋 Generated ${result.total_count} policy documents for profile ${id} via N8N (${((result.total_generation_time_ms || 0) / 1000).toFixed(1)}s)`);
+    console.log(`📋 Generated ${result.total_count} policy documents for profile ${id} (${(result.total_generation_time_ms / 1000).toFixed(1)}s)`);
     res.json({
       success: true,
       message: `Generated ${result.total_count} policy documents`,
       total_count: result.total_count,
-      policies: result.policies.map(p => ({ name: p.name, slug: p.slug }))
+      policies: result.policies.map(p => ({ name: p.name, slug: p.slug, error: p.error }))
     });
   } catch (error) {
     console.error('❌ [policies/generate] Error:', error.message);
@@ -1542,3 +1553,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
+// Expose the N8N helper as a property of the router so other modules
+// (profile-deploy.js generate-and-deploy) can drive profile generation
+// without going through HTTP.
+module.exports.callN8nGenerateProfile = callN8nGenerateProfile;

@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin: Deploy Lanes | Clinic-in-a-Box</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .tabs { display:flex; gap:0.5rem; border-bottom:2px solid var(--gray-200); margin-bottom:1.5rem; }
+    .tab { padding:0.75rem 1.5rem; cursor:pointer; font-weight:500; color:var(--gray-500);
+           border-bottom:2px solid transparent; margin-bottom:-2px; transition:all 0.2s; }
+    .tab:hover { color: var(--primary); }
+    .tab.active { color:var(--primary); border-bottom-color:var(--primary); background:rgba(59,130,246,0.05); }
+    .tab-content { display:none; }
+    .tab-content.active { display:block; }
+
+    .card { background:var(--bg-card, white); border-radius:12px; padding:1.5rem;
+            box-shadow:0 2px 8px rgba(0,0,0,0.08); margin-bottom:1rem; }
+    .card h3 { margin-top:0; }
+
+    .form-row { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem; }
+    .form-row.three { grid-template-columns:1fr 1fr 1fr; }
+    label { display:block; font-size:0.85rem; color:var(--gray-700); margin-bottom:0.35rem; font-weight:500; }
+    input[type=text], input[type=number], select, textarea {
+      width:100%; padding:0.55rem 0.75rem; border:1px solid var(--gray-300);
+      border-radius:8px; font-family:inherit; font-size:0.95rem;
+      background:var(--bg-input, white); color:var(--gray-900);
+    }
+
+    .asset-table { width:100%; border-collapse:collapse; font-size:0.9rem; }
+    .asset-table th, .asset-table td { padding:0.5rem 0.75rem; text-align:left;
+                                       border-bottom:1px solid var(--gray-200); }
+    .asset-table th { color:var(--gray-700); font-weight:600; background:var(--gray-50); }
+    .role-server { color:#3b82f6; font-weight:600; }
+    .role-workstation { color:var(--gray-500); }
+
+    .pill { display:inline-block; padding:0.15rem 0.6rem; border-radius:999px;
+            font-size:0.75rem; font-weight:600; }
+    .pill-active { background:#d1fae5; color:#065f46; }
+    .pill-deploying { background:#dbeafe; color:#1e40af; }
+    .pill-partial { background:#fef3c7; color:#92400e; }
+    .pill-error { background:#fee2e2; color:#991b1b; }
+    .pill-deleted { background:var(--gray-200); color:var(--gray-700); }
+    .pill-pending { background:var(--gray-200); color:var(--gray-700); }
+    .pill-cloning { background:#dbeafe; color:#1e40af; }
+    .pill-firstboot { background:#fef3c7; color:#92400e; }
+
+    .gap-card { background:#fef3c7; border-left:4px solid #f59e0b;
+                padding:0.75rem 1rem; border-radius:6px; margin:0.5rem 0; }
+    .miss-card { background:#fee2e2; border-left:4px solid #ef4444;
+                 padding:0.75rem 1rem; border-radius:6px; margin:0.5rem 0; }
+    .gap-card code, .miss-card code { background:rgba(0,0,0,0.05); padding:0.1rem 0.4rem; border-radius:4px; }
+
+    .lane-row { display:grid; grid-template-columns:60px 100px 1fr 120px 120px;
+                gap:0.5rem; padding:0.5rem 0.75rem; border-bottom:1px solid var(--gray-200);
+                align-items:center; font-size:0.9rem; }
+    .lane-row.header { font-weight:600; color:var(--gray-700); background:var(--gray-50); }
+    .ip-list { font-family:monospace; font-size:0.85rem; color:var(--gray-700); }
+
+    .btn { padding:0.55rem 1.1rem; border-radius:8px; border:none; cursor:pointer;
+           font-weight:500; font-size:0.9rem; }
+    .btn-primary { background:var(--primary, #3b82f6); color:white; }
+    .btn-primary:hover { background:#2563eb; }
+    .btn-secondary { background:var(--gray-200); color:var(--gray-900); }
+    .btn-danger { background:#ef4444; color:white; }
+    .btn-small { padding:0.3rem 0.7rem; font-size:0.8rem; }
+    .btn:disabled { opacity:0.5; cursor:not-allowed; }
+
+    .muted { color:var(--gray-500); font-size:0.85rem; }
+    .empty { padding:2rem; text-align:center; color:var(--gray-500); }
+
+    .status-banner { padding:0.75rem 1rem; border-radius:8px; margin:0.5rem 0; }
+    .status-banner.success { background:#d1fae5; color:#065f46; }
+    .status-banner.error { background:#fee2e2; color:#991b1b; }
+    .status-banner.info { background:#dbeafe; color:#1e40af; }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
+        </div>
+      </header>
+
+      <div class="page-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Admin: Deploy Lanes from Profile</h1>
+            <p class="page-subtitle">Deploy N classroom lanes from a single AI-generated CIAB profile.
+               Only server assets become real VMs; workstations stay phantom.
+               Default subnet scheme: <strong>v2</strong> (10.x.x.x lanes).</p>
+          </div>
+        </div>
+
+        <div class="tabs">
+          <div class="tab active" data-tab="generate" onclick="switchTab('generate')">1. Generate + Deploy</div>
+          <div class="tab" data-tab="existing" onclick="switchTab('existing')">2. Deploy From Existing</div>
+          <div class="tab" data-tab="groups" onclick="switchTab('groups')">3. Active Groups</div>
+        </div>
+
+        <!-- ───────────────────────────── TAB 1: Generate + Deploy ───────────────────────────── -->
+        <div class="tab-content active" id="tab-generate">
+          <div class="card">
+            <h3>Generate a new profile + deploy lanes in one step</h3>
+            <p class="muted">Calls the existing N8N profile-generation workflow, then immediately deploys lanes from the result.
+               You can tweak the asset selection after the profile is generated, on Tab 2.</p>
+
+            <div class="form-row three">
+              <div>
+                <label>Client type</label>
+                <select id="gen-client-type">
+                  <option value="SMB">SMB</option>
+                  <option value="NonProfit">NonProfit</option>
+                  <option value="Utility_IT_OT">Utility (IT/OT)</option>
+                  <option value="K12">K-12</option>
+                </select>
+              </div>
+              <div>
+                <label>Difficulty</label>
+                <select id="gen-difficulty">
+                  <option value="beginner">Beginner</option>
+                  <option value="intermediate" selected>Intermediate</option>
+                  <option value="advanced">Advanced</option>
+                </select>
+              </div>
+              <div>
+                <label>Industry</label>
+                <input type="text" id="gen-industry" placeholder="e.g. healthcare, retail" />
+              </div>
+            </div>
+
+            <div class="form-row three">
+              <div>
+                <label>Employees</label>
+                <input type="number" id="gen-employees" placeholder="50" min="1" />
+              </div>
+              <div>
+                <label>Group name (optional)</label>
+                <input type="text" id="gen-group-name" placeholder="Mon-AM-CIAB-101" />
+              </div>
+              <div>
+                <label>Number of lanes</label>
+                <input type="number" id="gen-num-lanes" value="3" min="1" max="20" />
+              </div>
+            </div>
+
+            <div class="form-row three">
+              <div>
+                <label>Subnet scheme</label>
+                <select id="gen-subnet-scheme">
+                  <option value="v2" selected>v2 (10.x.x.x — recommended)</option>
+                  <option value="v3">v3 (segmented DMZ — advanced)</option>
+                </select>
+              </div>
+              <div>
+                <label>&nbsp;</label>
+                <label><input type="checkbox" id="gen-attack-boxes" checked /> Deploy Kali attack box per lane</label>
+              </div>
+              <div>
+                <label>&nbsp;</label>
+                <label><input type="checkbox" id="gen-vuln-app" checked /> Generate AI vulnerable web app</label>
+              </div>
+            </div>
+
+            <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+              <button class="btn btn-primary" onclick="generateAndDeploy()">Generate + Deploy</button>
+            </div>
+            <div id="gen-result"></div>
+          </div>
+        </div>
+
+        <!-- ───────────────────────────── TAB 2: Deploy From Existing ───────────────────────────── -->
+        <div class="tab-content" id="tab-existing">
+          <div class="card">
+            <h3>Pick or upload a profile</h3>
+            <div class="form-row">
+              <div>
+                <label>Existing profile</label>
+                <select id="profile-picker"><option>Loading…</option></select>
+              </div>
+              <div>
+                <label>Or upload profile JSON</label>
+                <input type="file" id="profile-upload" accept="application/json" />
+              </div>
+            </div>
+            <div style="display:flex; gap:0.5rem;">
+              <button class="btn btn-secondary" onclick="refreshProfiles()">Refresh list</button>
+              <button class="btn btn-secondary" onclick="loadSelectedProfile()">Load profile</button>
+            </div>
+            <div id="profile-load-result"></div>
+          </div>
+
+          <div class="card" id="asset-selection-card" style="display:none;">
+            <h3>Asset selection</h3>
+            <p class="muted">Default: all <strong>server</strong> assets selected. Untick anything you don't want deployed.
+               Workstations / mobile / IoT stay phantom in the profile but won't get real VMs.</p>
+            <div style="max-height:340px; overflow:auto; border:1px solid var(--gray-200); border-radius:8px;">
+              <table class="asset-table">
+                <thead>
+                  <tr><th>Deploy</th><th>Hostname</th><th>Role</th><th>OS</th><th>Services</th></tr>
+                </thead>
+                <tbody id="asset-table-body"></tbody>
+              </table>
+            </div>
+
+            <div class="form-row three" style="margin-top:1rem;">
+              <div>
+                <label>Number of lanes</label>
+                <input type="number" id="dep-num-lanes" value="3" min="1" max="20" />
+              </div>
+              <div>
+                <label>Group name (optional)</label>
+                <input type="text" id="dep-group-name" placeholder="default = company-date" />
+              </div>
+              <div>
+                <label>Subnet scheme</label>
+                <select id="dep-subnet-scheme">
+                  <option value="v2" selected>v2 (10.x.x.x — recommended)</option>
+                  <option value="v3">v3 (segmented DMZ)</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row three">
+              <div><label>&nbsp;</label><label><input type="checkbox" id="dep-attack-boxes" checked /> Kali per lane</label></div>
+              <div><label>&nbsp;</label><label><input type="checkbox" id="dep-vuln-app" checked /> AI vulnerable web app</label></div>
+              <div><label>&nbsp;</label><label><input type="checkbox" id="dep-vuln-app-dedicated" /> Force dedicated VM for vuln app</label></div>
+            </div>
+
+            <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
+              <button class="btn btn-secondary" onclick="runPreview()">Preview impact</button>
+              <button class="btn btn-primary" onclick="runDeploy()">Deploy lanes</button>
+            </div>
+            <div id="preview-result"></div>
+            <div id="deploy-result"></div>
+          </div>
+        </div>
+
+        <!-- ───────────────────────────── TAB 3: Active Groups ───────────────────────────── -->
+        <div class="tab-content" id="tab-groups">
+          <div class="card">
+            <h3>Lane groups</h3>
+            <div style="display:flex; gap:0.5rem; margin-bottom:1rem;">
+              <button class="btn btn-secondary btn-small" onclick="refreshGroups()">Refresh</button>
+              <span class="muted" id="groups-status"></span>
+            </div>
+            <div id="groups-list"><div class="empty">Loading…</div></div>
+          </div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/ciab/js/ciab-api.js"></script>
+  <script src="/js/layout.js"></script>
+  <script src="/ciab/js/admin-profile-lanes.js"></script>
+</body>
+</html>

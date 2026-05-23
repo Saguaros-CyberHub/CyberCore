@@ -13,35 +13,20 @@ const { authenticate, optionalAuth } = require('../../../../../src/middleware/au
 // POST /api/generate - Trigger profile generation via N8N
 // ============================================================================
 
+// Generation now runs inline via /api/profiles/generate (which calls
+// ai/profile/index.js). This wrapper forwards for backward compatibility.
+const { generateProfile: aiGenerateProfile } = require('../ai/profile');
 router.post('/generate', authenticate, async (req, res) => {
   try {
-    const config = {
-      ...req.body,
-      user_id: req.user.userId, // ✅ UUID already trusted
-    };
-	config.user_id = req.user.userId;   // UUID
-	delete config.userId;   
-
-    const n8nUrl =
-      `${process.env.N8N_BASE_URL}${process.env.N8N_GENERATE_WEBHOOK}`;
-
-    const response = await fetch(n8nUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(config),
+    const { userId, ...rest } = req.body || {};
+    const profile = await aiGenerateProfile({
+      user_id: req.user.userId,
+      ...rest
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`N8N returned ${response.status}: ${text}`);
-    }
-
-    res.json(await response.json());
+    res.json({ success: true, profile_id: profile.id, profile });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Generation failed' });
+    console.error('[clinic-api /generate]', err.message);
+    res.status(err.statusCode || 500).json({ error: 'Generation failed', details: err.message });
   }
 });
 
@@ -51,46 +36,32 @@ router.post('/generate', authenticate, async (req, res) => {
 // POST /api/chat - Send message to AI assistant via N8N
 // ============================================================================
 
+// Generic clinic chat — runs inline through Claude. Session-aware via the
+// sessionId field on the client (we don't persist conversation server-side
+// here; client manages history if it wants context across turns).
+const llmClient = require('../../../../../src/utils/llm-client');
+const CHAT_SYSTEM_PROMPT = `You are an AI assistant embedded in Clinic-in-a-Box, a cybersecurity assessment training platform. Help students with cyber-risk concepts, CIS Controls, NIST CSF, interview techniques, and general security questions. Be concise — 2–4 sentences per response unless the student explicitly asks for depth.`;
+
 router.post('/chat', optionalAuth, async (req, res) => {
   try {
-    const { message, sessionId } = req.body;
+    const { message, sessionId, history } = req.body;
+    if (!message) return res.status(400).json({ error: 'Message is required' });
 
-    if (!message) {
-      return res.status(400).json({ error: 'Message is required' });
-    }
+    const priorMessages = Array.isArray(history)
+      ? history.slice(-10).map(m => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') }))
+      : [];
 
-    const n8nUrl = `${process.env.N8N_BASE_URL || 'http://localhost:5678'}${process.env.N8N_CHAT_WEBHOOK || '/webhook/0ff455fa-3bda-43db-a352-ba55517ad2b8/chat'}`;
-
-    const response = await fetch(n8nUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'sendMessage',
-        sessionId: sessionId || req.user?.userId || 'anonymous',
-        chatInput: message
-      })
+    const { text } = await llmClient.generate({
+      system: llmClient.cachedSystem(CHAT_SYSTEM_PROMPT),
+      messages: [...priorMessages, { role: 'user', content: message }],
+      max_tokens: 768,
+      temperature: 0.7,
+      label: `chat:${(sessionId || 'anon').toString().slice(0, 12)}`
     });
-
-    if (!response.ok) {
-      throw new Error(`N8N returned ${response.status}`);
-    }
-
-    const result = await response.json();
-
-    // Clean up response (remove thinking tags)
-    let reply = result.output || result.text || result.response || '';
-    reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
-
-    res.json({ 
-      success: true,
-      response: reply 
-    });
+    res.json({ success: true, response: (text || '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim() });
   } catch (error) {
     console.error('Chat error:', error);
-    res.status(500).json({ 
-      error: 'Failed to get response',
-      details: error.message 
-    });
+    res.status(500).json({ error: 'Failed to get response', details: error.message });
   }
 });
 
