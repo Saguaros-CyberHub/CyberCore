@@ -337,7 +337,16 @@ async function generateProfile(args) {
 
   fs.writeFileSync(jsonFilePath, JSON.stringify(combined, null, 2));
   try {
-    fs.writeFileSync(htmlFilePath, renderProfileHtml(combined));
+    // The ported pro generator expects `profile.meta` at top level + `config`/`seed`
+    // for some cover-page fields. Adapt our shape to match.
+    const profileForHtml = {
+      ...combined,
+      meta: combined.student_view?.meta || {},
+      config,
+      seed,
+      learning_objectives: combined.instructor_view?.learning_objectives || {}
+    };
+    fs.writeFileSync(htmlFilePath, renderProfileHtml(profileForHtml));
   } catch (htmlErr) {
     console.warn(`⚠️  [ai/profile] HTML render failed (JSON saved): ${htmlErr.message}`);
   }

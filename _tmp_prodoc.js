@@ -1,16 +1,3 @@
-/**
- * ai/profile/render.js -- Professional Client Profile HTML renderer.
- * Ported from the N8N "Professional Document Generator" workflow node (v4.1)
- * preserved at front-end/Info/Clinic-in-a-Box Profile Generator (API).json.
- *
- * Pure function: takes the profile object built by ai/profile/index.js
- * combineProfile() and returns a full standalone HTML document string.
- *
- * The original generator handles both the split-branch shape and the
- * merged shape we emit via cascading || fallbacks -- no adapter needed.
- */
-
-function renderProfileHtml(profile) {
 /*
  * ============================================================================
  * PROFESSIONAL CLIENT PROFILE GENERATOR v4.1 - UPGRADED for Workflow v1.2
@@ -30,7 +17,7 @@ function renderProfileHtml(profile) {
  * ============================================================================
  */
 
-// (profile passed as fn arg)
+const profile = items[0].json;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VALIDATION
@@ -2493,9 +2480,17 @@ const html = `<!DOCTYPE html>
 </html>`;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// RETURN OUTPUT
+// ═══════════════════════════════════════════════════════════════════════════
 
-  return html;
+const filename = `${data.company_name.replace(/[^a-zA-Z0-9]/g, '_')}_Client_Profile_${data.run_id}.html`;
 
-}
-
-module.exports = { renderProfileHtml };
+return [{
+  json: {
+    html_content: html,
+    filename: filename,
+    company_name: data.company_name,
+    run_id: data.run_id,
+    user_id: config.user_id || meta.user_id || null
+  }
+}];
