@@ -161,10 +161,11 @@ async function runProfileDeploy(opts) {
     ? providedSelection
     : defaultAssetSelection(assets);
 
-  // 3. Fetch catalogs from cybercore_db
+  // 3. Fetch catalogs — both tables live in clinic_db (CIAB pool), not cybercore_db.
+  //    See front-end/migrations/013_vm_template_catalog.sql and 011_challenge_templates.sql.
   const [vmCatalogRes, vulnCatalogRes] = await Promise.all([
-    cybercoreQuery(`SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at FROM vm_template_catalog WHERE is_active = true`),
-    cybercoreQuery(`SELECT id, slug, name, os_target, category, script_type, services_exposed, is_active FROM vuln_scripts WHERE is_active = true`)
+    query(`SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at FROM vm_template_catalog WHERE is_active = true`),
+    query(`SELECT id, slug, name, os_target, category, script_type, services_exposed, is_active FROM vuln_scripts WHERE is_active = true`)
   ]);
   const vmTemplateCatalog = vmCatalogRes.rows;
   const vulnScriptCatalog = vulnCatalogRes.rows;
@@ -275,6 +276,12 @@ async function runProfileDeploy(opts) {
     laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId });
   }
 
+  // Extract the company's public domain from the profile JSON so the
+  // orchestrator can inject it into Kali's /etc/hosts pointing at web-01.
+  const profileDomain = profile.json_data?.student_view?.raw?.threats?.organization?.domain_public
+    || profile.json_data?.student_view?.quick?.domain_public
+    || null;
+
   // 10. Kick off background deploy (don't await)
   setImmediate(() => {
     deployProfileLanesBatch({
@@ -285,7 +292,8 @@ async function runProfileDeploy(opts) {
       subnetScheme,
       module: 'ciab',
       attackBoxes,
-      vulnAppInstall: spec.vuln_app_install
+      vulnAppInstall: spec.vuln_app_install,
+      domain: profileDomain
     }).catch(err => {
       console.error(`[CIAB ProfileDeploy] Batch ${groupId} crashed:`, err);
       query(`UPDATE ciab_profile_lane_groups SET status='error', updated_at=NOW() WHERE id=$1`, [groupId])
@@ -490,6 +498,13 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
 
     res.status(202).json({ success: true, message: 'Retry started', lane_id: laneId, job_id: job.id });
 
+    // Re-extract the company domain from the group's frozen profile snapshot
+    // so the retried lane gets the same Kali /etc/hosts injection.
+    const snapshotAssets = Array.isArray(group.profile_snapshot) ? group.profile_snapshot : [];
+    const retryDomain = snapshotAssets.find(a => a.domain_public)?.domain_public
+      || group.profile_snapshot?.domain_public
+      || null;
+
     // Background: re-run that single lane
     const { createCloneSemaphore } = require('../../../../../src/utils/batch-deployer');
     setImmediate(() => {
@@ -508,6 +523,7 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
         attackBoxes: group.attack_boxes,
         subnetScheme: group.subnet_scheme,
         module: 'ciab',
+        domain: retryDomain,
         cloneSem: createCloneSemaphore(),
         progress: null
       }).catch(err => {

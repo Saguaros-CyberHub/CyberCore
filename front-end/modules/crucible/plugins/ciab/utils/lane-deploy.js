@@ -268,10 +268,37 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
   }
 }
 
+// ─── Build /etc/hosts entries for Kali ─────────────────────────────────────
+// For each deployed VM that has an IP, emit one entry. The web-server VM
+// (the one matched by isWebServer in the synthesizer / vulnAppInstall) also
+// gets the company's public domain as an alias, so visiting
+// `http://meridianadvisors.com` on Kali hits the actual deployed web-01.
+function buildKaliHostsEntries({ deployedVMs, domain }) {
+  const out = [];
+  const webServerNames = new Set();
+  for (const vm of deployedVMs) {
+    if (!vm.ip) continue;
+    // Identify web-server VMs by either: role=server with HTTP/HTTPS service,
+    // OR an exact role string match like 'web'.
+    const services = Array.isArray(vm.services) ? vm.services : [];
+    const isWeb = String(vm.role || '').toLowerCase() === 'server' &&
+      services.some(s => /(^|\/)https?$/i.test(String(s)) || /^(80|443)\//.test(String(s)));
+    if (isWeb) webServerNames.add(vm.name);
+  }
+  for (const vm of deployedVMs) {
+    if (!vm.ip || !vm.name) continue;
+    const aliases = [vm.name.toLowerCase()];
+    if (domain && webServerNames.has(vm.name)) aliases.push(domain.toLowerCase());
+    out.push({ ip: vm.ip, hostnames: aliases });
+  }
+  return out;
+}
+
 // ─── Post-clone vuln_scripts execution ─────────────────────────────────────
 async function runPostCloneScripts({ node, vmId, vmName, scriptSlugs, logTag }) {
   if (!scriptSlugs || scriptSlugs.length === 0) return { ran: 0 };
-  const rows = await cybercoreQuery(
+  // vuln_scripts lives in clinic_db (CIAB pool), not cybercore_db.
+  const rows = await query(
     `SELECT slug, script_content, os_target, depends_on, script_args
      FROM vuln_scripts WHERE slug = ANY($1) AND is_active = true`,
     [scriptSlugs]
@@ -310,7 +337,7 @@ async function collectVmIp(node, vmId, attempts = 10, intervalMs = 5000) {
 async function deployOneLaneFromSpec({
   laneId, jobId, spec, vxlanId, vnet, vnetInt, gatewayVmId, targetNode, templateNode,
   groupId, groupName, vulnAppInstall, attackBoxes, subnetScheme, module, cloneSem,
-  progress
+  progress, domain
 }) {
   const logTag = `[CIAB Deploy ${groupName}]`;
   const isV3 = subnetScheme === 'v3';
@@ -460,6 +487,36 @@ async function deployOneLaneFromSpec({
     let kaliIp = null;
     if (attackBoxVmId) {
       kaliIp = await collectVmIp(targetNode, attackBoxVmId, 6, 4000);
+
+      // ── Inject /etc/hosts entries on Kali so students can hit the company
+      // ── domain (and each VM's hostname) without DNS. The company's
+      // ── `domain_public` from the profile points at the web-server VM's
+      // ── real IP; every other deployed VM is also added by hostname so
+      // ── `ping dc-01` etc. works out of the box.
+      if (kaliIp) {
+        try {
+          const ready = await waitForGuestAgent(targetNode, attackBoxVmId, 180000);
+          if (ready) {
+            const hostsEntries = buildKaliHostsEntries({ deployedVMs, domain });
+            if (hostsEntries.length > 0) {
+              const block = [
+                '# === CIAB lane hosts (auto-injected) ===',
+                ...hostsEntries.map(e => `${e.ip}\t${e.hostnames.join(' ')}`),
+                '# === end CIAB block ==='
+              ].join('\n');
+              // tee -a is the safest way to append via guest agent (no shell quoting nightmare)
+              const cmd = `bash -c "cat <<'CIAB_HOSTS_EOF' >> /etc/hosts\n${block}\nCIAB_HOSTS_EOF"`;
+              await agentExec(targetNode, attackBoxVmId, cmd);
+              console.log(`${logTag} Injected ${hostsEntries.length} /etc/hosts entries on Kali (lane ${vxlanId})`);
+            }
+          } else {
+            console.warn(`${logTag} Kali guest agent not ready — skipping /etc/hosts injection`);
+          }
+        } catch (hostsErr) {
+          console.warn(`${logTag} /etc/hosts injection failed on Kali: ${hostsErr.message}`);
+        }
+      }
+
       if (kaliIp) {
         try {
           await guacAPI('POST', '/connections', {
@@ -545,7 +602,7 @@ async function deployOneLaneFromSpec({
 async function deployProfileLanesBatch({
   groupId, groupName, spec, laneAllocations,
   subnetScheme = 'v2', module: moduleKey = 'ciab',
-  attackBoxes = true, vulnAppInstall = null
+  attackBoxes = true, vulnAppInstall = null, domain = null
 }) {
   const templateNode = spec.template_node || 'cyberhub-node-5';
   const gatewayVmid = resolveGatewayVmid(moduleKey, subnetScheme, spec);
@@ -634,7 +691,8 @@ async function deployProfileLanesBatch({
       subnetScheme,
       module: moduleKey,
       cloneSem,
-      progress
+      progress,
+      domain
     });
   }, {
     concurrency,
