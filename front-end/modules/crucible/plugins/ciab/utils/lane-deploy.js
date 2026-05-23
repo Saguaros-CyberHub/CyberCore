@@ -218,7 +218,7 @@ async function getOrCreateProfileChallenge({ profileId, requestedMax, companyNam
   const chInsert = await cybercoreQuery(
     `INSERT INTO crucible_challenge
        (challenge_key, name, description, challenge_type, difficulty, module_key, spec, subnet_scheme, status)
-     VALUES ($1, $2, $3, 'multi_vm', 'intermediate', 'crucible', $4::jsonb, $5, 'active')
+     VALUES ($1, $2, $3, 'multi_vm', 3, 'crucible', $4::jsonb, $5, 'active')
      RETURNING challenge_id, challenge_key`,
     [
       challengeKey, challengeName,

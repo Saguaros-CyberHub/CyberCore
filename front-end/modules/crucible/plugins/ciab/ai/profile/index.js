@@ -30,8 +30,10 @@ const {
   buildItPrompt,
   buildNetworkPrompt,
   buildThreatPrompt,
-  buildNetworkSummary
+  buildNetworkSummary,
+  buildFlavorBundle
 } = require('./prompts');
+const { buildPrefilledIntake } = require('../../utils/profile-to-intake');
 const {
   validateOrg,
   validateIt,
@@ -311,16 +313,23 @@ async function generateProfile(args) {
 
   console.log(`🚀 [ai/profile] Generating ${config.clientType} profile for user ${user_id} (run ${seed.run_id})`);
 
-  // Stage 1: A + B + C in parallel (D needs network output)
+  // Stage 1: A + B + C in parallel (D needs network output).
+  // Higher temperatures + per-branch flavor anchors (vendor, hostname theme,
+  // EDR product, firewall, threat-actor archetype) injected into each
+  // user prompt break Claude's convergence on identical-looking profiles.
+  // The deterministic company name + stakeholder names handle the most
+  // visible duplication; flavor anchors break the rest.
+  const branchTemp = temperature ?? 0.9;
+  const orgTemp    = Math.min(1, branchTemp + 0.05);
   const stage1 = await llm.generateParallel([
     {
-      ...buildToOptionsObj(buildOrgPrompt({ config, seed, employeeCount }), { model: llmModel, maxTokens: 8192, label: `${labelBase}:org`, temperature }),
+      ...buildToOptionsObj(buildOrgPrompt({ config, seed, employeeCount }), { model: llmModel, maxTokens: 8192, label: `${labelBase}:org`, temperature: orgTemp }),
     },
     {
-      ...buildToOptionsObj(buildItPrompt({ config, seed, employeeCount }), { model: llmModel, maxTokens: 6144, label: `${labelBase}:it`, temperature }),
+      ...buildToOptionsObj(buildItPrompt({ config, seed, employeeCount }), { model: llmModel, maxTokens: 6144, label: `${labelBase}:it`, temperature: branchTemp }),
     },
     {
-      ...buildToOptionsObj(buildNetworkPrompt({ config, seed }), { model: llmModel, maxTokens: 8192, label: `${labelBase}:network`, temperature }),
+      ...buildToOptionsObj(buildNetworkPrompt({ config, seed }), { model: llmModel, maxTokens: 8192, label: `${labelBase}:network`, temperature: branchTemp }),
     }
   ], { json: true });
 
@@ -349,7 +358,7 @@ async function generateProfile(args) {
     system: llm.cachedSystem(threatPromptObj.systemPrompt),
     messages: [{ role: 'user', content: threatPromptObj.userPrompt }],
     max_tokens: 8192,
-    temperature: temperature ?? 0.7,
+    temperature: branchTemp,
     label: `${labelBase}:threats`
   });
 
@@ -371,6 +380,29 @@ async function generateProfile(args) {
     seed,
     employeeCount
   });
+
+  // Build pre-filled intake form (V8 schema) — purely deterministic mapping
+  // from the AI profile + flavor anchors + IG1 derivation. Students get a
+  // populated form to verify/edit instead of starting from a blank slate.
+  try {
+    const flavor = buildFlavorBundle(seed.run_id, seed.stakeholder_count || 5);
+    const prefillPayloads = {
+      organization:    orgV.payload?.organization || {},
+      it_environment:  itV.payload?.it_environment || {},
+      network:         netV.payload?.network || {},
+      threat_profile:  tpV.payload?.threat_profile || null,
+      profiles:        orgV.payload?.profiles || {},
+      stakeholders:    orgV.payload?.stakeholders || [],
+      compliance_frameworks: seed.template?.compliance || [],
+      vendor_flavor:   flavor.vendor_flavor,
+      maturity:        seed.maturity,
+      run_id:          seed.run_id
+    };
+    combined.prefilled_intake_form = buildPrefilledIntake(prefillPayloads);
+    console.log(`📝 [ai/profile] Pre-filled intake form: ${combined.prefilled_intake_form._meta.ig1_coverage_pct}% IG1 coverage (${combined.prefilled_intake_form._meta.ig1_totals.yes}/${combined.prefilled_intake_form._meta.ig1_totals.partial}/${combined.prefilled_intake_form._meta.ig1_totals.no} yes/partial/no)`);
+  } catch (prefillErr) {
+    console.warn(`⚠️  [ai/profile] Intake prefill failed (continuing without): ${prefillErr.message}`);
+  }
 
   // Write JSON + HTML to disk
   const profilesDir = path.join(process.cwd(), 'profiles');

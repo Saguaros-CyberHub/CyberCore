@@ -15,10 +15,12 @@ const V72_SECTIONS = [
   'network_ports', 'network_devices', 'pentesting'
 ];
 
-// Helper: Load profile JSON from file
+// Helper: Load profile JSON from file. Returns the student_view PLUS, when
+// available, a `_prefilled_intake_form` payload (built deterministically at
+// profile generation time — see ciab/utils/profile-to-intake.js).
 function loadProfileFromFile(jsonFilePath) {
   if (!jsonFilePath) throw new Error('No JSON file path provided');
-  
+
   const possiblePaths = [
     jsonFilePath,
     path.join(__dirname, '..', '..', jsonFilePath.replace(/^\//, '')),
@@ -26,12 +28,13 @@ function loadProfileFromFile(jsonFilePath) {
     path.join(process.cwd(), jsonFilePath.replace(/^\//, '')),
     path.join(process.cwd(), 'profiles', path.basename(jsonFilePath)),
   ];
-  
+
   for (const filePath of possiblePaths) {
     if (fs.existsSync(filePath)) {
       const fileContent = fs.readFileSync(filePath, 'utf8');
       let jsonData = JSON.parse(fileContent);
       if (Array.isArray(jsonData) && jsonData.length > 0) jsonData = jsonData[0];
+      const prefill = jsonData.prefilled_intake_form || null;
       let studentView = jsonData.student_view || jsonData;
       const stakeholdersRaw = studentView.raw?.threats?.stakeholders || studentView.stakeholders || [];
       return {
@@ -43,7 +46,8 @@ function loadProfileFromFile(jsonFilePath) {
           employees_total: studentView.raw?.threats?.organization?.employees_total || studentView.quick?.employees_total,
           domain_public: studentView.raw?.threats?.organization?.domain_public || studentView.quick?.domain_public
         },
-        stakeholders: stakeholdersRaw
+        stakeholders: stakeholdersRaw,
+        _prefilled_intake_form: prefill
       };
     }
   }
@@ -55,31 +59,25 @@ router.get('/:profileId', authenticateToken, async (req, res) => {
   try {
     const { profileId } = req.params;
     const userId = req.user.userId;
-    
-    let result = await pool.query(`SELECT * FROM intake_form_responses WHERE user_id = $1 AND profile_id = $2`, [userId, profileId]);
-    
-    if (result.rows.length === 0) {
-      result = await pool.query(`INSERT INTO intake_form_responses (user_id, profile_id, status) VALUES ($1, $2, 'not_started') RETURNING *`, [userId, profileId]);
-    }
-    
+
     const profileResult = await pool.query(`
       SELECT id, company_name, industry, client_type, difficulty, json_filename, json_file_path,
              employee_count, stakeholder_count, compliance_frameworks, key_risks, critical_systems
       FROM profiles WHERE id = $1
     `, [profileId]);
-    
+
     if (profileResult.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
-    
+
     const profile = profileResult.rows[0];
     let studentData = null;
-    
+
     try {
       const jsonPath = profile.json_file_path || profile.json_filename;
       if (jsonPath) studentData = loadProfileFromFile(jsonPath);
     } catch (fileErr) {
       console.warn('[Intake Form] Could not load JSON file:', fileErr.message);
     }
-    
+
     if (!studentData) {
       studentData = {
         quick: {
@@ -89,14 +87,50 @@ router.get('/:profileId', authenticateToken, async (req, res) => {
         }
       };
     }
-    
+
+    let result = await pool.query(`SELECT * FROM intake_form_responses WHERE user_id = $1 AND profile_id = $2`, [userId, profileId]);
+
+    if (result.rows.length === 0) {
+      // Seed the new row from the profile's pre-filled intake form when present
+      // (AI-generated profiles ship with one — see ciab/utils/profile-to-intake.js).
+      const prefill = studentData._prefilled_intake_form || null;
+      if (prefill) {
+        const seedFields = V72_SECTIONS.map(s => prefill[s] || {});
+        result = await pool.query(`
+          INSERT INTO intake_form_responses (
+            user_id, profile_id, status, completion_percentage,
+            company_info, security_policies, data_management, network_security,
+            wireless, endpoint_security, compliance, software_assets,
+            vuln_management, admin_privileges, secure_config, email_web,
+            network_ports, network_devices, pentesting
+          ) VALUES ($1, $2, 'in_progress', $3,
+            $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb,
+            $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
+            $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
+            $16::jsonb, $17::jsonb, $18::jsonb
+          ) RETURNING *`,
+          [
+            userId, profileId,
+            prefill._meta?.ig1_coverage_pct ?? 60,
+            ...seedFields.map(v => JSON.stringify(v))
+          ]
+        );
+        console.log(`[Intake Form] Seeded form for user ${userId} from profile ${profileId} prefill`);
+      } else {
+        result = await pool.query(
+          `INSERT INTO intake_form_responses (user_id, profile_id, status) VALUES ($1, $2, 'not_started') RETURNING *`,
+          [userId, profileId]
+        );
+      }
+    }
+
     // Build form_data from V7.2 columns
     const row = result.rows[0];
     const form_data = {};
     V72_SECTIONS.forEach(section => {
       form_data[section] = row[section] || {};
     });
-    
+
     res.json({ success: true, form_data, profile_data: studentData, profile_basic: { id: profile.id, company_name: profile.company_name } });
     
   } catch (error) {
