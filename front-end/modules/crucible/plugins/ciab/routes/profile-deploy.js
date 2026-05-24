@@ -166,19 +166,35 @@ async function runProfileDeploy(opts) {
   const vmTemplateCatalog = vmCatalogRes.rows;
   const vulnScriptCatalog = vulnCatalogRes.rows;
 
-  // 4. Get-or-generate vuln app (best-effort; skip if admin disabled)
-  let vulnApp = null;
-  if (vulnAppOpts.enabled !== false) {
-    try {
-      vulnApp = await getOrGenerateVulnApp({
+  // 4 + 6 in parallel. Vuln-app LLM generation can take ~4min on a fresh
+  // profile, and SDN provisioning for a 25-slot reservation takes ~45s.
+  // They're independent — kick both off, await both before continuing.
+  //   - vulnApp generation needs: profile + assets
+  //   - reservation+SDN needs: profileId + max + company name + subnetScheme
+  //                            (spec is stored but not used for VNet creation;
+  //                            we update it after synthesis via the "adopt
+  //                            fresh spec" branch below)
+  console.log(`[CIAB ProfileDeploy] Profile ${profileId.slice(0,8)}: starting vuln-app generation + reservation in parallel`);
+  const vulnAppPromise = vulnAppOpts.enabled === false
+    ? Promise.resolve(null)
+    : getOrGenerateVulnApp({
         profile: { ...profile, assets },
         llmModel: vulnAppOpts.llm_model,
         preferMode: vulnAppOpts.delivery_mode || 'docker'
+      }).catch(err => {
+        console.warn(`[CIAB ProfileDeploy] vuln app generation failed (continuing): ${err.message}`);
+        return null;
       });
-    } catch (err) {
-      console.warn(`[CIAB ProfileDeploy] vuln app generation failed (continuing): ${err.message}`);
-    }
-  }
+
+  const reservationPromise = getOrCreateProfileChallenge({
+    profileId,
+    requestedMax: effectiveMaxStudents,
+    companyName: profile.company_name,
+    spec: {},                            // synthesized spec filled in below
+    subnetScheme
+  });
+
+  const [vulnApp, reservation] = await Promise.all([vulnAppPromise, reservationPromise]);
 
   // 5. Synthesize the deploy spec (vxlan_block gets filled in by step 6 below)
   const { spec: rawSpec, service_gaps, template_misses } = synthesizeSpecFromProfile({
@@ -199,18 +215,6 @@ async function runProfileDeploy(opts) {
       { statusCode: 400, template_misses, service_gaps }
     );
   }
-
-  // 6. Get-or-create the profile's persistent crucible_challenge in cybercore_db.
-  //    The challenge's spec.vxlan_block IS the reservation. Idempotent — if
-  //    this profile has been deployed before, we reuse the same challenge and
-  //    its locked vxlan_block. New profiles get a freshly-carved slice.
-  const reservation = await getOrCreateProfileChallenge({
-    profileId,
-    requestedMax: effectiveMaxStudents,
-    companyName: profile.company_name,
-    spec: rawSpec,
-    subnetScheme
-  });
   console.log(`[CIAB ProfileDeploy] Profile ${profileId.slice(0,8)} → challenge ${reservation.challenge_id.slice(0,8)} (${reservation.was_existing ? 'existing' : 'newly created'}), VXLAN ${reservation.vxlan_block.start}-${reservation.vxlan_block.end}, max_students=${reservation.max_students}`);
 
   // Spec selection:

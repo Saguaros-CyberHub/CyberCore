@@ -259,6 +259,25 @@ async function getOrCreateProfileChallenge({ profileId, requestedMax, companyNam
 
   console.log(`[CIAB Reservation] Profile ${profileId.slice(0,8)} → challenge ${challenge.challenge_id.slice(0,8)} (${challengeKey}), VXLAN ${slot.start}-${slot.end} (${requestedMax} slots)`);
 
+  // Pre-provision ALL VNets in the reservation block, not just on-demand per
+  // deploy. Mirrors how challenge templates work: max_lanes = pre-created
+  // SDN VNets ready before any lane deploys. Per-deploy ensureSdnZoneAndVnets
+  // calls then become no-ops and the deploy proceeds without SDN-propagation
+  // waits. Best-effort: if SDN provision fails, the per-deploy call will
+  // retry; we don't fail the reservation creation just because SDN hiccupped.
+  try {
+    const allTagsInBlock = [];
+    for (let id = slot.start; id <= slot.end; id++) allTagsInBlock.push(id);
+    await ensureSdnZoneAndVnets({
+      vxlanIds: allTagsInBlock,
+      subnetScheme,
+      challengeKey,
+      logTag: `[CIAB Reservation ${profileId.slice(0,8)}]`
+    });
+  } catch (sdnErr) {
+    console.warn(`[CIAB Reservation] Pre-provision of ${requestedMax} VNets failed (per-deploy will retry): ${sdnErr.message}`);
+  }
+
   return {
     challenge_id: challenge.challenge_id,
     challenge_key: challenge.challenge_key,
@@ -457,17 +476,28 @@ async function ensureSdnZoneAndVnets({ vxlanIds, subnetScheme, challengeKey, log
     });
   }
 
-  // Reload SDN once for the whole batch
+  // Reload SDN once for the whole batch. Propagation time scales with the
+  // number of VNets created — empirically ~5s base + 200ms per VNet works
+  // for 1-50 VNets. Then poll for them to appear (up to 60s) instead of
+  // failing on first miss.
   console.log(`[${tag}] Reloading SDN (${missingTags.length} new VNets in '${zoneAbbrev}')`);
   await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
-  await new Promise(r => setTimeout(r, 5000));
+  const baseWait = Math.min(30000, 5000 + missingTags.length * 200);
+  await new Promise(r => setTimeout(r, baseWait));
 
-  // Verify the requested tags now appear
-  vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
-  const stillMissing = [...requiredTags].filter(t => !vnets.some(v => v.tag === t));
-  if (stillMissing.length > 0) {
-    throw new Error(`SDN reload did not surface VNets for tags: ${stillMissing.join(',')} — may need manual reload`);
+  // Poll for the requested tags to appear (up to another 60s for large batches)
+  const pollDeadline = Date.now() + 60000;
+  let stillMissing = [];
+  while (Date.now() < pollDeadline) {
+    vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+    stillMissing = [...requiredTags].filter(t => !vnets.some(v => v.tag === t));
+    if (stillMissing.length === 0) break;
+    await new Promise(r => setTimeout(r, 3000));
   }
+  if (stillMissing.length > 0) {
+    throw new Error(`SDN reload did not surface VNets for tags: ${stillMissing.slice(0, 10).join(',')}${stillMissing.length > 10 ? ',...' : ''} — may need manual reload`);
+  }
+  console.log(`[${tag}] ✓ All ${requiredTags.size} VNets confirmed in SDN after ${Math.round((Date.now() - (Date.now() - baseWait))/1000)}s wait + poll`);
 }
 
 // ─── Phase 1a — gateway template replication (LXC lock workaround) ────────
