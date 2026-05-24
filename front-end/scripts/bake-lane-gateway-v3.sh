@@ -281,15 +281,20 @@ rc-service dnsmasq restart >/dev/null 2>&1 \
 # subnet (the firewall would block it anyway, but not advertising it keeps
 # the topology honest). Auth key is pulled from the orchestrator's bootstrap
 # endpoint, identified by this lane's WAN source IP.
-ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:3000}"
+ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
 BOOTSTRAP_PATH="/api/lane-bootstrap"
 
+# Retry window: 60 attempts × (5s timeout + 5s sleep) = up to 10 minutes.
+# Covers slow-WAN, late dnsmasq/DHCP, and orchestrator-restart races.
 echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}..." >&2
 BOOTSTRAP_RESP=""
-for _ in 1 2 3 4 5; do
+for _ in $(seq 1 60); do
   BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}" 2>/dev/null || true)"
-  [ -n "$BOOTSTRAP_RESP" ] && break
-  sleep 2
+  if [ -n "$BOOTSTRAP_RESP" ] && echo "$BOOTSTRAP_RESP" | grep -q '"tailscale_authkey"'; then
+    break
+  fi
+  BOOTSTRAP_RESP=""
+  sleep 5
 done
 
 if [ -z "$BOOTSTRAP_RESP" ]; then
@@ -346,7 +351,10 @@ echo "[cybercore-firstboot] v3: ext0=${EXT_IP} int0=${INT_IP} controller=${CONTR
 FIRSTBOOT_EOF
 
 # 2b. Default env file (admin.js can overwrite per-deploy via `pct push`).
-cat > "$STAGING/cybercore-gateway.env" <<'ENV_EOF'
+# Read CYBERCORE_ORCHESTRATOR_URL from bake env (override at bake time).
+ORCH_URL_DEFAULT="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
+# Unquoted heredoc tag → ${ORCH_URL_DEFAULT} expands at bake time.
+cat > "$STAGING/cybercore-gateway.env" <<ENV_EOF
 # /etc/cybercore-gateway.env
 # Overrides for /etc/local.d/00-cybercore-firstboot.start (v3 segmented gateway).
 
@@ -367,7 +375,7 @@ DHCP_END_OCTET=200
 # The auth key is NOT stored here — firstboot pulls it from the orchestrator
 # at boot via GET <CYBERCORE_ORCHESTRATOR_URL>/api/lane-bootstrap. The v3
 # gateway advertises only the EXTERNAL segment's route.
-CYBERCORE_ORCHESTRATOR_URL=http://100.100.20.50:3000
+CYBERCORE_ORCHESTRATOR_URL=${ORCH_URL_DEFAULT}
 ENV_EOF
 
 # 2c. Placeholder dnsmasq.conf — replaced at boot by firstboot once ext0/int0

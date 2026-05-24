@@ -200,19 +200,28 @@ rc-service dnsmasq restart >/dev/null 2>&1 \
 # tailscaled runs in userspace-networking mode (configured by the bake
 # script in /etc/conf.d/tailscale), so no TUN device or LXC capability
 # tweaks are needed. Subnet routing still works.
-ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:3000}"
+ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
 BOOTSTRAP_PATH="/api/lane-bootstrap"
 
 # wget is preferred over curl on Alpine (smaller, always present). BusyBox wget
-# doesn't speak HTTPS by default, but http://orchestrator:3000 is on the
-# internal lab network — http is fine here. For HTTPS, install wget package
+# doesn't speak HTTPS by default, but http://orchestrator is on the internal
+# lab network — http is fine here. For HTTPS, install wget package
 # (apk add wget) which links against openssl/libtls.
+#
+# Retry window: 60 attempts × (5s timeout + 5s sleep) = up to 10 minutes.
+# Covers slow-WAN, late dnsmasq/DHCP, and orchestrator-restart races. The
+# bootstrap token's server-side TTL is also 10 min, so this matches.
 echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}..." >&2
 BOOTSTRAP_RESP=""
-for _ in 1 2 3 4 5; do
+for _ in $(seq 1 60); do
   BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}" 2>/dev/null || true)"
-  [ -n "$BOOTSTRAP_RESP" ] && break
-  sleep 2
+  # Accept payload only if it has the auth key field; an `{"error":...}` body
+  # (token missing / already consumed) is treated as a soft fail and retried.
+  if [ -n "$BOOTSTRAP_RESP" ] && echo "$BOOTSTRAP_RESP" | grep -q '"tailscale_authkey"'; then
+    break
+  fi
+  BOOTSTRAP_RESP=""
+  sleep 5
 done
 
 if [ -z "$BOOTSTRAP_RESP" ]; then
@@ -264,10 +273,15 @@ echo "[cybercore-firstboot] lan0=${LAN_IP}/${LAN_PREFIX} controller=${CONTROLLER
 FIRSTBOOT_EOF
 
 # 2b. Default env file (admin.js can overwrite per-deploy via `pct push`).
-cat > "$STAGING/cybercore-gateway.env" <<'ENV_EOF'
+# Read CYBERCORE_ORCHESTRATOR_URL from the bake environment so the baked-in
+# default matches whatever port the orchestrator actually runs on. Override
+# at bake time:  CYBERCORE_ORCHESTRATOR_URL=http://100.100.20.50:80 ./bake...
+ORCH_URL_DEFAULT="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
+# Note: unquoted heredoc tag → ${ORCH_URL_DEFAULT} expands at bake time.
+cat > "$STAGING/cybercore-gateway.env" <<ENV_EOF
 # /etc/cybercore-gateway.env
 # Overrides for /etc/local.d/00-cybercore-firstboot.start.
-# admin.js may overwrite this file at deploy time via `pct push`.
+# admin.js may overwrite this file at deploy time via \`pct push\`.
 
 # Upstream DNS (defaults to OPNsense lab gateway)
 DNS_FORWARDER=100.100.60.1
@@ -290,7 +304,7 @@ DHCP_END_OCTET=200
 # and the lane still works (just without BYOAB).
 #
 # Override the orchestrator URL here if it lives elsewhere:
-CYBERCORE_ORCHESTRATOR_URL=http://100.100.20.50:3000
+CYBERCORE_ORCHESTRATOR_URL=${ORCH_URL_DEFAULT}
 ENV_EOF
 
 # 2c. Placeholder dnsmasq.conf — replaced at boot by firstboot once lan0

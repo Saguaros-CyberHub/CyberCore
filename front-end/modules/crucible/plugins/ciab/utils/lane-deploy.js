@@ -616,20 +616,14 @@ async function collectVmIp(node, vmId, attempts = 10, intervalMs = 5000) {
 }
 
 // ─── Tailscale bootstrap verification ─────────────────────────────────────
-// After a gateway starts, the bake script's firstboot retries the bootstrap
-// fetch only 3× over ~15s. If the gateway's WAN is slow, the row sits
-// unconsumed and Tailscale silently never joins. This helper polls for
-// `consumed_at IS NOT NULL`; if not consumed after ~75s, it `pct exec`s
-// the firstboot script directly on the LXC to retry.
-async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logTag, maxWaitMs = 75000, retriggers = 2 }) {
-  const checkConsumed = async () => {
-    const r = await cybercoreQuery(
-      `SELECT consumed_at FROM lane_bootstrap_tokens WHERE vxlan_id = $1`,
-      [vxlanId]
-    );
-    return r.rows.length > 0 && r.rows[0].consumed_at !== null;
-  };
-
+// After a gateway starts, the bake script's firstboot tries to fetch the
+// bootstrap token. If that succeeds, the row's `consumed_at` is set. We poll
+// for it and warn loudly if it never happens.
+//
+// Note: Proxmox has no HTTP-API equivalent of `pct exec` for LXC, so we
+// can't re-trigger firstboot from here. The bake script needs a longer retry
+// window for slow-WAN cases (see bake-lane-gateway-v2.sh).
+async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logTag, maxWaitMs = 120000 }) {
   // No token row → Tailscale was never staged (env vars not set, or v1). Skip.
   const rowExists = await cybercoreQuery(
     `SELECT 1 FROM lane_bootstrap_tokens WHERE vxlan_id = $1`, [vxlanId]
@@ -640,41 +634,24 @@ async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logT
   }
 
   const startedAt = Date.now();
-  let consumed = false;
-  let attemptCount = 0;
   while (Date.now() - startedAt < maxWaitMs) {
-    if (await checkConsumed()) { consumed = true; break; }
+    const r = await cybercoreQuery(
+      `SELECT consumed_at FROM lane_bootstrap_tokens WHERE vxlan_id = $1`,
+      [vxlanId]
+    );
+    if (r.rows.length > 0 && r.rows[0].consumed_at !== null) {
+      console.log(`${logTag} ✓ Tailscale bootstrap consumed for vxlan ${vxlanId} — lane gateway should be on the tailnet`);
+      return;
+    }
     await new Promise(r => setTimeout(r, 5000));
   }
 
-  while (!consumed && attemptCount < retriggers) {
-    attemptCount++;
-    console.log(`${logTag} Tailscale bootstrap not yet consumed for vxlan ${vxlanId} — re-triggering firstboot via pct exec (attempt ${attemptCount}/${retriggers})`);
-    try {
-      // Re-run the firstboot script directly inside the LXC. This is the same
-      // /etc/local.d/00-cybercore-firstboot.start that runs at boot; rerunning
-      // is safe (idempotent) and forces a fresh bootstrap fetch attempt.
-      await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/status/exec`, {
-        command: ['/bin/sh', '/etc/local.d/00-cybercore-firstboot.start']
-      });
-    } catch (e) {
-      // Older pve versions don't expose /status/exec for LXC — fall back to no-op
-      // and rely on the gateway re-running firstboot on its next reboot.
-      console.warn(`${logTag} pct exec re-trigger failed (${e.message}) — gateway must re-fetch on its own`);
-      break;
-    }
-    const waitStart = Date.now();
-    while (Date.now() - waitStart < 30000) {
-      if (await checkConsumed()) { consumed = true; break; }
-      await new Promise(r => setTimeout(r, 5000));
-    }
-  }
-
-  if (consumed) {
-    console.log(`${logTag} ✓ Tailscale bootstrap consumed for vxlan ${vxlanId} — lane gateway should be on the tailnet`);
-  } else {
-    console.warn(`${logTag} ✗ Tailscale bootstrap NOT consumed for vxlan ${vxlanId} after ${Math.round((Date.now()-startedAt)/1000)}s — gateway likely can't reach the orchestrator. Check CYBERCORE_ORCHESTRATOR_URL in /etc/cybercore-gateway.env and network path from gateway WAN to ${process.env.CYBERCORE_ORCHESTRATOR_URL || 'http://100.100.20.50:3000'}`);
-  }
+  const orchUrl = process.env.CYBERCORE_ORCHESTRATOR_URL || 'http://100.100.20.50:3000';
+  console.warn(`${logTag} ✗ Tailscale bootstrap NOT consumed for vxlan ${vxlanId} after ${Math.round(maxWaitMs/1000)}s.\n` +
+               `    Likely causes: (a) gateway WAN took longer than the bake-script firstboot retry window (3×5s), ` +
+               `(b) gateway can't reach orchestrator at ${orchUrl}, or (c) firstboot service never ran.\n` +
+               `    Diagnose: pct enter ${gatewayVmId} on ${targetNode} → tail /var/log/messages | grep firstboot, then run /etc/local.d/00-cybercore-firstboot.start manually.\n` +
+               `    Permanent fix: re-bake the gateway template with a longer retry window in bake-lane-gateway-v2.sh.`);
 }
 
 // ─── Single-lane deploy (called by batch + retry endpoint) ─────────────────
@@ -828,8 +805,10 @@ async function deployOneLaneFromSpec({
     });
 
     // ── Wait for guest agents + run post-clone scripts + install vuln app ──
+    // Status stays 'firstboot' per the table CHECK constraint
+    // (pending|cloning|firstboot|active|error); detail moves through phases.
     if (progress) progress.lanes[laneId].status = 'configuring';
-    await query(`UPDATE ciab_profile_lane_jobs SET status='configuring', phase_detail='Waiting for guest agent' WHERE id=$1`, [jobId]);
+    await query(`UPDATE ciab_profile_lane_jobs SET phase_detail='Waiting for guest agent' WHERE id=$1`, [jobId]);
 
     for (const dvm of deployedVMs) {
       if (dvm.type !== 'qemu') continue;

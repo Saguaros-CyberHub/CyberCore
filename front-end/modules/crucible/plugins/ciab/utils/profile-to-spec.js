@@ -90,13 +90,24 @@ function isIncluded(asset, assetSelection) {
 }
 
 // ─── Detect web-server asset (for vuln-app placement) ──────────────────────
+// Matches by either: (a) declared HTTP/HTTPS service, OR (b) hostname pattern
+// (any token that is exactly 'web' or 'web<digits>'). The hostname check covers
+// AI-generated profiles where the services array is sometimes empty/missing
+// but the hostname clearly marks a web server (e.g. 'mercury-web-01', 'web01',
+// 'intranet-web'). Per the user's "every company has WEB01" convention.
 function isWebServer(asset) {
   if (String(asset.role || '').toLowerCase() !== 'server') return false;
+
   const svcs = Array.isArray(asset.services) ? asset.services : [];
-  return svcs.some(s => {
+  const hasHttpService = svcs.some(s => {
     const p = parseService(s);
-    return p && (p.port === 80 || p.port === 443 || /^https?$/.test(p.service));
+    return p && (p.port === 80 || p.port === 443 || /^https?$/i.test(p.service));
   });
+  if (hasHttpService) return true;
+
+  const hostname = String(asset.hostname || '').toLowerCase();
+  const tokens = hostname.split(/[-_.]/);
+  return tokens.some(t => /^web\d*$/.test(t));
 }
 
 // ─── VM type heuristic ──────────────────────────────────────────────────────

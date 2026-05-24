@@ -33,13 +33,19 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 
-// Pull the original request source IP from the socket. We deliberately do NOT
-// trust X-Forwarded-For here — bootstrap requests should come direct from the
-// lane gateway over the lab network, not via a reverse proxy. If you front
-// the orchestrator with a proxy, change this to use req.ip and configure
-// `app.set('trust proxy', ...)` accordingly.
+// Source IP resolution. We use Express's req.ip, which honors X-Forwarded-For
+// only when the request comes from a `trust proxy` CIDR (configured in
+// server.js — defaults to loopback/linklocal/uniquelocal, which covers Docker
+// bridge networks like 172.18.0.0/16 where the Node app commonly runs behind
+// a reverse proxy on the host).
+//
+// Security model: the X-Forwarded-For header is only trusted when set by a
+// proxy in the trust list. An attacker on the lab network cannot inject a
+// forged header that bypasses the source-IP check, because Express drops
+// X-Forwarded-For from untrusted hops. If the orchestrator is exposed
+// directly (no proxy), req.ip equals the socket peer, same as before.
 function rawSourceIp(req) {
-  const ra = req.socket?.remoteAddress || req.connection?.remoteAddress || '';
+  const ra = req.ip || req.socket?.remoteAddress || req.connection?.remoteAddress || '';
   // Strip the IPv4-mapped-IPv6 prefix if present (::ffff:10.39.16.1 → 10.39.16.1)
   return ra.replace(/^::ffff:/, '');
 }
