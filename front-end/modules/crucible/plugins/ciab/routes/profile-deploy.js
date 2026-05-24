@@ -219,12 +219,16 @@ async function runProfileDeploy(opts) {
 
   // Spec selection:
   //   - New reservation → stored spec is the rawSpec we just wrote, same thing.
+  //   - New reservation (was_existing=false) → reservation was created with
+  //     an empty stub spec (so SDN provision could run in parallel with the
+  //     vuln-app LLM). Now that synthesis is done, persist the real spec.
   //   - Existing reservation with 0 live lanes → admin may have changed the
   //     asset selection since the prior (failed) attempt. Adopt the fresh spec
   //     and update the stored one so retry/add-lanes stay consistent.
   //   - Existing reservation with live lanes → must keep stored spec; changing
   //     VM offsets/templates now would collide with running lanes.
   let spec = reservation.spec;
+  let shouldAdoptFreshSpec = !reservation.was_existing;   // always for new reservations
   if (reservation.was_existing) {
     const liveLanesRes = await cybercoreQuery(
       `SELECT COUNT(*)::int AS n FROM cybercore_lane
@@ -232,15 +236,21 @@ async function runProfileDeploy(opts) {
       [reservation.vxlan_block.start, reservation.vxlan_block.end]
     );
     if ((liveLanesRes.rows[0]?.n || 0) === 0) {
+      shouldAdoptFreshSpec = true;
       console.log(`[CIAB ProfileDeploy] Reservation has no live lanes — adopting fresh spec (${rawSpec.vms.length} VMs) from current asset selection`);
-      spec = { ...rawSpec, vxlan_block: reservation.vxlan_block };
-      await cybercoreQuery(
-        `UPDATE crucible_challenge SET spec = $1::jsonb WHERE challenge_id = $2`,
-        [JSON.stringify(spec), reservation.challenge_id]
-      );
     } else {
       console.log(`[CIAB ProfileDeploy] Reservation has ${liveLanesRes.rows[0].n} live lane(s) — keeping stored spec (${spec.vms?.length || 0} VMs) to avoid collision`);
     }
+  } else {
+    console.log(`[CIAB ProfileDeploy] New reservation — persisting fresh spec (${rawSpec.vms.length} VMs)`);
+  }
+
+  if (shouldAdoptFreshSpec) {
+    spec = { ...rawSpec, vxlan_block: reservation.vxlan_block };
+    await cybercoreQuery(
+      `UPDATE crucible_challenge SET spec = $1::jsonb WHERE challenge_id = $2`,
+      [JSON.stringify(spec), reservation.challenge_id]
+    );
   }
 
   if (numLanes > reservation.max_students) {
