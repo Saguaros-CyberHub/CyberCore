@@ -229,17 +229,28 @@ async function runProfileDeploy(opts) {
   //     VM offsets/templates now would collide with running lanes.
   let spec = reservation.spec;
   let shouldAdoptFreshSpec = !reservation.was_existing;   // always for new reservations
+  const storedHasVms = Array.isArray(spec && spec.vms) && spec.vms.length > 0;
+
   if (reservation.was_existing) {
     const liveLanesRes = await cybercoreQuery(
       `SELECT COUNT(*)::int AS n FROM cybercore_lane
         WHERE vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error','deleted')`,
       [reservation.vxlan_block.start, reservation.vxlan_block.end]
     );
-    if ((liveLanesRes.rows[0]?.n || 0) === 0) {
+    const liveCount = liveLanesRes.rows[0]?.n || 0;
+
+    if (!storedHasVms) {
+      // Stored spec is empty/missing (e.g. created from the empty-stub during
+      // the parallelized first deploy, or the previous deploy crashed before
+      // synthesis). MUST adopt fresh regardless of live-lane count — keeping
+      // an empty spec would just re-produce a broken deploy.
+      shouldAdoptFreshSpec = true;
+      console.log(`[CIAB ProfileDeploy] Stored spec is empty (${liveCount} live lane(s) ignored) — adopting fresh spec (${rawSpec.vms.length} VMs)`);
+    } else if (liveCount === 0) {
       shouldAdoptFreshSpec = true;
       console.log(`[CIAB ProfileDeploy] Reservation has no live lanes — adopting fresh spec (${rawSpec.vms.length} VMs) from current asset selection`);
     } else {
-      console.log(`[CIAB ProfileDeploy] Reservation has ${liveLanesRes.rows[0].n} live lane(s) — keeping stored spec (${spec.vms?.length || 0} VMs) to avoid collision`);
+      console.log(`[CIAB ProfileDeploy] Reservation has ${liveCount} live lane(s) — keeping stored spec (${spec.vms.length} VMs) to avoid collision`);
     }
   } else {
     console.log(`[CIAB ProfileDeploy] New reservation — persisting fresh spec (${rawSpec.vms.length} VMs)`);
