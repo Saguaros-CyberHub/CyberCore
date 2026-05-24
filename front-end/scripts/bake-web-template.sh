@@ -244,7 +244,12 @@ runcmd:
   - [ sh, -c, 'command -v docker >/dev/null && echo "DOCKER_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "DOCKER_INSTALLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v apache2 >/dev/null && echo "APACHE_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "APACHE_INSTALLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v php >/dev/null && echo "PHP_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "PHP_INSTALLED=no" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, 'echo "DOCKER_BASES_CACHED=$(docker images --format={{.Repository}}:{{.Tag}} | grep -cE \"^(node:20-alpine|python:3-slim|php:8.2-apache|nginx:alpine|ruby:3-alpine)$\")" >> /etc/cybercore-bake.env' ]
+  # Count cached base images by directly inspecting each. Survives docker
+  # output format changes across versions (some emit REPO/TAG separately,
+  # newer ones emit REPO:TAG in one IMAGE column with extra layout).
+  # All \$ are escaped so bash leaves them for the in-VM sh to evaluate.
+  - [ sh, -c, 'C=0; for I in node:20-alpine python:3-slim php:8.2-apache nginx:alpine ruby:3-alpine; do docker image inspect "\$I" >/dev/null 2>&1 && C=\$((C+1)); done; echo "DOCKER_BASES_CACHED=\$C" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'docker images > /etc/cybercore-docker-images.log 2>&1' ]
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 
   # Restore resolv.conf symlink so clones use DHCP-provided DNS.

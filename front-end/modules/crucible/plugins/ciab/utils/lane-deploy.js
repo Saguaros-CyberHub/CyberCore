@@ -275,13 +275,74 @@ async function getOrCreateProfileChallenge({ profileId, requestedMax, companyNam
  */
 async function deleteProfileChallenge(profileId) {
   const challengeKey = `ciab-profile-${profileId.slice(0, 8)}`;
-  const result = await cybercoreQuery(
-    `DELETE FROM crucible_challenge WHERE challenge_key = $1 RETURNING challenge_id`,
+
+  // 1. Read the challenge's spec first so we know which VXLAN block to free
+  //    in Proxmox SDN (mirrors the regular challenge-delete teardown in
+  //    front-end/src/routes/lab-templates.js — VNets + zone go too, not just
+  //    the DB row).
+  const chRes = await cybercoreQuery(
+    `SELECT challenge_id, spec FROM crucible_challenge WHERE challenge_key = $1`,
     [challengeKey]
   );
-  if (result.rows.length === 0) return { deleted: false, reason: 'no_challenge' };
-  console.log(`[CIAB Reservation] Released profile ${profileId.slice(0,8)} challenge ${result.rows[0].challenge_id.slice(0,8)}`);
-  return { deleted: true, challenge_id: result.rows[0].challenge_id };
+  if (chRes.rows.length === 0) {
+    return { deleted: false, reason: 'no_challenge' };
+  }
+  const ch = chRes.rows[0];
+  const spec = typeof ch.spec === 'string' ? JSON.parse(ch.spec) : ch.spec;
+  const block = (spec && spec.vxlan_block) || {};
+
+  // 2. Tear down SDN VNets in the block range, then the zone if empty.
+  let vnetsRemoved = 0;
+  let zoneRemoved = false;
+  if (Number.isFinite(block.start) && Number.isFinite(block.end)) {
+    try {
+      const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+      const ours = (vnets || []).filter(v => {
+        const t = Number(v.tag);
+        if (!Number.isFinite(t)) return false;
+        // External VNets (tag in block) AND v3 internal VNets (tag = block + V3_INTERNAL_TAG_OFFSET)
+        return (t >= block.start && t <= block.end)
+            || (t >= block.start + V3_INTERNAL_TAG_OFFSET && t <= block.end + V3_INTERNAL_TAG_OFFSET);
+      });
+      for (const v of ours) {
+        try {
+          await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${v.vnet}`);
+          vnetsRemoved++;
+        } catch (e) {
+          console.warn(`[CIAB Reservation] Failed to delete VNet ${v.vnet}: ${e.message}`);
+        }
+      }
+
+      // Derive zone the same way ensureSdnZoneAndVnets does, then drop it if empty.
+      const zoneAbbrev = challengeKey
+        .replace(/[^a-z0-9]/gi, '')
+        .substring(0, 8)
+        .toLowerCase();
+      const remainingVnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+      const zoneStillHasVnets = (remainingVnets || []).some(v => v.zone === zoneAbbrev);
+      if (!zoneStillHasVnets && zoneAbbrev) {
+        try {
+          await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/zones/${zoneAbbrev}`);
+          zoneRemoved = true;
+        } catch (e) {
+          console.warn(`[CIAB Reservation] Failed to delete zone ${zoneAbbrev}: ${e.message}`);
+        }
+      }
+
+      // Reload SDN so removals take effect cluster-wide.
+      try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (_) {}
+    } catch (sdnErr) {
+      console.warn(`[CIAB Reservation] SDN cleanup for profile ${profileId.slice(0,8)} partial: ${sdnErr.message}`);
+    }
+  }
+
+  // 3. Delete the challenge row last — once we're past SDN cleanup we don't
+  //    care if SDN had partial failures; the DB row going away frees the
+  //    VXLAN block to be re-used by future reservations.
+  await cybercoreQuery(`DELETE FROM crucible_challenge WHERE challenge_id = $1`, [ch.challenge_id]);
+
+  console.log(`[CIAB Reservation] Released profile ${profileId.slice(0,8)} challenge ${ch.challenge_id.slice(0,8)} — removed ${vnetsRemoved} VNet(s)${zoneRemoved ? ' + zone' : ''}`);
+  return { deleted: true, challenge_id: ch.challenge_id, vnets_removed: vnetsRemoved, zone_removed: zoneRemoved };
 }
 
 /**

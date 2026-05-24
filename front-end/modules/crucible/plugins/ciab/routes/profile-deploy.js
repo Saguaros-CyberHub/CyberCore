@@ -420,6 +420,7 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
     const {
       profile_id,
       num_lanes,
+      max_students,
       group_name,
       attack_boxes,
       subnet_scheme,
@@ -431,6 +432,7 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
       profileId: profile_id,
       userId: req.user.userId,
       numLanes: parseInt(num_lanes, 10),
+      maxStudents: max_students != null ? parseInt(max_students, 10) : undefined,
       groupName: group_name,
       attackBoxes: attack_boxes !== false,
       subnetScheme: subnet_scheme || 'v2',
