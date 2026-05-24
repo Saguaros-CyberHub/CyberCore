@@ -641,7 +641,8 @@ async function deployOneLaneFromSpec({
   // ── Pre-clone idempotency: destroy any stale VMs at expected target VMIDs ─
   // VMIDs are deterministic from vxlan_id, so a previous failed deploy on the
   // same vxlan can leave VMs that block fresh clones with "can't lock file"
-  // errors. Force-destroy them up-front (best-effort, ignore missing).
+  // errors. Same pattern as admin/lanes.js:508 — query cluster/resources once,
+  // then only destroy VMs that actually exist (with the known node).
   const expectedVmIds = [
     { id: gatewayVmId, type: 'lxc' },
     ...(spec.vms || []).map(vmSpec => ({
@@ -652,12 +653,22 @@ async function deployOneLaneFromSpec({
   if (attackBoxes) {
     expectedVmIds.push({ id: ATTACK_BOX_VMID_OFFSET + vxlanId, type: 'qemu' });
   }
-  for (const { id, type } of expectedVmIds) {
-    try {
-      await forceDestroyVM(id, type, null);
-    } catch (e) {
-      console.warn(`${logTag} Pre-clone cleanup of ${type} ${id} failed (continuing): ${e.message}`);
+  try {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const liveById = new Map();
+    for (const r of (resources || [])) {
+      liveById.set(Number(r.vmid), { node: r.node, type: r.type });  // r.type = 'qemu' | 'lxc'
     }
+    const stale = expectedVmIds.filter(v => liveById.has(v.id));
+    if (stale.length > 0) {
+      console.log(`${logTag} Pre-clone: destroying ${stale.length} stale VM(s) from a prior failed attempt: ${stale.map(s => s.id).join(',')}`);
+      for (const { id } of stale) {
+        const live = liveById.get(id);
+        await forceDestroyVM(id, live.type, live.node);
+      }
+    }
+  } catch (e) {
+    console.warn(`${logTag} Pre-clone cleanup query failed (continuing): ${e.message}`);
   }
 
   try {
