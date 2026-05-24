@@ -563,6 +563,32 @@ async function agentShellExec(node, vmId, shellCmd) {
   throw lastErr;
 }
 
+// ─── Wait for the agent's exec channel to actually work ──────────────────
+// waitForGuestAgent (in script-executor) only verifies guest-ping. The
+// guest-exec RPC frequently 596's for several seconds afterward, especially
+// on freshly-cloned Debian VMs. Probe with a real exec until success or
+// timeout. Returns true if exec succeeded at least once, false on timeout.
+async function waitForAgentExecReady(node, vmId, logTag, timeoutMs = 180000) {
+  const startedAt = Date.now();
+  let attempt = 0;
+  while (Date.now() - startedAt < timeoutMs) {
+    attempt++;
+    try {
+      const r = await agentShellExec(node, vmId, 'true');
+      console.log(`${logTag} ✓ Agent exec ready on vm=${vmId} (after ${attempt} attempt(s), ${Math.round((Date.now()-startedAt)/1000)}s)`);
+      return true;
+    } catch (err) {
+      // agentShellExec already does its own internal 5-retry; if we get here
+      // that means 5 quick retries all failed. Wait longer between rounds.
+      if (Date.now() - startedAt >= timeoutMs) break;
+      const waitMs = Math.min(15000, 5000 + attempt * 2000);
+      console.warn(`${logTag} Agent exec not ready on vm=${vmId} (round ${attempt}): ${err.message.substring(0,120)} — waiting ${waitMs/1000}s`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+  return false;
+}
+
 // ─── Vuln-app installer execution ──────────────────────────────────────────
 // Writes source_tree files via QEMU guest agent, then runs install_script.
 async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }) {
@@ -885,12 +911,23 @@ async function deployOneLaneFromSpec({
 
       // Vuln-app install (only on the matched target VM)
       if (vulnAppInstall && vulnAppInstall.target_vm === dvm.name) {
+        // Probe the agent's exec channel with a no-op until it actually
+        // succeeds. waitForGuestAgent above only checks ping; exec often
+        // 596s for several seconds after ping returns OK (especially on
+        // Debian 13 / freshly-cloned VMs). Poll up to 3 minutes.
         await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
-                    [jobId, `Installing vuln app on ${dvm.name} (${vulnAppInstall.mode})`]);
-        const appResult = await installVulnAppOnVM({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
-                                                     vulnAppInstall, logTag });
-        if (!appResult.success && !appResult.skipped) {
-          console.warn(`${logTag} Vuln app install failed on ${dvm.name}: ${appResult.error}`);
+                    [jobId, `Waiting for agent exec on ${dvm.name}`]);
+        const ready = await waitForAgentExecReady(dvm.node, dvm.vm_id, logTag, 180000);
+        if (!ready) {
+          console.warn(`${logTag} Agent exec never became ready on ${dvm.name} after 180s — skipping vuln-app install`);
+        } else {
+          await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
+                      [jobId, `Installing vuln app on ${dvm.name} (${vulnAppInstall.mode})`]);
+          const appResult = await installVulnAppOnVM({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
+                                                       vulnAppInstall, logTag });
+          if (!appResult.success && !appResult.skipped) {
+            console.warn(`${logTag} Vuln app install failed on ${dvm.name}: ${appResult.error}`);
+          }
         }
       }
 
