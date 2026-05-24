@@ -294,16 +294,27 @@ async function loadReservationStatus(profileId) {
   try {
     const r = await apiCall(`/profile-deploy/profiles/${profileId}/reservation`);
     if (r.reserved) {
-      // Lock the max_students field — reservation is already set
       const maxStudInput = document.getElementById('dep-max-students');
       maxStudInput.value = r.max_students;
-      maxStudInput.disabled = true;
-      el.innerHTML = `<div class="status-banner info">
-        🔒 Profile reservation: <strong>${r.slots_used}/${r.max_students}</strong> slots used —
-        VXLAN range <code>${r.vxlan_range_start}-${r.vxlan_range_end}</code>,
-        challenge <code>${(r.challenge_key||'').slice(0,40)}</code>.
-        Max students locked. <strong>${r.slots_free}</strong> free slot${r.slots_free===1?'':'s'} for new lanes.
-      </div>`;
+      // Empty reservation (no lanes deployed) is resizable — the server will
+      // delete-and-recreate the challenge with the new max on next deploy.
+      if (r.slots_used === 0) {
+        maxStudInput.disabled = false;
+        el.innerHTML = `<div class="status-banner info">
+          🔓 Profile reservation: <strong>0/${r.max_students}</strong> slots used —
+          VXLAN range <code>${r.vxlan_range_start}-${r.vxlan_range_end}</code>,
+          challenge <code>${(r.challenge_key||'').slice(0,40)}</code>.
+          No lanes deployed yet — <strong>max students can still be changed</strong>; the reservation will be resized on next deploy.
+        </div>`;
+      } else {
+        maxStudInput.disabled = true;
+        el.innerHTML = `<div class="status-banner info">
+          🔒 Profile reservation: <strong>${r.slots_used}/${r.max_students}</strong> slots used —
+          VXLAN range <code>${r.vxlan_range_start}-${r.vxlan_range_end}</code>,
+          challenge <code>${(r.challenge_key||'').slice(0,40)}</code>.
+          Max students locked (lanes deployed). <strong>${r.slots_free}</strong> free slot${r.slots_free===1?'':'s'} for new lanes.
+        </div>`;
+      }
     } else {
       const maxStudInput = document.getElementById('dep-max-students');
       maxStudInput.disabled = false;

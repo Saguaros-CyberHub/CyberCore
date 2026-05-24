@@ -154,14 +154,43 @@ async function getOrCreateProfileChallenge({ profileId, requestedMax, companyNam
     const existingSpec = typeof ch.spec === 'string' ? JSON.parse(ch.spec) : ch.spec;
     const block = existingSpec.vxlan_block || {};
     const blockSize = (block.end != null && block.start != null) ? (block.end - block.start + 1) : null;
-    return {
-      challenge_id: ch.challenge_id,
-      challenge_key: ch.challenge_key,
-      vxlan_block: block,
-      max_students: blockSize,                // derived from the spec — no separate column
-      was_existing: true,
-      spec: existingSpec
-    };
+
+    // If the caller wants a different size AND no lanes are bound to this
+    // reservation, delete it and fall through to re-create. This is the recovery
+    // path for the common case: a previous deploy attempt failed before any
+    // lanes deployed, locking the reservation at the wrong size.
+    if (Number.isFinite(requestedMax) && requestedMax !== blockSize
+        && block.start != null && block.end != null) {
+      const usedRes = await cybercoreQuery(
+        `SELECT COUNT(*)::int AS n FROM cybercore_lane
+          WHERE vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error','deleted')`,
+        [block.start, block.end]
+      );
+      if ((usedRes.rows[0]?.n || 0) === 0) {
+        console.log(`[CIAB Reservation] Profile ${profileId.slice(0,8)}: resizing empty reservation ${blockSize}→${requestedMax} (deleting challenge ${ch.challenge_id.slice(0,8)})`);
+        await cybercoreQuery(`DELETE FROM crucible_challenge WHERE challenge_id = $1`, [ch.challenge_id]);
+        // fall through to step 2 (re-allocate)
+      } else {
+        // Lanes exist — can't resize, return existing as-is
+        return {
+          challenge_id: ch.challenge_id,
+          challenge_key: ch.challenge_key,
+          vxlan_block: block,
+          max_students: blockSize,
+          was_existing: true,
+          spec: existingSpec
+        };
+      }
+    } else {
+      return {
+        challenge_id: ch.challenge_id,
+        challenge_key: ch.challenge_key,
+        vxlan_block: block,
+        max_students: blockSize,                // derived from the spec — no separate column
+        was_existing: true,
+        spec: existingSpec
+      };
+    }
   }
 
   // 2. New — validate requestedMax and find a free gap
@@ -298,6 +327,71 @@ async function resolveVnets(vxlanId, subnetScheme) {
     }
   }
   return { vnet, vnetInt };
+}
+
+// ─── Auto-provision SDN zone + VNets for the batch ────────────────────────
+// Mirrors the auto-provision logic in front-end/src/routes/admin/lab-networks.js
+// (single-lane create flow). Called once per batch before the per-lane
+// resolveVnets loop, so we don't race N parallel zone/vnet creates.
+async function ensureSdnZoneAndVnets({ vxlanIds, subnetScheme, challengeKey, logTag }) {
+  const tag = logTag || 'CIAB Deploy';
+  const requiredTags = new Set();
+  for (const id of vxlanIds) {
+    requiredTags.add(id);
+    if (subnetScheme === 'v3') requiredTags.add(id + V3_INTERNAL_TAG_OFFSET);
+  }
+
+  let vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+  const existingTags = new Set((vnets || []).map(v => v.tag));
+  const missingTags = [...requiredTags].filter(t => !existingTags.has(t));
+  if (missingTags.length === 0) return;
+
+  // Derive zone abbreviation from challenge_key (strip non-alphanumeric, 8 chars max)
+  const zoneAbbrev = (challengeKey || 'ciabprof')
+    .replace(/[^a-z0-9]/gi, '')
+    .substring(0, 8)
+    .toLowerCase() || 'ciabprof';
+
+  // Create zone if missing
+  const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
+  const zoneExists = (zones || []).some(z => z.zone === zoneAbbrev);
+  if (!zoneExists) {
+    const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
+    const nodeIps = (nodeList || [])
+      .map((n, i) => n.ip || `100.100.10.${10 + i}`)
+      .join(',');
+    console.log(`[${tag}] Creating SDN zone '${zoneAbbrev}' (vxlan, peers=${nodeIps})`);
+    await proxmoxAPI('POST', '/api2/json/cluster/sdn/zones', {
+      zone: zoneAbbrev,
+      type: 'vxlan',
+      peers: nodeIps,
+      ipam: 'pve'
+    });
+  }
+
+  // Create missing VNets
+  for (const vxTag of missingTags) {
+    const vnetName = `${zoneAbbrev}-${vxTag}`;
+    console.log(`[${tag}] Creating VNet '${vnetName}' (tag=${vxTag}, zone=${zoneAbbrev})`);
+    await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
+      vnet: vnetName,
+      zone: zoneAbbrev,
+      tag: vxTag,
+      alias: `${zoneAbbrev}-vnet-${vxTag}`
+    });
+  }
+
+  // Reload SDN once for the whole batch
+  console.log(`[${tag}] Reloading SDN (${missingTags.length} new VNets in '${zoneAbbrev}')`);
+  await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
+  await new Promise(r => setTimeout(r, 5000));
+
+  // Verify the requested tags now appear
+  vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+  const stillMissing = [...requiredTags].filter(t => !vnets.some(v => v.tag === t));
+  if (stillMissing.length > 0) {
+    throw new Error(`SDN reload did not surface VNets for tags: ${stillMissing.join(',')} — may need manual reload`);
+  }
 }
 
 // ─── Phase 1a — gateway template replication (LXC lock workaround) ────────
@@ -775,7 +869,8 @@ async function deployOneLaneFromSpec({
 async function deployProfileLanesBatch({
   groupId, groupName, spec, laneAllocations,
   subnetScheme = 'v2', module: moduleKey = 'ciab',
-  attackBoxes = true, vulnAppInstall = null, domain = null
+  attackBoxes = true, vulnAppInstall = null, domain = null,
+  challengeKey = null
 }) {
   const templateNode = spec.template_node || 'cyberhub-node-5';
   const gatewayVmid = resolveGatewayVmid(moduleKey, subnetScheme, spec);
@@ -783,7 +878,28 @@ async function deployProfileLanesBatch({
   const cloneSem = createCloneSemaphore();
   const progress = initProgress(groupId, laneAllocations.length, groupName);
 
-  // ── Resolve VNets (must already exist via SDN provisioning) ────────────
+  // ── Auto-provision SDN zone + VNets for the whole batch ────────────────
+  // CIAB ephemeral challenges aren't created via /create-lab, so their SDN
+  // infrastructure doesn't exist yet. Do this once up-front so the per-lane
+  // resolveVnets loop is a plain lookup.
+  try {
+    await ensureSdnZoneAndVnets({
+      vxlanIds: laneAllocations.map(a => a.vxlanId),
+      subnetScheme,
+      challengeKey: challengeKey || spec.challenge_key || `ciab-${groupId.slice(0,8)}`,
+      logTag: `CIAB Deploy ${groupName}`
+    });
+  } catch (err) {
+    console.error(`[CIAB Deploy ${groupName}] SDN provision failed: ${err.message}`);
+    for (const a of laneAllocations) {
+      await query(`UPDATE ciab_profile_lane_jobs SET status='error', error_msg=$2 WHERE id=$1`,
+                  [a.jobId, `SDN provision failed: ${err.message}`]);
+    }
+    await query(`UPDATE ciab_profile_lane_groups SET status='error', updated_at=NOW() WHERE id=$1`, [groupId]);
+    return { succeeded: 0, failed: laneAllocations.length, errors: [err.message] };
+  }
+
+  // ── Resolve VNets (now present after ensureSdnZoneAndVnets) ────────────
   const vnetByLaneId = {};
   const vnetIntByLaneId = {};
   for (const a of laneAllocations) {
@@ -942,6 +1058,7 @@ module.exports = {
   deleteProfileChallenge,
   findProfileChallenge,
   resolveVnets,
+  ensureSdnZoneAndVnets,
   getProgress,
   installVulnAppOnVM,
   collectVmIp,

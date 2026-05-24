@@ -38,6 +38,7 @@ const {
   deleteProfileChallenge,
   findProfileChallenge,
   resolveVnets,
+  ensureSdnZoneAndVnets,
   getProgress,
   VXLAN_SEARCH_MIN,
   VXLAN_SEARCH_MAX
@@ -313,7 +314,8 @@ async function runProfileDeploy(opts) {
       module: 'ciab',
       attackBoxes,
       vulnAppInstall: spec.vuln_app_install,
-      domain: profileDomain
+      domain: profileDomain,
+      challengeKey
     }).catch(err => {
       console.error(`[CIAB ProfileDeploy] Batch ${groupId} crashed:`, err);
       query(`UPDATE ciab_profile_lane_groups SET status='error', updated_at=NOW() WHERE id=$1`, [groupId])
@@ -573,7 +575,8 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
         module: 'crucible',
         attackBoxes: group.attack_boxes,
         vulnAppInstall: spec.vuln_app_install || null,
-        domain: addLanesDomain
+        domain: addLanesDomain,
+        challengeKey: reservation.challenge_key
       }).catch(err => {
         console.error(`[CIAB AddLanes] group ${groupId} add-lanes batch crashed: ${err.message}`);
       });
@@ -674,9 +677,9 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
     if (jobRes.rows.length === 0) return res.status(404).json({ error: 'Lane job not found' });
     const job = jobRes.rows[0];
 
-    // Re-fetch ephemeral challenge spec
+    // Re-fetch ephemeral challenge spec + key (key needed for SDN zone naming)
     const challengeRes = await cybercoreQuery(
-      `SELECT spec FROM crucible_challenge WHERE challenge_id=$1`,
+      `SELECT spec, challenge_key FROM crucible_challenge WHERE challenge_id=$1`,
       [group.ephemeral_challenge_id]
     );
     if (challengeRes.rows.length === 0) {
@@ -685,6 +688,7 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
     const spec = typeof challengeRes.rows[0].spec === 'string'
       ? JSON.parse(challengeRes.rows[0].spec)
       : challengeRes.rows[0].spec;
+    const challengeKey = challengeRes.rows[0].challenge_key;
 
     // Destroy any partial VMs from the failed attempt
     if (Array.isArray(job.vm_ids) && job.vm_ids.length > 0) {
@@ -694,7 +698,14 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
       }
     }
 
-    // Resolve VNets again (in case the SDN provisioning changed)
+    // Make sure SDN zone+VNets exist (idempotent) — covers the case where the
+    // initial batch never got past provisioning. Then look up the VNet objects.
+    await ensureSdnZoneAndVnets({
+      vxlanIds: [job.vxlan_id],
+      subnetScheme: group.subnet_scheme,
+      challengeKey,
+      logTag: `CIAB Retry ${group.group_name}`
+    });
     const { vnet, vnetInt } = await resolveVnets(job.vxlan_id, group.subnet_scheme);
     const gatewayVmId = 100000 + job.vxlan_id;
 
