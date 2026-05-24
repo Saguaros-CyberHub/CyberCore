@@ -666,7 +666,20 @@ async function waitForAgentExecReady(node, vmId, logTag, timeoutMs = 180000) {
     attempt++;
     try {
       const r = await agentShellExec(node, vmId, 'true');
+      // CRITICAL: actually wait for the probe to COMPLETE on the agent side
+      // before declaring ready. Without this, the API returns a PID instantly
+      // but the agent may still be processing the previous command — the
+      // immediate next call then 596s because the agent is busy.
+      if (r && r.pid) {
+        const status = await pollExecStatus(node, vmId, r.pid, 30000);
+        if (!status || !status.exited) {
+          throw new Error(`probe pid=${r.pid} did not complete within 30s`);
+        }
+      }
       console.log(`${logTag} ✓ Agent exec ready on vm=${vmId} (after ${attempt} attempt(s), ${Math.round((Date.now()-startedAt)/1000)}s)`);
+      // Brief settle delay — empirically the agent rejects back-to-back calls
+      // with 596 even after a verified-complete probe. 2s eliminates this.
+      await new Promise(r => setTimeout(r, 2000));
       return true;
     } catch (err) {
       // agentShellExec already does its own internal 5-retry; if we get here
