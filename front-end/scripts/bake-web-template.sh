@@ -221,6 +221,16 @@ runcmd:
   - [ systemctl, start, docker ]
   - [ systemctl, start, apache2 ]
 
+  # ---- Pre-pull common base images so docker-mode vuln-app builds work on
+  # lane VMs that have no outbound DNS/internet (the lane subnet is isolated
+  # behind the gateway, and apt/registry mirrors aren't reachable). Add more
+  # bases here if the LLM commonly emits FROM stanzas using them.
+  - [ sh, -c, 'docker pull node:20-alpine    || echo WARN: failed to pre-pull node:20-alpine' ]
+  - [ sh, -c, 'docker pull python:3-slim     || echo WARN: failed to pre-pull python:3-slim' ]
+  - [ sh, -c, 'docker pull php:8.2-apache    || echo WARN: failed to pre-pull php:8.2-apache' ]
+  - [ sh, -c, 'docker pull nginx:alpine      || echo WARN: failed to pre-pull nginx:alpine' ]
+  - [ sh, -c, 'docker pull ruby:3-alpine     || echo WARN: failed to pre-pull ruby:3-alpine' ]
+
   # ---- Make Apache's docroot writable by the cloned-template user too,
   # so install_script can drop files there via guest-agent without sudo ----
   - [ sh, -c, 'mkdir -p /var/www/html && chown -R $TEMPLATE_USER:www-data /var/www/html && chmod 0775 /var/www/html' ]
@@ -234,6 +244,7 @@ runcmd:
   - [ sh, -c, 'command -v docker >/dev/null && echo "DOCKER_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "DOCKER_INSTALLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v apache2 >/dev/null && echo "APACHE_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "APACHE_INSTALLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v php >/dev/null && echo "PHP_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "PHP_INSTALLED=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'echo "DOCKER_BASES_CACHED=$(docker images --format={{.Repository}}:{{.Tag}} | grep -cE \"^(node:20-alpine|python:3-slim|php:8.2-apache|nginx:alpine|ruby:3-alpine)$\")" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 
   # Restore resolv.conf symlink so clones use DHCP-provided DNS.
@@ -329,10 +340,12 @@ else
       DOCKER=$(awk -F= '/^DOCKER_INSTALLED=/{print $2}' "$BAKE_ENV")
       APACHE=$(awk -F= '/^APACHE_INSTALLED=/{print $2}' "$BAKE_ENV")
       PHP=$(awk -F= '/^PHP_INSTALLED=/{print $2}' "$BAKE_ENV")
+      DOCKER_BASES=$(awk -F= '/^DOCKER_BASES_CACHED=/{print $2}' "$BAKE_ENV")
       echo "    bake complete:    ${BAKE_COMPLETE:-no}"
       echo "    guest agent:      ${GUEST_AGENT:-unknown}"
       echo "    agent unblocked:  ${GUEST_AGENT_UNBLOCKED:-unknown}"
       echo "    docker:           ${DOCKER:-unknown}"
+      echo "    docker bases:     ${DOCKER_BASES:-0}/5 cached"
       echo "    apache:           ${APACHE:-unknown}"
       echo "    php:              ${PHP:-unknown}"
       [ "$BAKE_COMPLETE" != "yes" ]         && { echo "ERROR: runcmd did not complete"; FAIL=1; }

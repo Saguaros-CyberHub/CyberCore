@@ -43,7 +43,15 @@ async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker' }
   const assets = Array.isArray(profile.assets) ? profile.assets : [];
   const webServer = assets.find(isWebServer);
   const targetHostname = webServer ? webServer.hostname : null;
-  const effectiveMode = webServer ? preferMode : 'standalone_vm';
+
+  // Always use docker mode. Reasons:
+  //   - web template (1005) has docker pre-baked; image build/run always works
+  //   - standalone_vm mode produced apps tied to native runtimes (Node, PHP,
+  //     etc.) that the template may not have installed → broken installs
+  //   - docker mode lets the LLM pick any tech stack inside the Dockerfile;
+  //     the bake just runs it
+  // The preferMode param is kept for API compatibility but ignored.
+  const effectiveMode = 'docker';
 
   // Try the multi-stage pipeline first (concept → per-file fan-out → install).
   // Falls back to the hardcoded template if Claude is unreachable or the
