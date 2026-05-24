@@ -638,6 +638,28 @@ async function deployOneLaneFromSpec({
   const deployedVMs = [];
   const allVmIds = [gatewayVmId];
 
+  // ── Pre-clone idempotency: destroy any stale VMs at expected target VMIDs ─
+  // VMIDs are deterministic from vxlan_id, so a previous failed deploy on the
+  // same vxlan can leave VMs that block fresh clones with "can't lock file"
+  // errors. Force-destroy them up-front (best-effort, ignore missing).
+  const expectedVmIds = [
+    { id: gatewayVmId, type: 'lxc' },
+    ...(spec.vms || []).map(vmSpec => ({
+      id: (vmSpec.vm_offset || 600000) + vxlanId,
+      type: vmSpec.type || 'qemu'
+    }))
+  ];
+  if (attackBoxes) {
+    expectedVmIds.push({ id: ATTACK_BOX_VMID_OFFSET + vxlanId, type: 'qemu' });
+  }
+  for (const { id, type } of expectedVmIds) {
+    try {
+      await forceDestroyVM(id, type, null);
+    } catch (e) {
+      console.warn(`${logTag} Pre-clone cleanup of ${type} ${id} failed (continuing): ${e.message}`);
+    }
+  }
+
   try {
     // ── Clone challenge VMs in parallel via the shared semaphore ────────
     const clonePromises = (spec.vms || []).map(async (vmSpec) => {
