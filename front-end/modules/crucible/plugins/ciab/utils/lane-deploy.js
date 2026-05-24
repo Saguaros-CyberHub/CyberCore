@@ -602,54 +602,59 @@ async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupN
   }));
 }
 
-// ─── Direct form-urlencoded POST to Proxmox (bypasses proxmoxAPI) ──────────
-// User's curl test on PVE 9.1.9 returns HTTP 200 immediately using
-// --data-urlencode (which produces %20 for spaces, not +). URLSearchParams
-// uses + for spaces. Most servers accept either, but pveproxy is picky.
-// So we build the body byte-for-byte the same way curl does.
-//
-// Pass an array of [key, value] pairs (preserving duplicate keys).
+// ─── Shell out to curl for /agent/exec ─────────────────────────────────────
+// Node's https.request consistently gets HTTP 596 (pveproxy 3-second backend
+// timeout) on PVE 9.1.9, while curl with the same token + body + endpoint
+// returns 200 in ~200ms. Hours of debugging (URL encoding, content-type,
+// JSON vs form, keep-alive, Content-Length, etc.) yielded no Node-side fix.
+// So we just exec curl. Reliable, defensible (curl ships in the orchestrator
+// image), and the per-call overhead (~50ms forking curl) is irrelevant
+// compared to the actual work the agent does.
 async function proxmoxFormPOST(path, pairs) {
-  const https = require('https');
+  const { spawn } = require('child_process');
   const { PROXMOX_URL } = require('../../../../../src/utils/proxmox');
-  const url = new URL(`${PROXMOX_URL}${path}`);
   const tokenId = process.env.PROXMOX_TOKEN_ID;
   const tokenSecret = process.env.PROXMOX_TOKEN_SECRET;
-  // encodeURIComponent produces %20 for spaces (matches curl --data-urlencode)
-  const body = pairs.map(([k, v]) =>
-    `${encodeURIComponent(k)}=${encodeURIComponent(v)}`
-  ).join('&');
+  const url = `${PROXMOX_URL}${path}`;
+
+  // Build curl args: one --data-urlencode per pair
+  const args = [
+    '-k', '-s',
+    '-w', 'HTTP_STATUS:%{http_code}',
+    '-X', 'POST',
+    '-H', `Authorization: PVEAPIToken=${tokenId}=${tokenSecret}`
+  ];
+  for (const [k, v] of pairs) {
+    args.push('--data-urlencode', `${k}=${v}`);
+  }
+  args.push(url);
 
   return new Promise((resolve, reject) => {
-    const req = https.request({
-      hostname: url.hostname,
-      port: url.port || 8006,
-      path: url.pathname + url.search,
-      method: 'POST',
-      headers: {
-        'Authorization': `PVEAPIToken=${tokenId}=${tokenSecret}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Content-Length': Buffer.byteLength(body)
-      },
-      rejectUnauthorized: false
-    }, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        if (res.statusCode >= 400) {
-          return reject(new Error(`Proxmox POST ${url.pathname} failed (${res.statusCode}): ${data}`));
-        }
-        try {
-          const json = JSON.parse(data);
-          resolve(json.data !== undefined ? json.data : json);
-        } catch {
-          resolve(data);
-        }
-      });
+    const child = spawn('curl', args);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => stdout += d.toString());
+    child.stderr.on('data', d => stderr += d.toString());
+    child.on('error', err => reject(new Error(`curl spawn failed: ${err.message}`)));
+    child.on('close', code => {
+      if (code !== 0) {
+        return reject(new Error(`curl exited ${code}: ${stderr.slice(0, 300)}`));
+      }
+      // Split body + status (we appended HTTP_STATUS:<code> via -w)
+      const m = stdout.match(/^([\s\S]*)HTTP_STATUS:(\d+)$/);
+      if (!m) return reject(new Error(`unparseable curl output: ${stdout.slice(0, 300)}`));
+      const body = m[1];
+      const status = parseInt(m[2], 10);
+      if (status >= 400) {
+        return reject(new Error(`Proxmox POST ${path} failed (${status}): ${body}`));
+      }
+      try {
+        const json = JSON.parse(body);
+        resolve(json.data !== undefined ? json.data : json);
+      } catch {
+        resolve(body);
+      }
     });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
   });
 }
 
