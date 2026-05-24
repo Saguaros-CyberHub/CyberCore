@@ -208,6 +208,7 @@
     renderHeader();
     renderOverviewStats();
     renderHeatmap();
+    renderHeatmapResidual();
     renderRadar();
     renderCisBars();
     renderCsfBars();
@@ -311,12 +312,17 @@
     return Math.min(3, Math.ceil(v / 2));
   }
 
-  // === Heat map (CIS RAM tri-factor: 3×3) ===
+  // === Heat map (FINDINGS-ONLY 3×3) ===
+  // Standard risk-assessment practice: the heat map plots IDENTIFIED RISKS
+  // (entries on the risk register). CIS RAM safeguard scoring is presented
+  // separately in the Risk Register tab and CIS RAM Workbook tab — mixing
+  // the two scales (RAM 1-3 + findings 1-5→1-3) on one chart creates
+  // ambiguity. Both the on-screen dashboard and the printable report use
+  // the same algorithm so the numbers match.
   function renderHeatmap() {
     const c = getOrInitChart('chartHeatmap');
     if (!c) return;
     const findings = state.bundle.findings || [];
-    const ramRows = collectScoredRamRows();
 
     const grid = {};
     const bump = (l, i) => {
@@ -324,12 +330,6 @@
       const k = `${l},${i}`;
       grid[k] = (grid[k] || 0) + 1;
     };
-    // CIS RAM rows: Likelihood × max(Mission, Obligations) — already 1–3.
-    for (const r of ramRows) {
-      const i = Math.max(r.mission_impact || 0, r.obligations_impact || 0);
-      bump(r.likelihood, i);
-    }
-    // Free-form findings: project from 1–5 onto 1–3 bands.
     for (const f of findings) {
       bump(bandTo3(f.likelihood), bandTo3(f.impact));
     }
@@ -342,22 +342,68 @@
     }
     const maxCount = Math.max(1, ...data.map(d => d[2]));
     c.setOption({
-      grid: { left: 80, right: 30, top: 30, bottom: 50 },
-      xAxis: { type: 'category', data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'], name: 'max(Mission, Obligations) Impact', nameLocation: 'middle', nameGap: 28, axisLabel: { fontSize: 10 } },
-      yAxis: { type: 'category', data: ['1 Not Expected', '2 Foreseeable', '3 Expected'], name: 'Likelihood', nameLocation: 'middle', nameGap: 70, axisLabel: { fontSize: 10 } },
+      grid: { left: 100, right: 30, top: 20, bottom: 50 },
+      xAxis: { type: 'category', data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'], name: 'Impact', nameLocation: 'middle', nameGap: 28, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
+      yAxis: { type: 'category', data: ['1 Not Expected', '2 Foreseeable', '3 Expected'], name: 'Likelihood', nameLocation: 'middle', nameGap: 70, nameRotate: 90, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
       visualMap: {
+        show: false,
         min: 0, max: maxCount,
-        calculable: false, orient: 'horizontal', left: 'center', bottom: 0,
-        inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] },
-        textStyle: { fontSize: 10 },
+        inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] }
       },
       tooltip: {
-        formatter: (p) => `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1} (risk score ${(p.value[1]+1)*(p.value[0]+1)}): <b>${p.value[2]}</b> finding(s)`,
+        formatter: (p) => `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1} (risk ${(p.value[1] + 1) * (p.value[0] + 1)}): <b>${p.value[2]}</b> finding${p.value[2] === 1 ? '' : 's'}`,
       },
       series: [{
         type: 'heatmap',
         data,
-        label: { show: true, fontSize: 14, fontWeight: 600, formatter: (p) => p.value[2] || '' },
+        label: { show: true, fontSize: 14, fontWeight: 700, formatter: (p) => p.value[2] || '' },
+        itemStyle: { borderColor: '#fff', borderWidth: 2 },
+      }],
+    }, true);
+  }
+
+  // === Residual heat map — same algorithm as renderHeatmap but uses
+  // residual_likelihood / residual_impact (post-treatment projection).
+  // Findings without residual scoring are excluded from this view.
+  function renderHeatmapResidual() {
+    const c = getOrInitChart('chartHeatmapResidual');
+    if (!c) return;
+    const findings = (state.bundle.findings || [])
+      .filter(f => f.residual_likelihood && f.residual_impact);
+
+    const grid = {};
+    const bump = (l, i) => {
+      if (!l || !i) return;
+      const k = `${l},${i}`;
+      grid[k] = (grid[k] || 0) + 1;
+    };
+    for (const f of findings) {
+      bump(bandTo3(f.residual_likelihood), bandTo3(f.residual_impact));
+    }
+
+    const data = [];
+    for (let l = 1; l <= 3; l++) {
+      for (let i = 1; i <= 3; i++) {
+        data.push([i - 1, l - 1, grid[`${l},${i}`] || 0]);
+      }
+    }
+    const maxCount = Math.max(1, ...data.map(d => d[2]));
+    c.setOption({
+      grid: { left: 100, right: 30, top: 20, bottom: 50 },
+      xAxis: { type: 'category', data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'], name: 'Impact', nameLocation: 'middle', nameGap: 28, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
+      yAxis: { type: 'category', data: ['1 Not Expected', '2 Foreseeable', '3 Expected'], name: 'Likelihood', nameLocation: 'middle', nameGap: 70, nameRotate: 90, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
+      visualMap: {
+        show: false,
+        min: 0, max: maxCount,
+        inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] }
+      },
+      tooltip: {
+        formatter: (p) => `Residual L ${p.value[1] + 1} × I ${p.value[0] + 1}: <b>${p.value[2]}</b> finding${p.value[2] === 1 ? '' : 's'}`,
+      },
+      series: [{
+        type: 'heatmap',
+        data,
+        label: { show: true, fontSize: 14, fontWeight: 700, formatter: (p) => p.value[2] || '' },
         itemStyle: { borderColor: '#fff', borderWidth: 2 },
       }],
     }, true);
@@ -1009,6 +1055,697 @@
     } catch (err) {
       toast('Export failed: ' + err.message, 4000);
     }
+  }
+
+  // ════════════════════════════════════════════════════════════════════
+  // TIER 1-3 EXTENSIONS — Assets / POA&M / Insurance / Snapshots /
+  // Library / OWASP / FAIR / ALE / Deloitte exec / extended finding drawer
+  // ════════════════════════════════════════════════════════════════════
+
+  // ── Extended state ────────────────────────────────────────────────
+  state.assets = [];
+  state.insurance = null;
+  state.snapshots = [];
+  state.scenarioLib = null;
+
+  // Hook into loadAndRender to pull the additional data + render the new tabs.
+  // We monkey-patch by wrapping the existing function — see initExtensions().
+  function initExtensions() {
+    const origLoad = loadAndRender;
+    window._origCraLoad = origLoad;
+    // Wrap the load function so the new tabs render every time data refreshes.
+    loadAndRender = async function () {
+      await origLoad.apply(this, arguments);
+      await loadAssets();
+      await loadInsurance();
+      await loadSnapshots();
+      renderAssets();
+      renderPoam();
+      renderInsurance();
+      renderSnapshots();
+      renderDeloitteExec();
+      enhanceFindingsTable();
+    };
+    wireAssetDrawer();
+    wireLibraryModal();
+    wireInsuranceTab();
+    wireSnapshotTab();
+    wireDeloitteExecSave();
+    wireAleCalculator();
+    wireExtendedFindingDrawer();
+    wirePoamDownload();
+  }
+  // Defer until DOMContentLoaded — bootstrap hasn't necessarily replaced loadAndRender yet
+  document.addEventListener('DOMContentLoaded', () => {
+    if (typeof loadAndRender !== 'function') return;
+    initExtensions();
+    // Ensure the new tabs get an initial paint after bootstrap has loaded data
+    setTimeout(() => {
+      if (state.bundle) {
+        loadAssets().then(renderAssets);
+        loadInsurance().then(renderInsurance);
+        loadSnapshots().then(renderSnapshots);
+        renderPoam();
+        renderDeloitteExec();
+        enhanceFindingsTable();
+      }
+    }, 500);
+  });
+
+  // ── Data fetchers ─────────────────────────────────────────────────
+  async function loadAssets() {
+    try {
+      const r = await api('GET', '/' + encodeURIComponent(state.profileId) + '/assets');
+      state.assets = r.assets || [];
+    } catch (e) { state.assets = []; }
+  }
+  async function loadInsurance() {
+    try {
+      const r = await api('GET', '/' + encodeURIComponent(state.profileId) + '/insurance-readiness');
+      state.insurance = r.readiness || null;
+    } catch (e) { state.insurance = null; }
+  }
+  async function loadSnapshots() {
+    try {
+      const r = await api('GET', '/' + encodeURIComponent(state.profileId) + '/snapshots');
+      state.snapshots = r.snapshots || [];
+    } catch (e) { state.snapshots = []; }
+  }
+  async function loadScenarioLib() {
+    if (state.scenarioLib) return state.scenarioLib;
+    try {
+      const r = await api('GET', '/scenarios');
+      state.scenarioLib = r.scenarios || [];
+    } catch (e) { state.scenarioLib = []; }
+    return state.scenarioLib;
+  }
+
+  // ── ASSETS TAB ────────────────────────────────────────────────────
+  function renderAssets() {
+    const tbody = document.getElementById('assetsTbody');
+    const count = document.getElementById('assetsCount');
+    if (!tbody) return;
+    const assets = state.assets;
+    count.textContent = assets.length === 0
+      ? 'No assets yet. Every risk should trace back to one or more assets.'
+      : `${assets.length} assets · ${assets.filter(a => a.criticality_tier === 1).length} Tier 1 (crown jewels)`;
+    if (assets.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="6" style="padding:24px; text-align:center; color:var(--text-muted); font-style:italic;">No assets recorded yet. Click "+ Add Asset" to begin, or generate the answer key for AI-populated assets.</td></tr>`;
+      return;
+    }
+    const dcClass = c => `dc-${String(c || 'internal').toLowerCase()}`;
+    const tierColor = t => ({ 1: '#dc2626', 2: '#d97706', 3: '#0891b2' })[t] || '#94a3b8';
+    tbody.innerHTML = assets.map(a => `
+      <tr style="cursor:pointer; border-left:3px solid ${tierColor(a.criticality_tier)};" data-asset-id="${a.id}">
+        <td><strong>${escapeHtml(a.name)}</strong>${a.hostname ? `<br><small style="color:var(--text-muted)">${escapeHtml(a.hostname)}</small>` : ''}</td>
+        <td>${escapeHtml((a.asset_type || '').replace(/_/g, ' '))}</td>
+        <td>${escapeHtml(a.owner_role || '—')}${a.custodian && a.custodian !== a.owner_role ? `<br><small style="color:var(--text-muted)">${escapeHtml(a.custodian)}</small>` : ''}</td>
+        <td><strong>T${a.criticality_tier ?? '—'}</strong></td>
+        <td>${a.confidentiality ?? '?'} / ${a.integrity ?? '?'} / ${a.availability ?? '?'}</td>
+        <td><span class="${dcClass(a.data_classification)}" style="font-weight:600;">${escapeHtml(a.data_classification || '—')}</span></td>
+      </tr>
+    `).join('');
+    tbody.querySelectorAll('tr[data-asset-id]').forEach(tr => {
+      tr.addEventListener('click', () => openAssetDrawer(tr.dataset.assetId));
+    });
+  }
+
+  function wireAssetDrawer() {
+    const btn = document.getElementById('btnAddAsset');
+    if (btn) btn.addEventListener('click', () => openAssetDrawer(null));
+    ['btnCloseAssetDrawer', 'btnCancelAsset'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('click', closeAssetDrawer);
+    });
+    document.getElementById('assetBackdrop')?.addEventListener('click', closeAssetDrawer);
+    document.getElementById('btnSaveAsset')?.addEventListener('click', saveAsset);
+    document.getElementById('btnDeleteAsset')?.addEventListener('click', deleteAsset);
+    ['aConf', 'aInteg', 'aAvail'].forEach(id => {
+      const inp = document.getElementById(id);
+      if (inp) inp.addEventListener('input', () => {
+        document.getElementById(id + 'Val').textContent = inp.value;
+      });
+    });
+  }
+  function openAssetDrawer(assetId) {
+    const a = assetId ? state.assets.find(x => x.id === assetId) : null;
+    document.getElementById('assetDrawerTitle').textContent = a ? 'Edit Asset' : 'Add Asset';
+    document.getElementById('assetId').value = a?.id || '';
+    document.getElementById('aName').value = a?.name || '';
+    document.getElementById('aType').value = a?.asset_type || '';
+    document.getElementById('aCriticality').value = a?.criticality_tier || '';
+    document.getElementById('aOwner').value = a?.owner_role || '';
+    document.getElementById('aCustodian').value = a?.custodian || '';
+    document.getElementById('aHostname').value = a?.hostname || '';
+    document.getElementById('aIp').value = a?.ip_address || '';
+    document.getElementById('aDataClass').value = a?.data_classification || '';
+    ['aConf', 'aInteg', 'aAvail'].forEach((id, i) => {
+      const key = ['confidentiality', 'integrity', 'availability'][i];
+      const val = a?.[key] ?? 2;
+      document.getElementById(id).value = val;
+      document.getElementById(id + 'Val').textContent = val;
+    });
+    document.getElementById('aDescription').value = a?.description || '';
+    document.getElementById('btnDeleteAsset').style.display = a ? '' : 'none';
+    document.getElementById('assetDrawer').classList.add('open');
+    document.getElementById('assetBackdrop').classList.add('open');
+  }
+  function closeAssetDrawer() {
+    document.getElementById('assetDrawer').classList.remove('open');
+    document.getElementById('assetBackdrop').classList.remove('open');
+  }
+  async function saveAsset() {
+    const id = document.getElementById('assetId').value;
+    const payload = {
+      name: document.getElementById('aName').value.trim(),
+      asset_type: document.getElementById('aType').value || null,
+      criticality_tier: parseInt(document.getElementById('aCriticality').value) || null,
+      owner_role: document.getElementById('aOwner').value || null,
+      custodian: document.getElementById('aCustodian').value || null,
+      hostname: document.getElementById('aHostname').value || null,
+      ip_address: document.getElementById('aIp').value || null,
+      data_classification: document.getElementById('aDataClass').value || null,
+      confidentiality: parseInt(document.getElementById('aConf').value),
+      integrity: parseInt(document.getElementById('aInteg').value),
+      availability: parseInt(document.getElementById('aAvail').value),
+      description: document.getElementById('aDescription').value || null
+    };
+    if (!payload.name) { toast('Asset name required', 3000); return; }
+    try {
+      if (id) await api('PUT', `/${state.profileId}/assets/${id}`, payload);
+      else    await api('POST', `/${state.profileId}/assets`, payload);
+      closeAssetDrawer();
+      await loadAssets();
+      renderAssets();
+      toast(id ? 'Asset updated' : 'Asset added');
+    } catch (e) { toast('Save failed: ' + e.message, 4000); }
+  }
+  async function deleteAsset() {
+    const id = document.getElementById('assetId').value;
+    if (!id || !confirm('Delete this asset?')) return;
+    try {
+      await api('DELETE', `/${state.profileId}/assets/${id}`);
+      closeAssetDrawer();
+      await loadAssets();
+      renderAssets();
+      toast('Asset deleted');
+    } catch (e) { toast('Delete failed: ' + e.message, 4000); }
+  }
+
+  // ── POA&M TAB ─────────────────────────────────────────────────────
+  function renderPoam() {
+    const tbody = document.getElementById('poamTbody');
+    if (!tbody) return;
+    const open = (state.bundle?.findings || []).filter(f => f.status !== 'mitigated');
+    if (open.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" style="padding:24px; text-align:center; color:var(--text-muted); font-style:italic;">All findings mitigated, or no findings recorded. Nothing to plan.</td></tr>`;
+      return;
+    }
+    open.sort((a, b) => (Number(b.inherent_risk) || 0) - (Number(a.inherent_risk) || 0));
+    const sevClass = r => r >= 16 ? 'risk-critical' : r >= 12 ? 'risk-high' : r >= 6 ? 'risk-medium' : 'risk-low';
+    const sevLabel = r => r >= 16 ? 'CRIT' : r >= 12 ? 'HIGH' : r >= 6 ? 'MED' : 'LOW';
+    tbody.innerHTML = open.map(f => `
+      <tr>
+        <td><strong>${escapeHtml(f.finding_code)}</strong></td>
+        <td>${escapeHtml(f.title)}</td>
+        <td>${escapeHtml((f.discovery_method || '').replace(/_/g, ' '))}</td>
+        <td>${escapeHtml(f.owner_name || f.owner_role || '—')}</td>
+        <td>${f.target_completion_date ? new Date(f.target_completion_date).toLocaleDateString() : '—'}</td>
+        <td><span class="risk-badge ${sevClass(f.inherent_risk)}">${f.inherent_risk ?? '?'}</span> ${sevLabel(f.inherent_risk)}</td>
+        <td><span class="status-pill status-${f.status || 'open'}">${(f.status || 'open').toUpperCase()}</span></td>
+      </tr>
+    `).join('');
+  }
+  function wirePoamDownload() {
+    const btn = document.getElementById('btnDownloadPoam');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      try {
+        const r = await fetch(apiUrl(`/${encodeURIComponent(state.profileId)}/poam.csv`), { credentials: 'same-origin' });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `poam-${state.profileId.slice(0, 8)}.csv`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      } catch (e) { toast('POA&M download failed: ' + e.message, 4000); }
+    });
+  }
+
+  // ── INSURANCE READINESS TAB ───────────────────────────────────────
+  const READINESS_CTRLS = [
+    { k: 'mfa_email',           label: 'MFA on email accounts',                weight: 12, type: 'choice' },
+    { k: 'mfa_remote',          label: 'MFA on remote / VPN access',           weight: 12, type: 'choice' },
+    { k: 'mfa_privileged',      label: 'MFA on privileged / admin accounts',   weight: 14, type: 'choice' },
+    { k: 'mfa_cloud',           label: 'MFA on cloud / SaaS sessions',         weight: 10, type: 'choice' },
+    { k: 'edr_coverage_pct',    label: 'EDR coverage across endpoints (%)',    weight: 10, type: 'percent' },
+    { k: 'immutable_backups',   label: 'Immutable / WORM offsite backups',     weight: 8,  type: 'choice' },
+    { k: 'tested_restore_12mo', label: 'Backup restore test in last 12 months',weight: 6,  type: 'choice' },
+    { k: 'ir_plan_written',     label: 'Documented incident response plan',    weight: 6,  type: 'choice' },
+    { k: 'tabletop_12mo',       label: 'Tabletop exercise in last 12 months',  weight: 5,  type: 'choice' },
+    { k: 'pam_in_place',        label: 'Privileged Access Management (PAM)',   weight: 6,  type: 'choice' },
+    { k: 'security_training',   label: 'Annual security awareness training',   weight: 6,  type: 'choice' },
+    { k: 'vuln_scanning',       label: 'Regular vulnerability scanning',       weight: 5,  type: 'choice' }
+  ];
+  function renderInsurance() {
+    const host = document.getElementById('insControls');
+    if (!host) return;
+    const r = state.insurance || {};
+    host.innerHTML = READINESS_CTRLS.map(c => {
+      if (c.type === 'percent') {
+        const v = r[c.k] ?? '';
+        return `<div style="display:flex; align-items:center; gap:12px; padding:8px 0; border-bottom:1px solid var(--border-color,#e2e8f0);">
+          <div style="flex:1;">${escapeHtml(c.label)} <small style="color:var(--text-muted);">(${c.weight} pts)</small></div>
+          <input type="number" min="0" max="100" id="ins_${c.k}" value="${v}" style="width:80px; padding:6px; border:1px solid var(--border-color,#e2e8f0); border-radius:4px;">
+          <span style="width:40px;">%</span>
+        </div>`;
+      }
+      const cur = r[c.k] || '';
+      const optBtn = (val, lbl, color) =>
+        `<button type="button" class="ins-opt ${cur === val ? 'active' : ''}" data-k="${c.k}" data-v="${val}" style="padding:4px 12px; border:1px solid ${cur === val ? color : 'var(--border-color,#e2e8f0)'}; background:${cur === val ? color : 'white'}; color:${cur === val ? 'white' : 'var(--text-primary)'}; border-radius:4px; cursor:pointer; font-size:0.8rem; font-weight:600;">${lbl}</button>`;
+      return `<div style="display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--border-color,#e2e8f0);">
+        <div style="flex:1;">${escapeHtml(c.label)} <small style="color:var(--text-muted);">(${c.weight} pts)</small></div>
+        ${optBtn('yes', 'YES', '#16a34a')}
+        ${optBtn('partial', 'PARTIAL', '#d97706')}
+        ${optBtn('no', 'NO', '#dc2626')}
+      </div>`;
+    }).join('');
+    host.querySelectorAll('.ins-opt').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const k = btn.dataset.k;
+        if (!state.insurance) state.insurance = {};
+        state.insurance[k] = btn.dataset.v;
+        renderInsurance();  // re-render to update active state
+      });
+    });
+
+    // Tile updates
+    document.getElementById('insScore').textContent = r.readiness_score ?? '—';
+    const tier = r.readiness_tier || '—';
+    document.getElementById('insTier').textContent = tier;
+    const tierColors = { 'Insurable':'#16a34a','Conditional':'#d97706','Restricted':'#ea580c','Uninsurable':'#dc2626' };
+    const tierHints = {
+      'Insurable':   'standard market — competitive premiums',
+      'Conditional': 'sub-standard / restricted coverage',
+      'Restricted':  'only specialist carriers will quote',
+      'Uninsurable': 'declination expected — must remediate first'
+    };
+    const tile = document.getElementById('insTierTile');
+    if (tile && tierColors[tier]) tile.style.borderLeftColor = tierColors[tier];
+    document.getElementById('insTierHint').textContent = tierHints[tier] || '';
+  }
+  function wireInsuranceTab() {
+    const btn = document.getElementById('btnSaveInsurance');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const payload = { ...(state.insurance || {}) };
+      READINESS_CTRLS.forEach(c => {
+        if (c.type === 'percent') payload[c.k] = parseInt(document.getElementById('ins_' + c.k)?.value) || 0;
+      });
+      try {
+        const r = await api('PUT', `/${state.profileId}/insurance-readiness`, payload);
+        state.insurance = r.readiness;
+        renderInsurance();
+        toast(`Saved — score ${r.readiness.readiness_score}/100 (${r.readiness.readiness_tier})`);
+      } catch (e) { toast('Save failed: ' + e.message, 4000); }
+    });
+  }
+
+  // ── SNAPSHOTS TAB ─────────────────────────────────────────────────
+  function renderSnapshots() {
+    const tbody = document.getElementById('snapshotsTbody');
+    const deltaHost = document.getElementById('snapshotDeltaSection');
+    if (!tbody) return;
+    const snaps = state.snapshots;
+    if (snaps.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" style="padding:24px; text-align:center; color:var(--text-muted); font-style:italic;">No snapshots yet. Take your first snapshot to establish a baseline; re-snapshot after implementing recommendations to see the delta.</td></tr>`;
+      if (deltaHost) deltaHost.innerHTML = '';
+      return;
+    }
+    tbody.innerHTML = snaps.map(s => `
+      <tr>
+        <td><strong>${escapeHtml(s.label)}</strong></td>
+        <td>${new Date(s.created_at).toLocaleString()}</td>
+        <td>${s.findings_total ?? '—'}</td>
+        <td>${s.findings_critical ?? '—'}</td>
+        <td>${s.ig1_coverage_pct ?? '—'}%</td>
+        <td>${s.total_inherent_risk ?? '—'}</td>
+        <td>${escapeHtml(s.notes || '')}</td>
+      </tr>
+    `).join('');
+    // Delta cards (compare 2 most recent)
+    if (snaps.length >= 2 && deltaHost) {
+      const [now, prior] = snaps;
+      const delta = (label, n, p, opts={}) => {
+        const d = (Number(n)||0) - (Number(p)||0);
+        const arr = d > 0 ? '▲' : d < 0 ? '▼' : '—';
+        const cls = (opts.coverage ? (d > 0 ? 'down' : 'up') : (d > 0 ? 'up' : 'down'));  // coverage: up=good (green); findings: up=bad (red)
+        const color = cls === 'down' ? '#16a34a' : cls === 'up' ? '#dc2626' : '#94a3b8';
+        const sign = d > 0 ? '+' : '';
+        return `<div class="cra-stat-card" style="margin:0; border-left-color:${color};">
+          <div class="label">${escapeHtml(label)}</div>
+          <div class="value">${n ?? '—'}${opts.suffix||''}</div>
+          <div class="hint" style="color:${color}; font-weight:700;">${arr} ${sign}${d}${opts.suffix||''} vs prior</div>
+        </div>`;
+      };
+      deltaHost.innerHTML = `
+        <div class="cra-card" style="margin-bottom:14px;">
+          <h3 style="margin-top:0;">Delta vs Prior Snapshot</h3>
+          <p class="sub" style="font-size:0.85rem;">Comparing <strong>${escapeHtml(now.label)}</strong> against <strong>${escapeHtml(prior.label)}</strong>.</p>
+          <div class="cra-grid cols-4">
+            ${delta('Total Findings',  now.findings_total,    prior.findings_total)}
+            ${delta('Critical Risks',  now.findings_critical, prior.findings_critical)}
+            ${delta('IG1 Coverage',    now.ig1_coverage_pct,  prior.ig1_coverage_pct, { suffix:'%', coverage:true })}
+            ${delta('Inherent Risk',   now.total_inherent_risk, prior.total_inherent_risk)}
+          </div>
+        </div>`;
+    } else if (deltaHost) {
+      deltaHost.innerHTML = `<div class="cra-card" style="background:#f8fafc;"><p class="sub" style="margin:0;">Take at least 2 snapshots to see a delta comparison here.</p></div>`;
+    }
+  }
+  function wireSnapshotTab() {
+    const btn = document.getElementById('btnCreateSnapshot');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const label = prompt('Snapshot label?', `Snapshot ${new Date().toISOString().slice(0,10)}`);
+      if (!label) return;
+      try {
+        await api('POST', `/${state.profileId}/snapshots`, { label });
+        await loadSnapshots();
+        renderSnapshots();
+        toast('Snapshot saved');
+      } catch (e) { toast('Snapshot failed: ' + e.message, 4000); }
+    });
+  }
+
+  // ── LIBRARY MODAL (Add finding from canonical scenarios) ─────────
+  function wireLibraryModal() {
+    const openBtn = document.getElementById('btnLibrary');
+    if (!openBtn) return;
+    openBtn.addEventListener('click', openLibrary);
+    document.getElementById('btnCloseLib')?.addEventListener('click', closeLibrary);
+    document.getElementById('libBackdrop')?.addEventListener('click', closeLibrary);
+    document.getElementById('libSearch')?.addEventListener('input', renderLibList);
+    document.getElementById('libCategory')?.addEventListener('change', renderLibList);
+  }
+  async function openLibrary() {
+    document.getElementById('libDrawer').classList.add('open');
+    document.getElementById('libBackdrop').classList.add('open');
+    await loadScenarioLib();
+    renderLibList();
+  }
+  function closeLibrary() {
+    document.getElementById('libDrawer').classList.remove('open');
+    document.getElementById('libBackdrop').classList.remove('open');
+  }
+  function renderLibList() {
+    const list = state.scenarioLib || [];
+    const q = (document.getElementById('libSearch').value || '').toLowerCase();
+    const cat = document.getElementById('libCategory').value;
+    const filtered = list.filter(s =>
+      (!cat || s.category === cat) &&
+      (!q || s.title.toLowerCase().includes(q) || (s.description || '').toLowerCase().includes(q))
+    );
+    const host = document.getElementById('libList');
+    if (filtered.length === 0) {
+      host.innerHTML = `<p style="color:var(--text-muted); font-style:italic;">No scenarios match. Try clearing filters.</p>`;
+      return;
+    }
+    const catColor = c => ({ technical:'#0ea5e9', people:'#dc2626', process:'#d97706', physical:'#16a34a' })[c] || '#94a3b8';
+    host.innerHTML = filtered.map(s => `
+      <div style="border:1px solid var(--border-color,#e2e8f0); border-radius:6px; padding:12px; margin-bottom:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
+          <div style="flex:1;">
+            <div style="font-weight:700;">${escapeHtml(s.title)}</div>
+            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:3px;">
+              <span style="color:${catColor(s.category)}; font-weight:600;">${escapeHtml(s.category)}</span>
+              · ${escapeHtml(s.threat_source || '?')}
+              · default L${s.default_likelihood}/I${s.default_impact}
+            </div>
+            <p style="font-size:0.85rem; margin:8px 0;">${escapeHtml((s.description || '').slice(0, 240))}${s.description && s.description.length > 240 ? '…' : ''}</p>
+          </div>
+          <button class="btn primary" data-key="${escapeHtml(s.key)}">+ Add</button>
+        </div>
+      </div>
+    `).join('');
+    host.querySelectorAll('button[data-key]').forEach(btn => {
+      btn.addEventListener('click', () => instantiateScenario(btn.dataset.key));
+    });
+  }
+  async function instantiateScenario(key) {
+    try {
+      await api('POST', `/${state.profileId}/scenarios/${encodeURIComponent(key)}/instantiate`, {});
+      closeLibrary();
+      await loadAndRender();
+      toast('Finding added from library — edit to customize');
+    } catch (e) { toast('Add failed: ' + e.message, 4000); }
+  }
+
+  // ── DELOITTE EXEC SUMMARY EDITOR ──────────────────────────────────
+  function renderDeloitteExec() {
+    if (!state.bundle?.report) return;
+    const r = state.bundle.report;
+    const setIf = (id, v) => { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = v || ''; };
+    setIf('execCurrentPosture', r.exec_current_posture);
+    setIf('execTopRisks',       r.exec_top_risks);
+    setIf('execProgress',       r.exec_progress);
+    setIf('execDecisionsNeeded',r.exec_decisions_needed);
+    setIf('execSummary',        r.exec_summary);
+  }
+  function wireDeloitteExecSave() {
+    const btn = document.getElementById('btnSaveSummary');
+    if (!btn || btn.dataset.wired) return;
+    btn.dataset.wired = '1';
+    btn.addEventListener('click', async () => {
+      try {
+        const payload = {
+          exec_summary: document.getElementById('execSummary').value,
+          exec_current_posture: document.getElementById('execCurrentPosture')?.value || null,
+          exec_top_risks:       document.getElementById('execTopRisks')?.value || null,
+          exec_progress:        document.getElementById('execProgress')?.value || null,
+          exec_decisions_needed:document.getElementById('execDecisionsNeeded')?.value || null
+        };
+        await api('PUT', `/${state.profileId}/report`, payload);
+        toast('Exec summary saved');
+      } catch (e) { toast('Save failed: ' + e.message, 4000); }
+    }, { once: false });
+  }
+
+  // ── ALE/SLE/ARO CALCULATOR ────────────────────────────────────────
+  function wireAleCalculator() {
+    const btn = document.getElementById('btnCalcAle');
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const av  = parseFloat(document.getElementById('aleAV').value);
+      const ef  = parseFloat(document.getElementById('aleEF').value);
+      const aro = parseFloat(document.getElementById('aleARO').value);
+      if (!av || isNaN(ef) || isNaN(aro)) { toast('Enter all three values', 3000); return; }
+      try {
+        const r = await api('POST', '/utils/ale-sle-aro', { asset_value_usd: av, exposure_factor: ef, aro });
+        const fmt = n => '$' + Number(n).toLocaleString();
+        const el = document.getElementById('aleResult');
+        el.style.display = '';
+        el.innerHTML = `
+          <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+            <div>
+              <div style="font-size:0.7rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:0.1em; font-weight:700;">Single Loss Expectancy (SLE)</div>
+              <div style="font-size:1.6rem; font-weight:800; color:var(--text-primary);">${fmt(r.sle)}</div>
+              <div style="font-size:0.75rem; color:var(--text-muted);">${r.breakdown.formula_sle} = ${fmt(av)} × ${ef}</div>
+            </div>
+            <div>
+              <div style="font-size:0.7rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:0.1em; font-weight:700;">Annualized Loss Expectancy (ALE)</div>
+              <div style="font-size:1.6rem; font-weight:800; color:#dc2626;">${fmt(r.ale)}</div>
+              <div style="font-size:0.75rem; color:var(--text-muted);">${r.breakdown.formula_ale} = ${fmt(r.sle)} × ${aro}</div>
+            </div>
+          </div>`;
+      } catch (e) { toast('Calculation failed: ' + e.message, 4000); }
+    });
+  }
+
+  // ── EXTENDED FINDING DRAWER (slider updates + OWASP + FAIR) ──────
+  const OWASP_L_FACTORS = [
+    ['skill_level','Skill level'], ['motive','Motive'], ['opportunity','Opportunity'], ['size','Threat-agent size'],
+    ['ease_of_discovery','Ease of discovery'], ['ease_of_exploit','Ease of exploit'], ['awareness','Awareness'], ['intrusion_detection','Intrusion detection']
+  ];
+  const OWASP_I_FACTORS = [
+    ['loss_of_confidentiality','Loss of confidentiality'], ['loss_of_integrity','Loss of integrity'],
+    ['loss_of_availability','Loss of availability'], ['loss_of_accountability','Loss of accountability'],
+    ['financial_damage','Financial damage'], ['reputation_damage','Reputation damage'],
+    ['non_compliance','Non-compliance'], ['privacy_violation','Privacy violation']
+  ];
+  function renderOwaspFactors(existing) {
+    const host = document.getElementById('owaspFactors');
+    if (!host) return;
+    const f = existing || {};
+    const row = ([k, label]) => `
+      <div style="display:grid; grid-template-columns:1fr 60px 50px; gap:6px; align-items:center; margin-bottom:4px;">
+        <label style="font-size:0.8rem;">${escapeHtml(label)}</label>
+        <input type="range" id="ow_${k}" min="0" max="9" step="1" value="${f[k] ?? 5}">
+        <span id="ow_${k}_v" style="text-align:center; font-weight:600;">${f[k] ?? 5}</span>
+      </div>`;
+    host.innerHTML = `
+      <div style="margin-bottom:8px;"><strong style="font-size:0.8rem; color:var(--text-muted);">LIKELIHOOD FACTORS</strong></div>
+      ${OWASP_L_FACTORS.map(row).join('')}
+      <div style="margin:12px 0 8px;"><strong style="font-size:0.8rem; color:var(--text-muted);">IMPACT FACTORS</strong></div>
+      ${OWASP_I_FACTORS.map(row).join('')}
+    `;
+    host.querySelectorAll('input[type=range]').forEach(sl => {
+      sl.addEventListener('input', () => { document.getElementById(sl.id + '_v').textContent = sl.value; });
+    });
+  }
+  function wireExtendedFindingDrawer() {
+    // Slider value updates for residual sliders
+    ['fResLikelihood', 'fResImpact'].forEach(id => {
+      const sl = document.getElementById(id);
+      if (!sl) return;
+      sl.addEventListener('input', () => {
+        document.getElementById(id + 'Val').textContent = sl.value;
+      });
+    });
+    // Render OWASP factors when drawer opens (we observe drawer open via the existing openDrawer call)
+    // Initialize empty OWASP factors UI
+    renderOwaspFactors(null);
+    // OWASP "Compute Severity" button
+    document.getElementById('btnApplyOwasp')?.addEventListener('click', async () => {
+      const findingId = document.getElementById('findingId').value;
+      if (!findingId) { toast('Save the finding first, then run OWASP scoring', 3000); return; }
+      const factors = {};
+      [...OWASP_L_FACTORS, ...OWASP_I_FACTORS].forEach(([k]) => {
+        factors[k] = parseInt(document.getElementById('ow_' + k).value);
+      });
+      try {
+        const r = await api('PUT', `/${state.profileId}/findings/${findingId}/owasp`, { factors });
+        const el = document.getElementById('owaspResult');
+        el.innerHTML = `<strong>L=${r.rollup.likelihood_score} (${r.rollup.likelihood_band})</strong> · <strong>I=${r.rollup.impact_score} (${r.rollup.impact_band})</strong> → <strong style="color:#dc2626;">${r.rollup.severity}</strong>`;
+      } catch (e) { toast('OWASP scoring failed: ' + e.message, 4000); }
+    });
+    // FAIR Monte Carlo button
+    document.getElementById('btnRunFair')?.addEventListener('click', async () => {
+      const findingId = document.getElementById('findingId').value;
+      if (!findingId) { toast('Save the finding first, then run FAIR analysis', 3000); return; }
+      const lef = {
+        min:  parseFloat(document.getElementById('fairLefMin').value),
+        mode: parseFloat(document.getElementById('fairLefMode').value),
+        max:  parseFloat(document.getElementById('fairLefMax').value)
+      };
+      const lm = {
+        min:  parseFloat(document.getElementById('fairLmMin').value),
+        mode: parseFloat(document.getElementById('fairLmMode').value),
+        max:  parseFloat(document.getElementById('fairLmMax').value)
+      };
+      if (isNaN(lef.min) || isNaN(lm.min)) { toast('Fill in LEF and LM values', 3000); return; }
+      try {
+        const r = await api('POST', `/${state.profileId}/findings/${findingId}/fair`, { lef, lm });
+        const fmt = n => '$' + Math.round(n).toLocaleString();
+        document.getElementById('fairResult').innerHTML =
+          `<strong>ALE mean: ${fmt(r.fair.ale_mean)}</strong> · p10: ${fmt(r.fair.ale_p10)} · p90: ${fmt(r.fair.ale_p90)} (${r.fair.iterations} iterations)`;
+      } catch (e) { toast('FAIR run failed: ' + e.message, 4000); }
+    });
+  }
+
+  // Wrap the existing openDrawer to populate the new fields when editing
+  function enhanceFindingsTable() {
+    // The findings table renderer is in the original code; we re-render the table
+    // (calling its existing function) to pick up new columns (Owner / Due / Status).
+    // Patch: extend the original openDrawer to populate new fields.
+    if (window._origOpenDrawer || typeof openDrawer !== 'function') return;
+    window._origOpenDrawer = openDrawer;
+    openDrawer = function (findingId) {
+      window._origOpenDrawer(findingId);
+      const f = findingId ? (state.bundle?.findings || []).find(x => x.id === findingId) : null;
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+      set('fThreatSource',     f?.threat_source);
+      set('fDiscoveryMethod',  f?.discovery_method);
+      set('fOwnerRole',        f?.owner_role);
+      set('fOwnerName',        f?.owner_name);
+      set('fReviewer',         f?.reviewer);
+      set('fTargetDate',       f?.target_completion_date ? String(f.target_completion_date).slice(0, 10) : '');
+      set('fEvidence',         f?.evidence_observed);
+      const setSlider = (id, v) => {
+        const sl = document.getElementById(id);
+        const val = document.getElementById(id + 'Val');
+        if (sl && v != null) { sl.value = v; if (val) val.textContent = v; }
+      };
+      setSlider('fResLikelihood', f?.residual_likelihood ?? Math.max(1, (f?.likelihood ?? 3) - 2));
+      setSlider('fResImpact',     f?.residual_impact     ?? Math.max(1, (f?.impact ?? 3) - 1));
+      // OWASP factors — load existing
+      renderOwaspFactors(f?.owasp_factors || null);
+      document.getElementById('owaspResult').innerHTML = f?.owasp_factors?._rollup
+        ? `<strong>L=${f.owasp_factors._rollup.likelihood_score} (${f.owasp_factors._rollup.likelihood_band})</strong> · <strong>I=${f.owasp_factors._rollup.impact_score} (${f.owasp_factors._rollup.impact_band})</strong> → <strong style="color:#dc2626;">${f.owasp_factors._rollup.severity}</strong>`
+        : '';
+      // FAIR result
+      const fq = f?.fair_quant;
+      if (fq) {
+        const fmt = n => '$' + Math.round(n).toLocaleString();
+        document.getElementById('fairResult').innerHTML =
+          `<strong>ALE mean: ${fmt(fq.ale_mean)}</strong> · p10: ${fmt(fq.ale_p10)} · p90: ${fmt(fq.ale_p90)}`;
+        if (fq.inputs) {
+          ['min','mode','max'].forEach(k => {
+            const lefEl = document.getElementById('fairLef' + k.charAt(0).toUpperCase() + k.slice(1));
+            const lmEl  = document.getElementById('fairLm'  + k.charAt(0).toUpperCase() + k.slice(1));
+            if (lefEl && fq.inputs.lef) lefEl.value = fq.inputs.lef[k];
+            if (lmEl  && fq.inputs.lm)  lmEl.value  = fq.inputs.lm[k];
+          });
+        }
+      } else {
+        document.getElementById('fairResult').innerHTML = '';
+      }
+    };
+
+    // Also extend saveFinding to include the new fields
+    if (window._origSaveFinding || typeof saveFinding !== 'function') return;
+    window._origSaveFinding = saveFinding;
+    saveFinding = async function () {
+      // Inject the new field values into the body before the original save runs
+      // by setting them on the form (the original saveFinding reads from DOM).
+      // We need to intercept the actual POST/PUT to add residual + new fields.
+      // Easiest: re-implement saveFinding inline using the same API.
+      const id = document.getElementById('findingId').value;
+      const payload = {
+        title: document.getElementById('fTitle').value,
+        description: document.getElementById('fDescription').value || null,
+        category: document.getElementById('fCategory').value || null,
+        likelihood: parseInt(document.getElementById('fLikelihood').value),
+        impact: parseInt(document.getElementById('fImpact').value),
+        residual_likelihood: parseInt(document.getElementById('fResLikelihood')?.value) || null,
+        residual_impact:     parseInt(document.getElementById('fResImpact')?.value) || null,
+        status: document.getElementById('fStatus').value || 'open',
+        recommendation: document.getElementById('fRecommendation').value || null,
+        control_refs: parseControlRefs(document.getElementById('fControlRefs').value),
+        threat_source:        document.getElementById('fThreatSource')?.value || null,
+        discovery_method:     document.getElementById('fDiscoveryMethod')?.value || null,
+        owner_role:           document.getElementById('fOwnerRole')?.value || null,
+        owner_name:           document.getElementById('fOwnerName')?.value || null,
+        reviewer:             document.getElementById('fReviewer')?.value || null,
+        target_completion_date: document.getElementById('fTargetDate')?.value || null,
+        evidence_observed:    document.getElementById('fEvidence')?.value || null
+      };
+      try {
+        if (id) await api('PUT',  `/${state.profileId}/findings/${id}`, payload);
+        else    await api('POST', `/${state.profileId}/findings`, payload);
+        closeDrawer();
+        await loadAndRender();
+        toast(id ? 'Finding updated' : 'Finding added');
+      } catch (e) { toast('Save failed: ' + e.message, 4000); }
+    };
+    // Re-wire the save button so it calls our wrapped version (the original
+    // wireDrawer registered the listener before we redefined saveFinding).
+    const saveBtn = document.getElementById('btnSaveFinding');
+    if (saveBtn && !saveBtn.dataset.tier13Wired) {
+      // Remove the old listener by cloning the node
+      const clone = saveBtn.cloneNode(true);
+      saveBtn.parentNode.replaceChild(clone, saveBtn);
+      clone.addEventListener('click', () => saveFinding());
+      clone.dataset.tier13Wired = '1';
+    }
+  }
+  function parseControlRefs(str) {
+    if (!str) return [];
+    return str.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+      const [framework, id] = s.split(':');
+      return { framework: framework?.trim(), id: id?.trim() };
+    }).filter(x => x.framework && x.id);
   }
 
   // === Resize handler ===

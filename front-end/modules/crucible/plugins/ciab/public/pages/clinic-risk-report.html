@@ -261,6 +261,69 @@
   }
   .chart.small { height: 240px; }
 
+  /* ─── Deloitte exec summary blocks ─────────────────────────────────── */
+  .exec-block { margin-bottom: 14px; padding: 10px 14px; border-left: 3px solid var(--border); background: #fbfcfd; border-radius: 0 4px 4px 0; break-inside: avoid; }
+  .exec-block .exec-label { font-size: 0.65rem; font-weight: 800; letter-spacing: 0.18em; color: var(--primary); margin-bottom: 4px; }
+
+  /* ─── Asset register table ────────────────────────────────────────── */
+  table.asset-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; margin-top: 8px; }
+  table.asset-table thead { background: var(--primary-d); color: white; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  table.asset-table th { padding: 8px 6px; text-align: left; font-size: 0.7rem; letter-spacing: 0.08em; font-weight: 700; }
+  table.asset-table th.num { text-align: center; }
+  table.asset-table tbody td { padding: 8px 6px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.asset-table tbody td.num { text-align: center; font-variant-numeric: tabular-nums; }
+  table.asset-table tbody tr:nth-child(even) td { background: var(--bg); }
+  table.asset-table tbody tr.tier-1 { border-left: 3px solid var(--crit); }
+  table.asset-table tbody tr.tier-2 { border-left: 3px solid var(--med); }
+  table.asset-table tbody tr.tier-3 { border-left: 3px solid var(--low); }
+  table.asset-table .dc-restricted   { color: var(--crit); font-weight: 700; }
+  table.asset-table .dc-confidential { color: var(--med); font-weight: 600; }
+  table.asset-table .dc-internal     { color: var(--text-mute); }
+  table.asset-table .dc-public       { color: var(--ok); }
+
+  /* ─── Insurance readiness ─────────────────────────────────────────── */
+  table.insurance-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 10px; }
+  table.insurance-table th { padding: 8px 10px; text-align: left; background: var(--bg); font-size: 0.7rem; letter-spacing: 0.08em; color: var(--text-mute); font-weight: 700; border-bottom: 1px solid var(--border); }
+  table.insurance-table th.num { text-align: right; }
+  table.insurance-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  table.insurance-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  table.insurance-table .status-yes     { color: var(--ok);   font-weight: 700; }
+  table.insurance-table .status-partial { color: var(--med);  font-weight: 700; }
+  table.insurance-table .status-no      { color: var(--crit); font-weight: 700; }
+
+  /* ─── Snapshot delta cards ────────────────────────────────────────── */
+  .delta-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0; }
+  .delta-tile { border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; background: white; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .delta-tile .label { font-size: 0.7rem; color: var(--text-mute); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; }
+  .delta-tile .now   { font-size: 1.5rem; font-weight: 800; color: var(--text); margin: 4px 0 2px; }
+  .delta-tile .change { font-size: 0.85rem; font-weight: 600; }
+  .delta-tile .change.up   { color: var(--crit); }      /* more = worse for findings */
+  .delta-tile .change.down { color: var(--ok); }         /* fewer = better */
+  .delta-tile.coverage .change.up   { color: var(--ok); }   /* more coverage = better */
+  .delta-tile.coverage .change.down { color: var(--crit); }
+  .delta-tile .prior { font-size: 0.7rem; color: var(--text-mute); margin-top: 4px; }
+
+  /* ─── Heat map pair (inherent + residual side by side) ─────────────── */
+  .heatmap-pair {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+    margin: 8px 0;
+  }
+  .heatmap-col .chart { height: 300px; margin: 0; }
+  .heatmap-title {
+    font-size: 0.75rem; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; margin: 0 0 6px 0;
+    padding: 6px 10px; border-radius: 4px;
+    color: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .heatmap-title.inherent { background: var(--crit); }
+  .heatmap-title.residual { background: var(--ok); }
+  @media print {
+    .heatmap-pair { gap: 8px; }
+    .heatmap-col .chart { height: 240px !important; }
+  }
+
   /* ─── CIS RAM register ─────────────────────────────────────────────── */
   .ram-control { margin-bottom: 24px; break-inside: avoid; }
   .ram-control h4 {
@@ -437,10 +500,103 @@
     </div>
     <div class="kpi-grid" id="kpiGrid"></div>
     <div id="postureCallout"></div>
+
+    <!-- Deloitte / CISO-board 4-section exec summary structure -->
     <h3>Executive Summary</h3>
-    <div id="execSummary" class="field-body"></div>
+    <div id="execDeloitte">
+      <div id="execCurrentPosture" class="exec-block">
+        <div class="exec-label">CURRENT POSTURE</div>
+        <div class="field-body" id="execCurrentPostureBody"></div>
+      </div>
+      <div id="execTopRisks" class="exec-block">
+        <div class="exec-label">TOP RISKS</div>
+        <div class="field-body" id="execTopRisksBody"></div>
+      </div>
+      <div id="execProgress" class="exec-block">
+        <div class="exec-label">PROGRESS</div>
+        <div class="field-body" id="execProgressBody"></div>
+      </div>
+      <div id="execDecisionsNeeded" class="exec-block">
+        <div class="exec-label">DECISIONS NEEDED</div>
+        <div class="field-body" id="execDecisionsNeededBody"></div>
+      </div>
+    </div>
+    <!-- Fallback: legacy single-block exec summary if Deloitte fields empty -->
+    <div id="execSummary" class="field-body" style="display:none"></div>
+
     <h3>Engagement Scope</h3>
     <table class="kv" id="scopeTable"></table>
+  </section>
+
+  <!-- ─── ASSET REGISTER (Tier 1) ──────────────────────────────────── -->
+  <section class="asset-register" id="assetRegisterSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 02 · OCTAVE Allegro-style</div>
+        <h2>Asset Register</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;">
+      Every risk traces back to one or more assets. Each entry below records owner, data classification, and the C/I/A impact band that drives the risk calculation. Tier-1 (crown jewel) assets are flagged for board attention.
+    </p>
+    <table class="asset-table">
+      <thead>
+        <tr>
+          <th>NAME</th><th>TYPE</th><th>OWNER</th>
+          <th class="num">CRIT</th>
+          <th class="num">C</th><th class="num">I</th><th class="num">A</th>
+          <th>DATA CLASS</th>
+        </tr>
+      </thead>
+      <tbody id="assetTableBody"></tbody>
+    </table>
+  </section>
+
+  <!-- ─── CYBER-INSURANCE READINESS (Tier 2) ──────────────────────── -->
+  <section class="insurance-readiness" id="insuranceSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 07 · Underwriting Posture</div>
+        <h2>Cyber-Insurance Readiness</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;">
+      Mirrors the questionnaire major cyber-insurance carriers (Coalition, At-Bay, Cowbell, Resilience) use during underwriting. Score below 65 typically triggers a sub-standard / restricted coverage offer or outright declination.
+    </p>
+    <div class="kpi-grid" style="grid-template-columns: 1fr 1fr;">
+      <div class="kpi-tile" style="--accent:#1e40af; grid-column: span 1;">
+        <div class="label">Readiness Score</div>
+        <div class="value" id="insuranceScoreValue">—</div>
+        <div class="sub" id="insuranceScoreSub">of 100 possible points</div>
+      </div>
+      <div class="kpi-tile" id="insuranceTierTile" style="--accent:#dc2626; grid-column: span 1;">
+        <div class="label">Underwriter Tier</div>
+        <div class="value" id="insuranceTierValue">—</div>
+        <div class="sub" id="insuranceTierSub">— sub-standard market</div>
+      </div>
+    </div>
+    <h3>Control Scorecard</h3>
+    <table class="insurance-table">
+      <thead><tr><th>CONTROL</th><th>STATUS</th><th class="num">POINTS</th></tr></thead>
+      <tbody id="insuranceTableBody"></tbody>
+    </table>
+  </section>
+
+  <!-- ─── SNAPSHOT / DELTA COMPARISON (Tier 2) ────────────────────── -->
+  <section class="snapshot-delta" id="snapshotSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 08 · Engagement Progress</div>
+        <h2>Snapshot Comparison — Current vs Prior Assessment</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;">
+      A risk assessment is recurring, not one-and-done. This section measures progress against the prior snapshot — the visual proof that the work is moving the needle.
+    </p>
+    <div id="snapshotDelta"></div>
   </section>
 
   <!-- ─── HEAT MAP ─────────────────────────────────────────────────── -->
@@ -448,11 +604,24 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 02 · Inherent Risk</div>
+        <div class="kicker">Section 02 · Inherent vs Residual</div>
         <h2>Risk Heat Map</h2>
       </div>
     </div>
-    <div id="chartHeatmap" class="chart"></div>
+    <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;margin-bottom:14px;">
+      Two views of the same risk register. <strong>Inherent</strong> is the current exposure with controls as they exist today. <strong>Residual</strong> is the projected exposure after the recommended treatments (see Section 06) are implemented. Risks should visually migrate from the upper-right (red) toward the lower-left (blue).
+    </p>
+    <div class="heatmap-pair">
+      <div class="heatmap-col">
+        <h4 class="heatmap-title inherent">Inherent Risk — Today</h4>
+        <div id="chartHeatmap" class="chart"></div>
+      </div>
+      <div class="heatmap-col">
+        <h4 class="heatmap-title residual">Residual Risk — After Treatment</h4>
+        <div id="chartHeatmapResidual" class="chart"></div>
+      </div>
+    </div>
+    <div id="residualSummary" class="callout ok" style="display:none"></div>
     <h3>Top risks demanding attention</h3>
     <div id="critCards" class="crit-cards"></div>
   </section>
@@ -610,12 +779,38 @@
       (yes / partial / no) to one or more CSF functions via the IG1↔CSF crosswalk,
       then averaging per function and normalizing to a 0–5 maturity scale. The
       Compliance Posture archetype is derived from the response pattern and indicates
-      where the organization has invested compared to similar peers.
+      where the organization has invested compared to similar peers. Insurance
+      readiness scoring mirrors the 12-control underwriting questionnaire used by
+      major carriers (Coalition, At-Bay, Cowbell, Resilience).
+    </p>
+    <p style="font-size:0.9rem">
+      <strong>Threat source taxonomy</strong> (NIST SP 800-30 Rev 1 §3.2): each
+      finding is categorized as <em>Adversarial</em> (human attacker), <em>Accidental</em>
+      (mistake or misconfiguration), <em>Structural</em> (gap in design or process),
+      or <em>Environmental</em> (natural / physical event). This taxonomy aligns with
+      what students will encounter on Security+, CRISC, CISA, and CISSP exams.
+    </p>
+    <p style="font-size:0.9rem">
+      <strong>CSF Implementation Tiers</strong> (NIST CSF 2.0 §3.2): Tier 1 Partial,
+      Tier 2 Risk Informed, Tier 3 Repeatable, Tier 4 Adaptive. Our 0–5 maturity
+      score maps approximately as: 0–1.5 = Tier 1, 1.5–3 = Tier 2, 3–4 = Tier 3,
+      4–5 = Tier 4.
+    </p>
+    <p style="font-size:0.9rem">
+      <strong>5-point qualitative scale equivalents</strong> (NIST SP 800-30 Rev 1 Tables G-2 and H-3):
+      1 = Very Low, 2 = Low, 3 = Moderate, 4 = High, 5 = Very High. These map
+      directly to the numeric likelihood and impact scales used throughout this
+      report.
     </p>
     <ul class="bullet-list">
       <li>CIS Controls v8 (IG1) — Center for Internet Security, <em>cisecurity.org/controls/v8</em></li>
-      <li>NIST Cybersecurity Framework 2.0 — National Institute of Standards and Technology</li>
-      <li>CIS Risk Assessment Method (RAM) v2.1 — likelihood × impact risk scoring methodology</li>
+      <li>CIS Risk Assessment Method (RAM) v2.1 — Mission Impact × Obligations Impact × Likelihood (Expectancy)</li>
+      <li>NIST Cybersecurity Framework 2.0 — six functions: Govern, Identify, Protect, Detect, Respond, Recover</li>
+      <li>NIST SP 800-30 Rev 1 — Guide for Conducting Risk Assessments (threat source taxonomy, qualitative scales)</li>
+      <li>NIST SP 800-171 / CMMC — POA&amp;M (Plan of Action and Milestones) format used in <em>POA&amp;M CSV</em> export</li>
+      <li>OCTAVE Allegro (Carnegie Mellon SEI) — asset-centric risk methodology underlying the Asset Register</li>
+      <li>FAIR (Factor Analysis of Information Risk) — Open Group standard, optional quantification basis</li>
+      <li>Verizon Data Breach Investigations Report (DBIR) — empirical basis for SMB threat-scenario library</li>
     </ul>
   </section>
 

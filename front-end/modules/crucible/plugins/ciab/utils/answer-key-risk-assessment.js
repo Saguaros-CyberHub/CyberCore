@@ -23,6 +23,9 @@
 
 const { loadIg1, deriveIg1Baseline } = require('./ig1-derivation');
 const frameworks = require('./frameworks');
+const { buildAssetRegister } = require('./asset-register-generator');
+const { deriveReadinessFromProfile, scoreReadiness } = require('./insurance-readiness');
+const { fairMonteCarlo } = require('./quant-risk');
 
 // ─── Finding builders ────────────────────────────────────────────────────
 
@@ -338,6 +341,136 @@ function f_deliberate_weakness(text, idx) {
   };
 }
 
+// Map a finding category + control refs to an owner role + threat source +
+// realistic discovery method. Used to enrich the answer-key findings with
+// Tier 1 fields (owner / due date / evidence / discovery / threat source).
+function enrichFindingMeta(finding, ctx) {
+  const refs = (finding.control_refs || []).map(r => String(r.id || ''));
+  const cat = finding.category || '';
+  const title = String(finding.title || '').toLowerCase();
+  const stake = ctx.stakeholders || [];
+  const exec  = stake.find(s => /CEO|Owner|President|Principal|Director/i.test(s.role || ''));
+  const it    = stake.find(s => /IT|CIO|CISO|Technology|System|Network/i.test(s.role || ''));
+  const cfo   = stake.find(s => /CFO|Finance|Accountant|Controller/i.test(s.role || ''));
+  const hr    = stake.find(s => /HR|People|Talent/i.test(s.role || ''));
+
+  // Owner role + name by category
+  let owner_role = 'IT Manager';
+  let owner_name = it?.name || null;
+  if (/Identity|Account|MFA|Password|Privileg/i.test(title) || refs.some(r => /^5\.|^6\./.test(r))) {
+    owner_role = 'IT Manager'; owner_name = it?.name || null;
+  }
+  if (/Backup|Recovery|Data|Privacy|DLP/i.test(title) || refs.some(r => /^3\.|^11\./.test(r))) {
+    owner_role = 'IT Manager'; owner_name = it?.name || null;
+  }
+  if (/Training|Awareness|Policy|Governance/i.test(title) || refs.some(r => /^14\./.test(r))) {
+    owner_role = 'HR Manager'; owner_name = hr?.name || it?.name || null;
+  }
+  if (/Vendor|Third-?party|Supply.?chain|SaaS/i.test(title) || refs.some(r => /^15\./.test(r))) {
+    owner_role = 'CFO'; owner_name = cfo?.name || null;
+  }
+  if (/Incident.?Response|IR.?plan|Tabletop/i.test(title) || refs.some(r => /^17\./.test(r))) {
+    owner_role = 'CEO'; owner_name = exec?.name || null;
+  }
+
+  // Threat source (NIST 800-30 taxonomy)
+  let threat_source = 'adversarial';  // default
+  if (/structural|no\s+(plan|test|policy|inventory|training)/i.test(title) || /^(11\.|14\.|17\.)/.test(refs.join(' '))) {
+    threat_source = 'structural';
+  }
+  if (/misconfigur|accidental|exposure|expired/i.test(title)) threat_source = 'accidental';
+  if (/disaster|weather|environmental|outage|power/i.test(title)) threat_source = 'environmental';
+
+  // Discovery method
+  let discovery_method = 'document_review';
+  if (cat === 'people')   discovery_method = 'interview';
+  if (cat === 'process')  discovery_method = 'document_review';
+  if (cat === 'technical') discovery_method = 'technical_scan';
+  if (cat === 'physical') discovery_method = 'observation';
+
+  // Evidence observed — short specific note grounded in declared facts
+  let evidence = '';
+  if (/mfa/i.test(title)) {
+    evidence = `Verified via interview with ${it?.name || 'IT lead'}: MFA enforcement set to "${ctx.it?.remote_access?.mfa || 'unknown'}" in the identity provider console.`;
+  } else if (/patch/i.test(title)) {
+    evidence = `Patch dashboard screenshot from ${ctx.it?.patch_management?.method || 'patch console'} shows ${ctx.it?.patch_management?.compliance_rate || '?'}% compliance.`;
+  } else if (/backup/i.test(title)) {
+    evidence = `Backup-tool config review (${ctx.it?.backups?.frequency || 'unknown'} schedule). Restore tests: ${ctx.it?.backups?.restore_tests || 'never documented'}.`;
+  } else if (/vendor/i.test(title)) {
+    evidence = `Vendor inventory review: ${(ctx.it?.vendor_risk || []).length} vendors documented, missing SOC 2 attestations for several.`;
+  } else if (/incident|ir.?plan|tabletop/i.test(title)) {
+    evidence = `Interview with ${exec?.name || 'leadership'}: no IR plan document exists, no documented tabletop exercise in past 12 months.`;
+  } else if (/training|awareness/i.test(title)) {
+    evidence = `HR interview: no formal security training program, no simulated-phishing campaign, no acknowledged AUP on file.`;
+  } else if (/network|segment|firewall/i.test(title)) {
+    evidence = `Network architecture review: firewall rule export + topology diagram analysis.`;
+  } else if (/dlp/i.test(title)) {
+    evidence = `Email + endpoint configuration review: no DLP rules enabled in either tier.`;
+  } else if (/siem|logging/i.test(title)) {
+    evidence = `Console walkthrough: ${ctx.it?.endpoint_protection?.product || 'EDR'} logs available only in vendor portal; no centralized SIEM detected.`;
+  } else {
+    evidence = `Documented during architectural review of declared IT environment + interview with ${it?.name || 'IT lead'}.`;
+  }
+
+  // Target completion date — based on severity
+  const inherent = (finding.likelihood || 0) * (finding.impact || 0);
+  const today = new Date();
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
+  let target_completion_date;
+  if (inherent >= 16)      target_completion_date = addDays(today, 30);   // critical: 30d
+  else if (inherent >= 12) target_completion_date = addDays(today, 60);   // high: 60d
+  else if (inherent >= 6)  target_completion_date = addDays(today, 90);   // medium: 90d
+  else                     target_completion_date = addDays(today, 180);  // low: 6mo
+
+  // Reviewer — same role as owner unless owner IS the IT lead, in which case CEO reviews
+  let reviewer = exec?.name || 'CEO';
+  if (owner_role === 'CEO' || owner_role === 'CFO') reviewer = exec?.name || 'CEO';
+  else if (it?.name && owner_role !== 'IT Manager') reviewer = it.name;
+  else reviewer = exec?.name || 'CEO';
+
+  return {
+    ...finding,
+    owner_role,
+    owner_name,
+    reviewer,
+    target_completion_date,
+    evidence_observed: evidence,
+    discovery_method,
+    threat_source
+  };
+}
+
+// Project a finding's residual (post-treatment) likelihood + impact.
+//
+// Industry rule of thumb (NIST SP 800-30, CIS RAM v2.1):
+//   - Most controls reduce LIKELIHOOD (you prevent the bad thing from
+//     happening); impact tends to stay the same (the bad thing, if it
+//     happens, still hurts about the same).
+//   - A few control categories reduce IMPACT too: backups + immutability
+//     (you can recover), network segmentation (smaller blast radius), DLP
+//     (less data exfiltrated), encryption at rest.
+//
+// We model this with two reductions:
+//   residual_likelihood = max(1, likelihood - 2)   ← strong reduction
+//   residual_impact     = max(1, impact - {1 or 0}) ← modest, varies by control category
+function deriveResidualScores(finding) {
+  const L = Number(finding.likelihood || 0);
+  const I = Number(finding.impact || 0);
+  if (!L || !I) return { residual_likelihood: null, residual_impact: null };
+
+  // Categories whose treatments meaningfully reduce IMPACT (not just likelihood)
+  const impactReducingRefs = (finding.control_refs || [])
+    .map(r => String(r.id || ''))
+    .some(id => /^11\./.test(id)   // Data Recovery
+             || /^12\./.test(id)   // Network Infrastructure (segmentation)
+             || /^13\./.test(id)   // Network monitoring & defense
+             || /^3\./.test(id));  // Data Protection
+
+  const residualLikelihood = Math.max(1, L - 2);
+  const residualImpact     = impactReducingRefs ? Math.max(1, I - 1) : I;
+  return { residual_likelihood: residualLikelihood, residual_impact: residualImpact };
+}
+
 /**
  * Build the full findings list for this profile.
  * Deterministic, ordered: critical findings first, then medium, then low.
@@ -383,11 +516,79 @@ function buildFindings(ctx) {
   });
   out.sort((a, b) => (b.likelihood * b.impact) - (a.likelihood * a.impact));
 
-  // Assign finding codes in priority order
-  return out.map((f, i) => ({
-    ...f,
-    finding_code: `F-${String(i + 1).padStart(3, '0')}`
-  }));
+  // Assign finding codes in priority order + project residual scores + enrich with owner/evidence/threat source
+  return out.map((f, i) => {
+    const enriched = enrichFindingMeta({
+      ...f,
+      finding_code: `F-${String(i + 1).padStart(3, '0')}`,
+      ...deriveResidualScores(f)
+    }, ctx);
+    return enriched;
+  });
+}
+
+// Link findings to relevant assets by keyword matching against asset names.
+// Returns affected_asset_ids[] per finding (UUIDs assigned by DB INSERT —
+// we use a 2-pass approach: insert assets first to get IDs, then link).
+function linkFindingsToAssets(findings, assetsWithIds) {
+  return findings.map(f => {
+    const title = String(f.title || '').toLowerCase();
+    const desc = String(f.description || '').toLowerCase();
+    const text = title + ' ' + desc;
+    const affected = [];
+
+    // Heuristic linking
+    if (/mfa|password|credential|account|admin/.test(text)) {
+      // Identity-related — affects DC + all SaaS apps
+      assetsWithIds.forEach(a => {
+        if (/Domain Controller|Email|CRM|Accounting/i.test(a.name) || a.asset_type === 'saas')
+          affected.push(a.id);
+      });
+    }
+    if (/backup|recovery|ransomware/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (/Backup|File Server|Database/i.test(a.name)) affected.push(a.id);
+      });
+    }
+    if (/network|segment|flat|firewall|vlan/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (/Firewall|Switch/i.test(a.name)) affected.push(a.id);
+      });
+    }
+    if (/patch|vuln|outdated|cve/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (a.asset_type === 'server' || a.asset_type === 'workstation') affected.push(a.id);
+      });
+    }
+    if (/web|application|app/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (/Web|Application/i.test(a.name)) affected.push(a.id);
+      });
+    }
+    if (/vendor|third.?party|supply.?chain|saas/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (a.asset_type === 'saas') affected.push(a.id);
+      });
+    }
+    if (/dlp|data\s+(loss|exposure|theft)|exfil|customer|pii|phi/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (/Customer Records|Employee Records|Data/i.test(a.name) || a.data_classification === 'Restricted')
+          affected.push(a.id);
+      });
+    }
+    if (/laptop|stolen|physical/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (a.asset_type === 'workstation' || a.asset_type === 'mobile') affected.push(a.id);
+      });
+    }
+    if (/email|phishing|bec|wire/.test(text)) {
+      assetsWithIds.forEach(a => {
+        if (/Email|Executive/i.test(a.name)) affected.push(a.id);
+      });
+    }
+
+    return { ...f, affected_asset_ids: [...new Set(affected)].slice(0, 6) };
+  });
 }
 
 // ─── CIS RAM scoring ─────────────────────────────────────────────────────
@@ -503,6 +704,53 @@ function buildExecSummary(ctx, findings, coverage, csfScores) {
   ].join('\n');
 }
 
+// Deloitte / CISO-board-report structure for the executive summary.
+// Returns { current_posture, top_risks, progress, decisions_needed }
+// — each a 1-2 paragraph string ready for the report.
+function buildDeloitteExecSummary(ctx, findings, coverage, csfScores, readiness) {
+  const critical = findings.filter(f => f.likelihood * f.impact >= 16);
+  const high     = findings.filter(f => f.likelihood * f.impact >= 12 && f.likelihood * f.impact < 16);
+  const csfAvg = (['GV','ID','PR','DE','RS','RC']
+    .reduce((s, k) => s + (csfScores[k] || 0), 0) / 6).toFixed(1);
+  const company = ctx.org?.company_name || 'The organization';
+  const industry = ctx.org?.industry || 'small-business';
+  const employeeBand = ctx.org?.employees_total ? `${ctx.org.employees_total}-employee ` : '';
+  const postureName = ctx.posture?.name ? `"${ctx.posture.name}"` : 'mixed';
+
+  const top3 = findings.slice(0, 3);
+
+  const current_posture =
+    `${company} is a ${employeeBand}${industry} firm with a ${postureName} compliance posture. ` +
+    `Against the CIS Controls v8 Implementation Group 1 baseline, the organization has implemented ${coverage.yes} of ${coverage.total} safeguards (${coverage.score}% coverage). ` +
+    `NIST CSF 2.0 maturity averages ${csfAvg} of 5 across the six functions, indicating ${csfAvg >= 3.5 ? 'a mature' : csfAvg >= 2 ? 'a developing' : 'an early-stage'} cybersecurity program. ` +
+    `Cyber-insurance readiness scores ${readiness?.score ?? '—'}/100, placing the organization in the "${readiness?.tier ?? 'Unrated'}" tier with current underwriters.`;
+
+  const top_risks =
+    `Three risks demand board-level attention: ` +
+    top3.map((f, i) => `(${i + 1}) ${f.title} — inherent risk ${f.likelihood}×${f.impact}=${f.likelihood * f.impact}, ${f.likelihood * f.impact >= 16 ? 'critical' : 'high'} severity, ${f.owner_role || 'IT'}-owned.`).join(' ') +
+    ` Collectively these represent the largest reduction-of-exposure opportunities in the next two quarters. ` +
+    `If implemented as specified in Section 06 (Recommendations), the projected aggregate risk reduction is approximately ${(() => {
+      const inh = findings.reduce((s, f) => s + (f.likelihood * f.impact), 0);
+      const res = findings.reduce((s, f) => s + ((f.residual_likelihood || f.likelihood) * (f.residual_impact || f.impact)), 0);
+      return inh > 0 ? Math.round(((inh - res) / inh) * 100) + '%' : 'meaningful';
+    })()}.`;
+
+  const progress =
+    findings.some(f => f.status === 'mitigated')
+      ? `${findings.filter(f => f.status === 'mitigated').length} of ${findings.length} findings have already been mitigated since the prior engagement, demonstrating active remediation capability. ${findings.filter(f => f.status === 'open').length} findings remain open and require attention.`
+      : `This is the first formal risk assessment of record; no prior baseline exists to measure progress against. We recommend establishing this assessment as the baseline and re-measuring in 6 months following implementation of the recommendations in Section 06.`;
+
+  const decisions_needed =
+    `The leadership team should make explicit decisions on: ` +
+    `(1) BUDGET — approval of the cyber-insurance readiness uplift (estimated $${Math.round(15000 + (critical.length * 5000)).toLocaleString()} one-time + $${Math.round(8000 + (csfAvg < 2 ? 6000 : 0)).toLocaleString()}/year recurring) to move from ${readiness?.tier || 'current tier'} to Insurable; ` +
+    `(2) POLICY — formal adoption of the documented Incident Response plan + assignment of named tabletop owners; ` +
+    `(3) STAFFING — designation of a single accountable owner for cybersecurity (CISO function, even if part-time or fractional); ` +
+    `(4) RISK ACCEPTANCE — written sign-off on any of the ${critical.length} critical findings the board elects to formally accept rather than remediate. ` +
+    `These decisions should be documented at the next leadership meeting and revisited quarterly.`;
+
+  return { current_posture, top_risks, progress, decisions_needed };
+}
+
 // ─── Top-level entry: persist the answer key into the DB ─────────────────
 
 /**
@@ -537,32 +785,127 @@ async function generateInstructorAnswerKeyRiskAssessment({ profileId, userId, pr
   // 4) Exec summary -------------------------------------------------------
   const execSummary = buildExecSummary(ctx, findings, coverage, csfScores);
 
-  // 5) Persist ------------------------------------------------------------
+  // 5) Asset register -----------------------------------------------------
+  const assetRows = buildAssetRegister(ctx);
+
+  // 6) Insurance readiness ------------------------------------------------
+  const readinessAnswers = deriveReadinessFromProfile(ctx);
+  // Posture-driven overrides: a mature posture has these in place too
+  if (ctx.posture?.name === 'compliance-mature' || ctx.posture?.name === 'policy-strong-tech-weak') {
+    readinessAnswers.ir_plan_written = 'yes';
+    readinessAnswers.tabletop_12mo = 'partial';
+    readinessAnswers.security_training = 'yes';
+  }
+  if (ctx.posture?.name === 'tech-mature-policy-weak' || ctx.posture?.name === 'endpoint-heavy') {
+    readinessAnswers.vuln_scanning = 'yes';
+    readinessAnswers.pam_in_place = 'partial';
+  }
+  const readinessScore = scoreReadiness(readinessAnswers);
+
+  // 7) Persist ------------------------------------------------------------
   // Delete prior answer key for this profile (idempotent re-run).
   await pool.query(`DELETE FROM risk_findings WHERE profile_id = $1 AND user_id = $2 AND ai_generated = true`, [profileId, userId]);
-  // Note: we deliberately scope deletion to ai_generated = true so we don't
-  // wipe a student's manually-entered findings if they share the profile_id.
+  await pool.query(`DELETE FROM risk_assets WHERE profile_id = $1 AND user_id = $2 AND ai_generated = true`, [profileId, userId]);
+
+  // 7a) Insert asset register first so we have IDs for finding linkage
+  const insertedAssets = [];
+  for (const a of assetRows) {
+    const r = await pool.query(`
+      INSERT INTO risk_assets
+        (user_id, profile_id, name, asset_type, owner_role, custodian,
+         confidentiality, integrity, availability, criticality_tier,
+         data_classification, data_categories, hostname, description,
+         containers, ai_generated)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15::jsonb, true)
+      RETURNING id, name, asset_type, data_classification
+    `, [
+      userId, profileId, a.name, a.asset_type, a.owner_role, a.custodian,
+      a.confidentiality, a.integrity, a.availability, a.criticality_tier,
+      a.data_classification, JSON.stringify(a.data_categories || []),
+      a.hostname || null, a.description || null,
+      JSON.stringify(a.containers || [])
+    ]);
+    insertedAssets.push(r.rows[0]);
+  }
+
+  // 7b) Link findings to assets
+  const linkedFindings = linkFindingsToAssets(findings, insertedAssets);
 
   let findingsInserted = 0;
-  for (const f of findings) {
+  for (const f of linkedFindings) {
     await pool.query(`
       INSERT INTO risk_findings
         (user_id, profile_id, finding_code, title, description, category,
-         likelihood, impact, status, recommendation, control_refs, ai_generated)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, true)
+         likelihood, impact, residual_likelihood, residual_impact,
+         status, recommendation, control_refs, ai_generated,
+         owner_role, owner_name, reviewer, target_completion_date,
+         evidence_observed, discovery_method, threat_source, affected_asset_ids,
+         scenario_library_key)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, true,
+              $14, $15, $16, $17, $18, $19, $20, $21::jsonb, $22)
       ON CONFLICT (profile_id, finding_code) DO UPDATE SET
         title = EXCLUDED.title, description = EXCLUDED.description,
         category = EXCLUDED.category, likelihood = EXCLUDED.likelihood,
-        impact = EXCLUDED.impact, status = EXCLUDED.status,
+        impact = EXCLUDED.impact,
+        residual_likelihood = EXCLUDED.residual_likelihood,
+        residual_impact = EXCLUDED.residual_impact,
+        status = EXCLUDED.status,
         recommendation = EXCLUDED.recommendation, control_refs = EXCLUDED.control_refs,
+        owner_role = EXCLUDED.owner_role, owner_name = EXCLUDED.owner_name,
+        reviewer = EXCLUDED.reviewer, target_completion_date = EXCLUDED.target_completion_date,
+        evidence_observed = EXCLUDED.evidence_observed,
+        discovery_method = EXCLUDED.discovery_method,
+        threat_source = EXCLUDED.threat_source,
+        affected_asset_ids = EXCLUDED.affected_asset_ids,
+        scenario_library_key = EXCLUDED.scenario_library_key,
         updated_at = NOW()
     `, [
       userId, profileId, f.finding_code, f.title, f.description, f.category,
-      f.likelihood, f.impact, f.status, f.recommendation,
-      JSON.stringify(f.control_refs || [])
+      f.likelihood, f.impact, f.residual_likelihood, f.residual_impact,
+      f.status, f.recommendation,
+      JSON.stringify(f.control_refs || []),
+      f.owner_role || null, f.owner_name || null, f.reviewer || null,
+      f.target_completion_date || null,
+      f.evidence_observed || null, f.discovery_method || null,
+      f.threat_source || null,
+      JSON.stringify(f.affected_asset_ids || []),
+      f.scenario_library_key || null
     ]);
     findingsInserted++;
   }
+
+  // 7c) Insurance readiness upsert
+  await pool.query(`
+    INSERT INTO insurance_readiness
+      (user_id, profile_id, mfa_email, mfa_remote, mfa_privileged, mfa_cloud,
+       edr_coverage_pct, immutable_backups, tested_restore_12mo,
+       ir_plan_written, tabletop_12mo, pam_in_place, security_training, vuln_scanning,
+       readiness_score, readiness_tier, ai_generated)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, true)
+    ON CONFLICT (profile_id, user_id) DO UPDATE SET
+      mfa_email = EXCLUDED.mfa_email, mfa_remote = EXCLUDED.mfa_remote,
+      mfa_privileged = EXCLUDED.mfa_privileged, mfa_cloud = EXCLUDED.mfa_cloud,
+      edr_coverage_pct = EXCLUDED.edr_coverage_pct,
+      immutable_backups = EXCLUDED.immutable_backups,
+      tested_restore_12mo = EXCLUDED.tested_restore_12mo,
+      ir_plan_written = EXCLUDED.ir_plan_written,
+      tabletop_12mo = EXCLUDED.tabletop_12mo,
+      pam_in_place = EXCLUDED.pam_in_place,
+      security_training = EXCLUDED.security_training,
+      vuln_scanning = EXCLUDED.vuln_scanning,
+      readiness_score = EXCLUDED.readiness_score,
+      readiness_tier = EXCLUDED.readiness_tier,
+      updated_at = NOW()
+  `, [
+    userId, profileId,
+    readinessAnswers.mfa_email, readinessAnswers.mfa_remote,
+    readinessAnswers.mfa_privileged, readinessAnswers.mfa_cloud,
+    readinessAnswers.edr_coverage_pct, readinessAnswers.immutable_backups,
+    readinessAnswers.tested_restore_12mo, readinessAnswers.ir_plan_written,
+    readinessAnswers.tabletop_12mo, readinessAnswers.pam_in_place,
+    readinessAnswers.security_training, readinessAnswers.vuln_scanning,
+    readinessScore.score, readinessScore.tier
+  ]);
 
   // CIS RAM assessment envelope (upsert)
   await pool.query(`
@@ -620,6 +963,9 @@ async function generateInstructorAnswerKeyRiskAssessment({ profileId, userId, pr
     ramInserted++;
   }
 
+  // Deloitte-structured exec summary (4 sections)
+  const deloitte = buildDeloitteExecSummary(ctx, findings, coverage, csfScores, readinessScore);
+
   // Report deliverable (latest version — upsert)
   const reportQ = await pool.query(`SELECT id FROM report_deliverables WHERE profile_id = $1 ORDER BY version DESC LIMIT 1`, [profileId]);
   let reportId;
@@ -628,24 +974,35 @@ async function generateInstructorAnswerKeyRiskAssessment({ profileId, userId, pr
     await pool.query(`
       UPDATE report_deliverables
          SET exec_summary = $1,
-             csf_scores = $2::jsonb,
+             exec_current_posture = $2,
+             exec_top_risks = $3,
+             exec_progress = $4,
+             exec_decisions_needed = $5,
+             csf_scores = $6::jsonb,
              status = 'draft',
-             branding = COALESCE(branding, '{}'::jsonb) || $3::jsonb,
+             branding = COALESCE(branding, '{}'::jsonb) || $7::jsonb,
              updated_at = NOW()
-       WHERE id = $4
+       WHERE id = $8
     `, [
-      execSummary, JSON.stringify(csfScores),
+      execSummary,
+      deloitte.current_posture, deloitte.top_risks,
+      deloitte.progress, deloitte.decisions_needed,
+      JSON.stringify(csfScores),
       JSON.stringify({ prepared_by: 'Instructor answer-key (auto-generated)' }),
       reportId
     ]);
   } else {
     const ins = await pool.query(`
       INSERT INTO report_deliverables
-        (profile_id, version, status, exec_summary, branding, csf_scores, created_by)
-      VALUES ($1, 1, 'draft', $2, $3::jsonb, $4::jsonb, $5)
+        (profile_id, version, status, exec_summary,
+         exec_current_posture, exec_top_risks, exec_progress, exec_decisions_needed,
+         branding, csf_scores, created_by)
+      VALUES ($1, 1, 'draft', $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9)
       RETURNING id
     `, [
       profileId, execSummary,
+      deloitte.current_posture, deloitte.top_risks,
+      deloitte.progress, deloitte.decisions_needed,
       JSON.stringify({ prepared_by: 'Instructor answer-key (auto-generated)' }),
       JSON.stringify(csfScores), userId
     ]);
@@ -654,9 +1011,13 @@ async function generateInstructorAnswerKeyRiskAssessment({ profileId, userId, pr
 
   return {
     findings_inserted: findingsInserted,
+    assets_inserted: insertedAssets.length,
     cis_ram_rows_inserted: ramInserted,
+    insurance_readiness_score: readinessScore.score,
+    insurance_readiness_tier: readinessScore.tier,
     report_id: reportId,
     exec_summary: execSummary,
+    deloitte_exec: deloitte,
     coverage,
     csf_scores: csfScores,
     posture: ctx.posture
@@ -669,5 +1030,6 @@ module.exports = {
   buildFindings,
   buildCisRamRows,
   buildExecSummary,
+  buildDeloitteExecSummary,
   unpackContext
 };

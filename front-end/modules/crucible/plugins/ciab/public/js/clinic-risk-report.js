@@ -51,15 +51,18 @@
       banner.push('ECharts library failed to load — charts will be missing. Check that /ciab/vendor/echarts.min.js is reachable.');
     }
 
-    safe('cover',            () => renderCover(bundle));
-    safe('exec dashboard',   () => renderExecDashboard(bundle));
-    safe('heat map',         () => renderHeatmap(bundle));
-    safe('findings table',   () => renderFindingsTable(bundle));
-    safe('IG1',              () => renderIg1(bundle));
-    safe('CSF',              () => renderCsf(bundle));
-    safe('recommendations',  () => renderRecommendations(bundle));
-    safe('CIS RAM',          () => renderCisRam(bundle));
-    safe('detailed findings',() => renderDetailedFindings(bundle));
+    safe('cover',             () => renderCover(bundle));
+    safe('exec dashboard',    () => renderExecDashboard(bundle));
+    safe('asset register',    () => renderAssetRegister(bundle));
+    safe('heat map',          () => renderHeatmap(bundle));
+    safe('findings table',    () => renderFindingsTable(bundle));
+    safe('IG1',               () => renderIg1(bundle));
+    safe('CSF',               () => renderCsf(bundle));
+    safe('recommendations',   () => renderRecommendations(bundle));
+    safe('insurance readiness',() => renderInsuranceReadiness(bundle));
+    safe('snapshot delta',    () => renderSnapshotDelta(bundle));
+    safe('CIS RAM',           () => renderCisRam(bundle));
+    safe('detailed findings', () => renderDetailedFindings(bundle));
 
     document.title = `Risk Assessment — ${bundle.profile.company_name || 'Profile'}`;
     requestAnimationFrame(() => Object.values(charts).forEach(c => c && c.resize && c.resize()));
@@ -201,11 +204,38 @@
         </div>`;
     }
 
-    // Exec summary
-    const summary = b.report.exec_summary;
-    document.getElementById('execSummary').innerHTML = summary
-      ? escapeHtml(summary).replace(/\n\n/g, '</p><p>').replace(/^/, '<p>').replace(/$/, '</p>')
-      : '<p style="color:var(--text-mute);font-style:italic">Executive summary pending — the assessor has not yet drafted it on the Report tab.</p>';
+    // Exec summary — prefer Deloitte 4-section if populated, else fall back
+    // to the legacy single-block summary, else show pending notice.
+    const deloitte = {
+      posture: b.report.exec_current_posture,
+      risks:   b.report.exec_top_risks,
+      prog:    b.report.exec_progress,
+      decis:   b.report.exec_decisions_needed
+    };
+    const hasDeloitte = deloitte.posture || deloitte.risks || deloitte.prog || deloitte.decis;
+    const deloitteWrap = document.getElementById('execDeloitte');
+    const legacyEl = document.getElementById('execSummary');
+    if (hasDeloitte) {
+      deloitteWrap.style.display = '';
+      legacyEl.style.display = 'none';
+      const setBlock = (id, text) => {
+        const el = document.getElementById(id);
+        el.innerHTML = text
+          ? escapeHtml(text).replace(/\n\n/g, '</p><p>').replace(/^/, '<p>').replace(/$/, '</p>')
+          : '<p style="color:var(--text-mute);font-style:italic">Not yet drafted.</p>';
+      };
+      setBlock('execCurrentPostureBody',   deloitte.posture);
+      setBlock('execTopRisksBody',         deloitte.risks);
+      setBlock('execProgressBody',         deloitte.prog);
+      setBlock('execDecisionsNeededBody',  deloitte.decis);
+    } else {
+      deloitteWrap.style.display = 'none';
+      legacyEl.style.display = '';
+      const summary = b.report.exec_summary;
+      legacyEl.innerHTML = summary
+        ? escapeHtml(summary).replace(/\n\n/g, '</p><p>').replace(/^/, '<p>').replace(/$/, '</p>')
+        : '<p style="color:var(--text-mute);font-style:italic">Executive summary pending — the assessor has not yet drafted it on the Report tab.</p>';
+    }
 
     // Engagement scope
     const company = b.intake?.payload?.sections?.company || {};
@@ -231,45 +261,103 @@
   }
 
   // ── Heat Map ───────────────────────────────────────────────────────
-  function renderHeatmap(b) {
-    const findings = b.findings || [];
-    // Build a 3×3 grid (likelihood 1-5 collapsed to 3 bands, impact 1-5 → 3 bands)
+  // FINDINGS-ONLY (standard risk-assessment practice):
+  // A risk heat map plots IDENTIFIED RISKS — i.e. entries on the risk
+  // register — not raw control scoring. Two maps shown side-by-side:
+  //   INHERENT  = today's exposure (likelihood × impact as scored)
+  //   RESIDUAL  = projected exposure after recommended treatments are
+  //               applied (residual_likelihood × residual_impact)
+  // This is the standard NIST 800-30 / CIS RAM / ISO 27005 deliverable
+  // pattern. Risks should visibly migrate from upper-right (red) to
+  // lower-left (green) between the two.
+
+  // Returns a 3×3 grid keyed by [likelihoodBand][impactBand] = count.
+  function buildHeatmapGrid(findings, lField, iField) {
     const grid = Array.from({ length: 3 }, () => Array.from({ length: 3 }, () => 0));
-    const bandIdx = v => v >= 4 ? 2 : v >= 2 ? 1 : 0; // 0=low, 1=med, 2=high
-    findings.forEach(f => {
-      const li = bandIdx(Number(f.likelihood || 0));
-      const ii = bandIdx(Number(f.impact || 0));
-      grid[li][ii]++;
-    });
+    const bandIdx = v => v >= 4 ? 2 : v >= 2 ? 1 : 0;
+    for (const f of findings) {
+      const lv = Number(f[lField] || 0);
+      const iv = Number(f[iField] || 0);
+      if (!lv || !iv) continue;
+      grid[bandIdx(lv)][bandIdx(iv)]++;
+    }
+    return grid;
+  }
+
+  function renderOneHeatmap(elId, grid, mapName) {
     const data = [];
     for (let li = 0; li < 3; li++) for (let ii = 0; ii < 3; ii++) {
       data.push([ii, li, grid[li][ii]]);
     }
-    const chart = echarts.init(document.getElementById('chartHeatmap'));
-    charts.heatmap = chart;
+    const maxCount = Math.max(1, ...data.map(d => d[2]));
+    const el = document.getElementById(elId);
+    if (!el) return null;
+    const chart = echarts.init(el);
     chart.setOption({
-      tooltip: { position: 'top', formatter: p => `${p.value[2]} finding${p.value[2] === 1 ? '' : 's'}` },
-      grid: { left: 110, right: 30, top: 20, bottom: 50, containLabel: false },
-      xAxis: { type: 'category', name: 'Impact', nameLocation: 'middle', nameGap: 30,
-        nameTextStyle: { fontWeight: 700, color: '#64748b', fontSize: 11 },
+      tooltip: { formatter: p =>
+        `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1}: <b>${p.value[2]}</b> finding${p.value[2] === 1 ? '' : 's'}` },
+      grid: { left: 100, right: 20, top: 20, bottom: 50, containLabel: false },
+      xAxis: { type: 'category', name: 'Impact', nameLocation: 'middle', nameGap: 28,
+        nameTextStyle: { fontWeight: 700, color: '#64748b', fontSize: 10 },
         data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'],
-        axisLabel: { fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitArea: { show: false } },
-      yAxis: { type: 'category', name: 'Likelihood', nameLocation: 'middle', nameGap: 85, nameRotate: 90,
-        nameTextStyle: { fontWeight: 700, color: '#64748b', fontSize: 11 },
+        axisLabel: { fontSize: 10 }, axisLine: { show: false }, axisTick: { show: false }, splitArea: { show: false } },
+      yAxis: { type: 'category', name: 'Likelihood', nameLocation: 'middle', nameGap: 78, nameRotate: 90,
+        nameTextStyle: { fontWeight: 700, color: '#64748b', fontSize: 10 },
         data: ['1 Not Expected', '2 Foreseeable', '3 Expected'],
-        axisLabel: { fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitArea: { show: false } },
-      // visualMap drives the cell colors; we hide its slider/legend so it
-      // doesn't render the orange bar that was overlapping the grid.
+        axisLabel: { fontSize: 10 }, axisLine: { show: false }, axisTick: { show: false }, splitArea: { show: false } },
       visualMap: {
         show: false,
-        min: 0, max: Math.max(1, ...data.map(d => d[2])),
-        inRange: { color: ['#e0f2fe', '#fef3c7', '#fdba74', '#dc2626'] }
+        min: 0, max: maxCount,
+        inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] }
       },
       series: [{ type: 'heatmap', data,
-        label: { show: true, fontWeight: 700, color: '#1e293b' },
+        label: { show: true, fontSize: 14, fontWeight: 700, color: '#1e293b',
+          formatter: p => p.value[2] || '' },
         itemStyle: { borderColor: '#fff', borderWidth: 2 }
       }]
     });
+    return chart;
+  }
+
+  function renderHeatmap(b) {
+    const findings = b.findings || [];
+
+    // Inherent map — uses likelihood / impact (always populated)
+    const inherentGrid = buildHeatmapGrid(findings, 'likelihood', 'impact');
+    charts.heatmap = renderOneHeatmap('chartHeatmap', inherentGrid, 'inherent');
+
+    // Residual map — uses residual_likelihood / residual_impact when present;
+    // findings without residual scores are dropped from this view.
+    const scoredResidual = findings.filter(f => f.residual_likelihood && f.residual_impact);
+    const residualGrid = buildHeatmapGrid(scoredResidual, 'residual_likelihood', 'residual_impact');
+    charts.heatmapResidual = renderOneHeatmap('chartHeatmapResidual', residualGrid, 'residual');
+
+    // Comparison callout — quantify the shift
+    const sumRisk = (arr, lf, ifld) => arr.reduce((s, f) => s + (Number(f[lf] || 0) * Number(f[ifld] || 0)), 0);
+    const inherentTotal = sumRisk(findings, 'likelihood', 'impact');
+    const residualTotal = sumRisk(scoredResidual, 'residual_likelihood', 'residual_impact');
+    const reduction = inherentTotal > 0 ? Math.round(((inherentTotal - residualTotal) / inherentTotal) * 100) : 0;
+    if (scoredResidual.length === findings.length && findings.length > 0 && reduction > 0) {
+      const el = document.getElementById('residualSummary');
+      el.style.display = '';
+      el.innerHTML = `
+        <div class="title">Projected risk reduction: ${reduction}%</div>
+        <div class="body">
+          Total inherent risk score (Σ L×I across all ${findings.length} findings): <strong>${inherentTotal}</strong>.
+          After the recommended treatments in Section 06 are implemented, projected residual is <strong>${residualTotal}</strong> —
+          a ${reduction}% reduction in aggregate exposure. Critical-band cells (red) should be empty or near-empty on the residual map if the treatment plan is sound.
+        </div>`;
+    } else if (scoredResidual.length < findings.length) {
+      const el = document.getElementById('residualSummary');
+      el.style.display = '';
+      el.className = 'callout warn';
+      el.innerHTML = `
+        <div class="title">Residual scoring incomplete</div>
+        <div class="body">
+          Only ${scoredResidual.length} of ${findings.length} findings have residual_likelihood/residual_impact scored.
+          The residual map shows the scored subset only.
+        </div>`;
+    }
 
     // Top critical cards
     const top = [...findings]
@@ -536,6 +624,167 @@
       </div>
     `).join('');
   }
+
+  // ── Asset Register (Tier 1) ────────────────────────────────────────
+  function renderAssetRegister(b) {
+    const assets = b.assets || [];
+    if (assets.length === 0) return;  // section stays hidden if no assets
+    document.getElementById('assetRegisterSection').style.display = '';
+    const dcClass = c => `dc-${String(c || 'internal').toLowerCase()}`;
+    document.getElementById('assetTableBody').innerHTML = assets.map(a => `
+      <tr class="tier-${a.criticality_tier || 3}">
+        <td><strong>${escapeHtml(a.name)}</strong>${a.hostname ? `<br><span style="color:var(--text-mute);font-size:0.75em">${escapeHtml(a.hostname)}</span>` : ''}</td>
+        <td>${escapeHtml((a.asset_type || '').replace(/_/g, ' '))}</td>
+        <td>${escapeHtml(a.owner_role || '—')}${a.custodian && a.custodian !== a.owner_role ? `<br><span style="color:var(--text-mute);font-size:0.75em">${escapeHtml(a.custodian)}</span>` : ''}</td>
+        <td class="num"><strong>T${a.criticality_tier ?? '—'}</strong></td>
+        <td class="num">${a.confidentiality ?? '—'}</td>
+        <td class="num">${a.integrity ?? '—'}</td>
+        <td class="num">${a.availability ?? '—'}</td>
+        <td class="${dcClass(a.data_classification)}">${escapeHtml(a.data_classification || '—')}</td>
+      </tr>
+    `).join('');
+  }
+
+  // ── Cyber-Insurance Readiness (Tier 2) ─────────────────────────────
+  const READINESS_LABELS = {
+    mfa_email:           'MFA on email accounts',
+    mfa_remote:          'MFA on remote / VPN access',
+    mfa_privileged:      'MFA on privileged / admin accounts',
+    mfa_cloud:           'MFA on cloud / SaaS sessions',
+    edr_coverage_pct:    'EDR coverage across endpoints',
+    immutable_backups:   'Immutable / WORM offsite backups',
+    tested_restore_12mo: 'Backup restore test in last 12 months',
+    ir_plan_written:     'Documented incident response plan',
+    tabletop_12mo:       'Tabletop exercise in last 12 months',
+    pam_in_place:        'Privileged Access Management (PAM)',
+    security_training:   'Annual security awareness training',
+    vuln_scanning:       'Regular vulnerability scanning program'
+  };
+  const READINESS_WEIGHTS = {
+    mfa_email: 12, mfa_remote: 12, mfa_privileged: 14, mfa_cloud: 10,
+    edr_coverage_pct: 10, immutable_backups: 8, tested_restore_12mo: 6,
+    ir_plan_written: 6, tabletop_12mo: 5, pam_in_place: 6,
+    security_training: 6, vuln_scanning: 5
+  };
+  function renderInsuranceReadiness(b) {
+    const r = b.insurance_readiness;
+    if (!r) return;  // hidden if no scorecard
+    document.getElementById('insuranceSection').style.display = '';
+    document.getElementById('insuranceScoreValue').textContent = r.readiness_score ?? '—';
+    document.getElementById('insuranceTierValue').textContent = r.readiness_tier || '—';
+    const tierColors = {
+      'Insurable':    '#16a34a',
+      'Conditional':  '#d97706',
+      'Restricted':   '#ea580c',
+      'Uninsurable':  '#dc2626'
+    };
+    const tierSub = {
+      'Insurable':    'standard market — competitive premiums',
+      'Conditional':  'sub-standard / restricted coverage',
+      'Restricted':   'only specialist carriers will quote',
+      'Uninsurable':  'declination expected — must remediate first'
+    };
+    const tile = document.getElementById('insuranceTierTile');
+    tile.style.setProperty('--accent', tierColors[r.readiness_tier] || '#dc2626');
+    document.getElementById('insuranceTierSub').textContent = tierSub[r.readiness_tier] || '';
+
+    document.getElementById('insuranceTableBody').innerHTML = Object.keys(READINESS_LABELS).map(k => {
+      const val = r[k];
+      let display, statusClass;
+      if (k === 'edr_coverage_pct') {
+        display = (val || 0) + '%';
+        statusClass = val >= 95 ? 'yes' : val >= 70 ? 'partial' : 'no';
+      } else {
+        display = (val || 'no').toUpperCase();
+        statusClass = val === 'yes' ? 'yes' : val === 'partial' ? 'partial' : 'no';
+      }
+      const wt = READINESS_WEIGHTS[k];
+      const earned = k === 'edr_coverage_pct'
+        ? Math.round(wt * (Number(val || 0) / 100))
+        : Math.round(wt * (val === 'yes' ? 1 : val === 'partial' ? 0.5 : 0));
+      return `<tr>
+        <td>${escapeHtml(READINESS_LABELS[k])}</td>
+        <td class="status-${statusClass}">${escapeHtml(display)}</td>
+        <td class="num">${earned} / ${wt}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ── Snapshot delta comparison (Tier 2) ─────────────────────────────
+  function renderSnapshotDelta(b) {
+    const snaps = b.snapshots || [];
+    if (snaps.length < 2) return;  // need at least 2 for a delta
+    document.getElementById('snapshotSection').style.display = '';
+    const [now, prior] = snaps;
+    const dateOf = d => new Date(d).toLocaleDateString('en-US', { year:'numeric', month:'short', day:'numeric' });
+
+    const tile = (label, nowVal, priorVal, opts = {}) => {
+      const diff = (Number(nowVal) || 0) - (Number(priorVal) || 0);
+      const direction = diff > 0 ? 'up' : diff < 0 ? 'down' : 'flat';
+      const arrow = diff > 0 ? '▲' : diff < 0 ? '▼' : '—';
+      const sign = diff > 0 ? '+' : '';
+      const cls = opts.coverage ? 'coverage' : '';
+      return `<div class="delta-tile ${cls}">
+        <div class="label">${escapeHtml(label)}</div>
+        <div class="now">${escapeHtml(String(nowVal ?? '—'))}${opts.suffix || ''}</div>
+        <div class="change ${direction}">${arrow} ${sign}${diff}${opts.suffix || ''}</div>
+        <div class="prior">prior: ${escapeHtml(String(priorVal ?? '—'))}${opts.suffix || ''}</div>
+      </div>`;
+    };
+
+    document.getElementById('snapshotDelta').innerHTML = `
+      <p style="font-size:0.8rem;color:var(--text-mute);">
+        Comparing <strong>${escapeHtml(now.label)}</strong> (${dateOf(now.created_at)}) against <strong>${escapeHtml(prior.label)}</strong> (${dateOf(prior.created_at)}).
+      </p>
+      <div class="delta-grid">
+        ${tile('Total Findings',  now.findings_total,    prior.findings_total)}
+        ${tile('Critical Risks',  now.findings_critical, prior.findings_critical)}
+        ${tile('IG1 Coverage',    now.ig1_coverage_pct,  prior.ig1_coverage_pct, { suffix: '%', coverage: true })}
+        ${tile('Total Inherent Risk', now.total_inherent_risk, prior.total_inherent_risk)}
+      </div>
+      <p style="font-size:0.85rem;">
+        ${now.findings_critical < prior.findings_critical
+          ? `<span style="color:var(--ok);font-weight:700">✓ Reduced ${prior.findings_critical - now.findings_critical} critical risk${prior.findings_critical - now.findings_critical === 1 ? '' : 's'}</span> since the prior assessment.`
+          : now.findings_critical > prior.findings_critical
+          ? `<span style="color:var(--crit);font-weight:700">⚠ ${now.findings_critical - prior.findings_critical} new critical risk${now.findings_critical - prior.findings_critical === 1 ? '' : 's'}</span> emerged since the prior assessment.`
+          : 'Critical-risk count unchanged.'}
+        ${now.ig1_coverage_pct > prior.ig1_coverage_pct
+          ? ` IG1 coverage improved by ${now.ig1_coverage_pct - prior.ig1_coverage_pct} points.`
+          : ''}
+      </p>
+    `;
+  }
+
+  // ── Toolbar: POA&M CSV download ────────────────────────────────────
+  function wireToolbarExtras() {
+    const tb = document.querySelector('.toolbar');
+    if (!tb) return;
+    if (document.getElementById('btnDownloadPoam')) return;
+    const btn = document.createElement('button');
+    btn.id = 'btnDownloadPoam';
+    btn.className = 'secondary';
+    btn.title = 'Download a POA&M-formatted CSV of all open findings (NIST/CMMC standard)';
+    btn.textContent = '⬇ POA&M CSV';
+    btn.style.marginRight = '4px';
+    btn.onclick = async () => {
+      const url = `/api/clinic-risk-assessment/${encodeURIComponent(profileId)}/poam.csv`;
+      const token = localStorage.getItem('token') || '';
+      const r = await fetch(url, { headers: { 'Authorization': 'Bearer ' + token } });
+      if (!r.ok) { alert('POA&M export failed: HTTP ' + r.status); return; }
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `poam-${profileId.slice(0,8)}.csv`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    };
+    // Insert before the existing "Print to PDF" button
+    const printBtn = tb.querySelector('button');
+    if (printBtn) tb.insertBefore(btn, printBtn);
+    else tb.appendChild(btn);
+  }
+  // Fire after first paint
+  document.addEventListener('DOMContentLoaded', () => setTimeout(wireToolbarExtras, 100));
 
   // ── Resize charts on window resize ─────────────────────────────────
   window.addEventListener('resize', () => {

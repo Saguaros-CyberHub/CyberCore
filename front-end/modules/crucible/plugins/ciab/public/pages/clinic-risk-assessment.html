@@ -151,9 +151,13 @@
 
           <div class="cra-tabs" role="tablist">
             <button class="cra-tab active" data-tab="overview"  role="tab">Overview</button>
+            <button class="cra-tab" data-tab="assets"    role="tab">Assets</button>
             <button class="cra-tab" data-tab="register"  role="tab">Risk Register</button>
             <button class="cra-tab" data-tab="cisram"    role="tab">CIS RAM Workbook</button>
+            <button class="cra-tab" data-tab="poam"      role="tab">POA&amp;M</button>
+            <button class="cra-tab" data-tab="insurance" role="tab">Insurance</button>
             <button class="cra-tab" data-tab="maturity"  role="tab">Maturity &amp; Controls</button>
+            <button class="cra-tab" data-tab="snapshots" role="tab">Snapshots</button>
             <button class="cra-tab" data-tab="report"    role="tab">Report</button>
           </div>
 
@@ -170,9 +174,15 @@
 
             <div class="cra-grid cols-2" style="margin-top:16px">
               <div class="cra-card">
-                <h3>Risk Heat Map (inherent)</h3>
+                <h3>Risk Heat Map — Inherent (today)</h3>
                 <div class="cra-chart tall" id="chartHeatmap"></div>
               </div>
+              <div class="cra-card">
+                <h3>Risk Heat Map — Residual (post-treatment)</h3>
+                <div class="cra-chart tall" id="chartHeatmapResidual"></div>
+              </div>
+            </div>
+            <div class="cra-grid" style="margin-top:16px; grid-template-columns: 1fr;">
               <div class="cra-card">
                 <h3>NIST CSF 2.0 Maturity</h3>
                 <div class="cra-chart tall" id="chartRadar"></div>
@@ -191,11 +201,42 @@
             </div>
           </div>
 
+          <!-- ASSETS (Tier 1) -->
+          <div class="cra-pane" id="pane-assets">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+              <div>
+                <h3 style="margin:0 0 4px 0;">Asset Register</h3>
+                <div class="sub" id="assetsCount">No assets yet. Every risk should trace back to one or more assets.</div>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button class="btn" id="btnAddAsset">+ Add Asset</button>
+              </div>
+            </div>
+            <div class="cra-card" style="padding:0; overflow-x:auto;">
+              <table class="findings-table" id="assetsTable">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Type</th>
+                    <th>Owner</th>
+                    <th>Tier</th>
+                    <th>C / I / A</th>
+                    <th>Data Class</th>
+                  </tr>
+                </thead>
+                <tbody id="assetsTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
           <!-- RISK REGISTER -->
           <div class="cra-pane" id="pane-register">
             <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
               <div class="sub" id="registerCount">No findings yet.</div>
-              <button class="btn primary" id="btnAddFinding">+ Add Finding</button>
+              <div style="display:flex; gap:8px;">
+                <button class="btn" id="btnLibrary" title="Browse the threat scenario library and instantiate a starter finding">📚 Add from Library</button>
+                <button class="btn primary" id="btnAddFinding">+ Add Finding</button>
+              </div>
             </div>
             <div class="cra-card" style="padding:0; overflow-x:auto;">
               <table class="findings-table" id="findingsTable">
@@ -205,6 +246,8 @@
                     <th>Title</th>
                     <th>Category</th>
                     <th>L</th><th>I</th><th>Risk</th>
+                    <th>Owner</th>
+                    <th>Due</th>
                     <th>Status</th>
                   </tr>
                 </thead>
@@ -242,6 +285,67 @@
             <div id="ramControls"><!-- 17 control sections rendered here --></div>
           </div>
 
+          <!-- POA&M (Tier 2) -->
+          <div class="cra-pane" id="pane-poam">
+            <div class="cra-card" style="margin-bottom:14px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <h3 style="margin:0 0 4px 0;">Plan of Action &amp; Milestones (POA&amp;M)</h3>
+                  <div class="sub" style="font-size:0.85rem;">
+                    NIST SP 800-171 / CMMC standard format. One row per open finding, ordered by inherent risk descending. Download as CSV for client submission or import into FedRAMP / CMMC compliance tooling.
+                  </div>
+                </div>
+                <button class="btn primary" id="btnDownloadPoam">⬇ Download POA&amp;M CSV</button>
+              </div>
+            </div>
+            <div class="cra-card" style="padding:0; overflow-x:auto;">
+              <table class="findings-table" id="poamTable">
+                <thead>
+                  <tr>
+                    <th>Weakness ID</th>
+                    <th>Weakness Name</th>
+                    <th>Source</th>
+                    <th>Point of Contact</th>
+                    <th>Scheduled Completion</th>
+                    <th>Risk</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody id="poamTbody"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- INSURANCE READINESS (Tier 2) -->
+          <div class="cra-pane" id="pane-insurance">
+            <div class="cra-card" style="margin-bottom:14px;">
+              <h3 style="margin:0 0 4px 0;">Cyber-Insurance Readiness</h3>
+              <div class="sub" style="font-size:0.85rem;">
+                Mirrors the underwriting questionnaire used by Coalition, At-Bay, Cowbell, Resilience, and other major carriers. Score &lt; 65 typically triggers a sub-standard or restricted coverage offer; &lt; 45 is grounds for declination.
+              </div>
+            </div>
+            <div class="cra-grid cols-2" style="margin-bottom:16px;">
+              <div class="cra-stat-card" style="border-left-color:#1e40af;">
+                <div class="label">Readiness Score</div>
+                <div class="value" id="insScore">—</div>
+                <div class="hint" id="insScoreHint">of 100 possible points</div>
+              </div>
+              <div class="cra-stat-card" id="insTierTile" style="border-left-color:#dc2626;">
+                <div class="label">Underwriter Tier</div>
+                <div class="value" id="insTier">—</div>
+                <div class="hint" id="insTierHint">— complete the scorecard</div>
+              </div>
+            </div>
+            <div class="cra-card">
+              <h3 style="margin-top:0;">12-Control Scorecard</h3>
+              <p class="sub" style="font-size:0.85rem;">Pick yes / partial / no for each control. The score updates automatically.</p>
+              <div id="insControls"></div>
+              <div style="display:flex; gap:8px; margin-top:12px;">
+                <button class="btn primary" id="btnSaveInsurance">Save Scorecard</button>
+              </div>
+            </div>
+          </div>
+
           <!-- MATURITY -->
           <div class="cra-pane" id="pane-maturity">
             <div class="cra-card">
@@ -253,16 +357,86 @@
                 <button class="btn" id="btnResetCsf" title="Clear manual overrides — use auto values">Reset to Auto</button>
               </div>
             </div>
+            <div class="cra-card" style="margin-top:16px;">
+              <h3>ALE / SLE / ARO Calculator</h3>
+              <p class="sub">Classic quantitative risk formula: <code>SLE = AV × EF</code>, <code>ALE = SLE × ARO</code>. The single most-tested formula on Security+ / CISSP / CISA exams.</p>
+              <div style="display:grid; grid-template-columns: 1fr 1fr 1fr auto; gap:10px; align-items:end;">
+                <label>Asset Value (USD)
+                  <input type="number" id="aleAV" placeholder="500000" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+                </label>
+                <label>Exposure Factor (0.0 – 1.0)
+                  <input type="number" id="aleEF" step="0.05" min="0" max="1" placeholder="0.4" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+                </label>
+                <label>ARO (events / year)
+                  <input type="number" id="aleARO" step="0.05" min="0" placeholder="0.25" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+                </label>
+                <button class="btn primary" id="btnCalcAle">Calculate</button>
+              </div>
+              <div id="aleResult" style="display:none; margin-top:14px; padding:14px; background:var(--bg-table-head,#f8fafc); border-radius:6px;"></div>
+            </div>
+          </div>
+
+          <!-- SNAPSHOTS (Tier 2) -->
+          <div class="cra-pane" id="pane-snapshots">
+            <div class="cra-card" style="margin-bottom:14px;">
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <div>
+                  <h3 style="margin:0 0 4px 0;">Engagement Snapshots</h3>
+                  <div class="sub" style="font-size:0.85rem;">
+                    Risk assessment is recurring, not one-and-done. Take a snapshot before implementing recommendations, then re-measure later and watch the delta arrows move the right direction.
+                  </div>
+                </div>
+                <button class="btn primary" id="btnCreateSnapshot">📸 Take Snapshot</button>
+              </div>
+            </div>
+            <div id="snapshotDeltaSection"></div>
+            <div class="cra-card" style="padding:0; overflow-x:auto; margin-top:16px;">
+              <table class="findings-table">
+                <thead>
+                  <tr>
+                    <th>Label</th>
+                    <th>Date</th>
+                    <th>Findings</th>
+                    <th>Critical</th>
+                    <th>IG1 Coverage</th>
+                    <th>Inherent Risk</th>
+                    <th>Notes</th>
+                  </tr>
+                </thead>
+                <tbody id="snapshotsTbody"></tbody>
+              </table>
+            </div>
           </div>
 
           <!-- REPORT -->
           <div class="cra-pane" id="pane-report">
             <div class="cra-card">
-              <h3>Executive Summary</h3>
-              <p class="sub">Top-of-deliverable narrative. Plain text. ~1–3 paragraphs.</p>
-              <textarea id="execSummary" rows="10" style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              <h3>Executive Summary (Deloitte / CISO board structure)</h3>
+              <p class="sub">Real board reports use a 4-section structure. Each section answers a specific question the board has. Leave any blank to fall back to the legacy single-block summary below.</p>
+              <div class="field">
+                <label><strong>1. Current Posture</strong> — Where is the organization today? <span class="sub">(1 paragraph)</span></label>
+                <textarea id="execCurrentPosture" rows="4" placeholder="e.g. Methow Logistics is a 35-employee Manufacturing firm with a tech-mature-policy-weak posture. CIS IG1 coverage is 47%; CSF maturity is 2.9 of 5; insurance readiness is 'Conditional' tier..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+              <div class="field">
+                <label><strong>2. Top Risks</strong> — What are the 3 most pressing things the board must know about? <span class="sub">(business language, not technical)</span></label>
+                <textarea id="execTopRisks" rows="4" placeholder="e.g. (1) Domain-admin MFA gap means a single phishing click compromises the network; (2) No offsite/immutable backup means ransomware = total data loss; (3) No documented IR plan means the first 4h of any incident will be wasted reading templates..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+              <div class="field">
+                <label><strong>3. Progress</strong> — What has improved since the prior assessment, or what's the baseline? <span class="sub">(1 paragraph)</span></label>
+                <textarea id="execProgress" rows="3" placeholder="e.g. This is the first formal risk assessment of record — baseline established. Recommend re-measuring in 6 months following implementation..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+              <div class="field">
+                <label><strong>4. Decisions Needed</strong> — What does leadership need to explicitly approve / reject? <span class="sub">(budget, policy, staffing, risk acceptance)</span></label>
+                <textarea id="execDecisionsNeeded" rows="5" placeholder="e.g. (1) BUDGET: $35k one-time + $15k/year recurring to lift insurance readiness from Conditional to Insurable; (2) POLICY: formal adoption of the documented IR plan; (3) STAFFING: assign fractional CISO; (4) RISK ACCEPTANCE: written sign-off on the 2 critical findings the board elects to formally accept..." style="width:100%; padding:10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </div>
+
+              <details style="margin-top:14px;">
+                <summary style="cursor:pointer; color:var(--text-muted); font-size:0.85rem;">Legacy single-block exec summary (only shown if the 4 sections above are empty)</summary>
+                <textarea id="execSummary" rows="6" style="width:100%; padding:10px; margin-top:8px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; resize: vertical; background: var(--bg-input, white); color: var(--text-primary);"></textarea>
+              </details>
+
               <div style="display:flex; gap:10px; margin-top:12px;">
-                <button class="btn primary" id="btnSaveSummary">Save Summary</button>
+                <button class="btn primary" id="btnSaveSummary">Save Exec Summary</button>
                 <button class="btn" id="btnFinalize">Mark Final</button>
               </div>
             </div>
@@ -347,12 +521,250 @@
         <input type="text" id="fControlRefs" placeholder='e.g. CIS_IG1:6.3, NIST_CSF_2_0:PR.AA'>
         <div class="sub" style="font-size:0.75rem; color:var(--text-muted); margin-top:4px;">Comma-separated. Format: <code>FRAMEWORK:ID</code></div>
       </div>
+
+      <!-- Residual scoring (Tier 1) -->
+      <div class="row2">
+        <div class="field">
+          <label>Residual Likelihood (after treatment)</label>
+          <div class="slider-row">
+            <input type="range" id="fResLikelihood" min="1" max="5" value="2" step="1">
+            <span class="val" id="fResLikelihoodVal">2</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>Residual Impact (after treatment)</label>
+          <div class="slider-row">
+            <input type="range" id="fResImpact" min="1" max="5" value="2" step="1">
+            <span class="val" id="fResImpactVal">2</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Threat source (NIST 800-30) -->
+      <div class="row2">
+        <div class="field">
+          <label>Threat Source (NIST 800-30)</label>
+          <select id="fThreatSource">
+            <option value="">—</option>
+            <option value="adversarial">Adversarial (human attacker)</option>
+            <option value="accidental">Accidental (mistake / misconfiguration)</option>
+            <option value="structural">Structural (design / process gap)</option>
+            <option value="environmental">Environmental (natural / physical)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Discovery Method</label>
+          <select id="fDiscoveryMethod">
+            <option value="">—</option>
+            <option value="interview">Interview</option>
+            <option value="document_review">Document Review</option>
+            <option value="technical_scan">Technical Scan</option>
+            <option value="observation">Observation</option>
+            <option value="self_attestation">Self-Attestation</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Owner / Reviewer / Date (Tier 1) -->
+      <div class="row2">
+        <div class="field">
+          <label>Owner Role</label>
+          <input type="text" id="fOwnerRole" placeholder="e.g. IT Manager, CFO">
+        </div>
+        <div class="field">
+          <label>Owner Name</label>
+          <input type="text" id="fOwnerName" placeholder="e.g. Sam Tan">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Reviewer</label>
+          <input type="text" id="fReviewer" placeholder="Who approves remediation completion">
+        </div>
+        <div class="field">
+          <label>Target Completion Date</label>
+          <input type="date" id="fTargetDate">
+        </div>
+      </div>
+
+      <!-- Evidence (Tier 1) -->
+      <div class="field">
+        <label>Evidence Observed</label>
+        <textarea id="fEvidence" placeholder="Specific evidence: 'Saw 3/5 admin accounts without MFA in M365 admin center on 2026-05-23.'"></textarea>
+        <div class="sub" style="font-size:0.75rem; color:var(--text-muted); margin-top:4px;">CMMC / NIST 800-171A assessors require every finding to trace to specific observable evidence.</div>
+      </div>
+
+      <!-- OWASP decomposed scoring (Tier 3, collapsible) -->
+      <details class="field" style="border:1px solid var(--border-color, #e2e8f0); padding:10px; border-radius:6px;">
+        <summary style="cursor:pointer; font-weight:600;">Advanced: OWASP Decomposed Scoring (8 likelihood + 8 impact factors)</summary>
+        <p class="sub" style="font-size:0.8rem; margin:8px 0;">
+          Each factor 0–9. Hover labels for guidance. The system averages the 8 within each side and maps to LOW/MEDIUM/HIGH/CRITICAL via the OWASP 4×4 matrix. Use this when you need to defend a score in a client review.
+        </p>
+        <div id="owaspFactors"></div>
+        <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
+          <button class="btn" id="btnApplyOwasp" type="button">Compute Severity</button>
+          <span id="owaspResult" style="font-size:0.85rem; color:var(--text-muted);"></span>
+        </div>
+      </details>
+
+      <!-- FAIR quantification (Tier 3, collapsible) -->
+      <details class="field" style="border:1px solid var(--border-color, #e2e8f0); padding:10px; border-radius:6px;">
+        <summary style="cursor:pointer; font-weight:600;">Advanced: FAIR-lite Quantification (Monte Carlo ALE in dollars)</summary>
+        <p class="sub" style="font-size:0.8rem; margin:8px 0;">
+          Optional dollar-denominated risk model. Provide a triangular distribution (min / most-likely / max) for Loss Event Frequency (events per year) and Loss Magnitude (USD per event). Server runs 5,000-iteration Monte Carlo and returns Annualized Loss Expectancy.
+        </p>
+        <div class="row2"><strong style="grid-column:1/-1; font-size:0.75rem; color:var(--text-muted);">Loss Event Frequency (events / year)</strong></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+          <label>Min<input type="number" id="fairLefMin" step="0.05" placeholder="0.1"></label>
+          <label>Most Likely<input type="number" id="fairLefMode" step="0.05" placeholder="0.3"></label>
+          <label>Max<input type="number" id="fairLefMax" step="0.05" placeholder="1.0"></label>
+        </div>
+        <div class="row2" style="margin-top:8px;"><strong style="grid-column:1/-1; font-size:0.75rem; color:var(--text-muted);">Loss Magnitude (USD per event)</strong></div>
+        <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px;">
+          <label>Min<input type="number" id="fairLmMin" step="1000" placeholder="50000"></label>
+          <label>Most Likely<input type="number" id="fairLmMode" step="1000" placeholder="200000"></label>
+          <label>Max<input type="number" id="fairLmMax" step="1000" placeholder="1500000"></label>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:10px; align-items:center;">
+          <button class="btn" id="btnRunFair" type="button">Run Monte Carlo</button>
+          <span id="fairResult" style="font-size:0.85rem; color:var(--text-muted);"></span>
+        </div>
+      </details>
     </div>
     <footer>
       <button class="btn danger" id="btnDeleteFinding" style="display:none">Delete</button>
       <div style="flex:1"></div>
       <button class="btn" id="btnCancelFinding">Cancel</button>
       <button class="btn primary" id="btnSaveFinding">Save</button>
+    </footer>
+  </aside>
+
+  <!-- Threat Scenario Library modal -->
+  <div class="drawer-backdrop" id="libBackdrop"></div>
+  <aside class="drawer" id="libDrawer" style="width: 640px;">
+    <header>
+      <h3>Threat Scenario Library</h3>
+      <button class="btn" id="btnCloseLib">✕</button>
+    </header>
+    <div class="body">
+      <p class="sub" style="margin-top:0;">Browse canonical SMB risk scenarios. Click one to instantiate it as a new finding in your register — you can edit any field afterward.</p>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input type="text" id="libSearch" placeholder="Search scenarios…" style="flex:1; padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px;">
+        <select id="libCategory" style="padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px;">
+          <option value="">All categories</option>
+          <option value="technical">Technical</option>
+          <option value="process">Process</option>
+          <option value="people">People</option>
+          <option value="physical">Physical</option>
+        </select>
+      </div>
+      <div id="libList"></div>
+    </div>
+  </aside>
+
+  <!-- Asset add/edit drawer -->
+  <div class="drawer-backdrop" id="assetBackdrop"></div>
+  <aside class="drawer" id="assetDrawer">
+    <header>
+      <h3 id="assetDrawerTitle">Add Asset</h3>
+      <button class="btn" id="btnCloseAssetDrawer">✕</button>
+    </header>
+    <div class="body">
+      <input type="hidden" id="assetId">
+      <div class="field">
+        <label>Name <span style="color:#dc2626">*</span></label>
+        <input type="text" id="aName" placeholder="e.g. corp-dc-01 / Customer Records / Executive Email">
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Type</label>
+          <select id="aType">
+            <option value="">—</option>
+            <option value="workstation">Workstation</option>
+            <option value="server">Server</option>
+            <option value="network_device">Network Device</option>
+            <option value="saas">SaaS Application</option>
+            <option value="data_store">Data Store</option>
+            <option value="mobile">Mobile Device</option>
+            <option value="iot">IoT Device</option>
+            <option value="process">Business Process</option>
+            <option value="people">People / Role</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Criticality Tier</label>
+          <select id="aCriticality">
+            <option value="">—</option>
+            <option value="1">Tier 1 — Crown Jewel</option>
+            <option value="2">Tier 2 — Important</option>
+            <option value="3">Tier 3 — Standard</option>
+          </select>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Owner Role</label>
+          <input type="text" id="aOwner" placeholder="e.g. IT Manager, CFO">
+        </div>
+        <div class="field">
+          <label>Custodian (named person)</label>
+          <input type="text" id="aCustodian" placeholder="e.g. Sam Tan">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Hostname / Identifier</label>
+          <input type="text" id="aHostname" placeholder="corp-dc-01">
+        </div>
+        <div class="field">
+          <label>IP Address</label>
+          <input type="text" id="aIp" placeholder="10.0.0.5">
+        </div>
+      </div>
+      <div class="field">
+        <label>Data Classification</label>
+        <select id="aDataClass">
+          <option value="">—</option>
+          <option value="Public">Public</option>
+          <option value="Internal">Internal</option>
+          <option value="Confidential">Confidential</option>
+          <option value="Restricted">Restricted</option>
+          <option value="Unknown">Unknown</option>
+        </select>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Confidentiality (1–3)</label>
+          <div class="slider-row">
+            <input type="range" id="aConf" min="1" max="3" value="2" step="1">
+            <span class="val" id="aConfVal">2</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>Integrity (1–3)</label>
+          <div class="slider-row">
+            <input type="range" id="aInteg" min="1" max="3" value="2" step="1">
+            <span class="val" id="aIntegVal">2</span>
+          </div>
+        </div>
+      </div>
+      <div class="field">
+        <label>Availability (1–3)</label>
+        <div class="slider-row">
+          <input type="range" id="aAvail" min="1" max="3" value="2" step="1">
+          <span class="val" id="aAvailVal">2</span>
+        </div>
+      </div>
+      <div class="field">
+        <label>Description</label>
+        <textarea id="aDescription" placeholder="What this asset does + why it matters."></textarea>
+      </div>
+    </div>
+    <footer>
+      <button class="btn danger" id="btnDeleteAsset" style="display:none">Delete</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="btnCancelAsset">Cancel</button>
+      <button class="btn primary" id="btnSaveAsset">Save</button>
     </footer>
   </aside>
 

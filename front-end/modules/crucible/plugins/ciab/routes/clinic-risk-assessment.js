@@ -17,6 +17,18 @@ const { pool } = require('../utils/db');
 const { authenticateToken } = require('../../../../../src/middleware/auth');
 const frameworks = require('../utils/frameworks');
 const pdfh = require('../utils/pdf-helpers');
+const scenarioLib = require('../utils/threat-scenario-library');
+const { scoreReadiness } = require('../utils/insurance-readiness');
+const { fairMonteCarlo, classicAleSleAro, owaspRollup } = require('../utils/quant-risk');
+
+// Seed the threat scenario library on first request (idempotent).
+let _scenarioSeedAttempted = false;
+async function ensureScenariosSeeded() {
+  if (_scenarioSeedAttempted) return;
+  _scenarioSeedAttempted = true;
+  try { await scenarioLib.seedScenarioLibrary(pool); }
+  catch (e) { console.error('[CRA] scenario library seed failed:', e.message); }
+}
 
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024; // chart PNGs can be heavy
 
@@ -355,17 +367,41 @@ router.get('/:profileId/report-data', async (req, res) => {
       cisRam = await loadCisRamForPdf(profileId);
     } catch (_) { cisRam = null; }
 
+    // Tier 1: Assets
+    const assetsQ = await pool.query(
+      `SELECT * FROM risk_assets WHERE profile_id = $1 ORDER BY criticality_tier ASC NULLS LAST, name ASC`,
+      [profileId]
+    );
+
+    // Tier 2: Insurance readiness
+    const readinessQ = await pool.query(
+      `SELECT * FROM insurance_readiness WHERE profile_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [profileId]
+    );
+
+    // Tier 2: Latest 2 snapshots (for delta comparison if both exist)
+    const snapshotsQ = await pool.query(
+      `SELECT id, label, findings_total, findings_critical, findings_high,
+              findings_medium, findings_low, ig1_coverage_pct, total_inherent_risk,
+              total_residual_risk, csf_scores, notes, created_at
+       FROM risk_snapshots WHERE profile_id = $1 ORDER BY created_at DESC LIMIT 2`,
+      [profileId]
+    );
+
     res.json({
       profile,
       intake,                       // full payload, not summary
-      report,                       // full record
+      report,                       // full record incl. Deloitte exec sections
       findings: findingsQ.rows,
+      assets: assetsQ.rows,
       cis_coverage: cisCoverage,
       csf_scores: csfScores,
       top_unmet_safeguards: topUnmet,
       recommendations,
       cis_ram: cisRam,
-      posture
+      posture,
+      insurance_readiness: readinessQ.rows[0] || null,
+      snapshots: snapshotsQ.rows                  // [latest, prior] for delta comparison
     });
   } catch (err) {
     console.error('[CRA report-data]', err);
@@ -526,6 +562,387 @@ router.put('/:profileId/report', express.json(), async (req, res) => {
     console.error('[CRA report update]', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ============================================================================
+// ASSET REGISTER (Tier 1)
+// ============================================================================
+
+router.get('/:profileId/assets', async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    if (!(await userCanReadProfile(req.user.userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const r = await pool.query(
+      `SELECT * FROM risk_assets WHERE profile_id = $1 ORDER BY criticality_tier ASC NULLS LAST, name ASC`,
+      [profileId]
+    );
+    res.json({ assets: r.rows });
+  } catch (err) {
+    console.error('[CRA assets list]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/:profileId/assets', express.json(), async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const a = req.body || {};
+    if (!a.name) return res.status(400).json({ error: 'name is required' });
+    const r = await pool.query(`
+      INSERT INTO risk_assets
+        (user_id, profile_id, name, asset_type, owner_role, custodian,
+         confidentiality, integrity, availability, criticality_tier,
+         data_classification, data_categories, ip_address, hostname, description, containers)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16::jsonb)
+      RETURNING *
+    `, [
+      userId, profileId, a.name, a.asset_type || null, a.owner_role || null, a.custodian || null,
+      a.confidentiality || null, a.integrity || null, a.availability || null, a.criticality_tier || null,
+      a.data_classification || null, JSON.stringify(a.data_categories || []),
+      a.ip_address || null, a.hostname || null, a.description || null,
+      JSON.stringify(a.containers || [])
+    ]);
+    res.json({ asset: r.rows[0] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.put('/:profileId/assets/:assetId', express.json(), async (req, res) => {
+  try {
+    const { profileId, assetId } = req.params;
+    if (!(await userCanReadProfile(req.user.userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const a = req.body || {};
+    const r = await pool.query(`
+      UPDATE risk_assets SET
+        name = COALESCE($3, name), asset_type = COALESCE($4, asset_type),
+        owner_role = COALESCE($5, owner_role), custodian = COALESCE($6, custodian),
+        confidentiality = COALESCE($7, confidentiality), integrity = COALESCE($8, integrity),
+        availability = COALESCE($9, availability), criticality_tier = COALESCE($10, criticality_tier),
+        data_classification = COALESCE($11, data_classification),
+        data_categories = COALESCE($12::jsonb, data_categories),
+        ip_address = COALESCE($13, ip_address), hostname = COALESCE($14, hostname),
+        description = COALESCE($15, description),
+        updated_at = NOW()
+      WHERE id = $1 AND profile_id = $2
+      RETURNING *
+    `, [
+      assetId, profileId, a.name || null, a.asset_type || null,
+      a.owner_role || null, a.custodian || null,
+      a.confidentiality || null, a.integrity || null, a.availability || null, a.criticality_tier || null,
+      a.data_classification || null, a.data_categories ? JSON.stringify(a.data_categories) : null,
+      a.ip_address || null, a.hostname || null, a.description || null
+    ]);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Asset not found' });
+    res.json({ asset: r.rows[0] });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.delete('/:profileId/assets/:assetId', async (req, res) => {
+  try {
+    const { profileId, assetId } = req.params;
+    if (!(await userCanReadProfile(req.user.userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    await pool.query(`DELETE FROM risk_assets WHERE id = $1 AND profile_id = $2`, [assetId, profileId]);
+    res.json({ deleted: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================================================
+// THREAT SCENARIO LIBRARY (Tier 1)
+// ============================================================================
+
+router.get('/scenarios', async (req, res) => {
+  try {
+    await ensureScenariosSeeded();
+    const list = await scenarioLib.listScenarios(pool, {
+      industry: req.query.industry, size: req.query.size, category: req.query.category
+    });
+    res.json({ scenarios: list });
+  } catch (err) {
+    console.error('[CRA scenarios]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Instantiate a library scenario as a profile-specific finding
+router.post('/:profileId/scenarios/:key/instantiate', express.json(), async (req, res) => {
+  try {
+    const { profileId, key } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    await ensureScenariosSeeded();
+    const scn = await scenarioLib.getScenarioByKey(pool, key);
+    if (!scn) return res.status(404).json({ error: 'Scenario not found' });
+
+    // Next finding code
+    const codeQ = await pool.query(
+      `SELECT COALESCE(MAX(SUBSTRING(finding_code FROM 3)::int), 0) AS max_code
+       FROM risk_findings WHERE profile_id = $1 AND finding_code LIKE 'F-%'`,
+      [profileId]
+    );
+    const code = `F-${String((codeQ.rows[0].max_code || 0) + 1).padStart(3, '0')}`;
+
+    const f = scenarioLib.scenarioToFinding(scn, { findingCode: code });
+    const r = await pool.query(`
+      INSERT INTO risk_findings
+        (user_id, profile_id, finding_code, title, description, category,
+         likelihood, impact, residual_likelihood, residual_impact,
+         status, recommendation, control_refs, threat_source, scenario_library_key)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15)
+      RETURNING *
+    `, [
+      userId, profileId, f.finding_code, f.title, f.description, f.category,
+      f.likelihood, f.impact, f.residual_likelihood, f.residual_impact,
+      f.status, f.recommendation, JSON.stringify(f.control_refs || []),
+      f.threat_source, f.scenario_library_key
+    ]);
+    res.json({ finding: r.rows[0] });
+  } catch (err) {
+    console.error('[CRA scenario instantiate]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// POA&M EXPORT (Tier 2)  —  NIST/CMMC standard CSV format
+// ============================================================================
+
+router.get('/:profileId/poam.csv', async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    if (!(await userCanReadProfile(req.user.userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const profileQ = await pool.query(`SELECT company_name FROM profiles WHERE id = $1`, [profileId]);
+    const company = profileQ.rows[0]?.company_name || 'Unknown';
+    const r = await pool.query(`
+      SELECT finding_code, title, description, recommendation, owner_role, owner_name,
+             target_completion_date, status, likelihood, impact, inherent_risk,
+             discovery_method, control_refs
+      FROM risk_findings WHERE profile_id = $1 AND status != 'mitigated'
+      ORDER BY inherent_risk DESC NULLS LAST
+    `, [profileId]);
+
+    const esc = s => '"' + String(s || '').replace(/"/g, '""').replace(/\r?\n/g, ' ') + '"';
+    const rows = [
+      ['Weakness ID', 'Weakness Name', 'Weakness Description', 'Source of Discovery',
+       'Asset Identifier', 'Point of Contact', 'Resources Required',
+       'Scheduled Completion Date', 'Milestones / Notes', 'Status',
+       'Likelihood', 'Impact', 'Risk Rating', 'Control Refs'].map(esc).join(',')
+    ];
+    for (const f of r.rows) {
+      const refs = Array.isArray(f.control_refs) ? f.control_refs : [];
+      rows.push([
+        f.finding_code, f.title, f.description,
+        f.discovery_method, '', // Asset identifier — left blank, students fill in
+        f.owner_name || f.owner_role || '',
+        '', // Resources Required — students fill in
+        f.target_completion_date || '',
+        f.recommendation,
+        f.status, f.likelihood, f.impact, f.inherent_risk,
+        refs.map(x => `${x.framework}:${x.id}`).join('; ')
+      ].map(esc).join(','));
+    }
+    const safeName = String(company).replace(/[^a-zA-Z0-9]/g, '-');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="poam-${safeName}.csv"`);
+    res.send(rows.join('\r\n'));
+  } catch (err) {
+    console.error('[CRA POA&M]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// INSURANCE READINESS (Tier 2)
+// ============================================================================
+
+router.get('/:profileId/insurance-readiness', async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    if (!(await userCanReadProfile(req.user.userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const r = await pool.query(
+      `SELECT * FROM insurance_readiness WHERE profile_id = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [profileId]
+    );
+    res.json({ readiness: r.rows[0] || null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.put('/:profileId/insurance-readiness', express.json(), async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const a = req.body || {};
+    const score = scoreReadiness(a);
+    const r = await pool.query(`
+      INSERT INTO insurance_readiness
+        (user_id, profile_id, mfa_email, mfa_remote, mfa_privileged, mfa_cloud,
+         edr_coverage_pct, immutable_backups, tested_restore_12mo,
+         ir_plan_written, tabletop_12mo, pam_in_place, security_training, vuln_scanning,
+         readiness_score, readiness_tier, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+      ON CONFLICT (profile_id, user_id) DO UPDATE SET
+        mfa_email = EXCLUDED.mfa_email, mfa_remote = EXCLUDED.mfa_remote,
+        mfa_privileged = EXCLUDED.mfa_privileged, mfa_cloud = EXCLUDED.mfa_cloud,
+        edr_coverage_pct = EXCLUDED.edr_coverage_pct,
+        immutable_backups = EXCLUDED.immutable_backups,
+        tested_restore_12mo = EXCLUDED.tested_restore_12mo,
+        ir_plan_written = EXCLUDED.ir_plan_written,
+        tabletop_12mo = EXCLUDED.tabletop_12mo,
+        pam_in_place = EXCLUDED.pam_in_place,
+        security_training = EXCLUDED.security_training,
+        vuln_scanning = EXCLUDED.vuln_scanning,
+        readiness_score = EXCLUDED.readiness_score,
+        readiness_tier = EXCLUDED.readiness_tier,
+        notes = EXCLUDED.notes,
+        updated_at = NOW()
+      RETURNING *
+    `, [
+      userId, profileId, a.mfa_email || 'no', a.mfa_remote || 'no',
+      a.mfa_privileged || 'no', a.mfa_cloud || 'no',
+      Number(a.edr_coverage_pct) || 0, a.immutable_backups || 'no',
+      a.tested_restore_12mo || 'no', a.ir_plan_written || 'no',
+      a.tabletop_12mo || 'no', a.pam_in_place || 'no',
+      a.security_training || 'no', a.vuln_scanning || 'no',
+      score.score, score.tier, a.notes || null
+    ]);
+    res.json({ readiness: r.rows[0], breakdown: score.breakdown });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ============================================================================
+// SNAPSHOTS (Tier 2)
+// ============================================================================
+
+router.get('/:profileId/snapshots', async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    if (!(await userCanReadProfile(req.user.userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const r = await pool.query(
+      `SELECT id, label, findings_total, findings_critical, findings_high,
+              findings_medium, findings_low, ig1_coverage_pct, total_inherent_risk,
+              total_residual_risk, csf_scores, notes, created_at
+       FROM risk_snapshots WHERE profile_id = $1 ORDER BY created_at DESC`,
+      [profileId]
+    );
+    res.json({ snapshots: r.rows });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post('/:profileId/snapshots', express.json(), async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const label = req.body?.label || `Snapshot ${new Date().toISOString().slice(0, 10)}`;
+    const findingsQ = await pool.query(
+      `SELECT * FROM risk_findings WHERE profile_id = $1 ORDER BY inherent_risk DESC`,
+      [profileId]
+    );
+    const findings = findingsQ.rows;
+    const intake = await loadIntakeForProfile(profileId);
+    const cov = frameworks.ig1Coverage(intake?.payload?.sections?.ig1 || {});
+    const csf = frameworks.aggregateIg1ToCsf(intake?.payload?.sections?.ig1 || {});
+    const totalInh = findings.reduce((s, f) => s + (Number(f.inherent_risk) || 0), 0);
+    const totalRes = findings.reduce((s, f) => {
+      const rl = Number(f.residual_likelihood) || Number(f.likelihood) || 0;
+      const ri = Number(f.residual_impact)     || Number(f.impact)     || 0;
+      return s + (rl * ri);
+    }, 0);
+    const sev = score => Number(score) >= 16 ? 'crit' : score >= 12 ? 'high' : score >= 6 ? 'med' : 'low';
+    const counts = { crit:0, high:0, med:0, low:0 };
+    findings.forEach(f => counts[sev(f.inherent_risk)]++);
+
+    const r = await pool.query(`
+      INSERT INTO risk_snapshots
+        (user_id, profile_id, label, findings_total, findings_critical,
+         findings_high, findings_medium, findings_low, ig1_coverage_pct,
+         ig1_yes, ig1_partial, ig1_no, csf_scores,
+         total_inherent_risk, total_residual_risk, findings_snapshot, notes)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16::jsonb,$17)
+      RETURNING *
+    `, [
+      userId, profileId, label, findings.length, counts.crit, counts.high, counts.med, counts.low,
+      cov.score, cov.yes, cov.partial, cov.no,
+      JSON.stringify(csf), totalInh, totalRes,
+      JSON.stringify(findings), req.body?.notes || null
+    ]);
+    res.json({ snapshot: r.rows[0] });
+  } catch (err) {
+    console.error('[CRA snapshot create]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ============================================================================
+// QUANTITATIVE RISK (Tier 3)
+// ============================================================================
+
+// FAIR-lite Monte Carlo — POST inputs, return ALE + LEC chart data
+router.post('/:profileId/findings/:findingId/fair', express.json(), async (req, res) => {
+  try {
+    const { profileId, findingId } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const result = fairMonteCarlo({
+      lef: req.body?.lef, lm: req.body?.lm,
+      iterations: Math.min(50000, Math.max(500, Number(req.body?.iterations) || 5000))
+    });
+    if (!result) return res.status(400).json({ error: 'Invalid LEF or LM input' });
+    // Persist on the finding for re-render
+    await pool.query(
+      `UPDATE risk_findings SET fair_quant = $3::jsonb, updated_at = NOW() WHERE id = $1 AND profile_id = $2`,
+      [findingId, profileId, JSON.stringify(result)]
+    );
+    res.json({ fair: result });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ALE/SLE/ARO calculator widget (no persistence — just compute)
+router.post('/utils/ale-sle-aro', express.json(), (req, res) => {
+  try {
+    res.json(classicAleSleAro(req.body || {}));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// OWASP decomposed scoring — persists on the finding
+router.put('/:profileId/findings/:findingId/owasp', express.json(), async (req, res) => {
+  try {
+    const { profileId, findingId } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+    const factors = req.body?.factors || {};
+    const rollup = owaspRollup(factors);
+    await pool.query(
+      `UPDATE risk_findings SET owasp_factors = $3::jsonb, updated_at = NOW() WHERE id = $1 AND profile_id = $2`,
+      [findingId, profileId, JSON.stringify({ ...factors, _rollup: rollup })]
+    );
+    res.json({ factors, rollup });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // ============================================================================
