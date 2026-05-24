@@ -14,7 +14,7 @@
  */
 
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
+const { proxmoxAPI, waitForTask } = require('../../../../../src/utils/proxmox');
 const tailscale = require('../../../../../src/utils/tailscale');
 
 // ─── Constants (mirror admin.js) ────────────────────────────────────────────
@@ -181,20 +181,29 @@ async function forceDestroyVM(vmid, type, knownNode) {
       try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${type}/${vmid}/config`, { lock: '' });        } catch (_) {}
       try {
         const stopBody = type === 'qemu' ? { timeout: 0 } : {};
-        await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`, stopBody);
-        await new Promise(r => setTimeout(r, 4000));
+        const stopUpid = await proxmoxAPI('POST', `/api2/json/nodes/${node}/${type}/${vmid}/status/stop`, stopBody);
+        if (stopUpid) {
+          try { await waitForTask(node, stopUpid, 30000); } catch (_) {}
+        }
       } catch (_) {}
 
       const primaryUrl = type === 'lxc'
         ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
         : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
+      let destroyUpid;
       try {
-        await proxmoxAPI('DELETE', primaryUrl);
+        destroyUpid = await proxmoxAPI('DELETE', primaryUrl);
       } catch (_) {
         const fallback = type === 'lxc'
           ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
           : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
-        await proxmoxAPI('DELETE', fallback);
+        destroyUpid = await proxmoxAPI('DELETE', fallback);
+      }
+      // Wait for the destroy task to actually finish — otherwise the file lock
+      // /var/lock/qemu-server/lock-<vmid>.conf may still be held when the
+      // immediately-following clone tries to acquire it.
+      if (destroyUpid) {
+        try { await waitForTask(node, destroyUpid, 60000); } catch (_) {}
       }
 
       console.log(`[CIAB Teardown] Destroyed ${type} ${vmid} on ${node}`);
