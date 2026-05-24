@@ -512,18 +512,25 @@ async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupN
 }
 
 // ─── CIAB-local agent shell exec ───────────────────────────────────────────
-// Proxmox's /agent/exec endpoint takes `command` as the EXECUTABLE PATH (not
-// a shell line) and an optional `input-data` for stdin. The shared agentExec
-// in src/utils/script-executor.js is designed for the Windows path
-// (command='powershell.exe' + input-data=<script>). For Linux shell commands
-// we need to invoke /bin/sh and feed the command on stdin — otherwise
-// Proxmox tries to exec a literal binary named "mkdir -p /var/www/html"
-// and returns 596.
+// Mirrors what `qm guest exec <vmid> -- /bin/sh -c "..."` does: passes
+// `command` as an ARRAY (path + args). Proxmox's form-urlencoded API
+// represents arrays as repeated keys (command=/bin/sh&command=-c&command=...).
+// The shared proxmoxAPI util joins objects with `${k}=${v}` which mangles
+// arrays into comma-strings, so we build the body manually here.
+//
+// Why not input-data: the input-data + bare-`sh` form returned 596 on Debian
+// cloned via /clone API (works in some cases, not others — undiagnosed). The
+// `qm guest exec` form is the canonical one and works on every test we tried.
 async function agentShellExec(node, vmId, shellCmd) {
-  console.log(`[AgentShellExec] sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
+  console.log(`[AgentShellExec] /bin/sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
+  const body = [
+    `command=${encodeURIComponent('/bin/sh')}`,
+    `command=${encodeURIComponent('-c')}`,
+    `command=${encodeURIComponent(shellCmd)}`
+  ].join('&');
   const result = await proxmoxAPI('POST',
     `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
-    { command: 'sh', 'input-data': shellCmd }
+    body
   );
   const pid = result?.pid;
   if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);

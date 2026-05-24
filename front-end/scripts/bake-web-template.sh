@@ -169,6 +169,19 @@ write_files:
       BAKE_KIND=web-template
       BAKE_BASE=debian-13
 
+  # Clear qemu-guest-agent's default blacklist. Debian cloud images ship
+  # /etc/default/qemu-guest-agent with DAEMON_ARGS that blacklist guest-exec
+  # and guest-file-* for security — but the CIAB orchestrator requires both
+  # to drop the vuln-app onto web-01 over the agent channel. Without this
+  # override, every agentShellExec call returns 596 even though the agent
+  # itself is running and ping/network-get-interfaces succeed.
+  - path: /etc/default/qemu-guest-agent
+    permissions: '0644'
+    content: |
+      # Cleared by bake-web-template.sh — orchestrator needs guest-exec +
+      # guest-file-* RPCs to install the vuln-app on first boot.
+      DAEMON_ARGS=""
+
   # Disable Apache's default vhost so CIAB's install_script can drop its own
   # files into /var/www/html without conflicting. Apache stays enabled but
   # serves an empty document root at boot (a lane that doesn't install a
@@ -212,8 +225,12 @@ runcmd:
   # so install_script can drop files there via guest-agent without sudo ----
   - [ sh, -c, 'mkdir -p /var/www/html && chown -R $TEMPLATE_USER:www-data /var/www/html && chmod 0775 /var/www/html' ]
 
+  # ---- Restart qemu-guest-agent so the cleared blacklist takes effect ----
+  - [ systemctl, restart, qemu-guest-agent ]
+
   # ---- Pre-seal sanity ----
   - [ sh, -c, 'systemctl is-enabled qemu-guest-agent && echo "GUEST_AGENT_ENABLED=yes" >> /etc/cybercore-bake.env || echo "GUEST_AGENT_ENABLED=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "^DAEMON_ARGS=\"\"" /etc/default/qemu-guest-agent && echo "GUEST_AGENT_UNBLOCKED=yes" >> /etc/cybercore-bake.env || echo "GUEST_AGENT_UNBLOCKED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v docker >/dev/null && echo "DOCKER_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "DOCKER_INSTALLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v apache2 >/dev/null && echo "APACHE_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "APACHE_INSTALLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v php >/dev/null && echo "PHP_INSTALLED=yes" >> /etc/cybercore-bake.env || echo "PHP_INSTALLED=no" >> /etc/cybercore-bake.env' ]
@@ -308,19 +325,22 @@ else
     if [ -f "$BAKE_ENV" ]; then
       BAKE_COMPLETE=$(awk -F= '/^BAKE_COMPLETE=/{print $2}' "$BAKE_ENV")
       GUEST_AGENT=$(awk -F= '/^GUEST_AGENT_ENABLED=/{print $2}' "$BAKE_ENV")
+      GUEST_AGENT_UNBLOCKED=$(awk -F= '/^GUEST_AGENT_UNBLOCKED=/{print $2}' "$BAKE_ENV")
       DOCKER=$(awk -F= '/^DOCKER_INSTALLED=/{print $2}' "$BAKE_ENV")
       APACHE=$(awk -F= '/^APACHE_INSTALLED=/{print $2}' "$BAKE_ENV")
       PHP=$(awk -F= '/^PHP_INSTALLED=/{print $2}' "$BAKE_ENV")
-      echo "    bake complete:   ${BAKE_COMPLETE:-no}"
-      echo "    guest agent:     ${GUEST_AGENT:-unknown}"
-      echo "    docker:          ${DOCKER:-unknown}"
-      echo "    apache:          ${APACHE:-unknown}"
-      echo "    php:             ${PHP:-unknown}"
-      [ "$BAKE_COMPLETE" != "yes" ] && { echo "ERROR: runcmd did not complete"; FAIL=1; }
-      [ "$GUEST_AGENT" != "yes" ]   && { echo "ERROR: qemu-guest-agent not enabled"; FAIL=1; }
-      [ "$DOCKER" != "yes" ]        && { echo "ERROR: docker not installed"; FAIL=1; }
-      [ "$APACHE" != "yes" ]        && { echo "ERROR: apache not installed"; FAIL=1; }
-      [ "$PHP" != "yes" ]           && { echo "ERROR: php not installed"; FAIL=1; }
+      echo "    bake complete:    ${BAKE_COMPLETE:-no}"
+      echo "    guest agent:      ${GUEST_AGENT:-unknown}"
+      echo "    agent unblocked:  ${GUEST_AGENT_UNBLOCKED:-unknown}"
+      echo "    docker:           ${DOCKER:-unknown}"
+      echo "    apache:           ${APACHE:-unknown}"
+      echo "    php:              ${PHP:-unknown}"
+      [ "$BAKE_COMPLETE" != "yes" ]         && { echo "ERROR: runcmd did not complete"; FAIL=1; }
+      [ "$GUEST_AGENT" != "yes" ]           && { echo "ERROR: qemu-guest-agent not enabled"; FAIL=1; }
+      [ "$GUEST_AGENT_UNBLOCKED" != "yes" ] && { echo "ERROR: qemu-guest-agent blacklist not cleared (guest-exec will return 596)"; FAIL=1; }
+      [ "$DOCKER" != "yes" ]                && { echo "ERROR: docker not installed"; FAIL=1; }
+      [ "$APACHE" != "yes" ]                && { echo "ERROR: apache not installed"; FAIL=1; }
+      [ "$PHP" != "yes" ]                   && { echo "ERROR: php not installed"; FAIL=1; }
     else
       echo "ERROR: /etc/cybercore-bake.env not found"
       FAIL=1
