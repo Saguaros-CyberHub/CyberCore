@@ -248,17 +248,23 @@
     const chart = echarts.init(document.getElementById('chartHeatmap'));
     charts.heatmap = chart;
     chart.setOption({
-      tooltip: { position: 'top', formatter: p => `${p.value[2]} findings` },
-      grid: { left: 80, right: 30, top: 20, bottom: 40 },
-      xAxis: { type: 'category',
+      tooltip: { position: 'top', formatter: p => `${p.value[2]} finding${p.value[2] === 1 ? '' : 's'}` },
+      grid: { left: 110, right: 30, top: 20, bottom: 50, containLabel: false },
+      xAxis: { type: 'category', name: 'Impact', nameLocation: 'middle', nameGap: 30,
+        nameTextStyle: { fontWeight: 700, color: '#64748b', fontSize: 11 },
         data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'],
-        axisLabel: { fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false } },
-      yAxis: { type: 'category',
+        axisLabel: { fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitArea: { show: false } },
+      yAxis: { type: 'category', name: 'Likelihood', nameLocation: 'middle', nameGap: 85, nameRotate: 90,
+        nameTextStyle: { fontWeight: 700, color: '#64748b', fontSize: 11 },
         data: ['1 Not Expected', '2 Foreseeable', '3 Expected'],
-        axisLabel: { fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false } },
-      visualMap: { min: 0, max: Math.max(1, ...data.map(d => d[2])), orient: 'horizontal',
-        left: 'center', bottom: 5, text: ['Impact', ''], itemHeight: 8, itemWidth: 200,
-        inRange: { color: ['#e0f2fe', '#fef3c7', '#fdba74', '#dc2626'] }, calculable: false },
+        axisLabel: { fontSize: 11 }, axisLine: { show: false }, axisTick: { show: false }, splitArea: { show: false } },
+      // visualMap drives the cell colors; we hide its slider/legend so it
+      // doesn't render the orange bar that was overlapping the grid.
+      visualMap: {
+        show: false,
+        min: 0, max: Math.max(1, ...data.map(d => d[2])),
+        inRange: { color: ['#e0f2fe', '#fef3c7', '#fdba74', '#dc2626'] }
+      },
       series: [{ type: 'heatmap', data,
         label: { show: true, fontWeight: 700, color: '#1e293b' },
         itemStyle: { borderColor: '#fff', borderWidth: 2 }
