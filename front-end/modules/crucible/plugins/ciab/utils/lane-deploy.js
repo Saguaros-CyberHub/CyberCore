@@ -640,11 +640,13 @@ async function deployOneLaneFromSpec({
 
   // ── Pre-clone idempotency: destroy any stale VMs at expected target VMIDs ─
   // VMIDs are deterministic from vxlan_id, so a previous failed deploy on the
-  // same vxlan can leave VMs that block fresh clones with "can't lock file"
-  // errors. Same pattern as admin/lanes.js:508 — query cluster/resources once,
-  // then only destroy VMs that actually exist (with the known node).
+  // same vxlan can leave VMs that block fresh clones. Same pattern as
+  // admin/lanes.js:508 — query cluster/resources once, then only destroy VMs
+  // that actually exist (with the known node).
+  //
+  // IMPORTANT: do NOT include `gatewayVmId` here — Phase 1 (cloneGateways) just
+  // created it and we're in Phase 2. Destroying it now would orphan the lane.
   const expectedVmIds = [
-    { id: gatewayVmId, type: 'lxc' },
     ...(spec.vms || []).map(vmSpec => ({
       id: (vmSpec.vm_offset || 600000) + vxlanId,
       type: vmSpec.type || 'qemu'
