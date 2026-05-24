@@ -23,7 +23,7 @@
 const { pool, query } = require('./db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI, waitForTask } = require('../../../../../src/utils/proxmox');
-const { waitForGuestAgent, executeScriptsOnVM, guestFileWrite, guestWriteLargeText, agentExec, pollExecStatus, getVMIPs } = require('../../../../../src/utils/script-executor');
+const { waitForGuestAgent, executeScriptsOnVM, guestFileWrite, agentExec, pollExecStatus, getVMIPs } = require('../../../../../src/utils/script-executor');
 const { selectBestNode } = require('../../../../../src/utils/node-selector');
 const { runBatch, createCloneSemaphore, distributeAcrossNodes } = require('../../../../../src/utils/batch-deployer');
 const { guacAPI } = require('../../../../../src/utils/guacamole');
@@ -546,8 +546,9 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
       for (const [relPath, content] of Object.entries(source_tree)) {
         const safePath = relPath.replace(/\.\./g, '').replace(/^\/+/, '');
         const fullPath = `${targetDir}/${safePath}`;
-        const writer = content.length > 8000 ? guestWriteLargeText : guestFileWrite;
-        await writer(node, vmId, fullPath, content);
+        // guestFileWrite delegates to guestWriteLargeText internally for >8KB
+        // content, so a single helper handles any size.
+        await guestFileWrite(node, vmId, fullPath, content);
       }
     }
     if (dockerfile && mode === 'docker') {
