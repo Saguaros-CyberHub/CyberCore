@@ -213,9 +213,31 @@ async function runProfileDeploy(opts) {
   });
   console.log(`[CIAB ProfileDeploy] Profile ${profileId.slice(0,8)} → challenge ${reservation.challenge_id.slice(0,8)} (${reservation.was_existing ? 'existing' : 'newly created'}), VXLAN ${reservation.vxlan_block.start}-${reservation.vxlan_block.end}, max_students=${reservation.max_students}`);
 
-  // The spec we actually use is the challenge's stored spec (with the locked
-  // vxlan_block), not the freshly-synthesized one.
-  const spec = reservation.spec;
+  // Spec selection:
+  //   - New reservation → stored spec is the rawSpec we just wrote, same thing.
+  //   - Existing reservation with 0 live lanes → admin may have changed the
+  //     asset selection since the prior (failed) attempt. Adopt the fresh spec
+  //     and update the stored one so retry/add-lanes stay consistent.
+  //   - Existing reservation with live lanes → must keep stored spec; changing
+  //     VM offsets/templates now would collide with running lanes.
+  let spec = reservation.spec;
+  if (reservation.was_existing) {
+    const liveLanesRes = await cybercoreQuery(
+      `SELECT COUNT(*)::int AS n FROM cybercore_lane
+        WHERE vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error','deleted')`,
+      [reservation.vxlan_block.start, reservation.vxlan_block.end]
+    );
+    if ((liveLanesRes.rows[0]?.n || 0) === 0) {
+      console.log(`[CIAB ProfileDeploy] Reservation has no live lanes — adopting fresh spec (${rawSpec.vms.length} VMs) from current asset selection`);
+      spec = { ...rawSpec, vxlan_block: reservation.vxlan_block };
+      await cybercoreQuery(
+        `UPDATE crucible_challenge SET spec = $1::jsonb WHERE challenge_id = $2`,
+        [JSON.stringify(spec), reservation.challenge_id]
+      );
+    } else {
+      console.log(`[CIAB ProfileDeploy] Reservation has ${liveLanesRes.rows[0].n} live lane(s) — keeping stored spec (${spec.vms?.length || 0} VMs) to avoid collision`);
+    }
+  }
 
   if (numLanes > reservation.max_students) {
     throw Object.assign(
