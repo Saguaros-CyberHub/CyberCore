@@ -518,9 +518,11 @@ async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupN
 // The shared proxmoxAPI util joins objects with `${k}=${v}` which mangles
 // arrays into comma-strings, so we build the body manually here.
 //
-// Why not input-data: the input-data + bare-`sh` form returned 596 on Debian
-// cloned via /clone API (works in some cases, not others — undiagnosed). The
-// `qm guest exec` form is the canonical one and works on every test we tried.
+// Retry behavior: first agent/exec call right after VM boot occasionally
+// 596s even though waitForGuestAgent (which uses guest-ping) said ready.
+// `qm guest exec` against the same VM works moments later — the call shape
+// is fine, the agent just isn't fully warmed up. So retry on 596 with short
+// backoff before giving up.
 async function agentShellExec(node, vmId, shellCmd) {
   console.log(`[AgentShellExec] /bin/sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
   const body = [
@@ -528,13 +530,29 @@ async function agentShellExec(node, vmId, shellCmd) {
     `command=${encodeURIComponent('-c')}`,
     `command=${encodeURIComponent(shellCmd)}`
   ].join('&');
-  const result = await proxmoxAPI('POST',
-    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
-    body
-  );
-  const pid = result?.pid;
-  if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
-  return { pid };
+
+  let lastErr;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const result = await proxmoxAPI('POST',
+        `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+        body
+      );
+      const pid = result?.pid;
+      if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
+      return { pid };
+    } catch (err) {
+      lastErr = err;
+      // Retry only on transient agent failures (596 / connection-level). Hard
+      // application errors (403, 404, 500 with body) shouldn't be retried.
+      const transient = /failed \(596\)/.test(err.message) || /ECONNRESET|ETIMEDOUT|socket hang up/.test(err.message);
+      if (!transient || attempt === 5) throw err;
+      const delayMs = 2000 * attempt;  // 2s, 4s, 6s, 8s
+      console.warn(`[AgentShellExec] vm=${vmId} attempt ${attempt} got transient error, retrying in ${delayMs/1000}s: ${err.message.substring(0, 120)}`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 // ─── Vuln-app installer execution ──────────────────────────────────────────
