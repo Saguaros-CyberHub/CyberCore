@@ -9,6 +9,18 @@ const router = express.Router();
 
 const PAGES_DIR = path.join(__dirname, '../public/pages');
 
+// HTML pages must NEVER be cached aggressively — otherwise a fix to inline
+// page JS (e.g. the generator's progress poller) silently fails to reach
+// users still holding a 304-able copy from a previous deploy. ETag-based
+// revalidation is also disabled because some upstream proxies / browsers
+// will skip the conditional GET when storage is fine.
+function sendHtmlNoCache(res, file) {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  res.sendFile(path.join(PAGES_DIR, file), { etag: false, lastModified: false });
+}
+
 const pages = {
   '/dashboard':   'dashboard.html',
   '/my-profiles': 'profiles.html',
@@ -28,25 +40,29 @@ const pages = {
 
 // Dynamic page route for viewing a specific real-client intake
 router.get('/real-client-intake/:id', (req, res) => {
-  res.sendFile(path.join(PAGES_DIR, 'real-client-intake-detail.html'));
+  sendHtmlNoCache(res, 'real-client-intake-detail.html');
 });
 
 // Clinic Risk Assessment — single-page app, profileId in path
+router.get('/clinic-risk-assessment/:profileId/report', (req, res) => {
+  // Standalone print-ready HTML report (opens in new tab)
+  sendHtmlNoCache(res, 'clinic-risk-report.html');
+});
 router.get('/clinic-risk-assessment/:profileId', (req, res) => {
-  res.sendFile(path.join(PAGES_DIR, 'clinic-risk-assessment.html'));
+  sendHtmlNoCache(res, 'clinic-risk-assessment.html');
 });
 router.get('/clinic-risk-assessment', (req, res) => {
-  res.sendFile(path.join(PAGES_DIR, 'clinic-risk-assessment.html'));
+  sendHtmlNoCache(res, 'clinic-risk-assessment.html');
 });
 
 // Dynamic page route for the synthesize-challenge review page
 router.get('/real-client-intake/:id/synthesize', (req, res) => {
-  res.sendFile(path.join(PAGES_DIR, 'real-client-intake-synthesize.html'));
+  sendHtmlNoCache(res, 'real-client-intake-synthesize.html');
 });
 
 Object.entries(pages).forEach(([route, file]) => {
   router.get(route, (req, res) => {
-    res.sendFile(path.join(PAGES_DIR, file));
+    sendHtmlNoCache(res, file);
   });
 });
 

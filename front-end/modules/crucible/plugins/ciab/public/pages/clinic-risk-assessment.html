@@ -268,9 +268,15 @@
             </div>
 
             <div class="cra-card" style="margin-top:16px;">
-              <h3>Generate PDF Report</h3>
-              <p class="sub">Embeds the live charts and findings into a branded PDF deliverable. Charts in the PDF will match what you see on the Overview tab right now.</p>
-              <button class="btn primary" id="btnExport">⬇ Export PDF</button>
+              <h3>Print-Ready Report (recommended)</h3>
+              <p class="sub">Opens a polished HTML version of the report in a new tab. Use your browser's <strong>Print → Save as PDF</strong> to get a clean PDF with embedded charts, proper page breaks, and full Unicode rendering. Best output quality.</p>
+              <button class="btn primary" id="btnOpenHtmlReport">📄 Open HTML Report</button>
+            </div>
+
+            <div class="cra-card" style="margin-top:16px;">
+              <h3>Legacy PDF Export</h3>
+              <p class="sub">Embeds the live charts directly into a server-generated PDF. Faster but layout is less flexible than the HTML report above.</p>
+              <button class="btn" id="btnExport">⬇ Export PDF (legacy)</button>
             </div>
           </div>
         </div>

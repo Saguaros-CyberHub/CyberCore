@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Risk Assessment Report</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+  /* ─── Base ─────────────────────────────────────────────────────────── */
+  * { box-sizing: border-box; }
+  :root {
+    --primary:    #1e40af;
+    --primary-d:  #1e3a5f;
+    --text:       #1e293b;
+    --text-mute:  #64748b;
+    --border:     #e2e8f0;
+    --bg:         #f8fafc;
+    --crit:       #dc2626;
+    --high:       #ea580c;
+    --med:        #d97706;
+    --low:        #0891b2;
+    --ok:         #16a34a;
+    --warn-bg:    #fef3c7;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: var(--text);
+    background: #f1f5f9;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ─── Print-only toolbar ──────────────────────────────────────────── */
+  .toolbar {
+    position: sticky; top: 0; z-index: 100;
+    background: white;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex; align-items: center; gap: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  }
+  .toolbar h1 { font-size: 0.9rem; margin: 0; color: var(--text-mute); font-weight: 600; }
+  .toolbar h1 strong { color: var(--text); }
+  .toolbar .spacer { flex: 1; }
+  .toolbar button {
+    background: var(--primary); color: white; border: 0;
+    padding: 8px 14px; border-radius: 6px; font-weight: 600;
+    font-family: inherit; font-size: 0.85rem; cursor: pointer;
+  }
+  .toolbar button.secondary { background: white; color: var(--text); border: 1px solid var(--border); }
+  .toolbar button:hover { opacity: 0.9; }
+  .toolbar .hint { font-size: 0.75rem; color: var(--text-mute); margin-left: 8px; }
+
+  /* ─── Page container ──────────────────────────────────────────────── */
+  .report {
+    max-width: 8.5in;
+    margin: 24px auto;
+    background: white;
+    box-shadow: 0 4px 20px rgba(15,23,42,0.08);
+  }
+
+  /* ─── Cover ────────────────────────────────────────────────────────── */
+  .cover {
+    background: linear-gradient(180deg, var(--primary-d) 0%, #264971 70%, var(--primary) 100%);
+    color: white;
+    padding: 60px 50px 50px 50px;
+    position: relative;
+    min-height: 4.5in;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .cover .eyebrow {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.25em;
+    color: #cbd5e1; margin-bottom: 16px;
+  }
+  .cover h1 {
+    font-size: 2.4rem; font-weight: 800; margin: 0 0 16px 0;
+    line-height: 1.1; color: white;
+  }
+  .cover .company { font-size: 1.4rem; color: #e2e8f0; margin-bottom: 8px; }
+  .cover .date    { font-size: 0.95rem; color: #bfdbfe; font-style: italic; }
+  .cover .training-badge {
+    position: absolute; top: 24px; right: 30px;
+    background: #facc15; color: #1e1e1e;
+    padding: 5px 12px; border-radius: 4px;
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
+  }
+  .cover-meta {
+    background: white; padding: 30px 50px;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 18px 30px;
+  }
+  .cover-meta .item { }
+  .cover-meta .label {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.15em;
+    color: var(--text-mute); text-transform: uppercase;
+  }
+  .cover-meta .value { font-size: 1rem; color: var(--text); margin-top: 4px; }
+
+  /* ─── Sections ─────────────────────────────────────────────────────── */
+  section {
+    padding: 36px 50px;
+    border-top: 1px solid var(--border);
+  }
+  .section-header {
+    display: flex; align-items: flex-start; gap: 10px;
+    margin-bottom: 24px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .section-header .stripe {
+    width: 4px; height: 36px; background: var(--primary); border-radius: 2px;
+    margin-top: 4px;
+  }
+  .section-header .titles { flex: 1; }
+  .section-header .kicker {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.18em;
+    color: var(--primary); text-transform: uppercase;
+  }
+  .section-header h2 {
+    font-size: 1.5rem; font-weight: 700; margin: 4px 0 0 0;
+    color: var(--primary-d);
+  }
+  section h3 {
+    font-size: 1rem; font-weight: 700; color: var(--primary-d);
+    margin: 24px 0 12px 0;
+  }
+
+  /* ─── KPI tiles ────────────────────────────────────────────────────── */
+  .kpi-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+    margin-bottom: 18px;
+  }
+  .kpi-tile {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 16px; position: relative; overflow: hidden;
+    background: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .kpi-tile::before {
+    content: ''; position: absolute; left: 0; top: 0; bottom: 0;
+    width: 4px; background: var(--accent, var(--primary));
+  }
+  .kpi-tile .label {
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.12em;
+    color: var(--text-mute); text-transform: uppercase;
+  }
+  .kpi-tile .value {
+    font-size: 1.8rem; font-weight: 800; color: var(--text);
+    margin: 6px 0 4px 0; line-height: 1;
+  }
+  .kpi-tile .sub { font-size: 0.75rem; color: var(--text-mute); }
+
+  /* ─── Callout boxes ────────────────────────────────────────────────── */
+  .callout {
+    margin: 18px 0; padding: 14px 18px;
+    border-radius: 6px; border-left: 4px solid var(--accent, var(--primary));
+    background: rgba(30, 64, 175, 0.06);
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .callout.warn   { border-left-color: var(--med);  background: rgba(217, 119, 6, 0.08); }
+  .callout.danger { border-left-color: var(--crit); background: rgba(220, 38, 38, 0.06); }
+  .callout.ok     { border-left-color: var(--ok);   background: rgba(22, 163, 74, 0.06); }
+  .callout .title {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent, var(--primary)); margin-bottom: 6px;
+  }
+  .callout.warn .title   { color: var(--med); }
+  .callout.danger .title { color: var(--crit); }
+  .callout.ok .title     { color: var(--ok); }
+  .callout .body { font-size: 0.9rem; color: var(--text); }
+
+  /* ─── Key/value table (engagement scope) ──────────────────────────── */
+  table.kv {
+    width: 100%; border-collapse: collapse; font-size: 0.9rem;
+  }
+  table.kv tr:nth-child(even) { background: var(--bg); }
+  table.kv td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  table.kv td:first-child { color: var(--text-mute); font-weight: 600; width: 35%; }
+
+  /* ─── Findings table ──────────────────────────────────────────────── */
+  table.findings {
+    width: 100%; border-collapse: collapse; font-size: 0.85rem;
+    margin-top: 8px;
+  }
+  table.findings thead {
+    background: var(--primary-d); color: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  table.findings th {
+    padding: 10px 8px; text-align: left;
+    font-size: 0.7rem; letter-spacing: 0.08em; font-weight: 700;
+  }
+  table.findings tbody td {
+    padding: 10px 8px; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.findings tbody tr {
+    border-left: 3px solid transparent;
+  }
+  table.findings tbody tr.sev-crit { border-left-color: var(--crit); }
+  table.findings tbody tr.sev-high { border-left-color: var(--high); }
+  table.findings tbody tr.sev-med  { border-left-color: var(--med); }
+  table.findings tbody tr.sev-low  { border-left-color: var(--low); }
+  table.findings tbody tr:nth-child(even) td { background: var(--bg); }
+  table.findings .code  { font-weight: 700; white-space: nowrap; }
+  table.findings .title { font-weight: 500; }
+  table.findings .cat   { color: var(--text-mute); font-size: 0.8rem; }
+  table.findings .num   { text-align: center; }
+
+  .badge {
+    display: inline-block;
+    padding: 3px 8px; border-radius: 3px;
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.05em;
+    color: white;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .badge.crit { background: var(--crit); }
+  .badge.high { background: var(--high); }
+  .badge.med  { background: var(--med); }
+  .badge.low  { background: var(--low); }
+
+  .legend {
+    display: flex; gap: 18px; margin-top: 10px;
+    font-size: 0.75rem; color: var(--text-mute);
+  }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .legend .swatch.crit { background: var(--crit); }
+  .legend .swatch.high { background: var(--high); }
+  .legend .swatch.med  { background: var(--med); }
+  .legend .swatch.low  { background: var(--low); }
+
+  /* ─── Critical risk cards ──────────────────────────────────────────── */
+  .crit-cards { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  .crit-card {
+    border-left: 4px solid var(--crit);
+    background: rgba(220, 38, 38, 0.04);
+    padding: 10px 14px;
+    border-radius: 0 4px 4px 0;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .crit-card .meta {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+    color: var(--crit); text-transform: uppercase;
+  }
+  .crit-card .title { font-weight: 600; margin: 4px 0; }
+  .crit-card .sub   { font-size: 0.75rem; color: var(--text-mute); }
+
+  /* ─── Charts ───────────────────────────────────────────────────────── */
+  .chart {
+    width: 100%; height: 360px;
+    margin: 10px 0 20px 0;
+  }
+  .chart.small { height: 240px; }
+
+  /* ─── CIS RAM register ─────────────────────────────────────────────── */
+  .ram-control { margin-bottom: 24px; break-inside: avoid; }
+  .ram-control h4 {
+    font-size: 0.9rem; font-weight: 700; color: white;
+    background: var(--primary-d);
+    padding: 8px 12px; margin: 0 0 0 0;
+    border-radius: 4px 4px 0 0;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  .ram-control h4 .count {
+    font-weight: 400; font-size: 0.8rem; color: #cbd5e1;
+    margin-left: 8px;
+  }
+  table.ram {
+    width: 100%; border-collapse: collapse; font-size: 0.8rem;
+    border: 1px solid var(--border); border-top: 0;
+  }
+  table.ram th, table.ram td {
+    padding: 6px 10px; text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  table.ram th { background: var(--bg); font-size: 0.7rem; color: var(--text-mute); font-weight: 600; }
+  table.ram .num { text-align: center; font-variant-numeric: tabular-nums; }
+  table.ram .ok  { color: var(--ok); font-weight: 700; }
+  table.ram .no  { color: var(--crit); font-weight: 700; }
+
+  /* ─── Treatment plan cards ─────────────────────────────────────────── */
+  .treatment-card {
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 14px 18px; margin-bottom: 10px;
+    break-inside: avoid;
+  }
+  .treatment-card .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .treatment-card .ttl  { font-weight: 700; color: var(--primary-d); }
+  .treatment-card .ttl .num { color: var(--primary); font-weight: 800; margin-right: 6px; }
+  .treatment-card .meta { font-size: 0.75rem; color: var(--text-mute); }
+  .treatment-card .body { margin-top: 8px; font-size: 0.85rem; color: var(--text); }
+
+  /* ─── Detailed findings cards ──────────────────────────────────────── */
+  .finding-card {
+    border-left: 4px solid var(--primary);
+    padding: 14px 18px; margin-bottom: 16px;
+    background: white;
+    break-inside: avoid;
+    border-bottom: 1px solid var(--border);
+  }
+  .finding-card.sev-crit { border-left-color: var(--crit); }
+  .finding-card.sev-high { border-left-color: var(--high); }
+  .finding-card.sev-med  { border-left-color: var(--med); }
+  .finding-card.sev-low  { border-left-color: var(--low); }
+  .finding-card .head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .finding-card .ttl { font-weight: 700; color: var(--primary-d); font-size: 1rem; }
+  .finding-card .ttl .num { color: var(--primary); font-weight: 800; margin-right: 6px; }
+  .finding-card .meta-row { font-size: 0.78rem; color: var(--text-mute); margin-bottom: 12px; }
+  .finding-card .field-label {
+    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-mute); margin: 10px 0 4px 0;
+  }
+  .finding-card .field-body { font-size: 0.88rem; color: var(--text); }
+  .finding-card .refs { margin-top: 10px; font-size: 0.75rem; color: var(--text-mute); font-style: italic; }
+
+  /* ─── Recommendation lists ─────────────────────────────────────────── */
+  .rec-list { margin: 6px 0 18px 0; padding-left: 22px; }
+  .rec-list li { margin-bottom: 8px; font-size: 0.9rem; }
+  .rec-list.quick li::marker { color: var(--ok); font-weight: 700; }
+  .rec-list.strategic li::marker { color: var(--primary); font-weight: 700; }
+
+  /* ─── Bullet list ──────────────────────────────────────────────────── */
+  .bullet-list { margin: 4px 0 12px 0; padding-left: 22px; }
+  .bullet-list li { margin-bottom: 6px; font-size: 0.88rem; }
+  .bullet-list.danger li::marker { color: var(--crit); }
+
+  /* ─── CSF function table ───────────────────────────────────────────── */
+  .csf-fn-grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+    margin-top: 12px;
+  }
+  .csf-fn-tile {
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 10px 14px;
+    background: white;
+  }
+  .csf-fn-tile .name { font-size: 0.75rem; color: var(--text-mute); font-weight: 600; }
+  .csf-fn-tile .score { font-size: 1.4rem; font-weight: 800; color: var(--text); margin-top: 2px; }
+  .csf-fn-tile.weak { border-left: 3px solid var(--crit); }
+  .csf-fn-tile.strong { border-left: 3px solid var(--ok); }
+
+  /* ─── Loading / error states ───────────────────────────────────────── */
+  .loading { padding: 60px; text-align: center; color: var(--text-mute); }
+  .error   { padding: 40px; text-align: center; color: var(--crit); }
+
+  /* ──────────────────────────────────────────────────────────────────── */
+  /* PRINT STYLES — when user picks "Save as PDF"                       */
+  /* ──────────────────────────────────────────────────────────────────── */
+  @media print {
+    @page {
+      size: letter;
+      margin: 0.5in;
+    }
+    html, body { background: white !important; }
+    .toolbar, .no-print { display: none !important; }
+    .report {
+      box-shadow: none !important;
+      margin: 0 !important;
+      max-width: 100% !important;
+    }
+    section {
+      padding: 18pt 0;
+      break-inside: avoid-page;
+    }
+    /* Sections that should start on a fresh page */
+    section.heatmap,
+    section.findings-table,
+    section.ig1,
+    section.csf,
+    section.recommendations,
+    section.ram-register,
+    section.detailed-findings,
+    section.methodology {
+      break-before: page;
+    }
+    .cover { break-after: page; padding: 0.4in 0.4in 0.4in 0.4in; }
+    .cover-meta { padding: 0.25in 0.4in 0.4in 0.4in; }
+    .section-header { margin-bottom: 14pt; }
+    .section-header h2 { font-size: 18pt; }
+    section h3 { font-size: 11pt; }
+    .kpi-tile, .callout, .crit-card, .finding-card,
+    .treatment-card, .ram-control, table.findings thead,
+    .badge {
+      print-color-adjust: exact !important;
+      -webkit-print-color-adjust: exact !important;
+    }
+    .chart { height: 280px !important; }
+    .finding-card, .treatment-card, .ram-control,
+    table.findings tr, .crit-card { break-inside: avoid !important; }
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Sticky on-screen toolbar (hidden in print) -->
+<div class="toolbar no-print">
+  <h1>Risk Assessment Report — <strong id="hdrCompany">Loading…</strong></h1>
+  <span class="spacer"></span>
+  <span class="hint" id="printHint">Click Print → choose "Save as PDF" as destination</span>
+  <button onclick="window.print()" title="Open browser print dialog — pick 'Save as PDF' as the destination">🖨️ Print to PDF</button>
+  <button class="secondary" onclick="window.history.back()">← Back</button>
+</div>
+
+<div class="report">
+
+  <!-- ─── COVER ─────────────────────────────────────────────────────── -->
+  <div class="cover">
+    <div class="training-badge" id="trainingBadge" style="display:none">TRAINING SAMPLE</div>
+    <div class="eyebrow">CYBERSECURITY RISK ASSESSMENT</div>
+    <h1>Risk Assessment Report</h1>
+    <div class="company" id="coverCompany">—</div>
+    <div class="date" id="coverDate">—</div>
+  </div>
+  <div class="cover-meta" id="coverMeta">
+    <!-- populated by JS -->
+  </div>
+
+  <!-- ─── EXECUTIVE DASHBOARD ──────────────────────────────────────── -->
+  <section class="exec-dashboard">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 01</div>
+        <h2>Executive Dashboard</h2>
+      </div>
+    </div>
+    <div class="kpi-grid" id="kpiGrid"></div>
+    <div id="postureCallout"></div>
+    <h3>Executive Summary</h3>
+    <div id="execSummary" class="field-body"></div>
+    <h3>Engagement Scope</h3>
+    <table class="kv" id="scopeTable"></table>
+  </section>
+
+  <!-- ─── HEAT MAP ─────────────────────────────────────────────────── -->
+  <section class="heatmap">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 02 · Inherent Risk</div>
+        <h2>Risk Heat Map</h2>
+      </div>
+    </div>
+    <div id="chartHeatmap" class="chart"></div>
+    <h3>Top risks demanding attention</h3>
+    <div id="critCards" class="crit-cards"></div>
+  </section>
+
+  <!-- ─── FINDINGS TABLE ──────────────────────────────────────────── -->
+  <section class="findings-table">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 03</div>
+        <h2>Findings — Sorted by Inherent Risk</h2>
+      </div>
+    </div>
+    <table class="findings">
+      <thead>
+        <tr>
+          <th>CODE</th>
+          <th>FINDING</th>
+          <th>CATEGORY</th>
+          <th class="num">L</th>
+          <th class="num">I</th>
+          <th class="num">RISK</th>
+          <th>SEVERITY</th>
+          <th>STATUS</th>
+        </tr>
+      </thead>
+      <tbody id="findingsBody"></tbody>
+    </table>
+    <div class="legend">
+      <span><strong>SEVERITY:</strong></span>
+      <span class="item"><span class="swatch crit"></span> CRITICAL</span>
+      <span class="item"><span class="swatch high"></span> HIGH</span>
+      <span class="item"><span class="swatch med"></span> MEDIUM</span>
+      <span class="item"><span class="swatch low"></span> LOW</span>
+    </div>
+  </section>
+
+  <!-- ─── CIS IG1 COMPLIANCE ──────────────────────────────────────── -->
+  <section class="ig1">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 04 · CIS v8 Implementation Group 1</div>
+        <h2>CIS Controls IG1 Compliance</h2>
+      </div>
+    </div>
+    <div class="kpi-grid" id="ig1KpiGrid"></div>
+    <div id="chartCis" class="chart small"></div>
+    <div id="ig1Posture"></div>
+    <h3>Top unmet safeguards</h3>
+    <ul class="bullet-list danger" id="topUnmet"></ul>
+  </section>
+
+  <!-- ─── NIST CSF MATURITY ───────────────────────────────────────── -->
+  <section class="csf">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 05 · Functional Posture</div>
+        <h2>NIST CSF 2.0 Maturity</h2>
+      </div>
+    </div>
+    <div id="chartRadar" class="chart"></div>
+    <div id="chartCsf" class="chart small"></div>
+    <h3>Function scores</h3>
+    <div class="csf-fn-grid" id="csfGrid"></div>
+    <div id="csfWeakCallout"></div>
+  </section>
+
+  <!-- ─── RECOMMENDATIONS ──────────────────────────────────────────── -->
+  <section class="recommendations">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Section 06 · Prioritized Action Plan</div>
+        <h2>Recommendations</h2>
+      </div>
+    </div>
+    <div class="callout ok">
+      <div class="title">Quick Wins — Implement within 30 days</div>
+      <div class="body">High-impact controls that require minimal capital outlay or vendor procurement. The IT lead can typically own these within their existing licensing.</div>
+    </div>
+    <ol class="rec-list quick" id="quickWins"></ol>
+    <div class="callout">
+      <div class="title">Strategic Initiatives — 90 days to 6 months</div>
+      <div class="body">Larger lifts that require budget approval, vendor selection, or cross-team coordination. Stage these into the next quarterly planning cycle.</div>
+    </div>
+    <ol class="rec-list strategic" id="strategic"></ol>
+  </section>
+
+  <!-- ─── CIS RAM REGISTER ────────────────────────────────────────── -->
+  <section class="ram-register" id="ramRegisterSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix · CIS RAM v2.1 Workbook</div>
+        <h2>Risk Register — All IG1 Safeguards</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem; color:var(--text-mute); margin-top:0">
+      Each safeguard is scored Mission Impact × Obligations Impact × Likelihood
+      (1–3 each). Inherent risk = likelihood × max(mission, obligations).
+      "Reasonable" treatments bring residual risk to the acceptable risk
+      threshold (currently <strong id="ramAcceptable">6</strong>) or below.
+    </p>
+    <div id="ramRegister"></div>
+  </section>
+
+  <!-- ─── CIS RAM TREATMENT PLAN ──────────────────────────────────── -->
+  <section class="ram-treatment" id="ramTreatmentSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix · Treatment Plan</div>
+        <h2>Treatment Plan — Items Requiring Attention</h2>
+      </div>
+    </div>
+    <p style="font-size:0.85rem; color:var(--text-mute); margin-top:0">
+      <span id="ramTreatmentCount">—</span> items require attention — sorted by descending inherent risk.
+    </p>
+    <div id="ramTreatment"></div>
+  </section>
+
+  <!-- ─── DETAILED FINDINGS ────────────────────────────────────────── -->
+  <section class="detailed-findings">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix A</div>
+        <h2>Detailed Findings</h2>
+      </div>
+    </div>
+    <div id="detailedFindings"></div>
+  </section>
+
+  <!-- ─── METHODOLOGY ──────────────────────────────────────────────── -->
+  <section class="methodology">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Appendix B · How this report was built</div>
+        <h2>Methodology</h2>
+      </div>
+    </div>
+    <p style="font-size:0.9rem">
+      This assessment combines (1) an intake questionnaire completed by the assessor —
+      covering organizational profile, network topology, endpoint security, account
+      management, and data protection — and (2) a baseline against the CIS Controls v8
+      Implementation Group 1 (IG1) and NIST Cybersecurity Framework 2.0. Findings are
+      scored on a 1–5 likelihood × 1–5 impact scale (CIS RAM v2.1 style) producing a
+      1–25 inherent-risk score normalized to a 0–9 severity band.
+    </p>
+    <p style="font-size:0.9rem">
+      CSF maturity scores are computed by mapping each IG1 safeguard's response
+      (yes / partial / no) to one or more CSF functions via the IG1↔CSF crosswalk,
+      then averaging per function and normalizing to a 0–5 maturity scale. The
+      Compliance Posture archetype is derived from the response pattern and indicates
+      where the organization has invested compared to similar peers.
+    </p>
+    <ul class="bullet-list">
+      <li>CIS Controls v8 (IG1) — Center for Internet Security, <em>cisecurity.org/controls/v8</em></li>
+      <li>NIST Cybersecurity Framework 2.0 — National Institute of Standards and Technology</li>
+      <li>CIS Risk Assessment Method (RAM) v2.1 — likelihood × impact risk scoring methodology</li>
+    </ul>
+  </section>
+
+</div>
+
+<div id="loadingOverlay" class="loading">Loading report…</div>
+
+<script src="/js/app.js"></script>
+<script src="/ciab/js/clinic-risk-report.js"></script>
+</body>
+</html>

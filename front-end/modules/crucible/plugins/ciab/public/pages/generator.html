@@ -805,13 +805,20 @@
 
       // Real progress: tag the request with a progress_id, poll the server
       // every 1s for actual step + percent updates while generation runs.
+      // ─── BUILD MARKER: real-poll-v3 (2026-05-23) ─────────────────────────
+      // If you do NOT see "[generator v3]" in the console when clicking
+      // Generate, the browser is still serving cached HTML — hard-reload
+      // with Ctrl+Shift+R or open the page in an Incognito window.
       const progressId = (crypto.randomUUID ? crypto.randomUUID()
         : Date.now().toString(36) + Math.random().toString(36).slice(2));
       config.progress_id = progressId;
 
       const token = localStorage.getItem('token') || '';
       const pollUrl = `/api/profiles/run-status/${progressId}`;
-      console.log('[generator] polling', pollUrl, 'token?', !!token);
+      console.log('%c[generator v3] real-progress poll active', 'color:#16a34a;font-weight:700;');
+      console.log('[generator v3]', pollUrl, 'token?', !!token);
+      // Inline marker the user can see on the page too
+      status.textContent = 'Starting generation… [v3 poll active]';
 
       let polling = true;
       let pollCount = 0;

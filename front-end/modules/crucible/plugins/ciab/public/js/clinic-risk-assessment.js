@@ -936,6 +936,12 @@
       } catch (err) { toast('Failed: ' + err.message, 4000); }
     });
     document.getElementById('btnExport').addEventListener('click', exportPdf);
+    // Open the standalone HTML report in a new tab — student can hit
+    // Print → Save as PDF for a polished print-quality output.
+    const htmlBtn = document.getElementById('btnOpenHtmlReport');
+    if (htmlBtn) htmlBtn.addEventListener('click', () => {
+      window.open(`/ciab/clinic-risk-assessment/${encodeURIComponent(state.profileId)}/report`, '_blank');
+    });
   }
 
   // === PDF export ===

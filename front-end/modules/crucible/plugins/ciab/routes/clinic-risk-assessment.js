@@ -299,6 +299,80 @@ router.get('/:profileId', async (req, res) => {
   }
 });
 
+// GET /:profileId/report-data
+// Returns the FULL bundle needed by the standalone HTML report page
+// (different shape than /:profileId — includes intake.payload, CIS RAM
+// workbook, top-unmet safeguards, computed recommendations). The HTML
+// report uses this single request to render everything.
+router.get('/:profileId/report-data', async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    const userId = req.user.userId;
+    if (!(await userCanReadProfile(userId, profileId, req.user.role))) {
+      return res.status(403).json({ error: 'Not permitted' });
+    }
+
+    const profileQ = await pool.query(
+      `SELECT id, company_name, industry, profile_source, difficulty
+       FROM profiles WHERE id = $1`,
+      [profileId]
+    );
+    if (profileQ.rowCount === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const profile = profileQ.rows[0];
+    const intake = await loadIntakeForProfile(profileId);
+    const report = await loadOrInitReport(profileId, userId);
+    const findingsQ = await pool.query(
+      `SELECT * FROM risk_findings WHERE profile_id = $1 ORDER BY inherent_risk DESC, finding_code ASC`,
+      [profileId]
+    );
+
+    const ig1Section = intake?.payload?.sections?.ig1 || {};
+    const cisCoverage = frameworks.ig1Coverage(ig1Section);
+    const csfFromIg1 = frameworks.aggregateIg1ToCsf(ig1Section);
+    const csfManual = report.csf_scores || {};
+    const csfScores = { ...csfFromIg1, ...csfManual };
+
+    // Top unmet IG1 safeguards (top 8 'no' answers)
+    const ig1Cat = frameworks.getCisIg1();
+    const sgIndex = Object.fromEntries((ig1Cat.safeguards || []).map(s => [s.num, s]));
+    const topUnmet = Object.entries(ig1Section)
+      .filter(([k, v]) => /^ig1_\d+\.\d+$/.test(k) && v === 'no')
+      .map(([k]) => sgIndex[k.replace('ig1_', '')])
+      .filter(Boolean)
+      .slice(0, 8);
+
+    // Pre-compute recommendations (same logic as PDF render).
+    const posture = intake?.payload?._meta?.posture || null;
+    const recommendations = buildRecommendations({
+      findings: findingsQ.rows, cis_coverage: cisCoverage,
+      csf_scores: csfScores, posture, intake
+    });
+
+    // CIS RAM workbook (best-effort — table may be empty).
+    let cisRam = null;
+    try {
+      cisRam = await loadCisRamForPdf(profileId);
+    } catch (_) { cisRam = null; }
+
+    res.json({
+      profile,
+      intake,                       // full payload, not summary
+      report,                       // full record
+      findings: findingsQ.rows,
+      cis_coverage: cisCoverage,
+      csf_scores: csfScores,
+      top_unmet_safeguards: topUnmet,
+      recommendations,
+      cis_ram: cisRam,
+      posture
+    });
+  } catch (err) {
+    console.error('[CRA report-data]', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================================
 // FINDINGS CRUD
 // ============================================================================
