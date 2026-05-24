@@ -60,7 +60,7 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
   const pages = concept.page_inventory.filter(p => p && p.path);
   if (pages.length === 0) return { files: [], totalUsage: {}, fileErrors: [] };
 
-  const optsList = pages.map(pageSpec => ({
+  const buildOpts = (pageSpec, attemptLabel = '') => ({
     model: llmModel,
     // Cache the file-gen system prompt across all N calls — big input savings
     // since each call also includes the same `concept` JSON in the user prompt.
@@ -68,43 +68,87 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
     messages: [{ role: 'user', content: buildFileUserPrompt({ concept, pageSpec }) }],
     max_tokens: VULN_APP_FILE_MAX_TOKENS,
     temperature: 0.6,
-    label: `vuln-app:file:${pageSpec.path.replace(/[^a-z0-9]/gi, '_').slice(0, 20)}:${profileIdShort}`
-  }));
+    label: `vuln-app:file:${pageSpec.path.replace(/[^a-z0-9]/gi, '_').slice(0, 20)}:${profileIdShort}${attemptLabel}`
+  });
 
-  // Cap concurrency locally — overrides the global semaphore. On Tier 1
-  // Sonnet's 8K out/min limit means anything above ~2 in flight hits 429.
+  // Per-result interpreter — translates an LLM result + page into either a
+  // successful file entry or an error reason. Shared by the initial pass + retries.
+  const interpretResult = (r, page) => {
+    if (!r.ok) return { ok: false, error: r.error.message };
+    const fileSpec = r.value.value;
+    if (!fileSpec || !fileSpec.content || typeof fileSpec.content !== 'string') {
+      return { ok: false, error: 'no content field in file-gen response' };
+    }
+    return {
+      ok: true,
+      file: {
+        path: fileSpec.path || page.path,
+        content: fileSpec.content,
+        vuln_notes: fileSpec.vuln_notes || null,
+        vuln_role: page.vuln_role || 'none'
+      },
+      usage: r.value.usage || {}
+    };
+  };
+
+  // ── Initial parallel pass ──────────────────────────────────────────────
+  const optsList = pages.map(p => buildOpts(p));
   const results = await llm.generateParallel(optsList, {
     json: true,
     maxConcurrent: VULN_APP_FILE_CONCURRENCY
   });
+
   const files = [];
-  const fileErrors = [];
+  const pendingRetry = [];   // pages that still need a successful file
   let totalIn = 0, totalOut = 0, totalCacheRead = 0;
 
   for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    const page = pages[i];
-    if (!r.ok) {
-      fileErrors.push({ path: page.path, error: r.error.message });
-      continue;
+    const interp = interpretResult(results[i], pages[i]);
+    if (interp.ok) {
+      files.push(interp.file);
+      const u = interp.usage;
+      totalIn       += u.input_tokens             || 0;
+      totalOut      += u.output_tokens            || 0;
+      totalCacheRead+= u.cache_read_input_tokens  || 0;
+    } else {
+      pendingRetry.push({ page: pages[i], lastError: interp.error });
     }
-    const fileSpec = r.value.value;
-    if (!fileSpec || !fileSpec.content || typeof fileSpec.content !== 'string') {
-      fileErrors.push({ path: page.path, error: 'no content field in file-gen response' });
-      continue;
-    }
-    files.push({
-      path: fileSpec.path || page.path,
-      content: fileSpec.content,
-      vuln_notes: fileSpec.vuln_notes || null,
-      vuln_role: page.vuln_role || 'none'
-    });
-
-    const u = r.value.usage || {};
-    totalIn += u.input_tokens || 0;
-    totalOut += u.output_tokens || 0;
-    totalCacheRead += u.cache_read_input_tokens || 0;
   }
+
+  // ── Retry failed files individually, up to 2 extra attempts each ──────
+  // Done sequentially (not parallel) to dodge rate limits — the failures are
+  // usually rate-limit / partial-JSON parse errors, and serial gives the
+  // budget time to recover.
+  const MAX_RETRIES = 2;
+  for (let attempt = 1; attempt <= MAX_RETRIES && pendingRetry.length > 0; attempt++) {
+    console.warn(`   ↻ Retrying ${pendingRetry.length} failed file(s), attempt ${attempt}/${MAX_RETRIES}`);
+    const stillPending = [];
+    for (const item of pendingRetry) {
+      try {
+        const single = await llm.generateParallel(
+          [buildOpts(item.page, `:retry${attempt}`)],
+          { json: true, maxConcurrent: 1 }
+        );
+        const interp = interpretResult(single[0], item.page);
+        if (interp.ok) {
+          files.push(interp.file);
+          const u = interp.usage;
+          totalIn       += u.input_tokens             || 0;
+          totalOut      += u.output_tokens            || 0;
+          totalCacheRead+= u.cache_read_input_tokens  || 0;
+          console.log(`   ✓ Retry succeeded for ${item.page.path}`);
+        } else {
+          stillPending.push({ page: item.page, lastError: interp.error });
+        }
+      } catch (err) {
+        stillPending.push({ page: item.page, lastError: err.message });
+      }
+    }
+    pendingRetry.length = 0;
+    pendingRetry.push(...stillPending);
+  }
+
+  const fileErrors = pendingRetry.map(p => ({ path: p.page.path, error: p.lastError }));
 
   return {
     files,
