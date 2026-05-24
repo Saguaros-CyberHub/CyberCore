@@ -23,26 +23,53 @@
   document.addEventListener('DOMContentLoaded', boot);
 
   async function boot() {
+    let bundle;
     try {
-      const bundle = await fetchBundle();
-      hideLoading();
-      renderCover(bundle);
-      renderExecDashboard(bundle);
-      renderHeatmap(bundle);
-      renderFindingsTable(bundle);
-      renderIg1(bundle);
-      renderCsf(bundle);
-      renderRecommendations(bundle);
-      renderCisRam(bundle);
-      renderDetailedFindings(bundle);
-      // Set tab title
-      document.title = `Risk Assessment — ${bundle.profile.company_name || 'Profile'}`;
-      // Wait one frame then re-resize charts (so they pick up final dimensions)
-      requestAnimationFrame(() => Object.values(charts).forEach(c => c && c.resize && c.resize()));
+      bundle = await fetchBundle();
     } catch (err) {
-      console.error('[clinic-risk-report] boot failed:', err);
-      document.getElementById('loadingOverlay').textContent = 'Failed to load report: ' + err.message;
-      document.getElementById('loadingOverlay').className = 'error';
+      console.error('[clinic-risk-report] fetch failed:', err);
+      const el = document.getElementById('loadingOverlay');
+      el.textContent = 'Failed to load report: ' + err.message;
+      el.className = 'error';
+      el.style.display = '';
+      return;
+    }
+    hideLoading();
+
+    // Render each section in isolation — if one throws, the others still
+    // populate. Errors surface in the console and as a banner at the top.
+    const banner = [];
+    const safe = (name, fn) => {
+      try { fn(); }
+      catch (err) {
+        console.error(`[clinic-risk-report] ${name} failed:`, err);
+        banner.push(`${name}: ${err.message}`);
+      }
+    };
+
+    if (typeof echarts === 'undefined') {
+      banner.push('ECharts library failed to load — charts will be missing. Check that /ciab/vendor/echarts.min.js is reachable.');
+    }
+
+    safe('cover',            () => renderCover(bundle));
+    safe('exec dashboard',   () => renderExecDashboard(bundle));
+    safe('heat map',         () => renderHeatmap(bundle));
+    safe('findings table',   () => renderFindingsTable(bundle));
+    safe('IG1',              () => renderIg1(bundle));
+    safe('CSF',              () => renderCsf(bundle));
+    safe('recommendations',  () => renderRecommendations(bundle));
+    safe('CIS RAM',          () => renderCisRam(bundle));
+    safe('detailed findings',() => renderDetailedFindings(bundle));
+
+    document.title = `Risk Assessment — ${bundle.profile.company_name || 'Profile'}`;
+    requestAnimationFrame(() => Object.values(charts).forEach(c => c && c.resize && c.resize()));
+
+    if (banner.length) {
+      const b = document.createElement('div');
+      b.className = 'error no-print';
+      b.style.cssText = 'position:sticky;top:50px;z-index:99;padding:10px 16px;background:#fef3c7;border:1px solid #d97706;color:#1e293b;border-radius:4px;margin:8px;font-size:0.85rem;';
+      b.innerHTML = `<strong>Some sections couldn't render:</strong><br>${banner.map(s => '· ' + s.replace(/</g, '&lt;')).join('<br>')}`;
+      document.body.insertBefore(b, document.querySelector('.report'));
     }
   }
 

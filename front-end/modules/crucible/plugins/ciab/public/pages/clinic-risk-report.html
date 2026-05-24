@@ -5,7 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Risk Assessment Report</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<!-- Use the locally bundled ECharts (same file the dashboard uses) so the
+     report works on networks where jsdelivr / public CDNs are blocked. -->
+<script src="/ciab/vendor/echarts.min.js"></script>
 <style>
   /* ─── Base ─────────────────────────────────────────────────────────── */
   * { box-sizing: border-box; }
