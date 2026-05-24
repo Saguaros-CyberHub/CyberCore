@@ -842,6 +842,36 @@ function runCommand(cmd, args) {
   });
 }
 
+// ─── File write via curl-based agent exec (bypasses broken guestFileWrite) ─
+// The shared script-executor.js guestFileWrite uses proxmoxAPI's form-urlencoded
+// serialization, which 596s on PVE 9.1.9. We bypass it entirely by base64-
+// encoding the content and shipping it through a single `agentShellExec` call
+// that does `base64 -d > file`. For >50KB files we chunk via append (>>) to
+// avoid agent argv / Proxmox API body size limits.
+async function writeFileViaShellExec({ node, vmId, fullPath, content, logTag }) {
+  const buf = Buffer.from(content, 'utf8');
+  const b64 = buf.toString('base64');
+  const CHUNK = 48 * 1024;   // 48KB of base64 per agent call (~36KB binary)
+
+  // Ensure parent dir exists, then truncate the file
+  const dir = fullPath.replace(/\/[^/]+$/, '') || '/';
+  await agentShellExec(node, vmId, `mkdir -p '${dir}' && : > '${fullPath}'`);
+
+  if (b64.length <= CHUNK) {
+    // Single-shot: echo base64 → decode → file
+    await agentShellExec(node, vmId, `echo '${b64}' | base64 -d > '${fullPath}'`);
+  } else {
+    // Chunked: append each piece, decode at end into a different file, then mv
+    const tmpPath = `${fullPath}.b64`;
+    await agentShellExec(node, vmId, `: > '${tmpPath}'`);
+    for (let i = 0; i < b64.length; i += CHUNK) {
+      const piece = b64.slice(i, i + CHUNK);
+      await agentShellExec(node, vmId, `printf %s '${piece}' >> '${tmpPath}'`);
+    }
+    await agentShellExec(node, vmId, `base64 -d < '${tmpPath}' > '${fullPath}' && rm -f '${tmpPath}'`);
+  }
+}
+
 // ─── Vuln-app installer execution ──────────────────────────────────────────
 // Writes source_tree files via QEMU guest agent, then runs install_script.
 async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }) {
@@ -852,32 +882,50 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
   console.log(`${logTag} Installing vuln app on ${vmName} (mode=${mode}, dir=${targetDir})`);
 
   try {
+    console.log(`${logTag} [install:step1] mkdir ${targetDir}`);
     await agentShellExec(node, vmId, `mkdir -p ${targetDir}`);
+    console.log(`${logTag} [install:step1] ✓ mkdir done`);
 
     if (source_tree && typeof source_tree === 'object') {
+      const fileCount = Object.keys(source_tree).length;
+      console.log(`${logTag} [install:step2] writing ${fileCount} source_tree file(s) via curl-based shell writes`);
+      let i = 0;
       for (const [relPath, content] of Object.entries(source_tree)) {
+        i++;
         const safePath = relPath.replace(/\.\./g, '').replace(/^\/+/, '');
         const fullPath = `${targetDir}/${safePath}`;
-        // guestFileWrite delegates to guestWriteLargeText internally for >8KB
-        // content, so a single helper handles any size.
-        await guestFileWrite(node, vmId, fullPath, content);
+        // BYPASS the shared script-executor.js guestFileWrite — it uses the
+        // broken proxmoxAPI (form-urlencoded) which 596s. Use base64+exec via
+        // our working curl-based agentShellExec instead. Handles arbitrary
+        // binary safely. Files >100KB get chunked at 64KB to stay under any
+        // command-line / agent argv size limits.
+        console.log(`${logTag} [install:step2] ${i}/${fileCount} ${fullPath} (${content.length} bytes)`);
+        await writeFileViaShellExec({ node, vmId, fullPath, content, logTag });
       }
+      console.log(`${logTag} [install:step2] ✓ source_tree written`);
     }
     if (dockerfile && mode === 'docker') {
-      await guestFileWrite(node, vmId, `${targetDir}/Dockerfile`, dockerfile);
+      console.log(`${logTag} [install:step3] writing Dockerfile (${dockerfile.length} bytes)`);
+      await writeFileViaShellExec({ node, vmId, fullPath: `${targetDir}/Dockerfile`, content: dockerfile, logTag });
+      console.log(`${logTag} [install:step3] ✓ Dockerfile written`);
     }
 
     // Run install_script inline via sh on stdin → poll until exit
+    console.log(`${logTag} [install:step4] running install_script (${(install_script||'').length} bytes)`);
     const exec = await agentShellExec(node, vmId, install_script);
     const pid = exec && (exec.pid || (exec.result && exec.result.pid));
     if (pid) {
+      console.log(`${logTag} [install:step4] install_script pid=${pid}, polling for completion...`);
       const result = await pollExecStatus(node, vmId, pid, 15 * 60 * 1000);
       if (result && result['exit-code'] !== 0) {
+        console.warn(`${logTag} [install:step4] ✗ install_script exited ${result['exit-code']}`);
         return { success: false, error: `install_script exited ${result['exit-code']}`, stderr: result['err-data'] || null };
       }
+      console.log(`${logTag} [install:step4] ✓ install_script completed (exit ${result?.['exit-code']})`);
     }
     return { success: true };
   } catch (err) {
+    console.warn(`${logTag} [install:CAUGHT] ${err.message}`);
     return { success: false, error: err.message };
   }
 }
