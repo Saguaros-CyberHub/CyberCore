@@ -160,7 +160,20 @@ function synthesizeSpecFromProfile({
   // See front-end/public/admin.html:4275, front-end/migrations/009_multi_vm_support.sql,
   // and modules/.../real-client-intake.js:512 — they all use this formula.
   for (const asset of selected) {
-    const { os_family, os_version } = parseOs(asset.os);
+    let { os_family, os_version } = parseOs(asset.os);
+
+    // Force web-server hosts to Linux. The vuln-app generator emits Docker /
+    // apt install scripts that only run on Linux; if the AI profile gave us a
+    // Windows web-01, override the OS to Linux so the bake scripts work and
+    // we don't end up with a redundant standalone vuln-app VM. See user's
+    // "every company has a WEB01 server" rule.
+    if (isWebServer(asset)) {
+      if (os_family !== 'linux') {
+        console.log(`[profile-to-spec] Forcing ${asset.hostname} to Linux (was ${os_family}) — web servers must be Linux for vuln-app installability`);
+      }
+      os_family = 'linux';
+      os_version = null;
+    }
 
     if (!os_family) {
       templateMisses.push({
@@ -243,10 +256,20 @@ function synthesizeSpecFromProfile({
   }
 
   // ─── Vuln-app install plan ────────────────────────────────────────────────
+  // Targeting order:
+  //   1. The cached vulnApp.target_hostname (if that exact host is in vms)
+  //   2. Any web-server in this lane's vms (covers asset-selection changes
+  //      between profile generation and deploy — the cached target_hostname
+  //      may not match the currently-selected web server hostname)
+  //   3. Append a standalone Linux vuln-app VM (last resort, only if no
+  //      web server was selected)
   let vulnAppInstall = null;
   if (vulnApp && vulnApp.install_script) {
-    const wantedTarget = vulnApp.target_hostname || webServerVmName;
-    const targetVm = wantedTarget && vms.find(v => v.name === wantedTarget);
+    let targetVm = vulnApp.target_hostname
+      && vms.find(v => v.name === vulnApp.target_hostname);
+    if (!targetVm && webServerVmName) {
+      targetVm = vms.find(v => v.name === webServerVmName);
+    }
 
     if (targetVm) {
       vulnAppInstall = {

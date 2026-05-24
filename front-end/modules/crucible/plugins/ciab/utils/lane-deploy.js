@@ -587,10 +587,10 @@ async function runPostCloneScripts({ node, vmId, vmName, scriptSlugs, logTag }) 
   );
   if (rows.rows.length === 0) return { ran: 0 };
 
-  // executeScriptsOnVM expects a deploymentId for status logging. Use the
-  // lane_id as a string — admin.js does the same when wiring up deploys.
-  const deploymentId = `ciab-lane-${vmId}`;
-  await executeScriptsOnVM(node, vmId, vmName, rows.rows, deploymentId);
+  // executeScriptsOnVM's deploymentId is a UUID FK into `deployment_vuln_selections`
+  // (admin's challenge-template flow). CIAB doesn't use that table — pass null
+  // so updateScriptStatus short-circuits instead of erroring on a non-UUID.
+  await executeScriptsOnVM(node, vmId, vmName, rows.rows, null);
   console.log(`${logTag} Ran ${rows.rows.length} post-clone scripts on ${vmName}`);
   return { ran: rows.rows.length };
 }
@@ -613,6 +613,68 @@ async function collectVmIp(node, vmId, attempts = 10, intervalMs = 5000) {
     if (i < attempts - 1) await new Promise(r => setTimeout(r, intervalMs));
   }
   return null;
+}
+
+// ─── Tailscale bootstrap verification ─────────────────────────────────────
+// After a gateway starts, the bake script's firstboot retries the bootstrap
+// fetch only 3× over ~15s. If the gateway's WAN is slow, the row sits
+// unconsumed and Tailscale silently never joins. This helper polls for
+// `consumed_at IS NOT NULL`; if not consumed after ~75s, it `pct exec`s
+// the firstboot script directly on the LXC to retry.
+async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logTag, maxWaitMs = 75000, retriggers = 2 }) {
+  const checkConsumed = async () => {
+    const r = await cybercoreQuery(
+      `SELECT consumed_at FROM lane_bootstrap_tokens WHERE vxlan_id = $1`,
+      [vxlanId]
+    );
+    return r.rows.length > 0 && r.rows[0].consumed_at !== null;
+  };
+
+  // No token row → Tailscale was never staged (env vars not set, or v1). Skip.
+  const rowExists = await cybercoreQuery(
+    `SELECT 1 FROM lane_bootstrap_tokens WHERE vxlan_id = $1`, [vxlanId]
+  );
+  if (rowExists.rows.length === 0) {
+    console.log(`${logTag} No Tailscale bootstrap row for vxlan ${vxlanId} — skipping verification`);
+    return;
+  }
+
+  const startedAt = Date.now();
+  let consumed = false;
+  let attemptCount = 0;
+  while (Date.now() - startedAt < maxWaitMs) {
+    if (await checkConsumed()) { consumed = true; break; }
+    await new Promise(r => setTimeout(r, 5000));
+  }
+
+  while (!consumed && attemptCount < retriggers) {
+    attemptCount++;
+    console.log(`${logTag} Tailscale bootstrap not yet consumed for vxlan ${vxlanId} — re-triggering firstboot via pct exec (attempt ${attemptCount}/${retriggers})`);
+    try {
+      // Re-run the firstboot script directly inside the LXC. This is the same
+      // /etc/local.d/00-cybercore-firstboot.start that runs at boot; rerunning
+      // is safe (idempotent) and forces a fresh bootstrap fetch attempt.
+      await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/status/exec`, {
+        command: ['/bin/sh', '/etc/local.d/00-cybercore-firstboot.start']
+      });
+    } catch (e) {
+      // Older pve versions don't expose /status/exec for LXC — fall back to no-op
+      // and rely on the gateway re-running firstboot on its next reboot.
+      console.warn(`${logTag} pct exec re-trigger failed (${e.message}) — gateway must re-fetch on its own`);
+      break;
+    }
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 30000) {
+      if (await checkConsumed()) { consumed = true; break; }
+      await new Promise(r => setTimeout(r, 5000));
+    }
+  }
+
+  if (consumed) {
+    console.log(`${logTag} ✓ Tailscale bootstrap consumed for vxlan ${vxlanId} — lane gateway should be on the tailnet`);
+  } else {
+    console.warn(`${logTag} ✗ Tailscale bootstrap NOT consumed for vxlan ${vxlanId} after ${Math.round((Date.now()-startedAt)/1000)}s — gateway likely can't reach the orchestrator. Check CYBERCORE_ORCHESTRATOR_URL in /etc/cybercore-gateway.env and network path from gateway WAN to ${process.env.CYBERCORE_ORCHESTRATOR_URL || 'http://100.100.20.50:3000'}`);
+  }
 }
 
 // ─── Single-lane deploy (called by batch + retry endpoint) ─────────────────
@@ -754,11 +816,25 @@ async function deployOneLaneFromSpec({
       await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${attackBoxVmId}/status/start`);
     }
 
+    // ── Verify Tailscale bootstrap was consumed; re-trigger firstboot if not ──
+    // The bake script's firstboot only retries 3× over ~15s. If the gateway's
+    // WAN comes up late or DNS/routing settles slowly, the bootstrap fetch
+    // gives up silently and Tailscale never joins. Poll the token row; if
+    // still unconsumed after ~75s, re-run firstboot via pct exec.
+    await verifyTailscaleBootstrap({
+      vxlanId, gatewayVmId, targetNode, logTag
+    }).catch(err => {
+      console.warn(`${logTag} Tailscale verification failed (deploy continues): ${err.message}`);
+    });
+
     // ── Wait for guest agents + run post-clone scripts + install vuln app ──
     if (progress) progress.lanes[laneId].status = 'configuring';
+    await query(`UPDATE ciab_profile_lane_jobs SET status='configuring', phase_detail='Waiting for guest agent' WHERE id=$1`, [jobId]);
 
     for (const dvm of deployedVMs) {
       if (dvm.type !== 'qemu') continue;
+      await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
+                  [jobId, `Waiting for guest agent on ${dvm.name}`]);
       const ready = await waitForGuestAgent(dvm.node, dvm.vm_id, 240000);
       if (!ready) {
         console.warn(`${logTag} Guest agent did not come up on ${dvm.name} — skipping scripts`);
@@ -767,6 +843,8 @@ async function deployOneLaneFromSpec({
 
       // Per-VM post_clone_scripts (from synthesizer)
       if (Array.isArray(dvm.post_clone_scripts) && dvm.post_clone_scripts.length > 0) {
+        await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
+                    [jobId, `Running ${dvm.post_clone_scripts.length} scripts on ${dvm.name}`]);
         await runPostCloneScripts({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
                                     scriptSlugs: dvm.post_clone_scripts, logTag }).catch(err => {
           console.warn(`${logTag} post-clone scripts failed on ${dvm.name}: ${err.message}`);
@@ -775,6 +853,8 @@ async function deployOneLaneFromSpec({
 
       // Vuln-app install (only on the matched target VM)
       if (vulnAppInstall && vulnAppInstall.target_vm === dvm.name) {
+        await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
+                    [jobId, `Installing vuln app on ${dvm.name} (${vulnAppInstall.mode})`]);
         const appResult = await installVulnAppOnVM({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
                                                      vulnAppInstall, logTag });
         if (!appResult.success && !appResult.skipped) {
@@ -783,6 +863,8 @@ async function deployOneLaneFromSpec({
       }
 
       // Collect IP + write back into ciab_profile_lane_groups.lane_ip_writeback
+      await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
+                  [jobId, `Collecting IP for ${dvm.name}`]);
       const ip = await collectVmIp(dvm.node, dvm.vm_id, 6, 4000);
       if (ip) {
         dvm.ip = ip;
@@ -803,6 +885,7 @@ async function deployOneLaneFromSpec({
     // ── Optional: create Guacamole connection for the Kali box ─────────
     let kaliIp = null;
     if (attackBoxVmId) {
+      await query(`UPDATE ciab_profile_lane_jobs SET phase_detail='Configuring Kali attack box' WHERE id=$1`, [jobId]);
       kaliIp = await collectVmIp(targetNode, attackBoxVmId, 6, 4000);
 
       // ── Inject /etc/hosts entries on Kali so students can hit the company
