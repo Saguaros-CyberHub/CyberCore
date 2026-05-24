@@ -82,21 +82,22 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
     if (!fileSpec || !fileSpec.content || typeof fileSpec.content !== 'string') {
       return { ok: false, error: 'no content field in file-gen response' };
     }
-    // Detect truncation — LLM hit max_tokens mid-code. Common tells:
-    //   - stop_reason='max_tokens' from the response
-    //   - content ends mid-line / mid-token (no closing brace, ends in :, ;, or whitespace)
-    //   - unbalanced braces or parens
+    // Detect truncation. The ONLY definitive signal from the API is
+    // stop_reason='max_tokens'. We also flag if the file ends mid-token
+    // (last non-whitespace char is :, =, (, [, { — these almost never
+    // terminate valid code). Don't try to count braces or look for ; / ,
+    // — both are valid file terminators in JS/PHP/Python and produced
+    // false positives that wasted LLM budget on healthy files.
     const stopReason = r.value.stop_reason || (r.value.value && r.value.value.stop_reason);
     const c = fileSpec.content;
     const lastLine = c.split('\n').pop().trim();
+    const trimmed = c.replace(/\s+$/, '');
+    const lastChar = trimmed.slice(-1);
     const looksTruncated =
       stopReason === 'max_tokens' ||
-      // Ends with a partial token (no proper terminator)
-      /[:,;=({[]\s*$/.test(c) ||
-      // Balance check: |{| should be >= |}| but if they're very off, likely cut
-      Math.abs((c.match(/\{/g) || []).length - (c.match(/\}/g) || []).length) > 2;
+      /[:=([{]/.test(lastChar);
     if (looksTruncated) {
-      return { ok: false, error: `file looks truncated (stop=${stopReason}, last line: "${lastLine.slice(0,60)}")` };
+      return { ok: false, error: `file looks truncated (stop=${stopReason}, lastChar="${lastChar}", lastLine="${lastLine.slice(0,60)}")` };
     }
     return {
       ok: true,
