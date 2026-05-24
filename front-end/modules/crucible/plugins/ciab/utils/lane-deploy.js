@@ -602,18 +602,23 @@ async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupN
   }));
 }
 
-// ─── Proxmox JSON POST (bypasses proxmoxAPI which hardcodes form-urlencoded) ─
-// The shared src/utils/proxmox.js always sends application/x-www-form-urlencoded,
-// which is the root cause of the 596 storms on /agent/exec for array-valued
-// `command` params (Perl backend mis-parses the repeated `command=` keys when
-// the client URL-encodes them in any unusual way). Sending JSON eliminates
-// the ambiguity entirely. Used by agentShellExec below.
-async function proxmoxJsonPOST(path, jsonBody) {
+// ─── Direct form-urlencoded POST to Proxmox (bypasses proxmoxAPI) ──────────
+// User's curl test on PVE 9.1.9 returns HTTP 200 immediately using
+// --data-urlencode (which produces %20 for spaces, not +). URLSearchParams
+// uses + for spaces. Most servers accept either, but pveproxy is picky.
+// So we build the body byte-for-byte the same way curl does.
+//
+// Pass an array of [key, value] pairs (preserving duplicate keys).
+async function proxmoxFormPOST(path, pairs) {
   const https = require('https');
   const { PROXMOX_URL } = require('../../../../../src/utils/proxmox');
   const url = new URL(`${PROXMOX_URL}${path}`);
   const tokenId = process.env.PROXMOX_TOKEN_ID;
   const tokenSecret = process.env.PROXMOX_TOKEN_SECRET;
+  // encodeURIComponent produces %20 for spaces (matches curl --data-urlencode)
+  const body = pairs.map(([k, v]) =>
+    `${encodeURIComponent(k)}=${encodeURIComponent(v)}`
+  ).join('&');
 
   return new Promise((resolve, reject) => {
     const req = https.request({
@@ -623,8 +628,8 @@ async function proxmoxJsonPOST(path, jsonBody) {
       method: 'POST',
       headers: {
         'Authorization': `PVEAPIToken=${tokenId}=${tokenSecret}`,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(jsonBody)
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body)
       },
       rejectUnauthorized: false
     }, (res) => {
@@ -643,7 +648,7 @@ async function proxmoxJsonPOST(path, jsonBody) {
       });
     });
     req.on('error', reject);
-    req.write(jsonBody);
+    req.write(body);
     req.end();
   });
 }
@@ -671,14 +676,23 @@ async function proxmoxJsonPOST(path, jsonBody) {
 // suspenders.
 async function agentShellExec(node, vmId, shellCmd) {
   console.log(`[AgentShellExec] /bin/sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
-  const body = JSON.stringify({ command: ['/bin/sh', '-c', shellCmd] });
+
+  // Three separate `command=...` form-urlencoded pairs with %20 for spaces
+  // (matches curl --data-urlencode byte-for-byte). User verified this exact
+  // shape returns HTTP 200 immediately via curl on PVE 9.1.9 with the same
+  // token CIAB uses.
+  const pairs = [
+    ['command', '/bin/sh'],
+    ['command', '-c'],
+    ['command', shellCmd]
+  ];
 
   let lastErr;
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      const result = await proxmoxJsonPOST(
+      const result = await proxmoxFormPOST(
         `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
-        body
+        pairs
       );
       const pid = result?.pid;
       if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
