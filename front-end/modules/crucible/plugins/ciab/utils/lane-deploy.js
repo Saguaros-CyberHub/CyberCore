@@ -602,30 +602,81 @@ async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupN
   }));
 }
 
+// ─── Proxmox JSON POST (bypasses proxmoxAPI which hardcodes form-urlencoded) ─
+// The shared src/utils/proxmox.js always sends application/x-www-form-urlencoded,
+// which is the root cause of the 596 storms on /agent/exec for array-valued
+// `command` params (Perl backend mis-parses the repeated `command=` keys when
+// the client URL-encodes them in any unusual way). Sending JSON eliminates
+// the ambiguity entirely. Used by agentShellExec below.
+async function proxmoxJsonPOST(path, jsonBody) {
+  const https = require('https');
+  const { PROXMOX_URL } = require('../../../../../src/utils/proxmox');
+  const url = new URL(`${PROXMOX_URL}${path}`);
+  const tokenId = process.env.PROXMOX_TOKEN_ID;
+  const tokenSecret = process.env.PROXMOX_TOKEN_SECRET;
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: url.hostname,
+      port: url.port || 8006,
+      path: url.pathname + url.search,
+      method: 'POST',
+      headers: {
+        'Authorization': `PVEAPIToken=${tokenId}=${tokenSecret}`,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(jsonBody)
+      },
+      rejectUnauthorized: false
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        if (res.statusCode >= 400) {
+          return reject(new Error(`Proxmox POST ${url.pathname} failed (${res.statusCode}): ${data}`));
+        }
+        try {
+          const json = JSON.parse(data);
+          resolve(json.data !== undefined ? json.data : json);
+        } catch {
+          resolve(data);
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(jsonBody);
+    req.end();
+  });
+}
+
 // ─── CIAB-local agent shell exec ───────────────────────────────────────────
 // Mirrors what `qm guest exec <vmid> -- /bin/sh -c "..."` does: passes
-// `command` as an ARRAY (path + args). Proxmox's form-urlencoded API
-// represents arrays as repeated keys (command=/bin/sh&command=-c&command=...).
-// The shared proxmoxAPI util joins objects with `${k}=${v}` which mangles
-// arrays into comma-strings, so we build the body manually here.
+// `command` as an ARRAY (path + args).
 //
-// Retry behavior: first agent/exec call right after VM boot occasionally
-// 596s even though waitForGuestAgent (which uses guest-ping) said ready.
-// `qm guest exec` against the same VM works moments later — the call shape
-// is fine, the agent just isn't fully warmed up. So retry on 596 with short
-// backoff before giving up.
+// IMPORTANT: We send this as JSON (Content-Type: application/json) rather
+// than form-urlencoded. Per Proxmox forum / staff confirmation (PVE 8.x
+// breaking change), the form-urlencoded "repeated `command=` field" wire
+// format is ambiguous — many HTTP clients (incl. some Node behaviors)
+// collapse/reorder duplicate keys or URL-encode `/` and `-` in ways the
+// Perl backend mis-parses. The result is a hung guest-exec call that
+// pveproxy times out as HTTP 596 with an empty body — which is EXACTLY
+// the symptom we were chasing for hours. JSON sidesteps the entire
+// serialization morass.
+//   See: https://forum.proxmox.com/threads/issue-with-proxmox-8-2-4-qemu-guest-agent.151040/
+//        https://forum.proxmox.com/threads/proxmox-ve-api-596-broken-pipe.137863/
+//
+// Retry behavior: 596s from pveproxy → pvedaemon → QMP timeouts still
+// happen if back-to-back exec calls race on the agent's serial channel.
+// The outer waitForAgentExecReady already polls exec-status to completion
+// + adds a 2s settle delay, but we keep an internal 5-retry as belt-and-
+// suspenders.
 async function agentShellExec(node, vmId, shellCmd) {
   console.log(`[AgentShellExec] /bin/sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
-  const body = [
-    `command=${encodeURIComponent('/bin/sh')}`,
-    `command=${encodeURIComponent('-c')}`,
-    `command=${encodeURIComponent(shellCmd)}`
-  ].join('&');
+  const body = JSON.stringify({ command: ['/bin/sh', '-c', shellCmd] });
 
   let lastErr;
   for (let attempt = 1; attempt <= 5; attempt++) {
     try {
-      const result = await proxmoxAPI('POST',
+      const result = await proxmoxJsonPOST(
         `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
         body
       );
@@ -691,6 +742,85 @@ async function waitForAgentExecReady(node, vmId, logTag, timeoutMs = 180000) {
     }
   }
   return false;
+}
+
+// ─── SSH-based vuln-app installer ──────────────────────────────────────────
+// Sidesteps the chronically-flaky Proxmox /agent/exec endpoint (596 spam on
+// any command after the first probe) by running the install via SSH instead.
+// Requires the orchestrator to have IP reachability to the lane VM — works
+// if the orchestrator host is on Tailscale (which has subnet routing for the
+// lane via the gateway), or has a static route to 10.40.x.x.
+//
+// Uses sshpass for the bake-template's default 'web/bake-debug' credentials.
+// (sshpass must be installed in the orchestrator container — add to Dockerfile.)
+async function installVulnAppViaSSH({ node, vmId, vmName, vmIp, vulnAppInstall, logTag }) {
+  if (!vulnAppInstall) return { success: true, skipped: true };
+  if (!vmIp) return { success: false, error: 'no VM IP — cannot SSH' };
+  const { mode, install_script, source_tree, dockerfile } = vulnAppInstall;
+  const targetDir = mode === 'docker' ? '/opt/vuln-app' : '/var/www/html';
+  console.log(`${logTag} Installing vuln app via SSH on ${vmName} (${vmIp}, mode=${mode}, dir=${targetDir})`);
+
+  const fs = require('fs');
+  const path = require('path');
+  const { spawn } = require('child_process');
+
+  const tmpDir = fs.mkdtempSync(`/tmp/ciab-vuln-${vmId}-`);
+  try {
+    // Materialize the bundle on disk so we can scp it
+    fs.mkdirSync(path.join(tmpDir, 'files'), { recursive: true });
+    if (source_tree && typeof source_tree === 'object') {
+      for (const [relPath, content] of Object.entries(source_tree)) {
+        const safe = relPath.replace(/\.\./g, '_').replace(/^\/+/, '');
+        const full = path.join(tmpDir, 'files', safe);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, content);
+      }
+    }
+    if (dockerfile && mode === 'docker') {
+      fs.writeFileSync(path.join(tmpDir, 'files', 'Dockerfile'), dockerfile);
+    }
+    fs.writeFileSync(path.join(tmpDir, 'install.sh'), install_script || '');
+
+    // Tar the bundle so a single scp gets everything
+    await runCommand('tar', ['czf', path.join(tmpDir, 'bundle.tar.gz'), '-C', tmpDir, 'install.sh', 'files']);
+
+    const sshOpts = ['-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=10','-o','LogLevel=ERROR'];
+    const sshpass = ['-p','bake-debug'];
+
+    // 1. scp bundle to the VM
+    await runCommand('sshpass', [...sshpass, 'scp', ...sshOpts,
+      path.join(tmpDir, 'bundle.tar.gz'), `web@${vmIp}:/tmp/ciab-bundle.tar.gz`]);
+
+    // 2. SSH in and install
+    const remoteCmd = `set -e
+sudo mkdir -p ${targetDir}
+cd /tmp && rm -rf ciab-extract && mkdir ciab-extract && tar xzf ciab-bundle.tar.gz -C ciab-extract
+sudo cp -rT ciab-extract/files/ ${targetDir}/
+sudo chmod +x /tmp/ciab-extract/install.sh
+sudo bash /tmp/ciab-extract/install.sh
+echo "[ciab] install complete"
+`;
+    await runCommand('sshpass', [...sshpass, 'ssh', ...sshOpts, `web@${vmIp}`, remoteCmd]);
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  }
+}
+
+function runCommand(cmd, args) {
+  return new Promise((resolve, reject) => {
+    const child = require('child_process').spawn(cmd, args, { stdio: ['ignore','pipe','pipe'] });
+    let stderr = '';
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('error', reject);
+    child.on('close', code => {
+      if (code === 0) resolve();
+      else reject(new Error(`${cmd} exited ${code}: ${stderr.slice(0, 500)}`));
+    });
+  });
 }
 
 // ─── Vuln-app installer execution ──────────────────────────────────────────
