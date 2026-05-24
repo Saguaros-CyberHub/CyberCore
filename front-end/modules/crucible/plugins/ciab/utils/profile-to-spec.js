@@ -201,6 +201,7 @@ function synthesizeSpecFromProfile({
     const resolverRole = isWebServer(asset) ? 'web' : asset.role;
     const match = resolveTemplate({ os_family, os_version, role: resolverRole }, vmTemplateCatalog);
     if (!match) {
+      console.warn(`[profile-to-spec] No template match for ${asset.hostname} (os_family=${os_family} os_version=${os_version} role=${resolverRole}). Catalog had ${vmTemplateCatalog.filter(r => r.os_family === os_family).length} ${os_family} row(s).`);
       templateMisses.push({
         hostname: asset.hostname,
         os: asset.os || null,
@@ -208,6 +209,7 @@ function synthesizeSpecFromProfile({
       });
       continue;
     }
+    console.log(`[profile-to-spec] ${asset.hostname} → template_vmid=${match.template_vmid} (${match.os_name}, match=${match.match_type}, role=${resolverRole})`);
 
     // Resolve post-clone scripts for each declared service. Include the
     // 'init-setup' bootstrap only if its os_target matches the VM's os_family
