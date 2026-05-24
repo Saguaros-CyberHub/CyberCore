@@ -472,28 +472,39 @@ function renderHeatmapTable(doc, findings) {
 }
 
 function renderFindingsTable(doc, findings) {
-  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const pageWidth  = doc.page.width - doc.page.margins.left - doc.page.margins.right;
   const leftMargin = doc.page.margins.left;
   pdfh.ensureSpace(doc, 24);
 
+  // Column geometry — push severity badge into its own column for visual scan
+  const colCode    = 0;
+  const colTitle   = 60;
+  const colCat     = pageWidth - 240;
+  const colL       = pageWidth - 175;
+  const colI       = pageWidth - 152;
+  const colRisk    = pageWidth - 129;
+  const colSev     = pageWidth - 96;
+  const colStatus  = pageWidth - 32;
+
   // Header row
   const headerY = doc.y;
-  doc.rect(leftMargin, headerY, pageWidth, 16).fill(pdfh.PD_COLORS_HEADER || '#1e3a5f');
-  doc.fontSize(8).font('Helvetica-Bold').fillColor('#ffffff')
-    .text('Code', leftMargin + 6, headerY + 4, { width: 40 })
-    .text('Title', leftMargin + 50, headerY + 4, { width: pageWidth - 250 })
-    .text('Cat.', leftMargin + pageWidth - 200, headerY + 4, { width: 40 })
-    .text('L', leftMargin + pageWidth - 160, headerY + 4, { width: 18 })
-    .text('I', leftMargin + pageWidth - 142, headerY + 4, { width: 18 })
-    .text('Risk', leftMargin + pageWidth - 124, headerY + 4, { width: 32 })
-    .text('Status', leftMargin + pageWidth - 90, headerY + 4, { width: 84 });
+  doc.rect(leftMargin, headerY, pageWidth, 18).fill('#1e3a5f');
+  doc.fontSize(7.5).font('Helvetica-Bold').fillColor('#ffffff')
+    .text('CODE',  leftMargin + 6 + colCode,   headerY + 5, { width: 50, characterSpacing: 1 })
+    .text('FINDING', leftMargin + 6 + colTitle, headerY + 5, { width: colCat - colTitle - 8, characterSpacing: 1 })
+    .text('CAT.',  leftMargin + 6 + colCat,    headerY + 5, { width: 56, characterSpacing: 1 })
+    .text('L',     leftMargin + 6 + colL,      headerY + 5, { width: 18 })
+    .text('I',     leftMargin + 6 + colI,      headerY + 5, { width: 18 })
+    .text('RISK',  leftMargin + 6 + colRisk,   headerY + 5, { width: 28 })
+    .text('SEVERITY', leftMargin + 6 + colSev, headerY + 5, { width: 58, characterSpacing: 1 })
+    .text('STATUS',leftMargin + 6 + colStatus, headerY + 5, { width: 32, characterSpacing: 1 });
   doc.y = headerY + 18;
 
-  const ROW_H = 14;
+  const ROW_H = 18;
   if (findings.length === 0) {
-    doc.fontSize(9).font('Helvetica').fillColor('#64748b')
-      .text('No findings recorded.', leftMargin + 6, doc.y + 4);
-    doc.y += 20;
+    doc.fontSize(9).font('Helvetica-Oblique').fillColor('#64748b')
+      .text('No findings recorded yet for this engagement.', leftMargin + 6, doc.y + 6);
+    doc.y += 24;
     return;
   }
 
@@ -501,15 +512,82 @@ function renderFindingsTable(doc, findings) {
     pdfh.ensureSpace(doc, ROW_H);
     const rowY = doc.y;
     if (idx % 2 === 1) doc.rect(leftMargin, rowY, pageWidth, ROW_H).fill('#f8fafc');
+    // Left accent stripe colored by severity
+    doc.rect(leftMargin, rowY, 3, ROW_H).fill(pdfh.severityColorFor(f.inherent_risk));
+
+    doc.fontSize(8).font('Helvetica-Bold').fillColor('#1e293b')
+      .text(f.finding_code || '—', leftMargin + 6 + colCode, rowY + 5, { width: 50 });
     doc.fontSize(8).font('Helvetica').fillColor('#1e293b')
-      .text(f.finding_code || '', leftMargin + 6, rowY + 3, { width: 40 })
-      .text(f.title || '', leftMargin + 50, rowY + 3, { width: pageWidth - 250, ellipsis: true, lineBreak: false })
-      .text(f.category || '—', leftMargin + pageWidth - 200, rowY + 3, { width: 40 })
-      .text(f.likelihood ?? '—', leftMargin + pageWidth - 160, rowY + 3, { width: 18 })
-      .text(f.impact ?? '—', leftMargin + pageWidth - 142, rowY + 3, { width: 18 })
-      .text(f.inherent_risk ?? '—', leftMargin + pageWidth - 124, rowY + 3, { width: 32 })
-      .text(f.status || 'open', leftMargin + pageWidth - 90, rowY + 3, { width: 84 });
+      .text(f.title || '', leftMargin + 6 + colTitle, rowY + 5,
+        { width: colCat - colTitle - 8, ellipsis: true, lineBreak: false });
+    doc.fontSize(7.5).font('Helvetica').fillColor('#64748b')
+      .text(f.category || '—', leftMargin + 6 + colCat, rowY + 5, { width: 56, ellipsis: true, lineBreak: false });
+    doc.fontSize(8).font('Helvetica').fillColor('#1e293b')
+      .text(String(f.likelihood ?? '—'), leftMargin + 6 + colL, rowY + 5, { width: 18 })
+      .text(String(f.impact ?? '—'),     leftMargin + 6 + colI, rowY + 5, { width: 18 })
+      .text(String(f.inherent_risk ?? '—'), leftMargin + 6 + colRisk, rowY + 5, { width: 28 });
+    // Severity badge
+    pdfh.renderSeverityBadge(doc, leftMargin + 6 + colSev, rowY + 3, f.inherent_risk, 56);
+    doc.fontSize(7.5).font('Helvetica').fillColor('#1e293b')
+      .text((f.status || 'open').toUpperCase(), leftMargin + 6 + colStatus, rowY + 5, { width: 32 });
     doc.y = rowY + ROW_H;
+  });
+
+  // Severity legend
+  doc.moveDown(0.4);
+  const legY = doc.y;
+  const legends = [
+    { label: 'CRITICAL', color: '#dc2626' },
+    { label: 'HIGH',     color: '#ea580c' },
+    { label: 'MEDIUM',   color: '#d97706' },
+    { label: 'LOW',      color: '#0891b2' }
+  ];
+  let lx = leftMargin;
+  doc.fontSize(7).font('Helvetica-Bold').fillColor('#64748b')
+    .text('SEVERITY:', lx, legY + 2, { width: 50 });
+  lx += 50;
+  legends.forEach(l => {
+    doc.roundedRect(lx, legY + 1, 8, 8, 2).fill(l.color);
+    doc.fontSize(7).font('Helvetica').fillColor('#64748b')
+      .text(l.label, lx + 11, legY + 2, { width: 60 });
+    lx += 70;
+  });
+  doc.y = legY + 14;
+}
+
+/**
+ * Top-N critical findings as visually distinct cards under the heat map.
+ */
+function renderTopCriticalFindings(doc, findings, n = 3) {
+  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const left = doc.page.margins.left;
+  const top = [...findings]
+    .filter(f => Number(f.inherent_risk || 0) >= 5)
+    .sort((a, b) => Number(b.inherent_risk || 0) - Number(a.inherent_risk || 0))
+    .slice(0, n);
+  if (top.length === 0) return;
+
+  doc.fontSize(9).font('Helvetica-Bold').fillColor('#1e293b')
+    .text(`Top ${top.length} risk${top.length > 1 ? 's' : ''} demanding attention:`,
+      left, doc.y, { width: pageWidth });
+  doc.moveDown(0.3);
+  top.forEach((f) => {
+    pdfh.ensureSpace(doc, 44);
+    const rowY = doc.y;
+    const cardW = pageWidth;
+    const sev = pdfh.severityColorFor(f.inherent_risk);
+    doc.rect(left, rowY, cardW, 38).fillOpacity(0.04).fill(sev).fillOpacity(1);
+    doc.rect(left, rowY, 4, 38).fill(sev);
+    doc.fontSize(7).font('Helvetica-Bold').fillColor(sev)
+      .text(pdfh.severityLabelFor(f.inherent_risk) + ' · RISK ' + (f.inherent_risk ?? '—'),
+        left + 14, rowY + 6, { characterSpacing: 1 });
+    doc.fontSize(10).font('Helvetica-Bold').fillColor('#1e293b')
+      .text(`${f.finding_code || ''} — ${f.title || ''}`,
+        left + 14, rowY + 18, { width: cardW - 28, lineBreak: false, ellipsis: true });
+    doc.fontSize(7.5).font('Helvetica').fillColor('#64748b')
+      .text(`L${f.likelihood ?? '?'} × I${f.impact ?? '?'} · ${f.category || 'uncategorized'}`,
+        left + 14, rowY + 30, { width: cardW - 28 });
+    doc.y = rowY + 42;
   });
 }
 
@@ -654,118 +732,369 @@ function renderCisRamTreatmentPlan(doc, cisRam) {
 function renderClinicRiskAssessmentPdf(doc, data) {
   const { profile, intake, report, findings, cis_coverage, csf_scores, charts = {}, cisRam = null } = data;
   const coverName = profile.company_name || intake?.cover_name || 'Unknown Organization';
-  const watermark = (intake?.source === 'ai_simulated' || profile.profile_source !== 'real_intake')
-    ? 'TRAINING SAMPLE — NOT FOR CLIENT USE'
-    : null;
+  const isTraining = intake?.source === 'ai_simulated' || profile.profile_source !== 'real_intake';
+  const reportId = (report.id || '').slice(0, 8) || 'draft';
+  const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
 
-  // --- Cover page ---
-  pdfh.renderCoverPage(doc, {
-    title: 'Clinic Risk Assessment',
-    subtitle: 'Cybersecurity Risk Posture & Recommendations',
+  const csfFnNames = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
+  const csfAvg = (() => {
+    const vals = Object.keys(csfFnNames).map(k => Number(csf_scores[k] || 0));
+    return vals.reduce((s, v) => s + v, 0) / vals.length;
+  })();
+
+  const criticalCount = findings.filter(f => Number(f.inherent_risk || 0) >= 7).length;
+  const highCount     = findings.filter(f => Number(f.inherent_risk || 0) >= 5 && Number(f.inherent_risk) < 7).length;
+  const posture = intake?.payload?._meta?.posture || null;
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 1 — HERO COVER
+  // ═══════════════════════════════════════════════════════════════════════
+  pdfh.renderHeroCover(doc, {
+    eyebrow: 'Cybersecurity Risk Assessment',
+    title:   'Risk Assessment Report',
     companyName: coverName,
-    watermark,
+    subtitle: `Prepared ${date}`,
+    watermark: isTraining ? 'Training Sample' : null,
     meta: [
-      ['Date',         new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })],
-      ['Findings',     String(findings.length)],
-      ['IG1 Coverage', `${cis_coverage.score}%`],
-      ['Report State', (report.status || 'draft').toUpperCase()],
-      ['Prepared By',  (report.branding?.prepared_by) || 'Clinic-in-a-Box Platform'],
-      ['Source',       intake?.source === 'real_client' ? 'Real-Client Engagement' : 'Training Sample'],
+      ['Report ID',       reportId.toUpperCase()],
+      ['Engagement Type', isTraining ? 'Training engagement' : 'Real-client engagement'],
+      ['Findings',        `${findings.length} (${criticalCount} critical · ${highCount} high)`],
+      ['IG1 Coverage',    `${cis_coverage.score}%`],
+      ['CSF Maturity',    `${csfAvg.toFixed(1)} / 5`],
+      ['Prepared By',     (report.branding?.prepared_by) || 'Clinic-in-a-Box Platform']
     ],
+    footerRight: `Report ${reportId.toUpperCase()} · ${date}`
   });
 
-  // --- Executive Summary ---
-  pdfh.renderSectionHeader(doc, 'Executive Summary');
-  if (report.exec_summary && report.exec_summary.trim()) {
-    pdfh.renderTextarea(doc, '', report.exec_summary);
-  } else {
-    doc.fontSize(9).font('Helvetica').fillColor('#64748b')
-      .text('No executive summary recorded yet — assessor should complete the Report tab before finalizing.', { width: doc.page.width - doc.page.margins.left - doc.page.margins.right });
-    doc.moveDown(0.5);
-  }
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 2 — EXECUTIVE DASHBOARD
+  // ═══════════════════════════════════════════════════════════════════════
+  pdfh.renderSectionHeaderModern(doc, 'Executive Dashboard', 'Section 01');
 
-  // --- Engagement Scope (from intake) ---
-  pdfh.renderSectionHeader(doc, 'Engagement Scope');
-  const company = intake?.payload?.sections?.company || {};
-  const network = intake?.payload?.sections?.network || {};
-  const lines = [
-    ['Industry',         company.industry || '—'],
-    ['Employee band',    company.employees_band || '—'],
-    ['Endpoints',        network.endpoint_count ?? '—'],
-    ['Servers',          network.server_count ?? '—'],
-    ['Frameworks',       Array.isArray(company.frameworks) && company.frameworks.length ? company.frameworks.join(', ') : '—'],
+  const tiles = [
+    { label: 'Total findings',  value: String(findings.length),
+      sub: criticalCount > 0 ? `${criticalCount} critical` : 'none critical',
+      color: criticalCount > 0 ? '#dc2626' : '#0891b2' },
+    { label: 'Critical risks',  value: String(criticalCount),
+      sub: criticalCount === 0 ? 'all under control' : 'immediate attention',
+      color: criticalCount > 0 ? '#dc2626' : '#16a34a' },
+    { label: 'IG1 coverage',    value: `${cis_coverage.score}%`,
+      sub: `${cis_coverage.yes} of ${cis_coverage.total} met · ${cis_coverage.partial} partial`,
+      color: cis_coverage.score >= 70 ? '#16a34a' : cis_coverage.score >= 40 ? '#d97706' : '#dc2626' },
+    { label: 'CSF maturity',    value: csfAvg.toFixed(1),
+      sub: 'avg of 6 functions, scale 0–5',
+      color: csfAvg >= 3.5 ? '#16a34a' : csfAvg >= 2 ? '#d97706' : '#dc2626' }
   ];
-  lines.forEach(([k, v]) => {
-    doc.fontSize(9).font('Helvetica-Bold').fillColor('#64748b').text(k + ':', { continued: true });
-    doc.font('Helvetica').fillColor('#1e293b').text(' ' + v);
-  });
-  doc.moveDown(0.5);
+  pdfh.renderKpiTiles(doc, tiles);
 
-  // --- Heat Map page ---
-  doc.addPage();
-  pdfh.renderSectionHeader(doc, 'Risk Heat Map (Inherent Risk)');
-  if (charts.heatmap_png) {
-    embedChart(doc, charts.heatmap_png, 460);
-  } else {
-    renderHeatmapTable(doc, findings);
-  }
-
-  // --- Findings table ---
-  pdfh.renderSectionHeader(doc, 'Findings — Sorted by Inherent Risk');
-  renderFindingsTable(doc, findings);
-
-  // --- CIS RAM Register + Treatment Plan (Phase 2) ---
-  renderCisRamRegister(doc, cisRam);
-  renderCisRamTreatmentPlan(doc, cisRam);
-
-  // --- CSF Maturity Radar page ---
-  doc.addPage();
-  pdfh.renderSectionHeader(doc, 'NIST CSF 2.0 Maturity');
-  if (charts.radar_png) {
-    embedChart(doc, charts.radar_png, 380);
-  } else {
-    const fnNames = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
-    Object.entries(fnNames).forEach(([id, name]) => {
-      doc.fontSize(10).font('Helvetica-Bold').fillColor('#1e293b')
-        .text(`${name}: ${(csf_scores[id] ?? 0).toFixed(1)} / 5`);
+  // Posture archetype callout
+  if (posture && posture.name) {
+    pdfh.renderCallout(doc, {
+      title: `Compliance Posture: ${prettyArchetype(posture.name)}`,
+      body:  posture.description || '',
+      color: '#1e40af'
     });
   }
 
-  // --- Compliance Coverage page ---
-  doc.addPage();
-  pdfh.renderSectionHeader(doc, 'Compliance Coverage');
-  if (charts.cis_png) {
-    embedChart(doc, charts.cis_png, 240);
+  // Executive summary text
+  if (report.exec_summary && report.exec_summary.trim()) {
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1e3a5f').text('Executive Summary');
+    doc.moveDown(0.2);
+    doc.fontSize(9.5).font('Helvetica').fillColor('#1e293b')
+      .text(report.exec_summary, { width: doc.page.width - doc.page.margins.left - doc.page.margins.right, align: 'justify' });
+    doc.moveDown(0.5);
   } else {
-    doc.fontSize(10).font('Helvetica').fillColor('#1e293b')
-      .text(`CIS IG1: ${cis_coverage.score}% (${cis_coverage.yes} yes, ${cis_coverage.partial} partial, ${cis_coverage.no} no, ${cis_coverage.unknown} unanswered of ${cis_coverage.total})`);
-  }
-  doc.moveDown(0.5);
-  if (charts.csf_png) {
-    embedChart(doc, charts.csf_png, 240);
+    pdfh.renderCallout(doc, {
+      title: 'Executive summary pending',
+      body:  'The assessor has not yet drafted an executive summary on the Report tab. The narrative section will populate here once authored — the data sections below already reflect the current intake + scoring state.',
+      color: '#d97706'
+    });
   }
 
-  // --- Detailed findings ---
+  // Engagement scope grid
+  doc.fontSize(11).font('Helvetica-Bold').fillColor('#1e3a5f').text('Engagement Scope');
+  doc.moveDown(0.25);
+  const company = intake?.payload?.sections?.company || {};
+  const network = intake?.payload?.sections?.network || {};
+  const ep = intake?.payload?.sections?.endpoint || {};
+  const access = intake?.payload?.sections?.access || {};
+  const dp = intake?.payload?.sections?.data || {};
+
+  const scopeLines = [
+    ['Industry',           company.industry || '—'],
+    ['Employee band',      company.employees_band || '—'],
+    ['Revenue band',       company.revenue_band || '—'],
+    ['HQ region',          company.region || '—'],
+    ['Endpoints',          String(network.endpoint_count ?? '—')],
+    ['Servers',            String(network.server_count ?? '—')],
+    ['Domain mode',        (network.domain_mode || '—').toUpperCase()],
+    ['Compliance scope',   Array.isArray(company.frameworks) && company.frameworks.length ? company.frameworks.join(', ') : 'None declared'],
+    ['Primary EDR',        ep.av_vendor || '—'],
+    ['MFA coverage',       access.mfa_coverage || '—'],
+    ['Backups',            dp.backup_cadence ? `${dp.backup_cadence} · offsite=${dp.offsite_backup || 'n/a'}` : '—']
+  ];
+  renderTwoColTable(doc, scopeLines);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 3 — RISK HEAT MAP
+  // ═══════════════════════════════════════════════════════════════════════
+  doc.addPage();
+  pdfh.renderSectionHeaderModern(doc, 'Risk Heat Map', 'Section 02 · Inherent Risk');
+  if (charts.heatmap_png) {
+    embedChart(doc, charts.heatmap_png, 360);
+  } else {
+    renderHeatmapTable(doc, findings);
+  }
+  // Top 3 critical
+  renderTopCriticalFindings(doc, findings, 3);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 4 — FINDINGS TABLE
+  // ═══════════════════════════════════════════════════════════════════════
+  doc.addPage();
+  pdfh.renderSectionHeaderModern(doc, 'Findings — Sorted by Inherent Risk', 'Section 03');
+  renderFindingsTable(doc, findings);
+
+  // CIS RAM Register + Treatment Plan if present
+  renderCisRamRegister(doc, cisRam);
+  renderCisRamTreatmentPlan(doc, cisRam);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 5 — CIS IG1 COMPLIANCE
+  // ═══════════════════════════════════════════════════════════════════════
+  doc.addPage();
+  pdfh.renderSectionHeaderModern(doc, 'CIS Controls IG1 Compliance', 'Section 04 · CIS v8 Implementation Group 1');
+
+  // Coverage stat-block (3 columns)
+  pdfh.renderKpiTiles(doc, [
+    { label: 'Coverage score', value: `${cis_coverage.score}%`, sub: `of ${cis_coverage.total} safeguards`, color: '#1e40af' },
+    { label: 'Met (yes)',      value: String(cis_coverage.yes),     sub: 'fully implemented',          color: '#16a34a' },
+    { label: 'Partial',        value: String(cis_coverage.partial), sub: 'in progress',                color: '#d97706' },
+    { label: 'Not met',        value: String(cis_coverage.no),      sub: 'remediation required',      color: '#dc2626' }
+  ], { height: 70 });
+
+  if (charts.cis_png) embedChart(doc, charts.cis_png, 200);
+
+  // Posture callout (repeat — it's relevant context for IG1 results)
+  if (posture && posture.name) {
+    pdfh.renderCallout(doc, {
+      title: `Why this distribution? Posture: ${prettyArchetype(posture.name)}`,
+      body:  posture.description ||
+        'This organization shows an uneven baseline — strong in some control families and weaker in others. The pattern matches their stated maturity and business priorities.',
+      color: '#1e40af'
+    });
+  }
+
+  // Top unmet IG1 safeguards (top 5 'no' answers)
+  const ig1Notes = intake?.payload?.sections?.ig1 || {};
+  const ig1Cat   = require('../utils/frameworks').getCisIg1();
+  const sgIndex  = Object.fromEntries((ig1Cat.safeguards || []).map(s => [s.num, s]));
+  const unmet = Object.entries(ig1Notes)
+    .filter(([k, v]) => /^ig1_\d+\.\d+$/.test(k) && v === 'no')
+    .map(([k]) => k.replace('ig1_', ''))
+    .map(num => sgIndex[num])
+    .filter(Boolean)
+    .slice(0, 5);
+  if (unmet.length) {
+    doc.fontSize(11).font('Helvetica-Bold').fillColor('#1e3a5f').text('Top unmet safeguards');
+    doc.moveDown(0.2);
+    pdfh.renderBulletList(doc, unmet.map(sg => `${sg.num} — ${sg.name} (${sg.control_name})`),
+      { bulletColor: '#dc2626' });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 6 — NIST CSF 2.0 MATURITY
+  // ═══════════════════════════════════════════════════════════════════════
+  doc.addPage();
+  pdfh.renderSectionHeaderModern(doc, 'NIST CSF 2.0 Maturity', 'Section 05 · Functional Posture');
+
+  if (charts.radar_png) embedChart(doc, charts.radar_png, 320);
+  if (charts.csf_png)   embedChart(doc, charts.csf_png, 220);
+
+  // Function-by-function table
+  doc.fontSize(11).font('Helvetica-Bold').fillColor('#1e3a5f').text('Function scores');
+  doc.moveDown(0.25);
+  const fnLines = Object.entries(csfFnNames).map(([id, name]) =>
+    [name, `${(csf_scores[id] ?? 0).toFixed(1)} / 5`]);
+  renderTwoColTable(doc, fnLines);
+
+  // Weakest function callout
+  const ranked = Object.entries(csfFnNames)
+    .map(([id, name]) => ({ id, name, score: Number(csf_scores[id] || 0) }))
+    .sort((a, b) => a.score - b.score);
+  if (ranked.length && ranked[0].score < 3) {
+    pdfh.renderCallout(doc, {
+      title: `Weakest function: ${ranked[0].name} (${ranked[0].score.toFixed(1)} / 5)`,
+      body:  `Prioritize controls aligned to NIST CSF "${ranked[0].name}" first — this is where the organization is most exposed today.`,
+      color: '#dc2626'
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // PAGE 7 — RECOMMENDATIONS
+  // ═══════════════════════════════════════════════════════════════════════
+  const recs = buildRecommendations({ findings, cis_coverage, csf_scores, posture, intake });
+  if (recs.quickWins.length || recs.strategic.length) {
+    doc.addPage();
+    pdfh.renderSectionHeaderModern(doc, 'Recommendations', 'Section 06 · Prioritized Action Plan');
+
+    if (recs.quickWins.length) {
+      pdfh.renderCallout(doc, {
+        title: 'Quick wins — implement within 30 days',
+        body:  'High-impact controls that require minimal capital outlay or vendor procurement. The IT lead can typically own these within their existing licensing.',
+        color: '#16a34a'
+      });
+      pdfh.renderBulletList(doc, recs.quickWins, { bulletColor: '#16a34a' });
+      doc.moveDown(0.4);
+    }
+    if (recs.strategic.length) {
+      pdfh.renderCallout(doc, {
+        title: 'Strategic initiatives — 90 days to 6 months',
+        body:  'Larger lifts that require budget approval, vendor selection, or cross-team coordination. Stage these into the next quarterly planning cycle.',
+        color: '#1e40af'
+      });
+      pdfh.renderBulletList(doc, recs.strategic, { bulletColor: '#1e40af' });
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FINAL — DETAILED FINDINGS APPENDIX
+  // ═══════════════════════════════════════════════════════════════════════
   if (findings.length > 0) {
     doc.addPage();
-    pdfh.renderSectionHeader(doc, 'Detailed Findings');
+    pdfh.renderSectionHeaderModern(doc, 'Detailed Findings', 'Appendix A');
     findings.forEach(f => {
-      pdfh.ensureSpace(doc, 60);
+      pdfh.ensureSpace(doc, 70);
+      const top = doc.y;
+      const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+      const left = doc.page.margins.left;
+      const sev = pdfh.severityColorFor(f.inherent_risk);
+
+      // Title row with severity stripe
+      doc.rect(left, top, 4, 20).fill(sev);
       doc.fontSize(11).font('Helvetica-Bold').fillColor('#1e3a5f')
-        .text(`${f.finding_code || ''} — ${f.title}`);
-      doc.fontSize(9).font('Helvetica').fillColor('#64748b')
-        .text(`Category: ${f.category || '—'}  |  Likelihood ${f.likelihood ?? '—'} × Impact ${f.impact ?? '—'} = Risk ${f.inherent_risk ?? '—'}  |  Status: ${f.status}`);
-      doc.moveDown(0.2);
-      if (f.description) pdfh.renderTextarea(doc, 'Description', f.description);
+        .text(`${f.finding_code || ''} — ${f.title || ''}`, left + 12, top + 3, { width: pageWidth - 80 });
+      pdfh.renderSeverityBadge(doc, left + pageWidth - 60, top + 4, f.inherent_risk, 60);
+      doc.y = top + 24;
+      doc.fontSize(8).font('Helvetica').fillColor('#64748b')
+        .text(`Category: ${f.category || '—'}   ·   Likelihood ${f.likelihood ?? '?'} × Impact ${f.impact ?? '?'} = Risk ${f.inherent_risk ?? '?'}   ·   Status: ${(f.status || 'open').toUpperCase()}`,
+          left + 12, doc.y, { width: pageWidth - 12 });
+      doc.moveDown(0.3);
+      if (f.description)   pdfh.renderTextarea(doc, 'Description',    f.description);
       if (f.recommendation) pdfh.renderTextarea(doc, 'Recommendation', f.recommendation);
       const refs = Array.isArray(f.control_refs) ? f.control_refs : [];
       if (refs.length > 0) {
         const refStr = refs.map(r => `${r.framework || '?'}:${r.id || '?'}`).join(', ');
-        doc.fontSize(8).font('Helvetica-Oblique').fillColor('#64748b').text('Control refs: ' + refStr);
+        doc.fontSize(8).font('Helvetica-Oblique').fillColor('#64748b')
+          .text('Control refs: ' + refStr, left, doc.y, { width: pageWidth });
       }
-      doc.moveDown(0.4);
+      doc.moveDown(0.5);
     });
   }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // METHODOLOGY APPENDIX
+  // ═══════════════════════════════════════════════════════════════════════
+  doc.addPage();
+  pdfh.renderSectionHeaderModern(doc, 'Methodology', 'Appendix B · How this report was built');
+  doc.fontSize(9.5).font('Helvetica').fillColor('#1e293b').text(
+    'This assessment combines (1) an intake questionnaire completed by the assessor — covering organizational profile, network topology, endpoint security, account management, and data protection — and (2) a baseline against the CIS Controls v8 Implementation Group 1 (IG1) and NIST Cybersecurity Framework 2.0. Findings are scored on a 1–5 likelihood × 1–5 impact scale (CIS RAM v2.1 style) producing a 1–25 inherent-risk score normalized to a 0–9 severity band.',
+    { width: doc.page.width - doc.page.margins.left - doc.page.margins.right, align: 'justify' }
+  );
+  doc.moveDown(0.4);
+  doc.fontSize(9.5).font('Helvetica').fillColor('#1e293b').text(
+    'CSF maturity scores are computed by mapping each IG1 safeguard\'s response (yes / partial / no) to one or more CSF functions via the IG1↔CSF crosswalk, then averaging per function and normalizing to a 0–5 maturity scale. The Compliance Posture archetype is derived from the response pattern and indicates where the organization has invested compared to similar peers.',
+    { width: doc.page.width - doc.page.margins.left - doc.page.margins.right, align: 'justify' }
+  );
+  doc.moveDown(0.4);
+  pdfh.renderBulletList(doc, [
+    'CIS Controls v8 (IG1) — Center for Internet Security, www.cisecurity.org/controls/v8',
+    'NIST Cybersecurity Framework 2.0 — National Institute of Standards and Technology',
+    'CIS Risk Assessment Method (RAM) v2.1 — methodology for likelihood × impact risk scoring'
+  ]);
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // FOOTERS (after all content is drawn)
+  // ═══════════════════════════════════════════════════════════════════════
+  pdfh.renderPageFooters(doc, {
+    left:  `Clinic-in-a-Box · ${coverName} · Risk Assessment Report`,
+    right: `Report ${reportId.toUpperCase()}`
+  });
+}
+
+// Small helper — two-column key/value table
+function renderTwoColTable(doc, rows) {
+  const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  const left = doc.page.margins.left;
+  const colW = Math.floor(pageWidth / 2);
+  rows.forEach((row, i) => {
+    pdfh.ensureSpace(doc, 16);
+    const top = doc.y;
+    if (i % 2 === 1) doc.rect(left, top, pageWidth, 16).fill('#f8fafc');
+    doc.fontSize(8.5).font('Helvetica-Bold').fillColor('#64748b')
+      .text(row[0], left + 6, top + 4, { width: colW - 10 });
+    doc.fontSize(8.5).font('Helvetica').fillColor('#1e293b')
+      .text(String(row[1] ?? '—'), left + colW + 6, top + 4, { width: colW - 12 });
+    doc.y = top + 16;
+  });
+}
+
+// Pretty-print an archetype slug — "tech-mature-policy-weak" → "Tech-mature, policy-weak"
+function prettyArchetype(name) {
+  return String(name || '')
+    .split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ')
+    .replace(/Mature /g, 'mature, ').replace(/Weak /g, 'weak, ').replace(/,\s*$/, '');
+}
+
+// Build prioritized recommendations from coverage gaps + findings + posture.
+function buildRecommendations({ findings, cis_coverage, csf_scores, posture, intake }) {
+  const quickWins = [];
+  const strategic = [];
+  const access = intake?.payload?.sections?.access || {};
+  const dp = intake?.payload?.sections?.data || {};
+  const ep = intake?.payload?.sections?.endpoint || {};
+  const va = intake?.payload?.sections?.vuln_audit || {};
+
+  // Quick wins driven by intake gaps
+  if (access.mfa_coverage && access.mfa_coverage.toLowerCase().includes('exec')) {
+    quickWins.push('Extend MFA enforcement from executives to ALL accounts (CIS 6.3, 6.5) — typically a setting change in the existing identity provider.');
+  }
+  if (dp.restore_test && /never|not|none/i.test(dp.restore_test)) {
+    quickWins.push('Schedule a quarterly backup restore test (CIS 11.4) — pick a non-critical workload and document the steps.');
+  }
+  if (dp.offsite_backup && /no/i.test(dp.offsite_backup)) {
+    quickWins.push('Add an offsite backup tier (CIS 11.2) — cloud archive at the existing backup product is usually a single licensing add-on.');
+  }
+  if (ep.usb_policy && /allow/i.test(ep.usb_policy)) {
+    quickWins.push('Restrict removable-media usage on endpoints (CIS 10.3) via existing EDR / GPO; allow-list specific business uses.');
+  }
+  if (va.siem && /none/i.test(va.siem)) {
+    quickWins.push('Enable centralized log forwarding to a free-tier SIEM (Wazuh, Elastic Cloud trial) for at least firewall + EDR + auth events (CIS 8.1–8.3).');
+  }
+
+  // Strategic from coverage thresholds
+  if (cis_coverage.score < 50) {
+    strategic.push('Run a 90-day IG1 uplift sprint: target the top 10 unmet safeguards (Appendix A) with named owners and weekly status review.');
+  }
+  if ((csf_scores.RS || 0) < 2.5) {
+    strategic.push('Stand up a documented incident response plan + run one tabletop exercise per quarter (CSF Respond function below threshold).');
+  }
+  if ((csf_scores.RC || 0) < 2.5 || (csf_scores.DE || 0) < 2.5) {
+    strategic.push('Consider managed detection & response (MDR) service to lift Detect + Recover function maturity without hiring a SOC team.');
+  }
+  if (posture && posture.name === 'policy-strong-tech-weak') {
+    strategic.push('Translate existing policy documents into enforced technical controls (Intune/Jamf baselines, GPO, conditional-access policies).');
+  }
+  if (posture && posture.name === 'tech-mature-policy-weak') {
+    strategic.push('Document current technical controls into formal policy with assigned ownership (board-level approval; annual review cadence).');
+  }
+  // Per-critical-finding rec
+  const crits = findings.filter(f => Number(f.inherent_risk || 0) >= 7);
+  if (crits.length > 0) {
+    strategic.push(`Treat the ${crits.length} critical-risk finding${crits.length > 1 ? 's' : ''} (Appendix A) as the top board-reported KPIs for the next two quarters.`);
+  }
+
+  return { quickWins, strategic };
 }
 
 function embedChart(doc, base64png, height) {

@@ -35,15 +35,86 @@ function hashStr(s, salt = '') {
   return h;
 }
 
+// ─── Per-profile compliance posture archetypes ────────────────────────────
+// Two SMBs at the same maturity level rarely have identical compliance
+// profiles. Real-world variance comes from "what we invested in" — one shop
+// has great backups but no MFA, another has mature policy but weak endpoint
+// security. Each AI-generated profile picks ONE archetype hashed from
+// run_id, which shifts scores per control family. Result: meaningfully
+// different IG1 distributions even at the same maturity baseline.
+
+const POSTURE_ARCHETYPES = [
+  {
+    name: 'backup-mature',
+    description: 'Invested heavily in data recovery after a past incident; less on identity.',
+    shifts: { 11: +30, 3: +20, 10: +5,  5: -15, 6: -15, 14: -5,  17: -10 }
+  },
+  {
+    name: 'identity-focused',
+    description: 'Strong MFA + access management; backups and incident response lag.',
+    shifts: { 5: +25, 6: +25, 14: +5,  11: -15, 17: -15, 8: -10 }
+  },
+  {
+    name: 'endpoint-heavy',
+    description: 'Big EDR + patching investment; weaker on policy and recovery.',
+    shifts: { 10: +25, 4: +20, 7: +20, 2: +10, 14: -15, 17: -15, 11: -5 }
+  },
+  {
+    name: 'compliance-mature',
+    description: 'Audit-driven shop with policies and training but uneven tech controls.',
+    shifts: { 14: +25, 15: +25, 17: +20, 1: +10, 5: +5,  10: -10, 13: -15 }
+  },
+  {
+    name: 'tech-mature-policy-weak',
+    description: 'Engineers built solid technical controls; nobody wrote the policy down.',
+    shifts: { 1: +15, 2: +15, 4: +15, 10: +20, 11: +10, 14: -20, 15: -20, 17: -15 }
+  },
+  {
+    name: 'policy-strong-tech-weak',
+    description: 'Lots of binder policies + training; thin operational tooling.',
+    shifts: { 14: +20, 15: +20, 17: +15, 8: +5,  10: -15, 13: -20, 1: -10, 4: -10 }
+  },
+  {
+    name: 'uneven-chaotic',
+    description: 'Inconsistent posture — strong in some unexpected places, weak in others.',
+    // No fixed shifts — computed per-safeguard from run_id hash, ±25 swings.
+    shifts: '__uneven__'
+  },
+  {
+    name: 'balanced',
+    description: 'Even posture across the board; no standout strengths or weaknesses.',
+    shifts: {} // baseline-only
+  }
+];
+
+function pickPostureArchetype(runId) {
+  const idx = hashStr(runId, 'posture') % POSTURE_ARCHETYPES.length;
+  return POSTURE_ARCHETYPES[idx];
+}
+
+// Return the per-control shift for an archetype. For 'uneven-chaotic', the
+// shift is computed per-control from run_id hash so different controls get
+// different swings within the same profile.
+function archetypeShiftFor(archetype, controlNum, runId) {
+  if (archetype.shifts === '__uneven__') {
+    const h = hashStr(runId, 'unevenctrl' + controlNum) % 100;
+    // Maps 0..99 → -25..+25
+    return Math.round(((h / 99) * 50) - 25);
+  }
+  return archetype.shifts[String(controlNum)] || 0;
+}
+
 // Pick between three answers based on a numeric score (0-100).
-// Score-based makes answers more nuanced than binary thresholds.
+// Wider partial band squeezed (was 25-75, now 35-65) so genuine yes/no
+// answers happen more often than partial.
 function scoreToAnswer(score, runId, safeguardNum) {
-  if (score >= 75) return 'yes';
-  if (score <= 25) return 'no';
-  // 26-74 → partial, but pull some toward yes/no by hash for variety
+  if (score >= 70) return 'yes';
+  if (score <= 30) return 'no';
+  // 31-69 → mostly partial, but hash-driven pull toward yes/no for variety.
+  // Higher pull-rate (was 35%, now 50%) so more answers escape the partial bucket.
   const tieBreak = hashStr(runId, 'ig1' + safeguardNum) % 100;
-  if (score >= 60 && tieBreak < 35) return 'yes';
-  if (score <= 40 && tieBreak < 35) return 'no';
+  if (score >= 55 && tieBreak < 50) return 'yes';
+  if (score <= 45 && tieBreak < 50) return 'no';
   return 'partial';
 }
 
@@ -52,14 +123,14 @@ function maturityBaseline(maturity) {
   const m = String(maturity || '').toLowerCase();
   if (m.includes('high'))       return 70;
   if (m.includes('low'))        return 25;
-  return 45; // intermediate / default
+  return 48; // intermediate / default — pushed slightly above the 'partial' floor
 }
 
 // Look up answer for a specific safeguard given profile state.
 // Returns { answer, evidence } — evidence is a short note a student can read.
 function deriveSafeguard(sg, ctx) {
-  const { maturity, it, net, weaknessTexts, vendorFlavor, runId } = ctx;
-  const base = maturityBaseline(maturity);
+  const { maturity, it, net, weaknessTexts, vendorFlavor, runId, archetype } = ctx;
+  const base = maturityBaseline(maturity) + archetypeShiftFor(archetype, sg.control, runId);
   const num  = sg.num;
 
   // Helper: does any deliberate_weakness text mention this safeguard's
@@ -338,7 +409,8 @@ function deriveIg1Baseline(combinedPayloads, runId = '') {
     ...(combinedPayloads?.profiles?.governance_and_policy?.deliberate_weaknesses || [])
   ].map(String);
 
-  const ctx = { maturity, it, net, weaknessTexts, vendorFlavor, runId };
+  const archetype = pickPostureArchetype(runId);
+  const ctx = { maturity, it, net, weaknessTexts, vendorFlavor, runId, archetype };
   const answers = {};
   const notes   = {};
   let yes = 0, partial = 0, no = 0;
@@ -355,7 +427,13 @@ function deriveIg1Baseline(combinedPayloads, runId = '') {
   const total = ig1.safeguards.length;
   const coveragePct = Math.round(((yes + (partial * 0.5)) / total) * 100);
 
-  return { answers, notes, coverage_pct: coveragePct, totals: { yes, partial, no, total } };
+  return {
+    answers,
+    notes,
+    coverage_pct: coveragePct,
+    totals: { yes, partial, no, total },
+    posture: { name: archetype.name, description: archetype.description }
+  };
 }
 
 module.exports = { deriveIg1Baseline, deriveSafeguard, loadIg1 };

@@ -804,25 +804,47 @@
       };
 
       // Real progress: tag the request with a progress_id, poll the server
-      // every 1.2s for actual step + percent updates while generation runs.
+      // every 1s for actual step + percent updates while generation runs.
       const progressId = (crypto.randomUUID ? crypto.randomUUID()
         : Date.now().toString(36) + Math.random().toString(36).slice(2));
       config.progress_id = progressId;
 
+      const token = localStorage.getItem('token') || '';
+      const pollUrl = `/api/profiles/run-status/${progressId}`;
+      console.log('[generator] polling', pollUrl, 'token?', !!token);
+
       let polling = true;
+      let pollCount = 0;
       const poll = async () => {
         if (!polling) return;
+        pollCount++;
         try {
-          const s = await API.request(`/profiles/run-status/${progressId}`);
-          if (s) {
+          const r = await fetch(pollUrl, {
+            method: 'GET',
+            headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
+            credentials: 'include'
+          });
+          if (r.status === 200) {
+            const s = await r.json();
+            if (pollCount <= 3 || s.step === 'complete' || s.step === 'error') {
+              console.log('[generator] poll #' + pollCount, s.step, s.percent + '%', s.message);
+            }
             fill.style.width = `${Math.max(s.percent || 0, 1)}%`;
             status.textContent = s.message || s.step || 'Working…';
             if (s.step === 'complete' || s.step === 'error') return;
+          } else if (r.status === 404) {
+            // entry not created yet — keep waiting
+            if (pollCount <= 3) console.log('[generator] poll #' + pollCount, '404 (server not started yet)');
+          } else {
+            console.warn('[generator] poll #' + pollCount, 'HTTP', r.status);
           }
-        } catch (e) { /* 404 before server starts processing, or transient — keep polling */ }
-        setTimeout(poll, 1200);
+        } catch (e) {
+          console.warn('[generator] poll #' + pollCount, 'fetch error:', e.message);
+        }
+        setTimeout(poll, 1000);
       };
-      poll();
+      // Delay the first poll briefly so the POST has a head start.
+      setTimeout(poll, 400);
 
       try {
         const result = await API.generate(config);

@@ -161,6 +161,13 @@
           <div class="cra-pane active" id="pane-overview">
             <div class="cra-grid cols-4" id="overviewStats"></div>
 
+            <!-- Compliance posture callout — populated by JS from intake._meta.posture -->
+            <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:#eff6ff; border-left:4px solid #1e40af;">
+              <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:#1e40af; text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
+              <div style="font-size:1.05rem; font-weight:600; color:#1e293b; margin-top:4px;" id="postureTitle"></div>
+              <div style="font-size:0.85rem; color:#64748b; margin-top:4px;" id="postureBody"></div>
+            </div>
+
             <div class="cra-grid cols-2" style="margin-top:16px">
               <div class="cra-card">
                 <h3>Risk Heat Map (inherent)</h3>

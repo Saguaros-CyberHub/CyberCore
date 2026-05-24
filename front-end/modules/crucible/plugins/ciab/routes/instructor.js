@@ -1426,6 +1426,36 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
         } catch (intakeErr) {
           console.error('[Examples] Failed to store intake form:', intakeErr.message);
         }
+
+        // Auto-complete the Clinic Risk Assessment so the instructor has
+        // a true answer key (findings + CIS RAM scoring + exec summary +
+        // CSF maturity) to compare against students' work.
+        try {
+          const { pool } = require('../utils/db');
+          // The unified intakes row is what the CRA tool reads from. It was
+          // seeded at profile-generation time (see ciab/ai/profile/index.js).
+          // We load it here to get the IG1 answers + posture archetype.
+          const intakeQ = await pool.query(
+            `SELECT payload FROM intakes WHERE profile_id = $1 ORDER BY created_at DESC LIMIT 1`,
+            [profile_id]
+          );
+          const intakePayload = intakeQ.rows[0]?.payload;
+          if (!intakePayload || !intakePayload.sections?.ig1) {
+            console.warn('[Examples] Skipping answer-key risk assessment — no v11 intake found for profile', profile_id);
+          } else {
+            const { generateInstructorAnswerKeyRiskAssessment } = require('../utils/answer-key-risk-assessment');
+            const r = await generateInstructorAnswerKeyRiskAssessment({
+              profileId: profile_id,
+              userId: instructorId,
+              profileData: fullProfileData,
+              intakePayload,
+              pool
+            });
+            console.log(`[Examples] Answer-key risk assessment populated for instructor: ${r.findings_inserted} findings, ${r.cis_ram_rows_inserted} CIS RAM rows, CSF avg ${(Object.values(r.csf_scores).reduce((s,v)=>s+v,0)/6).toFixed(1)}/5, posture: ${r.posture?.name || 'unknown'}`);
+          }
+        } catch (raErr) {
+          console.error('[Examples] Failed to populate answer-key risk assessment:', raErr.message);
+        }
       } catch (err) {
         console.error('[Examples] Background generation failed:', err.message);
       } finally {

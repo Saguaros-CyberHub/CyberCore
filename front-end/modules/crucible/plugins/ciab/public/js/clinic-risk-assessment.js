@@ -269,6 +269,22 @@
         <div class="hint">${c.hint}</div>
       </div>
     `).join('');
+
+    // Compliance posture callout (only when intake._meta.posture is present)
+    const posture = b.intake?.payload?._meta?.posture;
+    const calloutEl = document.getElementById('postureCallout');
+    if (calloutEl) {
+      if (posture && posture.name) {
+        const pretty = String(posture.name)
+          .split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1)).join(' ');
+        document.getElementById('postureTitle').textContent = pretty;
+        document.getElementById('postureBody').textContent =
+          posture.description || 'Distinct compliance pattern detected for this profile.';
+        calloutEl.style.display = '';
+      } else {
+        calloutEl.style.display = 'none';
+      }
+    }
   }
 
   // === ECharts helpers ===

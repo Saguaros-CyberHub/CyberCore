@@ -477,7 +477,8 @@ function buildIntakeV11Payload(combinedPayloads) {
       generated_at:    new Date().toISOString(),
       source:          'ai_profile_prefill_v11',
       ig1_coverage_pct: ig1Result.coverage_pct,
-      ig1_totals:      ig1Result.totals
+      ig1_totals:      ig1Result.totals,
+      posture:         ig1Result.posture || null
     }
   };
 }
