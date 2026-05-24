@@ -511,6 +511,25 @@ async function cleanupTempTemplates(tempTemplateIds, originalGatewayVmid, groupN
   }));
 }
 
+// ─── CIAB-local agent shell exec ───────────────────────────────────────────
+// Proxmox's /agent/exec endpoint takes `command` as the EXECUTABLE PATH (not
+// a shell line) and an optional `input-data` for stdin. The shared agentExec
+// in src/utils/script-executor.js is designed for the Windows path
+// (command='powershell.exe' + input-data=<script>). For Linux shell commands
+// we need to invoke /bin/sh and feed the command on stdin — otherwise
+// Proxmox tries to exec a literal binary named "mkdir -p /var/www/html"
+// and returns 596.
+async function agentShellExec(node, vmId, shellCmd) {
+  console.log(`[AgentShellExec] sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
+  const result = await proxmoxAPI('POST',
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+    { command: 'sh', 'input-data': shellCmd }
+  );
+  const pid = result?.pid;
+  if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
+  return { pid };
+}
+
 // ─── Vuln-app installer execution ──────────────────────────────────────────
 // Writes source_tree files via QEMU guest agent, then runs install_script.
 async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }) {
@@ -521,7 +540,7 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
   console.log(`${logTag} Installing vuln app on ${vmName} (mode=${mode}, dir=${targetDir})`);
 
   try {
-    await agentExec(node, vmId, `mkdir -p ${targetDir}`);
+    await agentShellExec(node, vmId, `mkdir -p ${targetDir}`);
 
     if (source_tree && typeof source_tree === 'object') {
       for (const [relPath, content] of Object.entries(source_tree)) {
@@ -535,8 +554,8 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
       await guestFileWrite(node, vmId, `${targetDir}/Dockerfile`, dockerfile);
     }
 
-    // Run install_script inline via agentExec → poll until exit
-    const exec = await agentExec(node, vmId, install_script);
+    // Run install_script inline via sh on stdin → poll until exit
+    const exec = await agentShellExec(node, vmId, install_script);
     const pid = exec && (exec.pid || (exec.result && exec.result.pid));
     if (pid) {
       const result = await pollExecStatus(node, vmId, pid, 15 * 60 * 1000);
@@ -883,9 +902,10 @@ async function deployOneLaneFromSpec({
                 ...hostsEntries.map(e => `${e.ip}\t${e.hostnames.join(' ')}`),
                 '# === end CIAB block ==='
               ].join('\n');
-              // tee -a is the safest way to append via guest agent (no shell quoting nightmare)
-              const cmd = `bash -c "cat <<'CIAB_HOSTS_EOF' >> /etc/hosts\n${block}\nCIAB_HOSTS_EOF"`;
-              await agentExec(targetNode, attackBoxVmId, cmd);
+              // Append the block to /etc/hosts via sh on stdin (agentShellExec
+              // feeds the whole script to /bin/sh, no quoting required).
+              const cmd = `cat >> /etc/hosts <<'CIAB_HOSTS_EOF'\n${block}\nCIAB_HOSTS_EOF\n`;
+              await agentShellExec(targetNode, attackBoxVmId, cmd);
               console.log(`${logTag} Injected ${hostsEntries.length} /etc/hosts entries on Kali (lane ${vxlanId})`);
             }
           } else {

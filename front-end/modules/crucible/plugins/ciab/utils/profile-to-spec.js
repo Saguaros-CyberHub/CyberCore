@@ -209,13 +209,19 @@ function synthesizeSpecFromProfile({
       continue;
     }
 
-    // Resolve post-clone scripts for each declared service. Always include any
-    // 'init-setup' bootstrap if the catalog has one — keeps deployed VMs in a
-    // predictable baseline state before service-specific layers go on top.
+    // Resolve post-clone scripts for each declared service. Include the
+    // 'init-setup' bootstrap only if its os_target matches the VM's os_family
+    // (init-setup is currently Windows-only PowerShell; running it on a Linux
+    // VM 596's on every agent/exec call because powershell doesn't exist).
     const postCloneScripts = [];
     const seenSlugs = new Set();
 
-    const bootstrap = vulnScriptCatalog.find(r => r.slug === 'init-setup' && r.is_active !== false);
+    const lc = s => String(s || '').trim().toLowerCase();
+    const bootstrap = vulnScriptCatalog.find(r =>
+      r.slug === 'init-setup'
+      && r.is_active !== false
+      && (!r.os_target || lc(r.os_target) === lc(os_family) || lc(r.os_target) === 'any')
+    );
     if (bootstrap) {
       postCloneScripts.push(bootstrap.slug);
       seenSlugs.add(bootstrap.slug);
