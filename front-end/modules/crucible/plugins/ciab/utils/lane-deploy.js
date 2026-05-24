@@ -543,12 +543,20 @@ async function agentShellExec(node, vmId, shellCmd) {
       return { pid };
     } catch (err) {
       lastErr = err;
-      // Retry only on transient agent failures (596 / connection-level). Hard
-      // application errors (403, 404, 500 with body) shouldn't be retried.
-      const transient = /failed \(596\)/.test(err.message) || /ECONNRESET|ETIMEDOUT|socket hang up/.test(err.message);
+      // Retry on agent transient failures. Broadened the match to catch any
+      // 596-ish status — sometimes the error message format varies. Also log
+      // the full message on first failure so we can see exactly what's coming
+      // back if the regex still doesn't match.
+      const msg = String(err && err.message || err);
+      const transient = /\(596\)/.test(msg)
+        || /\b596\b/.test(msg)
+        || /ECONNRESET|ETIMEDOUT|socket hang up|EPIPE/.test(msg);
+      if (attempt === 1) {
+        console.warn(`[AgentShellExec] vm=${vmId} attempt 1 raw error (transient=${transient}): ${msg.substring(0, 200)}`);
+      }
       if (!transient || attempt === 5) throw err;
       const delayMs = 2000 * attempt;  // 2s, 4s, 6s, 8s
-      console.warn(`[AgentShellExec] vm=${vmId} attempt ${attempt} got transient error, retrying in ${delayMs/1000}s: ${err.message.substring(0, 120)}`);
+      console.warn(`[AgentShellExec] vm=${vmId} attempt ${attempt} got transient error, retrying in ${delayMs/1000}s`);
       await new Promise(r => setTimeout(r, delayMs));
     }
   }
