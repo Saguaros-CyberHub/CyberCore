@@ -54,6 +54,18 @@ HARD CONSTRAINTS — every design MUST:
 2. Have 4–7 pages total, with at least 2 public-facing and at least 1 admin-only.
    (Fewer pages = faster generation + fits inside Tier-1 LLM rate limits. Make each
    page do MORE rather than cramming everything into 10 thin pages.)
+2a. ALWAYS include the language's manifest file as the FIRST entry in page_inventory:
+    - Node.js → 'package.json' (purpose: 'npm dependencies + start script')
+    - Python → 'requirements.txt' (purpose: 'pip dependencies pinned')
+    - PHP → 'composer.json' OR a comment that vanilla PHP runs without one
+    Without this, the docker build fails at "npm install" / "pip install" and
+    the lab won't start. The manifest counts as a page; the 4-7 budget includes it.
+2b. ONLY use docker base images CIAB pre-bakes onto every web template:
+      node:20-alpine, python:3-slim, php:8.2-apache, nginx:alpine, ruby:3-alpine
+    Pick the one matching primary_language. The lane subnet has NO outbound
+    internet — any other FROM stanza will fail at build time because the
+    registry isn't reachable. Reflect this choice in tech_stack (e.g. say
+    'Node.js 20 + Express + SQLite' for Node, not 'Node.js 16').
 3. Have a 3–5 stage attack chain. Each stage MUST yield concrete progress (flag, credential, file, shell).
 4. PICK VULN TYPES OUTSIDE THE OWASP TOP-10 CORE WHEN POSSIBLE. Encourage variety. Examples — pick freely, don't reuse the same chain across companies:
    - SSTI (Jinja2, Twig, Handlebars), XXE in XML uploaders, deserialization (PHP unserialize, Python pickle, Node serialize), prototype pollution

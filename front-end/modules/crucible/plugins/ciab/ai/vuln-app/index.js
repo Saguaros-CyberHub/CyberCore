@@ -30,7 +30,10 @@ const {
 // the first ~15 seconds and the rest get 429'd. Default 2 keeps us within
 // Tier-1 limits; admins on higher tiers can bump this via env var.
 const VULN_APP_FILE_CONCURRENCY = parseInt(process.env.CIAB_VULN_APP_FILE_CONCURRENCY, 10) || 2;
-const VULN_APP_FILE_MAX_TOKENS  = parseInt(process.env.CIAB_VULN_APP_FILE_MAX_TOKENS,  10) || 4096;
+// 4096 was truncating files mid-line. 8192 is Sonnet's default ceiling and
+// fits even the larger pages (auth + dashboard with inline CSS). Override
+// via env if you start hitting it again.
+const VULN_APP_FILE_MAX_TOKENS  = parseInt(process.env.CIAB_VULN_APP_FILE_MAX_TOKENS,  10) || 8192;
 
 // ─── Stage 1: design the app ───────────────────────────────────────────────
 
@@ -79,11 +82,27 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
     if (!fileSpec || !fileSpec.content || typeof fileSpec.content !== 'string') {
       return { ok: false, error: 'no content field in file-gen response' };
     }
+    // Detect truncation — LLM hit max_tokens mid-code. Common tells:
+    //   - stop_reason='max_tokens' from the response
+    //   - content ends mid-line / mid-token (no closing brace, ends in :, ;, or whitespace)
+    //   - unbalanced braces or parens
+    const stopReason = r.value.stop_reason || (r.value.value && r.value.value.stop_reason);
+    const c = fileSpec.content;
+    const lastLine = c.split('\n').pop().trim();
+    const looksTruncated =
+      stopReason === 'max_tokens' ||
+      // Ends with a partial token (no proper terminator)
+      /[:,;=({[]\s*$/.test(c) ||
+      // Balance check: |{| should be >= |}| but if they're very off, likely cut
+      Math.abs((c.match(/\{/g) || []).length - (c.match(/\}/g) || []).length) > 2;
+    if (looksTruncated) {
+      return { ok: false, error: `file looks truncated (stop=${stopReason}, last line: "${lastLine.slice(0,60)}")` };
+    }
     return {
       ok: true,
       file: {
         path: fileSpec.path || page.path,
-        content: fileSpec.content,
+        content: c,
         vuln_notes: fileSpec.vuln_notes || null,
         vuln_role: page.vuln_role || 'none'
       },

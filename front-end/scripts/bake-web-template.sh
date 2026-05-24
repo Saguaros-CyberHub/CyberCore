@@ -182,6 +182,19 @@ write_files:
       # guest-file-* RPCs to install the vuln-app on first boot.
       DAEMON_ARGS=""
 
+  # DNS fallback. Debian cloud images' resolvconf/dhclient sometimes races
+  # and leaves /etc/resolv.conf empty on first boot — even though DHCP IS
+  # delivering DNS info. resolvconf reads /etc/resolvconf/resolv.conf.d/head
+  # first when building /etc/resolv.conf, so seeding public resolvers here
+  # guarantees the VM always has working DNS regardless of DHCP timing.
+  # Lane-gateway DNS (10.40.x.1) still gets prepended by dhclient when it
+  # works; this is the safety net.
+  - path: /etc/resolvconf/resolv.conf.d/head
+    permissions: '0644'
+    content: |
+      nameserver 1.1.1.1
+      nameserver 8.8.8.8
+
   # Disable Apache's default vhost so CIAB's install_script can drop its own
   # files into /var/www/html without conflicting. Apache stays enabled but
   # serves an empty document root at boot (a lane that doesn't install a
@@ -237,6 +250,9 @@ runcmd:
 
   # ---- Restart qemu-guest-agent so the cleared blacklist takes effect ----
   - [ systemctl, restart, qemu-guest-agent ]
+
+  # ---- Refresh resolv.conf so the new resolvconf/head takes effect ----
+  - [ sh, -c, 'command -v resolvconf >/dev/null && resolvconf -u || true' ]
 
   # ---- Pre-seal sanity ----
   - [ sh, -c, 'systemctl is-enabled qemu-guest-agent && echo "GUEST_AGENT_ENABLED=yes" >> /etc/cybercore-bake.env || echo "GUEST_AGENT_ENABLED=no" >> /etc/cybercore-bake.env' ]

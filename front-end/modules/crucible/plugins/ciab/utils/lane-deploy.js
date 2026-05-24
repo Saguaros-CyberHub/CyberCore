@@ -1012,12 +1012,37 @@ async function deployOneLaneFromSpec({
         if (!ready) {
           console.warn(`${logTag} Agent exec never became ready on ${dvm.name} after 180s — skipping vuln-app install`);
         } else {
-          await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
-                      [jobId, `Installing vuln app on ${dvm.name} (${vulnAppInstall.mode})`]);
-          const appResult = await installVulnAppOnVM({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
-                                                       vulnAppInstall, logTag });
+          // Outer-level retry — even if agentShellExec's internal retry
+          // doesn't fire (e.g. stale container), retry the WHOLE install
+          // up to 3 times. The agent often goes from "ready" to 596 between
+          // back-to-back calls; a small delay between attempts gives the
+          // QMP channel time to recover.
+          let appResult = { success: false };
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            await query(`UPDATE ciab_profile_lane_jobs SET phase_detail=$2 WHERE id=$1`,
+                        [jobId, `Installing vuln app on ${dvm.name} (${vulnAppInstall.mode}) [attempt ${attempt}/3]`]);
+            appResult = await installVulnAppOnVM({ node: dvm.node, vmId: dvm.vm_id, vmName: dvm.name,
+                                                   vulnAppInstall, logTag });
+            if (appResult.success || appResult.skipped) break;
+            // Retry only on transient agent errors. Hard application failures
+            // (install script exited non-zero) shouldn't keep retrying.
+            const transient = /\(596\)|\b596\b|ECONNRESET|ETIMEDOUT|socket hang up|EPIPE/.test(String(appResult.error || ''));
+            if (!transient) {
+              console.warn(`${logTag} Vuln app install failed on ${dvm.name} (non-transient, not retrying): ${appResult.error}`);
+              break;
+            }
+            if (attempt < 3) {
+              const waitMs = 10000 * attempt;
+              console.warn(`${logTag} Vuln app install attempt ${attempt}/3 hit transient agent error (${appResult.error?.substring(0, 100)}); waiting ${waitMs/1000}s before retry`);
+              await new Promise(r => setTimeout(r, waitMs));
+              // Re-probe the exec channel before the next attempt
+              await waitForAgentExecReady(dvm.node, dvm.vm_id, logTag, 60000);
+            }
+          }
           if (!appResult.success && !appResult.skipped) {
-            console.warn(`${logTag} Vuln app install failed on ${dvm.name}: ${appResult.error}`);
+            console.warn(`${logTag} ✗ Vuln app install gave up on ${dvm.name} after 3 attempts: ${appResult.error}`);
+          } else if (appResult.success) {
+            console.log(`${logTag} ✓ Vuln app installed on ${dvm.name}`);
           }
         }
       }
