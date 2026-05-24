@@ -330,9 +330,23 @@ async function resolveVnets(vxlanId, subnetScheme) {
 }
 
 // ─── Auto-provision SDN zone + VNets for the batch ────────────────────────
-// Mirrors the auto-provision logic in front-end/src/routes/admin/lab-networks.js
-// (single-lane create flow). Called once per batch before the per-lane
-// resolveVnets loop, so we don't race N parallel zone/vnet creates.
+// Proxmox VNet IDs must be ≤8 alphanumeric chars (no hyphens), so we use the
+// same base-20 encoding as front-end/src/routes/lab-templates.js for the VNet
+// names. Zone names follow the same 8-char alphanumeric rule.
+// Called once per batch before the per-lane resolveVnets loop, so we don't
+// race N parallel zone/vnet creates.
+const VNET_NAME_ALPHABET = 'abcdefghij0123456789';  // 20 chars, letters first
+function encodeVnetName(n) {
+  if (n === 0) return 'aaaaaaaa';
+  let s = '';
+  let x = n;
+  while (x > 0) {
+    s = VNET_NAME_ALPHABET[x % 20] + s;
+    x = Math.floor(x / 20);
+  }
+  return s.padStart(8, 'a');
+}
+
 async function ensureSdnZoneAndVnets({ vxlanIds, subnetScheme, challengeKey, logTag }) {
   const tag = logTag || 'CIAB Deploy';
   const requiredTags = new Set();
@@ -346,11 +360,12 @@ async function ensureSdnZoneAndVnets({ vxlanIds, subnetScheme, challengeKey, log
   const missingTags = [...requiredTags].filter(t => !existingTags.has(t));
   if (missingTags.length === 0) return;
 
-  // Derive zone abbreviation from challenge_key (strip non-alphanumeric, 8 chars max)
-  const zoneAbbrev = (challengeKey || 'ciabprof')
+  // Zone name: 8-char alphanumeric, derived from challenge_key. Strip dashes,
+  // truncate, lowercase. ('ciab-profile-abc12345' → 'ciabprof')
+  const zoneAbbrev = ((challengeKey || 'ciabprof')
     .replace(/[^a-z0-9]/gi, '')
     .substring(0, 8)
-    .toLowerCase() || 'ciabprof';
+    .toLowerCase()) || 'ciabprof';
 
   // Create zone if missing
   const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
@@ -369,9 +384,9 @@ async function ensureSdnZoneAndVnets({ vxlanIds, subnetScheme, challengeKey, log
     });
   }
 
-  // Create missing VNets
+  // Create missing VNets — base-20 encoded name (matches lab-templates.js)
   for (const vxTag of missingTags) {
-    const vnetName = `${zoneAbbrev}-${vxTag}`;
+    const vnetName = encodeVnetName(vxTag);
     console.log(`[${tag}] Creating VNet '${vnetName}' (tag=${vxTag}, zone=${zoneAbbrev})`);
     await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
       vnet: vnetName,
