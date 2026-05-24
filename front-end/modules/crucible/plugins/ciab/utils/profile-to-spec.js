@@ -156,6 +156,9 @@ function synthesizeSpecFromProfile({
   const templateMisses = [];
   let webServerVmName = null;
 
+  // Per-VM offsets follow admin's canonical convention: 600000 + idx * 10000.
+  // See front-end/public/admin.html:4275, front-end/migrations/009_multi_vm_support.sql,
+  // and modules/.../real-client-intake.js:512 — they all use this formula.
   for (const asset of selected) {
     const { os_family, os_version } = parseOs(asset.os);
 
@@ -224,7 +227,7 @@ function synthesizeSpecFromProfile({
       template_vmid: match.template_vmid,
       template_node: match.node || templateNode,
       type: inferVmType(match),
-      vm_offset: 600000,
+      vm_offset: 600000 + vms.length * 10000,
       role: asset.role,
       os_family,
       os_version,
@@ -262,7 +265,7 @@ function synthesizeSpecFromProfile({
         template_vmid: 1003,             // base Ubuntu per vm_template_catalog seed
         template_node: templateNode,
         type: 'qemu',
-        vm_offset: 600000,
+        vm_offset: 600000 + vms.length * 10000,
         role: 'server',
         os_family: 'linux',
         services: ['80/HTTP'],
