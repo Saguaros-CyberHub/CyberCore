@@ -195,7 +195,11 @@ function synthesizeSpecFromProfile({
       continue;
     }
 
-    const match = resolveTemplate({ os_family, os_version, role: asset.role }, vmTemplateCatalog);
+    // For web servers, pass role='web' so the resolver picks a template whose
+    // role_hints contains 'web' (e.g. 1005 Debian-web) deterministically,
+    // instead of falling back to the most-recent generic Linux template.
+    const resolverRole = isWebServer(asset) ? 'web' : asset.role;
+    const match = resolveTemplate({ os_family, os_version, role: resolverRole }, vmTemplateCatalog);
     if (!match) {
       templateMisses.push({
         hostname: asset.hostname,
