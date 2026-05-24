@@ -265,10 +265,13 @@ async function runProfileDeploy(opts) {
   for (let i = 0; i < vxlanIds.length; i++) {
     const vxlanId = vxlanIds[i];
     const laneName = `ciab-${finalGroupName.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30)}-${i + 1}`;
+    // NOTE: cybercore_lane.lane_group_id FKs to crucible_lane_group (a different
+    // table from ciab_profile_lane_groups). We don't create rows there, so we
+    // leave the column NULL; the CIAB group linkage lives in config.group_id.
     const laneInsert = await cybercoreQuery(
       `INSERT INTO cybercore_lane
-         (user_id, vxlan_id, name, status, config, module_key, challenge_id, lane_group_id, created_at, updated_at)
-       VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, $6, NOW(), NOW())
+         (user_id, vxlan_id, name, status, config, module_key, challenge_id, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, NOW(), NOW())
        RETURNING lane_id`,
       [
         userId, vxlanId, laneName,
@@ -278,8 +281,7 @@ async function runProfileDeploy(opts) {
           profile_lane_group: true,
           group_id: groupId
         }),
-        challengeId,
-        groupId
+        challengeId
       ]
     );
     const laneId = laneInsert.rows[0].lane_id;
@@ -519,15 +521,17 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       const vxlanId = vxlanIds[i];
       const laneIndex = startIndex + i + 1;
       const laneName = `ciab-${baseGroupName.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30)}-${laneIndex}`;
+      // See note in runProfileDeploy — lane_group_id FKs to crucible_lane_group,
+      // which CIAB does not populate. Group linkage lives in config.group_id.
       const laneInsert = await cybercoreQuery(
         `INSERT INTO cybercore_lane
-           (user_id, vxlan_id, name, status, config, module_key, challenge_id, lane_group_id, created_at, updated_at)
-         VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, $6, NOW(), NOW())
+           (user_id, vxlan_id, name, status, config, module_key, challenge_id, created_at, updated_at)
+         VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, NOW(), NOW())
          RETURNING lane_id`,
         [
           req.user.userId, vxlanId, laneName,
           JSON.stringify({ challenge_id: reservation.challenge_id, challenge_key: challengeKey, profile_lane_group: true, group_id: groupId }),
-          reservation.challenge_id, groupId
+          reservation.challenge_id
         ]
       );
       const laneId = laneInsert.rows[0].lane_id;
