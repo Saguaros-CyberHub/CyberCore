@@ -733,11 +733,11 @@
   </div>
 
   <!-- Workstations: deploy confirmation modal -->
-  <div id="wksDeployModal" class="modal-overlay" onclick="if(event.target===this)document.getElementById('wksDeployModal').classList.remove('active')">
+  <div id="wksDeployModal" class="modal-overlay" onclick="if(event.target===this&&!document.getElementById('wksDeploySubmitBtn').disabled)document.getElementById('wksDeployModal').classList.remove('active')">
     <div class="modal-dialog" style="max-width:460px;">
       <div class="modal-header">
         <h3 class="modal-title">Deploy Workstation</h3>
-        <button class="modal-close" onclick="document.getElementById('wksDeployModal').classList.remove('active')">✕</button>
+        <button class="modal-close" onclick="if(!document.getElementById('wksDeploySubmitBtn').disabled)document.getElementById('wksDeployModal').classList.remove('active')">✕</button>
       </div>
       <div class="modal-body">
         <p>Clone and start <strong id="wksDeployModalName"></strong> as your workstation VM?</p>
@@ -758,7 +758,7 @@
 
         <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1.25rem;">
           <button class="btn btn-outline btn-sm"
-                  onclick="document.getElementById('wksDeployModal').classList.remove('active')">Cancel</button>
+                  onclick="if(!document.getElementById('wksDeploySubmitBtn').disabled)document.getElementById('wksDeployModal').classList.remove('active')">Cancel</button>
           <button id="wksDeploySubmitBtn" class="btn btn-primary btn-sm"
                   onclick="Workstations.submitDeploy()">Deploy</button>
         </div>
