@@ -11,24 +11,25 @@ const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const instructorOnly = requireRole('instructor', 'admin');
 
 /**
- * GET /api/cle/vm-templates — List available VM templates
+ * GET /api/cle/templates/vm — List available workstation VM templates
  */
 router.get('/vm', instructorOnly, async (req, res) => {
   try {
-    const templatesResult = await cybercoreQuery(`
+    const result = await cybercoreQuery(`
       SELECT
-        template_id,
-        name,
-        role,
-        default_runtime_min,
+        id          AS template_id,
+        os_name     AS name,
+        template_key,
+        description,
         metadata,
-        active
-      FROM cybercore_vm_template
-      WHERE active = TRUE
-      ORDER BY name ASC
+        is_active
+      FROM cybercore_template_catalog
+      WHERE template_type = 'workstation'
+        AND is_active = TRUE
+      ORDER BY os_name ASC
     `);
 
-    res.json({ templates: templatesResult.rows });
+    res.json({ templates: result.rows });
   } catch (error) {
     console.error('[CLE] Get VM templates error:', error.message);
     res.status(500).json({ error: error.message });
@@ -36,13 +37,22 @@ router.get('/vm', instructorOnly, async (req, res) => {
 });
 
 /**
- * GET /api/cle/vulnerable-templates — List available vulnerable machine templates
+ * GET /api/cle/templates/vulnerable — List available challenge/lab templates
  */
 router.get('/vulnerable', instructorOnly, async (req, res) => {
   try {
-    // For now, return empty list as cybercore_challenge_template table doesn't exist
-    // This will be implemented when the challenge template system is set up
-    res.json({ templates: [] });
+    const result = await cybercoreQuery(`
+      SELECT
+        challenge_id  AS template_id,
+        name,
+        difficulty,
+        description
+      FROM crucible_challenge
+      WHERE status = 'active'
+      ORDER BY name ASC
+    `);
+
+    res.json({ templates: result.rows });
   } catch (error) {
     console.error('[CLE] Get vulnerable templates error:', error.message);
     res.status(500).json({ error: error.message });
