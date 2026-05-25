@@ -290,6 +290,7 @@ CREATE TABLE IF NOT EXISTS cybercore_template_catalog (
 
   -- Type/classification
   template_type VARCHAR(32)  NOT NULL DEFAULT 'os_template',
+  provider_type VARCHAR(8)   CHECK (provider_type IN ('qemu', 'lxc')),  -- auto-detected on verify; null = unknown
   template_key  TEXT,                    -- stable slug (required for workstation/lane_networking rows)
   module_key    TEXT REFERENCES cybercore_module(key) ON DELETE SET NULL,
   max_instances INTEGER      NOT NULL DEFAULT 10,
