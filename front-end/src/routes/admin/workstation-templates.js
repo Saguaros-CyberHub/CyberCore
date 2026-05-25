@@ -188,10 +188,18 @@ router.get('/workstation-templates/:id/verify', authenticateToken, adminOnly, as
     );
 
     if (!match) {
+      // Auto-disable: template is broken, pull it from active rotation
+      await cybercoreQuery(
+        `UPDATE cybercore_template_catalog
+         SET is_active = false, status = CASE WHEN status = 'active' THEN 'draft' ELSE status END, updated_at = now()
+         WHERE id = $1`,
+        [id]
+      );
       return res.json({
-        found: false,
+        found:          false,
         template_vmid,
-        message: `VMID ${template_vmid} not found on any cluster node`
+        auto_disabled:  true,
+        message:        `VMID ${template_vmid} not found on any cluster node`
       });
     }
 
