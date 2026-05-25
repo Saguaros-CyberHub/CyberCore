@@ -299,7 +299,7 @@ async function syncVmTemplateNodes() {
     const { proxmoxAPI } = require('./utils/proxmox');
 
     const [catalogResult, resources] = await Promise.all([
-      cybercoreQuery(`SELECT id, template_vmid, node FROM vm_template_catalog`),
+      cybercoreQuery(`SELECT id, template_vmid, node FROM cybercore_template_catalog`),
       proxmoxAPI('GET', '/api2/json/cluster/resources')
     ]);
 
@@ -312,7 +312,7 @@ async function syncVmTemplateNodes() {
     for (const row of catalogResult.rows) {
       const liveNode = vmMap[Number(row.template_vmid)];
       if (liveNode && liveNode !== row.node) {
-        await cybercoreQuery(`UPDATE vm_template_catalog SET node = $1 WHERE id = $2`, [liveNode, row.id]);
+        await cybercoreQuery(`UPDATE cybercore_template_catalog SET node = $1 WHERE id = $2`, [liveNode, row.id]);
         console.log(`[TemplateSync] VMID ${row.template_vmid}: ${row.node ?? 'null'} → ${liveNode}`);
         updatedCount++;
       }

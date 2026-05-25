@@ -3,7 +3,7 @@
  *
  * Simulates the route handler in real-client-intake.js:synthesize-challenge
  * against the AZ Cyber Initiative fixture + hardcoded catalog rows matching
- * what migrations 013 (vm_template_catalog) and 012 (vuln_scripts) seed.
+ * what migrations 013 (cybercore_template_catalog) and 012 (vuln_scripts) seed.
  *
  * Run with: node front-end/plugins/ciab/test/synthesize-integration.test.js
  */

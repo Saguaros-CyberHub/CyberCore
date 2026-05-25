@@ -465,8 +465,8 @@ router.post('/:id/synthesize-challenge', express.json(), async (req, res) => {
 
     // 2. Fetch catalogs in parallel.
     const [templatesRes, scriptsRes] = await Promise.all([
-      pool.query(`SELECT id, os_family, os_name, os_version, template_vmid, node, role_hints, preferred, is_active, created_at
-                  FROM vm_template_catalog WHERE is_active = true`),
+      cybercoreQuery(`SELECT id, os_family, os_name, os_version, template_vmid, node, role_hints, preferred, is_active, created_at
+                      FROM cybercore_template_catalog WHERE is_active = true AND template_type = 'os_template'`),
       pool.query(`SELECT id, slug, name, category, script_type, os_target, difficulty, services_exposed, depends_on, is_active
                   FROM vuln_scripts WHERE is_active = true ORDER BY category, name`)
     ]);

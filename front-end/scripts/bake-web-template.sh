@@ -21,7 +21,7 @@
 # Why Debian 13 not Rocky?
 #   The CIAB vuln-app install_script and fallback recipe both use apt-get,
 #   not dnf. Standardizing on Debian keeps the orchestrator simple. (The
-#   vm_template_catalog row originally said Rocky — see "Catalog update"
+#   cybercore_template_catalog row originally said Rocky — see "Catalog update"
 #   note at the bottom of this script's output.)
 #
 # Companion to:
@@ -420,10 +420,10 @@ echo "==================================================================="
 echo "  Verify:        qm config $VMID"
 echo "  Test clone:    qm clone $VMID 9995 --name web-test --full --storage $STORAGE"
 echo ""
-echo "  ---- vm_template_catalog row ----"
+echo "  ---- cybercore_template_catalog row ----"
 echo "  Run this on the orchestrator's clinic_db so CIAB picks it up:"
 echo ""
-echo "    UPDATE vm_template_catalog SET"
+echo "    UPDATE cybercore_template_catalog SET"
 echo "      os_name    = 'Debian 13 web',"
 echo "      os_version = '13',"
 echo "      role_hints = '{web}',"
@@ -433,6 +433,6 @@ echo "    WHERE template_vmid = $VMID;"
 echo ""
 echo "  If the row doesn't exist yet (no migration 013 ran):"
 echo ""
-echo "    INSERT INTO vm_template_catalog (os_family, os_name, os_version, template_vmid, role_hints, preferred, notes)"
+echo "    INSERT INTO cybercore_template_catalog (os_family, os_name, os_version, template_vmid, role_hints, preferred, notes)"
 echo "    VALUES ('linux', 'Debian 13 web', '13', $VMID, '{web}', true, 'web-template (debian13 + docker + apache + php). Baked from bake-web-template.sh.');"
 echo ""

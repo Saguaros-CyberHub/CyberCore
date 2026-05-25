@@ -4,7 +4,7 @@
  * ============================================================================
  * vuln_scripts → clinic_db (query)
  * crucible_challenge → cybercore_db (cybercoreQuery)
- * vm_template_catalog → cybercore_db (cybercoreQuery)
+ * cybercore_template_catalog → cybercore_db (cybercoreQuery)
  * deployment_vuln_selections → clinic_db (query)
  */
 
@@ -166,22 +166,26 @@ router.delete('/vuln-scripts/:id', authenticateToken, adminOnly, async (req, res
   }
 });
 
-// GET /api/admin/vm-templates — list active VM templates from vm_template_catalog
+// GET /api/admin/vm-templates — list VM templates from cybercore_template_catalog
+// ?template_type= filters by type (os_template, workstation, lane_networking, challenge)
+// ?os_family= filters by OS family; ?active_only=false to include inactive rows
 router.get('/vm-templates', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { os_family, active_only } = req.query;
+    const { os_family, active_only, template_type } = req.query;
     const where = [];
     const params = [];
     let idx = 1;
-    if (os_family) { where.push(`os_family = $${idx++}`); params.push(os_family); }
+    if (template_type) { where.push(`template_type = $${idx++}`); params.push(template_type); }
+    if (os_family)     { where.push(`os_family = $${idx++}`);     params.push(os_family); }
     if (active_only !== 'false') where.push(`is_active = true`);
     const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
 
     const result = await cybercoreQuery(
-      `SELECT id, os_family, os_name, os_version, template_vmid, node,
-              role_hints, preferred, notes, is_active, created_at
-       FROM vm_template_catalog ${whereClause}
-       ORDER BY os_family, os_name, os_version NULLS LAST`,
+      `SELECT id, template_type, template_key, os_family, os_name, os_version,
+              template_vmid, node, role_hints, preferred, module_key, max_instances,
+              status, description, notes, is_active, created_at, updated_at
+       FROM cybercore_template_catalog ${whereClause}
+       ORDER BY template_type, os_family, os_name, os_version NULLS LAST`,
       params
     );
     res.json(result.rows);
@@ -192,11 +196,11 @@ router.get('/vm-templates', authenticateToken, adminOnly, async (req, res) => {
 
 // POST /api/admin/vm-templates/sync-nodes
 // Queries live Proxmox cluster resources and writes the actual node for every
-// template VMID back into vm_template_catalog. Safe to call repeatedly.
+// template VMID back into cybercore_template_catalog. Safe to call repeatedly.
 router.post('/vm-templates/sync-nodes', authenticateToken, adminOnly, async (req, res) => {
   try {
     const [catalogResult, resources] = await Promise.all([
-      cybercoreQuery(`SELECT id, template_vmid, node FROM vm_template_catalog`),
+      cybercoreQuery(`SELECT id, template_vmid, node FROM cybercore_template_catalog`),
       proxmoxAPI('GET', '/api2/json/cluster/resources')
     ]);
 
@@ -217,7 +221,7 @@ router.post('/vm-templates/sync-nodes', authenticateToken, adminOnly, async (req
       }
       if (liveNode !== row.node) {
         await cybercoreQuery(
-          `UPDATE vm_template_catalog SET node = $1 WHERE id = $2`,
+          `UPDATE cybercore_template_catalog SET node = $1, updated_at = now() WHERE id = $2`,
           [liveNode, row.id]
         );
         updated.push({ vmid: row.template_vmid, from: row.node, to: liveNode });

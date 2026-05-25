@@ -226,6 +226,20 @@
       border-color: rgba(99,130,255,0.12);
       color: #f0f2fa;
     }
+    /* Toggle switch */
+    .toggle-switch { position:relative; display:inline-block; width:40px; height:22px; flex-shrink:0; }
+    .toggle-switch input { opacity:0; width:0; height:0; }
+    .toggle-slider {
+      position:absolute; cursor:pointer; inset:0;
+      background:#cbd5e0; border-radius:22px; transition:.2s;
+    }
+    .toggle-slider::before {
+      content:''; position:absolute; width:16px; height:16px;
+      left:3px; bottom:3px; background:white; border-radius:50%; transition:.2s;
+    }
+    .toggle-switch input:checked + .toggle-slider { background:#48bb78; }
+    .toggle-switch input:checked + .toggle-slider::before { transform:translateX(18px); }
+    .toggle-switch input:disabled + .toggle-slider { opacity:.5; cursor:not-allowed; }
   </style>
 </head>
 <body>
@@ -308,6 +322,7 @@
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
           <button class="tab-btn" onclick="switchTab('actlog', this)">Activity Log</button>
           <button class="tab-btn" onclick="switchTab('challenges', this)">Challenge Templates</button>
+          <button class="tab-btn" onclick="switchTab('workstation-templates', this)">Workstation Templates</button>
           <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Scripts</button>
           <button class="tab-btn" onclick="switchTab('settings', this)">Settings</button>
         </div>
@@ -649,6 +664,107 @@
 
           <!-- Challenge List -->
           <div id="challengeTemplatesList"></div>
+        </div>
+
+        <!-- TAB: Workstation Templates -->
+        <div class="tab-content" id="tab-workstation-templates">
+          <div class="action-bar">
+            <button class="btn btn-primary" onclick="showWorkstationTemplateForm()">+ New Template</button>
+            <button class="btn btn-outline" onclick="loadWorkstationTemplates()">Refresh</button>
+          </div>
+
+          <!-- Create / Edit Form -->
+          <div id="workstationTemplateForm" style="display:none; background:var(--bg-card,white); border-radius:12px; padding:1.5rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); margin-bottom:1.5rem;">
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem;">
+              <h3 id="workstationFormTitle" style="margin:0;">New Workstation Template</h3>
+              <button class="btn btn-sm btn-outline" onclick="closeWorkstationTemplateForm()">&times; Close</button>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Template Name</label>
+                <input type="text" id="wsTplName" placeholder="e.g., Kali Linux Workstation" oninput="wsTplAutoKey()">
+              </div>
+              <div class="form-group">
+                <label>Template Key</label>
+                <input type="text" id="wsTplKey" placeholder="e.g., kali-workstation" style="font-family:monospace;">
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>Description</label>
+              <textarea id="wsTplDesc" rows="2" placeholder="What this workstation is for..."></textarea>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Template VMID</label>
+                <input type="number" id="wsTplVmid" placeholder="e.g., 1002" min="100" max="9999">
+              </div>
+              <div class="form-group">
+                <label>OS Family</label>
+                <select id="wsTplOsFamily">
+                  <option value="windows_client">Windows Client</option>
+                  <option value="windows_server">Windows Server</option>
+                  <option value="linux">Linux</option>
+                  <option value="macos">macOS</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>OS Version <span style="color:var(--gray-400);font-size:0.8rem;">(optional)</span></label>
+                <input type="text" id="wsTplOsVersion" placeholder="e.g., 22.04, 11, 25H2">
+              </div>
+              <div class="form-group">
+                <label>Max Instances</label>
+                <input type="number" id="wsTplMaxInstances" value="10" min="1" max="500">
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Module</label>
+                <select id="wsTplModule">
+                  <option value="">— None —</option>
+                  <option value="crucible">Crucible</option>
+                  <option value="cyberlabs">CyberLabs</option>
+                  <option value="forge">Forge</option>
+                  <option value="university">University</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Notes <span style="color:var(--gray-400);font-size:0.8rem;">(admin-only)</span></label>
+                <input type="text" id="wsTplNotes" placeholder="e.g., proxmox template name or build notes">
+              </div>
+            </div>
+
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+              <div class="form-group">
+                <label>Status</label>
+                <select id="wsTplStatus">
+                  <option value="draft">Draft</option>
+                  <option value="active">Active</option>
+                  <option value="retired">Retired</option>
+                </select>
+              </div>
+              <div class="form-group" style="display:flex; align-items:center; gap:0.75rem; padding-top:1.6rem;">
+                <label class="toggle-switch" style="margin:0;">
+                  <input type="checkbox" id="wsTplIsActive" checked>
+                  <span class="toggle-slider"></span>
+                </label>
+                <span style="font-size:0.875rem;">Enabled</span>
+              </div>
+            </div>
+
+            <input type="hidden" id="wsTplEditId">
+            <button class="btn btn-primary" onclick="saveWorkstationTemplate()" style="width:100%; margin-top:0.5rem;">
+              <span id="wsTplSaveLabel">Create Workstation Template</span>
+            </button>
+            <div id="wsTplStatus2" style="margin-top:0.75rem; font-size:0.85rem;"></div>
+          </div>
+
+          <!-- Template List -->
+          <div id="workstationTemplatesList"></div>
         </div>
 
         <!-- TAB: Scripts -->
@@ -5118,6 +5234,193 @@
       // Load modules on page initialization
       loadModules();
     });
+
+    // ============================================================================
+    // WORKSTATION TEMPLATES
+    // ============================================================================
+
+    function showWorkstationTemplateForm(tpl = null) {
+      document.getElementById('wsTplEditId').value = tpl ? tpl.template_id : '';
+      document.getElementById('workstationFormTitle').textContent = tpl ? 'Edit Workstation Template' : 'New Workstation Template';
+      document.getElementById('wsTplSaveLabel').textContent = tpl ? 'Save Changes' : 'Create Workstation Template';
+      document.getElementById('wsTplName').value         = tpl?.name         || '';
+      document.getElementById('wsTplKey').value          = tpl?.template_key  || '';
+      document.getElementById('wsTplDesc').value         = tpl?.description   || '';
+      document.getElementById('wsTplVmid').value         = tpl?.template_vmid || '';
+      document.getElementById('wsTplOsFamily').value     = tpl?.os_family     || 'linux';
+      document.getElementById('wsTplOsVersion').value    = tpl?.os_version    || '';
+      document.getElementById('wsTplMaxInstances').value = tpl?.max_instances || 10;
+      document.getElementById('wsTplStatus').value       = tpl?.status        || 'draft';
+      document.getElementById('wsTplModule').value       = tpl?.module_key    || '';
+      document.getElementById('wsTplNotes').value        = tpl?.notes         || '';
+      document.getElementById('wsTplIsActive').checked   = tpl ? tpl.is_active !== false : true;
+      document.getElementById('wsTplStatus2').textContent = '';
+
+      document.getElementById('workstationTemplateForm').style.display = 'block';
+      document.getElementById('workstationTemplateForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+
+    function closeWorkstationTemplateForm() {
+      document.getElementById('workstationTemplateForm').style.display = 'none';
+      document.getElementById('wsTplEditId').value = '';
+    }
+
+    function wsTplAutoKey() {
+      if (document.getElementById('wsTplEditId').value) return;
+      const name = document.getElementById('wsTplName').value;
+      document.getElementById('wsTplKey').value = name
+        .toLowerCase().trim()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-|-$/g, '');
+    }
+
+    async function saveWorkstationTemplate() {
+      const editId   = document.getElementById('wsTplEditId').value;
+      const statusEl = document.getElementById('wsTplStatus2');
+
+      const body = {
+        template_key:  document.getElementById('wsTplKey').value.trim(),
+        name:          document.getElementById('wsTplName').value.trim(),
+        description:   document.getElementById('wsTplDesc').value.trim() || null,
+        template_vmid: Number(document.getElementById('wsTplVmid').value),
+        os_family:     document.getElementById('wsTplOsFamily').value,
+        os_version:    document.getElementById('wsTplOsVersion').value.trim() || null,
+        module_key:    document.getElementById('wsTplModule').value || null,
+        max_instances: Number(document.getElementById('wsTplMaxInstances').value) || 10,
+        status:        document.getElementById('wsTplStatus').value,
+        notes:         document.getElementById('wsTplNotes').value.trim() || null,
+        is_active:     document.getElementById('wsTplIsActive').checked
+      };
+
+      if (!body.template_key || !body.name || !body.template_vmid) {
+        statusEl.innerHTML = '<span style="color:#e53e3e;">Name, key, and VMID are required.</span>';
+        return;
+      }
+
+      statusEl.innerHTML = '<span style="color:var(--gray-500);">Saving…</span>';
+      try {
+        if (editId) {
+          await api('PUT', `/workstation-templates/${editId}`, body);
+        } else {
+          await api('POST', '/workstation-templates', body);
+        }
+        statusEl.innerHTML = '<span style="color:#38a169;">Saved.</span>';
+        closeWorkstationTemplateForm();
+        loadWorkstationTemplates();
+      } catch (e) {
+        statusEl.innerHTML = `<span style="color:#e53e3e;">Error: ${escHtml(e.message)}</span>`;
+      }
+    }
+
+    async function wsTplToggleActive(id, checkbox) {
+      checkbox.disabled = true;
+      try {
+        const result = await api('PATCH', `/workstation-templates/${id}/toggle`);
+        checkbox.checked = result.is_active;
+      } catch (e) {
+        checkbox.checked = !checkbox.checked; // revert on failure
+        alert(`Toggle failed: ${e.message}`);
+      } finally {
+        checkbox.disabled = false;
+      }
+    }
+
+    async function wsTplVerify(id, name) {
+      const resultEl = document.getElementById(`wsTplVerifyResult-${id}`);
+      const nodeEl   = document.getElementById(`wsTplNode-${id}`);
+      if (!resultEl) return;
+      resultEl.innerHTML = '<span style="color:var(--gray-400);">Checking…</span>';
+      try {
+        const r = await api('GET', `/workstation-templates/${id}/verify`);
+        if (r.found) {
+          const tplFlag = r.is_template
+            ? '<span style="color:#38a169;">✓ template</span>'
+            : '<span style="color:#e53e3e;">✗ not a template</span>';
+          const mem  = r.maxmem_gb  ? ` · ${r.maxmem_gb}GB RAM`  : '';
+          const disk = r.maxdisk_gb ? ` · ${r.maxdisk_gb}GB disk` : '';
+          resultEl.innerHTML = `<span style="color:#38a169;">✓ ${escHtml(r.node)}</span> ${tplFlag}<span style="color:var(--gray-400);">${mem}${disk}</span>`;
+          if (nodeEl && r.node) nodeEl.textContent = r.node;
+        } else {
+          resultEl.innerHTML = `<span style="color:#e53e3e;">✗ VMID ${r.template_vmid} not found</span>`;
+        }
+      } catch (e) {
+        resultEl.innerHTML = `<span style="color:#e53e3e;">Error: ${escHtml(e.message)}</span>`;
+      }
+    }
+
+    async function loadWorkstationTemplates() {
+      const container = document.getElementById('workstationTemplatesList');
+      container.innerHTML = '<p style="color:var(--gray-500);">Loading…</p>';
+      try {
+        const templates = await api('GET', '/workstation-templates');
+        if (templates.length === 0) {
+          container.innerHTML = '<div style="text-align:center; padding:2rem; color:var(--gray-500);">No workstation templates yet. Click "+ New Template" to create one.</div>';
+          return;
+        }
+        const statusBadge = s => s === 'active'
+          ? '<span class="badge badge-green">active</span>'
+          : s === 'retired'
+          ? '<span class="badge badge-gray">retired</span>'
+          : '<span class="badge badge-yellow">draft</span>';
+
+        container.innerHTML = `
+          <table class="admin-table">
+            <thead><tr>
+              <th>Template</th><th>Key</th><th>OS Family / VMID</th><th>Node</th>
+              <th>Module</th><th>Max</th><th>Status</th><th>Enabled</th><th>Actions</th>
+            </tr></thead>
+            <tbody>
+              ${templates.map(t => `
+                <tr id="wsTplRow-${t.template_id}">
+                  <td>
+                    <strong>${escHtml(t.name)}</strong>
+                    ${t.description ? `<br><span style="font-size:0.75rem;color:var(--gray-500);">${escHtml(t.description.substring(0,70))}</span>` : ''}
+                  </td>
+                  <td><code style="font-size:0.75rem;">${escHtml(t.template_key)}</code></td>
+                  <td style="font-size:0.8rem;">${escHtml(t.os_family || '—')}${t.os_version ? ' ' + escHtml(t.os_version) : ''}<br><span style="color:var(--gray-500);">VMID ${t.template_vmid}</span></td>
+                  <td style="font-size:0.8rem;" id="wsTplNode-${t.template_id}">${t.node ? escHtml(t.node) : '<span style="color:var(--gray-400);">—</span>'}</td>
+                  <td style="font-size:0.8rem;">${escHtml(t.module_key || '—')}</td>
+                  <td style="font-size:0.8rem;">${t.max_instances}</td>
+                  <td>${statusBadge(t.status)}</td>
+                  <td>
+                    <label class="toggle-switch">
+                      <input type="checkbox" ${t.is_active ? 'checked' : ''} onchange="wsTplToggleActive('${t.template_id}', this)">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </td>
+                  <td style="white-space:nowrap;">
+                    <button class="btn btn-sm btn-outline" style="font-size:0.7rem;" onclick="wsTplVerify('${t.template_id}', '${escHtml(t.name)}')">Test</button>
+                    <button class="btn btn-sm btn-outline" style="font-size:0.7rem;margin-left:0.25rem;" onclick="editWorkstationTemplate('${t.template_id}')">Edit</button>
+                    <button class="btn btn-sm" style="font-size:0.7rem;padding:0.15rem 0.4rem;border:1px solid #e53e3e;color:#e53e3e;background:transparent;margin-left:0.25rem;" onclick="deleteWorkstationTemplate('${t.template_id}','${escHtml(t.name)}')">Delete</button>
+                    <span id="wsTplVerifyResult-${t.template_id}" style="font-size:0.75rem;margin-left:0.4rem;"></span>
+                  </td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>`;
+      } catch (e) {
+        container.innerHTML = `<p style="color:#e53e3e;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    async function editWorkstationTemplate(id) {
+      try {
+        const tpl = await api('GET', `/workstation-templates/${id}`);
+        showWorkstationTemplateForm(tpl);
+      } catch (e) {
+        alert(`Failed to load template: ${e.message}`);
+      }
+    }
+
+    async function deleteWorkstationTemplate(id, name) {
+      if (!confirm(`Delete workstation template "${name}"? This cannot be undone.`)) return;
+      try {
+        await api('DELETE', `/workstation-templates/${id}`);
+        loadWorkstationTemplates();
+      } catch (e) {
+        alert(`Delete failed: ${e.message}`);
+      }
+    }
   </script>
 </body>
 </html>

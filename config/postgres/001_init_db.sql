@@ -271,3 +271,52 @@ CREATE INDEX IF NOT EXISTS idx_lane_bootstrap_tokens_expires
   ON lane_bootstrap_tokens(expires_at);
 COMMENT ON TABLE lane_bootstrap_tokens IS
   'Single-use bootstrap payloads delivered to lane gateways on first boot via GET /api/lane-bootstrap.';
+
+-- === VM Template Catalog ===
+-- Unified catalog for all Proxmox VM templates. `template_type` controls which
+-- menus/flows consume each row:
+--   os_template    — base OS images; CiaB synthesizer auto-picks by os_family/os_version
+--   workstation    — user self-provisioning via the Workstations dashboard
+--   lane_networking — gateway/networking VMs used by lane deployment logic
+--   challenge      — single-VM challenge templates for the Crucible
+-- `node` is nullable — populated at runtime by POST /api/admin/vm-templates/sync-nodes.
+CREATE TABLE IF NOT EXISTS cybercore_template_catalog (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  os_family     VARCHAR(32)  NOT NULL,   -- 'windows_server','windows_client','linux','macos','network'
+  os_name       VARCHAR(128) NOT NULL,   -- display name: 'Windows Server 2022', 'Engineering Workstation', etc.
+  os_version    VARCHAR(64),             -- '2022','11','22.04' — null = any version
+  template_vmid INTEGER      NOT NULL,
+  node          VARCHAR(64),             -- populated by sync-nodes, never seeded
+
+  -- Type/classification
+  template_type VARCHAR(32)  NOT NULL DEFAULT 'os_template',
+  template_key  TEXT,                    -- stable slug (required for workstation/lane_networking rows)
+  module_key    TEXT REFERENCES cybercore_module(key) ON DELETE SET NULL,
+  max_instances INTEGER      NOT NULL DEFAULT 10,
+  status        TEXT         NOT NULL DEFAULT 'active'
+                CHECK (status IN ('draft', 'active', 'retired')),
+  description   TEXT,                    -- user-facing description
+  metadata      JSONB        NOT NULL DEFAULT '{}'::jsonb,
+
+  role_hints    TEXT[]       NOT NULL DEFAULT '{}',
+  preferred     BOOLEAN      NOT NULL DEFAULT true,
+  notes         TEXT,                    -- admin-facing notes / Proxmox template name
+  is_active     BOOLEAN      NOT NULL DEFAULT true,
+  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_cybercore_tc_family ON cybercore_template_catalog(os_family, is_active);
+CREATE INDEX IF NOT EXISTS idx_cybercore_tc_active ON cybercore_template_catalog(is_active);
+CREATE INDEX IF NOT EXISTS idx_cybercore_tc_type   ON cybercore_template_catalog(template_type, is_active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cybercore_tc_key
+  ON cybercore_template_catalog(template_key) WHERE template_key IS NOT NULL;
+
+-- Seed: OS base images (template_type = 'os_template'). Node resolved at runtime via sync-nodes.
+INSERT INTO cybercore_template_catalog (os_family, os_name, os_version, template_vmid, role_hints, notes, template_type) VALUES
+  ('windows_server', 'Windows Server 2022', '2022', 1000, '{dc,file,web,mail,backup,print}', 'windows-server-2022-template', 'os_template'),
+  ('linux',          'Rocky Linux',         NULL,   1001, '{web,file,db}',                   'rocky-linux-template',         'os_template'),
+  ('windows_client', 'Windows 11',          '25H2', 1002, '{}',                              'windows-25h2-template',        'os_template'),
+  ('linux',          'Ubuntu',              NULL,   1003, '{web}',                           'Ubuntu-Template',              'os_template'),
+  ('linux',          'Metasploitable 2',    NULL,   1600, '{}',                              'Metasploitable-2-Template — admin-select only', 'os_template')
+ON CONFLICT DO NOTHING;
+UPDATE cybercore_template_catalog SET preferred = false WHERE template_vmid = 1600;
