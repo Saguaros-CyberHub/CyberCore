@@ -73,17 +73,18 @@ const Workstations = (() => {
           ${t.os_version ? `<span>${_esc(t.os_version)}</span>` : ''}
         </div>
         <button class="btn btn-primary btn-sm wks-deploy-btn"
-                onclick="Workstations.confirmDeploy('${t.template_id}', ${JSON.stringify(t.name)})">
+                onclick="Workstations.confirmDeploy('${t.template_id}')">
           Deploy Workstation
         </button>
       </div>`).join('');
   }
 
-  function confirmDeploy(templateId, name) {
+  function confirmDeploy(templateId) {
+    const tpl = _templates.find(t => t.template_id === templateId);
     _pendingDeployId   = templateId;
-    _pendingDeployName = name;
+    _pendingDeployName = tpl?.name || templateId;
 
-    document.getElementById('wksDeployModalName').textContent = name;
+    document.getElementById('wksDeployModalName').textContent = _pendingDeployName;
 
     // Show dev-mode section only for admins
     const devSection = document.getElementById('wksDeployDevSection');
@@ -183,8 +184,8 @@ const Workstations = (() => {
                   ${stopped ? 'disabled' : ''}>⏹ Shutdown</button>
           <button class="btn btn-sm" onclick="Workstations.action('${vm.vmId}','reboot')"
                   ${stopped ? 'disabled' : ''}>↺ Reboot</button>
-          <button class="btn btn-sm" onclick="Workstations.openSnapshots('${vm.vmId}',${JSON.stringify(vm.name)})">📷 Snapshots</button>
-          <button class="btn btn-sm wks-btn-danger" onclick="Workstations.confirmDelete('${vm.vmId}',${JSON.stringify(vm.name)})">🗑 Delete</button>
+          <button class="btn btn-sm" onclick="Workstations.openSnapshots('${vm.vmId}')">📷 Snapshots</button>
+          <button class="btn btn-sm wks-btn-danger" onclick="Workstations.confirmDelete('${vm.vmId}')">🗑 Delete</button>
         </div>
       </div>`;
   }
@@ -208,7 +209,8 @@ const Workstations = (() => {
     }
   }
 
-  async function confirmDelete(vmId, name) {
+  async function confirmDelete(vmId) {
+    const name = _myVms.find(v => v.vmId === vmId)?.name || vmId;
     if (!confirm(`Delete workstation "${name}"? This permanently destroys the VM and cannot be undone.`)) return;
     try {
       await _api('DELETE', `/${vmId}`);
@@ -222,7 +224,8 @@ const Workstations = (() => {
 
   // ── Snapshots modal ─────────────────────────────────────────────────────
 
-  async function openSnapshots(vmId, vmName) {
+  async function openSnapshots(vmId) {
+    const vmName = _myVms.find(v => v.vmId === vmId)?.name || vmId;
     _snapVmId = vmId;
     document.getElementById('wksSnapTitle').textContent = `Snapshots — ${vmName}`;
     document.getElementById('wksSnapNewName').value = '';
