@@ -473,6 +473,77 @@
 
     .vmc-error-icon { font-size: 2rem; }
     .vmc-error-msg  { color: var(--text-secondary); text-align: center; max-width: 400px; margin: 0; }
+
+    /* ===== Workstations ===== */
+    .wks-template-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+      gap: 1.25rem;
+    }
+    .wks-tpl-card {
+      background: var(--bg-card, white);
+      border-radius: 12px;
+      border: 1px solid var(--border-color, #e2e8f0);
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      transition: box-shadow 0.2s;
+    }
+    .wks-tpl-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.1); }
+    .wks-tpl-icon  { font-size: 2rem; }
+    .wks-tpl-name  { font-weight: 700; font-size: 1rem; color: var(--text-primary); }
+    .wks-tpl-desc  { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5; flex: 1; }
+    .wks-tpl-meta  { display: flex; flex-wrap: wrap; gap: 0.4rem; font-size: 0.78rem; color: var(--text-muted); }
+    .wks-tpl-meta span { background: var(--gray-100,#f7fafc); padding: 0.15rem 0.5rem; border-radius: 20px; }
+    .wks-deploy-btn { margin-top: 0.75rem; align-self: flex-start; }
+
+    .wks-vm-card {
+      background: var(--bg-card, white);
+      border-radius: 10px;
+      border: 1px solid var(--border-color, #e2e8f0);
+      padding: 1rem 1.25rem;
+      margin-bottom: 0.75rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+    }
+    .wks-vm-header { display: flex; align-items: center; gap: 0.75rem; }
+    .wks-vm-icon   { font-size: 1.6rem; }
+    .wks-vm-name   { font-weight: 600; font-size: 0.95rem; color: var(--text-primary); }
+    .wks-vm-meta   { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.2rem; }
+    .wks-vm-tpl    { font-size: 0.78rem; color: var(--text-muted); }
+    .wks-vm-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+
+    .wks-badge { display: inline-flex; align-items: center; padding: 0.15rem 0.55rem; border-radius: 20px; font-size: 0.73rem; font-weight: 600; }
+    .wks-badge-on  { background: #c6f6d5; color: #276749; }
+    .wks-badge-off { background: #fed7d7; color: #9b2c2c; }
+    .wks-badge-unk { background: var(--gray-100,#f7fafc); color: var(--text-muted); }
+
+    .wks-btn-danger { color: #e53e3e; border-color: #fc8181; }
+    .wks-btn-danger:hover { background: #fff5f5; }
+
+    .wks-empty { text-align: center; padding: 3rem 2rem; color: var(--text-secondary); }
+    .wks-empty-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }
+    .wks-empty-sub  { font-size: 0.85rem; color: var(--text-muted); margin-top: 0.25rem; }
+    .wks-loading    { color: var(--text-muted); padding: 1.5rem; text-align: center; }
+    .wks-error      { color: #e53e3e; padding: 1rem; }
+
+    .wks-snap-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.6rem 0;
+      border-bottom: 1px solid var(--border-color,#e2e8f0);
+    }
+    .wks-snap-row:last-child { border-bottom: none; }
+    .wks-snap-desc  { color: var(--text-muted); font-size: 0.85rem; }
+    .wks-snap-empty { text-align: center; color: var(--text-muted); padding: 1rem 0; }
   </style>
 </head>
 <body>
@@ -558,15 +629,25 @@
         <div id="workspaces-myworkspacesContent" style="display: none;">
           <div class="hub-welcome" style="margin-bottom:20px">
             <h1>My Workspaces</h1>
-            <p>VMs and workstations assigned to your account. Click <strong>Open Console</strong> to connect.</p>
+            <p>Lane VMs and workstations assigned to your account.</p>
           </div>
+
+          <!-- Lane VMs (assigned by modules/instructors) -->
+          <div class="section-title">Lane VMs</div>
           <div id="vmList" class="vml-list"></div>
           <div id="vmConsoleContainer" style="display:none; margin-top:24px;"></div>
+
+          <!-- Workstation VMs (self-deployed) -->
+          <div class="section-title" style="margin-top:32px;">My Workstations</div>
+          <div id="wksMyList"></div>
         </div>
 
         <div id="workspaces-availableContent" style="display: none;">
-          <h2>Available Workspaces</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
+          <div class="hub-welcome" style="margin-bottom:20px">
+            <h1>Available Workstations</h1>
+            <p>Choose a template to deploy your own workstation VM. Each VM runs in your lane and is yours to control.</p>
+          </div>
+          <div id="wksTemplateGrid"></div>
         </div>
 
         <div id="courses-enrolledContent" style="display: none;">
@@ -632,10 +713,74 @@
     </main>
   </div>
 
+  <!-- Workstations: deploy confirmation modal -->
+  <div id="wksDeployModal" class="modal-overlay" onclick="if(event.target===this)document.getElementById('wksDeployModal').classList.remove('active')">
+    <div class="modal-dialog" style="max-width:460px;">
+      <div class="modal-header">
+        <h3 class="modal-title">Deploy Workstation</h3>
+        <button class="modal-close" onclick="document.getElementById('wksDeployModal').classList.remove('active')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p>Clone and start <strong id="wksDeployModalName"></strong> as your workstation VM?</p>
+
+        <!-- Admin-only dev mode section — hidden for non-admins via JS -->
+        <div id="wksDeployDevSection" style="display:none; margin-top:1rem; padding:0.875rem 1rem;
+             background:#fff7ed; border:1px solid #f97316; border-radius:8px;">
+          <label style="display:flex; align-items:flex-start; gap:0.65rem; cursor:pointer;">
+            <input type="checkbox" id="wksDeploySkipLane" style="margin-top:3px; flex-shrink:0; accent-color:#ea580c;">
+            <div>
+              <div style="font-weight:700; color:#c2410c; font-size:0.9rem;">
+                ⚠ Skip lane networking &mdash; DEV / TESTING ONLY
+              </div>
+              <div style="font-size:0.8rem; color:#9a3412; margin-top:0.3rem; line-height:1.45;">
+                Deploys on <code style="background:#fed7aa; padding:0 3px; border-radius:3px;">vmbr0</code>
+                with no VLAN isolation and no lane gateway.
+                <strong>Unsafe for production &mdash; admin use only.</strong>
+              </div>
+            </div>
+          </label>
+        </div>
+
+        <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1.25rem;">
+          <button class="btn btn-outline btn-sm"
+                  onclick="document.getElementById('wksDeployModal').classList.remove('active')">Cancel</button>
+          <button id="wksDeploySubmitBtn" class="btn btn-primary btn-sm"
+                  onclick="Workstations.submitDeploy()">Deploy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Workstations snapshot modal -->
+  <div id="wksSnapshotModal" class="modal-overlay" onclick="if(event.target===this)Workstations.closeSnapshots()">
+    <div class="modal-dialog" style="max-width:520px;">
+      <div class="modal-header">
+        <h3 id="wksSnapTitle" class="modal-title">Snapshots</h3>
+        <button class="modal-close" onclick="Workstations.closeSnapshots()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="wksSnapList" style="margin-bottom:1.25rem; max-height:260px; overflow-y:auto;"></div>
+        <div style="border-top:1px solid var(--border-color,#e2e8f0); padding-top:1rem;">
+          <div style="font-weight:600; font-size:0.9rem; margin-bottom:0.75rem;">Create New Snapshot</div>
+          <input id="wksSnapNewName" type="text" placeholder="Snapshot name (letters, numbers, - _)"
+                 style="display:block; width:100%; margin-bottom:0.5rem; padding:0.5rem 0.75rem;
+                        border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+          <input id="wksSnapNewDesc" type="text" placeholder="Description (optional)"
+                 style="display:block; width:100%; margin-bottom:0.75rem; padding:0.5rem 0.75rem;
+                        border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+          <button id="wksSnapCreateBtn" class="btn btn-primary btn-sm" onclick="Workstations.createSnapshot()">
+            Create Snapshot
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
   <script src="/js/hub.js"></script>
   <script src="/js/vm-console.js"></script>
+  <script src="/js/workstations.js"></script>
   <script>
     // Load site configuration and update UI
     async function loadSiteConfig() {
@@ -733,13 +878,19 @@
         parentDetails.open = false;
       }
 
-      // Lazy-load VM list the first time the workspaces tab is opened
+      // Lazy-load lane VM list the first time My Workspaces tab is opened
       if (page === 'workspaces-myworkspaces' && !_vmListLoaded && typeof VmWorkspaces !== 'undefined') {
         _vmListLoaded = true;
         VmWorkspaces.render(
           document.getElementById('vmList'),
           'vmConsoleContainer'
         );
+      }
+
+      // Lazy-load workstation sections
+      if ((page === 'workspaces-myworkspaces' || page === 'workspaces-available') && typeof Workstations !== 'undefined') {
+        if (page === 'workspaces-available') Workstations.loadTemplates();
+        if (page === 'workspaces-myworkspaces') Workstations.loadMyWorkstations();
       }
 
       // Scroll to top

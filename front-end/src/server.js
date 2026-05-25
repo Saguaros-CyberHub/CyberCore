@@ -56,6 +56,7 @@ const labTemplateRoutes = require('./routes/lab-templates');
 const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 const guacSessionRoutes = require('./routes/guac-sessions');
+const workstationRoutes = require('./routes/workstations');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -204,6 +205,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/admin', labTemplateRoutes);
 app.use('/api/modules', moduleRoutes);
 app.use('/api/dashboard', guacSessionRoutes);
+app.use('/api/workstations', workstationRoutes);
 
 // Unauthenticated, source-IP-gated. Called by lane gateway LXCs on first boot
 // to fetch one-shot bootstrap payload (Tailscale auth key etc). See route

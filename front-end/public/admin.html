@@ -323,6 +323,7 @@
           <button class="tab-btn" onclick="switchTab('actlog', this)">Activity Log</button>
           <button class="tab-btn" onclick="switchTab('challenges', this)">Challenge Templates</button>
           <button class="tab-btn" onclick="switchTab('workstation-templates', this)">Workstation Templates</button>
+          <button class="tab-btn" onclick="switchTab('crucible-events', this); loadCrucibleEvents()">Crucible Events</button>
           <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Scripts</button>
           <button class="tab-btn" onclick="switchTab('settings', this)">Settings</button>
         </div>
@@ -767,6 +768,35 @@
           <div id="workstationTemplatesList"></div>
         </div>
 
+        <!-- TAB: Crucible Events -->
+        <div class="tab-content" id="tab-crucible-events">
+          <div class="action-bar" style="flex-wrap:wrap; gap:0.5rem; align-items:center;">
+            <button class="btn btn-primary" onclick="showCreateCrucibleEventModal()">+ New Event</button>
+            <button class="btn btn-outline" onclick="loadCrucibleEvents()">Refresh</button>
+            <div style="display:inline-flex; border:1px solid #e2e8f0; border-radius:6px; overflow:hidden; font-size:0.8rem; flex-wrap:wrap;">
+              <button class="crucible-type-filter active" data-type="" onclick="filterCrucibleEventsByType('')"
+                style="background:var(--primary,#1e40af);color:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">All</button>
+              <button class="crucible-type-filter" data-type="weekly"    onclick="filterCrucibleEventsByType('weekly')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">📅 Weekly</button>
+              <button class="crucible-type-filter" data-type="vuln"      onclick="filterCrucibleEventsByType('vuln')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">💀 Vuln Boxes</button>
+              <button class="crucible-type-filter" data-type="groupctf"  onclick="filterCrucibleEventsByType('groupctf')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">🏁 Group CTF</button>
+              <button class="crucible-type-filter" data-type="koth"      onclick="filterCrucibleEventsByType('koth')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">👑 KotH</button>
+              <button class="crucible-type-filter" data-type="redvsblue" onclick="filterCrucibleEventsByType('redvsblue')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">⚔️ RvB</button>
+              <button class="crucible-type-filter" data-type="ir"        onclick="filterCrucibleEventsByType('ir')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">🚨 IR/SOC</button>
+              <button class="crucible-type-filter" data-type="ctf_event" onclick="filterCrucibleEventsByType('ctf_event')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">🎯 Events</button>
+              <button class="crucible-type-filter" data-type="byoctf"    onclick="filterCrucibleEventsByType('byoctf')"
+                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;">🛠️ BYO CTF</button>
+            </div>
+          </div>
+          <div id="crucibleEventsList" style="margin-top:1rem;"></div>
+        </div>
+
         <!-- TAB: Scripts -->
         <div class="tab-content" id="tab-vulnscripts">
           <div class="action-bar" style="flex-wrap: wrap; align-items: center; gap: 0.5rem;">
@@ -1139,6 +1169,66 @@
     </div>
   </div>
 
+  <!-- Crucible Event Modal -->
+  <div class="modal-overlay" id="crucibleEventModal">
+    <div class="modal-content" style="width:90%; max-width:560px;">
+      <div class="modal-header">
+        <h3 id="crucibleEventModalTitle">New Crucible Event</h3>
+        <button class="modal-close" onclick="closeModal('crucibleEventModal')">&times;</button>
+      </div>
+      <input type="hidden" id="crucibleEventId">
+      <div style="display:flex; flex-direction:column; gap:1rem; margin-top:1rem;">
+        <div class="form-group">
+          <label>Event Name *</label>
+          <input type="text" id="crucibleEventName" placeholder="e.g. Weekly CTF — Week 22">
+        </div>
+        <div class="form-group">
+          <label>Challenge Type *</label>
+          <select id="crucibleEventType">
+            <option value="weekly">📅 Weekly Challenges</option>
+            <option value="vuln">💀 Vulnerable Boxes</option>
+            <option value="groupctf">🏁 Group CTF</option>
+            <option value="koth">👑 King of the Hill</option>
+            <option value="redvsblue">⚔️ Red vs Blue</option>
+            <option value="ir">🚨 Incident Response / SOC Sim</option>
+            <option value="ctf_event">🎯 CTF Events</option>
+            <option value="byoctf">🛠️ BYO CTF</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Description</label>
+          <textarea id="crucibleEventDesc" rows="2" placeholder="Brief description of the event..."></textarea>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+          <div class="form-group">
+            <label>Start Date/Time</label>
+            <input type="datetime-local" id="crucibleEventStart">
+          </div>
+          <div class="form-group">
+            <label>End Date/Time</label>
+            <input type="datetime-local" id="crucibleEventEnd">
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+          <div class="form-group">
+            <label>Max Players</label>
+            <input type="number" id="crucibleEventMaxPlayers" placeholder="Leave blank for unlimited" min="1">
+          </div>
+          <div class="form-group" style="justify-content:flex-end; padding-top:1.5rem;">
+            <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:normal;">
+              <input type="checkbox" id="crucibleEventPublic" checked> Publicly visible
+            </label>
+          </div>
+        </div>
+        <p style="font-size:0.8rem; color:var(--gray-500); margin:0;">Events start in <strong>Draft</strong> status. Activate them from the events list when ready for users to see.</p>
+      </div>
+      <div style="display:flex; gap:0.75rem; margin-top:1.5rem;">
+        <button class="btn btn-outline" onclick="closeModal('crucibleEventModal')" style="flex:1;">Cancel</button>
+        <button class="btn btn-primary" onclick="saveCrucibleEvent()" style="flex:1;">Save Event</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
   <script src="/js/admin/admin-core.js"></script>
@@ -1150,6 +1240,7 @@
   <script src="/js/admin/admin-challenges.js"></script>
   <script src="/js/admin/admin-vuln-scripts.js"></script>
   <script src="/js/admin/admin-workstation-templates.js"></script>
+  <script src="/js/admin/admin-crucible-events.js"></script>
   <script src="/js/admin/admin-settings.js"></script>
   <script src="/js/admin/admin-init.js"></script>
 </body>
