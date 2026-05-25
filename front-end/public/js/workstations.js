@@ -10,8 +10,9 @@ const Workstations = (() => {
   let _templates  = [];
   let _snapVmId   = null;
   let _snapshots  = [];
-  let _availLoaded = false;
-  let _myLoaded    = false;
+  let _availLoaded  = false;
+  let _myLoaded     = false;
+  let _refreshTimer = null;
   let _pendingDeployId   = null;
   let _pendingDeployName = null;
 
@@ -124,19 +125,36 @@ const Workstations = (() => {
 
   // ── My Workstations ─────────────────────────────────────────────────────
 
-  async function loadMyWorkstations() {
+  async function loadMyWorkstations(force = false) {
     const el = document.getElementById('wksMyList');
     if (!el) return;
-    if (_myLoaded) return;
-    el.innerHTML = '<div class="wks-loading">Loading your workstations…</div>';
+    if (_myLoaded && !force) return;
+    if (!_myLoaded) el.innerHTML = '<div class="wks-loading">Loading your workstations…</div>';
     try {
       const data = await _api('GET', '/mine');
-      _myVms   = data.vms || [];
+      _myVms    = data.vms || [];
       _myLoaded = true;
       _renderMyWorkstations(el);
+      _startAutoRefresh();
     } catch (err) {
       el.innerHTML = `<div class="wks-error">⚠ ${_esc(err.message)}</div>`;
     }
+  }
+
+  function _startAutoRefresh() {
+    if (_refreshTimer) return;
+    _refreshTimer = setInterval(() => {
+      if (!document.getElementById('wksMyList')) {
+        clearInterval(_refreshTimer);
+        _refreshTimer = null;
+        return;
+      }
+      _api('GET', '/mine').then(data => {
+        _myVms = data.vms || [];
+        const el = document.getElementById('wksMyList');
+        if (el) _renderMyWorkstations(el);
+      }).catch(() => {});
+    }, 30000);
   }
 
   function _renderMyWorkstations(el) {
@@ -153,8 +171,9 @@ const Workstations = (() => {
   }
 
   const _BADGE = {
-    running:  ['wks-badge-on',  'Running'],
-    stopped:  ['wks-badge-off', 'Stopped'],
+    running:  ['wks-badge-on',      'Running'],
+    stopped:  ['wks-badge-off',     'Stopped'],
+    pending:  ['wks-badge-pending', 'Pending…'],
   };
 
   function _powerBadge(state) {
@@ -165,6 +184,10 @@ const Workstations = (() => {
   function _vmCard(vm) {
     const running = vm.powerState === 'running';
     const stopped = vm.powerState === 'stopped';
+    const pending = vm.powerState === 'pending';
+    const disableAll = pending;
+    const disableStart    = running || pending;
+    const disableStop     = stopped || pending;
     return `
       <div class="wks-vm-card" id="wks-vm-${vm.vmId}">
         <div class="wks-vm-header">
@@ -174,44 +197,76 @@ const Workstations = (() => {
             <div class="wks-vm-meta">
               ${_powerBadge(vm.powerState)}
               ${vm.templateName ? `<span class="wks-vm-tpl">${_esc(vm.templateName)}</span>` : ''}
+              ${vm.devDeploy    ? `<span class="wks-dev-tag">DEV</span>` : ''}
             </div>
           </div>
         </div>
         <div class="wks-vm-actions">
           <button class="btn btn-sm" onclick="Workstations.action('${vm.vmId}','start')"
-                  ${running ? 'disabled' : ''}>▶ Start</button>
+                  ${disableStart ? 'disabled' : ''}>▶ Start</button>
           <button class="btn btn-sm" onclick="Workstations.action('${vm.vmId}','shutdown')"
-                  ${stopped ? 'disabled' : ''}>⏹ Shutdown</button>
+                  ${disableStop ? 'disabled' : ''}>⏹ Shutdown</button>
           <button class="btn btn-sm" onclick="Workstations.action('${vm.vmId}','reboot')"
-                  ${stopped ? 'disabled' : ''}>↺ Reboot</button>
-          <button class="btn btn-sm" onclick="Workstations.openSnapshots('${vm.vmId}')">📷 Snapshots</button>
-          <button class="btn btn-sm wks-btn-danger" onclick="Workstations.confirmDelete('${vm.vmId}')">🗑 Delete</button>
+                  ${disableStop ? 'disabled' : ''}>↺ Reboot</button>
+          <button class="btn btn-sm" onclick="Workstations.openSnapshots('${vm.vmId}')"
+                  ${disableAll ? 'disabled' : ''}>📷 Snapshots</button>
+          <button class="btn btn-sm wks-btn-danger" onclick="Workstations.confirmDelete('${vm.vmId}')"
+                  ${disableAll ? 'disabled' : ''}>🗑 Delete</button>
         </div>
       </div>`;
   }
 
   async function action(vmId, actionName) {
-    const card = document.getElementById(`wks-vm-${vmId}`);
-    if (card) card.querySelectorAll('button').forEach(b => b.disabled = true);
+    const vm = _myVms.find(v => v.vmId === vmId);
+    if (!vm) return;
+
+    // Mark pending immediately so buttons disable and badge updates
+    vm.powerState = 'pending';
+    const el = document.getElementById('wksMyList');
+    if (el) _renderMyWorkstations(el);
+
     try {
       await _api('POST', `/${vmId}/action`, { action: actionName });
-      const vm = _myVms.find(v => v.vmId === vmId);
-      if (vm) {
-        if (actionName === 'start')                      vm.powerState = 'running';
-        else if (actionName === 'stop' || actionName === 'shutdown') vm.powerState = 'stopped';
-        else if (actionName === 'reboot')                vm.powerState = 'running';
-        const el = document.getElementById('wksMyList');
-        if (el) _renderMyWorkstations(el);
-      }
     } catch (err) {
       alert(`Action "${actionName}" failed: ` + err.message);
-      if (card) card.querySelectorAll('button').forEach(b => b.disabled = false);
+      // Restore by polling real state
+      _pollUntilSettled(vmId);
+      return;
     }
+
+    _pollUntilSettled(vmId);
+  }
+
+  // Poll GET /:vmId/status every 3s until state is no longer 'pending' (or 45s timeout)
+  function _pollUntilSettled(vmId, maxMs = 45000) {
+    const start = Date.now();
+    const interval = setInterval(async () => {
+      if (Date.now() - start > maxMs) {
+        clearInterval(interval);
+        // Force a full reload on timeout
+        _myLoaded = false;
+        loadMyWorkstations(true);
+        return;
+      }
+      try {
+        const s = await _api('GET', `/${vmId}/status`);
+        const vm = _myVms.find(v => v.vmId === vmId);
+        if (vm && s.powerState !== 'pending') {
+          vm.powerState = s.powerState;
+          clearInterval(interval);
+          const el = document.getElementById('wksMyList');
+          if (el) _renderMyWorkstations(el);
+        }
+      } catch (_) { /* keep polling */ }
+    }, 3000);
   }
 
   async function confirmDelete(vmId) {
     const name = _myVms.find(v => v.vmId === vmId)?.name || vmId;
     if (!confirm(`Delete workstation "${name}"? This permanently destroys the VM and cannot be undone.`)) return;
+    // Mark pending while stop+delete runs
+    const vm = _myVms.find(v => v.vmId === vmId);
+    if (vm) { vm.powerState = 'pending'; const el = document.getElementById('wksMyList'); if (el) _renderMyWorkstations(el); }
     try {
       await _api('DELETE', `/${vmId}`);
       _myVms = _myVms.filter(v => v.vmId !== vmId);
@@ -219,6 +274,9 @@ const Workstations = (() => {
       if (el) _renderMyWorkstations(el);
     } catch (err) {
       alert('Delete failed: ' + err.message);
+      // Reload real state on failure
+      _myLoaded = false;
+      loadMyWorkstations(true);
     }
   }
 

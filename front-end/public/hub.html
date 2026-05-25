@@ -520,9 +520,12 @@
     .wks-vm-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
 
     .wks-badge { display: inline-flex; align-items: center; padding: 0.15rem 0.55rem; border-radius: 20px; font-size: 0.73rem; font-weight: 600; }
-    .wks-badge-on  { background: #c6f6d5; color: #276749; }
-    .wks-badge-off { background: #fed7d7; color: #9b2c2c; }
-    .wks-badge-unk { background: var(--gray-100,#f7fafc); color: var(--text-muted); }
+    .wks-badge-on      { background: #c6f6d5; color: #276749; }
+    .wks-badge-off     { background: #fed7d7; color: #9b2c2c; }
+    .wks-badge-unk     { background: var(--gray-100,#f7fafc); color: var(--text-muted); }
+    .wks-badge-pending { background: #fef9c3; color: #854d0e; animation: wks-pulse 1s ease-in-out infinite; }
+    @keyframes wks-pulse { 0%,100% { opacity:1; } 50% { opacity:.55; } }
+    .wks-dev-tag { font-size: 0.7rem; background: #fff7ed; color: #c2410c; border: 1px solid #f97316; border-radius: 4px; padding: 0 5px; font-weight: 600; }
 
     .wks-btn-danger { color: #e53e3e; border-color: #fc8181; }
     .wks-btn-danger:hover { background: #fff5f5; }
@@ -544,6 +547,18 @@
     .wks-snap-row:last-child { border-bottom: none; }
     .wks-snap-desc  { color: var(--text-muted); font-size: 0.85rem; }
     .wks-snap-empty { text-align: center; color: var(--text-muted); padding: 1rem 0; }
+
+    /* Deploy modal dev-mode box */
+    .wks-dev-box   { margin-top: 1rem; padding: 0.875rem 1rem; background: #fff7ed; border: 2px solid #f97316; border-radius: 8px; }
+    .wks-dev-label { display: flex; align-items: flex-start; gap: 0.65rem; cursor: pointer; margin: 0; }
+    .wks-dev-check { margin-top: 3px; flex-shrink: 0; accent-color: #ea580c; width: 15px; height: 15px; }
+    .wks-dev-title { font-weight: 700; color: #c2410c; font-size: 0.9rem; line-height: 1.3; }
+    .wks-dev-desc  { font-size: 0.8rem; color: #9a3412; margin-top: 0.3rem; line-height: 1.45; }
+    .wks-dev-code  { background: #fed7aa; padding: 1px 4px; border-radius: 3px; font-family: monospace; }
+    [data-theme="dark"] .wks-dev-box  { background: rgba(249,115,22,0.1); border-color: #f97316; }
+    [data-theme="dark"] .wks-dev-title { color: #fb923c; }
+    [data-theme="dark"] .wks-dev-desc  { color: #fdba74; }
+    [data-theme="dark"] .wks-dev-code  { background: rgba(249,115,22,0.2); }
   </style>
 </head>
 <body>
@@ -723,19 +738,15 @@
       <div class="modal-body">
         <p>Clone and start <strong id="wksDeployModalName"></strong> as your workstation VM?</p>
 
-        <!-- Admin-only dev mode section — hidden for non-admins via JS -->
-        <div id="wksDeployDevSection" style="display:none; margin-top:1rem; padding:0.875rem 1rem;
-             background:#fff7ed; border:1px solid #f97316; border-radius:8px;">
-          <label style="display:flex; align-items:flex-start; gap:0.65rem; cursor:pointer;">
-            <input type="checkbox" id="wksDeploySkipLane" style="margin-top:3px; flex-shrink:0; accent-color:#ea580c;">
+        <!-- Admin-only dev mode section — shown/hidden by workstations.js based on role -->
+        <div id="wksDeployDevSection" class="wks-dev-box" style="display:none;">
+          <label class="wks-dev-label">
+            <input type="checkbox" id="wksDeploySkipLane" class="wks-dev-check">
             <div>
-              <div style="font-weight:700; color:#c2410c; font-size:0.9rem;">
-                ⚠ Skip lane networking &mdash; DEV / TESTING ONLY
-              </div>
-              <div style="font-size:0.8rem; color:#9a3412; margin-top:0.3rem; line-height:1.45;">
-                Deploys on <code style="background:#fed7aa; padding:0 3px; border-radius:3px;">vmbr0</code>
-                with no VLAN isolation and no lane gateway.
-                <strong>Unsafe for production &mdash; admin use only.</strong>
+              <div class="wks-dev-title">⚠ Skip lane networking — DEV / TESTING ONLY</div>
+              <div class="wks-dev-desc">
+                Deploys directly on <code class="wks-dev-code">vmbr0</code> with no VLAN isolation
+                and no lane gateway. <strong>Unsafe for production — admin use only.</strong>
               </div>
             </div>
           </label>

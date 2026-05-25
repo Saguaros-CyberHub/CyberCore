@@ -11,11 +11,23 @@ const express = require('express');
 const router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 const { cybercoreQuery } = require('../utils/cybercore-db');
-const { proxmoxAPI, waitForTask } = require('../utils/proxmox');
+const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
+const { selectBestNode } = require('../utils/node-selector');
+const { getDefaultTemplateNode } = require('../utils/site-config');
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/** Sanitize a string to a Proxmox-safe VM name: lowercase, hyphens only, max 63 chars. */
+function sanitizeVmName(s) {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, 63);
+}
 
 /** Verify caller owns this workstation VM; returns the vm row or throws. */
 async function getOwnedWorkstation(userId, vmId) {
@@ -48,7 +60,49 @@ async function getOwnedWorkstation(userId, vmId) {
 /** Get next available VMID from Proxmox cluster. */
 async function nextVmId() {
   const data = await proxmoxAPI('GET', '/api2/json/cluster/nextid');
-  return data.data ?? data;
+  return parseInt(data.data ?? data, 10);
+}
+
+/**
+ * Bulk-sync power_state for a list of vm_instance rows using a single
+ * cluster/resources call.  Updates the DB in parallel; never throws — errors
+ * are swallowed so callers always get a response even if Proxmox is unreachable.
+ * Returns the same rows with power_state patched to the live value.
+ */
+async function syncPowerStates(rows) {
+  if (!rows.length) return rows;
+  try {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const byVmid = {};
+    for (const r of (resources || [])) byVmid[String(r.vmid)] = r;
+
+    const now = new Date().toISOString();
+    const updates = [];
+    for (const row of rows) {
+      const r = byVmid[String(row.provider_vmid)];
+      if (!r) continue;
+      // Proxmox reports 'running' or 'stopped'; surface anything else as-is
+      const live = r.status === 'running' ? 'running' : r.status === 'stopped' ? 'stopped' : r.status;
+      if (live !== row.power_state) {
+        updates.push(cybercoreQuery(
+          `UPDATE cybercore_vm_instance
+             SET power_state = $1, last_seen_at = now(), last_state_change = now()
+           WHERE vm_instance_id = $2`,
+          [live, row.vm_instance_id]
+        ));
+        row.power_state = live;
+      } else {
+        updates.push(cybercoreQuery(
+          `UPDATE cybercore_vm_instance SET last_seen_at = now() WHERE vm_instance_id = $1`,
+          [row.vm_instance_id]
+        ));
+      }
+    }
+    await Promise.allSettled(updates);
+  } catch (err) {
+    console.warn('[workstations] Proxmox state sync failed, using cached states:', err.message);
+  }
+  return rows;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -91,6 +145,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
   try {
     const result = await cybercoreQuery(`
       SELECT
+        vi.vm_instance_id                         AS vm_instance_id,
         vi.vm_instance_id                         AS vm_id,
         r.name                                     AS vm_name,
         r.module_key,
@@ -99,7 +154,9 @@ router.get('/mine', authenticateToken, async (req, res) => {
         vi.provider_node,
         vi.provider_vmid,
         vi.created_at,
+        vi.last_seen_at,
         r.metadata->>'template_name'               AS template_name,
+        r.metadata->>'dev_deploy'                  AS dev_deploy,
         r.metadata->>'guac_connection_id'          AS guac_connection_id,
         vi.metadata->>'guac_connection_id'         AS guac_connection_id_vi
       FROM cybercore_vm_instance vi
@@ -113,7 +170,10 @@ router.get('/mine', authenticateToken, async (req, res) => {
       ORDER BY vi.created_at DESC
     `, [req.user.userId]);
 
-    const vms = result.rows.map(r => ({
+    // Sync live power_state from Proxmox (single cluster/resources call)
+    const synced = await syncPowerStates(result.rows);
+
+    const vms = synced.map(r => ({
       vmId:         r.vm_id,
       name:         r.vm_name,
       moduleKey:    r.module_key,
@@ -121,7 +181,9 @@ router.get('/mine', authenticateToken, async (req, res) => {
       node:         r.provider_node,
       vmid:         r.provider_vmid,
       templateName: r.template_name,
+      devDeploy:    r.dev_deploy === 'true',
       createdAt:    r.created_at,
+      lastSeenAt:   r.last_seen_at,
       hasConsole:   !!(r.guac_connection_id || r.guac_connection_id_vi),
     }));
 
@@ -129,6 +191,45 @@ router.get('/mine', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('[workstations] GET /mine error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────────────
+// GET /api/workstations/:vmId/status
+// Live power state for a single VM — queries Proxmox and updates the DB.
+// Used by the frontend to poll after power actions.
+// ──────────────────────────────────────────────────────────────────────────────
+router.get('/:vmId/status', authenticateToken, async (req, res) => {
+  try {
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
+    const status = await proxmoxAPI(
+      'GET',
+      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/status/current`
+    );
+    const live = status.status === 'running' ? 'running'
+               : status.status === 'stopped' ? 'stopped'
+               : status.status || 'unknown';
+
+    await cybercoreQuery(
+      `UPDATE cybercore_vm_instance
+         SET power_state       = $1,
+             last_seen_at      = now(),
+             last_state_change = CASE WHEN power_state != $1 THEN now() ELSE last_state_change END
+       WHERE vm_instance_id = $2`,
+      [live, req.params.vmId]
+    );
+
+    res.json({
+      vmId:       req.params.vmId,
+      powerState: live,
+      uptime:     status.uptime ?? null,
+      cpu:        status.cpu    ?? null,
+      mem:        status.mem    ?? null,
+      maxmem:     status.maxmem ?? null,
+    });
+  } catch (err) {
+    console.error('[workstations] GET /status error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
@@ -167,34 +268,50 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
     }
 
     // skipLane: admin-only dev flag — deploys on vmbr0 with no lane/VLAN isolation
-    const skipLane = req.body.skipLane === true && req.user.role === 'admin';
     if (req.body.skipLane === true && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'skipLane is restricted to admins' });
     }
+    const skipLane = req.body.skipLane === true && req.user.role === 'admin';
 
-    // 3. Get next Proxmox VMID and clone
-    const newVmid = await nextVmId();
-    const vmName  = `wks-${tpl.template_key}-${userId.slice(0, 8)}-${Date.now()}`;
+    // 3. Resolve source node (where template actually lives) and best target node
+    const templateNode = await findTemplateNode(
+      tpl.template_vmid,
+      tpl.node || getDefaultTemplateNode()
+    );
+    const bestNodeInfo = await selectBestNode();
+    const bestNode     = bestNodeInfo.node;
+    console.log(`[workstations] Deploy node: template on ${templateNode}, placing on ${bestNode} (score ${bestNodeInfo.score})`);
 
-    console.log(`[workstations] Cloning template ${tpl.template_vmid} → ${newVmid} on ${tpl.node}${skipLane ? ' [DEV: skipLane]' : ''}`);
+    // 4. Get next VMID and build a Proxmox-safe name
+    const newVmid  = await nextVmId();
+    const rawName  = `wks-${tpl.template_key}-${userId.slice(0, 8)}`;
+    const vmName   = sanitizeVmName(rawName);
+
+    console.log(`[workstations] Cloning ${tpl.template_vmid} (${templateNode}) → ${newVmid} "${vmName}" on ${bestNode}${skipLane ? ' [DEV: skipLane]' : ''}`);
     const cloneUpid = await proxmoxAPI(
       'POST',
-      `/api2/json/nodes/${tpl.node}/qemu/${tpl.template_vmid}/clone`,
-      { newid: newVmid, name: vmName, full: 1, target: tpl.node }
+      `/api2/json/nodes/${templateNode}/qemu/${tpl.template_vmid}/clone`,
+      {
+        newid:       newVmid,
+        name:        vmName,
+        full:        1,
+        target:      bestNode,
+        description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}`,
+      }
     );
-    await waitForTask(tpl.node, cloneUpid);
+    await waitForTask(templateNode, cloneUpid);
 
-    // 3b. Dev mode: rewire network to local bridge, bypassing lane VLAN isolation
+    // 4b. Dev mode: rewire network to local bridge, bypassing lane VLAN isolation
     if (skipLane) {
       console.warn(`[workstations] DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0 (no lane isolation)`);
       await proxmoxAPI(
         'PUT',
-        `/api2/json/nodes/${tpl.node}/qemu/${newVmid}/config`,
+        `/api2/json/nodes/${bestNode}/qemu/${newVmid}/config`,
         { net0: 'virtio,bridge=vmbr0,firewall=0' }
       );
     }
 
-    // 4. Create DB records
+    // 5. Create DB records
     const resourceRes = await cybercoreQuery(`
       INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
       VALUES ('vm', $1, $2, 'allocated', $3::jsonb)
@@ -207,6 +324,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
         catalog_template_id: templateId,
         template_name:       tpl.os_name,
         template_key:        tpl.template_key,
+        deploy_node:         bestNode,
         ...(skipLane ? { dev_deploy: true, network_mode: 'local_dev' } : {}),
       }),
     ]);
@@ -216,20 +334,20 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
       INSERT INTO cybercore_vm_instance
         (resource_id, provider, provider_node, provider_vmid, power_state)
       VALUES ($1, 'proxmox', $2, $3, 'stopped')
-    `, [resourceId, tpl.node, String(newVmid)]);
+    `, [resourceId, bestNode, String(newVmid)]);
 
     await cybercoreQuery(`
       INSERT INTO cybercore_allocation (resource_id, user_id, purpose)
       VALUES ($1, $2, 'workstation')
     `, [resourceId, userId]);
 
-    // 5. Start the VM
+    // 6. Start the VM
     try {
       const startUpid = await proxmoxAPI(
         'POST',
-        `/api2/json/nodes/${tpl.node}/qemu/${newVmid}/status/start`
+        `/api2/json/nodes/${bestNode}/qemu/${newVmid}/status/start`
       );
-      await waitForTask(tpl.node, startUpid);
+      await waitForTask(bestNode, startUpid);
       await cybercoreQuery(
         `UPDATE cybercore_vm_instance SET power_state = 'running', started_at = now() WHERE resource_id = $1`,
         [resourceId]
@@ -248,7 +366,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
       success: true,
       vmId: vmRes.rows[0].vm_instance_id,
       name: vmName,
-      node: tpl.node,
+      node: bestNode,
       vmid: newVmid,
     });
   } catch (err) {
@@ -384,10 +502,10 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
       await waitForTask(vm.provider_node, stopUpid, 35000);
     } catch (_) {}
 
-    // Delete from Proxmox
+    // Delete from Proxmox (purge=1 removes disks; skiplock omitted — requires root)
     await proxmoxAPI(
       'DELETE',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}?purge=1&skiplock=1`
+      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}?purge=1`
     );
 
     // Mark destroyed in DB and end allocation
