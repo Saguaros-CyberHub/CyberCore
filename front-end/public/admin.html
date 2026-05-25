@@ -697,10 +697,18 @@
               <textarea id="wsTplDesc" rows="2" placeholder="What this workstation is for..."></textarea>
             </div>
 
-            <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr; gap:1rem;">
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr; gap:1rem;">
               <div class="form-group">
                 <label>Template VMID</label>
                 <input type="number" id="wsTplVmid" placeholder="e.g., 1002" min="100" max="9999">
+              </div>
+              <div class="form-group">
+                <label>VM Type</label>
+                <select id="wsTplProviderType">
+                  <option value="">Auto-detect</option>
+                  <option value="qemu">QEMU VM</option>
+                  <option value="lxc">LXC Container</option>
+                </select>
               </div>
               <div class="form-group">
                 <label>OS Family</label>

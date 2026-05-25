@@ -2,8 +2,8 @@
  * ============================================================================
  * User Workstations
  * Self-service workstation VMs: browse templates, deploy, power control,
- * snapshots, and rollback. Only QEMU VMs registered as workstations are
- * controllable — lane gateways (LXC) are never exposed here.
+ * snapshots, and rollback. Supports both QEMU VMs and LXC containers —
+ * provider_type in cybercore_template_catalog controls which API paths are used.
  * ============================================================================
  */
 
@@ -14,12 +14,14 @@ const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
 const { selectBestNode } = require('../utils/node-selector');
 const { getDefaultTemplateNode } = require('../utils/site-config');
+const createLogger = require('../utils/logger');
+const log = createLogger('workstations');
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
-/** Sanitize a string to a Proxmox-safe VM name: lowercase, hyphens only, max 63 chars. */
+/** Sanitize a string to a Proxmox-safe VM/CT name: lowercase, hyphens only, max 63 chars. */
 function sanitizeVmName(s) {
   return s
     .toLowerCase()
@@ -27,6 +29,16 @@ function sanitizeVmName(s) {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
     .substring(0, 63);
+}
+
+/**
+ * Returns the Proxmox API base path for a VM or container.
+ * provider_type 'lxc' → /api2/json/nodes/{node}/lxc/{vmid}
+ * anything else (or null/undefined) → /api2/json/nodes/{node}/qemu/{vmid}
+ */
+function vmApiBase(node, vmid, providerType) {
+  const kind = providerType === 'lxc' ? 'lxc' : 'qemu';
+  return `/api2/json/nodes/${node}/${kind}/${vmid}`;
 }
 
 /** Verify caller owns this workstation VM; returns the vm row or throws. */
@@ -37,11 +49,12 @@ async function getOwnedWorkstation(userId, vmId) {
       vi.provider_node,
       vi.provider_vmid,
       vi.power_state,
-      vi.metadata,
+      vi.metadata        AS vi_metadata,
       r.resource_id,
-      r.name         AS vm_name,
+      r.name             AS vm_name,
       r.module_key,
-      r.status       AS resource_status
+      r.status           AS resource_status,
+      r.metadata->>'provider_type' AS provider_type
     FROM cybercore_vm_instance vi
     JOIN cybercore_resource r ON r.resource_id = vi.resource_id
     JOIN cybercore_allocation a
@@ -72,16 +85,15 @@ async function nextVmId() {
 async function syncPowerStates(rows) {
   if (!rows.length) return rows;
   try {
+    // No ?type=vm filter — that returns both qemu and lxc in Proxmox
     const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
     const byVmid = {};
     for (const r of (resources || [])) byVmid[String(r.vmid)] = r;
 
-    const now = new Date().toISOString();
     const updates = [];
     for (const row of rows) {
       const r = byVmid[String(row.provider_vmid)];
       if (!r) continue;
-      // Proxmox reports 'running' or 'stopped'; surface anything else as-is
       const live = r.status === 'running' ? 'running' : r.status === 'stopped' ? 'stopped' : r.status;
       if (live !== row.power_state) {
         updates.push(cybercoreQuery(
@@ -100,7 +112,7 @@ async function syncPowerStates(rows) {
     }
     await Promise.allSettled(updates);
   } catch (err) {
-    console.warn('[workstations] Proxmox state sync failed, using cached states:', err.message);
+    log.warn('Proxmox state sync failed, using cached states:', err.message);
   }
   return rows;
 }
@@ -119,6 +131,7 @@ router.get('/templates', authenticateToken, async (req, res) => {
         description,
         os_family,
         os_version,
+        provider_type,
         template_vmid,
         node,
         module_key,
@@ -132,7 +145,7 @@ router.get('/templates', authenticateToken, async (req, res) => {
     `);
     res.json({ templates: result.rows });
   } catch (err) {
-    console.error('[workstations] GET /templates error:', err.message);
+    log.error('GET /templates error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -157,6 +170,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
         vi.last_seen_at,
         r.metadata->>'template_name'               AS template_name,
         r.metadata->>'dev_deploy'                  AS dev_deploy,
+        r.metadata->>'provider_type'               AS provider_type,
         r.metadata->>'guac_connection_id'          AS guac_connection_id,
         vi.metadata->>'guac_connection_id'         AS guac_connection_id_vi
       FROM cybercore_vm_instance vi
@@ -170,7 +184,6 @@ router.get('/mine', authenticateToken, async (req, res) => {
       ORDER BY vi.created_at DESC
     `, [req.user.userId]);
 
-    // Sync live power_state from Proxmox (single cluster/resources call)
     const synced = await syncPowerStates(result.rows);
 
     const vms = synced.map(r => ({
@@ -178,6 +191,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
       name:         r.vm_name,
       moduleKey:    r.module_key,
       powerState:   r.power_state || 'unknown',
+      providerType: r.provider_type || 'qemu',
       node:         r.provider_node,
       vmid:         r.provider_vmid,
       templateName: r.template_name,
@@ -189,7 +203,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
 
     res.json({ vms });
   } catch (err) {
-    console.error('[workstations] GET /mine error:', err.message);
+    log.error('GET /mine error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -197,14 +211,13 @@ router.get('/mine', authenticateToken, async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 // GET /api/workstations/:vmId/status
 // Live power state for a single VM — queries Proxmox and updates the DB.
-// Used by the frontend to poll after power actions.
 // ──────────────────────────────────────────────────────────────────────────────
 router.get('/:vmId/status', authenticateToken, async (req, res) => {
   try {
     const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
     const status = await proxmoxAPI(
       'GET',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/status/current`
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/status/current`
     );
     const live = status.status === 'running' ? 'running'
                : status.status === 'stopped' ? 'stopped'
@@ -228,14 +241,14 @@ router.get('/:vmId/status', authenticateToken, async (req, res) => {
       maxmem:     status.maxmem ?? null,
     });
   } catch (err) {
-    console.error('[workstations] GET /status error:', err.message);
+    log.error('GET /status error:', err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
 // POST /api/workstations/:templateId/deploy
-// Clone the template, register in DB, allocate to user, start the VM.
+// Clone the template, register in DB, allocate to user, start the VM/CT.
 // ──────────────────────────────────────────────────────────────────────────────
 router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
   const { templateId } = req.params;
@@ -244,7 +257,8 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
   try {
     // 1. Fetch template
     const tplRes = await cybercoreQuery(`
-      SELECT id, template_key, os_name, template_vmid, node, module_key, max_instances, metadata
+      SELECT id, template_key, os_name, template_vmid, node, provider_type,
+             module_key, max_instances, metadata
       FROM cybercore_template_catalog
       WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
     `, [templateId]);
@@ -254,6 +268,8 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
 
     if (!tpl.template_vmid) return res.status(400).json({ error: 'Template has no Proxmox VMID configured' });
     if (!tpl.node)          return res.status(400).json({ error: 'Template has no node assigned — sync nodes in admin first' });
+
+    const providerType = tpl.provider_type || 'qemu';
 
     // 2. Check max_instances across all users for this template
     const countRes = await cybercoreQuery(`
@@ -273,41 +289,45 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
     }
     const skipLane = req.body.skipLane === true && req.user.role === 'admin';
 
-    // 3. Resolve source node (where template actually lives) and best target node
+    // 3. Resolve source node and best target node
     const templateNode = await findTemplateNode(
       tpl.template_vmid,
       tpl.node || getDefaultTemplateNode()
     );
     const bestNodeInfo = await selectBestNode();
     const bestNode     = bestNodeInfo.node;
-    console.log(`[workstations] Deploy node: template on ${templateNode}, placing on ${bestNode} (score ${bestNodeInfo.score})`);
+    log.info(`Deploy: template ${tpl.template_vmid} (${providerType}) on ${templateNode} → ${bestNode} (score ${bestNodeInfo.score})`);
 
     // 4. Get next VMID and build a Proxmox-safe name
-    const newVmid  = await nextVmId();
-    const rawName  = `wks-${tpl.template_key}-${userId.slice(0, 8)}`;
-    const vmName   = sanitizeVmName(rawName);
+    const newVmid = await nextVmId();
+    const vmName  = sanitizeVmName(`wks-${tpl.template_key}-${userId.slice(0, 8)}`);
 
-    console.log(`[workstations] Cloning ${tpl.template_vmid} (${templateNode}) → ${newVmid} "${vmName}" on ${bestNode}${skipLane ? ' [DEV: skipLane]' : ''}`);
+    log.info(`Cloning VMID ${tpl.template_vmid} → ${newVmid} "${vmName}"${skipLane ? ' [DEV: skipLane]' : ''}`);
+
+    // Clone params differ slightly between qemu and lxc
+    const cloneBody = providerType === 'lxc'
+      ? { newid: newVmid, hostname: vmName, full: 1, target: bestNode,
+          description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` }
+      : { newid: newVmid, name: vmName, full: 1, target: bestNode,
+          description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` };
+
     const cloneUpid = await proxmoxAPI(
       'POST',
-      `/api2/json/nodes/${templateNode}/qemu/${tpl.template_vmid}/clone`,
-      {
-        newid:       newVmid,
-        name:        vmName,
-        full:        1,
-        target:      bestNode,
-        description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}`,
-      }
+      `${vmApiBase(templateNode, tpl.template_vmid, providerType)}/clone`,
+      cloneBody
     );
     await waitForTask(templateNode, cloneUpid);
 
     // 4b. Dev mode: rewire network to local bridge, bypassing lane VLAN isolation
     if (skipLane) {
-      console.warn(`[workstations] DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0 (no lane isolation)`);
+      log.warn(`DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0`);
+      const net0Value = providerType === 'lxc'
+        ? 'name=eth0,bridge=vmbr0,firewall=0'
+        : 'virtio,bridge=vmbr0,firewall=0';
       await proxmoxAPI(
         'PUT',
-        `/api2/json/nodes/${bestNode}/qemu/${newVmid}/config`,
-        { net0: 'virtio,bridge=vmbr0,firewall=0' }
+        `${vmApiBase(bestNode, newVmid, providerType)}/config`,
+        { net0: net0Value }
       );
     }
 
@@ -321,6 +341,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
       vmName,
       JSON.stringify({
         vm_category:         'workstation',
+        provider_type:       providerType,
         catalog_template_id: templateId,
         template_name:       tpl.os_name,
         template_key:        tpl.template_key,
@@ -341,11 +362,11 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
       VALUES ($1, $2, 'workstation')
     `, [resourceId, userId]);
 
-    // 6. Start the VM
+    // 6. Start the VM/CT
     try {
       const startUpid = await proxmoxAPI(
         'POST',
-        `/api2/json/nodes/${bestNode}/qemu/${newVmid}/status/start`
+        `${vmApiBase(bestNode, newVmid, providerType)}/status/start`
       );
       await waitForTask(bestNode, startUpid);
       await cybercoreQuery(
@@ -353,24 +374,24 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
         [resourceId]
       );
     } catch (startErr) {
-      console.warn(`[workstations] VM started with warning: ${startErr.message}`);
+      log.warn(`VM/CT started with warning: ${startErr.message}`);
     }
 
-    // Return the newly created VM id
     const vmRes = await cybercoreQuery(
       `SELECT vm_instance_id FROM cybercore_vm_instance WHERE resource_id = $1`,
       [resourceId]
     );
 
     res.status(201).json({
-      success: true,
-      vmId: vmRes.rows[0].vm_instance_id,
-      name: vmName,
-      node: bestNode,
-      vmid: newVmid,
+      success:      true,
+      vmId:         vmRes.rows[0].vm_instance_id,
+      name:         vmName,
+      node:         bestNode,
+      vmid:         newVmid,
+      providerType,
     });
   } catch (err) {
-    console.error('[workstations] Deploy error:', err.message);
+    log.error('Deploy error:', err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
@@ -396,11 +417,12 @@ router.post('/:vmId/action', authenticateToken, async (req, res) => {
 
     const upid = await proxmoxAPI(
       'POST',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/status/${action}`
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/status/${action}`
     );
 
-    // Update power_state optimistically; don't await full task to keep response fast
-    const newState = action === 'start' ? 'running' : (action === 'stop' || action === 'shutdown') ? 'stopped' : 'running';
+    const newState = action === 'start' ? 'running'
+                   : (action === 'stop' || action === 'shutdown') ? 'stopped'
+                   : 'running';
     await cybercoreQuery(
       `UPDATE cybercore_vm_instance SET power_state = $1, last_state_change = now() WHERE vm_instance_id = $2`,
       [newState, req.params.vmId]
@@ -408,27 +430,25 @@ router.post('/:vmId/action', authenticateToken, async (req, res) => {
 
     res.json({ success: true, action, upid });
   } catch (err) {
-    console.error(`[workstations] Action ${action} error:`, err.message);
+    log.error(`Action ${action} error:`, err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
 // GET /api/workstations/:vmId/snapshots
-// List all snapshots for the VM.
 // ──────────────────────────────────────────────────────────────────────────────
 router.get('/:vmId/snapshots', authenticateToken, async (req, res) => {
   try {
     const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
     const data = await proxmoxAPI(
       'GET',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/snapshot`
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot`
     );
-    // Filter out the implicit 'current' node
     const snapshots = (data.data || data || []).filter(s => s.name !== 'current');
     res.json({ snapshots });
   } catch (err) {
-    console.error('[workstations] GET /snapshots error:', err.message);
+    log.error('GET /snapshots error:', err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
@@ -447,20 +467,20 @@ router.post('/:vmId/snapshot', authenticateToken, async (req, res) => {
     const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
     const upid = await proxmoxAPI(
       'POST',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/snapshot`,
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot`,
       { snapname: name, description: description || '' }
     );
     await waitForTask(vm.provider_node, upid);
     res.json({ success: true, snapname: name });
   } catch (err) {
-    console.error('[workstations] POST /snapshot error:', err.message);
+    log.error('POST /snapshot error:', err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
 // POST /api/workstations/:vmId/rollback
-// Roll back VM to a snapshot. Body: { snapname }
+// Roll back VM/CT to a snapshot. Body: { snapname }
 // ──────────────────────────────────────────────────────────────────────────────
 router.post('/:vmId/rollback', authenticateToken, async (req, res) => {
   const { snapname } = req.body;
@@ -470,7 +490,7 @@ router.post('/:vmId/rollback', authenticateToken, async (req, res) => {
     const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
     const upid = await proxmoxAPI(
       'POST',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/snapshot/${encodeURIComponent(snapname)}/rollback`
+      `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot/${encodeURIComponent(snapname)}/rollback`
     );
     await waitForTask(vm.provider_node, upid);
     await cybercoreQuery(
@@ -479,56 +499,91 @@ router.post('/:vmId/rollback', authenticateToken, async (req, res) => {
     );
     res.json({ success: true, snapname });
   } catch (err) {
-    console.error('[workstations] POST /rollback error:', err.message);
+    log.error('POST /rollback error:', err.message);
     res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 // ──────────────────────────────────────────────────────────────────────────────
 // DELETE /api/workstations/:vmId
-// Destroy and deregister a user's workstation VM.
+// Destroy and deregister a user's workstation VM/CT.
 // ──────────────────────────────────────────────────────────────────────────────
 router.delete('/:vmId', authenticateToken, async (req, res) => {
+  const vmId   = req.params.vmId;
+  const userId = req.user.userId;
+
+  let vm;
   try {
-    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
-
-    // Stop VM first (ignore errors — it may already be stopped)
-    try {
-      const stopUpid = await proxmoxAPI(
-        'POST',
-        `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}/status/stop`,
-        { timeout: 30 }
-      );
-      await waitForTask(vm.provider_node, stopUpid, 35000);
-    } catch (_) {}
-
-    // Delete from Proxmox (purge=1 removes disks; skiplock omitted — requires root)
-    await proxmoxAPI(
-      'DELETE',
-      `/api2/json/nodes/${vm.provider_node}/qemu/${vm.provider_vmid}?purge=1`
-    );
-
-    // Mark destroyed in DB and end allocation
-    await cybercoreQuery(`
-      UPDATE cybercore_vm_instance SET destroyed_at = now(), power_state = 'stopped'
-      WHERE vm_instance_id = $1
-    `, [req.params.vmId]);
-
-    await cybercoreQuery(`
-      UPDATE cybercore_resource SET status = 'retired', updated_at = now()
-      WHERE resource_id = $1
-    `, [vm.resource_id]);
-
-    await cybercoreQuery(`
-      UPDATE cybercore_allocation SET ends_at = now()
-      WHERE resource_id = $1 AND user_id = $2 AND (ends_at IS NULL OR ends_at > NOW())
-    `, [vm.resource_id, req.user.userId]);
-
-    res.json({ success: true });
+    vm = await getOwnedWorkstation(userId, vmId);
   } catch (err) {
-    console.error('[workstations] DELETE error:', err.message);
-    res.status(err.status || 500).json({ error: err.message });
+    return res.status(err.status || 500).json({ error: err.message });
   }
+
+  const providerType = vm.provider_type || 'qemu';
+
+  await cybercoreQuery(
+    `UPDATE cybercore_vm_instance SET power_state = 'deleting' WHERE vm_instance_id = $1`,
+    [vmId]
+  );
+  await cybercoreQuery(
+    `UPDATE cybercore_resource SET status = 'deleting', updated_at = now() WHERE resource_id = $1`,
+    [vm.resource_id]
+  );
+
+  res.json({ success: true, status: 'deleting' });
+
+  (async () => {
+    try {
+      try {
+        const stopUpid = await proxmoxAPI(
+          'POST',
+          `${vmApiBase(vm.provider_node, vm.provider_vmid, providerType)}/status/stop`,
+          { timeout: 30 }
+        );
+        await waitForTask(vm.provider_node, stopUpid, 45000);
+      } catch (stopErr) {
+        log.warn(`Stop before delete did not complete cleanly (proceeding): ${stopErr.message}`);
+      }
+
+      try {
+        const delUpid = await proxmoxAPI(
+          'DELETE',
+          `${vmApiBase(vm.provider_node, vm.provider_vmid, providerType)}?purge=1`
+        );
+        if (typeof delUpid === 'string' && delUpid.startsWith('UPID:')) {
+          await waitForTask(vm.provider_node, delUpid, 180000);
+        }
+      } catch (delErr) {
+        log.warn(`Proxmox delete returned an error (marking destroyed anyway): ${delErr.message}`);
+      }
+
+      await cybercoreQuery(
+        `UPDATE cybercore_vm_instance SET destroyed_at = now(), power_state = 'stopped' WHERE vm_instance_id = $1`,
+        [vmId]
+      );
+      await cybercoreQuery(
+        `UPDATE cybercore_resource SET status = 'retired', updated_at = now() WHERE resource_id = $1`,
+        [vm.resource_id]
+      );
+      await cybercoreQuery(
+        `UPDATE cybercore_allocation SET ends_at = now()
+         WHERE resource_id = $1 AND user_id = $2 AND (ends_at IS NULL OR ends_at > NOW())`,
+        [vm.resource_id, userId]
+      );
+      log.info(`Workstation destroyed`, { vmId, node: vm.provider_node, vmid: vm.provider_vmid, providerType });
+
+    } catch (err) {
+      log.error(`Background delete failed for ${vmId}: ${err.message}`, err);
+      await cybercoreQuery(
+        `UPDATE cybercore_vm_instance SET destroyed_at = now(), power_state = 'stopped' WHERE vm_instance_id = $1`,
+        [vmId]
+      ).catch(() => {});
+      await cybercoreQuery(
+        `UPDATE cybercore_resource SET status = 'retired', updated_at = now() WHERE resource_id = $1`,
+        [vm.resource_id]
+      ).catch(() => {});
+    }
+  })();
 });
 
 module.exports = router;

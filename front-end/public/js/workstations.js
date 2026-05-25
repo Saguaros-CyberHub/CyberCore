@@ -70,6 +70,7 @@ const Workstations = (() => {
         <div class="wks-tpl-name">${_esc(t.name)}</div>
         ${t.description ? `<div class="wks-tpl-desc">${_esc(t.description)}</div>` : ''}
         <div class="wks-tpl-meta">
+          ${t.provider_type === 'lxc'  ? '<span class="wks-type-badge wks-type-lxc">LXC Container</span>' : t.provider_type === 'qemu' ? '<span class="wks-type-badge wks-type-vm">QEMU VM</span>' : ''}
           ${t.os_family  ? `<span>${_esc(t.os_family)}</span>`  : ''}
           ${t.os_version ? `<span>${_esc(t.os_version)}</span>` : ''}
         </div>
@@ -171,14 +172,21 @@ const Workstations = (() => {
   }
 
   const _BADGE = {
-    running:  ['wks-badge-on',      'Running'],
-    stopped:  ['wks-badge-off',     'Stopped'],
-    pending:  ['wks-badge-pending', 'Pending…'],
+    running:  ['wks-badge-on',       'Running'],
+    stopped:  ['wks-badge-off',      'Stopped'],
+    pending:  ['wks-badge-pending',  'Pending…'],
+    deleting: ['wks-badge-deleting', 'Deleting…'],
   };
 
   function _powerBadge(state) {
     const [cls, label] = _BADGE[state] || ['wks-badge-unk', state || 'Unknown'];
     return `<span class="wks-badge ${cls}">${label}</span>`;
+  }
+
+  function _typeBadge(providerType) {
+    if (providerType === 'lxc')  return '<span class="wks-type-badge wks-type-lxc">LXC</span>';
+    if (providerType === 'qemu') return '<span class="wks-type-badge wks-type-vm">VM</span>';
+    return '';
   }
 
   function _vmCard(vm) {
@@ -196,6 +204,7 @@ const Workstations = (() => {
             <div class="wks-vm-name">${_esc(vm.name)}</div>
             <div class="wks-vm-meta">
               ${_powerBadge(vm.powerState)}
+              ${_typeBadge(vm.providerType)}
               ${vm.templateName ? `<span class="wks-vm-tpl">${_esc(vm.templateName)}</span>` : ''}
               ${vm.devDeploy    ? `<span class="wks-dev-tag">DEV</span>` : ''}
             </div>

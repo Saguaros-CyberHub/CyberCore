@@ -5,6 +5,45 @@
  */
 
 require('dotenv').config();
+
+// ── Logging: must come before everything else so module-load logs are captured ─
+const createLogger = require('./utils/logger');
+const util = require('util');
+
+// Cache loggers keyed by tag (extracted from [TAG] prefix pattern most modules use)
+const _loggers = Object.create(null);
+function _getLogger(tag) {
+  return _loggers[tag] || (_loggers[tag] = createLogger(tag));
+}
+
+// Format variadic console args to a single string
+function _fmt(args) {
+  return args.map(a => (typeof a === 'string' ? a : util.inspect(a, { depth: 3 }))).join(' ');
+}
+
+// Extract [TAG] prefix from message for scoped log lines; falls back to 'app'
+function _tag(args) {
+  const first = String(args[0] ?? '');
+  const m = first.match(/^\[([^\]]{1,40})\]/);
+  return m ? m[1] : 'app';
+}
+
+// Strip the [TAG] prefix so it doesn't duplicate in the formatted output
+function _msg(args) {
+  const s = _fmt(args);
+  return s.replace(/^\[[^\]]{1,40}\]\s*/, '');
+}
+
+// Override console.* — logger writes directly to process.stdout/stderr (no recursion)
+console.log   = (...a) => _getLogger(_tag(a)).info (_msg(a));
+console.info  = (...a) => _getLogger(_tag(a)).info (_msg(a));
+console.warn  = (...a) => _getLogger(_tag(a)).warn (_msg(a));
+console.error = (...a) => _getLogger(_tag(a)).error(_msg(a));
+console.debug = (...a) => _getLogger(_tag(a)).debug(_msg(a));
+
+const log = createLogger('server');
+// ──────────────────────────────────────────────────────────────────────────────
+
 const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
@@ -83,6 +122,10 @@ if (guacPublicBase.startsWith('http')) {
     // Malformed URL — ignore; 'self' remains
   }
 }
+
+// HTTP request logging (before all routes)
+const requestLogger = require('./middleware/request-logger');
+app.use(requestLogger);
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -350,16 +393,12 @@ async function start() {
   app.use(errorHandler);
 
   app.listen(PORT, () => {
-    console.log(`
-+---------------------------------------------------------------+
-|               CYBERHUB SERVER STARTED                         |
-+---------------------------------------------------------------+
-|  Server:     http://localhost                                 |
-|  Hub:        http://localhost/hub                             |
-|  Login:      http://localhost/login                           |
-|  Environment: ${process.env.NODE_ENV || 'development'}                                      |
-+---------------------------------------------------------------+
-    `);
+    log.info('CyberHub server started', {
+      port:        PORT,
+      env:         process.env.NODE_ENV || 'development',
+      logLevel:    process.env.LOG_LEVEL || 'info',
+      logDir:      process.env.LOG_DIR   || 'logs/',
+    });
   });
 }
 

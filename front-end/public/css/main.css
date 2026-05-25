@@ -1226,7 +1226,8 @@ select.form-select {
   display: flex;
 }
 
-.modal {
+.modal,
+.modal-dialog {
   background: var(--bg-card, white);
   border-radius: var(--border-radius);
   width: 100%;
