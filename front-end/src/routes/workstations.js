@@ -70,9 +70,9 @@ async function getOwnedWorkstation(userId, vmId) {
   return result.rows[0];
 }
 
-/** Get next available VMID from Proxmox cluster. */
+/** Get next available VMID >= 800000 (keeps workstation VMIDs in a distinct high range). */
 async function nextVmId() {
-  const data = await proxmoxAPI('GET', '/api2/json/cluster/nextid');
+  const data = await proxmoxAPI('GET', '/api2/json/cluster/nextid?vmid=800000');
   return parseInt(data.data ?? data, 10);
 }
 
@@ -92,6 +92,8 @@ async function syncPowerStates(rows) {
 
     const updates = [];
     for (const row of rows) {
+      // Skip VMs still being provisioned — background deploy task owns their state
+      if (row.power_state === 'deploying' || !row.provider_vmid) continue;
       const r = byVmid[String(row.provider_vmid)];
       if (!r) continue;
       const live = r.status === 'running' ? 'running' : r.status === 'stopped' ? 'stopped' : r.status;
@@ -248,14 +250,15 @@ router.get('/:vmId/status', authenticateToken, async (req, res) => {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // POST /api/workstations/:templateId/deploy
-// Clone the template, register in DB, allocate to user, start the VM/CT.
+// Validates, creates DB records immediately, responds 202, then clones/starts
+// in the background — same non-blocking pattern as DELETE.
 // ──────────────────────────────────────────────────────────────────────────────
 router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
   const { templateId } = req.params;
   const userId = req.user.userId;
 
   try {
-    // 1. Fetch template
+    // 1. Fetch and validate template
     const tplRes = await cybercoreQuery(`
       SELECT id, template_key, os_name, template_vmid, node, provider_type,
              module_key, max_instances, metadata
@@ -271,70 +274,28 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
 
     const providerType = tpl.provider_type || 'qemu';
 
-    // 2. Check max_instances across all users for this template
+    // 2. Check max_instances
     const countRes = await cybercoreQuery(`
-      SELECT COUNT(*) AS cnt
-      FROM cybercore_resource
-      WHERE (metadata->>'catalog_template_id') = $1
-        AND status != 'retired'
+      SELECT COUNT(*) AS cnt FROM cybercore_resource
+      WHERE (metadata->>'catalog_template_id') = $1 AND status NOT IN ('retired', 'failed')
     `, [templateId]);
-    const currentCount = parseInt(countRes.rows[0].cnt, 10);
-    if (tpl.max_instances && currentCount >= tpl.max_instances) {
+    if (tpl.max_instances && parseInt(countRes.rows[0].cnt, 10) >= tpl.max_instances) {
       return res.status(409).json({ error: `Max instances (${tpl.max_instances}) reached for this template` });
     }
 
-    // skipLane: admin-only dev flag — deploys on vmbr0 with no lane/VLAN isolation
+    // 3. Validate skipLane
     if (req.body.skipLane === true && req.user.role !== 'admin') {
       return res.status(403).json({ error: 'skipLane is restricted to admins' });
     }
     const skipLane = req.body.skipLane === true && req.user.role === 'admin';
 
-    // 3. Resolve source node and best target node
-    const templateNode = await findTemplateNode(
-      tpl.template_vmid,
-      tpl.node || getDefaultTemplateNode()
-    );
-    const bestNodeInfo = await selectBestNode();
-    const bestNode     = bestNodeInfo.node;
-    log.info(`Deploy: template ${tpl.template_vmid} (${providerType}) on ${templateNode} → ${bestNode} (score ${bestNodeInfo.score})`);
+    // 4. Build VM name now (no Proxmox calls needed for this)
+    const vmName = sanitizeVmName(`wks-${tpl.template_key}-${userId.slice(0, 8)}`);
 
-    // 4. Get next VMID and build a Proxmox-safe name
-    const newVmid = await nextVmId();
-    const vmName  = sanitizeVmName(`wks-${tpl.template_key}-${userId.slice(0, 8)}`);
-
-    log.info(`Cloning VMID ${tpl.template_vmid} → ${newVmid} "${vmName}"${skipLane ? ' [DEV: skipLane]' : ''}`);
-
-    // Clone params differ slightly between qemu and lxc
-    const cloneBody = providerType === 'lxc'
-      ? { newid: newVmid, hostname: vmName, full: 1, target: bestNode,
-          description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` }
-      : { newid: newVmid, name: vmName, full: 1, target: bestNode,
-          description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` };
-
-    const cloneUpid = await proxmoxAPI(
-      'POST',
-      `${vmApiBase(templateNode, tpl.template_vmid, providerType)}/clone`,
-      cloneBody
-    );
-    await waitForTask(templateNode, cloneUpid);
-
-    // 4b. Dev mode: rewire network to local bridge, bypassing lane VLAN isolation
-    if (skipLane) {
-      log.warn(`DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0`);
-      const net0Value = providerType === 'lxc'
-        ? 'name=eth0,bridge=vmbr0,firewall=0'
-        : 'virtio,bridge=vmbr0,firewall=0';
-      await proxmoxAPI(
-        'PUT',
-        `${vmApiBase(bestNode, newVmid, providerType)}/config`,
-        { net0: net0Value }
-      );
-    }
-
-    // 5. Create DB records
+    // 5. Create DB records immediately so the UI can show the deploying state
     const resourceRes = await cybercoreQuery(`
       INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
-      VALUES ('vm', $1, $2, 'allocated', $3::jsonb)
+      VALUES ('vm', $1, $2, 'pending', $3::jsonb)
       RETURNING resource_id
     `, [
       tpl.module_key || null,
@@ -345,51 +306,103 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
         catalog_template_id: templateId,
         template_name:       tpl.os_name,
         template_key:        tpl.template_key,
-        deploy_node:         bestNode,
         ...(skipLane ? { dev_deploy: true, network_mode: 'local_dev' } : {}),
       }),
     ]);
     const resourceId = resourceRes.rows[0].resource_id;
 
-    await cybercoreQuery(`
+    const vmRes = await cybercoreQuery(`
       INSERT INTO cybercore_vm_instance
-        (resource_id, provider, provider_node, provider_vmid, power_state)
-      VALUES ($1, 'proxmox', $2, $3, 'stopped')
-    `, [resourceId, bestNode, String(newVmid)]);
+        (resource_id, provider, power_state)
+      VALUES ($1, 'proxmox', 'deploying')
+      RETURNING vm_instance_id
+    `, [resourceId]);
+    const vmId = vmRes.rows[0].vm_instance_id;
 
     await cybercoreQuery(`
       INSERT INTO cybercore_allocation (resource_id, user_id, purpose)
       VALUES ($1, $2, 'workstation')
     `, [resourceId, userId]);
 
-    // 6. Start the VM/CT
-    try {
-      const startUpid = await proxmoxAPI(
-        'POST',
-        `${vmApiBase(bestNode, newVmid, providerType)}/status/start`
-      );
-      await waitForTask(bestNode, startUpid);
-      await cybercoreQuery(
-        `UPDATE cybercore_vm_instance SET power_state = 'running', started_at = now() WHERE resource_id = $1`,
-        [resourceId]
-      );
-    } catch (startErr) {
-      log.warn(`VM/CT started with warning: ${startErr.message}`);
-    }
+    // 6. Respond immediately — client shows "Deploying…" card
+    res.status(202).json({ success: true, vmId, name: vmName, providerType });
 
-    const vmRes = await cybercoreQuery(
-      `SELECT vm_instance_id FROM cybercore_vm_instance WHERE resource_id = $1`,
-      [resourceId]
-    );
+    // 7. Clone + start in background
+    (async () => {
+      try {
+        const templateNode = await findTemplateNode(
+          tpl.template_vmid,
+          tpl.node || getDefaultTemplateNode()
+        );
+        const bestNodeInfo = await selectBestNode();
+        const bestNode     = bestNodeInfo.node;
+        const newVmid      = await nextVmId();
 
-    res.status(201).json({
-      success:      true,
-      vmId:         vmRes.rows[0].vm_instance_id,
-      name:         vmName,
-      node:         bestNode,
-      vmid:         newVmid,
-      providerType,
-    });
+        log.info(`Deploying ${tpl.template_vmid} (${providerType}) ${templateNode} → ${bestNode} VMID ${newVmid} "${vmName}"${skipLane ? ' [DEV]' : ''}`);
+
+        const cloneBody = providerType === 'lxc'
+          ? { newid: newVmid, hostname: vmName, full: 1, target: bestNode,
+              description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` }
+          : { newid: newVmid, name: vmName, full: 1, target: bestNode,
+              description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` };
+
+        const cloneUpid = await proxmoxAPI(
+          'POST',
+          `${vmApiBase(templateNode, tpl.template_vmid, providerType)}/clone`,
+          cloneBody
+        );
+        // Cloning large templates can take 5–10 minutes — give it plenty of headroom
+        await waitForTask(templateNode, cloneUpid, 600000);
+
+        if (skipLane) {
+          log.warn(`DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0`);
+          const net0Value = providerType === 'lxc'
+            ? 'name=eth0,bridge=vmbr0,firewall=0'
+            : 'virtio,bridge=vmbr0,firewall=0';
+          await proxmoxAPI('PUT', `${vmApiBase(bestNode, newVmid, providerType)}/config`, { net0: net0Value });
+        }
+
+        // Update DB with real Proxmox location now that clone succeeded
+        await cybercoreQuery(`
+          UPDATE cybercore_vm_instance
+             SET provider_node = $1, provider_vmid = $2
+           WHERE vm_instance_id = $3
+        `, [bestNode, String(newVmid), vmId]);
+        await cybercoreQuery(`
+          UPDATE cybercore_resource SET status = 'allocated', updated_at = now()
+           WHERE resource_id = $1
+        `, [resourceId]);
+
+        // Start VM/CT
+        try {
+          const startUpid = await proxmoxAPI(
+            'POST',
+            `${vmApiBase(bestNode, newVmid, providerType)}/status/start`
+          );
+          await waitForTask(bestNode, startUpid);
+        } catch (startErr) {
+          log.warn(`Start after clone had a warning: ${startErr.message}`);
+        }
+
+        await cybercoreQuery(`
+          UPDATE cybercore_vm_instance
+             SET power_state = 'running', started_at = now()
+           WHERE vm_instance_id = $1
+        `, [vmId]);
+
+        log.info(`Workstation deployed and running`, { vmId, vmid: newVmid, node: bestNode });
+
+      } catch (err) {
+        log.error(`Background deploy failed for ${vmId}: ${err.message}`, err);
+        await cybercoreQuery(`
+          UPDATE cybercore_vm_instance SET power_state = 'failed' WHERE vm_instance_id = $1
+        `, [vmId]).catch(() => {});
+        await cybercoreQuery(`
+          UPDATE cybercore_resource SET status = 'failed', updated_at = now() WHERE resource_id = $1
+        `, [resourceId]).catch(() => {});
+      }
+    })();
+
   } catch (err) {
     log.error('Deploy error:', err.message);
     res.status(err.status || 500).json({ error: err.message });

@@ -523,9 +523,20 @@
     .wks-badge-on      { background: #c6f6d5; color: #276749; }
     .wks-badge-off     { background: #fed7d7; color: #9b2c2c; }
     .wks-badge-unk     { background: var(--gray-100,#f7fafc); color: var(--text-muted); }
-    .wks-badge-pending  { background: #fef9c3; color: #854d0e; animation: wks-pulse 1s ease-in-out infinite; }
-    .wks-badge-deleting { background: #fed7d7; color: #9b2c2c; animation: wks-pulse 1s ease-in-out infinite; }
+    .wks-badge-pending   { background: #fef9c3; color: #854d0e; animation: wks-pulse 1s ease-in-out infinite; }
+    .wks-badge-deploying { background: #dbeafe; color: #1e40af; animation: wks-pulse 1s ease-in-out infinite; }
+    .wks-badge-deleting  { background: #fed7d7; color: #9b2c2c; animation: wks-pulse 1s ease-in-out infinite; }
+    .wks-badge-failed    { background: #fee2e2; color: #991b1b; }
     @keyframes wks-pulse { 0%,100% { opacity:1; } 50% { opacity:.55; } }
+
+    /* Toast notifications */
+    .wks-toast { padding: 0.75rem 1.1rem; border-radius: 8px; font-size: 0.875rem; font-weight: 500;
+                 box-shadow: 0 4px 16px rgba(0,0,0,0.15); opacity: 0; transform: translateY(8px);
+                 transition: opacity 0.3s ease, transform 0.3s ease; pointer-events: auto; max-width: 340px; }
+    .wks-toast-visible   { opacity: 1; transform: translateY(0); }
+    .wks-toast-info      { background: #1e40af; color: #fff; }
+    .wks-toast-success   { background: #166534; color: #fff; }
+    .wks-toast-error     { background: #991b1b; color: #fff; }
     .wks-dev-tag { font-size: 0.7rem; background: #fff7ed; color: #c2410c; border: 1px solid #f97316; border-radius: 4px; padding: 0 5px; font-weight: 600; }
     .wks-type-badge { font-size: 0.7rem; border-radius: 4px; padding: 0 5px; font-weight: 600; }
     .wks-type-vm  { background: #dbeafe; color: #1d4ed8; }
@@ -733,11 +744,11 @@
   </div>
 
   <!-- Workstations: deploy confirmation modal -->
-  <div id="wksDeployModal" class="modal-overlay" onclick="if(event.target===this&&!document.getElementById('wksDeploySubmitBtn').disabled)document.getElementById('wksDeployModal').classList.remove('active')">
+  <div id="wksDeployModal" class="modal-overlay" onclick="if(event.target===this)document.getElementById('wksDeployModal').classList.remove('active')">
     <div class="modal-dialog" style="max-width:460px;">
       <div class="modal-header">
         <h3 class="modal-title">Deploy Workstation</h3>
-        <button class="modal-close" onclick="if(!document.getElementById('wksDeploySubmitBtn').disabled)document.getElementById('wksDeployModal').classList.remove('active')">✕</button>
+        <button class="modal-close" onclick="document.getElementById('wksDeployModal').classList.remove('active')">✕</button>
       </div>
       <div class="modal-body">
         <p>Clone and start <strong id="wksDeployModalName"></strong> as your workstation VM?</p>
@@ -758,13 +769,16 @@
 
         <div style="display:flex; gap:0.5rem; justify-content:flex-end; margin-top:1.25rem;">
           <button class="btn btn-outline btn-sm"
-                  onclick="if(!document.getElementById('wksDeploySubmitBtn').disabled)document.getElementById('wksDeployModal').classList.remove('active')">Cancel</button>
+                  onclick="document.getElementById('wksDeployModal').classList.remove('active')">Cancel</button>
           <button id="wksDeploySubmitBtn" class="btn btn-primary btn-sm"
                   onclick="Workstations.submitDeploy()">Deploy</button>
         </div>
       </div>
     </div>
   </div>
+
+  <!-- Toast notification container (workstations and other modules) -->
+  <div id="wksToastContainer" style="position:fixed;bottom:1.5rem;right:1.5rem;z-index:9999;display:flex;flex-direction:column;gap:0.5rem;pointer-events:none;"></div>
 
   <!-- Workstations snapshot modal -->
   <div id="wksSnapshotModal" class="modal-overlay" onclick="if(event.target===this)Workstations.closeSnapshots()">

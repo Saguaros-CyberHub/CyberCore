@@ -37,7 +37,23 @@ const Workstations = (() => {
       .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
-  // ── Available Templates ─────────────────────────────────────────────────
+  // ── Toast notifications ──────────────────────────────────────────────────────
+
+  function _showToast(msg, type = 'info') {
+    const container = document.getElementById('wksToastContainer');
+    if (!container) return;
+    const toast = document.createElement('div');
+    toast.className = `wks-toast wks-toast-${type}`;
+    toast.textContent = msg;
+    container.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('wks-toast-visible'));
+    setTimeout(() => {
+      toast.classList.remove('wks-toast-visible');
+      setTimeout(() => toast.remove(), 350);
+    }, 5000);
+  }
+
+  // ── Available Templates ─────────────────────────────────────────────────────
 
   async function loadTemplates() {
     if (_availLoaded) return;
@@ -88,7 +104,6 @@ const Workstations = (() => {
 
     document.getElementById('wksDeployModalName').textContent = _pendingDeployName;
 
-    // Show dev-mode section only for admins
     const devSection = document.getElementById('wksDeployDevSection');
     const user = typeof Auth !== 'undefined' ? Auth.getUser() : null;
     if (devSection) devSection.style.display = (user?.role === 'admin') ? 'block' : 'none';
@@ -107,16 +122,14 @@ const Workstations = (() => {
     const skipLane = document.getElementById('wksDeploySkipLane')?.checked ?? false;
     const btn = document.getElementById('wksDeploySubmitBtn');
     btn.disabled    = true;
-    btn.textContent = 'Deploying…';
+    btn.textContent = 'Starting…';
     try {
       const data = await _api('POST', `/${_pendingDeployId}/deploy`, { skipLane });
+      // Backend responds 202 immediately — close modal and show deploying card
       document.getElementById('wksDeployModal').classList.remove('active');
       _myLoaded = false;
-      alert(
-        `Workstation "${data.name}" deployed successfully.` +
-        (skipLane ? '\n\n⚠ Dev mode: VM is on vmbr0 with no lane isolation.' : '') +
-        '\n\nGo to "My Workspaces" to see it.'
-      );
+      await loadMyWorkstations(true);
+      _showToast(`"${data.name}" is deploying — this usually takes 1–2 minutes.`, 'info');
     } catch (err) {
       btn.disabled    = false;
       btn.textContent = 'Deploy';
@@ -124,7 +137,7 @@ const Workstations = (() => {
     }
   }
 
-  // ── My Workstations ─────────────────────────────────────────────────────
+  // ── My Workstations ─────────────────────────────────────────────────────────
 
   async function loadMyWorkstations(force = false) {
     const el = document.getElementById('wksMyList');
@@ -136,26 +149,50 @@ const Workstations = (() => {
       _myVms    = data.vms || [];
       _myLoaded = true;
       _renderMyWorkstations(el);
-      _startAutoRefresh();
+      _scheduleRefresh();
     } catch (err) {
       el.innerHTML = `<div class="wks-error">⚠ ${_esc(err.message)}</div>`;
     }
   }
 
-  function _startAutoRefresh() {
-    if (_refreshTimer) return;
-    _refreshTimer = setInterval(() => {
-      if (!document.getElementById('wksMyList')) {
-        clearInterval(_refreshTimer);
-        _refreshTimer = null;
-        return;
+  // Adaptive polling: 5s when any VM is in a transient state, 30s otherwise.
+  function _scheduleRefresh() {
+    if (_refreshTimer) clearTimeout(_refreshTimer);
+    const hasTransient = _myVms.some(v =>
+      v.powerState === 'deploying' || v.powerState === 'deleting' || v.powerState === 'pending'
+    );
+    _refreshTimer = setTimeout(_doRefresh, hasTransient ? 5000 : 30000);
+  }
+
+  async function _doRefresh() {
+    _refreshTimer = null;
+    if (!document.getElementById('wksMyList')) return;
+
+    // Snapshot previous states to detect transitions
+    const prevStates = {};
+    for (const v of _myVms) prevStates[v.vmId] = v.powerState;
+
+    try {
+      const data = await _api('GET', '/mine');
+      _myVms = data.vms || [];
+
+      // Notify on notable transitions
+      for (const vm of _myVms) {
+        const prev = prevStates[vm.vmId];
+        if (prev === 'deploying') {
+          if (vm.powerState === 'running') {
+            _showToast(`"${vm.name}" is now running!`, 'success');
+          } else if (vm.powerState === 'failed') {
+            _showToast(`"${vm.name}" failed to deploy. Contact your administrator.`, 'error');
+          }
+        }
       }
-      _api('GET', '/mine').then(data => {
-        _myVms = data.vms || [];
-        const el = document.getElementById('wksMyList');
-        if (el) _renderMyWorkstations(el);
-      }).catch(() => {});
-    }, 30000);
+
+      const el = document.getElementById('wksMyList');
+      if (el) _renderMyWorkstations(el);
+    } catch (_) {}
+
+    _scheduleRefresh();
   }
 
   function _renderMyWorkstations(el) {
@@ -172,10 +209,12 @@ const Workstations = (() => {
   }
 
   const _BADGE = {
-    running:  ['wks-badge-on',       'Running'],
-    stopped:  ['wks-badge-off',      'Stopped'],
-    pending:  ['wks-badge-pending',  'Pending…'],
-    deleting: ['wks-badge-deleting', 'Deleting…'],
+    running:   ['wks-badge-on',        'Running'],
+    stopped:   ['wks-badge-off',       'Stopped'],
+    pending:   ['wks-badge-pending',   'Pending…'],
+    deploying: ['wks-badge-deploying', 'Deploying…'],
+    deleting:  ['wks-badge-deleting',  'Deleting…'],
+    failed:    ['wks-badge-failed',    'Failed'],
   };
 
   function _powerBadge(state) {
@@ -190,12 +229,14 @@ const Workstations = (() => {
   }
 
   function _vmCard(vm) {
-    const running = vm.powerState === 'running';
-    const stopped = vm.powerState === 'stopped';
-    const pending = vm.powerState === 'pending';
-    const disableAll = pending;
-    const disableStart    = running || pending;
-    const disableStop     = stopped || pending;
+    const running    = vm.powerState === 'running';
+    const stopped    = vm.powerState === 'stopped';
+    const pending    = vm.powerState === 'pending';
+    const deploying  = vm.powerState === 'deploying';
+    const failed     = vm.powerState === 'failed';
+    const disableAll  = pending || deploying || failed;
+    const disableStart = running || pending || deploying || failed;
+    const disableStop  = stopped || pending || deploying || failed;
     return `
       <div class="wks-vm-card" id="wks-vm-${vm.vmId}">
         <div class="wks-vm-header">
@@ -229,7 +270,6 @@ const Workstations = (() => {
     const vm = _myVms.find(v => v.vmId === vmId);
     if (!vm) return;
 
-    // Mark pending immediately so buttons disable and badge updates
     vm.powerState = 'pending';
     const el = document.getElementById('wksMyList');
     if (el) _renderMyWorkstations(el);
@@ -238,7 +278,6 @@ const Workstations = (() => {
       await _api('POST', `/${vmId}/action`, { action: actionName });
     } catch (err) {
       alert(`Action "${actionName}" failed: ` + err.message);
-      // Restore by polling real state
       _pollUntilSettled(vmId);
       return;
     }
@@ -246,13 +285,11 @@ const Workstations = (() => {
     _pollUntilSettled(vmId);
   }
 
-  // Poll GET /:vmId/status every 3s until state is no longer 'pending' (or 45s timeout)
   function _pollUntilSettled(vmId, maxMs = 45000) {
     const start = Date.now();
     const interval = setInterval(async () => {
       if (Date.now() - start > maxMs) {
         clearInterval(interval);
-        // Force a full reload on timeout
         _myLoaded = false;
         loadMyWorkstations(true);
         return;
@@ -266,16 +303,19 @@ const Workstations = (() => {
           const el = document.getElementById('wksMyList');
           if (el) _renderMyWorkstations(el);
         }
-      } catch (_) { /* keep polling */ }
+      } catch (_) {}
     }, 3000);
   }
 
   async function confirmDelete(vmId) {
     const name = _myVms.find(v => v.vmId === vmId)?.name || vmId;
     if (!confirm(`Delete workstation "${name}"? This permanently destroys the VM and cannot be undone.`)) return;
-    // Mark pending while stop+delete runs
     const vm = _myVms.find(v => v.vmId === vmId);
-    if (vm) { vm.powerState = 'pending'; const el = document.getElementById('wksMyList'); if (el) _renderMyWorkstations(el); }
+    if (vm) {
+      vm.powerState = 'deleting';
+      const el = document.getElementById('wksMyList');
+      if (el) _renderMyWorkstations(el);
+    }
     try {
       await _api('DELETE', `/${vmId}`);
       _myVms = _myVms.filter(v => v.vmId !== vmId);
@@ -283,13 +323,12 @@ const Workstations = (() => {
       if (el) _renderMyWorkstations(el);
     } catch (err) {
       alert('Delete failed: ' + err.message);
-      // Reload real state on failure
       _myLoaded = false;
       loadMyWorkstations(true);
     }
   }
 
-  // ── Snapshots modal ─────────────────────────────────────────────────────
+  // ── Snapshots modal ─────────────────────────────────────────────────────────
 
   async function openSnapshots(vmId) {
     const vmName = _myVms.find(v => v.vmId === vmId)?.name || vmId;
