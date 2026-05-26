@@ -436,7 +436,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
               const rdpUser = tpl.metadata?.default_rdp_user || null;
               const rdpPass = tpl.metadata?.default_rdp_pass || null;
               const conn = await guacAPI('POST', '/connections', {
-                name: vmName,
+                name: `${vmName}-${newVmid}`,
                 protocol: 'rdp',
                 parentIdentifier: 'ROOT',
                 parameters: {
@@ -652,7 +652,7 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
         const stopUpid = await proxmoxAPI(
           'POST',
           `${vmApiBase(vm.provider_node, vm.provider_vmid, providerType)}/status/stop`,
-          { timeout: 30 }
+          providerType === 'lxc' ? null : { timeout: 30 }
         );
         await waitForTask(vm.provider_node, stopUpid, 45000);
       } catch (stopErr) {

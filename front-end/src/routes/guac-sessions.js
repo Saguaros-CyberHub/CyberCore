@@ -158,6 +158,7 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.vm_instance_id,
           vi.power_state,
           vi.metadata,
+          vi.provider_vmid,
           r.name,
           r.module_key,
           r.status AS resource_status
@@ -175,6 +176,7 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.vm_instance_id,
           vi.power_state,
           vi.metadata,
+          vi.provider_vmid,
           r.name,
           r.module_key,
           r.status        AS resource_status,
@@ -208,7 +210,12 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     if (!connId) {
       try {
         const tree = await guacAPI('GET', '/connectionGroups/ROOT/tree');
-        connId = findConnectionByName(tree, vmRow.name);
+        // Try "{name}-{vmid}" first (workstation naming), then plain "{name}" (legacy/other modules)
+        const qualifiedName = vmRow.provider_vmid
+          ? `${vmRow.name}-${vmRow.provider_vmid}`
+          : null;
+        connId = (qualifiedName && findConnectionByName(tree, qualifiedName))
+               || findConnectionByName(tree, vmRow.name);
       } catch (guacErr) {
         console.warn('[guac-sessions] Guacamole API fallback failed:', guacErr.message);
       }
