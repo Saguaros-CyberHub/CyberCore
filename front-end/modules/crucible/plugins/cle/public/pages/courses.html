@@ -740,7 +740,10 @@
               <td style="font-size:0.85rem;">${nodeLabel}</td>
               <td style="font-size:0.85rem;">${v.ip_address ? escHtml(v.ip_address) : '<span style="color:var(--text-muted);">—</span>'}</td>
               <td>${_powerBadge(v.power_state)}</td>
-              <td><button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.vm_instance_id)}')">Delete</button></td>
+              <td style="display:flex;gap:0.4rem;align-items:center;">
+                ${v.power_state === 'running' ? `<button class="btn btn-sm btn-outline" style="color:#2b6cb0;border-color:#2b6cb0;" onclick="openVMConsole('${escHtml(v.vm_instance_id)}')">Console</button>` : ''}
+                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.vm_instance_id)}')">Delete</button>
+              </td>
             </tr>`;
           });
 
@@ -1036,6 +1039,32 @@
         toast('Guacamole session opened (read-only)');
       } catch (e) {
         toast('Error accessing Guacamole: ' + e.message, true);
+      }
+    }
+
+    async function openVMConsole(vmInstanceId) {
+      try {
+        const res = await fetch(`/api/dashboard/vms/${vmInstanceId}/guac-session`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${TOKEN()}` },
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+
+        if (data.guacToken) {
+          localStorage.setItem('GUAC_AUTH', JSON.stringify({
+            authToken:            data.guacToken,
+            username:             data.username,
+            dataSource:           data.dataSource,
+            availableDataSources: data.availableDataSources,
+          }));
+        } else if (data.clearGuacAuth) {
+          localStorage.removeItem('GUAC_AUTH');
+        }
+
+        window.open(data.launchUrl, '_blank', 'noopener,noreferrer');
+      } catch (e) {
+        toast('Console error: ' + e.message, true);
       }
     }
 
