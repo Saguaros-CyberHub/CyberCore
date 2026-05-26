@@ -119,10 +119,27 @@ async function getVmIp(node, vmid, providerType, retries = 12, delayMs = 10000) 
   return null;
 }
 
-/** Get next available VMID >= 800000 (keeps workstation VMIDs in a distinct high range). */
+/**
+ * Get next available VMID >= 800000, serialized so concurrent deploy requests
+ * don't all receive the same ID before any VM is created on Proxmox.
+ * Tracks in-flight VMIDs and skips them when allocating the next one.
+ */
+const _pendingVmids = new Set();
+let   _vmidMutex   = Promise.resolve();
+
 async function nextVmId() {
-  const data = await proxmoxAPI('GET', '/api2/json/cluster/nextid?vmid=800000');
-  return parseInt(data.data ?? data, 10);
+  return (_vmidMutex = _vmidMutex.then(async () => {
+    let candidate = 800000;
+    while (true) {
+      const data = await proxmoxAPI('GET', `/api2/json/cluster/nextid?vmid=${candidate}`);
+      const vmid = parseInt(data.data ?? data, 10);
+      if (!_pendingVmids.has(vmid)) {
+        _pendingVmids.add(vmid);
+        return vmid;
+      }
+      candidate = vmid + 1;
+    }
+  }));
 }
 
 /**
@@ -419,10 +436,13 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
       VALUES ($1, $2, 'workstation')
     `, [resourceId, userId]);
 
-    // 6. Respond immediately — client shows "Deploying…" card
+    // 6. Reserve VMID now so concurrent bulk-deploys each get a unique ID
+    const newVmid = await nextVmId();
+
+    // 7. Respond immediately — client shows "Deploying…" card
     res.status(202).json({ success: true, vmId, name: vmName, providerType });
 
-    // 7. Clone + start in background
+    // 8. Clone + start in background
     (async () => {
       try {
         const templateNode = await findTemplateNode(
@@ -431,7 +451,6 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
         );
         const bestNodeInfo = await selectBestNode();
         const bestNode     = bestNodeInfo.node;
-        const newVmid      = await nextVmId();
 
         log.info(`Deploying ${tpl.template_vmid} (${providerType}) ${templateNode} → ${bestNode} VMID ${newVmid} "${vmName}"${skipLane ? ' [DEV]' : ''}`);
 
@@ -448,6 +467,8 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
         );
         // Cloning large templates can take 5–10 minutes — give it plenty of headroom
         await waitForTask(templateNode, cloneUpid, 600000);
+        // VMID is now committed on Proxmox — release reservation so future deploys don't skip it
+        _pendingVmids.delete(newVmid);
 
         if (skipLane) {
           log.warn(`DEV DEPLOY by admin ${userId} — overriding net0 to vmbr0`);
@@ -595,6 +616,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
         }
 
       } catch (err) {
+        _pendingVmids.delete(newVmid);
         log.error(`Background deploy failed for ${vmId}: ${err.message}`, err);
         await cybercoreQuery(`
           UPDATE cybercore_vm_instance SET power_state = 'failed' WHERE vm_instance_id = $1

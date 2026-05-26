@@ -693,7 +693,21 @@
       }
     }
 
+    let _vmRefreshTimer = null;
+
+    function _powerBadge(state) {
+      const map = {
+        running:   ['#38a169', 'Running'],
+        deploying: ['#d97706', 'Deploying…'],
+        stopped:   ['#6b7280', 'Stopped'],
+        failed:    ['#e53e3e', 'Failed'],
+      };
+      const [color, label] = map[state] || ['#6b7280', state || 'Unknown'];
+      return `<span style="background:${color}20;color:${color};border-radius:4px;padding:2px 8px;font-size:0.78rem;font-weight:600;">${label}</span>`;
+    }
+
     async function loadVMManagement() {
+      clearTimeout(_vmRefreshTimer);
       try {
         const data = await api('GET', `/courses/${currentCourseId}/vms`);
         const vms = data.vms || [];
@@ -707,23 +721,35 @@
             <thead><tr>
               <th>Student</th>
               <th>VM Name</th>
-              <th>Lane ID</th>
-              <th>Status</th>
+              <th>Node / VMID</th>
+              <th>IP</th>
+              <th>State</th>
               <th>Actions</th>
             </tr></thead>
             <tbody>`;
 
           vms.forEach(v => {
+            const studentName = [v.first_name, v.last_name].filter(Boolean).join(' ');
+            const studentLabel = studentName ? `${escHtml(studentName)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(v.student_email)}</span>` : escHtml(v.student_email);
+            const nodeLabel = v.provider_node
+              ? `${escHtml(v.provider_node)}<br><span style="font-size:0.75rem;color:var(--text-muted);">VMID ${escHtml(String(v.provider_vmid || '—'))}</span>`
+              : '<span style="color:var(--text-muted);">—</span>';
             html += `<tr>
-              <td>${escHtml(v.student_email)}</td>
-              <td>${escHtml(v.vm_name)}</td>
-              <td><code style="font-size: 0.8rem;">${escHtml(v.lane_id)}</code></td>
-              <td><span class="badge ${v.status === 'active' ? 'badge-active' : 'badge-draft'}">${v.status}</span></td>
-              <td><button class="btn btn-sm btn-outline" onclick="deleteVM('${escHtml(v.vm_id)}')">Delete</button></td>
+              <td>${studentLabel}</td>
+              <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}</td>
+              <td style="font-size:0.85rem;">${nodeLabel}</td>
+              <td style="font-size:0.85rem;">${v.ip_address ? escHtml(v.ip_address) : '<span style="color:var(--text-muted);">—</span>'}</td>
+              <td>${_powerBadge(v.power_state)}</td>
+              <td><button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.vm_instance_id)}')">Delete</button></td>
             </tr>`;
           });
 
           html += `</tbody></table>`;
+
+          // Auto-refresh while any VM is still deploying
+          if (vms.some(v => v.power_state === 'deploying')) {
+            _vmRefreshTimer = setTimeout(loadVMManagement, 8000);
+          }
         }
 
         document.getElementById('vmManagementContent').innerHTML = html;
