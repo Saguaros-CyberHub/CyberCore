@@ -5,7 +5,7 @@
  * plus a service-gaps report and template-misses report so the admin can
  * see what won't deploy and why.
  *
- * No DB calls — callers pre-fetch vm_template_catalog and vuln_scripts and
+ * No DB calls — callers pre-fetch cybercore_template_catalog and vuln_scripts and
  * pass them in. This keeps the function unit-testable and lets the route
  * handler control caching/concurrency.
  *
@@ -126,7 +126,7 @@ function inferVmType(matchedRow) {
  *                                            profile.assets to be the asset array
  *                                            (callers normalize from student_view.raw.threats.network.assets).
  * @param {Array}  args.assetSelection        [{hostname, included:bool}]; falsy → default server-only.
- * @param {Array}  args.vmTemplateCatalog     vm_template_catalog rows.
+ * @param {Array}  args.vmTemplateCatalog     cybercore_template_catalog rows.
  * @param {Array}  args.vulnScriptCatalog     vuln_scripts rows.
  * @param {object} [args.vulnApp]             ciab_profile_vuln_apps row (or null).
  * @param {object} [args.options]
@@ -308,7 +308,7 @@ function synthesizeSpecFromProfile({
       vms.push({
         name: 'vuln-app',
         hostname: 'vuln-app',
-        template_vmid: 1003,             // base Ubuntu per vm_template_catalog seed
+        template_vmid: 1003,             // base Ubuntu per cybercore_template_catalog seed
         template_node: templateNode,
         type: 'qemu',
         vm_offset: 600000 + vms.length * 10000,

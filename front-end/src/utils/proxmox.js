@@ -53,6 +53,11 @@ async function proxmoxAPI(method, path, body = null) {
       });
     });
 
+    // 30-second socket timeout prevents hanging if Proxmox stops responding mid-request
+    req.setTimeout(30000, () => {
+      req.destroy(new Error(`Proxmox ${method} ${url.pathname} timed out after 30s`));
+    });
+
     req.on('error', reject);
     if (bodyStr) req.write(bodyStr);
     req.end();

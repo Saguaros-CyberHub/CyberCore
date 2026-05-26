@@ -33,10 +33,10 @@
     .course-item-code { font-weight: 500; }
 
     /* Filter section */
-    .filter-panel { background: var(--card-bg, white); border-radius: 12px; padding: 1.25rem; border: 1px solid #e5e7eb; }
+    .filter-panel { background: var(--card-bg, white); border-radius: 12px; padding: 1.25rem; border: 1px solid #e5e7eb; width: 100%; min-width: 0; }
     .filter-title { font-weight: 600; margin-bottom: 1rem; font-size: 0.9rem; text-transform: uppercase; color: #6b7280; }
-    .search-box { position: relative; margin-bottom: 1rem; }
-    .search-box input { width: 100%; padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
+    .search-box { margin-bottom: 1rem; }
+    .search-box input { display: block; width: 100%; padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
     .search-box input:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1); }
     .filter-group { margin-bottom: 1.5rem; }
     .filter-checkbox { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; cursor: pointer; font-size: 0.9rem; }
@@ -171,9 +171,9 @@
               <!-- Instructor Filter -->
               <div class="filter-panel" id="instructorFilterPanel" style="display: none;">
                 <div class="filter-title">Instructor</div>
-                <div class="filter-group" id="instructorFilterGroup">
-                  <!-- Populated by JavaScript -->
-                </div>
+                <select id="instructorFilterSelect" onchange="applyFilters()" style="display: block; width: 100%; padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; background: var(--card-bg, white); color: inherit;">
+                  <option value="">All Instructors</option>
+                </select>
               </div>
             </div>
           </div>
@@ -423,24 +423,17 @@
 
     async function loadCourses() {
       try {
-        // Show admin button if user is admin
-        if (Auth && Auth.user && Auth.user.role === 'admin') {
+        const isAdmin = Auth && Auth.user && Auth.user.role === 'admin';
+
+        if (isAdmin) {
           document.getElementById('adminNewCourseBtnPanel').style.display = 'block';
-          loadInstructors();
+          await loadInstructors();
         }
-        
+
         const data = await api('GET', '/courses');
         allCourses = data.courses || [];
-        
-        // Build instructor filter
-        if (Auth && Auth.user && Auth.user.role === 'admin' && allCourses.length > 0) {
-          const instructorIds = [...new Set(allCourses.map(c => c.instructor_id).filter(Boolean))];
-          if (instructorIds.length > 0) {
-            const filterPanel = document.getElementById('instructorFilterPanel');
-            filterPanel.style.display = 'block';
-            // Filter will be populated with instructor names when available
-          }
-        }
+
+        if (isAdmin) buildInstructorFilter();
 
         // Update filter counts
         updateFilterCounts();
@@ -491,17 +484,18 @@
       const searchTerm = document.getElementById('courseSearchInput').value.toLowerCase();
       const filterActive = document.getElementById('filterActive').checked;
       const filterInactive = document.getElementById('filterInactive').checked;
+      const selectedInstructor = document.getElementById('instructorFilterSelect')?.value || '';
 
       const filtered = allCourses.filter(course => {
-        // Search filter
-        const matchesSearch = !searchTerm || 
+        const matchesSearch = !searchTerm ||
           course.course_name.toLowerCase().includes(searchTerm) ||
           (course.code && course.code.toLowerCase().includes(searchTerm));
 
-        // Status filter
         const statusMatches = (course.is_active && filterActive) || (!course.is_active && filterInactive);
 
-        return matchesSearch && statusMatches;
+        const matchesInstructor = !selectedInstructor || course.instructor_id === selectedInstructor;
+
+        return matchesSearch && statusMatches && matchesInstructor;
       });
 
       // Render filtered courses
@@ -563,6 +557,23 @@
       document.querySelectorAll('.detail-tab-pane').forEach(p => p.classList.remove('active'));
       tabEl.classList.add('active');
       document.getElementById(tabName + '-pane').classList.add('active');
+    }
+
+    function buildInstructorFilter() {
+      const instructorIds = [...new Set(allCourses.map(c => c.instructor_id).filter(Boolean))];
+      if (instructorIds.length === 0) return;
+
+      const select = document.getElementById('instructorFilterSelect');
+      select.innerHTML = '<option value="">All Instructors</option>' +
+        instructorIds.map(id => {
+          const inst = allInstructors.find(i => i.user_id === id);
+          const label = inst
+            ? (inst.first_name && inst.last_name ? `${inst.first_name} ${inst.last_name}` : inst.email)
+            : id;
+          return `<option value="${escHtml(id)}">${escHtml(label)}</option>`;
+        }).join('');
+
+      document.getElementById('instructorFilterPanel').style.display = 'block';
     }
 
     async function loadInstructors() {

@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <script src="/js/theme-patch.js"></script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>The Crucible | CTF Range</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/layout.css">
+  <style>
+    .crucible-layout { display: flex; gap: 0; height: calc(100vh - var(--header-height, 64px)); }
+
+    /* Type nav */
+    .type-nav { width: 220px; flex-shrink: 0; background: var(--bg-card, white); border-right: 1px solid var(--border-color, #e5e7eb); overflow-y: auto; padding: 1rem 0; }
+    .type-nav-header { padding: 0.5rem 1.25rem 1rem; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-secondary, #6b7280); }
+    .type-nav-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.65rem 1.25rem; cursor: pointer; font-size: 0.9rem; color: var(--text-primary, #1f2937); transition: background 0.15s; border-left: 3px solid transparent; }
+    .type-nav-item:hover { background: var(--bg-hover, #f9fafb); }
+    .type-nav-item.active { background: #fef2f2; border-left-color: #f56565; color: #dc2626; font-weight: 600; }
+    .type-nav-item .type-icon { font-size: 1.1rem; width: 1.4rem; text-align: center; }
+    .type-nav-divider { height: 1px; background: var(--border-color, #e5e7eb); margin: 0.5rem 0; }
+
+    /* Content area */
+    .type-content { flex: 1; overflow-y: auto; padding: 2rem; min-width: 0; }
+    .content-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.75rem; flex-wrap: wrap; gap: 1rem; }
+    .content-header h2 { margin: 0; font-size: 1.5rem; display: flex; align-items: center; gap: 0.5rem; }
+    .content-desc { color: var(--text-secondary, #6b7280); margin-bottom: 1.75rem; margin-top: -1rem; font-size: 0.95rem; }
+
+    /* Event cards */
+    .events-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1.25rem; }
+    .event-card { background: var(--bg-card, white); border-radius: 12px; border: 1px solid var(--border-color, #e5e7eb); padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; transition: box-shadow 0.2s; }
+    .event-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.1); }
+    .event-card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.5rem; }
+    .event-card-title { font-weight: 600; font-size: 1rem; margin: 0; }
+    .event-card-desc { font-size: 0.875rem; color: var(--text-secondary, #6b7280); line-height: 1.5; flex: 1; }
+    .event-card-meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.8rem; color: var(--text-secondary, #6b7280); }
+    .event-card-meta span { display: flex; align-items: center; gap: 0.25rem; }
+    .event-card-footer { display: flex; align-items: center; justify-content: space-between; padding-top: 0.75rem; border-top: 1px solid var(--border-color, #e5e7eb); }
+
+    .badge { display: inline-flex; align-items: center; padding: 0.2rem 0.6rem; border-radius: 20px; font-size: 0.72rem; font-weight: 600; }
+    .badge-active { background: #d1fae5; color: #065f46; }
+    .badge-draft  { background: #fef3c7; color: #92400e; }
+    .badge-archived { background: #f3f4f6; color: #6b7280; }
+
+    .btn { padding: 0.5rem 1rem; border-radius: 6px; font-weight: 600; font-size: 0.875rem; cursor: pointer; border: none; transition: background 0.15s; }
+    .btn-primary { background: #ef4444; color: white; }
+    .btn-primary:hover { background: #dc2626; }
+    .btn-outline { background: transparent; border: 1px solid var(--border-color, #e5e7eb); color: var(--text-primary, #1f2937); }
+    .btn-outline:hover { background: var(--bg-hover, #f9fafb); }
+    .btn-sm { padding: 0.35rem 0.75rem; font-size: 0.8rem; }
+
+    .empty-state { text-align: center; padding: 4rem 2rem; color: var(--text-secondary, #6b7280); }
+    .empty-state .empty-icon { font-size: 3rem; margin-bottom: 1rem; }
+    .empty-state h3 { color: var(--text-primary, #1f2937); margin-bottom: 0.5rem; }
+
+    /* Leaderboard */
+    .leaderboard-table { width: 100%; border-collapse: collapse; }
+    .leaderboard-table th { background: var(--bg-hover, #f9fafb); padding: 0.75rem 1rem; text-align: left; font-weight: 600; font-size: 0.85rem; border-bottom: 2px solid var(--border-color, #e5e7eb); }
+    .leaderboard-table td { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-color, #e5e7eb); font-size: 0.9rem; }
+    .leaderboard-table tr:hover td { background: var(--bg-hover, #f9fafb); }
+    .rank-1 { color: #f59e0b; font-weight: 700; }
+    .rank-2 { color: #9ca3af; font-weight: 700; }
+    .rank-3 { color: #cd7c2f; font-weight: 700; }
+
+    .loading { color: var(--text-secondary); text-align: center; padding: 2rem; }
+  </style>
+</head>
+<body>
+  <div class="app-layout">
+    <aside class="sidebar" id="sidebar"></aside>
+    <main class="main-content">
+      <header class="main-header">
+        <div class="header-left">
+          <button class="menu-toggle" onclick="toggleSidebar()">&#9776;</button>
+          <h2 style="margin:0; font-size:1.1rem;">🔥 The Crucible</h2>
+        </div>
+        <div class="header-right">
+          <span class="header-user" id="headerUser"></span>
+        </div>
+      </header>
+
+      <div style="display:flex; height:calc(100vh - 64px); overflow:hidden;">
+        <!-- Challenge Type Nav -->
+        <nav class="type-nav">
+          <div class="type-nav-header">Challenge Types</div>
+          <div class="type-nav-item active" data-type="weekly" onclick="selectType('weekly', this)">
+            <span class="type-icon">📅</span> Weekly Challenges
+          </div>
+          <div class="type-nav-item" data-type="vuln" onclick="selectType('vuln', this)">
+            <span class="type-icon">💀</span> Vulnerable Boxes
+          </div>
+          <div class="type-nav-divider"></div>
+          <div class="type-nav-item" data-type="groupctf" onclick="selectType('groupctf', this)">
+            <span class="type-icon">🏁</span> Group CTF
+          </div>
+          <div class="type-nav-item" data-type="koth" onclick="selectType('koth', this)">
+            <span class="type-icon">👑</span> King of the Hill
+          </div>
+          <div class="type-nav-item" data-type="redvsblue" onclick="selectType('redvsblue', this)">
+            <span class="type-icon">⚔️</span> Red vs Blue
+          </div>
+          <div class="type-nav-item" data-type="ir" onclick="selectType('ir', this)">
+            <span class="type-icon">🚨</span> IR / SOC Sim
+          </div>
+          <div class="type-nav-divider"></div>
+          <div class="type-nav-item" data-type="ctf_event" onclick="selectType('ctf_event', this)">
+            <span class="type-icon">🎯</span> CTF Events
+          </div>
+          <div class="type-nav-item" data-type="byoctf" onclick="selectType('byoctf', this)">
+            <span class="type-icon">🛠️</span> BYO CTF
+          </div>
+          <div class="type-nav-divider"></div>
+          <div class="type-nav-item" data-type="leaderboard" onclick="selectType('leaderboard', this)">
+            <span class="type-icon">🏆</span> Leaderboard
+          </div>
+        </nav>
+
+        <!-- Content -->
+        <div class="type-content" id="typeContent">
+          <div class="loading">Loading...</div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script src="/js/layout.js"></script>
+  <script>
+    const TYPE_META = {
+      weekly:     { label: 'Weekly Challenges',          icon: '📅', desc: 'Rotating weekly CTF problems refreshed every Monday. Complete them before time runs out.' },
+      vuln:       { label: 'Vulnerable Boxes',           icon: '💀', desc: 'Self-paced vulnerable machines. Exploit them to capture flags at your own pace.' },
+      groupctf:   { label: 'Group CTF',                  icon: '🏁', desc: 'Team-based Capture the Flag competitions. Form a team and compete for the top spot.' },
+      koth:       { label: 'King of the Hill',           icon: '👑', desc: 'Be the last team to own the target. Defend your flag while attacking others.' },
+      redvsblue:  { label: 'Red vs Blue',                icon: '⚔️', desc: 'Red team attacks while blue team defends. Test your offensive and defensive skills.' },
+      ir:         { label: 'Incident Response / SOC Sim',icon: '🚨', desc: 'Simulated breach scenarios. Investigate, contain, and remediate as a SOC analyst.' },
+      ctf_event:  { label: 'CTF Events',                 icon: '🎯', desc: 'Scheduled competitions open to all participants. Register and compete for prizes.' },
+      byoctf:     { label: 'BYO CTF',                    icon: '🛠️', desc: 'Build and host your own CTF challenges. Share your knowledge with the community.' },
+      leaderboard:{ label: 'Leaderboard',                icon: '🏆', desc: 'Rankings across all Crucible events. See where you stand.' },
+    };
+
+    let currentType = 'weekly';
+    let isAdmin = false;
+
+    function escHtml(s) {
+      return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function formatDate(iso) {
+      if (!iso) return '—';
+      return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    }
+
+    function statusBadge(status) {
+      const map = { active: 'badge-active', draft: 'badge-draft', archived: 'badge-archived' };
+      return `<span class="badge ${map[status] || 'badge-draft'}">${escHtml(status)}</span>`;
+    }
+
+    async function selectType(type, el) {
+      document.querySelectorAll('.type-nav-item').forEach(i => i.classList.remove('active'));
+      el.classList.add('active');
+      currentType = type;
+      await loadType(type);
+    }
+
+    async function loadType(type) {
+      const content = document.getElementById('typeContent');
+      const meta = TYPE_META[type];
+      content.innerHTML = '<div class="loading">Loading...</div>';
+
+      if (type === 'leaderboard') {
+        renderLeaderboard(content, meta);
+        return;
+      }
+
+      try {
+        const res = await fetch(`/api/crucible/events?type=${type}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        const data = await res.json();
+        renderEvents(content, meta, data.events || []);
+      } catch (e) {
+        content.innerHTML = `<p style="color:#ef4444;">Error loading events: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    function renderEvents(container, meta, events) {
+      let html = `
+        <div class="content-header">
+          <h2>${meta.icon} ${escHtml(meta.label)}</h2>
+        </div>
+        <p class="content-desc">${escHtml(meta.desc)}</p>
+      `;
+
+      if (events.length === 0) {
+        html += `
+          <div class="empty-state">
+            <div class="empty-icon">${meta.icon}</div>
+            <h3>No Active Events</h3>
+            <p>There are no active ${escHtml(meta.label.toLowerCase())} right now. Check back soon.</p>
+          </div>`;
+      } else {
+        html += '<div class="events-grid">' + events.map(e => `
+          <div class="event-card">
+            <div class="event-card-header">
+              <h3 class="event-card-title">${escHtml(e.name)}</h3>
+              ${statusBadge(e.status)}
+            </div>
+            ${e.description ? `<p class="event-card-desc">${escHtml(e.description)}</p>` : ''}
+            <div class="event-card-meta">
+              ${e.starts_at ? `<span>📅 ${formatDate(e.starts_at)}</span>` : ''}
+              ${e.ends_at   ? `<span>⏰ Ends ${formatDate(e.ends_at)}</span>` : ''}
+              ${e.max_players ? `<span>👥 Up to ${e.max_players} players</span>` : ''}
+              <span>👤 ${escHtml(e.participant_count || 0)} joined</span>
+            </div>
+            <div class="event-card-footer">
+              <button class="btn btn-primary btn-sm" onclick="joinEvent('${e.event_id}')">Join Event</button>
+              <span style="font-size:0.75rem; color:var(--text-secondary);">#${escHtml(e.event_id.slice(0,8))}</span>
+            </div>
+          </div>
+        `).join('') + '</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
+    async function renderLeaderboard(container, meta) {
+      container.innerHTML = `
+        <div class="content-header">
+          <h2>${meta.icon} ${escHtml(meta.label)}</h2>
+        </div>
+        <p class="content-desc">${escHtml(meta.desc)}</p>
+        <div class="loading">Loading scores...</div>
+      `;
+
+      try {
+        const res = await fetch('/api/crucible/events?type=all', {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        // Placeholder leaderboard — scoring system TBD
+        container.querySelector('.loading').outerHTML = `
+          <div class="empty-state">
+            <div class="empty-icon">🏆</div>
+            <h3>Leaderboard Coming Soon</h3>
+            <p>Complete events to earn points and appear on the leaderboard.</p>
+          </div>`;
+      } catch {
+        container.querySelector('.loading').outerHTML = '<p style="color:#ef4444;">Error loading leaderboard.</p>';
+      }
+    }
+
+    function joinEvent(eventId) {
+      alert('Event joining will be available once your instructor activates the event lane.');
+    }
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      const loggedIn = await Auth.requireAuth();
+      if (!loggedIn) return;
+
+      const user = Auth.getUser();
+      if (user) {
+        isAdmin = user.role === 'admin';
+        document.getElementById('headerUser').textContent = user.email || '';
+      }
+
+      await loadType('weekly');
+    });
+  </script>
+</body>
+</html>

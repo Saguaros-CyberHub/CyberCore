@@ -5,6 +5,56 @@
  */
 
 require('dotenv').config();
+
+// ── Logging: must come before everything else so module-load logs are captured ─
+const createLogger = require('./utils/logger');
+const util = require('util');
+
+// Cache loggers keyed by tag (extracted from [TAG] prefix pattern most modules use)
+const _loggers = Object.create(null);
+function _getLogger(tag) {
+  return _loggers[tag] || (_loggers[tag] = createLogger(tag));
+}
+
+// Format variadic console args to a single string
+function _fmt(args) {
+  return args.map(a => (typeof a === 'string' ? a : util.inspect(a, { depth: 3 }))).join(' ');
+}
+
+// Extract [TAG] prefix from message for scoped log lines; falls back to 'app'
+function _tag(args) {
+  const first = String(args[0] ?? '');
+  const m = first.match(/^\[([^\]]{1,40})\]/);
+  return m ? m[1] : 'app';
+}
+
+// Strip the [TAG] prefix so it doesn't duplicate in the formatted output
+function _msg(args) {
+  const s = _fmt(args);
+  return s.replace(/^\[[^\]]{1,40}\]\s*/, '');
+}
+
+// Override console.* — logger writes directly to process.stdout/stderr (no recursion)
+console.log   = (...a) => _getLogger(_tag(a)).info (_msg(a));
+console.info  = (...a) => _getLogger(_tag(a)).info (_msg(a));
+console.warn  = (...a) => _getLogger(_tag(a)).warn (_msg(a));
+console.error = (...a) => _getLogger(_tag(a)).error(_msg(a));
+console.debug = (...a) => _getLogger(_tag(a)).debug(_msg(a));
+
+const log = createLogger('server');
+
+// Catch unhandled rejections and uncaught exceptions so the process doesn't
+// silently crash. In Node 18+ an unhandled rejection exits with code 1 if
+// no listener is registered — this surfaces the cause before exit.
+process.on('unhandledRejection', (reason, promise) => {
+  log.error('Unhandled promise rejection', { reason: reason?.stack || reason, promise: String(promise) });
+});
+process.on('uncaughtException', (err) => {
+  log.error('Uncaught exception — process will exit', err);
+  process.exit(1);
+});
+// ──────────────────────────────────────────────────────────────────────────────
+
 const crypto = require('crypto');
 const express = require('express');
 const helmet = require('helmet');
@@ -56,6 +106,7 @@ const labTemplateRoutes = require('./routes/lab-templates');
 const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 const guacSessionRoutes = require('./routes/guac-sessions');
+const workstationRoutes = require('./routes/workstations');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -82,6 +133,10 @@ if (guacPublicBase.startsWith('http')) {
     // Malformed URL — ignore; 'self' remains
   }
 }
+
+// HTTP request logging (before all routes)
+const requestLogger = require('./middleware/request-logger');
+app.use(requestLogger);
 
 app.use(helmet({
   contentSecurityPolicy: {
@@ -204,6 +259,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/admin', labTemplateRoutes);
 app.use('/api/modules', moduleRoutes);
 app.use('/api/dashboard', guacSessionRoutes);
+app.use('/api/workstations', workstationRoutes);
 
 // Unauthenticated, source-IP-gated. Called by lane gateway LXCs on first boot
 // to fetch one-shot bootstrap payload (Tailscale auth key etc). See route
@@ -299,7 +355,7 @@ async function syncVmTemplateNodes() {
     const { proxmoxAPI } = require('./utils/proxmox');
 
     const [catalogResult, resources] = await Promise.all([
-      cybercoreQuery(`SELECT id, template_vmid, node FROM vm_template_catalog`),
+      cybercoreQuery(`SELECT id, template_vmid, node FROM cybercore_template_catalog`),
       proxmoxAPI('GET', '/api2/json/cluster/resources')
     ]);
 
@@ -312,7 +368,7 @@ async function syncVmTemplateNodes() {
     for (const row of catalogResult.rows) {
       const liveNode = vmMap[Number(row.template_vmid)];
       if (liveNode && liveNode !== row.node) {
-        await cybercoreQuery(`UPDATE vm_template_catalog SET node = $1 WHERE id = $2`, [liveNode, row.id]);
+        await cybercoreQuery(`UPDATE cybercore_template_catalog SET node = $1 WHERE id = $2`, [liveNode, row.id]);
         console.log(`[TemplateSync] VMID ${row.template_vmid}: ${row.node ?? 'null'} → ${liveNode}`);
         updatedCount++;
       }
@@ -348,16 +404,12 @@ async function start() {
   app.use(errorHandler);
 
   app.listen(PORT, () => {
-    console.log(`
-+---------------------------------------------------------------+
-|               CYBERHUB SERVER STARTED                         |
-+---------------------------------------------------------------+
-|  Server:     http://localhost                                 |
-|  Hub:        http://localhost/hub                             |
-|  Login:      http://localhost/login                           |
-|  Environment: ${process.env.NODE_ENV || 'development'}                                      |
-+---------------------------------------------------------------+
-    `);
+    log.info('CyberHub server started', {
+      port:        PORT,
+      env:         process.env.NODE_ENV || 'development',
+      logLevel:    process.env.LOG_LEVEL || 'info',
+      logDir:      process.env.LOG_DIR   || 'logs/',
+    });
   });
 }
 

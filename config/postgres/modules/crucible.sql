@@ -4,6 +4,22 @@ INSERT INTO cybercore_module (key, name, active)
 VALUES ('crucible', 'The Crucible', TRUE)
 ON CONFLICT (key) DO NOTHING;
 
+-- Extend cybercore_event for Crucible CTF event type, status, and metadata
+ALTER TABLE cybercore_event
+  ADD COLUMN IF NOT EXISTS event_type  TEXT,
+  ADD COLUMN IF NOT EXISTS status      TEXT NOT NULL DEFAULT 'draft',
+  ADD COLUMN IF NOT EXISTS description TEXT,
+  ADD COLUMN IF NOT EXISTS max_players INTEGER,
+  ADD COLUMN IF NOT EXISTS is_public   BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS created_by  UUID REFERENCES cybercore_user(user_id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS module_key  TEXT REFERENCES cybercore_module(key)   ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ADD COLUMN IF NOT EXISTS updated_at  TIMESTAMPTZ NOT NULL DEFAULT now();
+
+CREATE INDEX IF NOT EXISTS idx_cybercore_event_type   ON cybercore_event (event_type);
+CREATE INDEX IF NOT EXISTS idx_cybercore_event_status ON cybercore_event (status);
+CREATE INDEX IF NOT EXISTS idx_cybercore_event_module ON cybercore_event (module_key);
+
 -- Module tables (enabled)
 
 CREATE TABLE IF NOT EXISTS crucible_score (
@@ -278,41 +294,6 @@ LEFT JOIN latest_allocations la ON la.resource_id = r.resource_id
 LEFT JOIN cybercore_user u ON la.user_id = u.user_id
 WHERE r.type = 'vm'
   AND r.module_key = 'crucible';
-
--- ============================================================================
--- VM Template Catalog
--- Maps OS family/version strings → Proxmox template VMIDs so the synthesizer
--- can auto-pick templates. `node` is nullable — populated at runtime by
--- POST /api/admin/vm-templates/sync-nodes, never hardcoded here.
--- ============================================================================
-
-CREATE TABLE IF NOT EXISTS vm_template_catalog (
-  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  os_family     VARCHAR(32)  NOT NULL,   -- 'windows_server','windows_client','linux','macos','network'
-  os_name       VARCHAR(128) NOT NULL,   -- 'Windows Server 2022','Windows 11','Ubuntu 22.04'
-  os_version    VARCHAR(64),             -- '2022','11','22.04' — null = any version
-  template_vmid INTEGER      NOT NULL,
-  node          VARCHAR(64),             -- populated by sync-nodes, never seeded
-  role_hints    TEXT[]       NOT NULL DEFAULT '{}',
-  preferred     BOOLEAN      NOT NULL DEFAULT true,
-  notes         TEXT,
-  is_active     BOOLEAN      NOT NULL DEFAULT true,
-  created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_vmtc_family ON vm_template_catalog(os_family, is_active);
-CREATE INDEX IF NOT EXISTS idx_vmtc_active ON vm_template_catalog(is_active);
-
--- Seed: VMID + OS identity only. Node resolved at runtime via sync-nodes.
-INSERT INTO vm_template_catalog (os_family, os_name, os_version, template_vmid, role_hints, notes) VALUES
-  ('windows_server', 'Windows Server 2022', '2022', 1000, '{dc,file,web,mail,backup,print}', 'windows-server-2022-template'),
-  ('linux',          'Rocky Linux',         NULL,   1001, '{web,file,db}',                   'rocky-linux-template'),
-  ('windows_client', 'Windows 11',          '25H2', 1002, '{}',                              'windows-25h2-template'),
-  ('linux',          'Ubuntu',              NULL,   1003, '{web}',                           'Ubuntu-Template'),
-  ('linux',          'Metasploitable 2',    NULL,   1600, '{}',                              'Metasploitable-2-Template — admin-select only')
-ON CONFLICT DO NOTHING;
-
-UPDATE vm_template_catalog SET preferred = false WHERE template_vmid = 1600;
 
 -- ============================================================================
 -- Attachable lab challenge seeds

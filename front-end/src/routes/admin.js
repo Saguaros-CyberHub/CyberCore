@@ -14,6 +14,7 @@ router.use(require('./admin/cluster'));
 router.use(require('./admin/lanes'));
 router.use(require('./admin/groups'));
 router.use(require('./admin/lab-networks'));
+router.use(require('./admin/workstation-templates'));
 router.use(require('./admin/settings'));
 
 module.exports = router;

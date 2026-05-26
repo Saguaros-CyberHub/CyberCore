@@ -2,7 +2,7 @@
  * VM Template Resolver
  *
  * Given a normalized VM spec ({os_family, os_version, role}), pick the best
- * template from a pre-fetched vm_template_catalog array. Pure function —
+ * template from a pre-fetched cybercore_template_catalog array. Pure function —
  * caller is responsible for the DB query.
  *
  * Four-rung fallback ladder:
@@ -20,7 +20,7 @@ function lc(v) {
 
 /**
  * @param {object} input  { os_family, os_version, role }
- * @param {Array}  catalog  vm_template_catalog rows (active only)
+ * @param {Array}  catalog  cybercore_template_catalog rows (active only)
  * @returns {object} { template_vmid, node, os_name, os_version, match_type, row } or null
  */
 function resolveTemplate(input, catalog) {

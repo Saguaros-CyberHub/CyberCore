@@ -5,6 +5,8 @@
  * ============================================================================
  */
 
+const { randomBytes } = require('crypto');
+
 const GUAC_URL = process.env.GUAC_API_URL || 'http://100.100.70.10:8080/guacamole';
 const GUAC_DS = process.env.GUAC_DATASOURCE || 'postgresql';
 
@@ -64,4 +66,30 @@ async function guacAPI(method, path, body = null) {
   try { return JSON.parse(text); } catch { return text; }
 }
 
-module.exports = { guacAPI, getGuacToken, GUAC_URL, GUAC_DS };
+/**
+ * Ensure a Guacamole user account exists for `username` (a CyberCore email).
+ * Creates the account if it doesn't exist, or resets the password if it does,
+ * so the caller always receives a known credential.
+ * Returns the plaintext password on success, or null if Guac is unreachable.
+ */
+async function ensureGuacAccount(username) {
+  const password = randomBytes(24).toString('hex');
+  try {
+    await guacAPI('POST', '/users', { username, password, attributes: {} });
+    return password;
+  } catch (_createErr) {
+    // User already exists — reset the password so the caller gets a known value.
+    try {
+      await guacAPI('PUT', `/users/${encodeURIComponent(username)}`, {
+        username,
+        password,
+        attributes: {},
+      });
+      return password;
+    } catch (_resetErr) {
+      return null;
+    }
+  }
+}
+
+module.exports = { guacAPI, getGuacToken, ensureGuacAccount, GUAC_URL, GUAC_DS };

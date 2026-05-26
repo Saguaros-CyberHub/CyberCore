@@ -845,7 +845,7 @@ router.patch('/lanes/:id/internet', authenticateToken, adminOnly, async (req, re
 
 router.get('/modules', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const result = await cybercoreQuery(`SELECT * FROM cybercore_module ORDER BY key`);
+    const result = await cybercoreQuery(`SELECT * FROM cybercore_module WHERE active = TRUE ORDER BY key`);
     res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });

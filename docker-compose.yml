@@ -149,6 +149,7 @@ services:
       - ./front-end/plugins:/app/plugins:rw
       - ./front-end/profiles:/app/profiles:rw
       - ./front-end/vuln-assets:/app/vuln-assets:ro
+      - ./logs:/app/logs:rw
     networks:
       - cybercore-net
 

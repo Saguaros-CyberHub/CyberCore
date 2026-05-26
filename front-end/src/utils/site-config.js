@@ -28,8 +28,8 @@ function getClusterNodes() {
 
 /**
  * Last-resort fallback node for template resolution.
- * Used only when vm_template_catalog.node is null AND Proxmox is unreachable.
- * Real source of truth is vm_template_catalog, populated by syncVmTemplateNodes().
+ * Used only when cybercore_template_catalog.node is null AND Proxmox is unreachable.
+ * Real source of truth is cybercore_template_catalog, populated by syncVmTemplateNodes().
  */
 function getDefaultTemplateNode() {
   const nodes = getClusterNodes();

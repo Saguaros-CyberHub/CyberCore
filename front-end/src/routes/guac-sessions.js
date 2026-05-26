@@ -18,7 +18,8 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
-const { guacAPI, GUAC_DS } = require('../utils/guacamole');
+const { guacAPI, getGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
+const { proxmoxAPI } = require('../utils/proxmox');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -54,6 +55,80 @@ function findConnectionByName(node, name) {
     if (found) return found;
   }
   return null;
+}
+
+/**
+ * Single-attempt fetch of the VM's first non-loopback IPv4 from Proxmox.
+ * Used for lazy IP refresh — no retry loop, VM is expected to already be running.
+ */
+async function fetchCurrentVmIp(node, vmid, providerType) {
+  try {
+    if (providerType === 'lxc') {
+      const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/lxc/${vmid}/interfaces`);
+      for (const iface of (Array.isArray(ifaces) ? ifaces : [])) {
+        if (iface.name === 'lo') continue;
+        const ip = (iface.inet || '').split('/')[0];
+        if (ip && !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+      }
+    } else {
+      const data = await proxmoxAPI('GET', `/api2/json/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
+      const ifaces = data?.result || (Array.isArray(data) ? data : []);
+      for (const iface of ifaces) {
+        if (iface.name === 'lo') continue;
+        for (const addr of (iface['ip-addresses'] || [])) {
+          const ip = addr['ip-address'];
+          if (addr['ip-address-type'] === 'ipv4' && ip &&
+              !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+        }
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * If the VM's current IP differs from what Guacamole has stored, update the
+ * connection in-place so the next RDP session reaches the right address.
+ */
+async function refreshGuacHostname(connId, currentIp) {
+  try {
+    // Parameters require a separate API call — GET /connections/:id alone returns only summary.
+    const [conn, params] = await Promise.all([
+      guacAPI('GET', `/connections/${connId}`),
+      guacAPI('GET', `/connections/${connId}/parameters`),
+    ]);
+    if (!params) return;
+    const storedIp = params.hostname;
+    if (!storedIp || storedIp === currentIp) return;
+
+    await guacAPI('PUT', `/connections/${connId}`, {
+      ...conn,
+      parameters: { ...params, hostname: currentIp },
+    });
+    console.log(`[guac-sessions] Updated connection ${connId} hostname: ${storedIp} → ${currentIp}`);
+  } catch (err) {
+    console.warn(`[guac-sessions] Could not refresh Guac hostname for ${connId}: ${err.message}`);
+  }
+}
+
+/**
+ * Authenticate to Guacamole as the VM's owner using the stored per-user
+ * credentials, returning a scoped auth token the browser can use directly.
+ * Returns null if credentials aren't stored or authentication fails.
+ */
+async function getUserGuacToken(guacUser, guacPassword) {
+  if (!guacUser || !guacPassword) return null;
+  try {
+    const resp = await fetch(`${GUAC_URL}/api/tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `username=${encodeURIComponent(guacUser)}&password=${encodeURIComponent(guacPassword)}`,
+    });
+    if (!resp.ok) return null;
+    return await resp.json(); // { authToken, username, dataSource, availableDataSources }
+  } catch (_) {
+    return null;
+  }
 }
 
 // ============================================================================
@@ -158,15 +233,26 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.vm_instance_id,
           vi.power_state,
           vi.metadata,
+          vi.provider_node,
+          vi.provider_vmid,
+          vi.metadata->>'provider_type' AS provider_type,
+          vi.metadata->>'guac_user'     AS guac_user,
+          COALESCE(
+            CASE WHEN cu.guac_password IS NOT NULL
+                 THEN pgp_sym_decrypt(cu.guac_password, $2)::text
+            END,
+            vi.metadata->>'guac_password'
+          )                             AS guac_password,
           r.name,
           r.module_key,
           r.status AS resource_status
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        LEFT JOIN cybercore_user cu ON cu.email = (vi.metadata->>'guac_user')
         WHERE vi.vm_instance_id = $1
           AND vi.destroyed_at IS NULL
           AND r.status != 'retired'
-      `, [vmId]);
+      `, [vmId, process.env.GUAC_ENCRYPT_KEY || '']);
       vmRow = r.rows[0];
     } else {
       // Require an active allocation linking this user to this VM.
@@ -175,6 +261,16 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.vm_instance_id,
           vi.power_state,
           vi.metadata,
+          vi.provider_node,
+          vi.provider_vmid,
+          vi.metadata->>'provider_type' AS provider_type,
+          vi.metadata->>'guac_user'     AS guac_user,
+          COALESCE(
+            CASE WHEN cu.guac_password IS NOT NULL
+                 THEN pgp_sym_decrypt(cu.guac_password, $3)::text
+            END,
+            vi.metadata->>'guac_password'
+          )                             AS guac_password,
           r.name,
           r.module_key,
           r.status        AS resource_status,
@@ -185,10 +281,11 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           ON  a.resource_id = r.resource_id
           AND a.user_id     = $1
           AND (a.ends_at IS NULL OR a.ends_at > NOW())
+        LEFT JOIN cybercore_user cu ON cu.email = (vi.metadata->>'guac_user')
         WHERE vi.vm_instance_id = $2
           AND vi.destroyed_at IS NULL
           AND r.status != 'retired'
-      `, [userId, vmId]);
+      `, [userId, vmId, process.env.GUAC_ENCRYPT_KEY || '']);
       vmRow = r.rows[0];
     }
 
@@ -208,7 +305,12 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     if (!connId) {
       try {
         const tree = await guacAPI('GET', '/connectionGroups/ROOT/tree');
-        connId = findConnectionByName(tree, vmRow.name);
+        // Try "{name}-{vmid}" first (workstation naming), then plain "{name}" (legacy/other modules)
+        const qualifiedName = vmRow.provider_vmid
+          ? `${vmRow.name}-${vmRow.provider_vmid}`
+          : null;
+        connId = (qualifiedName && findConnectionByName(tree, qualifiedName))
+               || findConnectionByName(tree, vmRow.name);
       } catch (guacErr) {
         console.warn('[guac-sessions] Guacamole API fallback failed:', guacErr.message);
       }
@@ -220,7 +322,47 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
       });
     }
 
-    res.json({ launchUrl: buildLaunchUrl(connId) });
+    // Lazy IP refresh — if the VM's IP changed since the connection was created,
+    // update the Guacamole connection hostname before returning the URL.
+    if (vmRow.provider_node && vmRow.provider_vmid && vmRow.power_state === 'running') {
+      const currentIp = await fetchCurrentVmIp(
+        vmRow.provider_node,
+        vmRow.provider_vmid,
+        vmRow.provider_type || 'qemu'
+      );
+      if (currentIp) await refreshGuacHostname(connId, currentIp);
+    }
+
+    // Authenticate to Guacamole so the browser never sees the login prompt.
+    // Prefer a scoped per-user token; fall back to the admin token (CyberCore
+    // already enforced authorization above, so admin-level Guac access is safe).
+    // If both fail we still return the launchUrl — the client will clear any
+    // stale GUAC_AUTH so the user gets a clean login prompt rather than an
+    // "Invalid Login" flash from an expired cached token.
+    let guacAuth = await getUserGuacToken(vmRow.guac_user, vmRow.guac_password);
+    if (!guacAuth) {
+      try {
+        const adminToken = await getGuacToken();
+        guacAuth = {
+          authToken:            adminToken,
+          dataSource:           GUAC_DS,
+          username:             process.env.GUAC_ADMIN_USER || 'cactus-admin',
+          availableDataSources: [GUAC_DS],
+        };
+      } catch (adminAuthErr) {
+        console.warn('[guac-sessions] Admin Guacamole auth failed — returning URL without token:', adminAuthErr.message);
+      }
+    }
+
+    res.json({
+      launchUrl:            buildLaunchUrl(connId),
+      ...(guacAuth ? {
+        guacToken:            guacAuth.authToken,
+        dataSource:           guacAuth.dataSource           || GUAC_DS,
+        username:             guacAuth.username             || vmRow.guac_user,
+        availableDataSources: guacAuth.availableDataSources || [GUAC_DS],
+      } : { clearGuacAuth: true }),
+    });
   } catch (err) {
     console.error('[guac-sessions] POST /vms/:vmId/guac-session error:', err.message);
     res.status(500).json({ error: 'Failed to create console session.' });

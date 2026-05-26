@@ -157,10 +157,10 @@ async function runProfileDeploy(opts) {
     ? providedSelection
     : defaultAssetSelection(assets);
 
-  // 3. Fetch catalogs — both tables live in clinic_db (CIAB pool), not cybercore_db.
-  //    See front-end/migrations/013_vm_template_catalog.sql and 011_challenge_templates.sql.
+  // 3. Fetch catalogs. vm catalog lives in cybercore_db; vuln scripts in clinic_db.
   const [vmCatalogRes, vulnCatalogRes] = await Promise.all([
-    query(`SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at FROM vm_template_catalog WHERE is_active = true`),
+    cybercoreQuery(`SELECT id, os_family, os_version, os_name, template_vmid, node, role_hints, is_active, preferred, created_at
+                    FROM cybercore_template_catalog WHERE is_active = true AND template_type = 'os_template'`),
     query(`SELECT id, slug, name, os_target, category, script_type, services_exposed, is_active FROM vuln_scripts WHERE is_active = true`)
   ]);
   const vmTemplateCatalog = vmCatalogRes.rows;
