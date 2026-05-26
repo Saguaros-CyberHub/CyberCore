@@ -945,7 +945,7 @@
         const createLane = document.getElementById('provisionCreateLane').checked;
         const skipLane   = document.getElementById('provisionSkipLane').checked;
 
-        await api('POST', `/courses/${currentCourseId}/provision-vms`, {
+        await api('POST', `/courses/${currentCourseId}/vms/provision`, {
           template_id: templateId,
           student_ids: selectedStudents,
           create_separate_lanes: createLane,
