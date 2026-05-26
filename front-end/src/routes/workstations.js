@@ -348,7 +348,9 @@ router.get('/:vmId/status', authenticateToken, async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
   const { templateId } = req.params;
-  const userId = req.user.userId;
+
+  // Admins can deploy on behalf of another user (e.g. CLE bulk provisioning)
+  const userId = (req.user.role === 'admin' && req.body.forUserId) ? req.body.forUserId : req.user.userId;
 
   try {
     // 1. Fetch and validate template
