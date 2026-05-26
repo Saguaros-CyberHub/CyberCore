@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS cybercore_user (
   active         BOOLEAN NOT NULL DEFAULT TRUE,
   role           TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','student','admin','instructor')),
   group_key      TEXT REFERENCES cybercore_group(key) ON DELETE SET NULL,
+  guac_password  BYTEA,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_auth_at   TIMESTAMPTZ
