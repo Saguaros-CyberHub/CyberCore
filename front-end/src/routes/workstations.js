@@ -122,23 +122,25 @@ async function getVmIp(node, vmid, providerType, retries = 12, delayMs = 10000) 
 /**
  * Get next available VMID >= 800000, serialized so concurrent deploy requests
  * don't all receive the same ID before any VM is created on Proxmox.
- * Tracks in-flight VMIDs and skips them when allocating the next one.
+ *
+ * Queries live cluster resources to build the full set of existing VMIDs, then
+ * walks forward from 800000 skipping anything taken on Proxmox or reserved
+ * in-flight by another pending deploy in this process.
  */
 const _pendingVmids = new Set();
 let   _vmidMutex   = Promise.resolve();
 
 async function nextVmId() {
   return (_vmidMutex = _vmidMutex.then(async () => {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const existing  = new Set((resources || []).map(r => Number(r.vmid)));
+
     let candidate = 800000;
-    while (true) {
-      const data = await proxmoxAPI('GET', `/api2/json/cluster/nextid?vmid=${candidate}`);
-      const vmid = parseInt(data.data ?? data, 10);
-      if (!_pendingVmids.has(vmid)) {
-        _pendingVmids.add(vmid);
-        return vmid;
-      }
-      candidate = vmid + 1;
+    while (existing.has(candidate) || _pendingVmids.has(candidate)) {
+      candidate++;
     }
+    _pendingVmids.add(candidate);
+    return candidate;
   }));
 }
 
