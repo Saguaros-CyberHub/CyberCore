@@ -241,7 +241,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
           JOIN cybercore_user u ON u.user_id = a.user_id
           WHERE a.resource_id = r.resource_id
             AND (a.ends_at IS NULL OR a.ends_at > NOW())
-          ORDER BY a.created_at ASC
+          ORDER BY a.starts_at ASC
           LIMIT 1
         ) owner ON TRUE
         WHERE vi.destroyed_at IS NULL
