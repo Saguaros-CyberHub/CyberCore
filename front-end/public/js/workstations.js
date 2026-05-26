@@ -277,6 +277,19 @@ const Workstations = (() => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+
+      // Pre-authenticate with Guacamole so the user doesn't see the login prompt.
+      // localStorage is shared across same-origin tabs, so setting it here means
+      // the new Guacamole tab will find the token on load and skip login.
+      if (data.guacToken) {
+        localStorage.setItem('GUAC_AUTH', JSON.stringify({
+          authToken:            data.guacToken,
+          username:             data.username,
+          dataSource:           data.dataSource,
+          availableDataSources: data.availableDataSources,
+        }));
+      }
+
       window.open(data.launchUrl, '_blank', 'noopener,noreferrer');
     } catch (err) {
       alert('Console error: ' + err.message);

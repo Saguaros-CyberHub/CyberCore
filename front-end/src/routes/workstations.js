@@ -456,33 +456,68 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
               });
               const connId = conn?.identifier;
               if (connId) {
-                await cybercoreQuery(
-                  `UPDATE cybercore_vm_instance
-                      SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{guac_connection_id}', $1::jsonb)
-                    WHERE vm_instance_id = $2`,
-                  [JSON.stringify(connId), vmId]
+                // Resolve Guacamole user credentials — reuse existing password if the
+                // user already has a Guacamole account from a previous workstation deploy.
+                const userRes = await cybercoreQuery(
+                  'SELECT email FROM cybercore_user WHERE user_id = $1', [userId]
                 );
-                // Grant the deploying user READ access to this connection
-                try {
-                  const userRes = await cybercoreQuery(
-                    'SELECT email FROM cybercore_user WHERE user_id = $1', [userId]
-                  );
-                  const userEmail = userRes.rows[0]?.email;
-                  if (userEmail) {
+                const userEmail = userRes.rows[0]?.email;
+                let guacPassword = null;
+
+                if (userEmail) {
+                  // Look for a password stored on any of this user's existing VMs
+                  const existingPw = await cybercoreQuery(`
+                    SELECT vi.metadata->>'guac_password' AS pw
+                    FROM cybercore_vm_instance vi
+                    JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+                    JOIN cybercore_allocation a
+                      ON  a.resource_id = r.resource_id AND a.user_id = $1
+                    WHERE vi.metadata->>'guac_password' IS NOT NULL
+                      AND vi.destroyed_at IS NULL
+                    LIMIT 1
+                  `, [userId]);
+
+                  if (existingPw.rows[0]?.pw) {
+                    // Reuse — Guacamole account already exists with this password
+                    guacPassword = existingPw.rows[0].pw;
+                  } else {
+                    // First workstation for this user — create a fresh Guacamole account
+                    guacPassword = randomBytes(24).toString('hex');
                     try {
                       await guacAPI('POST', '/users', {
                         username: userEmail,
-                        password: randomBytes(24).toString('hex'),
+                        password: guacPassword,
                         attributes: {},
                       });
-                    } catch (_) { /* user may already exist in Guacamole */ }
+                    } catch (_) {
+                      // User already exists (race or manual creation) — don't overwrite password
+                      guacPassword = null;
+                    }
+                  }
+
+                  // Grant READ on this connection regardless of whether we know the password
+                  try {
                     await guacAPI('PATCH', `/users/${encodeURIComponent(userEmail)}/permissions`, [
                       { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' },
                     ]);
+                  } catch (permErr) {
+                    log.warn(`Could not grant Guac permissions for ${vmName}: ${permErr.message}`);
                   }
-                } catch (permErr) {
-                  log.warn(`Could not grant Guac permissions for ${vmName}: ${permErr.message}`);
                 }
+
+                // Store connection ID + user credentials in vm_instance metadata
+                const guacMeta = {
+                  guac_connection_id: connId,
+                  ...(userEmail    ? { guac_user:     userEmail    } : {}),
+                  ...(guacPassword ? { guac_password: guacPassword } : {}),
+                };
+                await cybercoreQuery(
+                  `UPDATE cybercore_vm_instance
+                      SET metadata = COALESCE(metadata, '{}') || $1::jsonb
+                    WHERE vm_instance_id = $2`,
+                  [JSON.stringify(guacMeta), vmId]
+                );
+
                 log.info(`Guacamole connection ${connId} created for ${vmName} (${vmIp})`, { vmId });
               }
             } else {

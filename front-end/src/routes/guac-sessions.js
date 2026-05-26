@@ -18,7 +18,8 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
-const { guacAPI, GUAC_DS } = require('../utils/guacamole');
+const { guacAPI, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
+const { proxmoxAPI } = require('../utils/proxmox');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -54,6 +55,76 @@ function findConnectionByName(node, name) {
     if (found) return found;
   }
   return null;
+}
+
+/**
+ * Single-attempt fetch of the VM's first non-loopback IPv4 from Proxmox.
+ * Used for lazy IP refresh — no retry loop, VM is expected to already be running.
+ */
+async function fetchCurrentVmIp(node, vmid, providerType) {
+  try {
+    if (providerType === 'lxc') {
+      const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/lxc/${vmid}/interfaces`);
+      for (const iface of (Array.isArray(ifaces) ? ifaces : [])) {
+        if (iface.name === 'lo') continue;
+        const ip = (iface.inet || '').split('/')[0];
+        if (ip && !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+      }
+    } else {
+      const data = await proxmoxAPI('GET', `/api2/json/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
+      const ifaces = data?.result || (Array.isArray(data) ? data : []);
+      for (const iface of ifaces) {
+        if (iface.name === 'lo') continue;
+        for (const addr of (iface['ip-addresses'] || [])) {
+          const ip = addr['ip-address'];
+          if (addr['ip-address-type'] === 'ipv4' && ip &&
+              !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+        }
+      }
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * If the VM's current IP differs from what Guacamole has stored, update the
+ * connection in-place so the next RDP session reaches the right address.
+ */
+async function refreshGuacHostname(connId, currentIp) {
+  try {
+    const conn = await guacAPI('GET', `/connections/${connId}`);
+    if (!conn?.parameters) return;
+    const storedIp = conn.parameters.hostname;
+    if (!storedIp || storedIp === currentIp) return;
+
+    await guacAPI('PUT', `/connections/${connId}`, {
+      ...conn,
+      parameters: { ...conn.parameters, hostname: currentIp },
+    });
+    console.log(`[guac-sessions] Updated connection ${connId} hostname: ${storedIp} → ${currentIp}`);
+  } catch (err) {
+    console.warn(`[guac-sessions] Could not refresh Guac hostname for ${connId}: ${err.message}`);
+  }
+}
+
+/**
+ * Authenticate to Guacamole as the VM's owner using the stored per-user
+ * credentials, returning a scoped auth token the browser can use directly.
+ * Returns null if credentials aren't stored or authentication fails.
+ */
+async function getUserGuacToken(guacUser, guacPassword) {
+  if (!guacUser || !guacPassword) return null;
+  try {
+    const resp = await fetch(`${GUAC_URL}/api/tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `username=${encodeURIComponent(guacUser)}&password=${encodeURIComponent(guacPassword)}`,
+    });
+    if (!resp.ok) return null;
+    return await resp.json(); // { authToken, username, dataSource, availableDataSources }
+  } catch (_) {
+    return null;
+  }
 }
 
 // ============================================================================
@@ -158,7 +229,11 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.vm_instance_id,
           vi.power_state,
           vi.metadata,
+          vi.provider_node,
           vi.provider_vmid,
+          vi.metadata->>'provider_type' AS provider_type,
+          vi.metadata->>'guac_user'     AS guac_user,
+          vi.metadata->>'guac_password' AS guac_password,
           r.name,
           r.module_key,
           r.status AS resource_status
@@ -176,7 +251,11 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.vm_instance_id,
           vi.power_state,
           vi.metadata,
+          vi.provider_node,
           vi.provider_vmid,
+          vi.metadata->>'provider_type' AS provider_type,
+          vi.metadata->>'guac_user'     AS guac_user,
+          vi.metadata->>'guac_password' AS guac_password,
           r.name,
           r.module_key,
           r.status        AS resource_status,
@@ -227,7 +306,30 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
       });
     }
 
-    res.json({ launchUrl: buildLaunchUrl(connId) });
+    // Lazy IP refresh — if the VM's IP changed since the connection was created,
+    // update the Guacamole connection hostname before returning the URL.
+    if (vmRow.provider_node && vmRow.provider_vmid && vmRow.power_state === 'running') {
+      const currentIp = await fetchCurrentVmIp(
+        vmRow.provider_node,
+        vmRow.provider_vmid,
+        vmRow.provider_type || 'qemu'
+      );
+      if (currentIp) await refreshGuacHostname(connId, currentIp);
+    }
+
+    // Authenticate to Guacamole as the VM owner so the browser doesn't see the
+    // Guacamole login prompt. Falls back gracefully if credentials aren't stored.
+    const guacAuth = await getUserGuacToken(vmRow.guac_user, vmRow.guac_password);
+
+    res.json({
+      launchUrl: buildLaunchUrl(connId),
+      ...(guacAuth ? {
+        guacToken:  guacAuth.authToken,
+        dataSource: guacAuth.dataSource  || GUAC_DS,
+        username:   guacAuth.username    || vmRow.guac_user,
+        availableDataSources: guacAuth.availableDataSources || [guacAuth.dataSource || GUAC_DS],
+      } : {}),
+    });
   } catch (err) {
     console.error('[guac-sessions] POST /vms/:vmId/guac-session error:', err.message);
     res.status(500).json({ error: 'Failed to create console session.' });
