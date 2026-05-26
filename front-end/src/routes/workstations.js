@@ -13,9 +13,8 @@ const { authenticateToken } = require('../middleware/auth');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
 const { selectBestNode } = require('../utils/node-selector');
-const { guacAPI } = require('../utils/guacamole');
+const { guacAPI, ensureGuacAccount } = require('../utils/guacamole');
 const { getDefaultTemplateNode } = require('../utils/site-config');
-const { randomBytes } = require('crypto');
 const createLogger = require('../utils/logger');
 const log = createLogger('workstations');
 
@@ -456,16 +455,23 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
               });
               const connId = conn?.identifier;
               if (connId) {
-                // Resolve Guacamole user credentials — reuse existing password if the
-                // user already has a Guacamole account from a previous workstation deploy.
+                // Resolve Guacamole user credentials.
+                // Priority: user-level guac_password (set at registration or prior sync)
+                // → old VM-metadata guac_password (legacy deploys)
+                // → ensureGuacAccount (creates/resets the Guac account and stores the password).
                 const userRes = await cybercoreQuery(
-                  'SELECT email FROM cybercore_user WHERE user_id = $1', [userId]
+                  `SELECT email,
+                     CASE WHEN guac_password IS NOT NULL
+                          THEN pgp_sym_decrypt(guac_password, $2)::text
+                     END AS guac_password
+                   FROM cybercore_user WHERE user_id = $1`,
+                  [userId, process.env.GUAC_ENCRYPT_KEY || '']
                 );
                 const userEmail = userRes.rows[0]?.email;
-                let guacPassword = null;
+                let guacPassword = userRes.rows[0]?.guac_password || null;
 
-                if (userEmail) {
-                  // Look for a password stored on any of this user's existing VMs
+                if (userEmail && !guacPassword) {
+                  // Fall back to old per-VM metadata (users who deployed before migration)
                   const existingPw = await cybercoreQuery(`
                     SELECT vi.metadata->>'guac_password' AS pw
                     FROM cybercore_vm_instance vi
@@ -476,26 +482,22 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
                       AND vi.destroyed_at IS NULL
                     LIMIT 1
                   `, [userId]);
+                  guacPassword = existingPw.rows[0]?.pw || null;
 
-                  if (existingPw.rows[0]?.pw) {
-                    // Reuse — Guacamole account already exists with this password
-                    guacPassword = existingPw.rows[0].pw;
-                  } else {
-                    // First workstation for this user — create a fresh Guacamole account
-                    guacPassword = randomBytes(24).toString('hex');
-                    try {
-                      await guacAPI('POST', '/users', {
-                        username: userEmail,
-                        password: guacPassword,
-                        attributes: {},
-                      });
-                    } catch (_) {
-                      // User already exists (race or manual creation) — don't overwrite password
-                      guacPassword = null;
-                    }
+                  if (!guacPassword) {
+                    guacPassword = await ensureGuacAccount(userEmail).catch(() => null);
                   }
 
-                  // Grant READ on this connection regardless of whether we know the password
+                  if (guacPassword && process.env.GUAC_ENCRYPT_KEY) {
+                    await cybercoreQuery(
+                      'UPDATE cybercore_user SET guac_password = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
+                      [guacPassword, process.env.GUAC_ENCRYPT_KEY, userId]
+                    ).catch(() => {});
+                  }
+                }
+
+                // Grant READ on this connection to the VM owner's Guacamole account
+                if (userEmail) {
                   try {
                     await guacAPI('PATCH', `/users/${encodeURIComponent(userEmail)}/permissions`, [
                       { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' },
@@ -505,11 +507,12 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
                   }
                 }
 
-                // Store connection ID + user credentials in vm_instance metadata
+                // Store connection ID and owner email in vm_instance metadata.
+                // guac_password is intentionally excluded — it lives only in the
+                // encrypted cybercore_user.guac_password column.
                 const guacMeta = {
                   guac_connection_id: connId,
-                  ...(userEmail    ? { guac_user:     userEmail    } : {}),
-                  ...(guacPassword ? { guac_password: guacPassword } : {}),
+                  ...(userEmail ? { guac_user: userEmail } : {}),
                 };
                 await cybercoreQuery(
                   `UPDATE cybercore_vm_instance

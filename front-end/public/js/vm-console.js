@@ -66,8 +66,9 @@ const VmConsole = (() => {
           <iframe
             src="${launchUrl}"
             class="vmc-iframe"
-            allow="clipboard-read; clipboard-write; fullscreen"
+            allow="clipboard-read; clipboard-write; fullscreen; pointer-lock"
             referrerpolicy="no-referrer"
+            sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-modals"
           ></iframe>
         </div>
       </div>
@@ -96,6 +97,18 @@ const VmConsole = (() => {
 
       // Discard result if user navigated away or opened a different console
       if (_activeVmId !== vmId) return;
+
+      // Pre-authenticate with Guacamole so the iframe never shows the login prompt.
+      if (data.guacToken) {
+        localStorage.setItem('GUAC_AUTH', JSON.stringify({
+          authToken:            data.guacToken,
+          username:             data.username,
+          dataSource:           data.dataSource,
+          availableDataSources: data.availableDataSources,
+        }));
+      } else if (data.clearGuacAuth) {
+        localStorage.removeItem('GUAC_AUTH');
+      }
 
       _renderIframe(container, data.launchUrl);
     } catch (err) {

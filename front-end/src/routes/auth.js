@@ -13,6 +13,9 @@ const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticate } = require('../middleware/auth');
+const { ensureGuacAccount } = require('../utils/guacamole');
+
+const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 
 // ============================================================================
 // VALIDATION RULES
@@ -110,6 +113,25 @@ router.post('/register', registerValidation, async (req, res) => {
     );
 
     const user = result.rows[0];
+
+    // Create a corresponding Guacamole account for the new user so they can
+    // receive connection permissions without waiting for a first workstation deploy.
+    if (GUAC_ENABLED) {
+      setImmediate(async () => {
+        try {
+          const pw = await ensureGuacAccount(user.email);
+          if (pw && process.env.GUAC_ENCRYPT_KEY) {
+            await cybercoreQuery(
+              'UPDATE cybercore_user SET guac_password = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
+              [pw, process.env.GUAC_ENCRYPT_KEY, user.user_id]
+            );
+          }
+        } catch (err) {
+          console.warn('[auth] Guac account creation failed for', user.email, ':', err.message);
+        }
+      });
+    }
+
     const { accessToken } = generateTokens(user);
 
     res.cookie('token', accessToken, {

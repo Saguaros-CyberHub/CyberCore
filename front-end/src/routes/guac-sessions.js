@@ -18,7 +18,7 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
-const { guacAPI, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
+const { guacAPI, getGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
 const { proxmoxAPI } = require('../utils/proxmox');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
@@ -92,14 +92,18 @@ async function fetchCurrentVmIp(node, vmid, providerType) {
  */
 async function refreshGuacHostname(connId, currentIp) {
   try {
-    const conn = await guacAPI('GET', `/connections/${connId}`);
-    if (!conn?.parameters) return;
-    const storedIp = conn.parameters.hostname;
+    // Parameters require a separate API call — GET /connections/:id alone returns only summary.
+    const [conn, params] = await Promise.all([
+      guacAPI('GET', `/connections/${connId}`),
+      guacAPI('GET', `/connections/${connId}/parameters`),
+    ]);
+    if (!params) return;
+    const storedIp = params.hostname;
     if (!storedIp || storedIp === currentIp) return;
 
     await guacAPI('PUT', `/connections/${connId}`, {
       ...conn,
-      parameters: { ...conn.parameters, hostname: currentIp },
+      parameters: { ...params, hostname: currentIp },
     });
     console.log(`[guac-sessions] Updated connection ${connId} hostname: ${storedIp} → ${currentIp}`);
   } catch (err) {
@@ -233,16 +237,22 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.provider_vmid,
           vi.metadata->>'provider_type' AS provider_type,
           vi.metadata->>'guac_user'     AS guac_user,
-          vi.metadata->>'guac_password' AS guac_password,
+          COALESCE(
+            CASE WHEN cu.guac_password IS NOT NULL
+                 THEN pgp_sym_decrypt(cu.guac_password, $2)::text
+            END,
+            vi.metadata->>'guac_password'
+          )                             AS guac_password,
           r.name,
           r.module_key,
           r.status AS resource_status
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        LEFT JOIN cybercore_user cu ON cu.email = (vi.metadata->>'guac_user')
         WHERE vi.vm_instance_id = $1
           AND vi.destroyed_at IS NULL
           AND r.status != 'retired'
-      `, [vmId]);
+      `, [vmId, process.env.GUAC_ENCRYPT_KEY || '']);
       vmRow = r.rows[0];
     } else {
       // Require an active allocation linking this user to this VM.
@@ -255,7 +265,12 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           vi.provider_vmid,
           vi.metadata->>'provider_type' AS provider_type,
           vi.metadata->>'guac_user'     AS guac_user,
-          vi.metadata->>'guac_password' AS guac_password,
+          COALESCE(
+            CASE WHEN cu.guac_password IS NOT NULL
+                 THEN pgp_sym_decrypt(cu.guac_password, $3)::text
+            END,
+            vi.metadata->>'guac_password'
+          )                             AS guac_password,
           r.name,
           r.module_key,
           r.status        AS resource_status,
@@ -266,10 +281,11 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           ON  a.resource_id = r.resource_id
           AND a.user_id     = $1
           AND (a.ends_at IS NULL OR a.ends_at > NOW())
+        LEFT JOIN cybercore_user cu ON cu.email = (vi.metadata->>'guac_user')
         WHERE vi.vm_instance_id = $2
           AND vi.destroyed_at IS NULL
           AND r.status != 'retired'
-      `, [userId, vmId]);
+      `, [userId, vmId, process.env.GUAC_ENCRYPT_KEY || '']);
       vmRow = r.rows[0];
     }
 
@@ -317,18 +333,35 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
       if (currentIp) await refreshGuacHostname(connId, currentIp);
     }
 
-    // Authenticate to Guacamole as the VM owner so the browser doesn't see the
-    // Guacamole login prompt. Falls back gracefully if credentials aren't stored.
-    const guacAuth = await getUserGuacToken(vmRow.guac_user, vmRow.guac_password);
+    // Authenticate to Guacamole so the browser never sees the login prompt.
+    // Prefer a scoped per-user token; fall back to the admin token (CyberCore
+    // already enforced authorization above, so admin-level Guac access is safe).
+    // If both fail we still return the launchUrl — the client will clear any
+    // stale GUAC_AUTH so the user gets a clean login prompt rather than an
+    // "Invalid Login" flash from an expired cached token.
+    let guacAuth = await getUserGuacToken(vmRow.guac_user, vmRow.guac_password);
+    if (!guacAuth) {
+      try {
+        const adminToken = await getGuacToken();
+        guacAuth = {
+          authToken:            adminToken,
+          dataSource:           GUAC_DS,
+          username:             process.env.GUAC_ADMIN_USER || 'cactus-admin',
+          availableDataSources: [GUAC_DS],
+        };
+      } catch (adminAuthErr) {
+        console.warn('[guac-sessions] Admin Guacamole auth failed — returning URL without token:', adminAuthErr.message);
+      }
+    }
 
     res.json({
-      launchUrl: buildLaunchUrl(connId),
+      launchUrl:            buildLaunchUrl(connId),
       ...(guacAuth ? {
-        guacToken:  guacAuth.authToken,
-        dataSource: guacAuth.dataSource  || GUAC_DS,
-        username:   guacAuth.username    || vmRow.guac_user,
-        availableDataSources: guacAuth.availableDataSources || [guacAuth.dataSource || GUAC_DS],
-      } : {}),
+        guacToken:            guacAuth.authToken,
+        dataSource:           guacAuth.dataSource           || GUAC_DS,
+        username:             guacAuth.username             || vmRow.guac_user,
+        availableDataSources: guacAuth.availableDataSources || [GUAC_DS],
+      } : { clearGuacAuth: true }),
     });
   } catch (err) {
     console.error('[guac-sessions] POST /vms/:vmId/guac-session error:', err.message);

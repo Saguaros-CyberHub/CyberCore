@@ -288,6 +288,8 @@ const Workstations = (() => {
           dataSource:           data.dataSource,
           availableDataSources: data.availableDataSources,
         }));
+      } else if (data.clearGuacAuth) {
+        localStorage.removeItem('GUAC_AUTH');
       }
 
       window.open(data.launchUrl, '_blank', 'noopener,noreferrer');

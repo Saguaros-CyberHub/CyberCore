@@ -9,9 +9,83 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken, requireRole } = require('../../middleware/auth');
-const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
+const { guacAPI, getGuacToken, ensureGuacAccount, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
+const { cybercoreQuery } = require('../../utils/cybercore-db');
 
 const adminOnly = requireRole('admin');
+
+
+// ============================================================================
+// USER SYNC
+// Creates/resets Guacamole accounts for all active CyberCore users who don't
+// yet have a guac_password stored on their user record. Useful for backfilling
+// users created before registration-time account creation was added, including
+// the seeded admin account.
+// ============================================================================
+
+router.post('/guac/sync-users', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const users = await cybercoreQuery(`
+      SELECT user_id, email,
+        CASE WHEN guac_password IS NOT NULL
+             THEN pgp_sym_decrypt(guac_password, $1)::text
+        END AS guac_password
+      FROM cybercore_user
+      WHERE status = 'active' AND active = true
+      ORDER BY created_at
+    `, [process.env.GUAC_ENCRYPT_KEY || '']);
+
+    const results = [];
+
+    for (const user of users.rows) {
+      if (user.guac_password) {
+        results.push({ email: user.email, status: 'already_synced' });
+        continue;
+      }
+
+      // Check if a password was stored in any of this user's VM instances (legacy path)
+      const legacyPw = await cybercoreQuery(`
+        SELECT vi.metadata->>'guac_password' AS pw
+        FROM cybercore_vm_instance vi
+        JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        JOIN cybercore_allocation a
+          ON  a.resource_id = r.resource_id AND a.user_id = $1
+        WHERE vi.metadata->>'guac_password' IS NOT NULL
+          AND vi.destroyed_at IS NULL
+        LIMIT 1
+      `, [user.user_id]);
+
+      let pw = legacyPw.rows[0]?.pw || null;
+      let status;
+
+      if (pw) {
+        status = 'migrated_from_vm';
+      } else {
+        pw = await ensureGuacAccount(user.email).catch(() => null);
+        status = pw ? 'created' : 'failed';
+      }
+
+      if (pw && process.env.GUAC_ENCRYPT_KEY) {
+        await cybercoreQuery(
+          'UPDATE cybercore_user SET guac_password = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
+          [pw, process.env.GUAC_ENCRYPT_KEY, user.user_id]
+        );
+      }
+
+      results.push({ email: user.email, status });
+    }
+
+    const summary = results.reduce((acc, r) => {
+      acc[r.status] = (acc[r.status] || 0) + 1;
+      return acc;
+    }, {});
+
+    res.json({ summary, results });
+  } catch (err) {
+    console.error('[admin/guac] sync-users error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 
 // ============================================================================
