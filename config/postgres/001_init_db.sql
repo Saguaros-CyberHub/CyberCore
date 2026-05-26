@@ -5,7 +5,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- === Groups (text key) — must come before users ===
 CREATE TABLE IF NOT EXISTS cybercore_group (
-  key         TEXT PRIMARY KEY,            -- 'cyberlabs','crucible','forge','university','library','wiki','archive'
+  key         TEXT PRIMARY KEY,            -- 'cyberlabs','crucible','forge','university','library','cyberwiki','archive'
   label       TEXT,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS cybercore_user_group (
 
 -- === Modules (text key) ===
 CREATE TABLE IF NOT EXISTS cybercore_module (
-  key            TEXT PRIMARY KEY,                -- 'cyberlabs','crucible','forge','university','library','wiki','archive'
+  key            TEXT PRIMARY KEY,                -- 'cyberlabs','crucible','forge','university','library','cyberwiki','archive'
   name           TEXT NOT NULL,
   icon           TEXT,
   description    TEXT,

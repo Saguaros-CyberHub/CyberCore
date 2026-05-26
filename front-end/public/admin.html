@@ -747,7 +747,7 @@
               </div>
             </div>
 
-            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+            <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem;">
               <div class="form-group">
                 <label>Default RDP Username <span style="color:var(--gray-400);font-size:0.8rem;">(optional — used for Guacamole console)</span></label>
                 <input type="text" id="wsTplRdpUser" placeholder="e.g., Administrator" autocomplete="off">
@@ -755,6 +755,15 @@
               <div class="form-group">
                 <label>Default RDP Password <span style="color:var(--gray-400);font-size:0.8rem;">(optional)</span></label>
                 <input type="text" id="wsTplRdpPass" placeholder="VM's RDP password" autocomplete="off">
+              </div>
+              <div class="form-group">
+                <label>RDP Security <span style="color:var(--gray-400);font-size:0.8rem;">(Guacamole)</span></label>
+                <select id="wsTplRdpSecurity">
+                  <option value="tls">TLS (recommended)</option>
+                  <option value="any">Any (auto-negotiate)</option>
+                  <option value="rdp">RDP (classic, no TLS)</option>
+                  <option value="nla">NLA (Windows)</option>
+                </select>
               </div>
             </div>
 
