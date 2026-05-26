@@ -502,6 +502,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           } else {
             const gatewayVmId = 100000 + vxlanId;
             const deployedVMs = [];
+            // Captured during Guac connection creation, persisted into the
+            // Kali vm_instance metadata so My Workspaces shows a Console button.
+            let kaliGuacConnId = null;
             const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
             const isV3 = subnetScheme === 'v3';
             const vnetExtName = vnet.vnet;
@@ -701,6 +704,35 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               const guacTargetIp = gatewayTransitIp || kaliIp;
               console.log(`[Group ${group_name}] Guac RDP target: ${guacTargetIp} (${gatewayTransitIp ? 'via gateway DNAT' : 'direct to Kali'})`);
 
+              // Install the DNAT + FORWARD rules on the lane gateway so that
+              // Guac (or anything else on the lab network) reaching the
+              // gateway's WAN IP on 3389 lands on Kali's lane IP. -C ... || -A
+              // makes both rules idempotent on retry. iptables-save persists
+              // across reboot. Failure here doesn't fail the deploy — it just
+              // means Guac won't be able to reach Kali until the rule is
+              // re-applied.
+              if (gatewayTransitIp && kaliIp && attackBoxVmId) {
+                try {
+                  const dnatCmd = [
+                    `iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -j DNAT --to-destination ${kaliIp}:3389 2>/dev/null || ` +
+                    `iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 -j DNAT --to-destination ${kaliIp}:3389`,
+                    `iptables -C FORWARD -i wan0 -o lan0 -p tcp -d ${kaliIp} --dport 3389 -j ACCEPT 2>/dev/null || ` +
+                    `iptables -A FORWARD -i wan0 -o lan0 -p tcp -d ${kaliIp} --dport 3389 -j ACCEPT`,
+                    // Persist. The Alpine-based v2 gateway uses
+                    // /etc/iptables/rules-save; fall back to /etc/iptables/rules.v4
+                    // for Debian-based gateways. Both paths fail silently if absent.
+                    'mkdir -p /etc/iptables 2>/dev/null',
+                    '(iptables-save > /etc/iptables/rules-save 2>/dev/null) || (iptables-save > /etc/iptables/rules.v4 2>/dev/null) || true'
+                  ].join(' && ');
+                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/exec`, {
+                    command: JSON.stringify(['sh', '-c', dnatCmd])
+                  });
+                  console.log(`[Group ${group_name}] Gateway ${gatewayVmId}: DNAT wan0:3389 → ${kaliIp}:3389 installed`);
+                } catch (dnatErr) {
+                  console.warn(`[Group ${group_name}] Gateway DNAT install failed (Guac may not reach Kali): ${dnatErr.message}`);
+                }
+              }
+
               try {
                 const guacParent = created.guac_group?.identifier || 'ROOT';
                 const kaliConn = await guacAPI('POST', '/connections', {
@@ -729,6 +761,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
                 if (kaliConn?.identifier) {
                   const connId = kaliConn.identifier;
+                  kaliGuacConnId = connId;
                   created.guac_connections.push({
                     id: connId,
                     name: `${group_name} - ${student.email.split('@')[0]} - Kali`,
@@ -786,6 +819,75 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               }
               await query(`UPDATE deployment_vuln_selections SET status = 'complete', updated_at = NOW() WHERE id = $1`, [deploymentId]);
               console.log(`[Group ${group_name}] Vuln scripts completed for ${student.email}`);
+            }
+
+            // Register each lane VM (challenge VMs + Kali, NOT the gateway —
+            // gateway is plumbing, not a workspace) in cybercore_resource +
+            // cybercore_vm_instance + cybercore_allocation so the student's
+            // "My Workspaces" page sees them. Only Kali gets a guac_connection_id
+            // since that's the only VM with a Guac connection in the group flow.
+            try {
+              const vmInstanceRows = [
+                ...deployedVMs.map(v => ({
+                  name: v.name,
+                  vmid: v.vm_id,
+                  node: v.node,
+                  providerType: v.type === 'lxc' ? 'lxc' : 'qemu',
+                  guacConnId: null,
+                  templateName: v.name
+                })),
+                ...(attackBoxVmId ? [{
+                  name: `kali-${student.email.split('@')[0]}`,
+                  vmid: attackBoxVmId,
+                  node: bestNode,
+                  providerType: 'qemu',
+                  guacConnId: kaliGuacConnId,
+                  templateName: 'Kali (Attack Box)'
+                }] : [])
+              ];
+
+              for (const v of vmInstanceRows) {
+                const resourceRes = await cybercoreQuery(`
+                  INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
+                  VALUES ('vm', $1, $2, 'allocated', $3::jsonb)
+                  RETURNING resource_id
+                `, [
+                  module,
+                  v.name,
+                  JSON.stringify({
+                    vm_category:    'lane_vm',
+                    provider_type:  v.providerType,
+                    template_name:  v.templateName,
+                    lane_id:        laneId,
+                    group_id:       groupId,
+                    group_name,
+                    challenge_key,
+                    vxlan_id:       vxlanId
+                  })
+                ]);
+                const resourceId = resourceRes.rows[0].resource_id;
+
+                await cybercoreQuery(`
+                  INSERT INTO cybercore_vm_instance
+                    (resource_id, provider, provider_node, provider_vmid, power_state, metadata)
+                  VALUES ($1, 'proxmox', $2, $3, 'running', $4::jsonb)
+                `, [
+                  resourceId,
+                  v.node,
+                  String(v.vmid),
+                  JSON.stringify({
+                    ...(v.guacConnId ? { guac_connection_id: v.guacConnId, guac_user: student.email } : {})
+                  })
+                ]);
+
+                await cybercoreQuery(`
+                  INSERT INTO cybercore_allocation (resource_id, user_id, purpose)
+                  VALUES ($1, $2, 'lane_vm')
+                `, [resourceId, student.id]);
+              }
+            } catch (regErr) {
+              // Non-fatal: lane still goes active, but VMs won't surface in My Workspaces.
+              console.warn(`[Group ${group_name}] Lane VM registration failed for ${student.email}: ${regErr.message}`);
             }
 
             const activeConfig = {
@@ -1161,6 +1263,16 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     await Promise.all([
       laneIds.length > 0
         ? cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = ANY($1)`, [laneIds]).catch(e => errors.push(`Lane cleanup: ${e.message}`))
+        : Promise.resolve(),
+
+      // Drop the cybercore_resource rows we created for each lane VM during
+      // deploy (see "Lane VM registration" in deploy path). The vm_instance
+      // and allocation rows cascade. Skip if no lane IDs to delete.
+      laneIds.length > 0
+        ? cybercoreQuery(
+            `DELETE FROM cybercore_resource WHERE (metadata->>'lane_id')::uuid = ANY($1::uuid[])`,
+            [laneIds]
+          ).catch(e => errors.push(`Lane VM resource cleanup: ${e.message}`))
         : Promise.resolve(),
 
       allUserIds.length > 0
