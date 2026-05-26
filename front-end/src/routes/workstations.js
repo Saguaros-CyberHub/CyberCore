@@ -13,7 +13,9 @@ const { authenticateToken } = require('../middleware/auth');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
 const { selectBestNode } = require('../utils/node-selector');
+const { guacAPI } = require('../utils/guacamole');
 const { getDefaultTemplateNode } = require('../utils/site-config');
+const { randomBytes } = require('crypto');
 const createLogger = require('../utils/logger');
 const log = createLogger('workstations');
 
@@ -68,6 +70,40 @@ async function getOwnedWorkstation(userId, vmId) {
 
   if (!result.rows.length) throw Object.assign(new Error('Workstation not found or not yours'), { status: 404 });
   return result.rows[0];
+}
+
+/**
+ * Fetch the first non-loopback IPv4 from the Proxmox guest agent or LXC interfaces API.
+ * Polls with retries to wait for the guest agent to come online after boot.
+ */
+async function getVmIp(node, vmid, providerType, retries = 12, delayMs = 10000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      if (providerType === 'lxc') {
+        const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/lxc/${vmid}/interfaces`);
+        for (const iface of (Array.isArray(ifaces) ? ifaces : [])) {
+          if (iface.name === 'lo') continue;
+          const ip = (iface.inet || '').split('/')[0];
+          if (ip && !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+        }
+      } else {
+        const data = await proxmoxAPI('GET', `/api2/json/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
+        const ifaces = data?.result || (Array.isArray(data) ? data : []);
+        for (const iface of ifaces) {
+          if (iface.name === 'lo') continue;
+          for (const addr of (iface['ip-addresses'] || [])) {
+            const ip = addr['ip-address'];
+            if (addr['ip-address-type'] === 'ipv4' && ip &&
+                !ip.startsWith('127.') && !ip.startsWith('169.254.')) {
+              return ip;
+            }
+          }
+        }
+      }
+    } catch (_) {}
+    if (i < retries - 1) await new Promise(r => setTimeout(r, delayMs));
+  }
+  return null;
 }
 
 /** Get next available VMID >= 800000 (keeps workstation VMIDs in a distinct high range). */
@@ -392,6 +428,71 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
 
         log.info(`Workstation deployed and running`, { vmId, vmid: newVmid, node: bestNode });
 
+        // Create Guacamole RDP connection if Guacamole is enabled
+        if (process.env.GUAC_ENABLED === 'true') {
+          try {
+            const vmIp = await getVmIp(bestNode, newVmid, providerType);
+            if (vmIp) {
+              const rdpUser = tpl.metadata?.default_rdp_user || null;
+              const rdpPass = tpl.metadata?.default_rdp_pass || null;
+              const conn = await guacAPI('POST', '/connections', {
+                name: vmName,
+                protocol: 'rdp',
+                parentIdentifier: 'ROOT',
+                parameters: {
+                  hostname: vmIp,
+                  port: '3389',
+                  ...(rdpUser ? { username: rdpUser } : {}),
+                  ...(rdpPass ? { password: rdpPass } : {}),
+                  security: 'any',
+                  'ignore-cert': 'true',
+                  'enable-wallpaper': 'true',
+                  'enable-theming': 'true',
+                  'enable-font-smoothing': 'true',
+                  'color-depth': '24',
+                  'resize-method': 'display-update',
+                },
+                attributes: { 'max-connections': '5', 'max-connections-per-user': '2' },
+              });
+              const connId = conn?.identifier;
+              if (connId) {
+                await cybercoreQuery(
+                  `UPDATE cybercore_vm_instance
+                      SET metadata = jsonb_set(COALESCE(metadata, '{}'), '{guac_connection_id}', $1::jsonb)
+                    WHERE vm_instance_id = $2`,
+                  [JSON.stringify(connId), vmId]
+                );
+                // Grant the deploying user READ access to this connection
+                try {
+                  const userRes = await cybercoreQuery(
+                    'SELECT email FROM cybercore_user WHERE user_id = $1', [userId]
+                  );
+                  const userEmail = userRes.rows[0]?.email;
+                  if (userEmail) {
+                    try {
+                      await guacAPI('POST', '/users', {
+                        username: userEmail,
+                        password: randomBytes(24).toString('hex'),
+                        attributes: {},
+                      });
+                    } catch (_) { /* user may already exist in Guacamole */ }
+                    await guacAPI('PATCH', `/users/${encodeURIComponent(userEmail)}/permissions`, [
+                      { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' },
+                    ]);
+                  }
+                } catch (permErr) {
+                  log.warn(`Could not grant Guac permissions for ${vmName}: ${permErr.message}`);
+                }
+                log.info(`Guacamole connection ${connId} created for ${vmName} (${vmIp})`, { vmId });
+              }
+            } else {
+              log.warn(`VM ${vmName} IP not available after 2 min — Guac connection skipped`, { vmId });
+            }
+          } catch (guacErr) {
+            log.warn(`Guacamole setup failed for ${vmName}: ${guacErr.message}`, { vmId });
+          }
+        }
+
       } catch (err) {
         log.error(`Background deploy failed for ${vmId}: ${err.message}`, err);
         await cybercoreQuery(`
@@ -583,6 +684,18 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
          WHERE resource_id = $1 AND user_id = $2 AND (ends_at IS NULL OR ends_at > NOW())`,
         [vm.resource_id, userId]
       );
+
+      // Clean up Guacamole connection
+      const guacConnId = vm.vi_metadata?.guac_connection_id;
+      if (guacConnId && process.env.GUAC_ENABLED === 'true') {
+        try {
+          await guacAPI('DELETE', `/connections/${encodeURIComponent(guacConnId)}`);
+          log.info(`Guacamole connection ${guacConnId} deleted`, { vmId });
+        } catch (guacErr) {
+          log.warn(`Guac cleanup failed for ${vmId}: ${guacErr.message}`);
+        }
+      }
+
       log.info(`Workstation destroyed`, { vmId, node: vm.provider_node, vmid: vm.provider_vmid, providerType });
 
     } catch (err) {

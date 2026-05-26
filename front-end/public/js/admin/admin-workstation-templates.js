@@ -23,6 +23,8 @@ function showWorkstationTemplateForm(tpl = null) {
   document.getElementById('wsTplStatus').value        = tpl?.status        || 'draft';
   document.getElementById('wsTplModule').value        = tpl?.module_key    || '';
   document.getElementById('wsTplNotes').value         = tpl?.notes         || '';
+  document.getElementById('wsTplRdpUser').value       = tpl?.metadata?.default_rdp_user || '';
+  document.getElementById('wsTplRdpPass').value       = tpl?.metadata?.default_rdp_pass || '';
   document.getElementById('wsTplIsActive').checked    = tpl ? tpl.is_active !== false : true;
   document.getElementById('wsTplStatus2').textContent = '';
 
@@ -49,6 +51,8 @@ async function saveWorkstationTemplate() {
   const statusEl = document.getElementById('wsTplStatus2');
 
   const providerTypeVal = document.getElementById('wsTplProviderType').value;
+  const rdpUser = document.getElementById('wsTplRdpUser').value.trim();
+  const rdpPass = document.getElementById('wsTplRdpPass').value.trim();
 
   const body = {
     template_key:  document.getElementById('wsTplKey').value.trim(),
@@ -63,6 +67,10 @@ async function saveWorkstationTemplate() {
     status:        document.getElementById('wsTplStatus').value,
     notes:         document.getElementById('wsTplNotes').value.trim() || null,
     is_active:     document.getElementById('wsTplIsActive').checked,
+    metadata: {
+      ...(rdpUser ? { default_rdp_user: rdpUser } : {}),
+      ...(rdpPass ? { default_rdp_pass: rdpPass } : {}),
+    },
   };
 
   if (!body.template_key || !body.name || !body.template_vmid) {

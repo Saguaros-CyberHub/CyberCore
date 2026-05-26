@@ -260,10 +260,27 @@ const Workstations = (() => {
                   ${disableStop ? 'disabled' : ''}>↺ Reboot</button>
           <button class="btn btn-sm" onclick="Workstations.openSnapshots('${vm.vmId}')"
                   ${disableAll ? 'disabled' : ''}>📷 Snapshots</button>
+          ${vm.hasConsole ? `<button class="btn btn-sm wks-btn-console"
+                  onclick="Workstations.openConsole('${vm.vmId}')"
+                  ${!running ? 'disabled' : ''}>🖥 Console</button>` : ''}
           <button class="btn btn-sm wks-btn-danger" onclick="Workstations.confirmDelete('${vm.vmId}')"
                   ${disableAll ? 'disabled' : ''}>🗑 Delete</button>
         </div>
       </div>`;
+  }
+
+  async function openConsole(vmId) {
+    try {
+      const res = await fetch(`/api/dashboard/vms/${vmId}/guac-session`, {
+        method: 'POST',
+        headers: _headers(),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      window.open(data.launchUrl, '_blank', 'noopener,noreferrer');
+    } catch (err) {
+      alert('Console error: ' + err.message);
+    }
   }
 
   async function action(vmId, actionName) {
@@ -419,5 +436,6 @@ const Workstations = (() => {
     createSnapshot,
     rollback,
     closeSnapshots,
+    openConsole,
   };
 })();
