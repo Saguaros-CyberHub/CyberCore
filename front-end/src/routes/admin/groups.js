@@ -829,15 +829,23 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             progress.phase_detail = `Deploying lanes: ${completed}/${total} complete`;
             const etaStr = progress.eta_s != null ? ` — ETA ${Math.ceil(progress.eta_s / 60)}min` : '';
             console.log(`[Group ${group_name}] Progress: ${completed}/${total} (${progress.succeeded} ok, ${progress.failed} failed)${etaStr}`);
+            if (!result.success) {
+              const errMsg = result.error?.message || result.error || 'unknown error';
+              console.error(`[Group ${group_name}] Lane ${job.laneId} (${job.student?.email || '?'}) FAILED: ${errMsg}`);
+              if (result.error?.stack) {
+                console.error(`[Group ${group_name}] Lane ${job.laneId} stack:\n${result.error.stack}`);
+              }
+            }
           }
         });
 
         for (const err of errors) {
           const job = laneJobs[err.index];
           if (job) {
+            console.error(`[Group ${group_name}] Lane ${job.laneId} error (post-batch): ${err.error?.message || err.error}`);
             await cybercoreQuery(
               `UPDATE cybercore_lane SET status = 'error', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-              [job.laneId, JSON.stringify({ error: err.error })]
+              [job.laneId, JSON.stringify({ error: err.error?.message || String(err.error) })]
             ).catch(() => {});
           }
         }

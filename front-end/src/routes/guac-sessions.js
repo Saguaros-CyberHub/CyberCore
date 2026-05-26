@@ -134,8 +134,9 @@ async function getUserGuacToken(guacUser, guacPassword) {
 // ============================================================================
 // GET /api/dashboard/vms
 // Returns VMs that the requesting user is authorized to access.
-// Admins/instructors see all VMs with a guac_connection_id; regular users see
-// only VMs they have an active cybercore_allocation for.
+// Admins/instructors see every active VM (with ownerEmail) by default. They
+// can pass ?scope=mine to fall back to the per-user filter.
+// Regular users always get the per-user filter regardless of query params.
 // ============================================================================
 router.get('/vms', authenticateToken, async (req, res) => {
   if (!GUAC_ENABLED) {
@@ -145,9 +146,13 @@ router.get('/vms', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const isPrivileged = ['admin', 'instructor'].includes(req.user.role);
+    const showAll = isPrivileged && req.query.scope !== 'mine';
     let result;
 
-    if (isPrivileged) {
+    if (showAll) {
+      // LEFT JOIN LATERAL pulls the first open allocation's user so the
+      // admin UI can show who owns each VM. NULL when nobody is currently
+      // allocated to the resource (rare — usually only for in-flight deploys).
       result = await cybercoreQuery(`
         SELECT
           vi.vm_instance_id        AS id,
@@ -155,9 +160,20 @@ router.get('/vms', authenticateToken, async (req, res) => {
           r.module_key,
           r.status                 AS resource_status,
           vi.power_state,
-          vi.metadata->>'guac_connection_id' AS guac_connection_id
+          vi.metadata->>'guac_connection_id' AS guac_connection_id,
+          owner.email              AS owner_email,
+          owner.user_id            AS owner_id
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        LEFT JOIN LATERAL (
+          SELECT u.user_id, u.email
+          FROM cybercore_allocation a
+          JOIN cybercore_user u ON u.user_id = a.user_id
+          WHERE a.resource_id = r.resource_id
+            AND (a.ends_at IS NULL OR a.ends_at > NOW())
+          ORDER BY a.created_at ASC
+          LIMIT 1
+        ) owner ON TRUE
         WHERE r.type   = 'vm'
           AND r.status != 'retired'
           AND vi.destroyed_at IS NULL
@@ -195,9 +211,10 @@ router.get('/vms', authenticateToken, async (req, res) => {
       powerState:     row.power_state,
       resourceStatus: row.resource_status,
       hasConsole:     !!row.guac_connection_id,
+      ...(showAll ? { ownerEmail: row.owner_email || null, ownerId: row.owner_id || null } : {}),
     }));
 
-    res.json({ vms });
+    res.json({ vms, scope: showAll ? 'all' : 'mine' });
   } catch (err) {
     console.error('[guac-sessions] GET /vms error:', err.message);
     res.status(500).json({ error: 'Failed to fetch VMs.' });

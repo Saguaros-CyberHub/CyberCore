@@ -15,6 +15,17 @@ const Workstations = (() => {
   let _refreshTimer = null;
   let _pendingDeployId   = null;
   let _pendingDeployName = null;
+  // Admin-only: when true, GET /mine?scope=all returns every user's workstation
+  let _adminScopeAll = true;
+
+  function _isAdmin() {
+    const u = (typeof Auth !== 'undefined') ? Auth.getUser() : null;
+    return u?.role === 'admin';
+  }
+
+  function _scopeQuery() {
+    return _isAdmin() && _adminScopeAll ? '?scope=all' : '';
+  }
 
   function _headers() {
     return {
@@ -143,9 +154,10 @@ const Workstations = (() => {
     const el = document.getElementById('wksMyList');
     if (!el) return;
     if (_myLoaded && !force) return;
-    if (!_myLoaded) el.innerHTML = '<div class="wks-loading">Loading your workstations…</div>';
+    _renderHeader();
+    if (!_myLoaded) el.innerHTML = '<div class="wks-loading">Loading workstations…</div>';
     try {
-      const data = await _api('GET', '/mine');
+      const data = await _api('GET', `/mine${_scopeQuery()}`);
       _myVms    = data.vms || [];
       _myLoaded = true;
       _renderMyWorkstations(el);
@@ -153,6 +165,52 @@ const Workstations = (() => {
     } catch (err) {
       el.innerHTML = `<div class="wks-error">⚠ ${_esc(err.message)}</div>`;
     }
+  }
+
+  // Inject the admin scope toggle + relabel the section header for admins.
+  // Runs on every load so role changes / tab re-entry stay correct.
+  function _renderHeader() {
+    const sectionTitle = document.querySelector('#workspaces-myworkspacesContent .section-title[data-wks-section="my"]')
+                       || document.querySelector('#workspaces-myworkspacesContent .section-title:nth-of-type(2)');
+    if (!sectionTitle) return;
+
+    const admin = _isAdmin();
+    sectionTitle.textContent = admin && _adminScopeAll ? 'All Workstations' : 'My Workstations';
+
+    if (!admin) {
+      const existing = document.getElementById('wksScopeToggle');
+      if (existing) existing.remove();
+      return;
+    }
+
+    let toggle = document.getElementById('wksScopeToggle');
+    if (!toggle) {
+      toggle = document.createElement('div');
+      toggle.id = 'wksScopeToggle';
+      toggle.style.cssText = 'display:inline-flex;gap:8px;margin-left:16px;font-size:12px;font-weight:normal;text-transform:none;letter-spacing:normal;';
+      toggle.innerHTML = `
+        <span style="color:var(--text-secondary)">Show:</span>
+        <a href="#" data-scope="all" class="wks-scope-link">All users</a>
+        <span style="color:var(--text-secondary)">|</span>
+        <a href="#" data-scope="mine" class="wks-scope-link">Me only</a>`;
+      sectionTitle.appendChild(toggle);
+      toggle.querySelectorAll('a').forEach(a => {
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          const next = a.dataset.scope === 'all';
+          if (next === _adminScopeAll) return;
+          _adminScopeAll = next;
+          _myLoaded = false;
+          loadMyWorkstations(true);
+        });
+      });
+    }
+    toggle.querySelectorAll('a').forEach(a => {
+      const active = (a.dataset.scope === 'all') === _adminScopeAll;
+      a.style.fontWeight = active ? '600' : 'normal';
+      a.style.color = active ? 'var(--text-primary)' : 'var(--text-secondary)';
+      a.style.textDecoration = active ? 'underline' : 'none';
+    });
   }
 
   // Adaptive polling: 5s when any VM is in a transient state, 30s otherwise.
@@ -173,7 +231,7 @@ const Workstations = (() => {
     for (const v of _myVms) prevStates[v.vmId] = v.powerState;
 
     try {
-      const data = await _api('GET', '/mine');
+      const data = await _api('GET', `/mine${_scopeQuery()}`);
       _myVms = data.vms || [];
 
       // Notify on notable transitions
@@ -197,12 +255,17 @@ const Workstations = (() => {
 
   function _renderMyWorkstations(el) {
     if (_myVms.length === 0) {
-      el.innerHTML = `
-        <div class="wks-empty">
-          <div class="wks-empty-icon">🖥</div>
-          <p>You haven't deployed any workstations yet.</p>
-          <p class="wks-empty-sub">Go to <strong>Available</strong> to deploy a template.</p>
-        </div>`;
+      const adminAll = _isAdmin() && _adminScopeAll;
+      el.innerHTML = adminAll
+        ? `<div class="wks-empty">
+             <div class="wks-empty-icon">🖥</div>
+             <p>No workstations have been deployed by any user yet.</p>
+           </div>`
+        : `<div class="wks-empty">
+             <div class="wks-empty-icon">🖥</div>
+             <p>You haven't deployed any workstations yet.</p>
+             <p class="wks-empty-sub">Go to <strong>Available</strong> to deploy a template.</p>
+           </div>`;
       return;
     }
     el.innerHTML = _myVms.map(_vmCard).join('');
@@ -248,6 +311,7 @@ const Workstations = (() => {
               ${_typeBadge(vm.providerType)}
               ${vm.templateName ? `<span class="wks-vm-tpl">${_esc(vm.templateName)}</span>` : ''}
               ${vm.devDeploy    ? `<span class="wks-dev-tag">DEV</span>` : ''}
+              ${vm.ownerEmail   ? `<span class="wks-vm-owner" title="Owner">👤 ${_esc(vm.ownerEmail)}</span>` : ''}
             </div>
           </div>
         </div>

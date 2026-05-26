@@ -42,30 +42,44 @@ function vmApiBase(node, vmid, providerType) {
   return `/api2/json/nodes/${node}/${kind}/${vmid}`;
 }
 
-/** Verify caller owns this workstation VM; returns the vm row or throws. */
-async function getOwnedWorkstation(userId, vmId) {
-  const result = await cybercoreQuery(`
-    SELECT
-      vi.vm_instance_id,
-      vi.provider_node,
-      vi.provider_vmid,
-      vi.power_state,
-      vi.metadata        AS vi_metadata,
-      r.resource_id,
-      r.name             AS vm_name,
-      r.module_key,
-      r.status           AS resource_status,
-      r.metadata->>'provider_type' AS provider_type
-    FROM cybercore_vm_instance vi
-    JOIN cybercore_resource r ON r.resource_id = vi.resource_id
-    JOIN cybercore_allocation a
-      ON  a.resource_id = r.resource_id
-      AND a.user_id     = $1
-      AND (a.ends_at IS NULL OR a.ends_at > NOW())
-    WHERE vi.vm_instance_id = $2
-      AND vi.destroyed_at   IS NULL
-      AND (r.metadata->>'vm_category') = 'workstation'
-  `, [userId, vmId]);
+/**
+ * Verify caller can access this workstation VM; returns the vm row or throws.
+ * Admins bypass the ownership filter and can target any non-destroyed workstation.
+ */
+async function getOwnedWorkstation(userId, vmId, isAdmin = false) {
+  const sql = isAdmin
+    ? `
+      SELECT
+        vi.vm_instance_id, vi.provider_node, vi.provider_vmid,
+        vi.power_state, vi.metadata AS vi_metadata,
+        r.resource_id, r.name AS vm_name, r.module_key,
+        r.status AS resource_status,
+        r.metadata->>'provider_type' AS provider_type
+      FROM cybercore_vm_instance vi
+      JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+      WHERE vi.vm_instance_id = $1
+        AND vi.destroyed_at IS NULL
+        AND (r.metadata->>'vm_category') = 'workstation'
+    `
+    : `
+      SELECT
+        vi.vm_instance_id, vi.provider_node, vi.provider_vmid,
+        vi.power_state, vi.metadata AS vi_metadata,
+        r.resource_id, r.name AS vm_name, r.module_key,
+        r.status AS resource_status,
+        r.metadata->>'provider_type' AS provider_type
+      FROM cybercore_vm_instance vi
+      JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+      JOIN cybercore_allocation a
+        ON  a.resource_id = r.resource_id
+        AND a.user_id     = $1
+        AND (a.ends_at IS NULL OR a.ends_at > NOW())
+      WHERE vi.vm_instance_id = $2
+        AND vi.destroyed_at IS NULL
+        AND (r.metadata->>'vm_category') = 'workstation'
+    `;
+  const params = isAdmin ? [vmId] : [userId, vmId];
+  const result = await cybercoreQuery(sql, params);
 
   if (!result.rows.length) throw Object.assign(new Error('Workstation not found or not yours'), { status: 404 });
   return result.rows[0];
@@ -189,37 +203,80 @@ router.get('/templates', authenticateToken, async (req, res) => {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // GET /api/workstations/mine
-// List the requesting user's deployed workstation VMs.
+// Lists the caller's deployed workstation VMs. Admins receive every active
+// workstation in the cluster (with owner_email on each row) so they can
+// monitor / control the full fleet from one view. Non-admins always get the
+// per-user filter regardless of query params.
 // ──────────────────────────────────────────────────────────────────────────────
 router.get('/mine', authenticateToken, async (req, res) => {
   try {
-    const result = await cybercoreQuery(`
-      SELECT
-        vi.vm_instance_id                         AS vm_instance_id,
-        vi.vm_instance_id                         AS vm_id,
-        r.name                                     AS vm_name,
-        r.module_key,
-        r.status                                   AS resource_status,
-        vi.power_state,
-        vi.provider_node,
-        vi.provider_vmid,
-        vi.created_at,
-        vi.last_seen_at,
-        r.metadata->>'template_name'               AS template_name,
-        r.metadata->>'dev_deploy'                  AS dev_deploy,
-        r.metadata->>'provider_type'               AS provider_type,
-        r.metadata->>'guac_connection_id'          AS guac_connection_id,
-        vi.metadata->>'guac_connection_id'         AS guac_connection_id_vi
-      FROM cybercore_vm_instance vi
-      JOIN cybercore_resource r ON r.resource_id = vi.resource_id
-      JOIN cybercore_allocation a
-        ON  a.resource_id = r.resource_id
-        AND a.user_id     = $1
-        AND (a.ends_at IS NULL OR a.ends_at > NOW())
-      WHERE vi.destroyed_at IS NULL
-        AND (r.metadata->>'vm_category') = 'workstation'
-      ORDER BY vi.created_at DESC
-    `, [req.user.userId]);
+    const isAdmin = req.user.role === 'admin';
+    const showAll = isAdmin && req.query.scope !== 'mine';
+
+    const sql = showAll
+      ? `
+        SELECT
+          vi.vm_instance_id                  AS vm_instance_id,
+          vi.vm_instance_id                  AS vm_id,
+          r.name                              AS vm_name,
+          r.module_key,
+          r.status                            AS resource_status,
+          vi.power_state,
+          vi.provider_node,
+          vi.provider_vmid,
+          vi.created_at,
+          vi.last_seen_at,
+          r.metadata->>'template_name'        AS template_name,
+          r.metadata->>'dev_deploy'           AS dev_deploy,
+          r.metadata->>'provider_type'        AS provider_type,
+          r.metadata->>'guac_connection_id'   AS guac_connection_id,
+          vi.metadata->>'guac_connection_id'  AS guac_connection_id_vi,
+          owner.email                         AS owner_email,
+          owner.user_id                       AS owner_id
+        FROM cybercore_vm_instance vi
+        JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        LEFT JOIN LATERAL (
+          SELECT u.user_id, u.email
+          FROM cybercore_allocation a
+          JOIN cybercore_user u ON u.user_id = a.user_id
+          WHERE a.resource_id = r.resource_id
+            AND (a.ends_at IS NULL OR a.ends_at > NOW())
+          ORDER BY a.created_at ASC
+          LIMIT 1
+        ) owner ON TRUE
+        WHERE vi.destroyed_at IS NULL
+          AND (r.metadata->>'vm_category') = 'workstation'
+        ORDER BY vi.created_at DESC
+      `
+      : `
+        SELECT
+          vi.vm_instance_id                  AS vm_instance_id,
+          vi.vm_instance_id                  AS vm_id,
+          r.name                              AS vm_name,
+          r.module_key,
+          r.status                            AS resource_status,
+          vi.power_state,
+          vi.provider_node,
+          vi.provider_vmid,
+          vi.created_at,
+          vi.last_seen_at,
+          r.metadata->>'template_name'        AS template_name,
+          r.metadata->>'dev_deploy'           AS dev_deploy,
+          r.metadata->>'provider_type'        AS provider_type,
+          r.metadata->>'guac_connection_id'   AS guac_connection_id,
+          vi.metadata->>'guac_connection_id'  AS guac_connection_id_vi
+        FROM cybercore_vm_instance vi
+        JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        JOIN cybercore_allocation a
+          ON  a.resource_id = r.resource_id
+          AND a.user_id     = $1
+          AND (a.ends_at IS NULL OR a.ends_at > NOW())
+        WHERE vi.destroyed_at IS NULL
+          AND (r.metadata->>'vm_category') = 'workstation'
+        ORDER BY vi.created_at DESC
+      `;
+    const params = showAll ? [] : [req.user.userId];
+    const result = await cybercoreQuery(sql, params);
 
     const synced = await syncPowerStates(result.rows);
 
@@ -236,9 +293,10 @@ router.get('/mine', authenticateToken, async (req, res) => {
       createdAt:    r.created_at,
       lastSeenAt:   r.last_seen_at,
       hasConsole:   !!(r.guac_connection_id || r.guac_connection_id_vi),
+      ...(showAll ? { ownerEmail: r.owner_email || null, ownerId: r.owner_id || null } : {}),
     }));
 
-    res.json({ vms });
+    res.json({ vms, scope: showAll ? 'all' : 'mine' });
   } catch (err) {
     log.error('GET /mine error:', err.message);
     res.status(500).json({ error: err.message });
@@ -251,7 +309,7 @@ router.get('/mine', authenticateToken, async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 router.get('/:vmId/status', authenticateToken, async (req, res) => {
   try {
-    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
     const status = await proxmoxAPI(
       'GET',
       `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/status/current`
@@ -564,7 +622,7 @@ router.post('/:vmId/action', authenticateToken, async (req, res) => {
   }
 
   try {
-    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
 
     if (!vm.provider_node || !vm.provider_vmid) {
       return res.status(400).json({ error: 'VM has no Proxmox location recorded' });
@@ -595,7 +653,7 @@ router.post('/:vmId/action', authenticateToken, async (req, res) => {
 // ──────────────────────────────────────────────────────────────────────────────
 router.get('/:vmId/snapshots', authenticateToken, async (req, res) => {
   try {
-    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
     const data = await proxmoxAPI(
       'GET',
       `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot`
@@ -619,7 +677,7 @@ router.post('/:vmId/snapshot', authenticateToken, async (req, res) => {
   }
 
   try {
-    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
     const upid = await proxmoxAPI(
       'POST',
       `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot`,
@@ -642,7 +700,7 @@ router.post('/:vmId/rollback', authenticateToken, async (req, res) => {
   if (!snapname) return res.status(400).json({ error: 'snapname is required' });
 
   try {
-    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId);
+    const vm = await getOwnedWorkstation(req.user.userId, req.params.vmId, req.user.role === 'admin');
     const upid = await proxmoxAPI(
       'POST',
       `${vmApiBase(vm.provider_node, vm.provider_vmid, vm.provider_type)}/snapshot/${encodeURIComponent(snapname)}/rollback`
@@ -669,7 +727,7 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
 
   let vm;
   try {
-    vm = await getOwnedWorkstation(userId, vmId);
+    vm = await getOwnedWorkstation(userId, vmId, req.user.role === 'admin');
   } catch (err) {
     return res.status(err.status || 500).json({ error: err.message });
   }
@@ -720,10 +778,13 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
         `UPDATE cybercore_resource SET status = 'retired', updated_at = now() WHERE resource_id = $1`,
         [vm.resource_id]
       );
+      // When admins destroy a workstation belonging to another user, the
+      // allocation row is keyed to the owner, not the admin — end ALL open
+      // allocations on this resource instead of just the caller's.
       await cybercoreQuery(
         `UPDATE cybercore_allocation SET ends_at = now()
-         WHERE resource_id = $1 AND user_id = $2 AND (ends_at IS NULL OR ends_at > NOW())`,
-        [vm.resource_id, userId]
+         WHERE resource_id = $1 AND (ends_at IS NULL OR ends_at > NOW())`,
+        [vm.resource_id]
       );
 
       // Clean up Guacamole connection
