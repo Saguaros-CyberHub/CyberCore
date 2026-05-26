@@ -287,7 +287,7 @@ app.get('/register', (req, res) => {
 });
 
 // Placeholder pages for modules without content
-const placeholderModules = ['crucible', 'cyberlabs', 'forge', 'university', 'archive', 'wiki', 'library', 'cyberprobe'];
+const placeholderModules = ['crucible', 'cyberlabs', 'forge', 'university', 'archive', 'cyberwiki', 'wiki', 'library', 'cyberprobe'];
 placeholderModules.forEach(mod => {
   app.get(`/${mod}`, (req, res) => {
     res.sendFile(path.join(__dirname, '../public/module-placeholder.html'));
