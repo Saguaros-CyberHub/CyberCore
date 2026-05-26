@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS cybercore_resource (
   name         TEXT NOT NULL,
   provider_ref TEXT,
   metadata     JSONB NOT NULL DEFAULT '{}'::jsonb,
-  status       TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','provisioning','allocated','error','retired')),
+  status       TEXT NOT NULL DEFAULT 'available' CHECK (status IN ('available','provisioning','allocated','deleting','error','retired')),
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (module_key, name)

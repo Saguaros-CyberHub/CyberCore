@@ -53,7 +53,7 @@ router.get('/api/crucible/events', authenticateToken, async (req, res) => {
       ${where}
       GROUP BY e.event_id, u.first_name, u.last_name
       ORDER BY e.starts_at DESC NULLS LAST, e.created_at DESC
-    `);
+    `, params);
 
     res.json({ events: result.rows });
   } catch (err) {

@@ -277,7 +277,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
     // 2. Check max_instances
     const countRes = await cybercoreQuery(`
       SELECT COUNT(*) AS cnt FROM cybercore_resource
-      WHERE (metadata->>'catalog_template_id') = $1 AND status NOT IN ('retired', 'failed')
+      WHERE (metadata->>'catalog_template_id') = $1 AND status NOT IN ('retired', 'error')
     `, [templateId]);
     if (tpl.max_instances && parseInt(countRes.rows[0].cnt, 10) >= tpl.max_instances) {
       return res.status(409).json({ error: `Max instances (${tpl.max_instances}) reached for this template` });
@@ -295,7 +295,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
     // 5. Create DB records immediately so the UI can show the deploying state
     const resourceRes = await cybercoreQuery(`
       INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
-      VALUES ('vm', $1, $2, 'pending', $3::jsonb)
+      VALUES ('vm', $1, $2, 'provisioning', $3::jsonb)
       RETURNING resource_id
     `, [
       tpl.module_key || null,
@@ -398,7 +398,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
           UPDATE cybercore_vm_instance SET power_state = 'failed' WHERE vm_instance_id = $1
         `, [vmId]).catch(() => {});
         await cybercoreQuery(`
-          UPDATE cybercore_resource SET status = 'failed', updated_at = now() WHERE resource_id = $1
+          UPDATE cybercore_resource SET status = 'error', updated_at = now() WHERE resource_id = $1
         `, [resourceId]).catch(() => {});
       }
     })();
