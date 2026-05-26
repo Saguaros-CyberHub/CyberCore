@@ -347,11 +347,21 @@
           <label>Student(s)</label>
           <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
         </div>
-        <div class="form-group">
-          <label>
-            <input type="checkbox" id="provisionCreateLane">
-            Create separate VXLAN lane per student
-          </label>
+        <div style="border-top: 1px solid var(--border-color, #e5e7eb); padding-top: 1rem; margin-top: 0.5rem;">
+          <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted, #6b7280); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem;">Settings</div>
+          <div style="display: flex; flex-direction: column; gap: 0.6rem;">
+            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem;">
+              <input type="checkbox" id="provisionCreateLane">
+              Create separate VXLAN lane per student
+            </label>
+            <label id="provisionSkipLaneRow" style="display: none; align-items: center; gap: 0.5rem; font-size: 0.9rem;">
+              <input type="checkbox" id="provisionSkipLane">
+              <span>
+                Dev mode — deploy directly on local network
+                <span style="font-size: 0.75rem; color: var(--text-muted, #6b7280); margin-left: 0.25rem;">(admin only, no VXLAN isolation)</span>
+              </span>
+            </label>
+          </div>
         </div>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('provisionVMModal')">Cancel</button>
@@ -889,6 +899,9 @@
     function showProvisionVMModal() {
       loadVMTemplates();
       loadModalStudents('provisionVMStudents');
+      const isAdmin = Auth && Auth.user && Auth.user.role === 'admin';
+      document.getElementById('provisionSkipLaneRow').style.display = isAdmin ? 'flex' : 'none';
+      if (!isAdmin) document.getElementById('provisionSkipLane').checked = false;
       showModal('provisionVMModal');
     }
 
@@ -930,11 +943,13 @@
         }
 
         const createLane = document.getElementById('provisionCreateLane').checked;
+        const skipLane   = document.getElementById('provisionSkipLane').checked;
 
         await api('POST', `/courses/${currentCourseId}/provision-vms`, {
           template_id: templateId,
           student_ids: selectedStudents,
-          create_separate_lanes: createLane
+          create_separate_lanes: createLane,
+          skip_lane: skipLane
         });
 
         toast('VM provisioning started');

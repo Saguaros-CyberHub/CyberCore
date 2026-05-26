@@ -105,7 +105,10 @@ router.post('/provision', instructorOnly, async (req, res) => {
   try {
     const instructorId = req.user.userId;
     const { courseId } = req.params;
-    const { template_id, student_ids, create_separate_lanes } = req.body;
+    const { template_id, student_ids, create_separate_lanes, skip_lane } = req.body;
+
+    // skip_lane is admin-only — enforce server-side
+    const skipLane = skip_lane === true && req.user.role === 'admin';
 
     if (!template_id || !Array.isArray(student_ids) || student_ids.length === 0) {
       return res.status(400).json({ error: 'template_id and non-empty student_ids array required' });
@@ -148,9 +151,9 @@ router.post('/provision', instructorOnly, async (req, res) => {
           continue;
         }
 
-        // Create lane if requested
+        // Create lane if requested (skip_lane overrides create_separate_lanes)
         let laneId = null;
-        if (create_separate_lanes) {
+        if (create_separate_lanes && !skipLane) {
           const laneResult = await cybercoreQuery(`
             INSERT INTO cybercore_lane
               (course_id, user_id, status, created_at)
