@@ -42,6 +42,17 @@ console.error = (...a) => _getLogger(_tag(a)).error(_msg(a));
 console.debug = (...a) => _getLogger(_tag(a)).debug(_msg(a));
 
 const log = createLogger('server');
+
+// Catch unhandled rejections and uncaught exceptions so the process doesn't
+// silently crash. In Node 18+ an unhandled rejection exits with code 1 if
+// no listener is registered — this surfaces the cause before exit.
+process.on('unhandledRejection', (reason, promise) => {
+  log.error('Unhandled promise rejection', { reason: reason?.stack || reason, promise: String(promise) });
+});
+process.on('uncaughtException', (err) => {
+  log.error('Uncaught exception — process will exit', err);
+  process.exit(1);
+});
 // ──────────────────────────────────────────────────────────────────────────────
 
 const crypto = require('crypto');

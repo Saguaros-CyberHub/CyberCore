@@ -540,7 +540,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
           UPDATE cybercore_resource SET status = 'error', updated_at = now() WHERE resource_id = $1
         `, [resourceId]).catch(() => {});
       }
-    })();
+    })().catch(err => log.error(`Unhandled error in deploy background task for ${vmId}`, err));
 
   } catch (err) {
     log.error('Deploy error:', err.message);
@@ -747,7 +747,7 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
         [vm.resource_id]
       ).catch(() => {});
     }
-  })();
+  })().catch(err => log.error(`Unhandled error in delete background task for ${vmId}`, err));
 });
 
 module.exports = router;
