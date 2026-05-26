@@ -182,18 +182,68 @@ write_files:
       # guest-file-* RPCs to install the vuln-app on first boot.
       DAEMON_ARGS=""
 
-  # DNS fallback. Debian cloud images' resolvconf/dhclient sometimes races
-  # and leaves /etc/resolv.conf empty on first boot — even though DHCP IS
-  # delivering DNS info. resolvconf reads /etc/resolvconf/resolv.conf.d/head
-  # first when building /etc/resolv.conf, so seeding public resolvers here
-  # guarantees the VM always has working DNS regardless of DHCP timing.
-  # Lane-gateway DNS (10.40.x.1) still gets prepended by dhclient when it
-  # works; this is the safety net.
+  # DNS resolver tuning. Don't hardcode public resolvers (1.1.1.1 / 8.8.8.8)
+  # — the lane subnet blocks outbound UDP 53 to anywhere except the lane
+  # gateway, so public IPs as nameservers just make every lookup time out
+  # for 5s before falling through.
   - path: /etc/resolvconf/resolv.conf.d/head
     permissions: '0644'
     content: |
-      nameserver 1.1.1.1
-      nameserver 8.8.8.8
+      options timeout:2 attempts:1 rotate
+
+  # Boot-time DNS fixup. dhclient on Debian cloud images sometimes loses the
+  # race with resolvconf and leaves /etc/resolv.conf without a nameserver
+  # entry. This service runs every boot, derives the lane gateway IP from
+  # the default route, and forces it into resolv.conf as the nameserver.
+  # The gateway's dnsmasq forwards upstream — this is the only working DNS
+  # path in the lane.
+  - path: /usr/local/bin/cybercore-dns-fixup.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Wait briefly for default route to come up (cold boot race)
+      for i in $(seq 1 10); do
+        GW=$(ip route | awk '/^default/ {print $3; exit}')
+        [ -n "$GW" ] && break
+        sleep 1
+      done
+      [ -z "$GW" ] && exit 0
+      # Write nameserver + fast-fail options DIRECTLY to /etc/resolv.conf
+      # (overrides resolvconf since we know the file is broken). Symlink stays.
+      LINK=/etc/resolv.conf
+      [ -L "$LINK" ] && TARGET=$(readlink -f "$LINK") || TARGET="$LINK"
+      printf "nameserver %s\noptions timeout:2 attempts:1 rotate\n" "$GW" > "$TARGET"
+      logger -t cybercore-dns-fixup "Set nameserver to $GW (lane gateway)"
+
+  - path: /etc/systemd/system/cybercore-dns-fixup.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Force lane-gateway DNS into /etc/resolv.conf
+      After=network-online.target NetworkManager.service systemd-networkd.service
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/cybercore-dns-fixup.sh
+      RemainAfterExit=yes
+
+      [Install]
+      WantedBy=multi-user.target
+
+
+  # Docker DNS config — use TCP (use-vc) because the lane network blocks
+  # outbound UDP 53. Without this, `docker pull` and `docker build` (any
+  # FROM stanza needing a registry lookup) fail with: dial udp 8.8.8.8:53:
+  # read: connection refused. use-vc forces resolv.conf-style lookups over
+  # TCP, which the lane gateway/OPNsense does allow.
+  - path: /etc/docker/daemon.json
+    permissions: '0644'
+    content: |
+      {
+        "dns": ["1.1.1.1", "8.8.8.8"],
+        "dns-opts": ["use-vc"]
+      }
 
   # Disable Apache's default vhost so CIAB's install_script can drop its own
   # files into /var/www/html without conflicting. Apache stays enabled but
@@ -230,9 +280,14 @@ runcmd:
   - [ systemctl, enable, qemu-guest-agent ]
   - [ systemctl, enable, ssh ]
   - [ systemctl, enable, docker ]
-  - [ systemctl, enable, apache2 ]
   - [ systemctl, start, docker ]
-  - [ systemctl, start, apache2 ]
+  # Apache is INSTALLED (for apache_vhost fallback path) but NOT enabled. The
+  # vuln-app always lands in docker mode and needs port 80 for `docker run -p
+  # 80:80`. If apache is running it grabs :80 and the docker bind fails. Lanes
+  # that actually want apache can `systemctl enable --now apache2` at install
+  # time.
+  - [ systemctl, disable, apache2 ]
+  - [ systemctl, stop, apache2 ]
 
   # ---- Pre-pull common base images so docker-mode vuln-app builds work on
   # lane VMs that have no outbound DNS/internet (the lane subnet is isolated
@@ -253,6 +308,15 @@ runcmd:
 
   # ---- Refresh resolv.conf so the new resolvconf/head takes effect ----
   - [ sh, -c, 'command -v resolvconf >/dev/null && resolvconf -u || true' ]
+
+  # ---- Enable the DNS fixup service so every lane boot gets working DNS
+  # (gateway IP varies per lane — service derives it from default route) ----
+  - [ systemctl, enable, cybercore-dns-fixup ]
+
+  # ---- Prefer IPv4 over IPv6 in glibc resolver. Lane has no IPv6 egress;
+  # without this, apt/apk inside containers hit "DNS: transient error" when
+  # CDNs (Fastly, etc.) return AAAA records for dualstack hostnames ----
+  - [ sh, -c, "echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf" ]
 
   # ---- Pre-seal sanity ----
   - [ sh, -c, 'systemctl is-enabled qemu-guest-agent && echo "GUEST_AGENT_ENABLED=yes" >> /etc/cybercore-bake.env || echo "GUEST_AGENT_ENABLED=no" >> /etc/cybercore-bake.env' ]

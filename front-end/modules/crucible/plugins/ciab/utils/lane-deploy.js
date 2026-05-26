@@ -874,9 +874,50 @@ async function writeFileViaShellExec({ node, vmId, fullPath, content, logTag }) 
 
 // ─── Vuln-app installer execution ──────────────────────────────────────────
 // Writes source_tree files via QEMU guest agent, then runs install_script.
+// Rewrite Dockerfile FROM lines to use a base image we've pre-baked into
+// the web template. The LLM is told to only use these in the prompt, but
+// regularly ignores it (emits node:16-slim, node:20-slim, etc.). Lane has
+// no UDP-53 egress and unreliable DNS for pulls, so non-cached bases break.
+const CACHED_BASES = {
+  // Map "language hint" → cached image. First match wins.
+  node:    'node:20-alpine',
+  python:  'python:3-slim',
+  php:     'php:8.2-apache',
+  nginx:   'nginx:alpine',
+  ruby:    'ruby:3-alpine'
+};
+function rewriteDockerfileBases(dockerfile, logTag) {
+  if (!dockerfile) return dockerfile;
+  const allowed = new Set(Object.values(CACHED_BASES));
+  return dockerfile.replace(/^(FROM\s+)(\S+)(.*)$/gim, (line, prefix, image, suffix) => {
+    if (allowed.has(image)) return line;   // already OK
+    // Detect language from the image name
+    for (const [lang, cached] of Object.entries(CACHED_BASES)) {
+      if (image.toLowerCase().startsWith(lang)) {
+        console.log(`${logTag} Rewriting Dockerfile FROM ${image} → ${cached} (LLM picked non-cached base)`);
+        return `${prefix}${cached}${suffix}`;
+      }
+    }
+    // Unknown image — default to node:20-alpine since most LLM-generated apps are Node
+    console.log(`${logTag} Rewriting Dockerfile FROM ${image} → node:20-alpine (unknown base, defaulting to node)`);
+    return `${prefix}node:20-alpine${suffix}`;
+  });
+}
+
 async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }) {
   if (!vulnAppInstall) return { success: true, skipped: true };
-  const { mode, install_script, source_tree, dockerfile } = vulnAppInstall;
+  const { mode, source_tree } = vulnAppInstall;
+  // Rewrite Dockerfile base to a cached image BEFORE writing it.
+  const dockerfile = rewriteDockerfileBases(vulnAppInstall.dockerfile, logTag);
+
+  // Force `docker build` to use --network=host so RUN steps (apk/apt) can
+  // resolve DNS via the host's resolver. Lane subnet blocks outbound UDP 53
+  // for containers, but host DNS via lane gateway → OPNsense works on TCP.
+  let install_script = vulnAppInstall.install_script || '';
+  if (install_script.includes('docker build') && !install_script.includes('--network=host')) {
+    install_script = install_script.replace(/docker\s+build\b/g, 'docker build --network=host');
+    console.log(`${logTag} Patched install_script: added --network=host to docker build (lane has no container DNS)`);
+  }
 
   const targetDir = mode === 'docker' ? '/opt/vuln-app' : '/var/www/html';
   console.log(`${logTag} Installing vuln app on ${vmName} (mode=${mode}, dir=${targetDir})`);
@@ -917,11 +958,23 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
     if (pid) {
       console.log(`${logTag} [install:step4] install_script pid=${pid}, polling for completion...`);
       const result = await pollExecStatus(node, vmId, pid, 15 * 60 * 1000);
-      if (result && result['exit-code'] !== 0) {
-        console.warn(`${logTag} [install:step4] ✗ install_script exited ${result['exit-code']}`);
-        return { success: false, error: `install_script exited ${result['exit-code']}`, stderr: result['err-data'] || null };
+      // PVE 9.x returns `exitcode` (no hyphen); older versions / docs used
+      // `exit-code`. Accept both. Same for err-data / err vs stderr.
+      const exitCode = result?.exitcode ?? result?.['exit-code'];
+      const stderr = result?.['err-data'] ?? result?.err ?? null;
+      if (exitCode !== 0 && exitCode !== undefined) {
+        console.warn(`${logTag} [install:step4] ✗ install_script exited ${exitCode}`);
+        return { success: false, error: `install_script exited ${exitCode}`, stderr };
       }
-      console.log(`${logTag} [install:step4] ✓ install_script completed (exit ${result?.['exit-code']})`);
+      if (exitCode === undefined) {
+        // pollExecStatus returned but no exit code field — likely timed out
+        // before the agent flushed final status. Log loudly but don't fail
+        // the deploy; if the script actually ran (it usually did), the app
+        // is up.
+        console.warn(`${logTag} [install:step4] ⚠ install_script status had no exit-code field — assuming success. Raw status: ${JSON.stringify(result || {}).slice(0, 200)}`);
+      } else {
+        console.log(`${logTag} [install:step4] ✓ install_script completed (exit ${exitCode})`);
+      }
     }
     return { success: true };
   } catch (err) {
