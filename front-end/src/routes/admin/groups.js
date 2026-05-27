@@ -704,33 +704,26 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               const guacTargetIp = gatewayTransitIp || kaliIp;
               console.log(`[Group ${group_name}] Guac RDP target: ${guacTargetIp} (${gatewayTransitIp ? 'via gateway DNAT' : 'direct to Kali'})`);
 
-              // Install the DNAT + FORWARD rules on the lane gateway so that
-              // Guac (or anything else on the lab network) reaching the
-              // gateway's WAN IP on 3389 lands on Kali's lane IP. -C ... || -A
-              // makes both rules idempotent on retry. iptables-save persists
-              // across reboot. Failure here doesn't fail the deploy — it just
-              // means Guac won't be able to reach Kali until the rule is
-              // re-applied.
+              // TODO(gateway-rebake): install DNAT wan0:3389 → ${kaliIp}:3389
+              // on the lane gateway so Guac can reach Kali through the WAN IP.
+              // PVE's REST API has no /lxc/exec endpoint, so this needs to ship
+              // via lane-bootstrap payload + a firstboot hook in the rebaked v2
+              // gateway template (1694). Until then, run manually on each lane:
+              //
+              //   pct enter <gw_vmid>
+              //   iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
+              //     -j DNAT --to-destination <kali_ip>:3389
+              //   iptables -A FORWARD -i wan0 -o lan0 -p tcp -d <kali_ip> \
+              //     --dport 3389 -j ACCEPT
+              //   iptables-save > /etc/iptables/rules-save
               if (gatewayTransitIp && kaliIp && attackBoxVmId) {
-                try {
-                  const dnatCmd = [
-                    `iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -j DNAT --to-destination ${kaliIp}:3389 2>/dev/null || ` +
-                    `iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 -j DNAT --to-destination ${kaliIp}:3389`,
-                    `iptables -C FORWARD -i wan0 -o lan0 -p tcp -d ${kaliIp} --dport 3389 -j ACCEPT 2>/dev/null || ` +
-                    `iptables -A FORWARD -i wan0 -o lan0 -p tcp -d ${kaliIp} --dport 3389 -j ACCEPT`,
-                    // Persist. The Alpine-based v2 gateway uses
-                    // /etc/iptables/rules-save; fall back to /etc/iptables/rules.v4
-                    // for Debian-based gateways. Both paths fail silently if absent.
-                    'mkdir -p /etc/iptables 2>/dev/null',
-                    '(iptables-save > /etc/iptables/rules-save 2>/dev/null) || (iptables-save > /etc/iptables/rules.v4 2>/dev/null) || true'
-                  ].join(' && ');
-                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/exec`, {
-                    command: JSON.stringify(['sh', '-c', dnatCmd])
-                  });
-                  console.log(`[Group ${group_name}] Gateway ${gatewayVmId}: DNAT wan0:3389 → ${kaliIp}:3389 installed`);
-                } catch (dnatErr) {
-                  console.warn(`[Group ${group_name}] Gateway DNAT install failed (Guac may not reach Kali): ${dnatErr.message}`);
-                }
+                console.log(
+                  `[Group ${group_name}] Gateway ${gatewayVmId} needs manual DNAT: ` +
+                  `pct enter ${gatewayVmId} && iptables -t nat -A PREROUTING -i wan0 ` +
+                  `-p tcp --dport 3389 -j DNAT --to-destination ${kaliIp}:3389 ` +
+                  `&& iptables -A FORWARD -i wan0 -o lan0 -p tcp -d ${kaliIp} ` +
+                  `--dport 3389 -j ACCEPT && iptables-save > /etc/iptables/rules-save`
+                );
               }
 
               try {
@@ -831,10 +824,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             // cybercore_vm_instance + cybercore_allocation so the student's
             // "My Workspaces" page sees them. Only Kali gets a guac_connection_id
             // since that's the only VM with a Guac connection in the group flow.
+            //
+            // Resource names are (module_key, name) UNIQUE — a single challenge
+            // deployed to N lanes would collide on the base VM name (e.g. "ws01").
+            // Suffix with the Proxmox VMID (cluster-unique) to guarantee uniqueness
+            // while keeping the name human-readable.
+            const studentSlug = student.email.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
             try {
               const vmInstanceRows = [
                 ...deployedVMs.map(v => ({
-                  name: v.name,
+                  name: `${v.name}-${studentSlug}-${v.vm_id}`.substring(0, 80),
+                  displayName: v.name,
                   vmid: v.vm_id,
                   node: v.node,
                   providerType: v.type === 'lxc' ? 'lxc' : 'qemu',
@@ -842,7 +842,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                   templateName: v.name
                 })),
                 ...(attackBoxVmId ? [{
-                  name: `kali-${student.email.split('@')[0]}`,
+                  name: `kali-${studentSlug}-${attackBoxVmId}`.substring(0, 80),
+                  displayName: `kali-${studentSlug}`,
                   vmid: attackBoxVmId,
                   node: bestNode,
                   providerType: 'qemu',

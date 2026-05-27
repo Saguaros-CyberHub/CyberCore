@@ -143,11 +143,20 @@ const VmConsole = (() => {
 
   /**
    * Open the active console in a new browser tab so it can run in its own
-   * window (resizable, full-tab area, no iframe nesting).
+   * window (resizable, full-tab area, no iframe nesting). Closes the
+   * embedded iframe immediately so the user doesn't end up with two live
+   * sessions competing for the same Guacamole connection (max-connections
+   * per user is usually 1 — leaving both open would prevent the popout from
+   * actually connecting).
    */
   function popout() {
     if (!_activeLaunchUrl) return;
-    window.open(_activeLaunchUrl, '_blank', 'noopener,noreferrer');
+    const url = _activeLaunchUrl;
+    // window.open returns immediately; the new tab is still loading when
+    // close() removes the iframe, so the embedded session releases its
+    // Guac slot well before the new tab tries to claim it.
+    window.open(url, '_blank', 'noopener,noreferrer');
+    close();
   }
 
   /**
