@@ -109,6 +109,7 @@ ENV_FILE=/etc/cybercore-gateway.env
 DNS_FORWARDER="${DNS_FORWARDER:-100.100.60.1}"   # OPNsense lab gateway
 LANE_DOMAIN="${LANE_DOMAIN:-cybercore.lan}"
 CONTROLLER_OCTET="${CONTROLLER_OCTET:-5}"        # GOAD controller is .5 by convention
+KALI_OCTET="${KALI_OCTET:-50}"                   # Kali attack box is .50 by convention
 DHCP_START_OCTET="${DHCP_START_OCTET:-10}"
 DHCP_END_OCTET="${DHCP_END_OCTET:-200}"
 
@@ -134,6 +135,7 @@ LAN_NET="${LAN_BASE3}.0/${LAN_PREFIX}"
 DHCP_START="${LAN_BASE3}.${DHCP_START_OCTET}"
 DHCP_END="${LAN_BASE3}.${DHCP_END_OCTET}"
 CONTROLLER_IP="${LAN_BASE3}.${CONTROLLER_OCTET}"
+KALI_IP="${LAN_BASE3}.${KALI_OCTET}"
 
 # Render /etc/dnsmasq.conf
 cat > /etc/dnsmasq.conf <<DNSMASQ_EOF
@@ -157,6 +159,13 @@ dhcp-option=option:router,${LAN_IP}
 dhcp-option=option:dns-server,${LAN_IP}
 dhcp-authoritative
 
+# Reserve <lane-base>.<KALI_OCTET> for the Kali attack box. Match is by the
+# hostname the client sends in its DHCPREQUEST — Kali always identifies as
+# "kali", so it deterministically lands on this IP without any per-deploy
+# admin.js setup.  The gateway's CYBERCORE-KALI-RDP iptables DNAT (installed
+# below) targets exactly this IP, so RDP through wan0:3389 always reaches Kali.
+dhcp-host=kali,${KALI_IP}
+
 # Per-host reservations (admin.js or the GOAD controller drops files here):
 conf-dir=/etc/dnsmasq.d/,*.conf
 
@@ -179,6 +188,16 @@ iptables -I INPUT -i lan0 -s "${CONTROLLER_IP}" -p tcp --dport 22 \
 if ! iptables -t nat -C POSTROUTING -s "${LAN_NET}" -o wan0 -j MASQUERADE 2>/dev/null; then
   iptables -t nat -A POSTROUTING -s "${LAN_NET}" -o wan0 -j MASQUERADE
 fi
+
+# 3. Kali attack-box DNAT — forward wan0:3389 to the lane's Kali (.50 by
+#    convention; admin.js pins this via cloud-init ipconfig0). Strip any
+#    stale rule first in case lan0 changed subnet between boots.
+iptables-save | grep -v "CYBERCORE-KALI-RDP" | iptables-restore || true
+iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
+  -m comment --comment "CYBERCORE-KALI-RDP" \
+  -j DNAT --to-destination "${KALI_IP}:3389"
+iptables -A FORWARD -i wan0 -o lan0 -p tcp -d "${KALI_IP}" --dport 3389 \
+  -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT
 
 # Persist current rule set (Alpine iptables init reloads from here)
 mkdir -p /etc/iptables
@@ -268,12 +287,7 @@ else
 fi
 unset BOOTSTRAP_RESP
 
-# Kali DNAT watcher is launched by a separate /etc/local.d/01-cybercore-kali-dnat.start
-# hook so OpenRC owns its lifecycle independently. Trying to background it
-# from inside this firstboot script proved unreliable across busybox sh
-# versions (`a || b &` precedence varies).
-
-logger -t cybercore-firstboot "rendered: lan0=${LAN_IP}/${LAN_PREFIX} net=${LAN_NET} dhcp=${DHCP_START}-${DHCP_END} controller=${CONTROLLER_IP} dns_fwd=${DNS_FORWARDER}"
+logger -t cybercore-firstboot "rendered: lan0=${LAN_IP}/${LAN_PREFIX} net=${LAN_NET} dhcp=${DHCP_START}-${DHCP_END} controller=${CONTROLLER_IP} kali=${KALI_IP} dns_fwd=${DNS_FORWARDER}"
 echo "[cybercore-firstboot] lan0=${LAN_IP}/${LAN_PREFIX} controller=${CONTROLLER_IP}" >&2
 FIRSTBOOT_EOF
 
@@ -300,7 +314,11 @@ LANE_DOMAIN=cybercore.lan
 # Convention: the GOAD controller VM gets <lan-base>.5 in every lane
 CONTROLLER_OCTET=5
 
-# DHCP scope for lane VMs (excludes .1 gateway and .5 controller)
+# Convention: the Kali attack box gets <lan-base>.50 (admin.js pins this via
+# cloud-init ipconfig0). Firstboot installs wan0:3389 DNAT to this IP.
+KALI_OCTET=50
+
+# DHCP scope for lane VMs (excludes .1 gateway, .5 controller, .50 kali)
 DHCP_START_OCTET=10
 DHCP_END_OCTET=200
 
@@ -324,75 +342,8 @@ interface=lo
 bind-interfaces
 PLACEHOLDER_EOF
 
-# 2d. Kali DNAT watcher — polls dnsmasq leases for any host with a hostname
-#     matching kali*, installs wan0:3389 → <kali>:3389 DNAT once.  Idempotent.
-#     Launched by a dedicated /etc/local.d hook (below) so OpenRC manages its
-#     lifecycle independently of firstboot.
-cat > "$STAGING/cybercore-kali-dnat-watcher.sh" <<'WATCHER_EOF'
-#!/bin/sh
-# /usr/local/bin/cybercore-kali-dnat-watcher.sh
-# ---------------------------------------------------------------
-# Polls /var/lib/misc/dnsmasq.leases for a host with hostname
-# matching "kali*". When found, installs wan0:3389 -> <kali>:3389
-# DNAT (and the corresponding FORWARD accept), persists, and exits.
-# Idempotent: skips installation if a CYBERCORE-KALI-RDP rule
-# already exists.
-# ---------------------------------------------------------------
-set -e
-
-LEASE_FILE=/var/lib/misc/dnsmasq.leases
-LAN_IFACE=lan0
-COMMENT="CYBERCORE-KALI-RDP"
-
-# Skip if a DNAT rule with our comment already exists.
-if iptables-save -t nat | grep -q -- "$COMMENT"; then
-  logger -t cybercore-kali-dnat "DNAT already present — nothing to do"
-  exit 0
-fi
-
-# Poll up to 60 times × 5s = 5 min.
-for _ in $(seq 1 60); do
-  IP="$(awk '$4 ~ /^kali/ { print $3; exit }' "$LEASE_FILE" 2>/dev/null)"
-  if [ -n "$IP" ]; then
-    iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
-      -m comment --comment "$COMMENT" \
-      -j DNAT --to-destination "${IP}:3389"
-    iptables -A FORWARD -i wan0 -o "$LAN_IFACE" -p tcp -d "${IP}" --dport 3389 \
-      -m comment --comment "$COMMENT" -j ACCEPT
-    mkdir -p /etc/iptables
-    iptables-save > /etc/iptables/rules-save
-    logger -t cybercore-kali-dnat "Installed DNAT: wan0:3389 -> ${IP}:3389 (out=$LAN_IFACE)"
-    exit 0
-  fi
-  sleep 5
-done
-
-logger -t cybercore-kali-dnat "Timeout: no kali* lease found in 5min — DNAT not installed"
-WATCHER_EOF
-
-# Dedicated OpenRC `local` hook that launches the watcher in the background
-# and returns immediately. Lives at /etc/local.d/01-cybercore-kali-dnat.start
-# so it runs after firstboot (00-*) but as its own process — meaning
-# backgrounding via setsid is reliable here regardless of busybox sh quirks.
-cat > "$STAGING/01-cybercore-kali-dnat.start" <<'KALILAUNCHER_EOF'
-#!/bin/sh
-# /etc/local.d/01-cybercore-kali-dnat.start
-# Launches cybercore-kali-dnat-watcher.sh in the background and exits.
-# OpenRC runs this AFTER 00-cybercore-firstboot.start (alphabetical),
-# so dnsmasq is up and able to receive leases by the time the watcher polls.
-[ -x /usr/local/bin/cybercore-kali-dnat-watcher.sh ] || exit 0
-setsid /usr/local/bin/cybercore-kali-dnat-watcher.sh </dev/null >/dev/null 2>&1 &
-exit 0
-KALILAUNCHER_EOF
-
 echo "==> Pushing firstboot script to /etc/local.d/00-cybercore-firstboot.start..."
 pct push "$TMP_VMID" "$STAGING/00-cybercore-firstboot.start" /etc/local.d/00-cybercore-firstboot.start --perms 0755
-
-echo "==> Pushing Kali DNAT watcher to /usr/local/bin/cybercore-kali-dnat-watcher.sh..."
-pct push "$TMP_VMID" "$STAGING/cybercore-kali-dnat-watcher.sh" /usr/local/bin/cybercore-kali-dnat-watcher.sh --perms 0755
-
-echo "==> Pushing Kali DNAT launcher hook to /etc/local.d/01-cybercore-kali-dnat.start..."
-pct push "$TMP_VMID" "$STAGING/01-cybercore-kali-dnat.start" /etc/local.d/01-cybercore-kali-dnat.start --perms 0755
 
 echo "==> Pushing /etc/cybercore-gateway.env (defaults)..."
 pct push "$TMP_VMID" "$STAGING/cybercore-gateway.env" /etc/cybercore-gateway.env --perms 0644
@@ -720,6 +671,8 @@ pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C INPUT -i lan0 -s 10.99.0.5 -p
   || { echo "FAIL: controller ACCEPT rule missing for 10.99.0.5"; RENDERED_OK=0; }
 pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -t nat -C POSTROUTING -s 10.99.0.0/24 -o wan0 -j MASQUERADE" 2>/dev/null \
   || { echo "FAIL: lane NAT MASQUERADE rule missing for 10.99.0.0/24"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination 10.99.0.50:3389" 2>/dev/null \
+  || { echo "FAIL: Kali DNAT rule missing for 10.99.0.50:3389"; RENDERED_OK=0; }
 
 pct stop "$VERIFY_VMID"
 pct destroy "$VERIFY_VMID" --purge

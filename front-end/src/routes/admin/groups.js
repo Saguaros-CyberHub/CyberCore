@@ -704,27 +704,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               const guacTargetIp = gatewayTransitIp || kaliIp;
               console.log(`[Group ${group_name}] Guac RDP target: ${guacTargetIp} (${gatewayTransitIp ? 'via gateway DNAT' : 'direct to Kali'})`);
 
-              // TODO(gateway-rebake): install DNAT wan0:3389 → ${kaliIp}:3389
-              // on the lane gateway so Guac can reach Kali through the WAN IP.
-              // PVE's REST API has no /lxc/exec endpoint, so this needs to ship
-              // via lane-bootstrap payload + a firstboot hook in the rebaked v2
-              // gateway template (1694). Until then, run manually on each lane:
-              //
-              //   pct enter <gw_vmid>
-              //   iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
-              //     -j DNAT --to-destination <kali_ip>:3389
-              //   iptables -A FORWARD -i wan0 -o lan0 -p tcp -d <kali_ip> \
-              //     --dport 3389 -j ACCEPT
-              //   iptables-save > /etc/iptables/rules-save
-              if (gatewayTransitIp && kaliIp && attackBoxVmId) {
-                console.log(
-                  `[Group ${group_name}] Gateway ${gatewayVmId} needs manual DNAT: ` +
-                  `pct enter ${gatewayVmId} && iptables -t nat -A PREROUTING -i wan0 ` +
-                  `-p tcp --dport 3389 -j DNAT --to-destination ${kaliIp}:3389 ` +
-                  `&& iptables -A FORWARD -i wan0 -o lan0 -p tcp -d ${kaliIp} ` +
-                  `--dport 3389 -j ACCEPT && iptables-save > /etc/iptables/rules-save`
-                );
-              }
+              // DNAT install is no longer a deploy-time concern — the gateway
+              // template bakes wan0:3389 → <lane-base>.50:3389 into firstboot,
+              // and Kali is pinned to .50 via cloud-init ipconfig0 above.
 
               try {
                 const guacParent = created.guac_group?.identifier || 'ROOT';
@@ -1283,11 +1265,29 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
         : Promise.resolve(),
 
       allUserIds.length > 0
-        ? cybercoreQuery(`DELETE FROM cybercore_user WHERE user_id = ANY($1) OR username = ANY($2)`, [allUserIds, allUserEmails]).catch(e => errors.push(`User cleanup: ${e.message}`))
+        ? cybercoreQuery(
+            `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) OR username = ANY($2)`,
+            [allUserIds, allUserEmails]
+          )
+          .then(r => {
+            console.log(`[Group Teardown] cybercore_user DELETE: ${r.rowCount}/${allUserIds.length} rows removed`);
+            if (r.rowCount < allUserIds.length) {
+              const msg = `Only ${r.rowCount}/${allUserIds.length} cybercore_user rows deleted — check for FK constraints (badges awarded, schedules overridden, etc.)`;
+              console.warn(`[Group Teardown] ${msg}`);
+              errors.push(msg);
+            }
+          })
+          .catch(e => {
+            console.error(`[Group Teardown] User cleanup FAILED: ${e.message}`);
+            errors.push(`User cleanup: ${e.message}`);
+          })
         : Promise.resolve(),
 
       ...((config.guac_users || []).map(username =>
-        guacAPI('DELETE', `/users/${encodeURIComponent(username)}`).catch(e => errors.push(`Guac delete ${username}: ${e.message}`))
+        guacAPI('DELETE', `/users/${encodeURIComponent(username)}`).catch(e => {
+          console.warn(`[Group Teardown] Guac user delete failed for ${username}: ${e.message}`);
+          errors.push(`Guac delete ${username}: ${e.message}`);
+        })
       )),
 
       ...((config.guac_connections || []).map(conn =>
