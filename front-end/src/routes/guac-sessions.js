@@ -262,7 +262,8 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           )                             AS guac_password,
           r.name,
           r.module_key,
-          r.status AS resource_status
+          r.status AS resource_status,
+          r.metadata->>'vm_category' AS vm_category
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
         LEFT JOIN cybercore_user cu ON cu.email = (vi.metadata->>'guac_user')
@@ -291,6 +292,7 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           r.name,
           r.module_key,
           r.status        AS resource_status,
+          r.metadata->>'vm_category' AS vm_category,
           a.metadata      AS alloc_metadata
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
@@ -339,9 +341,15 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
       });
     }
 
-    // Lazy IP refresh — if the VM's IP changed since the connection was created,
-    // update the Guacamole connection hostname before returning the URL.
-    if (vmRow.provider_node && vmRow.provider_vmid && vmRow.power_state === 'running') {
+    // Lazy IP refresh — if the VM's IP changed since the connection was
+    // created, update the Guacamole connection hostname before returning the
+    // URL.  Workstations are directly reachable so their guest-agent IP is
+    // the correct hostname.  Lane VMs (vm_category='lane_vm') sit behind a
+    // lane gateway; refreshing would overwrite the gateway WAN IP with the
+    // lane-local IP, which isn't routable from outside the gateway.  Skip
+    // refresh for lane VMs.
+    const isLaneVm = vmRow.vm_category === 'lane_vm';
+    if (!isLaneVm && vmRow.provider_node && vmRow.provider_vmid && vmRow.power_state === 'running') {
       const currentIp = await fetchCurrentVmIp(
         vmRow.provider_node,
         vmRow.provider_vmid,
@@ -381,8 +389,15 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
       } : { clearGuacAuth: true }),
     });
   } catch (err) {
-    console.error('[guac-sessions] POST /vms/:vmId/guac-session error:', err.message);
-    res.status(500).json({ error: 'Failed to create console session.' });
+    console.error('[guac-sessions] POST /vms/:vmId/guac-session error:', err.message, err.stack);
+    // Admins/instructors get the real error message to make debugging tractable;
+    // students get the generic fallback so we don't leak internals.
+    const isPrivileged = ['admin', 'instructor'].includes(req.user.role);
+    res.status(500).json({
+      error: isPrivileged
+        ? `Failed to create console session: ${err.message}`
+        : 'Failed to create console session.'
+    });
   }
 });
 

@@ -746,6 +746,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                     password: studentPassword,
                     security: 'any',
                     'ignore-cert': 'true',
+                    // Without server-layout the Guac UI shows "Keyboard layout"
+                    // as unset and keystrokes never reach xrdp. en-us-qwerty
+                    // matches the default xrdp keymap on Kali; override per
+                    // template later if a different physical keyboard is used.
+                    'server-layout': 'en-us-qwerty',
                     'enable-wallpaper': 'true',
                     'enable-theming': 'true',
                     'enable-font-smoothing': 'true',
@@ -876,6 +881,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                   v.node,
                   String(v.vmid),
                   JSON.stringify({
+                    provider_type: v.providerType,
                     ...(v.guacConnId ? { guac_connection_id: v.guacConnId, guac_user: student.email } : {})
                   })
                 ]);

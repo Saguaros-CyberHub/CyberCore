@@ -409,11 +409,12 @@
     .vmc-toolbar {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      gap: 8px;
       padding: 10px 16px;
       background: var(--gray-100, #f7fafc);
       border-bottom: 1px solid var(--border-color, #e2e8f0);
     }
+    .vmc-tool-spacer { flex: 1; }
 
     [data-theme="dark"] .vmc-toolbar {
       background: rgba(255,255,255,0.04);
@@ -425,7 +426,7 @@
       color: var(--text-primary);
     }
 
-    .vmc-close-btn {
+    .vmc-tool-btn, .vmc-close-btn {
       background: none;
       border: 1px solid var(--border-color, #e2e8f0);
       border-radius: 6px;
@@ -435,7 +436,14 @@
       cursor: pointer;
       transition: all 0.15s ease;
     }
+    .vmc-tool-btn:hover  { background: var(--gray-100, #f7fafc); color: var(--text-primary); }
     .vmc-close-btn:hover { background: #fed7d7; color: #9b2c2c; border-color: #fc8181; }
+
+    /* When the panel is fullscreen, fill the screen and let the iframe fill the panel. */
+    .vmc-panel:fullscreen { background: var(--bg-card, white); }
+    .vmc-panel:fullscreen .vmc-body { height: calc(100vh - 44px); }
+    .vmc-panel:fullscreen .vmc-iframe-wrap,
+    .vmc-panel:fullscreen .vmc-iframe { height: 100%; width: 100%; }
 
     .vmc-body {
       min-height: 120px;

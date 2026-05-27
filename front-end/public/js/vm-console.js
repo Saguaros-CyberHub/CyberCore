@@ -17,15 +17,23 @@ const VmConsole = (() => {
 
   // Track the vmId currently being requested so stale callbacks don't render.
   let _activeVmId = null;
+  // Most recent launch URL, kept for the "Open in new tab" button.
+  let _activeLaunchUrl = null;
 
   // ──────────────────────────────────────────────────────────────────────────
   // Rendering helpers
   // ──────────────────────────────────────────────────────────────────────────
 
-  function _toolbar(label) {
+  function _toolbar(label, withControls = false) {
+    const controls = withControls
+      ? `<button class="vmc-tool-btn" onclick="VmConsole.fullscreen()" title="Toggle full-screen (Esc to exit)">⛶ Full-screen</button>
+         <button class="vmc-tool-btn" onclick="VmConsole.popout()" title="Open console in a new tab">⇗ Pop out</button>`
+      : '';
     return `
       <div class="vmc-toolbar">
         <span class="vmc-title">${label}</span>
+        <span class="vmc-tool-spacer"></span>
+        ${controls}
         <button class="vmc-close-btn" onclick="VmConsole.close()" title="Close console">
           ✕ Close
         </button>
@@ -59,9 +67,10 @@ const VmConsole = (() => {
   }
 
   function _renderIframe(container, launchUrl) {
+    _activeLaunchUrl = launchUrl;
     container.innerHTML = `
       <div class="vmc-panel">
-        ${_toolbar('Remote Console')}
+        ${_toolbar('Remote Console', true)}
         <div class="vmc-body vmc-iframe-wrap">
           <iframe
             src="${launchUrl}"
@@ -123,6 +132,7 @@ const VmConsole = (() => {
    */
   function close() {
     _activeVmId = null;
+    _activeLaunchUrl = null;
     const panel = document.querySelector('.vmc-panel');
     if (panel) {
       const container = panel.closest('[id]') || panel.parentElement;
@@ -131,7 +141,31 @@ const VmConsole = (() => {
     }
   }
 
-  return { open, close };
+  /**
+   * Open the active console in a new browser tab so it can run in its own
+   * window (resizable, full-tab area, no iframe nesting).
+   */
+  function popout() {
+    if (!_activeLaunchUrl) return;
+    window.open(_activeLaunchUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  /**
+   * Request browser fullscreen on the active console panel. Press Esc to exit.
+   */
+  function fullscreen() {
+    const panel = document.querySelector('.vmc-panel');
+    if (!panel) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      panel.requestFullscreen().catch(err => {
+        console.warn('Fullscreen request failed:', err.message);
+      });
+    }
+  }
+
+  return { open, close, popout, fullscreen };
 })();
 
 // ============================================================================
