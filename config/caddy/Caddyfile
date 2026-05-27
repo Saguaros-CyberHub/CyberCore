@@ -1,29 +1,51 @@
 # =============================================================================
 # CyberHub — Caddy Reverse Proxy
 # =============================================================================
-# CYBERHUB_HOST controls the mode:
+# CYBERHUB_HOST controls the public site:
 #
 #   yourdomain.example.edu   — HTTPS with automatic Let's Encrypt certificate
 #   :80                      — HTTP only, no certificate (offline / LAN mode)
 #
-# Set CYBERHUB_HOST in your .env file. See docs/offline-mode.md to disable HTTPS.
+# A SECOND, internal-only HTTP listener on :80 is always defined below so that
+# in-cluster clients (lane gateways, GOAD controllers, anything calling
+# /api/lane-bootstrap from inside the lab) can reach the app over plain HTTP
+# without dealing with TLS handshakes against the public Let's Encrypt cert.
+# This avoids:
+#   - BusyBox wget on Alpine LXCs failing the public-cert handshake
+#   - Hairpin-NAT routing problems when an internal host resolves the public
+#     hostname to a public IP and the lab edge router doesn't NAT back in
+#
+# Reachability of the internal :80 listener is gated at the network layer by
+# OPNsense firewall rules (only lab subnets and the orchestrator's own
+# interface), so it isn't exposed to the public internet.
 # =============================================================================
 
+# --- Public site (HTTPS via Let's Encrypt when CYBERHUB_HOST is a domain) ----
 {$CYBERHUB_HOST} {
 
-    # ------------------------------------------------------------------
-    # Guacamole remote console
-    # Proxied at /guacamole/ so the browser and Guacamole share the same
-    # origin, satisfying Guacamole's X-Frame-Options: SAMEORIGIN header.
+    # Guacamole remote console — same-origin proxy so the browser and Guacamole
+    # share an origin (satisfies Guacamole's X-Frame-Options: SAMEORIGIN).
     # Caddy upgrades WebSocket connections automatically.
-    # ------------------------------------------------------------------
     handle /guacamole* {
         reverse_proxy guacamole:8080
     }
 
-    # ------------------------------------------------------------------
     # CyberHub application
-    # ------------------------------------------------------------------
+    handle {
+        reverse_proxy app:3000
+    }
+}
+
+# --- Internal HTTP listener (no TLS, no redirect) ----------------------------
+# Catches any direct-IP request on :80 — e.g. lane gateways hitting
+# http://100.100.20.50/api/lane-bootstrap. Same routes as the public site.
+# Listening on :80 here doesn't conflict with the public block above unless
+# CYBERHUB_HOST is itself set to ":80"; in that offline/LAN configuration,
+# remove or comment out this second block.
+:80 {
+    handle /guacamole* {
+        reverse_proxy guacamole:8080
+    }
     handle {
         reverse_proxy app:3000
     }

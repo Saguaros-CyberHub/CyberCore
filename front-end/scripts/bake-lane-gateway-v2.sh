@@ -268,15 +268,23 @@ else
 fi
 unset BOOTSTRAP_RESP
 
+# Kali DNAT watcher is launched by a separate /etc/local.d/01-cybercore-kali-dnat.start
+# hook so OpenRC owns its lifecycle independently. Trying to background it
+# from inside this firstboot script proved unreliable across busybox sh
+# versions (`a || b &` precedence varies).
+
 logger -t cybercore-firstboot "rendered: lan0=${LAN_IP}/${LAN_PREFIX} net=${LAN_NET} dhcp=${DHCP_START}-${DHCP_END} controller=${CONTROLLER_IP} dns_fwd=${DNS_FORWARDER}"
 echo "[cybercore-firstboot] lan0=${LAN_IP}/${LAN_PREFIX} controller=${CONTROLLER_IP}" >&2
 FIRSTBOOT_EOF
 
 # 2b. Default env file (admin.js can overwrite per-deploy via `pct push`).
 # Read CYBERCORE_ORCHESTRATOR_URL from the bake environment so the baked-in
-# default matches whatever port the orchestrator actually runs on. Override
-# at bake time:  CYBERCORE_ORCHESTRATOR_URL=http://100.100.20.50:80 ./bake...
-ORCH_URL_DEFAULT="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
+# default matches whatever scheme/host the orchestrator actually uses.
+# Override at bake time, e.g.:
+#   CYBERCORE_ORCHESTRATOR_URL=https://saguaroscyberhub.org ./bake-lane-gateway-v2.sh
+# HTTPS is now the default — Caddy fronts the app with Let's Encrypt certs,
+# and the gateway has full wget + ca-certificates baked in to handle TLS.
+ORCH_URL_DEFAULT="${CYBERCORE_ORCHESTRATOR_URL:-https://saguaroscyberhub.org}"
 # Note: unquoted heredoc tag → ${ORCH_URL_DEFAULT} expands at bake time.
 cat > "$STAGING/cybercore-gateway.env" <<ENV_EOF
 # /etc/cybercore-gateway.env
@@ -316,8 +324,75 @@ interface=lo
 bind-interfaces
 PLACEHOLDER_EOF
 
+# 2d. Kali DNAT watcher — polls dnsmasq leases for any host with a hostname
+#     matching kali*, installs wan0:3389 → <kali>:3389 DNAT once.  Idempotent.
+#     Launched by a dedicated /etc/local.d hook (below) so OpenRC manages its
+#     lifecycle independently of firstboot.
+cat > "$STAGING/cybercore-kali-dnat-watcher.sh" <<'WATCHER_EOF'
+#!/bin/sh
+# /usr/local/bin/cybercore-kali-dnat-watcher.sh
+# ---------------------------------------------------------------
+# Polls /var/lib/misc/dnsmasq.leases for a host with hostname
+# matching "kali*". When found, installs wan0:3389 -> <kali>:3389
+# DNAT (and the corresponding FORWARD accept), persists, and exits.
+# Idempotent: skips installation if a CYBERCORE-KALI-RDP rule
+# already exists.
+# ---------------------------------------------------------------
+set -e
+
+LEASE_FILE=/var/lib/misc/dnsmasq.leases
+LAN_IFACE=lan0
+COMMENT="CYBERCORE-KALI-RDP"
+
+# Skip if a DNAT rule with our comment already exists.
+if iptables-save -t nat | grep -q -- "$COMMENT"; then
+  logger -t cybercore-kali-dnat "DNAT already present — nothing to do"
+  exit 0
+fi
+
+# Poll up to 60 times × 5s = 5 min.
+for _ in $(seq 1 60); do
+  IP="$(awk '$4 ~ /^kali/ { print $3; exit }' "$LEASE_FILE" 2>/dev/null)"
+  if [ -n "$IP" ]; then
+    iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
+      -m comment --comment "$COMMENT" \
+      -j DNAT --to-destination "${IP}:3389"
+    iptables -A FORWARD -i wan0 -o "$LAN_IFACE" -p tcp -d "${IP}" --dport 3389 \
+      -m comment --comment "$COMMENT" -j ACCEPT
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules-save
+    logger -t cybercore-kali-dnat "Installed DNAT: wan0:3389 -> ${IP}:3389 (out=$LAN_IFACE)"
+    exit 0
+  fi
+  sleep 5
+done
+
+logger -t cybercore-kali-dnat "Timeout: no kali* lease found in 5min — DNAT not installed"
+WATCHER_EOF
+
+# Dedicated OpenRC `local` hook that launches the watcher in the background
+# and returns immediately. Lives at /etc/local.d/01-cybercore-kali-dnat.start
+# so it runs after firstboot (00-*) but as its own process — meaning
+# backgrounding via setsid is reliable here regardless of busybox sh quirks.
+cat > "$STAGING/01-cybercore-kali-dnat.start" <<'KALILAUNCHER_EOF'
+#!/bin/sh
+# /etc/local.d/01-cybercore-kali-dnat.start
+# Launches cybercore-kali-dnat-watcher.sh in the background and exits.
+# OpenRC runs this AFTER 00-cybercore-firstboot.start (alphabetical),
+# so dnsmasq is up and able to receive leases by the time the watcher polls.
+[ -x /usr/local/bin/cybercore-kali-dnat-watcher.sh ] || exit 0
+setsid /usr/local/bin/cybercore-kali-dnat-watcher.sh </dev/null >/dev/null 2>&1 &
+exit 0
+KALILAUNCHER_EOF
+
 echo "==> Pushing firstboot script to /etc/local.d/00-cybercore-firstboot.start..."
 pct push "$TMP_VMID" "$STAGING/00-cybercore-firstboot.start" /etc/local.d/00-cybercore-firstboot.start --perms 0755
+
+echo "==> Pushing Kali DNAT watcher to /usr/local/bin/cybercore-kali-dnat-watcher.sh..."
+pct push "$TMP_VMID" "$STAGING/cybercore-kali-dnat-watcher.sh" /usr/local/bin/cybercore-kali-dnat-watcher.sh --perms 0755
+
+echo "==> Pushing Kali DNAT launcher hook to /etc/local.d/01-cybercore-kali-dnat.start..."
+pct push "$TMP_VMID" "$STAGING/01-cybercore-kali-dnat.start" /etc/local.d/01-cybercore-kali-dnat.start --perms 0755
 
 echo "==> Pushing /etc/cybercore-gateway.env (defaults)..."
 pct push "$TMP_VMID" "$STAGING/cybercore-gateway.env" /etc/cybercore-gateway.env --perms 0644
@@ -460,6 +535,28 @@ pct exec "$TMP_VMID" -- /bin/sh -c '
 pct exec "$TMP_VMID" -- /bin/sh -c "rc-update add dnsmasq default 2>/dev/null || true"
 pct exec "$TMP_VMID" -- /bin/sh -c "rc-update add local default 2>/dev/null || true"
 
+# 2f2. Install full wget + ca-certificates so the bootstrap fetch in firstboot
+#      can speak HTTPS. BusyBox's built-in wget either lacks TLS entirely or
+#      handshakes with the wrong cipher suite against modern Caddy/Let's Encrypt,
+#      so we replace it with the GNU wget binary (`apk add wget`) and ship the
+#      Mozilla CA bundle (`ca-certificates`). Without this, gateways behind a
+#      public-HTTPS orchestrator silently fail bootstrap and Tailscale never
+#      comes up — which is exactly the AZ-CYBR regression we hit.
+echo "==> Installing full wget + ca-certificates for HTTPS bootstrap fetch..."
+pct exec "$TMP_VMID" -- /bin/sh -c '
+  set -e
+  apk update >/dev/null 2>&1 || true
+  apk add --no-cache wget ca-certificates 2>&1 | tail -5
+  # Refresh the trust bundle so Let'\''s Encrypt root is recognized.
+  update-ca-certificates 2>/dev/null || true
+  # Smoke-test: hit a known-HTTPS endpoint to confirm wget+TLS works.
+  if wget -q --timeout=5 --spider https://www.google.com/generate_204 2>/dev/null; then
+    echo "  HTTPS smoke test: OK"
+  else
+    echo "  HTTPS smoke test: FAILED (gateway may still need firewall/DNS fixes)"
+  fi
+'
+
 # 2g. Install Tailscale + configure userspace-networking mode.
 #     Userspace mode means tailscaled doesn't need a TUN device — works in
 #     unprivileged Proxmox LXCs without any LXC config tweaks. Subnet
@@ -515,6 +612,31 @@ TSD_EOF
     rc-service tailscale status 2>&1 || true
   fi
   echo "Tailscale install + config complete."
+'
+
+# 2g2. Scrub stale v1 iptables rules from the persistent rule set. 1692
+#      ships /etc/iptables/rules-save with DNATs to 192.18.0.10:3389 and
+#      100.100.70.10 (the legacy single Guac VM and the v1 lane subnet). Those
+#      get reloaded at every boot BEFORE firstboot runs, end up first in the
+#      PREROUTING chain, and silently swallow inbound 3389 → black hole. We
+#      drop any rule referencing the v1 subnet (192.18.0.*) or the old Guac
+#      IP (100.100.70.10), then re-persist the cleaned ruleset.
+echo "==> Scrubbing stale v1 iptables rules from /etc/iptables/rules-save..."
+pct exec "$TMP_VMID" -- /bin/sh -c '
+  set -e
+  RULES=/etc/iptables/rules-save
+  if [ -f "$RULES" ]; then
+    cp "$RULES" "${RULES}.v1.bak"
+    grep -vE "192\.18\.0|100\.100\.70\.10" "${RULES}.v1.bak" > "$RULES"
+    echo "  Cleaned $RULES (backup at ${RULES}.v1.bak)"
+  fi
+  # Also flush the running NAT table + any v1 FORWARD rules so the running
+  # state matches the persistent state.  iptables-save | grep -v | iptables-restore
+  # is the standard idiom for surgical rule deletion.
+  iptables-save | grep -vE "192\.18\.0|100\.100\.70\.10" | iptables-restore || true
+  mkdir -p /etc/iptables
+  iptables-save > /etc/iptables/rules-save
+  echo "  Persistent + running iptables: stale v1 references purged"
 '
 
 # 2h. CRITICAL: re-push the placeholder dnsmasq.conf as the absolute last
