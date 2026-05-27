@@ -201,6 +201,10 @@ const VmWorkspaces = (() => {
   // Admin/instructor-only toggle controlling ?scope on /api/dashboard/vms.
   // Default ON for privileged users so they land on the cluster-wide view.
   let _scopeAll = true;
+  // UI-side filter: hide cards that have no Guac console (lane target VMs
+  // are pivot-only, never directly accessed). Default ON because the typical
+  // student/admin only cares about cards they can actually click.
+  let _consoleOnly = true;
   let _lastListEl = null;
   let _lastConsoleId = null;
 
@@ -253,12 +257,43 @@ const VmWorkspaces = (() => {
     `;
   }
 
-  // Inject the admin/instructor scope toggle next to the "Lane VMs" section
-  // header. Idempotent — safe to call on every render.
+  // Inject the scope toggle (admin-only) + the console filter toggle (everyone)
+  // next to the "Lane VMs" section header. Idempotent — safe to call on every render.
   function _renderHeaderToggle() {
     const title = document.querySelector('#workspaces-myworkspacesContent .section-title[data-lane-section="lanes"]')
                 || document.querySelector('#workspaces-myworkspacesContent .section-title:first-of-type');
     if (!title) return;
+
+    // Console filter — visible to all users
+    let consoleToggle = document.getElementById('vmlConsoleToggle');
+    if (!consoleToggle) {
+      consoleToggle = document.createElement('div');
+      consoleToggle.id = 'vmlConsoleToggle';
+      consoleToggle.style.cssText = 'display:inline-flex;gap:8px;margin-left:16px;font-size:12px;font-weight:normal;text-transform:none;letter-spacing:normal;';
+      consoleToggle.innerHTML = `
+        <span style="color:var(--text-secondary)">Show:</span>
+        <a href="#" data-filter="console" class="wks-scope-link">With console</a>
+        <span style="color:var(--text-secondary)">|</span>
+        <a href="#" data-filter="all" class="wks-scope-link">All VMs</a>`;
+      title.appendChild(consoleToggle);
+      consoleToggle.querySelectorAll('a').forEach(a => {
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          const next = a.dataset.filter === 'console';
+          if (next === _consoleOnly) return;
+          _consoleOnly = next;
+          if (_lastListEl) render(_lastListEl, _lastConsoleId);
+        });
+      });
+    }
+    consoleToggle.querySelectorAll('a').forEach(a => {
+      const active = (a.dataset.filter === 'console') === _consoleOnly;
+      a.style.fontWeight = active ? '600' : 'normal';
+      a.style.color = active ? 'var(--text-primary)' : 'var(--text-secondary)';
+      a.style.textDecoration = active ? 'underline' : 'none';
+    });
+
+    // Scope toggle — admin/instructor only
     if (!_isPrivileged()) {
       const existing = document.getElementById('vmlScopeToggle');
       if (existing) existing.remove();
@@ -270,8 +305,8 @@ const VmWorkspaces = (() => {
       toggle.id = 'vmlScopeToggle';
       toggle.style.cssText = 'display:inline-flex;gap:8px;margin-left:16px;font-size:12px;font-weight:normal;text-transform:none;letter-spacing:normal;';
       toggle.innerHTML = `
-        <span style="color:var(--text-secondary)">Show:</span>
-        <a href="#" data-scope="all" class="wks-scope-link">All users</a>
+        <span style="color:var(--text-secondary)">Users:</span>
+        <a href="#" data-scope="all" class="wks-scope-link">All</a>
         <span style="color:var(--text-secondary)">|</span>
         <a href="#" data-scope="mine" class="wks-scope-link">Me only</a>`;
       title.appendChild(toggle);
@@ -307,10 +342,27 @@ const VmWorkspaces = (() => {
       // Admins/instructors default to scope=all; non-admins ignore the param server-side.
       const scopeQuery = _isPrivileged() && !_scopeAll ? '?scope=mine' : '';
       const data = await API.request(`/dashboard/vms${scopeQuery}`);
-      const vms = data.vms || [];
+      const rawVms = data.vms || [];
+      // Console filter: by default we only show cards the user can actually
+      // click. Lane target VMs (ws01, ws02, etc.) have no Guac connection —
+      // they're pivot-only from Kali — so listing them is just visual noise.
+      // Flip via the "All VMs" toggle to see the full inventory.
+      const vms = _consoleOnly ? rawVms.filter(v => v.hasConsole) : rawVms;
 
       if (vms.length === 0) {
         const adminAll = _isPrivileged() && _scopeAll;
+        // If the console filter is hiding everything, hint at the toggle.
+        if (_consoleOnly && rawVms.length > 0) {
+          listEl.innerHTML = `
+            <div class="vml-empty">
+              <span class="vml-empty-icon">🖥</span>
+              <p>${rawVms.length} VM${rawVms.length === 1 ? '' : 's'} hidden — none have a console configured.</p>
+              <p style="font-size:0.85rem;color:var(--text-muted)">
+                Lane target VMs are accessed by pivoting from Kali. Click <strong>All VMs</strong> above to see them.
+              </p>
+            </div>`;
+          return;
+        }
         listEl.innerHTML = adminAll
           ? `<div class="vml-empty">
                <span class="vml-empty-icon">🖥</span>

@@ -123,7 +123,6 @@ ENV_FILE=/etc/cybercore-gateway.env
 DNS_FORWARDER="${DNS_FORWARDER:-100.100.60.1}"   # OPNsense lab gateway
 LANE_DOMAIN="${LANE_DOMAIN:-cybercore.lan}"
 CONTROLLER_OCTET="${CONTROLLER_OCTET:-5}"        # GOAD controller — internal .5
-KALI_OCTET="${KALI_OCTET:-50}"                   # Kali attack box — external .50
 DHCP_START_OCTET="${DHCP_START_OCTET:-10}"
 DHCP_END_OCTET="${DHCP_END_OCTET:-200}"
 
@@ -154,7 +153,6 @@ INT_BASE3="$(echo "$INT_IP" | awk -F. '{print $1"."$2"."$3}')"
 EXT_NET="${EXT_BASE3}.0/${EXT_PREFIX}"
 INT_NET="${INT_BASE3}.0/${INT_PREFIX}"
 CONTROLLER_IP="${INT_BASE3}.${CONTROLLER_OCTET}"
-KALI_IP="${EXT_BASE3}.${KALI_OCTET}"  # Kali lives on the external (ext0) segment
 
 # Render /etc/dnsmasq.conf — one DHCP scope per segment, options tagged so
 # each segment's clients get their own subnet's router/DNS.
@@ -186,11 +184,6 @@ dhcp-option=tag:intnet,option:router,${INT_BASE3}.1
 dhcp-option=tag:intnet,option:dns-server,${INT_BASE3}.1
 
 dhcp-authoritative
-
-# Reserve <ext-base>.<KALI_OCTET> for the Kali attack box. Matched by hostname
-# (Kali always identifies as "kali" in its DHCPREQUEST), so it deterministically
-# lands on this IP and the gateway's CYBERCORE-KALI-RDP DNAT rule reaches it.
-dhcp-host=kali,${KALI_IP}
 
 # Per-host reservations (admin.js / the GOAD controller drop files here):
 conf-dir=/etc/dnsmasq.d/,*.conf
@@ -274,16 +267,6 @@ if ! iptables -t nat -C POSTROUTING -s "$EXT_NET" -o tailscale0 -j MASQUERADE 2>
   iptables -t nat -A POSTROUTING -s "$EXT_NET" -o tailscale0 -j MASQUERADE
 fi
 
-# 6. Kali attack-box DNAT — forward wan0:3389 to the lane's Kali on the
-#    EXTERNAL segment (.50 by convention; admin.js pins this via cloud-init
-#    ipconfig0). Strip any stale rule first in case ext0 changed subnet.
-iptables-save | grep -v "CYBERCORE-KALI-RDP" | iptables-restore || true
-iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
-  -m comment --comment "CYBERCORE-KALI-RDP" \
-  -j DNAT --to-destination "${KALI_IP}:3389"
-iptables -A FORWARD -i wan0 -o ext0 -p tcp -d "${KALI_IP}" --dport 3389 \
-  -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT
-
 mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules-save
 
@@ -362,6 +345,9 @@ unset BOOTSTRAP_RESP
 # run after `tailscale up`: Tailscale inserts `-j ts-input` at INPUT
 # position 1, so ours is inserted at position 1 last, to sit above it.
 iptables -I INPUT 1 -i wan0 -s 100.100.0.0/16 -m comment --comment "CYBERCORE-V3" -j ACCEPT
+
+# Kali DNAT watcher is launched by a separate /etc/local.d/01-cybercore-kali-dnat.start
+# hook so OpenRC owns its lifecycle independently of firstboot.
 
 logger -t cybercore-firstboot "rendered v3: ext0=${EXT_IP}/${EXT_PREFIX} int0=${INT_IP}/${INT_PREFIX} controller=${CONTROLLER_IP}"
 echo "[cybercore-firstboot] v3: ext0=${EXT_IP} int0=${INT_IP} controller=${CONTROLLER_IP}" >&2

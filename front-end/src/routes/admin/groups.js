@@ -1249,6 +1249,25 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       }
     }
 
+    // cybercore_allocation has CHECK (user_id IS NOT NULL OR group_key IS NOT NULL)
+    // and cybercore_user FK is ON DELETE SET NULL — so deleting a user would
+    // try to NULL out user_id on any of their allocations not tied to a
+    // group_key, which violates the check and rolls back the user delete.
+    // Purge each user's allocations FIRST (before the user delete in the
+    // Promise.all below) so the user delete has nothing left to SET NULL on.
+    if (allUserIds.length > 0) {
+      try {
+        const ar = await cybercoreQuery(
+          `DELETE FROM cybercore_allocation WHERE user_id = ANY($1::uuid[])`,
+          [allUserIds]
+        );
+        console.log(`[Group Teardown] cybercore_allocation DELETE: ${ar.rowCount} rows removed (pre-user-delete)`);
+      } catch (e) {
+        console.error(`[Group Teardown] Allocation cleanup FAILED: ${e.message}`);
+        errors.push(`Allocation cleanup: ${e.message}`);
+      }
+    }
+
     await Promise.all([
       laneIds.length > 0
         ? cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = ANY($1)`, [laneIds]).catch(e => errors.push(`Lane cleanup: ${e.message}`))
