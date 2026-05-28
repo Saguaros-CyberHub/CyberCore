@@ -116,10 +116,12 @@ router.post('/provision', instructorOnly, async (req, res) => {
     const authHeader = req.headers.authorization;
     const provisionedVMs = [];
     const failed = [];
-    const CLONE_STAGGER_MS = 15000; // Proxmox locks the template disk during clone start
 
-    for (let i = 0; i < student_ids.length; i++) {
-      const studentId = student_ids[i];
+    // No stagger: the workstations deploy endpoint serializes the locked phase
+    // of clones per-template (see cloneTemplateSerialized in routes/workstations.js).
+    // Background tasks naturally queue on Proxmox's template lock state.
+
+    for (const studentId of student_ids) {
       try {
         // Verify student is enrolled in this course
         const enrolled = await query(`
@@ -132,9 +134,6 @@ router.post('/provision', instructorOnly, async (req, res) => {
           failed.push({ student_id: studentId, reason: 'not enrolled' });
           continue;
         }
-
-        // Stagger clones so each one gets past Proxmox's template disk lock before the next starts
-        if (i > 0) await new Promise(r => setTimeout(r, CLONE_STAGGER_MS));
 
         // Delegate to the workstations deploy endpoint; forUserId allocates the VM to the student
         const deployRes = await fetch(`http://127.0.0.1:${PORT}/api/workstations/${template_id}/deploy`, {

@@ -925,13 +925,28 @@
       }
     }
 
-    function showProvisionVMModal() {
-      loadVMTemplates();
-      loadModalStudents('provisionVMStudents');
+    // Snapshot of active VMs in this course, used to grey out students who
+    // already have a VM for the currently-selected template in the modal.
+    let _provisionExistingVMs = [];
+
+    async function showProvisionVMModal() {
       const isAdmin = Auth && Auth.user && Auth.user.role === 'admin';
       document.getElementById('provisionSkipLaneRow').style.display = isAdmin ? 'flex' : 'none';
       if (!isAdmin) document.getElementById('provisionSkipLane').checked = false;
       showModal('provisionVMModal');
+
+      // Load templates, students, and current VMs in parallel, then update eligibility once
+      try {
+        const [, , vmsData] = await Promise.all([
+          loadVMTemplates(),
+          loadModalStudents('provisionVMStudents'),
+          api('GET', `/courses/${currentCourseId}/vms`).catch(() => ({ vms: [] })),
+        ]);
+        _provisionExistingVMs = (vmsData && vmsData.vms) || [];
+        updateProvisionEligibility();
+      } catch (e) {
+        toast('Error preparing provision modal: ' + e.message, true);
+      }
     }
 
     async function loadVMTemplates() {
@@ -940,6 +955,8 @@
         const templates = data.templates || [];
         const select = document.getElementById('provisionVMTemplate');
         select.innerHTML = templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
+        // Re-evaluate which students are eligible whenever the template changes
+        select.onchange = updateProvisionEligibility;
       } catch (e) {
         toast('Error loading templates: ' + e.message, true);
       }
@@ -951,9 +968,10 @@
         const students = data.students || [];
         const container = document.getElementById(containerId);
         container.innerHTML = students.map(s => `
-          <label style="display: flex; align-items: center; gap: 0.5rem;">
+          <label data-user-id="${escHtml(s.user_id)}" style="display: flex; align-items: center; gap: 0.5rem;">
             <input type="checkbox" class="modal-student-select" value="${s.user_id}" data-email="${s.email}">
-            ${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})
+            <span class="modal-student-label">${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})</span>
+            <span class="provision-note" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); font-style: italic;"></span>
           </label>
         `).join('');
       } catch (e) {
@@ -961,10 +979,49 @@
       }
     }
 
+    /**
+     * Greys out + permanently checks any student who already has an active VM
+     * built from the currently-selected template. Re-runs whenever the
+     * template select changes.
+     */
+    function updateProvisionEligibility() {
+      const templateId = document.getElementById('provisionVMTemplate').value;
+      const container  = document.getElementById('provisionVMStudents');
+      if (!container) return;
+
+      const occupied = new Set(
+        _provisionExistingVMs
+          .filter(v => v.metadata && String(v.metadata.catalog_template_id) === String(templateId))
+          .map(v => v.user_id)
+      );
+
+      container.querySelectorAll('label[data-user-id]').forEach(label => {
+        const userId   = label.dataset.userId;
+        const checkbox = label.querySelector('input.modal-student-select');
+        const note     = label.querySelector('.provision-note');
+        if (occupied.has(userId)) {
+          checkbox.checked  = true;
+          checkbox.disabled = true;
+          label.style.opacity = '0.55';
+          label.style.cursor  = 'not-allowed';
+          if (note) note.textContent = '— already deployed';
+        } else {
+          checkbox.disabled = false;
+          checkbox.checked  = false;
+          label.style.opacity = '';
+          label.style.cursor  = '';
+          if (note) note.textContent = '';
+        }
+      });
+    }
+
     async function provisionVMs() {
       try {
         const templateId = document.getElementById('provisionVMTemplate').value;
-        const selectedStudents = Array.from(document.querySelectorAll('.modal-student-select:checked')).map(c => c.value);
+        // Skip checkboxes that are checked-but-disabled (already-deployed students)
+        const selectedStudents = Array.from(
+          document.querySelectorAll('#provisionVMStudents .modal-student-select:checked:not(:disabled)')
+        ).map(c => c.value);
 
         if (!templateId || selectedStudents.length === 0) {
           toast('Select template and at least one student', true);

@@ -145,6 +145,62 @@ async function nextVmId() {
 }
 
 /**
+ * Per-template clone serialization. Proxmox locks the template (LXC or QEMU)
+ * during the disk-copy phase of a clone; concurrent clones of the same
+ * template fail with "CT is locked (disk)". We chain clones of the same
+ * template through this map and actively poll the template's lock status
+ * rather than waiting a fixed time. Different templates clone in parallel.
+ */
+const _templateCloneMutex = new Map(); // `${node}:${vmid}` → Promise chain
+
+async function waitForTemplateUnlock(node, vmid, providerType, maxWaitMs = 300000) {
+  const start = Date.now();
+  const apiBase = vmApiBase(node, vmid, providerType);
+  let lastLock = null;
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const status = await proxmoxAPI('GET', `${apiBase}/status/current`);
+      if (!status?.lock) return;
+      if (status.lock !== lastLock) {
+        log.info(`Template ${vmid} on ${node} locked (${status.lock}) — waiting for unlock…`);
+        lastLock = status.lock;
+      }
+    } catch (err) {
+      log.warn(`Template ${vmid} lock check failed (will retry): ${err.message}`);
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error(`Timed out after ${maxWaitMs}ms waiting for template ${vmid} on ${node} to unlock`);
+}
+
+/**
+ * Serializes the LOCKED phase of cloning a single template. Waits for prior
+ * clones to clear, kicks off the new clone, then holds the mutex until the
+ * template's disk lock clears again — at which point the next clone is safe
+ * to start. Returns the clone task UPID; caller still awaits the full task.
+ */
+async function cloneTemplateSerialized(templateNode, templateVmid, providerType, cloneBody) {
+  const key  = `${templateNode}:${templateVmid}`;
+  const prev = _templateCloneMutex.get(key) || Promise.resolve();
+  const next = prev.then(async () => {
+    await waitForTemplateUnlock(templateNode, templateVmid, providerType);
+    const upid = await proxmoxAPI(
+      'POST',
+      `${vmApiBase(templateNode, templateVmid, providerType)}/clone`,
+      cloneBody
+    );
+    // Give Proxmox a moment to actually acquire the lock after returning UPID,
+    // then wait for it to clear (= disk copy phase complete, safe for next clone)
+    await new Promise(r => setTimeout(r, 2000));
+    await waitForTemplateUnlock(templateNode, templateVmid, providerType);
+    return upid;
+  });
+  // Always advance the chain even on failure so a stuck error doesn't block subsequent clones
+  _templateCloneMutex.set(key, next.catch(() => {}));
+  return next;
+}
+
+/**
  * Bulk-sync power_state for a list of vm_instance rows using a single
  * cluster/resources call.  Updates the DB in parallel; never throws — errors
  * are swallowed so callers always get a response even if Proxmox is unreachable.
@@ -462,9 +518,12 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
           : { newid: newVmid, name: vmName, full: 1, target: bestNode,
               description: `Workstation: ${tpl.os_name}\nUser: ${userId}\nTemplate: ${tpl.template_key}` };
 
-        const cloneUpid = await proxmoxAPI(
-          'POST',
-          `${vmApiBase(templateNode, tpl.template_vmid, providerType)}/clone`,
+        // Serialized per-template: waits for any prior clone's disk-copy phase
+        // to release the template lock before starting (and before next clone starts)
+        const cloneUpid = await cloneTemplateSerialized(
+          templateNode,
+          tpl.template_vmid,
+          providerType,
           cloneBody
         );
         // Cloning large templates can take 5–10 minutes — give it plenty of headroom
