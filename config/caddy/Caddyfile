@@ -38,11 +38,20 @@
 
 # --- Internal HTTP listener (no TLS, no redirect) ----------------------------
 # Catches any direct-IP request on :80 — e.g. lane gateways hitting
-# http://100.100.20.50/api/lane-bootstrap. Same routes as the public site.
-# Listening on :80 here doesn't conflict with the public block above unless
-# CYBERHUB_HOST is itself set to ":80"; in that offline/LAN configuration,
-# remove or comment out this second block.
-:80 {
+# http://100.100.20.50/api/lane-bootstrap, lane web VMs pulling vuln-app images
+# from /api/profile-deploy/image/<token>. Same routes as the public site.
+#
+# `http://` prefix is REQUIRED — without it, Caddy treats this as a site that
+# COULD do HTTPS, and the auto-HTTPS engine adds a 308 HTTP→HTTPS redirect on
+# behalf of any HTTPS-eligible site (including {$CYBERHUB_HOST}), which then
+# bounces lane requests to https://<ip> where the cert doesn't match and the
+# lane has no Let's Encrypt root anyway. The explicit `http://` opts this
+# block out of auto-HTTPS so it stays a plain HTTP listener.
+#
+# Reachability of the internal :80 listener is gated at the network layer by
+# OPNsense firewall rules (only lab subnets and the orchestrator's own
+# interface), so it isn't exposed to the public internet.
+http://:80 {
     handle /guacamole* {
         reverse_proxy guacamole:8080
     }
