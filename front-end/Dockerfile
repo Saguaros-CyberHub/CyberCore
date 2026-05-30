@@ -6,6 +6,14 @@ FROM gcr.io/kaniko-project/executor:v1.23.2 AS kaniko
 
 FROM node:18-alpine
 
+# Runtime tools the app shells out to. `curl` is required by proxmoxFormPOST
+# in lane-deploy.js (spawn('curl', args) — used for every /agent/exec call to
+# the Proxmox API). It used to come in transitively via the docker-cli package
+# the old DooD build installed, so removing docker-cli also removed curl —
+# re-add it explicitly. `ca-certificates` keeps TLS happy for outbound HTTPS
+# (Anthropic, kaniko base image pulls, Tailscale).
+RUN apk add --no-cache curl ca-certificates
+
 # Kaniko (vuln-app builder). Build runs via /kaniko/executor — no Docker
 # daemon, no /var/run/docker.sock mount, no host-VM escape path. LLM-authored
 # Dockerfile RUN steps still run with this container's privileges, so don't
