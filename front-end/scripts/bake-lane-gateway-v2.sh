@@ -222,6 +222,22 @@ rc-service dnsmasq restart >/dev/null 2>&1 \
 ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
 BOOTSTRAP_PATH="/api/lane-bootstrap"
 
+# Per-lane claim secret. The orchestrator embeds a `b<16hex>` suffix in this
+# LXC's hostname at clone time; we grep it back out here and pass it to the
+# bootstrap endpoint as ?secret=…  The endpoint matches on the secret instead
+# of source IP, which gets rewritten by the orchestrator's Docker bridge and
+# never reaches the app as the gateway's real WAN IP.
+#
+# If no secret is present (gateway baked before this change, manual rebuild,
+# etc.), fall back to the no-querystring URL — the endpoint still honors
+# source-IP matching for backward compat.
+CLAIM_SECRET="$(hostname | grep -oE 'b[a-f0-9]{16}$' | sed 's/^b//')"
+if [ -n "$CLAIM_SECRET" ]; then
+  BOOTSTRAP_URL="${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}?secret=${CLAIM_SECRET}"
+else
+  BOOTSTRAP_URL="${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}"
+fi
+
 # wget is preferred over curl on Alpine (smaller, always present). BusyBox wget
 # doesn't speak HTTPS by default, but http://orchestrator is on the internal
 # lab network — http is fine here. For HTTPS, install wget package
@@ -230,10 +246,10 @@ BOOTSTRAP_PATH="/api/lane-bootstrap"
 # Retry window: 60 attempts × (5s timeout + 5s sleep) = up to 10 minutes.
 # Covers slow-WAN, late dnsmasq/DHCP, and orchestrator-restart races. The
 # bootstrap token's server-side TTL is also 10 min, so this matches.
-echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}..." >&2
+echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH} (claim=${CLAIM_SECRET:+secret}${CLAIM_SECRET:-ip})..." >&2
 BOOTSTRAP_RESP=""
 for _ in $(seq 1 60); do
-  BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}" 2>/dev/null || true)"
+  BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${BOOTSTRAP_URL}" 2>/dev/null || true)"
   # Accept payload only if it has the auth key field; an `{"error":...}` body
   # (token missing / already consumed) is treated as a soft fail and retried.
   if [ -n "$BOOTSTRAP_RESP" ] && echo "$BOOTSTRAP_RESP" | grep -q '"tailscale_authkey"'; then

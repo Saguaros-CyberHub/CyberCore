@@ -284,12 +284,24 @@ rc-service dnsmasq restart >/dev/null 2>&1 \
 ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
 BOOTSTRAP_PATH="/api/lane-bootstrap"
 
+# Per-lane claim secret. Orchestrator embeds a `b<16hex>` suffix in this LXC's
+# hostname at clone time; we grep it back and pass it as ?secret=… so the
+# endpoint can match without source-IP (Docker bridge on the orchestrator
+# rewrites the source IP, breaking IP-based matching). Falls back to no
+# querystring (IP-gated mode) if the suffix isn't present, for backward compat.
+CLAIM_SECRET="$(hostname | grep -oE 'b[a-f0-9]{16}$' | sed 's/^b//')"
+if [ -n "$CLAIM_SECRET" ]; then
+  BOOTSTRAP_URL="${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}?secret=${CLAIM_SECRET}"
+else
+  BOOTSTRAP_URL="${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}"
+fi
+
 # Retry window: 60 attempts × (5s timeout + 5s sleep) = up to 10 minutes.
 # Covers slow-WAN, late dnsmasq/DHCP, and orchestrator-restart races.
-echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}..." >&2
+echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH} (claim=${CLAIM_SECRET:+secret}${CLAIM_SECRET:-ip})..." >&2
 BOOTSTRAP_RESP=""
 for _ in $(seq 1 60); do
-  BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}" 2>/dev/null || true)"
+  BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${BOOTSTRAP_URL}" 2>/dev/null || true)"
   if [ -n "$BOOTSTRAP_RESP" ] && echo "$BOOTSTRAP_RESP" | grep -q '"tailscale_authkey"'; then
     break
   fi

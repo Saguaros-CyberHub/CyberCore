@@ -20,6 +20,7 @@
  * the single failed lane via deployOneLaneFromSpec().
  */
 
+const crypto = require('crypto');
 const { pool, query } = require('./db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI, waitForTask } = require('../../../../../src/utils/proxmox');
@@ -547,9 +548,21 @@ async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, 
       const vnet = vnetByLaneId[laneId];
       const vnetInt = vnetIntByLaneId[laneId];
       try {
+        // Per-lane bootstrap secret embedded in the LXC hostname as a `b<hex>`
+        // suffix. The bake script's firstboot greps it out of `hostname` and
+        // appends it to /api/lane-bootstrap as ?secret=…  This lets the
+        // bootstrap endpoint match on the secret instead of source IP, which
+        // gets rewritten by Docker's bridge (proxy chain ate the real WAN IP).
+        // 8 random bytes → 16 hex chars → 64 bits, plenty for a one-shot.
+        // Hostname budget: 63 chars max, reserve 18 for `-b<16hex>`.
+        const claimSecret = crypto.randomBytes(8).toString('hex');
+        const baseHost = `${laneName}-gw`.substring(0, 63 - 18).toLowerCase()
+          .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
+        const hostname = `${baseHost}-b${claimSecret}`;
+
         const cloneRes = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/lxc/${localTemplateId}/clone`, {
           newid: gatewayVmId,
-          hostname: `${laneName}-gw`.substring(0, 63).toLowerCase(),
+          hostname,
           full: 1,
           target: node,
           description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}`
@@ -575,6 +588,7 @@ async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, 
           vxlanId,
           wanIp: net.wan.ip.split('/')[0],
           laneName,
+          claimSecret,
           logTag: `[CIAB Deploy ${groupName}]`
         });
 
@@ -1122,7 +1136,13 @@ async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logT
     await new Promise(r => setTimeout(r, 5000));
   }
 
-  const orchUrl = process.env.CYBERCORE_ORCHESTRATOR_URL || 'http://100.100.20.50:3000';
+  // Match what the bake script actually points gateways at. App:3000 is bound
+  // to 127.0.0.1 in compose and never reachable from a lane; Caddy proxies :80
+  // (and HTTPS via CYBERHUB_HOST) → app:3000. The bake's default is the public
+  // HTTPS URL; CYBERCORE_INTERNAL_URL covers internal HTTP. Either is fine here.
+  const orchUrl = process.env.CYBERCORE_ORCHESTRATOR_URL
+    || process.env.CYBERCORE_INTERNAL_URL
+    || 'http://100.100.20.50:80';
   console.warn(`${logTag} ✗ Tailscale bootstrap NOT consumed for vxlan ${vxlanId} after ${Math.round(maxWaitMs/1000)}s.\n` +
                `    Likely causes: (a) gateway WAN took longer than the bake-script firstboot retry window (3×5s), ` +
                `(b) gateway can't reach orchestrator at ${orchUrl}, or (c) firstboot service never ran.\n` +

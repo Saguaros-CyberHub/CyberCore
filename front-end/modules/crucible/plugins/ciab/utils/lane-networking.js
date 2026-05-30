@@ -131,7 +131,7 @@ function formatLaneGatewayNet0(wan) {
 
 // ─── Tailscale staging (v2/v3 only) ─────────────────────────────────────────
 
-async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, logTag = '[CIAB Deploy]' }) {
+async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, claimSecret, logTag = '[CIAB Deploy]' }) {
   if (subnetScheme !== 'v2' && subnetScheme !== 'v3') return false;
   if (!tailscale.isEnabled()) {
     console.log(`${logTag} Tailscale env not configured — skipping BYOAB key mint for lane ${vxlanId}`);
@@ -144,6 +144,11 @@ async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, 
   try {
     const { key, tags } = await tailscale.mintLaneAuthKey({ vxlanId });
     const hostname = formatLaneHostname({ vxlanId, laneName });
+    // `_claim_secret` is the per-lane one-shot the gateway echoes back as
+    // ?secret=… on /api/lane-bootstrap. It replaces source-IP matching, which
+    // breaks when the orchestrator's docker bridge rewrites the source IP
+    // (see lane-bootstrap.js + the gateway bake scripts). Leading underscore
+    // marks it as internal-to-the-claim-flow, not part of the gateway payload.
     await tailscale.storeLaneBootstrap({
       cybercoreQuery,
       vxlanId,
@@ -151,10 +156,11 @@ async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, 
       payload: {
         tailscale_authkey:  key,
         tailscale_tags:     tags.join(','),
-        tailscale_hostname: hostname
+        tailscale_hostname: hostname,
+        _claim_secret:      claimSecret || null
       }
     });
-    console.log(`${logTag} Tailscale bootstrap staged for lane ${vxlanId} (wan=${wanIp})`);
+    console.log(`${logTag} Tailscale bootstrap staged for lane ${vxlanId} (wan=${wanIp}${claimSecret ? ', secret-gated' : ', IP-gated'})`);
     return true;
   } catch (err) {
     console.warn(`${logTag} Tailscale config failed for lane ${vxlanId} (deploy continues): ${err.message}`);
