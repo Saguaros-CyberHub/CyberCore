@@ -23,6 +23,7 @@ const {
   buildFileUserPrompt,
   buildInstallUserPrompt
 } = require('./prompts');
+const { detectMissingRelativeImports } = require('../../utils/vuln-app-builder');
 
 // Override the global concurrency cap for the file-gen fan-out specifically.
 // Each file call emits up to ~4K output tokens; with the global cap at 6 and
@@ -59,6 +60,82 @@ async function designConcept({ profile, webServer, deliveryMode, llmModel }) {
     throw new Error('Concept design returned no attack_chain');
   }
   return { concept: value, usage, latencyMs };
+}
+
+// ─── Stage 2.5 helper: turn a missing-import diagnostic into a page spec ────
+// The file generator runs off a `pageSpec` (path/purpose/auth_required/...).
+// For self-healing we don't have an explicit pageSpec — we have a file path
+// that something else `require()`s. Synthesize a sensible spec by:
+//   1. resolving the consumer's import to a canonical file path
+//   2. listing every consumer that references it (so the LLM understands
+//      the shape needed: schema, query helpers, exported functions, etc.)
+//   3. excerpting a few lines around the import so the LLM sees the call
+//      sites and can match function signatures
+// The richer the `purpose` field, the more likely the regenerated file
+// fits its consumers without further iteration.
+function synthesizeRepairPage(missingItem, sourceTree, concept) {
+  // missingItem = { from, spec, expected }
+  const path = require('path').posix;
+  const fileName = path.basename(missingItem.expected) || missingItem.expected;
+  // The expected target — append .js if there's no extension so the LLM
+  // generates a JS module (matches what node would resolve to).
+  const targetPath = /\.[a-z]+$/i.test(missingItem.expected)
+    ? missingItem.expected
+    : `${missingItem.expected}.js`;
+
+  // Find every file that imports this same module — there may be more than one.
+  // The signal "imported by N files" tells the LLM this is shared infrastructure.
+  const consumers = [];
+  const importRe = new RegExp(
+    `\\b(require|import)\\s*[\\(\\s][^'"\\n]*?['"]([^'"\\n]+)['"]`, 'g'
+  );
+  for (const [filePath, content] of Object.entries(sourceTree)) {
+    if (!/\.(m?[jt]s|cjs)$/i.test(filePath)) continue;
+    const src = String(content || '');
+    for (const m of src.matchAll(importRe)) {
+      const spec = m[2];
+      if (!spec.startsWith('.') && !spec.startsWith('/')) continue;
+      // Resolve the consumer's spec relative to ITS path; compare to our target.
+      const resolved = path.normalize(path.join(path.dirname(filePath), spec));
+      if (resolved === missingItem.expected ||
+          resolved === missingItem.expected.replace(/\.[a-z]+$/i, '') ||
+          missingItem.expected.startsWith(`${resolved}.`) ||
+          missingItem.expected.startsWith(`${resolved}/`)) {
+        // Grab a few lines of context around the import to show call sites.
+        const lines = src.split('\n');
+        const lineIdx = lines.findIndex(l => l.includes(spec));
+        const excerpt = lineIdx >= 0
+          ? lines.slice(Math.max(0, lineIdx - 1), Math.min(lines.length, lineIdx + 4)).join('\n')
+          : '';
+        consumers.push({ from: filePath, excerpt });
+      }
+    }
+  }
+
+  // Build a rich purpose string the file generator can act on.
+  const stack = concept.tech_stack || '';
+  const consumerSummary = consumers.length
+    ? `Imported by ${consumers.length} file(s): ${consumers.map(c => c.from).join(', ')}`
+    : `Referenced by ${missingItem.from} as '${missingItem.spec}'`;
+  const callSites = consumers
+    .filter(c => c.excerpt)
+    .slice(0, 3)
+    .map(c => `// in ${c.from}:\n${c.excerpt}`)
+    .join('\n\n');
+
+  return {
+    path: targetPath,
+    purpose: [
+      `Shared module ${fileName} that was referenced but never generated in this app's source_tree.`,
+      consumerSummary + '.',
+      callSites ? `Generate it to match these existing call sites:\n${callSites}` : '',
+      `Match the app's stack: ${stack}.`,
+      `Export whatever the consumers expect (db connection, helper functions, schemas, etc.) — infer from the call sites.`
+    ].filter(Boolean).join('\n'),
+    auth_required: false,
+    vuln_role: 'none',
+    vuln_summary: null
+  };
 }
 
 // ─── Stage 2: generate every page in parallel ─────────────────────────────
@@ -384,6 +461,30 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel }) {
   // Build source_tree (path → content map)
   const source_tree = {};
   for (const f of files) source_tree[f.path] = f.content;
+
+  // ── Stage 2.5: self-healing pass for missing relative imports ───────────
+  // Stage 2's per-file generators don't see each other's output, so it's
+  // common for one file to `require('../db')` while no generator ever
+  // produced db.js. Detect that statically and re-invoke the file generator
+  // for ONLY the missing paths, with a purpose field that tells the LLM
+  // what shape the file needs to satisfy its consumers. One pass — the
+  // smoke test in vuln-app-builder.js catches anything still broken.
+  const missing = detectMissingRelativeImports(source_tree, '[vuln-app:self-heal]');
+  if (missing.length > 0) {
+    console.warn(`🩹 [vuln-app] Self-healing ${missing.length} missing file(s) before Stage 3`);
+    const repairPages = missing.map(m => synthesizeRepairPage(m, source_tree, concept));
+    const repairConcept = { ...concept, page_inventory: repairPages };
+    const { files: repairFiles, fileErrors: repairErrors } = await generateAllFiles({
+      concept: repairConcept, llmModel, profileIdShort: `${profileIdShort}:heal`
+    });
+    for (const f of repairFiles) source_tree[f.path] = f.content;
+    if (repairFiles.length > 0) {
+      console.log(`🩹 [vuln-app] Self-heal added ${repairFiles.length}/${missing.length} files: ${repairFiles.map(f => f.path).join(', ')}`);
+    }
+    if (repairErrors.length > 0) {
+      console.warn(`🩹 [vuln-app] Self-heal could not generate ${repairErrors.length} file(s): ${repairErrors.map(e => e.path).join(', ')} — smoke test will catch if still broken`);
+    }
+  }
 
   console.log(`🎯 [vuln-app] Stage 3: generate install script + Dockerfile`);
   let install_script, dockerfile, post_install_notes, stage3Usage;

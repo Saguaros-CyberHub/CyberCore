@@ -513,7 +513,9 @@ module.exports = {
   ensureVulnImage,
   resolveImageFile,
   releaseImage,
-  // exported for testing
+  // exported for reuse by the AI pipeline's self-healing retry pass and for testing
+  detectMissingRelativeImports,
+  repairNodeSourceTree,
   buildAndPackage,
   dockerAvailable,
   hashBundle,
