@@ -156,10 +156,16 @@ services:
       - ./front-end/vuln-assets:/app/vuln-assets:ro
       - ./logs:/app/logs:rw
       # Built vuln-app image tarballs, served over HTTP to lane web VMs.
-      # Image build itself runs via the kaniko binary baked into this container
-      # (daemonless, no docker.sock mount, no host-VM escape path from a
-      # malicious RUN step) — see utils/vuln-app-builder.js + Dockerfile.
       - ./front-end/vuln-builds:/app/vuln-builds:rw
+      # DooD — the CIAB vuln-app builder runs `docker build` + `docker save`
+      # against the orchestrator VM's daemon. Reverted from a kaniko-only
+      # approach because kaniko-in-container extracts each build's base image
+      # into / and clobbers the running app container (curl, apk, /etc/os-release
+      # all get overwritten with Debian/glibc files). The security tradeoff is
+      # accepted: anything with code-execution inside this container can reach
+      # orchestrator-VM root via `docker run -v /:/host`. Blast radius is this
+      # VM only — not Proxmox.
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - cybercore-net
 

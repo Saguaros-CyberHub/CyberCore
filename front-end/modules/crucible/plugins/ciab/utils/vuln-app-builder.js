@@ -14,13 +14,21 @@
  * The big image blob goes over one HTTP stream; the QEMU guest agent only
  * carries a tiny wget+load+run command (no slow base64 file transfer).
  *
- * Build engine: the `kaniko` executor binary (baked into the app image via
- * multi-stage COPY — see ../Dockerfile). Daemonless: no `docker` CLI, no
- * `/var/run/docker.sock` mount, no host-VM escape path from a malicious
- * Dockerfile RUN step. RUN steps still execute with this container's
- * privileges, so this is not a hard sandbox — but it removes the worst
- * pivot. If kaniko isn't available, ensureVulnImage() falls back silently
- * and the deploy uses the legacy on-VM build path.
+ * Build engine: DooD — `docker build` + `docker save` against the
+ * orchestrator VM's daemon via the /var/run/docker.sock mount declared in
+ * docker-compose.yml.
+ *
+ * Why not kaniko? It was tried as a daemonless alternative but extracts each
+ * build's base image into /, which clobbers the running app container
+ * (overwrites curl, apk, /etc/os-release with Debian/glibc files) and makes
+ * deploys deterministically break. Kaniko's documented runtime is a
+ * disposable container per build, which would require either DooD (defeats
+ * the point) or a separate sidecar service. See builder revert in this file.
+ *
+ * Security note: anything with code-execution inside the app container can
+ * reach orchestrator-VM root via `docker run -v /:/host`. Mitigations:
+ * dep hygiene (npm audit), no shell:true on spawns, OPNsense in front of the
+ * orchestrator, admin-only gating on build features.
  */
 
 const crypto = require('crypto');
@@ -39,8 +47,6 @@ const IMAGE_TTL_MS = parseInt(process.env.CIAB_VULN_IMAGE_TTL_MS, 10) || 2 * 60 
 // SNATs to the gateway WAN IP — the same source lane-bootstrap uses.
 const LANE_ORCH_URL = (process.env.CYBERCORE_INTERNAL_URL || 'http://100.100.20.50:80').replace(/\/+$/, '');
 const BUILD_TIMEOUT_MS = parseInt(process.env.CIAB_VULN_BUILD_TIMEOUT_MS, 10) || 12 * 60 * 1000;
-// Path to the kaniko executor. Baked in by the Dockerfile multi-stage copy.
-const KANIKO_EXECUTOR = process.env.KANIKO_EXECUTOR || '/kaniko/executor';
 
 // token → { filePath, imageTag, hash, expiresAt }
 const _registry = new Map();
@@ -48,7 +54,7 @@ const _registry = new Map();
 // and per-lane retries reuse the same image instead of rebuilding)
 const _byHash = new Map();
 
-let _builderAvailable = null;   // cached probe result
+let _dockerAvailable = null;   // cached probe result
 
 // ─── Shell helper ───────────────────────────────────────────────────────────
 function runShell(script, { timeoutMs = BUILD_TIMEOUT_MS, label = 'sh' } = {}) {
@@ -70,19 +76,16 @@ function runShell(script, { timeoutMs = BUILD_TIMEOUT_MS, label = 'sh' } = {}) {
   });
 }
 
-async function builderAvailable() {
-  if (_builderAvailable !== null) return _builderAvailable;
+async function dockerAvailable() {
+  if (_dockerAvailable !== null) return _dockerAvailable;
   try {
-    // kaniko doesn't expose a clean --version on every release; existence +
-    // executable bit is enough to decide whether to use it. Falls back to the
-    // on-VM build path when missing (local dev without the kaniko-bearing image).
-    await runShell(`test -x ${shellQuote(KANIKO_EXECUTOR)}`, { timeoutMs: 5000, label: 'kaniko probe' });
-    _builderAvailable = true;
+    await runShell(`docker version --format '{{.Server.Version}}'`, { timeoutMs: 15000, label: 'docker version' });
+    _dockerAvailable = true;
   } catch (err) {
-    console.warn(`[CIAB VulnBuild] Kaniko not available at ${KANIKO_EXECUTOR} (${err.message.slice(0, 120)}) — lane-side build fallback will be used`);
-    _builderAvailable = false;
+    console.warn(`[CIAB VulnBuild] Docker not available on orchestrator (${err.message.slice(0, 120)}) — lane-side build fallback will be used`);
+    _dockerAvailable = false;
   }
-  return _builderAvailable;
+  return _dockerAvailable;
 }
 
 // ─── Registry housekeeping ───────────────────────────────────────────────────
@@ -147,32 +150,17 @@ async function buildAndPackage({ sourceTree, dockerfile, logTag = '[CIAB VulnBui
       throw new Error('no Dockerfile in bundle — cannot build image');
     }
 
-    // Build with kaniko: daemonless, no /var/run/docker.sock. Writes a
-    // Docker-loadable tarball via --tar-path. --no-push skips registry I/O
-    // entirely (we serve the tar over HTTP — no registry in the loop).
-    // --cache=false because kaniko's layer cache wants a registry to back it;
-    // we dedupe at the builder level via content hash instead.
-    // --destination names the image inside the tar so the lane's
-    // `docker load && docker run <tag>` finds it.
-    const tarFile = path.join(BUILD_DIR, `${token}.tar`);
-    console.log(`${logTag} Building image ${imageTag} via kaniko (context ${ctxDir})`);
-    await runShell(
-      `${shellQuote(KANIKO_EXECUTOR)} ` +
-      `--dockerfile=${shellQuote(path.join(ctxDir, 'Dockerfile'))} ` +
-      `--context=${shellQuote('dir://' + ctxDir)} ` +
-      `--destination=${shellQuote(imageTag)} ` +
-      `--tar-path=${shellQuote(tarFile)} ` +
-      `--no-push --cache=false --verbosity=warn`,
-      { label: `kaniko build ${imageTag}` }
-    );
+    // Build on the orchestrator's daemon (DooD via the mounted socket). The
+    // build runs in a sandboxed Docker build container — RUN steps don't
+    // share the app container's filesystem the way kaniko did, so this no
+    // longer clobbers /usr/bin/curl etc. on the orchestrator.
+    console.log(`${logTag} Building image ${imageTag} (context ${ctxDir})`);
+    await runShell(`docker build -t ${imageTag} ${shellQuote(ctxDir)}`, { label: `docker build ${imageTag}` });
 
-    // gzip the tar in place. `docker load` on the lane VM accepts the gzipped
-    // form transparently. The intermediate uncompressed tar is discarded.
-    console.log(`${logTag} Compressing ${tarFile} → ${outFile}`);
-    await runShell(
-      `gzip -c ${shellQuote(tarFile)} > ${shellQuote(outFile)} && rm -f ${shellQuote(tarFile)}`,
-      { label: 'gzip image' }
-    );
+    // Save → gzip to the served file. `docker save` keeps the repo:tag so the
+    // lane's `docker load` restores the exact tag we tell it to run.
+    console.log(`${logTag} Saving image ${imageTag} → ${outFile}`);
+    await runShell(`docker save ${imageTag} | gzip -c > ${shellQuote(outFile)}`, { label: `docker save ${imageTag}` });
 
     const sizeBytes = fs.statSync(outFile).size;
     const entry = { filePath: outFile, imageTag, hash, expiresAt: Date.now() + IMAGE_TTL_MS };
@@ -216,7 +204,7 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
     console.warn(`${logTag} docker-mode vuln app has no Dockerfile — cannot pre-build on orchestrator, using on-VM path`);
     return vulnAppInstall;
   }
-  if (!(await builderAvailable())) return vulnAppInstall;
+  if (!(await dockerAvailable())) return vulnAppInstall;
 
   try {
     const built = await buildAndPackage({
@@ -264,7 +252,7 @@ module.exports = {
   releaseImage,
   // exported for testing
   buildAndPackage,
-  builderAvailable,
+  dockerAvailable,
   hashBundle,
   LANE_ORCH_URL
 };

@@ -1,26 +1,20 @@
-# Stage 1: pull the kaniko executor binary. Daemonless container image build —
-# replaces the prior DooD/docker.sock approach so the app container no longer
-# has a path to host-VM root. Pin a specific kaniko tag for reproducibility;
-# bump as needed.
-FROM gcr.io/kaniko-project/executor:v1.23.2 AS kaniko
-
 FROM node:18-alpine
 
-# Runtime tools the app shells out to. `curl` is required by proxmoxFormPOST
-# in lane-deploy.js (spawn('curl', args) — used for every /agent/exec call to
-# the Proxmox API). It used to come in transitively via the docker-cli package
-# the old DooD build installed, so removing docker-cli also removed curl —
-# re-add it explicitly. `ca-certificates` keeps TLS happy for outbound HTTPS
-# (Anthropic, kaniko base image pulls, Tailscale).
-RUN apk add --no-cache curl ca-certificates
-
-# Kaniko (vuln-app builder). Build runs via /kaniko/executor — no Docker
-# daemon, no /var/run/docker.sock mount, no host-VM escape path. LLM-authored
-# Dockerfile RUN steps still run with this container's privileges, so don't
-# treat the build environment as a hard sandbox; the win is removing the
-# daemon-socket pivot. See utils/vuln-app-builder.js.
-COPY --from=kaniko /kaniko /kaniko
-ENV PATH="/kaniko:$PATH"
+# Runtime tools the app shells out to:
+#   - curl       : proxmoxFormPOST in lane-deploy.js spawn('curl', …) for every
+#                  Proxmox /agent/exec call.
+#   - docker-cli : DooD — the CIAB vuln-app builder runs `docker build` +
+#                  `docker save` against the orchestrator VM's daemon via the
+#                  /var/run/docker.sock mount declared in docker-compose.yml.
+#                  Kaniko was tried as a daemonless alternative but clobbered
+#                  the app container's filesystem on every build (it extracts
+#                  the base image into /), making deploys deterministically
+#                  break the orchestrator. DooD is back; the security tradeoff
+#                  is documented in utils/vuln-app-builder.js + the project
+#                  threat-model notes.
+#   - ca-certificates : keeps TLS happy for outbound HTTPS (Anthropic, registry
+#                       pulls during builds, Tailscale).
+RUN apk add --no-cache curl docker-cli ca-certificates
 
 WORKDIR /app
 
