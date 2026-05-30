@@ -776,6 +776,22 @@
             <div id="policiesStatus" style="color: var(--gray-600); font-size: 0.9rem;"></div>
           </div>
 
+          <!-- Vuln-App Cheat Sheet Card (admin only) -->
+          <div id="vulnCheatSheetCard" style="background: white; border-radius: 8px; padding: 1.5rem; margin-top: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #e53e3e; display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+              <div>
+                <h3 style="margin: 0 0 0.25rem 0;">🔓 Vuln-App Answer Key <span style="font-size: 0.7rem; background: #fed7d7; color: #c53030; padding: 0.15rem 0.5rem; border-radius: 1rem; font-weight: 600; vertical-align: middle;">INSTRUCTORS</span></h3>
+                <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">View the attack chain, planted flags, seed credentials, and per-file vulnerability notes for this profile's deployed vuln-app.</p>
+              </div>
+              <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
+                <button id="viewVulnCheatSheetBtn" class="btn btn-primary" onclick="viewVulnCheatSheet()" disabled>
+                  🔓 View Vuln-App Key
+                </button>
+              </div>
+            </div>
+            <div id="vulnCheatSheetStatus" style="color: var(--gray-600); font-size: 0.9rem;"></div>
+          </div>
+
         </div>
 
       </div>
@@ -912,6 +928,61 @@
     </div>
   </div>
 
+  <!-- Vuln-App Cheat Sheet Modal (admin-only) -->
+  <div class="modal-overlay" id="vulnCheatSheetModal">
+    <div class="modal-content" style="max-width: 1000px; max-height: 90vh; display: flex; flex-direction: column;">
+      <div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
+        <h3 style="margin: 0;">🔓 Vuln-App Answer Key — <span id="vulnCheatSheetTitle"></span></h3>
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <button class="btn btn-sm btn-primary" onclick="printVulnCheatSheet()" style="font-size: 0.8rem;">
+            🖨️ Print
+          </button>
+          <button class="modal-close" onclick="closeModal('vulnCheatSheetModal')">&times;</button>
+        </div>
+      </div>
+      <div id="vulnCheatSheetBody" style="flex: 1; overflow-y: auto; padding: 1.5rem;">
+        <div class="empty-state">
+          <div class="icon">🔓</div>
+          <h3>Loading…</h3>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <style>
+    /* Vuln-app cheat sheet styles */
+    .vcs-section { margin-bottom: 2rem; }
+    .vcs-section h4 { color: #2d3748; border-bottom: 2px solid #e53e3e; padding-bottom: 0.4rem; margin: 0 0 0.75rem 0; font-size: 1.05rem; }
+    .vcs-meta { background: #f7fafc; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
+    .vcs-meta strong { color: #2d3748; }
+    .vcs-stage { background: #fff; border: 1px solid #e2e8f0; border-left: 4px solid #e53e3e; border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; }
+    .vcs-stage-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .vcs-stage-num { background: #e53e3e; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.85rem; }
+    .vcs-vuln-type { font-weight: 600; color: #2d3748; }
+    .vcs-field { margin: 0.4rem 0; font-size: 0.9rem; line-height: 1.5; }
+    .vcs-field-label { color: #718096; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; display: inline-block; min-width: 100px; }
+    .vcs-flag { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: #fffbea; border: 1px solid #ecc94b; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; color: #744210; }
+    .vcs-creds-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
+    .vcs-creds-table th { background: #2d3748; color: #fff; padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+    .vcs-creds-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #e2e8f0; }
+    .vcs-creds-table code { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: #edf2f7; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    .vcs-files-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
+    .vcs-files-table th { background: #2d3748; color: #fff; padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+    .vcs-files-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+    .vcs-role-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+    .vcs-role-primary { background: #fed7d7; color: #c53030; }
+    .vcs-role-pivot { background: #feebc8; color: #b7791f; }
+    .vcs-role-noise { background: #e2e8f0; color: #4a5568; }
+    .vcs-callout { background: #ebf8ff; border-left: 4px solid #3182ce; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.9rem; }
+    @media print {
+      body * { visibility: hidden; }
+      #vulnCheatSheetModal, #vulnCheatSheetModal * { visibility: visible; }
+      #vulnCheatSheetModal { position: absolute; left: 0; top: 0; width: 100%; }
+      .modal-close, .modal-header button { display: none !important; }
+      .vcs-stage { page-break-inside: avoid; }
+    }
+  </style>
+
   <style>
     .ak-part-item { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; transition: all 0.15s; font-size: 0.9em; }
     .ak-part-item:hover { background: #f7fafc; }
@@ -1021,6 +1092,14 @@
       await loadProfiles();
       loadDashboardTab();
       updateInstructorCostEstimate();
+
+      // Reveal the Vuln-App Cheat Sheet card for instructor + admin roles.
+      // Page-level auth already restricts entry to those two roles, so this
+      // is mostly belt-and-suspenders against a future page-auth change.
+      if (user.role === 'instructor' || user.role === 'admin') {
+        const card = document.getElementById('vulnCheatSheetCard');
+        if (card) card.style.display = '';
+      }
     });
     
     // Load dashboard data
@@ -1105,6 +1184,8 @@
           document.getElementById('generateExamplesBtn').disabled = !profileId;
           document.getElementById('generatePoliciesBtn').disabled = !profileId;
           document.getElementById('viewExamplesBtn').style.display = 'none';
+          const vcsBtn = document.getElementById('viewVulnCheatSheetBtn');
+          if (vcsBtn) vcsBtn.disabled = !profileId;
 
           if (profileId) {
             // Load existing documents for this profile
@@ -3347,6 +3428,170 @@
         btn.disabled = false;
         btn.innerHTML = '📋 Generate Policies';
       }
+    }
+
+    // ─── Vuln-App Cheat Sheet (admin-only) ──────────────────────────────────
+    // Fetches the answer-key payload for the selected profile and renders the
+    // attack chain, seed credentials, and per-file vuln annotations in the
+    // shared modal. Locked to admin role both client-side (card hidden) and
+    // server-side (route requires role=admin).
+    async function viewVulnCheatSheet() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) return;
+      const status = document.getElementById('vulnCheatSheetStatus');
+      const body = document.getElementById('vulnCheatSheetBody');
+      const title = document.getElementById('vulnCheatSheetTitle');
+      title.textContent = 'Loading…';
+      body.innerHTML = '<div class="empty-state"><div class="icon">⏳</div><h3>Loading vuln-app answer key…</h3></div>';
+      document.getElementById('vulnCheatSheetModal').classList.add('active');
+      try {
+        const token = Auth.getToken();
+        const resp = await fetch(`/api/instructor/vuln-cheat-sheet/${profileId}`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+        const data = await resp.json();
+        renderVulnCheatSheet(data);
+        status.textContent = `Loaded answer key for ${data.title || 'vuln-app'}.`;
+      } catch (err) {
+        console.error('Vuln cheat sheet error:', err);
+        body.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><h3>Could not load answer key</h3><p>${escapeHtml(err.message)}</p></div>`;
+        status.textContent = `Error: ${err.message}`;
+      }
+    }
+
+    function renderVulnCheatSheet(data) {
+      const title = document.getElementById('vulnCheatSheetTitle');
+      const body = document.getElementById('vulnCheatSheetBody');
+      title.textContent = data.title || '(untitled app)';
+
+      const parts = [];
+
+      // Meta header
+      const diffBadge = data.difficulty
+        ? `<span style="display:inline-block; padding:0.15rem 0.5rem; border-radius:1rem; font-size:0.75rem; font-weight:600; vertical-align:middle; ${
+            data.difficulty === 'easy' ? 'background:#c6f6d5; color:#22543d;' :
+            data.difficulty === 'medium' ? 'background:#feebc8; color:#7c2d12;' :
+            data.difficulty === 'hard' ? 'background:#fed7d7; color:#742a2a;' :
+            'background:#e2e8f0; color:#4a5568;'
+          }">${escapeHtml(data.difficulty.toUpperCase())}</span>`
+        : '';
+      parts.push(`
+        <div class="vcs-meta">
+          <div><strong>Difficulty:</strong> ${diffBadge || '—'}</div>
+          <div><strong>Tech stack:</strong> ${escapeHtml(data.tech_stack || '—')}</div>
+          <div><strong>Theme:</strong> ${escapeHtml(data.theme_summary || '—')}</div>
+          <div><strong>Generated:</strong> ${data.generated_at ? new Date(data.generated_at).toLocaleString() : '—'} (${escapeHtml(data.delivery_mode || 'unknown')} delivery, ${data.page_count || '?'} files)</div>
+        </div>
+      `);
+
+      // Post-install access (URL + default creds for quick verification)
+      if (data.post_install_notes) {
+        parts.push(`
+          <div class="vcs-callout">
+            <strong>Access:</strong> ${escapeHtml(data.post_install_notes)}
+          </div>
+        `);
+      }
+
+      // Attack chain — the meat of the answer key
+      if (data.attack_chain && data.attack_chain.length) {
+        parts.push('<div class="vcs-section"><h4>🗡️ Attack Chain</h4>');
+        for (const s of data.attack_chain) {
+          parts.push(`
+            <div class="vcs-stage">
+              <div class="vcs-stage-head">
+                <span class="vcs-stage-num">${escapeHtml(String(s.stage || '?'))}</span>
+                <span class="vcs-vuln-type">${escapeHtml(s.vuln_type || 'Unspecified vulnerability')}</span>
+              </div>
+              ${s.discovery_hint ? `<div class="vcs-field"><span class="vcs-field-label">Discovery</span> ${escapeHtml(s.discovery_hint)}</div>` : ''}
+              ${s.exploit_summary ? `<div class="vcs-field"><span class="vcs-field-label">Exploit</span> ${escapeHtml(s.exploit_summary)}</div>` : ''}
+              ${s.yields ? `<div class="vcs-field"><span class="vcs-field-label">Yields</span> ${escapeHtml(s.yields)}</div>` : ''}
+              ${s.flag ? `<div class="vcs-field"><span class="vcs-field-label">Flag</span> <span class="vcs-flag">${escapeHtml(s.flag)}</span></div>` : ''}
+            </div>
+          `);
+        }
+        parts.push('</div>');
+      }
+
+      // Seed credentials
+      const users = data.seed_data && Array.isArray(data.seed_data.users) ? data.seed_data.users : [];
+      if (users.length) {
+        parts.push('<div class="vcs-section"><h4>🔑 Seed Credentials</h4>');
+        parts.push('<table class="vcs-creds-table"><thead><tr><th>Username</th><th>Password</th><th>Role</th><th>Notes</th></tr></thead><tbody>');
+        for (const u of users) {
+          parts.push(`<tr>
+            <td><code>${escapeHtml(u.username || '')}</code></td>
+            <td><code>${escapeHtml(u.password || '')}</code></td>
+            <td>${escapeHtml(u.role || '')}</td>
+            <td>${escapeHtml(u.notes || '')}</td>
+          </tr>`);
+        }
+        parts.push('</tbody></table></div>');
+      }
+
+      // Per-file vuln annotations
+      const fileEntries = Object.entries(data.file_annotations || {}).filter(([, v]) => v && (v.vuln_notes || v.vuln_role !== 'none'));
+      if (fileEntries.length) {
+        parts.push('<div class="vcs-section"><h4>📂 Per-File Notes</h4>');
+        parts.push('<table class="vcs-files-table"><thead><tr><th>Path</th><th>Role</th><th>Vulnerability notes</th></tr></thead><tbody>');
+        // Sort: primary first, then pivot, noise, none — instructor sees the meaty stuff first.
+        const rolePriority = { primary: 0, pivot: 1, noise: 2, none: 3 };
+        fileEntries.sort(([, a], [, b]) => (rolePriority[a.vuln_role] ?? 9) - (rolePriority[b.vuln_role] ?? 9));
+        for (const [path, ann] of fileEntries) {
+          const role = ann.vuln_role || 'none';
+          parts.push(`<tr>
+            <td><code>${escapeHtml(path)}</code></td>
+            <td><span class="vcs-role-badge vcs-role-${escapeHtml(role)}">${escapeHtml(role)}</span></td>
+            <td>${escapeHtml(ann.vuln_notes || '—')}</td>
+          </tr>`);
+        }
+        parts.push('</tbody></table></div>');
+      }
+
+      // Instructor notes (overall scenario + expected time)
+      if (data.instructor_notes) {
+        parts.push(`
+          <div class="vcs-section">
+            <h4>👨‍🏫 Instructor Notes</h4>
+            <div style="background: #f7fafc; padding: 1rem; border-radius: 6px; line-height: 1.6;">${escapeHtml(data.instructor_notes)}</div>
+          </div>
+        `);
+      }
+
+      // Page errors (transparency about what failed to generate)
+      if (data.page_errors && data.page_errors.length) {
+        parts.push(`
+          <div class="vcs-section">
+            <h4>⚠️ Files That Failed to Generate</h4>
+            <ul style="margin: 0; padding-left: 1.5rem; line-height: 1.6;">
+              ${data.page_errors.map(e => `<li><code>${escapeHtml(e.path || '?')}</code> — ${escapeHtml(e.error || '')}</li>`).join('')}
+            </ul>
+          </div>
+        `);
+      }
+
+      body.innerHTML = parts.join('') || '<div class="empty-state"><div class="icon">📭</div><h3>No answer-key data available</h3><p>The vuln-app was generated, but contains no attack chain or annotations.</p></div>';
+    }
+
+    function printVulnCheatSheet() {
+      window.print();
+    }
+
+    // HTML-escape user-supplied strings before rendering. Keeps the rendered
+    // cheat sheet safe even though attack_chain / instructor_notes / vuln_notes
+    // come from the LLM — they could contain `<script>` tags or HTML entities.
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     async function viewExamples() {

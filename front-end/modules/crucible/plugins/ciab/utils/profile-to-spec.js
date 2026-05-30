@@ -300,7 +300,8 @@ function synthesizeSpecFromProfile({
         mode: vulnApp.delivery_mode,
         install_script: vulnApp.install_script,
         source_tree: vulnApp.source_tree || null,
-        dockerfile: vulnApp.dockerfile || null
+        dockerfile: vulnApp.dockerfile || null,
+        color_palette: vulnApp.color_palette || null
       };
     } else if (vulnApp.delivery_mode === 'standalone_vm') {
       // Caller asked for dedicated VM. Append one extra phantom VM that the
@@ -323,7 +324,8 @@ function synthesizeSpecFromProfile({
         mode: 'standalone_vm',
         install_script: vulnApp.install_script,
         source_tree: vulnApp.source_tree || null,
-        dockerfile: vulnApp.dockerfile || null
+        dockerfile: vulnApp.dockerfile || null,
+        color_palette: vulnApp.color_palette || null
       };
     }
     // else: no web server and not standalone_vm → silently skip; vulnApp stays

@@ -29,12 +29,20 @@ const { generateVulnApp: generateVulnAppMultistage } = require('../ai/vuln-app')
  * @param {object} args.profile          profiles row + loaded JSON. profile.assets is the asset array.
  * @param {string} [args.llmModel]       model alias or full ID (resolved by llm-client)
  * @param {'docker'|'apache_vhost'|'standalone_vm'} [args.preferMode='docker']
+ * @param {'easy'|'medium'|'hard'} [args.difficulty='easy']  per-deploy admin choice
  * @returns {Promise<object>}            ciab_profile_vuln_apps row
  */
-async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker' }) {
+async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker', difficulty = 'easy' }) {
+  // Cache by (profile, difficulty) — switching difficulty must produce a
+  // new generation (different vuln pool entirely). Falls back to legacy
+  // rows that don't have difficulty stored (treated as 'easy' since the
+  // previous prompt produced beginner-style chains by default).
   const existing = await query(
-    `SELECT * FROM ciab_profile_vuln_apps WHERE profile_id = $1 ORDER BY generated_at DESC LIMIT 1`,
-    [profile.id]
+    `SELECT * FROM ciab_profile_vuln_apps
+     WHERE profile_id = $1
+       AND COALESCE(generation_meta->>'difficulty', 'easy') = $2
+     ORDER BY generated_at DESC LIMIT 1`,
+    [profile.id, difficulty]
   );
   if (existing.rows.length > 0) {
     return existing.rows[0];
@@ -63,7 +71,7 @@ async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker' }
   if (process.env.ANTHROPIC_API_KEY) {
     try {
       generated = await generateVulnAppMultistage({
-        profile, webServer, deliveryMode: effectiveMode, llmModel
+        profile, webServer, deliveryMode: effectiveMode, llmModel, difficulty
       });
       source = 'claude_multistage';
     } catch (err) {
@@ -90,7 +98,10 @@ async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker' }
       JSON.stringify(generated.source_tree || {}),
       generated.install_script,
       source.startsWith('claude') ? (llmModel || llm.DEFAULT_MODEL) : null,
-      JSON.stringify({ ...(generated.generation_meta || {}), source })
+      // Persist the chosen difficulty alongside the other metadata so the
+      // cache lookup above can find the right row, and the answer-key UI
+      // can display it.
+      JSON.stringify({ ...(generated.generation_meta || {}), source, difficulty })
     ]
   );
   return insert.rows[0];

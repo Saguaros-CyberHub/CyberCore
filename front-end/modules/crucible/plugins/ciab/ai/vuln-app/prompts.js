@@ -60,6 +60,16 @@ HARD CONSTRAINTS — every design MUST:
     - PHP → 'composer.json' OR a comment that vanilla PHP runs without one
     Without this, the docker build fails at "npm install" / "pip install" and
     the lab won't start. The manifest counts as a page; the 4-7 budget includes it.
+2a-0. THE APP MUST LISTEN ON PORT 80 INSIDE THE CONTAINER.
+    CIAB ships the container with: -e PORT=80 -p 80:80
+    The app code MUST read this env var and bind to it. Examples:
+      Node/Express:    app.listen(process.env.PORT || 80, '0.0.0.0')
+      Python/Flask:    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 80)))
+      Python/FastAPI:  uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 80)))
+    DO NOT hardcode 3000/5000/8080 with no env-var fallback — CIAB's smoke
+    test will reject the build because the container will be running but
+    not reachable on :80. Also bind to 0.0.0.0 (not localhost / 127.0.0.1)
+    so docker's port forwarding can reach the listener.
 2a-1. DEPENDENCY HYGIENE — every module the app imports at runtime
     MUST be declared in the manifest's runtime-dependencies section:
     - Node.js: in 'dependencies' NOT 'devDependencies' (CIAB installs with
@@ -96,33 +106,105 @@ HARD CONSTRAINTS — every design MUST:
     - Node + canvas/sharp: needs glibc + build deps; only use if app genuinely
       needs image processing, and pin to a Debian-slim base + install build-essential.
 3. Have a 3–5 stage attack chain. Each stage MUST yield concrete progress (flag, credential, file, shell).
-4. PICK VULN TYPES OUTSIDE THE OWASP TOP-10 CORE WHEN POSSIBLE. Encourage variety. Examples — pick freely, don't reuse the same chain across companies:
-   - SSTI (Jinja2, Twig, Handlebars), XXE in XML uploaders, deserialization (PHP unserialize, Python pickle, Node serialize), prototype pollution
-   - Race conditions (TOCTOU on coupon redemption, double-spend on credits), business logic flaws (negative quantity, infinite refund)
-   - JWT none-algorithm / algorithm confusion / weak secret / kid header injection
-   - LDAP injection, NoSQL injection, XSLT injection, command injection via ImageMagick, SVG-borne XSS
-   - Open redirect → SSRF chain, host header injection, cache poisoning
-   - Weak crypto (predictable session IDs, ECB mode, timing attacks)
-   - GraphQL introspection + IDOR via node id, mass assignment, path traversal in ZIP extraction (zip-slip)
-   - Insecure direct file include, log injection → log4shell-style, second-order SQLi via cached profile data
-   - Subdomain takeover hints, dangling CNAME hint, exposed .git directory
-   - SQLi, XSS, IDOR, file upload RCE are FINE but should not be the ONLY vulns — combine with at least one less-common bug
+4. PICK BEGINNER-FRIENDLY VULNERABILITIES. This is a college course; most
+   students are NEW to web exploitation. Default to OWASP-style classics that
+   are discoverable in a browser + curl, with payloads they can copy from any
+   intro tutorial. NO Burp Suite required for stages 1–2 of the chain.
+
+   PREFERRED — pick at least 3 of these for every chain (vary across companies
+   so different labs feature different bugs):
+   - **SQL injection** (basic): a login form or search box where ' OR '1'='1
+     or UNION SELECT works. Plant the bug in a SINGLE query — no second-order
+     SQLi, no blind, no time-based. Error messages should leak useful info.
+   - **Reflected XSS**: a URL parameter or search field that echoes input
+     unescaped — the payload <script>alert(1)</script> should fire.
+   - **Stored XSS**: a comment / message / profile-bio field that renders
+     unescaped on a page another user (e.g. admin) views.
+   - **IDOR (Insecure Direct Object Reference)**: /profile/123 → /profile/124
+     reveals someone else's data. /invoice/5.pdf → /invoice/6.pdf works. The
+     ID should be in the URL, NOT a hashed token — easy to spot in DevTools.
+   - **Missing authorization**: an /admin or /reports page that's linked
+     ONLY from the nav-for-admins, but accessible to any logged-in user (or
+     no login at all) if they know the URL. Discovery via robots.txt, a
+     leaked comment in HTML, or just guessing /admin.
+   - **Default credentials**: admin/admin, admin/password123, or per the
+     company's seed_data. Often combined with another bug to land an admin
+     session, then pivot.
+   - **Exposed sensitive files**: /.env, /backup.sql, /config.bak, /admin.bak
+     served by the web server because they're in the static directory.
+     Discoverable via robots.txt hints, a comment in HTML, or directory guessing.
+   - **Information disclosure**: error pages that leak the DB schema, stack
+     traces with file paths, debug headers, .git/HEAD exposed.
+   - **Path traversal** (file download / read endpoint): ?file=../../etc/passwd
+     or ?path=../app.js — keep it to ONE simple traversal, not deep encoded.
+   - **File upload RCE** (advanced — only for stage 3+ of the chain): upload
+     a .php or .jsp shell to a "profile picture" or "vendor document" endpoint
+     that doesn't validate file type. Yields a shell.
+   - **Predictable cookies / hidden form fields**: a cookie like
+     role=user that can be edited to role=admin; or a hidden form field
+     <input type="hidden" name="price" value="99.99"> that the server trusts.
+
+   AVOID for now — too advanced for first-time web-exploit students:
+   - SSTI / template injection (requires knowing the template engine first)
+   - XXE, deserialization (PHP unserialize, Python pickle, Node serialize)
+   - Prototype pollution, race conditions / TOCTOU
+   - JWT algorithm confusion, kid header injection
+   - LDAP / NoSQL / XSLT injection
+   - SSRF, cache poisoning, host header injection
+   - Predictable session IDs / ECB / timing-based crypto attacks
+   - Zip-slip, log4shell-style log injection, dangling CNAME
+   - GraphQL introspection (most students don't know what GraphQL is yet)
+
+   These can return in an "advanced" version of the curriculum later. For now,
+   variety comes from how the OWASP classics are themed (a SQLi in a Cochise
+   procurement portal feels different from the same SQLi in a Meridian patient
+   portal), not from exotic vuln types.
+
+4a. **Discoverability budget per stage** — student of average experience must
+    be able to find each stage in:
+      Stage 1: under 5 minutes — visible in DevTools, robots.txt, view-source,
+               a single URL guess, or an obvious form input.
+      Stage 2: under 15 minutes — pivots off stage 1's flag/cred. Should be a
+               single payload from a tutorial.
+      Stage 3: under 30 minutes — chains stages 1 & 2's outputs. May require
+               trying 2-3 variations of a known payload.
+      Stages 4–5 (if used): under 45 minutes each — the harder pivot, e.g.
+               file upload RCE landed via stage 3's admin creds.
 5. Tech stack should VARY across companies. Don't always pick PHP. Match it to plausible internal-tool choices (a finance firm might run a Python Flask portal, a healthcare clinic might be PHP, a tech startup Node.js).
 6. The attack chain must be SOLVABLE — every stage must be reachable from the previous one's outcome.
 7. Seed data must reference the company (employee names from stakeholders, asset hostnames from the network if relevant, industry-realistic data like patient IDs / order numbers / lesson plans / SCADA tags).
 8. No real malware. No outbound network calls beyond apt-get / pip / npm. No backdoors with real production-style credentials (use obvious-fake creds like admin/admin, jsmith/Password123).
 
 PEDAGOGICAL VARIATION:
-- Vary difficulty across the chain — early stages should be discoverable with curl + browser; later stages may require Burp / chained payloads.
-- Include 1-2 "noise" pages (vuln_role='noise') that look interesting but aren't exploitable — students learn to triage.
-- Plant breadcrumbs: a comment in HTML, a /robots.txt entry, a debug header, a backup file — small clues that earlier stages reveal the path to later stages.
+- Vary difficulty across the chain — see rule 4a's time budget. Early stages
+  use copy-paste payloads from intro tutorials; later stages chain previous
+  stages' yields. Never require Burp Suite or proxy chaining at this level.
+- Include 1-2 "noise" pages (vuln_role='noise') that look interesting but
+  aren't exploitable — students learn to triage. Keep noise pages obviously
+  secure (proper escaping, parameterized queries) so the red herring is
+  educational, not frustrating.
+- Plant breadcrumbs: a comment in HTML pointing at /admin, a /robots.txt
+  entry disallowing /backup, a debug header echoing the DB version, a link
+  to a .bak file — small clues that earlier stages reveal the path to later
+  stages. STUDENTS SHOULD ALWAYS BE LOOKING AT view-source AND DEVTOOLS;
+  reward that habit by hiding clues there.
+- Stage 1's discovery_hint MUST name the exact place the student should
+  look (e.g., "Try the login form with SQL injection payloads" or "Check
+  /robots.txt and look at the disallowed paths"). Don't make stage 1 a
+  mystery — it's the entry point to the whole chain.
 
 You will be called once per company; design something a student would remember.`;
 
-function buildConceptUserPrompt({ profile, webServer, deliveryMode }) {
+function buildConceptUserPrompt({ profile, webServer, deliveryMode, difficulty }) {
   const company = profile.company_name || 'AcmeCo';
   const industry = profile.industry || 'general business';
-  const difficulty = profile.difficulty || 'intermediate';
+  // Per-deploy difficulty (easy|medium|hard) chosen by admin. Falls back to
+  // profile.difficulty (an older field used at profile-creation time, with
+  // values like 'beginner'/'intermediate'/'advanced'). Normalize to one of
+  // easy/medium/hard so the prompt rules can branch cleanly.
+  const NORMALIZE = { easy: 'easy', medium: 'medium', hard: 'hard',
+    beginner: 'easy', intermediate: 'medium', advanced: 'hard' };
+  const diffNorm = NORMALIZE[(difficulty || profile.difficulty || 'easy').toLowerCase()] || 'easy';
   const employees = profile.employee_count || profile.employees_total || '?';
   const declaredServices = (webServer && Array.isArray(webServer.services))
     ? webServer.services.join(', ')
@@ -133,13 +215,56 @@ function buildConceptUserPrompt({ profile, webServer, deliveryMode }) {
     ? profile.stakeholders.slice(0, 4).map(s => `${s.name} (${s.role})`).join('; ')
     : '';
 
+  // Per-difficulty vuln-pool guidance — appended to the system prompt's rule 4
+  // (which describes the master list). Each level has a sharply different
+  // expected output: easy = OWASP basics + 3-stage chain, medium = +1
+  // intermediate vuln + 4-stage chain, hard = mostly advanced + 4-5 stages.
+  const DIFFICULTY_DIRECTIVES = {
+    easy: `DIFFICULTY: EASY (selected by instructor for this deploy).
+- Chain length: 3 stages only.
+- Vuln pool: USE ONLY from rule 4's PREFERRED list (SQLi, reflected XSS, stored XSS, IDOR, missing authorization, default credentials, exposed sensitive files, information disclosure, simple path traversal, predictable cookies/hidden fields).
+- NO file-upload RCE in this chain (save for medium+).
+- All payloads must be copy-pasteable from any intro web-security tutorial.
+- DevTools + curl + view-source are sufficient — Burp NOT required.
+- Discovery hints must literally name the file/URL/field to look at.`,
+    medium: `DIFFICULTY: MEDIUM (selected by instructor for this deploy).
+- Chain length: 4 stages.
+- Vuln pool: AT LEAST 2 from rule 4's PREFERRED list (SQLi/XSS/IDOR/missing auth/etc.), PLUS exactly ONE of the following intermediate vulns:
+    * File upload RCE — a profile-picture / document upload endpoint that doesn't validate file type, lets students drop a .php/.jsp/.js shell.
+    * JWT with weak secret — token signed with HS256 and a weak password like 'secret' or 'company123'. Students brute-force with jwt-cracker or hashcat and forge admin role.
+    * Stored XSS that fires in admin context — comment / message / ticket field renders unescaped on the admin dashboard, leading to session theft or admin action.
+    * Simple SSRF — a "fetch URL" or "image preview" endpoint that fetches user-supplied URLs server-side (great for accessing internal /admin or metadata).
+    * CSRF on a state-changing admin endpoint — no token, GET-based, exploitable via a crafted link from a low-priv user.
+- Burp Suite (Repeater + Intruder basics) helpful but not strictly required.
+- Students should need to chain stage-1's yield to find stage-2's input.`,
+    hard: `DIFFICULTY: HARD (selected by instructor for this deploy).
+- Chain length: 4-5 stages.
+- Vuln pool: AT LEAST 2 ADVANCED vulnerabilities from this list:
+    * SSTI (Jinja2 / Twig / Handlebars / EJS) in a search / template / report-render endpoint.
+    * Deserialization (PHP unserialize / Python pickle / Node node-serialize) on a cookie or POST body.
+    * Prototype pollution leading to auth bypass (Node apps).
+    * Race condition / TOCTOU on a balance / coupon / approval endpoint.
+    * NoSQL injection (MongoDB $where, operator injection) — only if the app legitimately uses NoSQL.
+    * JWT algorithm confusion / kid header injection (more sophisticated than weak-secret).
+    * Zip-slip in an archive-upload endpoint.
+    * Second-order SQLi via cached / stored input.
+    * Server-side template injection chained with sandbox escape.
+  Plus 1-2 OWASP basics as warm-up stages 1-2.
+- Burp Suite required (Repeater, Intruder, Decoder, sometimes a custom Python script).
+- Students must read source where exposed (.git, /static/server.js.bak, exposed admin source-view feature).
+- Custom payloads expected — no copy-paste off a single tutorial.`
+  };
+  const difficultyDirective = DIFFICULTY_DIRECTIVES[diffNorm];
+
   return `Design a vulnerable web app for this client:
 
 COMPANY:
 - Name: ${company}
 - Industry: ${industry}
 - Size: ${employees} employees
-- Difficulty target: ${difficulty}  (beginner=very obvious vulns, intermediate=mix of obvious+subtle, advanced=mostly subtle requires reading code)
+- Difficulty: ${diffNorm.toUpperCase()}  (per-deploy admin choice — see DIFFICULTY block below for the exact vuln pool to use)
+
+${difficultyDirective}
 
 HOSTING:
 - Delivery mode: ${deliveryMode}  (docker = self-contained image, apache_vhost = installed on existing web VM, standalone_vm = dedicated Ubuntu VM)
@@ -149,7 +274,7 @@ HOSTING:
 REAL STAKEHOLDERS (use a few real names in seed_data so the lab feels personal):
 ${stakeholders || '(no stakeholder data in profile — invent plausible names)'}
 
-Design something this specific company would actually run internally. Tech stack, theme, vuln chain — all tailored. Avoid the obvious DVWA / SQLi-search-box pattern unless it's part of a larger chain.
+Design something this specific company would actually run internally. Tech stack, theme, vuln chain — all tailored. The DIFFICULTY block above OVERRIDES the system prompt's default vuln-pool guidance — pick vulns from that block's allowed list.
 
 Respond with the JSON design only.`;
 }
@@ -174,7 +299,37 @@ HARD CONSTRAINTS:
 5. Theme: every page header, navigation, copy, button label must reference the company name and theme from the design. NO generic "Welcome to the App" placeholders.
 6. Cross-link: when this page is a landing or nav-bearing page, link to the OTHER pages from the design's page_inventory.
 7. Seed data: when this is a setup/init script or a page that displays records, use the seed_data from the design.
-8. Style: include inline CSS or a <link> to a shared stylesheet path that the design specifies. Use the design's color_palette. Make it look like a real internal tool — not a tutorial example.
+8. Style: CIAB auto-injects a professional base stylesheet at /ciab-base.css
+   into every HTML file's <head> at build time. It provides themed layout
+   for: header/navbar, main content area (max-width 1200px), cards (.card),
+   forms (label + input/textarea/select inherit clean styling automatically),
+   buttons (button + .btn + .btn-secondary + .btn-outline + .btn-danger),
+   tables (clean rows with hover), alerts (.alert + .alert-error/success/warning),
+   footer, login pages (.login-container > .login-card, single-column centered,
+   max-width 450px), dashboard grids (.dashboard-grid > .stat-card with
+   .stat-value/.stat-label), status badges (.badge-pending/approved/rejected/active).
+   It's themed automatically from the design's color_palette.
+
+   YOUR JOB: write semantic HTML that USES these classes — don't reinvent
+   layout, don't add 3-column login wrappers, don't write inline grid CSS.
+   If you write your own stylesheet, ONLY add page-specific touches (custom
+   accent on a unique component) — not full layout or color theming. The
+   base.css already handles those, and overriding the layout has produced
+   broken visual rendering in past deploys.
+   Standard structure for every HTML page:
+     <body>
+       <header class="navbar">…company logo + nav…</header>
+       <main>…page content using .card .alert .btn etc…</main>
+       <footer>…copyright…</footer>
+     </body>
+   For login pages specifically:
+     <main>
+       <div class="login-container">
+         <div class="login-card">…title, form, button…</div>
+       </div>
+     </main>
+   DO NOT add aside elements or sidebar divs to login pages — base.css hides
+   them with display:none because they always end up as broken narrow columns.
 9. Length: aim for 60-250 lines per file. Pages should feel like real pages (headers, forms, error handling), not minimal demos.
 10. Security: no destructive code (no rm -rf, no fork bombs). No real backdoors beyond what the attack chain describes. No outbound public-internet calls.
 11. MODULE EXPORTS — every file the main app imports MUST export the thing

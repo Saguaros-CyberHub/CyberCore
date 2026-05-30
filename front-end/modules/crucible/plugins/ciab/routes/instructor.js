@@ -105,12 +105,68 @@ router.post('/store-example', authenticateToken, async (req, res) => {
 // Simple test endpoint
 router.get('/test', authenticateToken, async (req, res) => {
   try {
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       user: req.user,
       message: 'Instructor routes working'
     });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── Vuln-app cheat sheet (answer key for instructors + admins) ────────────
+// Returns the attack chain, instructor notes, seed credentials, and per-file
+// vuln annotations for a profile's most recently generated vuln-app. Surfaced
+// in the instructor dashboard's "Documents & Answer Keys" tab so instructors
+// can see exactly what students are expected to find, with copy-pasteable
+// flags and login credentials — without grep'ing source_tree JSONB by hand.
+//
+// Gated to instructor + admin roles. Page-level auth already restricts the
+// dashboard to those two roles, so this matches that boundary.
+router.get('/vuln-cheat-sheet/:profileId', authenticateToken, instructorOnly, async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    // Latest vuln-app row for this profile (regeneration creates a new row).
+    const r = await query(`
+      SELECT profile_id, generation_meta, delivery_mode, created_at
+      FROM ciab_profile_vuln_apps
+      WHERE profile_id = $1
+      ORDER BY created_at DESC
+      LIMIT 1
+    `, [profileId]);
+
+    if (!r.rows.length) {
+      return res.status(404).json({
+        error: 'No vuln-app generated for this profile yet — run a deploy first.',
+        profile_id: profileId
+      });
+    }
+
+    const row = r.rows[0];
+    const meta = row.generation_meta || {};
+    // Shape into a payload the frontend can render directly. Defensively pull
+    // every field that might be present — older rows may be missing
+    // file_annotations or seed_data, and that's fine, the UI handles nulls.
+    res.json({
+      profile_id: row.profile_id,
+      generated_at: row.created_at,
+      delivery_mode: row.delivery_mode,
+      difficulty: meta.difficulty || null,
+      title: meta.title || null,
+      theme_summary: meta.theme_summary || null,
+      tech_stack: meta.tech_stack || null,
+      primary_language: meta.primary_language || null,
+      instructor_notes: meta.instructor_notes || null,
+      post_install_notes: meta.post_install_notes || null,
+      attack_chain: Array.isArray(meta.attack_chain) ? meta.attack_chain : [],
+      seed_data: meta.seed_data || null,
+      file_annotations: meta.file_annotations || {},
+      page_count: meta.page_count || null,
+      page_errors: meta.page_errors || []
+    });
+  } catch (error) {
+    console.error('[VulnCheatSheet] Error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

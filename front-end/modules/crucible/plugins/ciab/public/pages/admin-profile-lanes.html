@@ -414,6 +414,19 @@
               <div><label>&nbsp;</label><label><input type="checkbox" id="dep-vuln-app-dedicated" /> Force dedicated VM for vuln app</label></div>
             </div>
 
+            <!-- Vuln-App difficulty (admin/instructor choice per deploy). Hidden when "AI vulnerable
+                 web app" is unchecked. Drives the LLM prompt's vuln-pool selection. -->
+            <div class="form-row" id="dep-vuln-difficulty-row">
+              <div>
+                <label>Vuln-App difficulty <span style="color:#718096; font-weight: normal; font-size:0.85em;">(controls vulnerability complexity & required skillset)</span></label>
+                <div style="display:flex; gap:1rem; align-items:center; flex-wrap:wrap; margin-top:0.25rem;">
+                  <label style="font-weight: normal; cursor: pointer;"><input type="radio" name="dep-vuln-difficulty" value="easy" checked> <strong style="color:#38a169;">Easy</strong> — OWASP basics, browser+curl, 3-stage chain</label>
+                  <label style="font-weight: normal; cursor: pointer;"><input type="radio" name="dep-vuln-difficulty" value="medium"> <strong style="color:#d69e2e;">Medium</strong> — adds file-upload RCE / JWT / stored XSS, 4-stage chain</label>
+                  <label style="font-weight: normal; cursor: pointer;"><input type="radio" name="dep-vuln-difficulty" value="hard"> <strong style="color:#c53030;">Hard</strong> — SSTI / deserialization / race conditions, 4-5 stage chain, Burp expected</label>
+                </div>
+              </div>
+            </div>
+
             <div style="display:flex; gap:0.5rem; justify-content:flex-end;">
               <button class="btn btn-secondary" onclick="runPreview()">Preview impact</button>
               <button class="btn btn-primary" onclick="runDeploy()">Deploy lanes</button>

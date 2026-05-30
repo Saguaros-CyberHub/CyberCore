@@ -181,7 +181,12 @@ async function runProfileDeploy(opts) {
     : getOrGenerateVulnApp({
         profile: { ...profile, assets },
         llmModel: vulnAppOpts.llm_model,
-        preferMode: vulnAppOpts.delivery_mode || 'docker'
+        preferMode: vulnAppOpts.delivery_mode || 'docker',
+        // Per-deploy difficulty (easy|medium|hard) from the admin UI radio.
+        // Drives the LLM prompt's vuln-pool selection. Defaults to easy so
+        // existing callers (without the field) get the beginner-friendly
+        // chain that the rest of the prompt now assumes.
+        difficulty: vulnAppOpts.difficulty || 'easy'
       }).catch(err => {
         console.warn(`[CIAB ProfileDeploy] vuln app generation failed (continuing): ${err.message}`);
         return null;

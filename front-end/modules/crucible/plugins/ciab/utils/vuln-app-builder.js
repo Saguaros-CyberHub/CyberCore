@@ -36,6 +36,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { buildBaseCss } = require('./vuln-app-base-css');
 
 // Where built image tarballs land. Bind-mounted in docker-compose for
 // persistence + easy cleanup; falls back to a tmp dir if unset.
@@ -335,6 +336,76 @@ function detectMissingRelativeImports(sourceTree, logTag) {
   return issues;
 }
 
+// ─── Professional base styles auto-injection ─────────────────────────────────
+// Inject a known-good CSS file into the source_tree and add a <link> tag to
+// every HTML/EJS file's <head> so the base styles ALWAYS load — regardless of
+// whether the LLM remembered to link its own stylesheet, or what weird inline
+// styles it added. The base.css is themed from concept.color_palette via CSS
+// custom properties, so each lab still feels like its own company while the
+// LAYOUT stays consistent and professional.
+//
+// Loading order is base FIRST, then any LLM-generated stylesheets. The LLM's
+// CSS can override variables and most rules; the !important guards in base
+// catch the worst patterns (narrow login sidebars, broken grids, etc.).
+function injectBaseStyles(sourceTree, palette, logTag) {
+  if (!sourceTree || typeof sourceTree !== 'object') return;
+
+  palette = palette || {};
+  const baseCss = buildBaseCss({
+    primary: palette.primary,
+    accent: palette.accent,
+    bg: palette.bg
+  });
+
+  // Decide where to drop the file. Conventions in the LLM-generated apps we've
+  // seen: public/*.css (Express + static), static/*.css (Flask), assets/*.css.
+  // Try to match the LLM's chosen layout; default to public/.
+  const cssDirs = ['public', 'static', 'assets'];
+  const detectedDir = cssDirs.find(d =>
+    Object.keys(sourceTree).some(k => k.startsWith(`${d}/`) && k.endsWith('.css'))
+  ) || 'public';
+  const baseCssKey = `${detectedDir}/ciab-base.css`;
+  sourceTree[baseCssKey] = baseCss;
+
+  // The href the HTML <link> tag will use. Express/Flask/etc serve `public/`
+  // (or `static/`) at the URL root, so 'public/foo.css' is served at '/foo.css'.
+  const baseHref = `/ciab-base.css`;
+
+  // Inject into every HTML/EJS/Handlebars file. Place the link FIRST in <head>
+  // so the LLM's app-specific stylesheet loads after and can override.
+  // Templating placeholders (<%= %>, {{}}) are left alone — we only touch
+  // <head> tag opening.
+  const htmlExts = /\.(html?|ejs|hbs|handlebars|jsx|tsx|tmpl|tpl)$/i;
+  const linkTag = `<link rel="stylesheet" href="${baseHref}">`;
+  let injectedCount = 0;
+  const alreadyHas = new RegExp(`href=["']${baseHref}["']`);
+
+  for (const [key, value] of Object.entries(sourceTree)) {
+    if (!htmlExts.test(key)) continue;
+    let content = String(value || '');
+    if (alreadyHas.test(content)) continue;
+
+    if (/<head[^>]*>/i.test(content)) {
+      content = content.replace(/(<head[^>]*>)/i, `$1\n  ${linkTag}`);
+    } else if (/<html[^>]*>/i.test(content)) {
+      // No <head> — add a minimal one right after <html>
+      content = content.replace(/(<html[^>]*>)/i, `$1\n<head>\n  ${linkTag}\n</head>`);
+    } else {
+      // No <html> either — likely a partial / fragment. Prepend the link;
+      // it'll still apply once the partial is included.
+      content = `${linkTag}\n${content}`;
+    }
+    sourceTree[key] = content;
+    injectedCount++;
+  }
+
+  console.log(
+    `${logTag} Injected base CSS at ${baseCssKey} (${(baseCss.length/1024).toFixed(1)}KB) ` +
+    `themed primary=${palette.primary || 'default'} accent=${palette.accent || 'default'} ` +
+    `bg=${palette.bg || 'default'}; linked into ${injectedCount} HTML file(s)`
+  );
+}
+
 // ─── Build-time smoke test ───────────────────────────────────────────────────
 // Run the freshly-built image with no port bindings or volumes and confirm it
 // stays running for SMOKE_DURATION_MS. If the container exits within the
@@ -354,16 +425,28 @@ const SMOKE_POLL_MS = 2000;
 
 async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
   const containerName = `ciab-smoke-${crypto.randomBytes(4).toString('hex')}`;
-  console.log(`${logTag} Smoke-testing ${imageTag} (container ${containerName}, ${SMOKE_DURATION_MS/1000}s)`);
+  // Random high host port to avoid colliding with orchestrator services
+  // (Caddy on 80/443, app on 3000, n8n on 5678, postgres on 5432, etc.).
+  const smokeHostPort = 30000 + crypto.randomBytes(2).readUInt16BE() % 30000;
+  // We also pass PORT=80 in case the app reads it — same as the install_script
+  // we ship to lanes. The container's :80 maps to ${smokeHostPort} on the
+  // orchestrator host so we can curl it. If the app binds to a different port
+  // (3000, 8080, etc.) the curl-localhost probe will fail and surface that.
+  console.log(`${logTag} Smoke-testing ${imageTag} (container ${containerName}, host :${smokeHostPort} → container :80, ${SMOKE_DURATION_MS/1000}s)`);
   try {
     await runShell(
-      `docker run -d --name ${shellQuote(containerName)} ${shellQuote(imageTag)}`,
+      `docker run -d --name ${shellQuote(containerName)} -e PORT=80 -p 127.0.0.1:${smokeHostPort}:80 ${shellQuote(imageTag)}`,
       { label: 'docker run smoke', timeoutMs: 30000 }
     );
 
     const startedAt = Date.now();
+    let httpOk = false;
+    let lastCurlErr = '';
+
     while (Date.now() - startedAt < SMOKE_DURATION_MS) {
       await new Promise(r => setTimeout(r, SMOKE_POLL_MS));
+
+      // First: is the container even still running? Quick crash detection.
       let running = null, exitCode = null;
       try {
         const { stdout } = await runShell(
@@ -372,7 +455,6 @@ async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
         );
         [running, exitCode] = stdout.trim().split(/\s+/);
       } catch (_) {
-        // Transient inspect failure; keep polling.
         continue;
       }
       if (running !== 'true') {
@@ -392,10 +474,57 @@ async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
         err.code = 'VULN_APP_SMOKE_FAILED';
         throw err;
       }
+
+      // Second: does it answer HTTP on :80 (mapped to ${smokeHostPort})? Any
+      // HTTP status is acceptable — even 500 means the app is bound and
+      // responding. We only want to catch port-mismatch ("app on 3000 not 80")
+      // and "app crashed on first request" defects.
+      // -s silent, -o /dev/null discard body, -w write only the HTTP code,
+      // --max-time prevents hanging on slow-start apps. -f makes 4xx/5xx
+      // non-zero, so we use --write-out + grep for any 3-digit HTTP code.
+      if (!httpOk) {
+        try {
+          const r = await runShell(
+            `curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:${smokeHostPort}/`,
+            { label: 'curl smoke', timeoutMs: 5000 }
+          );
+          const code = r.stdout.trim();
+          if (/^[1-5]\d\d$/.test(code)) {
+            httpOk = true;
+            console.log(`${logTag} ✓ HTTP probe got ${code} from container :80 after ${Math.round((Date.now() - startedAt)/1000)}s`);
+          } else {
+            lastCurlErr = `unexpected response code "${code}"`;
+          }
+        } catch (err) {
+          lastCurlErr = err.message.slice(0, 120);
+        }
+      }
     }
-    console.log(`${logTag} ✓ Smoke test passed — container stayed running ${SMOKE_DURATION_MS/1000}s`);
+
+    if (!httpOk) {
+      // Container ran the full window but never responded on :80. Almost
+      // always means the app is bound to a different port (Express default
+      // 3000, Flask default 5000, etc.). Grab logs so the user can see where
+      // the app says it's listening.
+      let logs = '(logs unavailable)';
+      try {
+        const r = await runShell(
+          `docker logs ${shellQuote(containerName)} 2>&1 | tail -40`,
+          { label: 'docker logs smoke', timeoutMs: 5000 }
+        );
+        logs = r.stdout.trim();
+      } catch (_) {}
+      const err = new Error(
+        `vuln-app smoke test failed — container stayed running ${SMOKE_DURATION_MS/1000}s but never served HTTP on :80 (last curl: ${lastCurlErr || 'no response'}). ` +
+        `Most likely the app is bound to a different port — install_script passes PORT=80 env, so the app should read process.env.PORT (Node) or os.environ['PORT'] (Python). ` +
+        `Last 40 log lines:\n${logs}`
+      );
+      err.code = 'VULN_APP_SMOKE_FAILED';
+      throw err;
+    }
+
+    console.log(`${logTag} ✓ Smoke test passed — container stayed running ${SMOKE_DURATION_MS/1000}s and served HTTP on :80`);
   } finally {
-    // Best-effort cleanup; --rm wasn't used so we can grab logs on failure.
     try {
       await runShell(`docker rm -f ${shellQuote(containerName)} 2>/dev/null`, {
         label: 'docker rm smoke', timeoutMs: 10000
@@ -442,6 +571,12 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
   // in place, so both this build path AND any subsequent on-VM fallback see
   // the repaired manifest.
   repairNodeSourceTree(vulnAppInstall.source_tree, logTag);
+
+  // Inject professional base CSS + <link> tags into every HTML/EJS file.
+  // Themed from the concept's color_palette so each company gets its own
+  // brand identity while the LAYOUT stays consistent and professional.
+  // The LLM's own styles still load AFTER and can layer custom touches.
+  injectBaseStyles(vulnAppInstall.source_tree, vulnAppInstall.color_palette, logTag);
 
   // Static check: every relative require/import must point to a file the LLM
   // actually generated. Catches Stage-2-parallel-generation skew where one

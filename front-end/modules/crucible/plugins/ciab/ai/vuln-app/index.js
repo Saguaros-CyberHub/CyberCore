@@ -42,14 +42,14 @@ const VULN_APP_FILE_RETRY_MAX_TOKENS = parseInt(process.env.CIAB_VULN_APP_FILE_R
 
 // ─── Stage 1: design the app ───────────────────────────────────────────────
 
-async function designConcept({ profile, webServer, deliveryMode, llmModel }) {
+async function designConcept({ profile, webServer, deliveryMode, llmModel, difficulty = 'easy' }) {
   const { value, usage, latencyMs } = await llm.generateJson({
     model: llmModel,
     system: llm.cachedSystem(CONCEPT_SYSTEM_PROMPT),
-    messages: [{ role: 'user', content: buildConceptUserPrompt({ profile, webServer, deliveryMode }) }],
+    messages: [{ role: 'user', content: buildConceptUserPrompt({ profile, webServer, deliveryMode, difficulty }) }],
     max_tokens: 8192,
     temperature: 0.8,           // higher to encourage variety across companies
-    label: `vuln-app:concept:${profile.id?.slice(0,8) || 'na'}`
+    label: `vuln-app:concept:${profile.id?.slice(0,8) || 'na'}:${difficulty}`
   });
 
   // Basic shape validation — caller can decide what to do if anything is missing
@@ -439,12 +439,12 @@ async function generateInstall({ concept, deliveryMode, sourceTreeFileList, llmM
  * @param {string} [args.llmModel]
  * @returns {Promise<{source_tree, dockerfile, install_script, generation_meta}>}
  */
-async function generateVulnApp({ profile, webServer, deliveryMode, llmModel }) {
+async function generateVulnApp({ profile, webServer, deliveryMode, llmModel, difficulty = 'easy' }) {
   const profileIdShort = profile.id?.slice(0, 8) || 'na';
   const startedAt = Date.now();
 
-  console.log(`🎯 [vuln-app] Stage 1: design concept for profile ${profileIdShort} (${profile.company_name})`);
-  const { concept, usage: stage1Usage } = await designConcept({ profile, webServer, deliveryMode, llmModel });
+  console.log(`🎯 [vuln-app] Stage 1: design concept for profile ${profileIdShort} (${profile.company_name}) at difficulty=${difficulty}`);
+  const { concept, usage: stage1Usage } = await designConcept({ profile, webServer, deliveryMode, llmModel, difficulty });
   console.log(`   → ${concept.page_inventory.length} pages, ${concept.attack_chain.length}-stage chain, stack: ${concept.tech_stack}`);
 
   console.log(`🎯 [vuln-app] Stage 2: generate ${concept.page_inventory.length} files in parallel`);
@@ -458,9 +458,20 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel }) {
     console.warn(`   ⚠ ${fileErrors.length}/${concept.page_inventory.length} files failed to generate (continuing with rest)`);
   }
 
-  // Build source_tree (path → content map)
+  // Build source_tree (path → content map). Per-file vuln_notes get collected
+  // into a separate map so they survive into generation_meta — source_tree
+  // itself stays content-only (it's what gets written to disk in the lane VM).
   const source_tree = {};
-  for (const f of files) source_tree[f.path] = f.content;
+  const file_annotations = {};
+  for (const f of files) {
+    source_tree[f.path] = f.content;
+    if (f.vuln_notes || (f.vuln_role && f.vuln_role !== 'none')) {
+      file_annotations[f.path] = {
+        vuln_role: f.vuln_role || 'none',
+        vuln_notes: f.vuln_notes || null
+      };
+    }
+  }
 
   // ── Stage 2.5: self-healing pass for missing relative imports ───────────
   // Stage 2's per-file generators don't see each other's output, so it's
@@ -515,9 +526,16 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel }) {
     source_tree,
     dockerfile,
     install_script,
+    // Surface the palette to the orchestrator's CSS injector so the auto-
+    // injected base.css gets themed to this company's brand.
+    color_palette: concept.color_palette || null,
     generation_meta: {
       source: 'claude_multistage',
       pipeline_version: 2,
+      // Persisted so vuln-app-generator's cache lookup can find rows by
+      // (profile_id, difficulty), and the answer-key UI can show which
+      // level was generated.
+      difficulty,
       title: concept.title,
       theme_summary: concept.theme_summary,
       tech_stack: concept.tech_stack,
@@ -527,6 +545,12 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel }) {
       page_errors: fileErrors,
       post_install_notes,
       instructor_notes: concept.instructor_notes,
+      // Surfaced to the instructor cheat sheet so they have login creds +
+      // seed data on hand without grep'ing the source tree.
+      seed_data: concept.seed_data || null,
+      // Per-file vuln annotations — vuln_role + vuln_notes (which stages
+      // each page plays in the attack chain) from Stage 2 output.
+      file_annotations,
       elapsed_ms: elapsedMs,
       usage: {
         stage1: stage1Usage,

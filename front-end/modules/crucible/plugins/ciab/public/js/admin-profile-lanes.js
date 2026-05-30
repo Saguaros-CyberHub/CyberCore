@@ -424,7 +424,11 @@ async function runDeploy() {
     asset_selection: gatherAssetSelection(),
     vuln_app: {
       enabled: document.getElementById('dep-vuln-app').checked,
-      delivery_mode: document.getElementById('dep-vuln-app-dedicated').checked ? 'standalone_vm' : 'docker'
+      delivery_mode: document.getElementById('dep-vuln-app-dedicated').checked ? 'standalone_vm' : 'docker',
+      // Per-deploy difficulty (easy|medium|hard) chosen by admin/instructor in the UI.
+      // Drives the LLM prompt's vuln-pool selection. Falls back to 'easy' if no radio
+      // is selected (shouldn't happen because 'easy' is checked by default in the HTML).
+      difficulty: (document.querySelector('input[name="dep-vuln-difficulty"]:checked') || {}).value || 'easy'
     }
   };
 
@@ -631,4 +635,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
   // Populate the industry dropdown for the default client type (SMB)
   if (typeof onClientTypeChange === 'function') onClientTypeChange();
+
+  // Hide the Vuln-App difficulty row when the vuln-app checkbox is off —
+  // the selector is meaningless if no vuln-app will be generated.
+  const vulnCb = document.getElementById('dep-vuln-app');
+  const diffRow = document.getElementById('dep-vuln-difficulty-row');
+  if (vulnCb && diffRow) {
+    const syncDifficultyVisibility = () => {
+      diffRow.style.display = vulnCb.checked ? '' : 'none';
+    };
+    syncDifficultyVisibility();
+    vulnCb.addEventListener('change', syncDifficultyVisibility);
+  }
 });

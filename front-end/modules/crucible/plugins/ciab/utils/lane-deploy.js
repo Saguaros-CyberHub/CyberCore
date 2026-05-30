@@ -951,7 +951,12 @@ function buildPrebuiltInstallScript({ url, imageTag }) {
     '  systemctl stop "$svc" 2>/dev/null || service "$svc" stop 2>/dev/null || true',
     '  systemctl disable "$svc" 2>/dev/null || true',
     'done',
-    `docker run -d --restart=always --name vuln-app -p 80:80 ${shellQuoteArg(imageTag)}`,
+    // -e PORT=80: most Node frameworks (Express, Fastify, Hapi, Nest) and
+    // Python frameworks read this env var. When the LLM writes
+    // `app.listen(process.env.PORT || 3000)` we still get the app on host :80
+    // without remapping. Apps that hardcode a different port slip through
+    // this — the build-time smoke HTTP probe catches that case before ship.
+    `docker run -d --restart=always --name vuln-app -e PORT=80 -p 80:80 ${shellQuoteArg(imageTag)}`,
     'rm -f /tmp/vuln-app.tar.gz',
     'echo "[ciab] vuln-app running"'
   ].join('\n');
@@ -1453,8 +1458,15 @@ async function deployOneLaneFromSpec({
 
       if (kaliIp) {
         try {
-          await guacAPI('POST', '/connections', {
-            name: `${groupName} - lane${vxlanId} - Kali`,
+          // Idempotent upsert: a previous deploy of the same lane leaves a
+          // Guacamole connection with this name pointing at the OLD Kali's
+          // IP. POST-only creation 400s with "already exists", AND the stale
+          // entry's parameters.hostname is now wrong, so students click the
+          // tile and the RDP backend fails. List → find-by-name → PUT to
+          // refresh parameters (or POST if no prior entry exists).
+          const connName = `${groupName} - lane${vxlanId} - Kali`;
+          const connBody = {
+            name: connName,
             protocol: 'rdp',
             parentIdentifier: 'ROOT',
             parameters: {
@@ -1465,7 +1477,29 @@ async function deployOneLaneFromSpec({
               'color-depth': '24', 'resize-method': 'display-update'
             },
             attributes: { 'max-connections': '4', 'max-connections-per-user': '2' }
-          });
+          };
+
+          // GET /connections returns an object keyed by identifier:
+          //   { "12": { identifier: "12", name: "...", protocol: "rdp", ... }, ... }
+          // Match on name (case-sensitive — Guac is consistent here).
+          const existing = await guacAPI('GET', '/connections');
+          let foundId = null;
+          if (existing && typeof existing === 'object') {
+            for (const [id, conn] of Object.entries(existing)) {
+              if (conn && conn.name === connName) { foundId = id; break; }
+            }
+          }
+
+          if (foundId) {
+            // PUT replaces the connection's full body. We re-send everything
+            // including the refreshed hostname so the stale IP from the
+            // previous deploy gets overwritten.
+            await guacAPI('PUT', `/connections/${encodeURIComponent(foundId)}`, connBody);
+            console.log(`${logTag} Guac connection refreshed for lane ${vxlanId}: ${connName} → ${kaliIp}:3389 (id=${foundId})`);
+          } else {
+            await guacAPI('POST', '/connections', connBody);
+            console.log(`${logTag} Guac connection created for lane ${vxlanId}: ${connName} → ${kaliIp}:3389`);
+          }
         } catch (gErr) {
           console.warn(`${logTag} Guac connection failed for lane ${vxlanId}: ${gErr.message}`);
         }
