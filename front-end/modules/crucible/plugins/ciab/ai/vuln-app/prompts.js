@@ -60,6 +60,18 @@ HARD CONSTRAINTS — every design MUST:
     - PHP → 'composer.json' OR a comment that vanilla PHP runs without one
     Without this, the docker build fails at "npm install" / "pip install" and
     the lab won't start. The manifest counts as a page; the 4-7 budget includes it.
+2a-1. DEPENDENCY HYGIENE — every module the app imports at runtime
+    MUST be declared in the manifest's runtime-dependencies section:
+    - Node.js: in 'dependencies' NOT 'devDependencies' (CIAB installs with
+      --omit=dev). The container will crash with MODULE_NOT_FOUND otherwise.
+    - Python: in 'requirements.txt' (no devDependencies concept).
+    Native modules ARE supported — CIAB's default Node Dockerfile auto-installs
+    python3/make/g++ via apk virtual deps for the npm-install step, so things
+    like better-sqlite3, bcrypt, sharp, sqlite, canvas all build cleanly. If
+    you write your own Dockerfile in source_tree, you take responsibility for
+    matching this (apk add python3 make g++ before npm install on alpine).
+    Pure-JS equivalents (sql.js, bcryptjs) are also fine — pick what makes the
+    app pedagogically interesting, not what avoids native compilation.
 2b. ONLY use docker base images CIAB pre-bakes onto every web template:
       node:20-alpine, python:3-slim, php:8.2-apache, nginx:alpine, ruby:3-alpine
     Pick the one matching primary_language. The lane subnet has NO outbound

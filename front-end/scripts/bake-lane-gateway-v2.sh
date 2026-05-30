@@ -199,6 +199,28 @@ iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
 iptables -A FORWARD -i wan0 -o lan0 -p tcp -d "${KALI_IP}" --dport 3389 \
   -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT
 
+# 4. Vuln-app image pull — narrow ACCEPT for lane → orchestrator:80.
+#    The v1/v2 base template ships FORWARD DROPs for lan0 → 100.64.0.0/10
+#    (perimeter to keep lane attackers off lab infra). That also blocks the
+#    legitimate prebuilt-image pull where web VMs curl
+#    http://<INTERNAL>/api/profile-deploy/image/<token>. Punch one hole, only
+#    that destination, only NEW state. Reply traffic is covered by the global
+#    RELATED,ESTABLISHED ACCEPT at position 1 of FORWARD. Position 2 puts us
+#    right above the DROP block.
+#
+#    IMPORTANT: use CYBERCORE_INTERNAL_URL (the lab-internal IP, default
+#    100.100.20.50), not CYBERCORE_ORCHESTRATOR_URL (the public domain). The
+#    orchestrator embeds the INTERNAL URL into install_script via
+#    vuln-app-builder.js LANE_ORCH_URL — so the lane VM's TCP dst is
+#    100.100.20.50, not the public IP. A rule keyed on the public hostname
+#    resolves to the wrong dst and misses every packet.
+ORCH_INTERNAL_HOST_FOR_IPT="$(echo "${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}" | sed -E 's|^https?://||; s|[:/].*$||')"
+iptables-save | grep -v "CYBERCORE-IMAGE-PULL" | iptables-restore || true
+iptables -I FORWARD 2 -i lan0 -o wan0 -s "${LAN_NET}" -d "${ORCH_INTERNAL_HOST_FOR_IPT}" \
+  -p tcp --dport 80 -m conntrack --ctstate NEW \
+  -m comment --comment "CYBERCORE-IMAGE-PULL" -j ACCEPT
+logger -t cybercore-firstboot "iptables: CYBERCORE-IMAGE-PULL ACCEPT lan0→wan0 ${LAN_NET}→${ORCH_INTERNAL_HOST_FOR_IPT}:80 inserted at FORWARD pos 2"
+
 # Persist current rule set (Alpine iptables init reloads from here)
 mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules-save
@@ -315,7 +337,13 @@ FIRSTBOOT_EOF
 # HTTPS is now the default — Caddy fronts the app with Let's Encrypt certs,
 # and the gateway has full wget + ca-certificates baked in to handle TLS.
 ORCH_URL_DEFAULT="${CYBERCORE_ORCHESTRATOR_URL:-https://saguaroscyberhub.org}"
-# Note: unquoted heredoc tag → ${ORCH_URL_DEFAULT} expands at bake time.
+# Internal lab URL for the prebuilt-image pull. MUST be the same IP/port that
+# vuln-app-builder.js's LANE_ORCH_URL embeds into install_script — otherwise
+# the firstboot iptables CYBERCORE-IMAGE-PULL rule matches the wrong dst and
+# every lane's vuln-app install fails with exit 11. Keep these two defaults
+# in sync (front-end/modules/crucible/plugins/ciab/utils/vuln-app-builder.js:48).
+ORCH_INTERNAL_DEFAULT="${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}"
+# Note: unquoted heredoc tag → ${ORCH_URL_DEFAULT}/${ORCH_INTERNAL_DEFAULT} expand at bake time.
 cat > "$STAGING/cybercore-gateway.env" <<ENV_EOF
 # /etc/cybercore-gateway.env
 # Overrides for /etc/local.d/00-cybercore-firstboot.start.
@@ -347,6 +375,12 @@ DHCP_END_OCTET=200
 #
 # Override the orchestrator URL here if it lives elsewhere:
 CYBERCORE_ORCHESTRATOR_URL=${ORCH_URL_DEFAULT}
+
+# Lab-internal URL the LANE uses to pull prebuilt vuln-app images. Read by
+# firstboot's iptables block (CYBERCORE-IMAGE-PULL) to whitelist this exact
+# destination through the perimeter DROPs. Must match vuln-app-builder.js's
+# LANE_ORCH_URL — if you change one, change both.
+CYBERCORE_INTERNAL_URL=${ORCH_INTERNAL_DEFAULT}
 ENV_EOF
 
 # 2c. Placeholder dnsmasq.conf — replaced at boot by firstboot once lan0
@@ -689,6 +723,12 @@ pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -t nat -C POSTROUTING -s 10.99.0
   || { echo "FAIL: lane NAT MASQUERADE rule missing for 10.99.0.0/24"; RENDERED_OK=0; }
 pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination 10.99.0.50:3389" 2>/dev/null \
   || { echo "FAIL: Kali DNAT rule missing for 10.99.0.50:3389"; RENDERED_OK=0; }
+# Image-pull rule: assert it lands above the base-template DROP block. Use the
+# same INTERNAL default the firstboot block uses, so an override at bake time
+# (CYBERCORE_INTERNAL_URL=...) gets verified against the actual configured IP.
+EXPECTED_IMG_PULL_DST="$(echo "${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}" | sed -E 's|^https?://||; s|[:/].*$||')"
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i lan0 -o wan0 -s 10.99.0.0/24 -d ${EXPECTED_IMG_PULL_DST} -p tcp --dport 80 -m conntrack --ctstate NEW -m comment --comment CYBERCORE-IMAGE-PULL -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: image-pull ACCEPT rule missing (lane→${EXPECTED_IMG_PULL_DST}:80)"; RENDERED_OK=0; }
 
 pct stop "$VERIFY_VMID"
 pct destroy "$VERIFY_VMID" --purge
@@ -702,6 +742,7 @@ if [ "$RENDERED_OK" = "1" ]; then
   echo "    - dnsmasq dhcp-range  10.99.0.10 .. 10.99.0.200"
   echo "    - controller ACCEPT   10.99.0.5 -> lan0:22"
   echo "    - lane MASQUERADE     10.99.0.0/24 -> wan0"
+  echo "    - image-pull ACCEPT   10.99.0.0/24 -> ${EXPECTED_IMG_PULL_DST}:80 (above base DROPs)"
   echo ""
   echo "  Use from admin.js:"
   echo "    pct clone $NEW_VMID <ctid> --full --storage $STORAGE"

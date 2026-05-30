@@ -157,6 +157,14 @@ async function buildAndPackage({ sourceTree, dockerfile, logTag = '[CIAB VulnBui
     console.log(`${logTag} Building image ${imageTag} (context ${ctxDir})`);
     await runShell(`docker build -t ${imageTag} ${shellQuote(ctxDir)}`, { label: `docker build ${imageTag}` });
 
+    // Smoke-test: run the image briefly and confirm it doesn't crash on
+    // startup. Catches the "image builds clean, app crashes on require()"
+    // class of LLM-generated-app defects — missing deps (better-sqlite3),
+    // syntax errors, port collisions inside the image, etc. Failures here
+    // throw VULN_APP_SMOKE_FAILED so the deploy fails fast with the actual
+    // container logs, rather than letting a broken image ship to lanes.
+    await smokeTestImage(imageTag, { logTag });
+
     // Save → gzip to the served file. `docker save` keeps the repo:tag so the
     // lane's `docker load` restores the exact tag we tell it to run.
     console.log(`${logTag} Saving image ${imageTag} → ${outFile}`);
@@ -179,6 +187,75 @@ function shellQuote(s) {
 
 function imageUrl(token) {
   return `${LANE_ORCH_URL}/api/profile-deploy/image/${token}`;
+}
+
+// ─── Build-time smoke test ───────────────────────────────────────────────────
+// Run the freshly-built image with no port bindings or volumes and confirm it
+// stays running for SMOKE_DURATION_MS. If the container exits within the
+// window — MODULE_NOT_FOUND, syntax error, EACCES on bind, anything — grab
+// the last ~40 log lines and throw a VULN_APP_SMOKE_FAILED error so the deploy
+// surfaces the real reason. Without this check, a broken image still
+// `docker save`s clean, ships to the lane, and only fails at the very end
+// when the lane's `docker run` enters a crash loop (which we discover when a
+// student opens their browser).
+//
+// We intentionally DO NOT bind ports during the smoke test — the goal is to
+// catch crash-on-startup, not to verify the app accepts HTTP requests. Apps
+// that bind :80 internally don't conflict with anything because the smoke
+// container is its own network namespace.
+const SMOKE_DURATION_MS = parseInt(process.env.CIAB_VULN_SMOKE_DURATION_MS, 10) || 25000;
+const SMOKE_POLL_MS = 2000;
+
+async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
+  const containerName = `ciab-smoke-${crypto.randomBytes(4).toString('hex')}`;
+  console.log(`${logTag} Smoke-testing ${imageTag} (container ${containerName}, ${SMOKE_DURATION_MS/1000}s)`);
+  try {
+    await runShell(
+      `docker run -d --name ${shellQuote(containerName)} ${shellQuote(imageTag)}`,
+      { label: 'docker run smoke', timeoutMs: 30000 }
+    );
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < SMOKE_DURATION_MS) {
+      await new Promise(r => setTimeout(r, SMOKE_POLL_MS));
+      let running = null, exitCode = null;
+      try {
+        const { stdout } = await runShell(
+          `docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' ${shellQuote(containerName)}`,
+          { label: 'docker inspect smoke', timeoutMs: 5000 }
+        );
+        [running, exitCode] = stdout.trim().split(/\s+/);
+      } catch (_) {
+        // Transient inspect failure; keep polling.
+        continue;
+      }
+      if (running !== 'true') {
+        let logs = '(logs unavailable)';
+        try {
+          const r = await runShell(
+            `docker logs ${shellQuote(containerName)} 2>&1 | tail -40`,
+            { label: 'docker logs smoke', timeoutMs: 5000 }
+          );
+          logs = r.stdout.trim();
+        } catch (_) {}
+        const elapsedS = Math.round((Date.now() - startedAt) / 1000);
+        const err = new Error(
+          `vuln-app smoke test failed — container exited (code=${exitCode}) within ${elapsedS}s. ` +
+          `Last 40 log lines:\n${logs}`
+        );
+        err.code = 'VULN_APP_SMOKE_FAILED';
+        throw err;
+      }
+    }
+    console.log(`${logTag} ✓ Smoke test passed — container stayed running ${SMOKE_DURATION_MS/1000}s`);
+  } finally {
+    // Best-effort cleanup; --rm wasn't used so we can grab logs on failure.
+    try {
+      await runShell(`docker rm -f ${shellQuote(containerName)} 2>/dev/null`, {
+        label: 'docker rm smoke', timeoutMs: 10000
+      });
+    } catch (_) {}
+  }
 }
 
 // ─── Public: ensure a docker-mode vuln-app has a prebuilt, servable image ────
@@ -217,6 +294,15 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
       prebuilt: { token: built.token, imageTag: built.imageTag, url: built.url }
     };
   } catch (err) {
+    if (err.code === 'VULN_APP_SMOKE_FAILED') {
+      // Image built but the app crashes on startup — falling back to on-VM
+      // build won't help (same source, same Dockerfile, same crash). Surface
+      // the error to the deploy so the user regenerates the app instead of
+      // discovering the bug from a crash-looping container in a lane.
+      console.warn(`${logTag} ${err.message.split('\n')[0]}`);
+      console.warn(`${logTag} Smoke logs:\n${err.message.split('\n').slice(1).join('\n')}`);
+      throw err;
+    }
     console.warn(`${logTag} Orchestrator image build failed (${err.message.slice(0, 160)}) — falling back to on-VM build`);
     return vulnAppInstall;
   }

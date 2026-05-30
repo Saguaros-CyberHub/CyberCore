@@ -285,7 +285,12 @@ CMD ["python", "app.py"]
         dockerfile: `FROM node:20-alpine
 WORKDIR /app
 COPY . .
-RUN npm install --omit=dev
+# Build tools for native modules (better-sqlite3, bcrypt, sharp, etc.).
+# Installed as a virtual package so we can drop them after npm install
+# and the final image stays at the runtime size, not the toolchain size.
+RUN apk add --no-cache --virtual .build-deps python3 make g++ \\
+ && npm install --omit=dev \\
+ && apk del .build-deps
 EXPOSE 80
 CMD ["node", "server.js"]
 `,

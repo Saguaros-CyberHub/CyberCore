@@ -943,6 +943,14 @@ function buildPrebuiltInstallScript({ url, imageTag }) {
     'echo "[ciab] loading image"',
     'docker load -i /tmp/vuln-app.tar.gz',
     'docker rm -f vuln-app 2>/dev/null || true',
+    // Debian web template ships apache2 enabled+running on :80; on some images
+    // nginx is similarly active. Either binds the host port and makes the
+    // subsequent `docker run -p 80:80` fail with exit 125 "address already in
+    // use". Stop+disable both before launching the container so reboots stick.
+    'for svc in apache2 nginx; do',
+    '  systemctl stop "$svc" 2>/dev/null || service "$svc" stop 2>/dev/null || true',
+    '  systemctl disable "$svc" 2>/dev/null || true',
+    'done',
     `docker run -d --restart=always --name vuln-app -p 80:80 ${shellQuoteArg(imageTag)}`,
     'rm -f /tmp/vuln-app.tar.gz',
     'echo "[ciab] vuln-app running"'
