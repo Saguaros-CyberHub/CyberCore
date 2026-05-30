@@ -279,6 +279,62 @@ function repairNodeSourceTree(sourceTree, logTag) {
   return added;
 }
 
+// ─── Static source-tree validation ───────────────────────────────────────────
+// Catch the "LLM forgot to generate a file it requires" class of bugs BEFORE
+// docker build. Stage 2 of the generation pipeline generates files in
+// parallel from a planned page_inventory, but each generator only sees its
+// own file's brief — nothing enforces that routes/auth.js's `require('../db')`
+// actually corresponds to a file the index-generator produced. Today's case:
+// auth.js requires `../db` but db.js was never generated, so the smoke test
+// catches it 25-30 seconds into the build pipeline.
+//
+// This is faster (~5ms) and the error is precise enough to feed back to the
+// LLM for a self-healing retry pass later. Returns a list of issues; empty
+// means the tree is consistent.
+function detectMissingRelativeImports(sourceTree, logTag) {
+  if (!sourceTree || typeof sourceTree !== 'object') return [];
+  const path = require('path').posix;
+  const fileSet = new Set(Object.keys(sourceTree));
+
+  // Given a file 'routes/auth.js' importing '../db', resolve to a candidate
+  // path. Try common node-module conventions.
+  function resolveToTreePath(fromFile, spec) {
+    const fromDir = path.dirname(fromFile);
+    const base = path.normalize(path.join(fromDir, spec));
+    const tryPaths = [
+      base,
+      `${base}.js`, `${base}.mjs`, `${base}.cjs`, `${base}.json`, `${base}.ts`,
+      `${base}/index.js`, `${base}/index.mjs`, `${base}/index.cjs`, `${base}/index.ts`
+    ];
+    return tryPaths.find(p => fileSet.has(p));
+  }
+
+  const requireRe = /\brequire\(\s*['"]([^'"\n]+)['"]\s*\)/g;
+  const importRe = /\bimport\s+(?:[^'"\n;]*?\s+from\s+)?['"]([^'"\n]+)['"]/g;
+  const issues = [];
+  for (const [key, value] of Object.entries(sourceTree)) {
+    if (!/\.(m?[jt]s|cjs)$/i.test(key)) continue;
+    const src = String(value || '');
+    const refs = new Set();
+    for (const m of src.matchAll(requireRe)) refs.add(m[1]);
+    for (const m of src.matchAll(importRe)) refs.add(m[1]);
+    for (const spec of refs) {
+      if (!spec.startsWith('.') && !spec.startsWith('/')) continue; // bare module name — handled by repair
+      const found = resolveToTreePath(key, spec);
+      if (!found) {
+        issues.push({ from: key, spec, expected: path.normalize(path.join(path.dirname(key), spec)) });
+      }
+    }
+  }
+  if (issues.length > 0) {
+    console.warn(`${logTag} Source tree missing ${issues.length} file(s) referenced by relative imports:`);
+    for (const it of issues) {
+      console.warn(`${logTag}   ${it.from} requires '${it.spec}' → no '${it.expected}{,.js,/index.js,...}' in source_tree`);
+    }
+  }
+  return issues;
+}
+
 // ─── Build-time smoke test ───────────────────────────────────────────────────
 // Run the freshly-built image with no port bindings or volumes and confirm it
 // stays running for SMOKE_DURATION_MS. If the container exits within the
@@ -386,6 +442,22 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
   // in place, so both this build path AND any subsequent on-VM fallback see
   // the repaired manifest.
   repairNodeSourceTree(vulnAppInstall.source_tree, logTag);
+
+  // Static check: every relative require/import must point to a file the LLM
+  // actually generated. Catches Stage-2-parallel-generation skew where one
+  // file references another that was never produced. Faster than waiting for
+  // the smoke test and gives a more actionable error.
+  const missing = detectMissingRelativeImports(vulnAppInstall.source_tree, logTag);
+  if (missing.length > 0) {
+    const summary = missing.map(m => `${m.from} → '${m.spec}'`).join('; ');
+    const err = new Error(
+      `vuln-app source incomplete — ${missing.length} relative import(s) point to ungenerated files: ${summary}`
+    );
+    err.code = 'VULN_APP_SMOKE_FAILED';
+    err.missingFiles = missing;
+    vulnAppInstall._smokeFailed = true;
+    throw err;
+  }
 
   try {
     const built = await buildAndPackage({
