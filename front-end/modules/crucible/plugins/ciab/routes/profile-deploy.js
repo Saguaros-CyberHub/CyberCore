@@ -32,7 +32,9 @@ const { resolveImageFile } = require('../utils/vuln-app-builder');
 const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator');
 const { generatePassword } = require('../../../../../src/utils/password-generator');
 const { guacAPI } = require('../../../../../src/utils/guacamole');
-const bcrypt = require('bcrypt');
+// bcryptjs (pure JS) is what package.json ships — matches src/routes/admin/groups.js's
+// student-creation pattern. The native `bcrypt` package isn't a dependency.
+const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const {
   deployProfileLanesBatch,
