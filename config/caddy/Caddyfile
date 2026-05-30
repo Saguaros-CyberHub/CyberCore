@@ -20,6 +20,17 @@
 # interface), so it isn't exposed to the public internet.
 # =============================================================================
 
+# --- Global options ---------------------------------------------------------
+# Disable Caddy's automatic HTTP→HTTPS redirect. Caddy keeps managing TLS for
+# {$CYBERHUB_HOST} (HTTPS still works on :443), but it stops emitting 308
+# redirects for *every* :80 request — which was bouncing lane VM image pulls
+# to https://<ip> where the cert doesn't match and the lane has no LE root.
+# If you want to restore HTTP→HTTPS for the public site only, add an explicit
+# `http://yourdomain { redir https://{host}{uri} }` block.
+{
+    auto_https disable_redirects
+}
+
 # --- Public site (HTTPS via Let's Encrypt when CYBERHUB_HOST is a domain) ----
 {$CYBERHUB_HOST} {
 
