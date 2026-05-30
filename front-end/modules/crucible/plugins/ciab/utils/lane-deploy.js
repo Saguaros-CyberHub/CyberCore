@@ -27,6 +27,7 @@ const { waitForGuestAgent, executeScriptsOnVM, guestFileWrite, agentExec, pollEx
 const { selectBestNode } = require('../../../../../src/utils/node-selector');
 const { runBatch, createCloneSemaphore, distributeAcrossNodes } = require('../../../../../src/utils/batch-deployer');
 const { guacAPI } = require('../../../../../src/utils/guacamole');
+const { ensureVulnImage } = require('./vuln-app-builder');
 
 const {
   V2_LANE_GATEWAY_VMID,
@@ -904,19 +905,61 @@ function rewriteDockerfileBases(dockerfile, logTag) {
   });
 }
 
+// Build the small install script the lane runs when the image was prebuilt on
+// the orchestrator: pull the gzip'd image over HTTP, docker load, run it. No
+// build, no registry pulls, no base64 source transfer — the heavy blob comes
+// down one HTTP stream the guest agent never touches.
+function buildPrebuiltInstallScript({ url, imageTag }) {
+  return [
+    'set -e',
+    `echo "[ciab] pulling prebuilt image from ${url}"`,
+    // Web template may ship curl OR wget, not necessarily both — try each.
+    'if command -v curl >/dev/null 2>&1; then',
+    `  curl -fsSL "${url}" -o /tmp/vuln-app.tar.gz || { echo "[ciab] image pull failed (curl)"; exit 11; }`,
+    'elif command -v wget >/dev/null 2>&1; then',
+    `  wget -q -O /tmp/vuln-app.tar.gz "${url}" || { echo "[ciab] image pull failed (wget)"; exit 11; }`,
+    'else',
+    '  echo "[ciab] no curl or wget on host"; exit 12',
+    'fi',
+    'echo "[ciab] loading image"',
+    'docker load -i /tmp/vuln-app.tar.gz',
+    'docker rm -f vuln-app 2>/dev/null || true',
+    `docker run -d --restart=always --name vuln-app -p 80:80 ${shellQuoteArg(imageTag)}`,
+    'rm -f /tmp/vuln-app.tar.gz',
+    'echo "[ciab] vuln-app running"'
+  ].join('\n');
+}
+
+function shellQuoteArg(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
 async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }) {
   if (!vulnAppInstall) return { success: true, skipped: true };
-  const { mode, source_tree } = vulnAppInstall;
-  // Rewrite Dockerfile base to a cached image BEFORE writing it.
-  const dockerfile = rewriteDockerfileBases(vulnAppInstall.dockerfile, logTag);
+  const { mode } = vulnAppInstall;
+  const prebuilt = vulnAppInstall.prebuilt;
 
-  // Force `docker build` to use --network=host so RUN steps (apk/apt) can
-  // resolve DNS via the host's resolver. Lane subnet blocks outbound UDP 53
-  // for containers, but host DNS via lane gateway → OPNsense works on TCP.
-  let install_script = vulnAppInstall.install_script || '';
-  if (install_script.includes('docker build') && !install_script.includes('--network=host')) {
-    install_script = install_script.replace(/docker\s+build\b/g, 'docker build --network=host');
-    console.log(`${logTag} Patched install_script: added --network=host to docker build (lane has no container DNS)`);
+  let source_tree, dockerfile, install_script;
+  if (prebuilt && prebuilt.token) {
+    // Orchestrator already built + saved the image. Nothing to write to the VM
+    // — just pull/load/run. Skip source_tree + Dockerfile materialization.
+    source_tree = null;
+    dockerfile = null;
+    install_script = buildPrebuiltInstallScript(prebuilt);
+    console.log(`${logTag} Using prebuilt image ${prebuilt.imageTag} (pull from ${prebuilt.url}) — skipping on-VM build`);
+  } else {
+    // Legacy on-VM build path. Rewrite Dockerfile base to a cached image
+    // BEFORE writing it, and force `docker build` to use --network=host so RUN
+    // steps (apk/apt) can resolve DNS via the host's resolver. Lane subnet
+    // blocks outbound UDP 53 for containers, but host DNS via lane gateway →
+    // OPNsense works on TCP.
+    source_tree = vulnAppInstall.source_tree;
+    dockerfile = rewriteDockerfileBases(vulnAppInstall.dockerfile, logTag);
+    install_script = vulnAppInstall.install_script || '';
+    if (install_script.includes('docker build') && !install_script.includes('--network=host')) {
+      install_script = install_script.replace(/docker\s+build\b/g, 'docker build --network=host');
+      console.log(`${logTag} Patched install_script: added --network=host to docker build (lane has no container DNS)`);
+    }
   }
 
   const targetDir = mode === 'docker' ? '/opt/vuln-app' : '/var/www/html';
@@ -1094,6 +1137,15 @@ async function deployOneLaneFromSpec({
   progress, domain
 }) {
   const logTag = `[CIAB Deploy ${groupName}]`;
+
+  // Retry path: the batch normally prebuilds the image, but a single-lane
+  // retry (called straight from the retry endpoint) may run after the group's
+  // image TTL expired. Ensure one exists (no-op + fast cache hit when it does).
+  if (vulnAppInstall && vulnAppInstall.mode === 'docker'
+      && !(vulnAppInstall.prebuilt && vulnAppInstall.prebuilt.token)) {
+    vulnAppInstall = await ensureVulnImage(vulnAppInstall, { logTag });
+  }
+
   const isV3 = subnetScheme === 'v3';
   const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
   const vnetExtName = vnet.vnet;
@@ -1460,6 +1512,18 @@ async function deployProfileLanesBatch({
   const cloneSem = createCloneSemaphore();
   const progress = initProgress(groupId, laneAllocations.length, groupName);
 
+  // ── Pre-build the vuln-app image on the orchestrator (once per group) ──
+  // The orchestrator has internet; the lane subnet does not. Build + save the
+  // image here while gateways clone, then each lane pulls + loads the ready
+  // image (see installVulnAppOnVM's prebuilt branch). ensureVulnImage returns
+  // the input unchanged if Docker is unavailable or the build fails, so the
+  // legacy on-VM build path remains the fallback.
+  let vulnImgPromise = null;
+  if (vulnAppInstall && vulnAppInstall.mode === 'docker') {
+    vulnImgPromise = ensureVulnImage(vulnAppInstall, { logTag: `[CIAB Deploy ${groupName}]` })
+      .catch(err => { console.warn(`[CIAB Deploy ${groupName}] image prebuild error: ${err.message}`); return vulnAppInstall; });
+  }
+
   // ── Auto-provision SDN zone + VNets for the whole batch ────────────────
   // CIAB ephemeral challenges aren't created via /create-lab, so their SDN
   // infrastructure doesn't exist yet. Do this once up-front so the per-lane
@@ -1539,6 +1603,16 @@ async function deployProfileLanesBatch({
     }
   }
   const deployableJobs = laneJobs.filter(j => gatewayResults[j.laneId]?.success);
+
+  // Await the orchestrator image build (started above, overlapped Phase 1).
+  if (vulnImgPromise) {
+    vulnAppInstall = await vulnImgPromise;
+    if (vulnAppInstall && vulnAppInstall.prebuilt) {
+      console.log(`[CIAB Deploy ${groupName}] Lanes will pull prebuilt image ${vulnAppInstall.prebuilt.imageTag}`);
+    } else {
+      console.log(`[CIAB Deploy ${groupName}] No prebuilt image — lanes fall back to on-VM build`);
+    }
+  }
 
   // ── Phase 2: per-lane VM clones + firstboot + IP writeback ─────────────
   progress.phase = 'deploying';

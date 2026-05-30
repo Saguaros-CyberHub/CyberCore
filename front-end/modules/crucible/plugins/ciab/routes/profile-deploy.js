@@ -28,6 +28,7 @@ const { buildDeployPreview } = require('../../../../../src/middleware/deployment
 
 const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
 const { getOrGenerateVulnApp } = require('../utils/vuln-app-generator');
+const { resolveImageFile } = require('../utils/vuln-app-builder');
 const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator');
 const {
   deployProfileLanesBatch,
@@ -383,6 +384,43 @@ async function runProfileDeploy(opts) {
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
+
+// Lab-internal source check for the unauthenticated image pull. The token is
+// the real gate (24 random bytes); this is defense-in-depth so the endpoint
+// can't be probed from the public internet. Lane egress SNATs to the gateway
+// WAN IP (100.64.0.0/10 CGNAT) — same source lane-bootstrap trusts.
+function isLabSourceIp(ip) {
+  if (!ip) return false;
+  if (/^127\./.test(ip) || ip === '::1') return true;            // loopback (local test)
+  if (/^10\./.test(ip)) return true;                              // RFC1918
+  if (/^192\.168\./.test(ip)) return true;                        // RFC1918
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;         // RFC1918 + docker bridge
+  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip)) return true; // 100.64/10 CGNAT (lab/Tailscale)
+  return false;
+}
+
+// GET /api/profile-deploy/image/:token — UNAUTHENTICATED, token-gated.
+// Lane web VMs pull their prebuilt vuln-app image tarball here (they have no
+// JWT). Streamed gzip'd `docker save` output. See utils/vuln-app-builder.js.
+router.get('/image/:token', (req, res) => {
+  const ip = String(req.ip || req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+  if (!isLabSourceIp(ip)) {
+    console.warn(`[CIAB ProfileDeploy] image pull rejected from non-lab source ${ip}`);
+    return res.status(403).end();
+  }
+  const entry = resolveImageFile(req.params.token);
+  if (!entry) return res.status(404).end();
+
+  res.setHeader('Content-Type', 'application/gzip');
+  const safeName = entry.imageTag.replace(/[^a-z0-9._-]/gi, '_');
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.tar.gz"`);
+  const stream = fs.createReadStream(entry.filePath);
+  stream.on('error', err => {
+    console.error(`[CIAB ProfileDeploy] image stream error for ${req.params.token.slice(0, 8)}…: ${err.message}`);
+    if (!res.headersSent) res.status(500).end(); else res.destroy();
+  });
+  stream.pipe(res);
+});
 
 // POST /api/profile-deploy/preview — pre-flight resource estimate
 router.post('/preview', authenticateToken, adminOnly, async (req, res) => {

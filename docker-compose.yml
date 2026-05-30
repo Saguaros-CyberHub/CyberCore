@@ -111,6 +111,11 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-4-5}
       LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-6}
+      # Internal URL lane web VMs use to PULL prebuilt vuln-app images (HTTP, no
+      # TLS — busybox wget on the web template). Lane egress SNATs to the gateway
+      # WAN IP, reaching this via the same path lane-bootstrap uses. Override if
+      # the orchestrator's lab IP differs. See utils/vuln-app-builder.js.
+      CYBERCORE_INTERNAL_URL: ${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}
       # Guacamole — internal service, always points to compose container
       GUAC_ENABLED: "true"
       GUAC_PUBLIC_BASE_URL: /guacamole
@@ -150,6 +155,11 @@ services:
       - ./front-end/profiles:/app/profiles:rw
       - ./front-end/vuln-assets:/app/vuln-assets:ro
       - ./logs:/app/logs:rw
+      # Built vuln-app image tarballs, served over HTTP to lane web VMs.
+      # Image build itself runs via the kaniko binary baked into this container
+      # (daemonless, no docker.sock mount, no host-VM escape path from a
+      # malicious RUN step) — see utils/vuln-app-builder.js + Dockerfile.
+      - ./front-end/vuln-builds:/app/vuln-builds:rw
     networks:
       - cybercore-net
 

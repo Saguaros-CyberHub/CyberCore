@@ -34,6 +34,10 @@ const VULN_APP_FILE_CONCURRENCY = parseInt(process.env.CIAB_VULN_APP_FILE_CONCUR
 // fits even the larger pages (auth + dashboard with inline CSS). Override
 // via env if you start hitting it again.
 const VULN_APP_FILE_MAX_TOKENS  = parseInt(process.env.CIAB_VULN_APP_FILE_MAX_TOKENS,  10) || 8192;
+// Retries are serial (no fan-out budget pressure), so give a flagged-truncated
+// page a bigger ceiling — re-running at the same 8192 cap just truncates again
+// and the page gets dropped. Sonnet 4.5 allows far more output than this.
+const VULN_APP_FILE_RETRY_MAX_TOKENS = parseInt(process.env.CIAB_VULN_APP_FILE_RETRY_MAX_TOKENS, 10) || 16384;
 
 // ─── Stage 1: design the app ───────────────────────────────────────────────
 
@@ -63,13 +67,13 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
   const pages = concept.page_inventory.filter(p => p && p.path);
   if (pages.length === 0) return { files: [], totalUsage: {}, fileErrors: [] };
 
-  const buildOpts = (pageSpec, attemptLabel = '') => ({
+  const buildOpts = (pageSpec, attemptLabel = '', maxTokens = VULN_APP_FILE_MAX_TOKENS) => ({
     model: llmModel,
     // Cache the file-gen system prompt across all N calls — big input savings
     // since each call also includes the same `concept` JSON in the user prompt.
     system: llm.cachedSystem(FILE_GEN_SYSTEM_PROMPT),
     messages: [{ role: 'user', content: buildFileUserPrompt({ concept, pageSpec }) }],
-    max_tokens: VULN_APP_FILE_MAX_TOKENS,
+    max_tokens: maxTokens,
     temperature: 0.6,
     label: `vuln-app:file:${pageSpec.path.replace(/[^a-z0-9]/gi, '_').slice(0, 20)}:${profileIdShort}${attemptLabel}`
   });
@@ -88,7 +92,11 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
     // terminate valid code). Don't try to count braces or look for ; / ,
     // — both are valid file terminators in JS/PHP/Python and produced
     // false positives that wasted LLM budget on healthy files.
-    const stopReason = r.value.stop_reason || (r.value.value && r.value.value.stop_reason);
+    // stop_reason lives on the raw Anthropic response (generateJson returns
+    // { value, raw, usage, latencyMs }). Reading r.value.stop_reason or
+    // r.value.value.stop_reason always yielded undefined, so 'max_tokens' was
+    // never detected and truncated files ending on a "safe" char slipped through.
+    const stopReason = r.value.raw && r.value.raw.stop_reason;
     const c = fileSpec.content;
     const lastLine = c.split('\n').pop().trim();
     const trimmed = c.replace(/\s+$/, '');
@@ -146,7 +154,7 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
     for (const item of pendingRetry) {
       try {
         const single = await llm.generateParallel(
-          [buildOpts(item.page, `:retry${attempt}`)],
+          [buildOpts(item.page, `:retry${attempt}`, VULN_APP_FILE_RETRY_MAX_TOKENS)],
           { json: true, maxConcurrent: 1 }
         );
         const interp = interpretResult(single[0], item.page);

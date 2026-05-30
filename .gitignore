@@ -101,3 +101,7 @@ runs/
 *.tmp
 .*.swp
 cybersaguaros-ad-rename.md
+
+# CIAB vuln-app image build output (built on the orchestrator, served to lanes)
+front-end/vuln-builds/
+**/vuln-builds/
