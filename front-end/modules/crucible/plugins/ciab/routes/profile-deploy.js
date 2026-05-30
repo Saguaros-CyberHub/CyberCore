@@ -30,6 +30,10 @@ const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
 const { getOrGenerateVulnApp } = require('../utils/vuln-app-generator');
 const { resolveImageFile } = require('../utils/vuln-app-builder');
 const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator');
+const { generatePassword } = require('../../../../../src/utils/password-generator');
+const { guacAPI } = require('../../../../../src/utils/guacamole');
+const bcrypt = require('bcrypt');
+const { v4: uuidv4 } = require('uuid');
 const {
   deployProfileLanesBatch,
   deployOneLaneFromSpec,
@@ -314,26 +318,89 @@ async function runProfileDeploy(opts) {
   const challengeId = reservation.challenge_id;
   const challengeKey = reservation.challenge_key;
 
+  // 8b. Auto-create student accounts (one per lane) + Guac users so each lane
+  // appears in its owner's "My Workspaces" page. Mirrors the pattern from
+  // /api/admin/deploy-group (src/routes/admin/groups.js:180-203). Pre-existing
+  // students with the same username get their password rotated via ON CONFLICT,
+  // so repeat deploys with the same group_name are safe — students keep their
+  // identity, instructors get fresh credentials to hand out.
+  const groupSlug = finalGroupName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const credentials = [];
+  const students = [];
+  for (let i = 1; i <= numLanes; i++) {
+    const studentId = uuidv4();
+    const email = `${groupSlug}-student${i}@clinic.local`;
+    const password = generatePassword();
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // Upsert the user — re-deploys of the same group rotate the password but
+    // keep the same user_id so prior workspaces/permissions stay associated.
+    const userRow = await cybercoreQuery(
+      `INSERT INTO cybercore_user
+         (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
+       VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, 'student', true, NOW())
+       ON CONFLICT (username) DO UPDATE SET
+         password_hash = EXCLUDED.password_hash,
+         password_alg  = 'bcrypt',
+         organization  = EXCLUDED.organization
+       RETURNING user_id`,
+      [studentId, email, email, passwordHash, 'Student', String(i), finalGroupName]
+    );
+    const effectiveId = userRow.rows[0].user_id;
+    students.push({ id: effectiveId, email, name: `Student ${i}`, index: i });
+    credentials.push({ email, password, role: 'student' });
+
+    // Best-effort Guac account — if Guac is down the deploy still completes
+    // and the admin can create it manually later.
+    try {
+      await guacAPI('POST', '/users', {
+        username: email,
+        password,
+        attributes: { disabled: null, timezone: 'America/Phoenix' }
+      });
+    } catch (_) {
+      // Guac may already have this user from a previous deploy; PUT to refresh password.
+      try {
+        await guacAPI('PUT', `/users/${encodeURIComponent(email)}`, {
+          username: email,
+          password,
+          attributes: { disabled: null, timezone: 'America/Phoenix' }
+        });
+      } catch (_) {}
+    }
+  }
+  console.log(`[CIAB ProfileDeploy] Group ${finalGroupName}: provisioned ${students.length} student account(s) (1 per lane)`);
+
   // 9. Create cybercore_lane + ciab_profile_lane_jobs rows for each lane
   const laneAllocations = [];
   for (let i = 0; i < vxlanIds.length; i++) {
     const vxlanId = vxlanIds[i];
-    const laneName = `ciab-${finalGroupName.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30)}-${i + 1}`;
-    // NOTE: cybercore_lane.lane_group_id FKs to crucible_lane_group (a different
-    // table from ciab_profile_lane_groups). We don't create rows there, so we
-    // leave the column NULL; the CIAB group linkage lives in config.group_id.
+    const student = students[i];
+    // Naming: matches the existing AZCYBR lane convention so My Workspaces
+    // shows readable titles like `kali-cochise-student1-710265`. The trailing
+    // VMID is the Kali VM ID (attack box offset + vxlan), making each lane
+    // uniquely identifiable at a glance.
+    const ATTACK_BOX_VMID_OFFSET = 700000;
+    const kaliVmid = ATTACK_BOX_VMID_OFFSET + vxlanId;
+    const laneName = `kali-${groupSlug}-student${student.index}-${kaliVmid}`;
+    // cybercore_lane.user_id MUST be the student's ID so the lane appears in
+    // that student's My Workspaces (the page filters by user_id). Previously
+    // we set this to the admin's userId, which is why Cochise lanes never
+    // appeared in any student's workspaces.
     const laneInsert = await cybercoreQuery(
       `INSERT INTO cybercore_lane
          (user_id, vxlan_id, name, status, config, module_key, challenge_id, created_at, updated_at)
        VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, NOW(), NOW())
        RETURNING lane_id`,
       [
-        userId, vxlanId, laneName,
+        student.id, vxlanId, laneName,
         JSON.stringify({
           challenge_id: challengeId,
           challenge_key: challengeKey,
           profile_lane_group: true,
-          group_id: groupId
+          group_id: groupId,
+          student_email: student.email,
+          student_index: student.index
         }),
         challengeId
       ]
@@ -384,7 +451,13 @@ async function runProfileDeploy(opts) {
     lanes: laneAllocations,
     service_gaps,
     template_misses,
-    vuln_app_id: vulnApp ? vulnApp.id : null
+    vuln_app_id: vulnApp ? vulnApp.id : null,
+    // One-time display in the admin deploy UI — the instructor hands these to
+    // students. Passwords are NOT stored in plaintext anywhere (hashes go to
+    // cybercore_user); this is the only point in the lifetime the cleartext
+    // password is visible. The admin UI surfaces a "save these now" warning.
+    credentials,
+    students: students.map(s => ({ email: s.email, name: s.name, index: s.index }))
   };
 }
 

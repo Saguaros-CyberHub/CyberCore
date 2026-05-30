@@ -435,18 +435,65 @@ async function runDeploy() {
   renderBanner('deploy-result', 'info', '⏳ Starting deployment…');
   try {
     const data = await apiCall('/profile-deploy/deploy', { method: 'POST', body: payload });
+
+    // Build the credentials block (one-time display — these passwords are
+    // never recoverable in plaintext again). Escape the password field
+    // because random charsets include HTML-sensitive chars like < > & " '.
+    const escapeHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    let credsBlock = '';
+    if (Array.isArray(data.credentials) && data.credentials.length) {
+      const rows = data.credentials.map(c =>
+        `<tr><td><code>${escapeHtml(c.email)}</code></td>` +
+        `<td><code>${escapeHtml(c.password)}</code></td>` +
+        `<td>${escapeHtml(c.role)}</td></tr>`
+      ).join('');
+      credsBlock = `
+        <div style="margin-top:1rem; background:#fffbea; border:2px solid #ecc94b; padding:1rem; border-radius:6px;">
+          <strong style="color:#744210;">⚠️ One-time student credentials — copy these now</strong>
+          <p style="margin:0.5rem 0; font-size:0.875rem; color:#744210;">These passwords are NOT recoverable. Re-deploying this group rotates them.</p>
+          <table style="width:100%; border-collapse:collapse; font-size:0.875rem; margin-top:0.5rem;">
+            <thead><tr style="background:#744210; color:#fff;">
+              <th style="padding:0.4rem 0.75rem; text-align:left;">Email</th>
+              <th style="padding:0.4rem 0.75rem; text-align:left;">Password</th>
+              <th style="padding:0.4rem 0.75rem; text-align:left;">Role</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <button onclick="copyCredsToClipboard()" class="btn btn-secondary" style="margin-top:0.5rem; font-size:0.85rem;">📋 Copy as CSV</button>
+        </div>`;
+      // Stash for the copy button
+      window._lastDeployCredentials = data.credentials;
+    }
+
     renderBanner('deploy-result', 'success',
-      `✅ Deploy started. Group <code>${data.group_id}</code> — ${data.lanes.length} lanes.
+      `✅ Deploy started. Group <code>${data.group_id}</code> — ${data.lanes.length} lanes, ${data.students?.length || 0} students.
        ${data.service_gaps.length ? `<br>⚠ ${data.service_gaps.length} service gaps` : ''}
-       ${data.template_misses.length ? `<br>⚠ ${data.template_misses.length} template misses` : ''}<br>
-       Switching to Active Groups…`);
-    setTimeout(() => switchTab('groups'), 1500);
+       ${data.template_misses.length ? `<br>⚠ ${data.template_misses.length} template misses` : ''}
+       ${credsBlock}`);
+    // Don't auto-switch tabs when we have credentials to show — let the admin
+    // copy them first. They can click into Active Groups themselves.
+    if (!credsBlock) setTimeout(() => switchTab('groups'), 1500);
   } catch (err) {
     const extra = [];
     if (err.body?.template_misses?.length) extra.push(`Template misses: ${err.body.template_misses.map(m => m.hostname).join(', ')}`);
     if (err.body?.service_gaps?.length)    extra.push(`Service gaps: ${err.body.service_gaps.length}`);
     renderBanner('deploy-result', 'error', `❌ ${err.message}${extra.length ? '<br>' + extra.join('<br>') : ''}`);
   }
+}
+
+// Copy the credentials block as a CSV the admin can paste into a class roster
+// email, spreadsheet, or LMS. One row per student; password is the plaintext
+// shown in the table — only available in this session, not retrievable later.
+function copyCredsToClipboard() {
+  const creds = window._lastDeployCredentials || [];
+  if (!creds.length) return;
+  const csv = 'email,password,role\n' +
+    creds.map(c => `${c.email},"${String(c.password).replace(/"/g, '""')}",${c.role}`).join('\n');
+  navigator.clipboard.writeText(csv).then(
+    () => renderBanner('deploy-result', 'success', '✅ Credentials copied as CSV. Paste into your spreadsheet.'),
+    () => alert(csv)   // fallback if clipboard API blocked — show in dialog
+  );
 }
 
 // ─── TAB 3: Active groups ──────────────────────────────────────────────────
