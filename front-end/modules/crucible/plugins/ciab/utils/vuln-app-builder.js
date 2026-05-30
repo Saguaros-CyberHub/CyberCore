@@ -394,22 +394,29 @@ function injectBaseStyles(sourceTree, palette, logTag) {
   // (or `static/`) at the URL root, so 'public/foo.css' is served at '/foo.css'.
   const baseHref = `/ciab-base.css`;
 
-  // Inject into every HTML/EJS/Handlebars/PHP/Python-template file. Place the
-  // link FIRST in <head> so the LLM's app-specific stylesheet loads after and
-  // can override. Templating placeholders (<%= %>, {{}}, <?php ?>) are left
-  // alone — we only touch the <head> tag opening.
-  // PHP is the big one — PHP+Apache labs embed HTML inside .php files, and
-  // the regex previously missed them entirely. Same for Python templates
-  // (.j2, .jinja2) and Ruby's .erb. ASP-flavored extensions included for
-  // completeness even though they're rare in CIAB labs.
-  const htmlExts = /\.(html?|ejs|hbs|handlebars|jsx|tsx|tmpl|tpl|php|phtml|j2|jinja2?|erb|aspx|cshtml|razor|vue|svelte)$/i;
+  // Identify HTML/template files by CONTENT, not extension. The LLM picks
+  // unpredictable extensions (.php, .ejs, .html, .vue, but also .htm, .tpl,
+  // .twig, weird mix), and matching a fixed extension list lost too many
+  // files. Content-based detection is robust against:
+  //   - new template engines we forget to whitelist
+  //   - extensions the LLM invents
+  //   - deployment-sync issues where the disk regex is stale
+  // We sniff the first 2KB of each file for HTML markup or common template
+  // language tags. Binary content (composer.json, .sql, .css, .js) doesn't
+  // match these patterns, so it's safely skipped.
+  const HTML_OR_TEMPLATE_RE = /<(html|head|body|!doctype|\?php|%[=@-]?|script|div|h[1-6]\b)/i;
+  const SKIP_KEYS_RE = /\.(css|js|mjs|cjs|ts|json|sql|md|txt|yml|yaml|toml|ini|env|lock|map|png|jpe?g|gif|svg|ico|woff2?|ttf|otf)$/i;
   const linkTag = `<link rel="stylesheet" href="${baseHref}">`;
   let injectedCount = 0;
   const alreadyHas = new RegExp(`href=["']${baseHref}["']`);
 
   for (const [key, value] of Object.entries(sourceTree)) {
-    if (!htmlExts.test(key)) continue;
+    // Fast-skip obvious non-template files by extension (cheap check).
+    if (SKIP_KEYS_RE.test(key)) continue;
     let content = String(value || '');
+    if (!content) continue;
+    // Content sniff — first 2KB is plenty to see <html, <!DOCTYPE, <?php, {%, etc.
+    if (!HTML_OR_TEMPLATE_RE.test(content.slice(0, 2048))) continue;
     if (alreadyHas.test(content)) continue;
 
     if (/<head[^>]*>/i.test(content)) {
@@ -465,17 +472,16 @@ const SMOKE_POLL_MS = 2000;
 
 async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
   const containerName = `ciab-smoke-${crypto.randomBytes(4).toString('hex')}`;
-  // Random high host port to avoid colliding with orchestrator services
-  // (Caddy on 80/443, app on 3000, n8n on 5678, postgres on 5432, etc.).
-  const smokeHostPort = 30000 + crypto.randomBytes(2).readUInt16BE() % 30000;
-  // We also pass PORT=80 in case the app reads it — same as the install_script
-  // we ship to lanes. The container's :80 maps to ${smokeHostPort} on the
-  // orchestrator host so we can curl it. If the app binds to a different port
-  // (3000, 8080, etc.) the curl-localhost probe will fail and surface that.
-  console.log(`${logTag} Smoke-testing ${imageTag} (container ${containerName}, host :${smokeHostPort} → container :80, ${SMOKE_DURATION_MS/1000}s)`);
+  // No port binding — the HTTP probe runs INSIDE the smoke container via
+  // `docker exec`, so we don't need to expose anything to the orchestrator
+  // host. Previously we bound to `127.0.0.1:<port>:80` and curl'd from the
+  // cybercore-app container, but the app container's loopback ≠ the host's
+  // loopback (separate netns), so the curl always failed even when the app
+  // was happily listening inside the smoke container.
+  console.log(`${logTag} Smoke-testing ${imageTag} (container ${containerName}, ${SMOKE_DURATION_MS/1000}s)`);
   try {
     await runShell(
-      `docker run -d --name ${shellQuote(containerName)} -e PORT=80 -p 127.0.0.1:${smokeHostPort}:80 ${shellQuote(imageTag)}`,
+      `docker run -d --name ${shellQuote(containerName)} -e PORT=80 ${shellQuote(imageTag)}`,
       { label: 'docker run smoke', timeoutMs: 30000 }
     );
 
@@ -515,29 +521,54 @@ async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
         throw err;
       }
 
-      // Second: does it answer HTTP on :80 (mapped to ${smokeHostPort})? Any
-      // HTTP status is acceptable — even 500 means the app is bound and
-      // responding. We only want to catch port-mismatch ("app on 3000 not 80")
-      // and "app crashed on first request" defects.
-      // -s silent, -o /dev/null discard body, -w write only the HTTP code,
-      // --max-time prevents hanging on slow-start apps. -f makes 4xx/5xx
-      // non-zero, so we use --write-out + grep for any 3-digit HTTP code.
+      // Second: does it answer HTTP on its own :80? Probe from INSIDE the
+      // container so we don't have to worry about netns boundaries. Try wget
+      // first (universally available — busybox in alpine, GNU wget in Debian),
+      // fall back to curl. Any HTTP status (1xx-5xx) means the app bound and
+      // responded; only "connection refused" or "no tool" means we should
+      // keep polling (the app may still be starting up).
       if (!httpOk) {
         try {
+          // wget -S writes headers to stderr; -O /dev/null discards the body;
+          // --tries=1 prevents the default 20-retry loop on connection
+          // refused; the `2>&1` merges stderr into stdout so we can grep
+          // a single stream. `|| true` so wget's non-zero exit on 4xx/5xx
+          // (which still means the app responded) doesn't kill the shell.
           const r = await runShell(
-            `curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://127.0.0.1:${smokeHostPort}/`,
-            { label: 'curl smoke', timeoutMs: 5000 }
+            `docker exec ${shellQuote(containerName)} sh -c "wget -S -O /dev/null --tries=1 --timeout=3 http://127.0.0.1:80/ 2>&1 || curl -s -o /dev/null -w 'HTTP/1.1 %{http_code}\\n' --max-time 3 http://127.0.0.1:80/ 2>&1 || true"`,
+            { label: 'docker exec smoke probe', timeoutMs: 8000 }
           );
-          const code = r.stdout.trim();
-          if (/^[1-5]\d\d$/.test(code)) {
+          const out = (r.stdout || '') + (r.stderr || '');
+          // Look for an HTTP response line — present whenever the server
+          // answered, regardless of status code.
+          const m = out.match(/HTTP\/[\d.]+\s+(\d{3})/);
+          if (m) {
             httpOk = true;
-            console.log(`${logTag} ✓ HTTP probe got ${code} from container :80 after ${Math.round((Date.now() - startedAt)/1000)}s`);
+            console.log(`${logTag} ✓ HTTP probe got ${m[1]} from container :80 after ${Math.round((Date.now() - startedAt)/1000)}s`);
           } else {
-            lastCurlErr = `unexpected response code "${code}"`;
+            // No tool inside the container, OR connection still refused.
+            // The presence of "command not found" / "executable file not
+            // found" indicates we need a different probe strategy; in that
+            // case we accept "container stayed alive" as smoke success
+            // (degraded mode — still better than no check).
+            lastCurlErr = out.trim().split('\n').slice(-3).join(' | ').slice(0, 200);
           }
         } catch (err) {
-          lastCurlErr = err.message.slice(0, 120);
+          lastCurlErr = err.message.slice(0, 200);
         }
+      }
+    }
+
+    if (!httpOk) {
+      // If the failure mode is "no HTTP probe tool in the image", treat the
+      // run as a PASS provided the container is still alive at end of window.
+      // Catches images so minimal they ship without wget AND curl (rare —
+      // node/python/php/nginx/ruby base images all have at least wget).
+      const probeToolMissing = /not found|command not found|executable file not found|wget: not found/i.test(lastCurlErr);
+      if (probeToolMissing) {
+        console.warn(`${logTag} ⚠ HTTP probe tool not present inside container — accepting liveness-only smoke pass (last probe output: ${lastCurlErr.slice(0, 120)})`);
+        // Fall through to the success log below.
+        httpOk = true;
       }
     }
 

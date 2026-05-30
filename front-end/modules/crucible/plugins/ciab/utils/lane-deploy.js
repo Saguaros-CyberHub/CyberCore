@@ -971,6 +971,20 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
   const { mode } = vulnAppInstall;
   const prebuilt = vulnAppInstall.prebuilt;
 
+  // Hard skip: the orchestrator-side smoke test already proved this app
+  // crashes (or can't bind :80, or has missing files). On-VM build runs the
+  // SAME source against the SAME Dockerfile from a less-capable environment
+  // (no internet through lane perimeter for some package mirrors, brittle
+  // apt-get inside the lane web VM). It has never worked in this session
+  // and produces noisy install_script exit-100 failures that confuse the
+  // operator. Skip it — admin needs to regenerate the vuln-app instead.
+  if (vulnAppInstall._smokeFailed) {
+    console.warn(`${logTag} Vuln-app skipped on ${vmName}: orchestrator smoke test failed earlier in this deploy. ` +
+      `On-VM build is intentionally not attempted (it would hit the same crash). ` +
+      `Redeploy this lane to trigger a fresh LLM generation, or pick a different difficulty.`);
+    return { success: false, skipped: true, error: 'vuln-app smoke test failed; on-VM fallback disabled' };
+  }
+
   let source_tree, dockerfile, install_script;
   if (prebuilt && prebuilt.token) {
     // Orchestrator already built + saved the image. Nothing to write to the VM
@@ -979,6 +993,14 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
     dockerfile = null;
     install_script = buildPrebuiltInstallScript(prebuilt);
     console.log(`${logTag} Using prebuilt image ${prebuilt.imageTag} (pull from ${prebuilt.url}) — skipping on-VM build`);
+  } else if (!prebuilt) {
+    // No prebuilt image AND smoke didn't explicitly fail — usually means
+    // Docker was unreachable on the orchestrator or the LLM didn't produce
+    // a Dockerfile. Same reasoning applies: the on-VM build path is known
+    // unreliable; better to fail loud than fail late in install_script.
+    console.warn(`${logTag} Vuln-app skipped on ${vmName}: no prebuilt image and on-VM fallback is disabled. ` +
+      `Check the earlier "Orchestrator image build failed" log line for the root cause.`);
+    return { success: false, skipped: true, error: 'no prebuilt image; on-VM fallback disabled' };
   } else {
     // Legacy on-VM build path. Rewrite Dockerfile base to a cached image
     // BEFORE writing it, and force `docker build` to use --network=host so RUN
