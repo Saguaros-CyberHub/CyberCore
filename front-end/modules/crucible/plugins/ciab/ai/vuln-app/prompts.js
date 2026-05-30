@@ -72,12 +72,29 @@ HARD CONSTRAINTS — every design MUST:
     matching this (apk add python3 make g++ before npm install on alpine).
     Pure-JS equivalents (sql.js, bcryptjs) are also fine — pick what makes the
     app pedagogically interesting, not what avoids native compilation.
-2b. ONLY use docker base images CIAB pre-bakes onto every web template:
-      node:20-alpine, python:3-slim, php:8.2-apache, nginx:alpine, ruby:3-alpine
-    Pick the one matching primary_language. The lane subnet has NO outbound
-    internet — any other FROM stanza will fail at build time because the
-    registry isn't reachable. Reflect this choice in tech_stack (e.g. say
-    'Node.js 20 + Express + SQLite' for Node, not 'Node.js 16').
+2b. BASE IMAGE — pick from the proven-working set below. CIAB builds the image
+    on the orchestrator (which has internet), then ships the tarball to the
+    isolated lane VM. The image must START cleanly: CIAB runs a 2-second
+    smoke-test "docker run" after build, and a startup crash there kills the
+    deploy. Pick:
+      node:20-alpine             Node apps. MUST use better-sqlite3 (not
+                                 sqlite3 — its v5 prebuilt requires GLIBC 2.38
+                                 which alpine/musl doesnt have, crashes on
+                                 startup).
+      python:3-slim              Python apps (Flask, FastAPI). SQLite via
+                                 stdlib sqlite3 module works out of the box.
+      php:8.2-apache             PHP apps. php-sqlite3 extension is pre-enabled.
+      nginx:alpine               Static + reverse-proxy patterns.
+      ruby:3-alpine              Ruby/Sinatra apps.
+    Pick the one matching primary_language. Reflect it in tech_stack (e.g.
+    'Node.js 20 + Express + better-sqlite3', NOT 'Node.js 16').
+
+    Native-binding gotchas you MUST avoid:
+    - Node + sqlite3 (the npm package): broken on alpine and on Debian
+      Bookworm. Use better-sqlite3 instead — same SQL, better prebuilt coverage.
+    - Node + bcrypt: same family of issues; use bcryptjs (pure JS).
+    - Node + canvas/sharp: needs glibc + build deps; only use if app genuinely
+      needs image processing, and pin to a Debian-slim base + install build-essential.
 3. Have a 3–5 stage attack chain. Each stage MUST yield concrete progress (flag, credential, file, shell).
 4. PICK VULN TYPES OUTSIDE THE OWASP TOP-10 CORE WHEN POSSIBLE. Encourage variety. Examples — pick freely, don't reuse the same chain across companies:
    - SSTI (Jinja2, Twig, Handlebars), XXE in XML uploaders, deserialization (PHP unserialize, Python pickle, Node serialize), prototype pollution
