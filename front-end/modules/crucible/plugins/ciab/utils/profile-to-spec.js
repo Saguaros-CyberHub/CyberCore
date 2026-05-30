@@ -301,7 +301,11 @@ function synthesizeSpecFromProfile({
         install_script: vulnApp.install_script,
         source_tree: vulnApp.source_tree || null,
         dockerfile: vulnApp.dockerfile || null,
-        color_palette: vulnApp.color_palette || null
+        // Color palette lives in the generation_meta JSONB (no dedicated DB
+        // column). Read from there with a fallback to a top-level field for
+        // any in-memory callers that don't go through the DB round-trip.
+        color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
+          || vulnApp.color_palette || null
       };
     } else if (vulnApp.delivery_mode === 'standalone_vm') {
       // Caller asked for dedicated VM. Append one extra phantom VM that the
@@ -325,7 +329,8 @@ function synthesizeSpecFromProfile({
         install_script: vulnApp.install_script,
         source_tree: vulnApp.source_tree || null,
         dockerfile: vulnApp.dockerfile || null,
-        color_palette: vulnApp.color_palette || null
+        color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
+          || vulnApp.color_palette || null
       };
     }
     // else: no web server and not standalone_vm → silently skip; vulnApp stays

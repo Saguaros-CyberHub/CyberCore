@@ -58,6 +58,11 @@ const _byHash = new Map();
 let _dockerAvailable = null;   // cached probe result
 
 // ─── Shell helper ───────────────────────────────────────────────────────────
+// Captures both stdout and stderr. On non-zero exit, attaches a generous
+// error tail so deprecation banners at the END of the output don't push the
+// REAL error off the truncation cliff (which is exactly what bit us with
+// `docker build` — Docker's new deprecation warning at the end took up the
+// last 600 chars and hid the actual layer-build failure).
 function runShell(script, { timeoutMs = BUILD_TIMEOUT_MS, label = 'sh' } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn('/bin/sh', ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -71,8 +76,18 @@ function runShell(script, { timeoutMs = BUILD_TIMEOUT_MS, label = 'sh' } = {}) {
     child.on('error', err => { clearTimeout(timer); reject(err); });
     child.on('close', code => {
       clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${label} exited ${code}: ${(stderr || stdout).slice(-600)}`));
+      if (code === 0) return resolve({ stdout, stderr });
+      // Big tail (3KB) so multi-step builds with banners + the real error
+      // both fit. If the output is short enough to fit in the tail, the
+      // entire output is shown.
+      const TAIL = 3000;
+      const out = stderr || stdout;
+      const tail = out.length > TAIL ? `... [truncated, last ${TAIL} chars] ...\n${out.slice(-TAIL)}` : out;
+      const err = new Error(`${label} exited ${code}:\n${tail}`);
+      err.exitCode = code;
+      err.stdout = stdout;
+      err.stderr = stderr;
+      reject(err);
     });
   });
 }
@@ -155,8 +170,16 @@ async function buildAndPackage({ sourceTree, dockerfile, logTag = '[CIAB VulnBui
     // build runs in a sandboxed Docker build container — RUN steps don't
     // share the app container's filesystem the way kaniko did, so this no
     // longer clobbers /usr/bin/curl etc. on the orchestrator.
+    //
+    // DOCKER_BUILDKIT=1 opts into BuildKit (the modern Docker builder).
+    // The legacy builder is being removed in Docker 27+; without this var
+    // newer Docker prints a deprecation banner that polluted our error
+    // tails, and recent versions outright fail when buildx isn't installed.
+    // BuildKit is included by default in any reasonably-current Docker
+    // Engine — if the host doesn't have it, the build fails fast with a
+    // clear "buildx not available" error instead of the truncated banner.
     console.log(`${logTag} Building image ${imageTag} (context ${ctxDir})`);
-    await runShell(`docker build -t ${imageTag} ${shellQuote(ctxDir)}`, { label: `docker build ${imageTag}` });
+    await runShell(`DOCKER_BUILDKIT=1 docker build -t ${imageTag} ${shellQuote(ctxDir)}`, { label: `docker build ${imageTag}` });
 
     // Smoke-test: run the image briefly and confirm it doesn't crash on
     // startup. Catches the "image builds clean, app crashes on require()"
@@ -371,11 +394,15 @@ function injectBaseStyles(sourceTree, palette, logTag) {
   // (or `static/`) at the URL root, so 'public/foo.css' is served at '/foo.css'.
   const baseHref = `/ciab-base.css`;
 
-  // Inject into every HTML/EJS/Handlebars file. Place the link FIRST in <head>
-  // so the LLM's app-specific stylesheet loads after and can override.
-  // Templating placeholders (<%= %>, {{}}) are left alone — we only touch
-  // <head> tag opening.
-  const htmlExts = /\.(html?|ejs|hbs|handlebars|jsx|tsx|tmpl|tpl)$/i;
+  // Inject into every HTML/EJS/Handlebars/PHP/Python-template file. Place the
+  // link FIRST in <head> so the LLM's app-specific stylesheet loads after and
+  // can override. Templating placeholders (<%= %>, {{}}, <?php ?>) are left
+  // alone — we only touch the <head> tag opening.
+  // PHP is the big one — PHP+Apache labs embed HTML inside .php files, and
+  // the regex previously missed them entirely. Same for Python templates
+  // (.j2, .jinja2) and Ruby's .erb. ASP-flavored extensions included for
+  // completeness even though they're rare in CIAB labs.
+  const htmlExts = /\.(html?|ejs|hbs|handlebars|jsx|tsx|tmpl|tpl|php|phtml|j2|jinja2?|erb|aspx|cshtml|razor|vue|svelte)$/i;
   const linkTag = `<link rel="stylesheet" href="${baseHref}">`;
   let injectedCount = 0;
   const alreadyHas = new RegExp(`href=["']${baseHref}["']`);

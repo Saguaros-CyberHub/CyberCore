@@ -1037,8 +1037,18 @@ async function installVulnAppOnVM({ node, vmId, vmName, vulnAppInstall, logTag }
       // `exit-code`. Accept both. Same for err-data / err vs stderr.
       const exitCode = result?.exitcode ?? result?.['exit-code'];
       const stderr = result?.['err-data'] ?? result?.err ?? null;
+      const stdout = result?.['out-data'] ?? result?.out ?? null;
       if (exitCode !== 0 && exitCode !== undefined) {
         console.warn(`${logTag} [install:step4] ✗ install_script exited ${exitCode}`);
+        // Surface the script's actual stderr + last lines of stdout to the
+        // orchestrator log. Without this we can see "exited 100" but not
+        // WHY (apt failure, docker daemon down, etc.) — which means the
+        // user has to ssh into the lane VM to diagnose. Most install_script
+        // outputs are short (<10KB); we cap at 4KB to bound log size.
+        const tailStderr = stderr ? String(stderr).slice(-4000) : null;
+        const tailStdout = stdout ? String(stdout).slice(-1500) : null;
+        if (tailStderr) console.warn(`${logTag} [install:step4] stderr:\n${tailStderr}`);
+        if (tailStdout) console.warn(`${logTag} [install:step4] stdout (tail):\n${tailStdout}`);
         return { success: false, error: `install_script exited ${exitCode}`, stderr };
       }
       if (exitCode === undefined) {

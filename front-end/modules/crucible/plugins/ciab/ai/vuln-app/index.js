@@ -536,6 +536,10 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel, dif
       // (profile_id, difficulty), and the answer-key UI can show which
       // level was generated.
       difficulty,
+      // Stashed in generation_meta because there's no dedicated DB column —
+      // profile-to-spec.js reads it back to thread into vulnAppInstall so
+      // the CSS injector can theme base.css to the company's brand.
+      color_palette: concept.color_palette || null,
       title: concept.title,
       theme_summary: concept.theme_summary,
       tech_stack: concept.tech_stack,
