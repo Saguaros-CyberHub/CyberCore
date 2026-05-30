@@ -209,7 +209,7 @@ function resolveLaneNetworking(subnetScheme, module, vxlanId) {
  * No-op if subnet_scheme is v1 or Tailscale env vars are not configured.
  * Failure does NOT fail the deploy — logged as a warning.
  */
-async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, logTag = '[Deploy]' }) {
+async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, claimSecret, logTag = '[Deploy]' }) {
   if (subnetScheme !== 'v2' && subnetScheme !== 'v3') return false;
   if (!tailscale.isEnabled()) {
     console.log(`${logTag} Tailscale env not configured — skipping BYOAB key mint for lane ${vxlanId}`);
@@ -222,6 +222,10 @@ async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, 
   try {
     const { key, tags } = await tailscale.mintLaneAuthKey({ vxlanId });
     const hostname = formatLaneHostname({ vxlanId, laneName });
+    // _claim_secret is the per-lane one-shot the gateway echoes back as
+    // ?secret=… on /api/lane-bootstrap. Replaces source-IP matching, which
+    // breaks when the orchestrator's Docker bridge / proxy chain rewrites
+    // the source IP. Mirrors the CIAB-side configureLaneTailscale.
     await tailscale.storeLaneBootstrap({
       cybercoreQuery,
       vxlanId,
@@ -229,10 +233,11 @@ async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, 
       payload: {
         tailscale_authkey:  key,
         tailscale_tags:     tags.join(','),
-        tailscale_hostname: hostname
+        tailscale_hostname: hostname,
+        _claim_secret:      claimSecret || null
       }
     });
-    console.log(`${logTag} Tailscale bootstrap staged for lane ${vxlanId} (wan=${wanIp}, tags=${tags.join(',')})`);
+    console.log(`${logTag} Tailscale bootstrap staged for lane ${vxlanId} (wan=${wanIp}, tags=${tags.join(',')}${claimSecret ? ', secret-gated' : ', IP-gated'})`);
     return true;
   } catch (err) {
     const cause = err.cause ? ` (cause: ${err.cause.code || err.cause.message || err.cause})` : '';

@@ -8,6 +8,7 @@
 
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { proxmoxAPI, waitForTask, forceDestroyVM, findTemplateNode } = require('../../utils/proxmox');
 const { getDefaultTemplateNode } = require('../../utils/site-config');
@@ -273,9 +274,19 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
         }
 
         const gatewayVmId = 100000 + vxlanId;
+        // Per-lane bootstrap secret embedded as `-b<16hex>` hostname suffix.
+        // firstboot greps it back and passes ?secret=… to /api/lane-bootstrap,
+        // replacing source-IP gating. See utils/lane-networking.js
+        // configureLaneTailscale + bake-lane-gateway-v2.sh. Hostname budget:
+        // 63 chars; reserve 18 for `-b<16hex>`.
+        const claimSecret = crypto.randomBytes(8).toString('hex');
+        const baseHost = `${laneName}-gateway`.substring(0, 63 - 18).toLowerCase()
+          .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
+        const gwHostname = `${baseHost}-b${claimSecret}`;
+
         const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
           newid: gatewayVmId,
-          hostname: `${laneName}-gateway`,
+          hostname: gwHostname,
           full: 1,
           target: bestNode,
           description: `Challenge: ${challenge_key}\nUser ID: ${user_id}\nLane ID: ${lane.lane_id}\nModule: ${module}`,
@@ -302,6 +313,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           vxlanId,
           wanIp: net.wan.ip.split('/')[0],
           laneName,
+          claimSecret,
           logTag: '[Deploy]'
         });
 

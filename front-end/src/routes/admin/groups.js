@@ -8,6 +8,7 @@
 
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
@@ -405,9 +406,21 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             const gatewayVmId = 100000 + vxlanId;
             try {
               console.log(`[Group ${group_name}] Cloning gateway LXC ${localTemplateId}@${sourceNode} → ${gatewayVmId} for ${student.email}`);
+              // Per-lane bootstrap secret embedded as `-b<16hex>` suffix on the
+              // LXC hostname. firstboot greps it back out (`hostname | grep -oE
+              // 'b[a-f0-9]{16}$'`) and includes it as ?secret=… on the bootstrap
+              // request. Replaces source-IP gating which breaks behind the
+              // orchestrator's Docker bridge. See utils/lane-networking.js
+              // configureLaneTailscale + bake-lane-gateway-v2.sh.
+              // Hostname budget: 63 chars; reserve 18 for `-b<16hex>`.
+              const claimSecret = crypto.randomBytes(8).toString('hex');
+              const baseHost = `${job.laneName}-gateway`.substring(0, 63 - 18).toLowerCase()
+                .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
+              const hostname = `${baseHost}-b${claimSecret}`;
+
               const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/lxc/${localTemplateId}/clone`, {
                 newid: gatewayVmId,
-                hostname: `${job.laneName}-gateway`,
+                hostname,
                 full: 1,
                 target: node,
                 description: `Group: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
@@ -432,6 +445,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 vxlanId,
                 wanIp: net.wan.ip.split('/')[0],
                 laneName: job.laneName,
+                claimSecret,
                 logTag: `[Group ${group_name}]`
               });
               gatewayResults[laneId] = { success: true };

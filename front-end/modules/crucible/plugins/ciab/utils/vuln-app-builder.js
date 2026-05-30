@@ -189,6 +189,96 @@ function imageUrl(token) {
   return `${LANE_ORCH_URL}/api/profile-deploy/image/${token}`;
 }
 
+// ─── package.json auto-repair ────────────────────────────────────────────────
+// The LLM regularly generates apps that `require('bcrypt')` or
+// `require('better-sqlite3')` without adding the package to package.json's
+// `dependencies` (often in `devDependencies`, or omitted entirely). The
+// docker build's `npm install --omit=dev` then silently skips them, the
+// container crashes on startup with MODULE_NOT_FOUND. Rather than rejecting
+// these apps — which were designed correctly otherwise — we statically scan
+// the source for runtime imports and ADD anything missing to `dependencies`
+// with a version of "*" (latest). The orchestrator has internet for the
+// build, so npm install pulls them. If a package name was hallucinated,
+// npm install fails noisily, which is still a clearer failure than
+// MODULE_NOT_FOUND at startup.
+//
+// Mutates sourceTree in place. Returns the list of added/moved deps for
+// logging.
+const NODE_BUILTINS = new Set([
+  'assert','async_hooks','buffer','child_process','cluster','console','constants',
+  'crypto','dgram','dns','domain','events','fs','fs/promises','http','http2','https',
+  'module','net','os','path','perf_hooks','process','punycode','querystring',
+  'readline','repl','stream','stream/promises','string_decoder','sys','timers',
+  'timers/promises','tls','trace_events','tty','url','util','util/types','v8',
+  'vm','wasi','worker_threads','zlib','inspector','test'
+]);
+
+function isNodeBuiltin(name) {
+  const bare = name.replace(/^node:/, '');
+  return NODE_BUILTINS.has(bare);
+}
+
+function topLevelPkgName(spec) {
+  // 'lodash/fp' → 'lodash'   '@scope/pkg/sub' → '@scope/pkg'
+  if (spec.startsWith('@')) return spec.split('/').slice(0, 2).join('/');
+  return spec.split('/')[0];
+}
+
+function repairNodeSourceTree(sourceTree, logTag) {
+  if (!sourceTree || typeof sourceTree !== 'object') return [];
+  const pkgKey = Object.keys(sourceTree).find(
+    k => k === 'package.json' || k.endsWith('/package.json')
+  );
+  if (!pkgKey) return []; // not a node project
+
+  let pkg;
+  try {
+    pkg = JSON.parse(String(sourceTree[pkgKey]));
+  } catch (err) {
+    console.warn(`${logTag} package.json is not valid JSON — skipping dep repair (${err.message.slice(0, 80)})`);
+    return [];
+  }
+  pkg.dependencies = pkg.dependencies || {};
+  pkg.devDependencies = pkg.devDependencies || {};
+  const declared = new Set(Object.keys(pkg.dependencies));
+
+  // Scan all .js/.mjs/.cjs/.ts files for require()/import statements.
+  const detected = new Set();
+  const requireRe = /\brequire\(\s*['"]([^'"\n]+)['"]\s*\)/g;
+  const importRe = /\bimport\s+(?:[^'"\n;]*?\s+from\s+)?['"]([^'"\n]+)['"]/g;
+  for (const [key, value] of Object.entries(sourceTree)) {
+    if (!/\.(m?[jt]s|cjs)$/i.test(key)) continue;
+    const src = String(value || '');
+    for (const m of src.matchAll(requireRe)) detected.add(m[1]);
+    for (const m of src.matchAll(importRe)) detected.add(m[1]);
+  }
+
+  const added = [];
+  for (const spec of detected) {
+    if (spec.startsWith('.') || spec.startsWith('/')) continue; // relative
+    if (isNodeBuiltin(spec)) continue;
+    const name = topLevelPkgName(spec);
+    if (declared.has(name)) continue;
+    if (pkg.devDependencies[name]) {
+      pkg.dependencies[name] = pkg.devDependencies[name];
+      delete pkg.devDependencies[name];
+      added.push(`${name} (moved from devDependencies)`);
+    } else {
+      pkg.dependencies[name] = '*';
+      added.push(name);
+    }
+    declared.add(name);
+  }
+
+  if (added.length === 0) return [];
+
+  // Clean up empty devDependencies object if we moved everything out
+  if (Object.keys(pkg.devDependencies).length === 0) delete pkg.devDependencies;
+  sourceTree[pkgKey] = JSON.stringify(pkg, null, 2) + '\n';
+  console.log(`${logTag} Auto-repaired ${pkgKey} — added ${added.length} missing runtime dep(s): ${added.join(', ')}`);
+  return added;
+}
+
 // ─── Build-time smoke test ───────────────────────────────────────────────────
 // Run the freshly-built image with no port bindings or volumes and confirm it
 // stays running for SMOKE_DURATION_MS. If the container exits within the
@@ -272,6 +362,14 @@ async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
  */
 async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } = {}) {
   if (!vulnAppInstall || vulnAppInstall.mode !== 'docker') return vulnAppInstall;
+  // Don't retry a build we already know will fail with the same source. Set
+  // by the prebuild path's catch (lane-deploy.js:1556) when smoke fails, so
+  // the per-lane retry safety net at lane-deploy.js:1179 skips a second
+  // doomed build attempt.
+  if (vulnAppInstall._smokeFailed) {
+    console.warn(`${logTag} skipping rebuild — earlier smoke test failed (source unchanged)`);
+    return vulnAppInstall;
+  }
   if (vulnAppInstall.prebuilt && vulnAppInstall.prebuilt.token) {
     // Already built — confirm the file still exists (TTL/restart safety).
     const entry = _registry.get(vulnAppInstall.prebuilt.token);
@@ -282,6 +380,12 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
     return vulnAppInstall;
   }
   if (!(await dockerAvailable())) return vulnAppInstall;
+
+  // Auto-repair package.json BEFORE building — adds runtime modules the LLM
+  // forgot to declare in `dependencies`. Mutates vulnAppInstall.source_tree
+  // in place, so both this build path AND any subsequent on-VM fallback see
+  // the repaired manifest.
+  repairNodeSourceTree(vulnAppInstall.source_tree, logTag);
 
   try {
     const built = await buildAndPackage({
@@ -295,12 +399,13 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
     };
   } catch (err) {
     if (err.code === 'VULN_APP_SMOKE_FAILED') {
-      // Image built but the app crashes on startup — falling back to on-VM
-      // build won't help (same source, same Dockerfile, same crash). Surface
-      // the error to the deploy so the user regenerates the app instead of
-      // discovering the bug from a crash-looping container in a lane.
+      // Image built but the app crashes on startup. Manifest auto-repair
+      // already ran, so if it still fails, the bug is in the app source
+      // itself (syntax error, bad CMD, etc.) — re-running with identical
+      // input gets the same result. Mark so per-lane retry skips.
       console.warn(`${logTag} ${err.message.split('\n')[0]}`);
       console.warn(`${logTag} Smoke logs:\n${err.message.split('\n').slice(1).join('\n')}`);
+      vulnAppInstall._smokeFailed = true;
       throw err;
     }
     console.warn(`${logTag} Orchestrator image build failed (${err.message.slice(0, 160)}) — falling back to on-VM build`);
