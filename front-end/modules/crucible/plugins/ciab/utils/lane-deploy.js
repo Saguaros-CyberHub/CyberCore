@@ -645,12 +645,17 @@ async function proxmoxFormPOST(path, pairs) {
   args.push(url);
 
   return new Promise((resolve, reject) => {
-    const child = spawn('curl', args);
+    // Absolute path — alpine's apk installs curl to /usr/bin/curl unconditionally.
+    // Bypasses PATH search so a Node process whose env.PATH is missing /usr/bin
+    // (mysteriously, but we've hit it) still finds the binary. Override via
+    // CURL_BIN env if curl ever ships somewhere else.
+    const curlBin = process.env.CURL_BIN || '/usr/bin/curl';
+    const child = spawn(curlBin, args);
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', d => stdout += d.toString());
     child.stderr.on('data', d => stderr += d.toString());
-    child.on('error', err => reject(new Error(`curl spawn failed: ${err.message}`)));
+    child.on('error', err => reject(new Error(`${curlBin} spawn failed: ${err.message}`)));
     child.on('close', code => {
       if (code !== 0) {
         return reject(new Error(`curl exited ${code}: ${stderr.slice(0, 300)}`));
