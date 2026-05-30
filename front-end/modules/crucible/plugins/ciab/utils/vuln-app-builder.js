@@ -431,6 +431,19 @@ function injectBaseStyles(sourceTree, palette, logTag) {
     `themed primary=${palette.primary || 'default'} accent=${palette.accent || 'default'} ` +
     `bg=${palette.bg || 'default'}; linked into ${injectedCount} HTML file(s)`
   );
+  // Diagnostic: when no HTML files were linked but we have other files, log the
+  // source_tree keys so we can see WHY the regex missed. Most common cause is
+  // the LLM generating paths the regex doesn't know about (e.g. mustache .ms,
+  // vanilla .htm without the l), or the source_tree being passed in as a JSON
+  // STRING rather than a parsed object (a DB-layer parsing regression).
+  if (injectedCount === 0) {
+    const keys = Object.keys(sourceTree);
+    if (keys.length === 0) {
+      console.warn(`${logTag}   ⚠ source_tree is empty (${typeof sourceTree}) — nothing to link into`);
+    } else {
+      console.warn(`${logTag}   ⚠ no HTML/template files matched. source_tree has ${keys.length} key(s): ${keys.slice(0, 20).join(', ')}${keys.length > 20 ? ` ... +${keys.length-20} more` : ''}`);
+    }
+  }
 }
 
 // ─── Build-time smoke test ───────────────────────────────────────────────────

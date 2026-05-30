@@ -12,9 +12,15 @@ FROM node:18-alpine
 #                  break the orchestrator. DooD is back; the security tradeoff
 #                  is documented in utils/vuln-app-builder.js + the project
 #                  threat-model notes.
+#   - docker-cli-buildx : BuildKit CLI plugin. Docker 23+ defaults to BuildKit
+#                  and outright fails on `docker build` without buildx; the
+#                  Alpine `docker-cli` package does NOT bundle it. Symptom
+#                  without this: `ERROR: BuildKit is enabled but the buildx
+#                  component is missing or broken`. We set DOCKER_BUILDKIT=1
+#                  in vuln-app-builder.js so this needs to be present.
 #   - ca-certificates : keeps TLS happy for outbound HTTPS (Anthropic, registry
 #                       pulls during builds, Tailscale).
-RUN apk add --no-cache curl docker-cli ca-certificates
+RUN apk add --no-cache curl docker-cli docker-cli-buildx ca-certificates
 
 WORKDIR /app
 
