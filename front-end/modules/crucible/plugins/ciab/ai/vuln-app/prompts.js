@@ -177,6 +177,24 @@ HARD CONSTRAINTS:
 8. Style: include inline CSS or a <link> to a shared stylesheet path that the design specifies. Use the design's color_palette. Make it look like a real internal tool — not a tutorial example.
 9. Length: aim for 60-250 lines per file. Pages should feel like real pages (headers, forms, error handling), not minimal demos.
 10. Security: no destructive code (no rm -rf, no fork bombs). No real backdoors beyond what the attack chain describes. No outbound public-internet calls.
+11. MODULE EXPORTS — every file the main app imports MUST export the thing
+    the app expects to receive. The CIAB builder smoke-tests the image by
+    starting it for 2 seconds; a startup TypeError ("Router.use() requires a
+    middleware function but got a Object", "require() returned undefined",
+    Python ImportError) kills the deploy. Concretely:
+    - Node.js route files: end with "module.exports = router;" — never plain
+      "module.exports = {};" or "module.exports = { router };" because then
+      "app.use(require('./routes/foo'))" gets an object literal, not a router.
+    - Node.js middleware files: end with "module.exports = functionName;" so
+      "app.use(require('./mw/auth'))" gets a function.
+    - Python Flask blueprints: end with "bp = Blueprint(...)" at module scope
+      and the main file imports it as "from routes.foo import bp; app.register_blueprint(bp)".
+    - PHP: requires are include-based; no module export, but the included file
+      MUST not output anything (no leading whitespace, no echo before headers).
+12. APP MAIN-FILE WIRING — the entrypoint (server.js / app.py / index.php)
+    must import + mount every other file it references in the design's
+    page_inventory. If page_inventory lists routes/foo.js but server.js
+    doesn't require it, that route is dead. Cross-check before emitting.
 
 For server-side files: include realistic error handling, logging (where it makes pedagogical sense — e.g. a vuln's discovery hint may be a leaked error message), and headers.
 For frontend / HTML files: include the company logo placeholder, navigation, a footer.
