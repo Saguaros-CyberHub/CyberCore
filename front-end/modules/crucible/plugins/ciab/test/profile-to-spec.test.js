@@ -299,7 +299,11 @@ test('vuln-app standalone_vm adds an extra synthetic VM when no web server', () 
   assert.strictEqual(result.spec.vuln_app_install.target_vm, 'vuln-app');
 });
 
-test('vuln-app silently skipped when no web server and not standalone_vm', () => {
+test('vuln-app (docker mode) gets a dedicated standalone VM when no web server', () => {
+  // The real delivery mode is always 'docker'. With most realistic profiles
+  // now being serverless, "no web server" is the common case — the app must
+  // still deploy onto its own VM cloned from the Linux web template (so Docker
+  // is present), NOT be silently skipped.
   const profile = profileWith([
     { hostname: 'DC-01', role: 'server', os: 'Windows Server 2022', services: ['445/SMB'] }
   ]);
@@ -309,10 +313,38 @@ test('vuln-app silently skipped when no web server and not standalone_vm', () =>
     vmTemplateCatalog: VM_CATALOG,
     vulnScriptCatalog: VULN_SCRIPTS,
     vulnApp: {
-      id: 'va-3', delivery_mode: 'apache_vhost', install_script: 'echo vhost'
+      id: 'va-3', delivery_mode: 'docker', install_script: 'echo docker'
     }
   });
-  assert.strictEqual(result.spec.vuln_app_install, null);
+  assert.ok(result.spec.vuln_app_install, 'vuln-app should still be placed');
+  assert.strictEqual(result.spec.vuln_app_install.target_vm, 'vuln-app');
+  assert.strictEqual(result.spec.vuln_app_install.mode, 'docker');
+  const synthetic = result.spec.vms.find(v => v.synthetic);
+  assert.ok(synthetic, 'expected a synthetic vuln-app VM');
+  // Must clone template 1005 — the baked Docker-capable "web-01" template.
+  assert.strictEqual(synthetic.template_vmid, 1005);
+});
+
+test('vuln-app fully serverless profile (no servers at all) still deploys standalone', () => {
+  // A cloud-first org: only workstations, zero servers. The vuln-app must
+  // still come up on its own VM.
+  const profile = profileWith([
+    { hostname: 'admin-ws-01', role: 'workstation', os: 'Windows 11', services: [] },
+    { hostname: 'ops-ws-02',   role: 'workstation', os: 'Windows 11', services: [] }
+  ]);
+  const result = synthesizeSpecFromProfile({
+    profile,
+    assetSelection: null,
+    vmTemplateCatalog: VM_CATALOG,
+    vulnScriptCatalog: VULN_SCRIPTS,
+    vulnApp: {
+      id: 'va-4', delivery_mode: 'docker', install_script: 'echo docker'
+    }
+  });
+  assert.ok(result.spec.vuln_app_install, 'vuln-app should be placed even with no servers');
+  assert.strictEqual(result.spec.vuln_app_install.target_vm, 'vuln-app');
+  const synthetic = result.spec.vms.find(v => v.synthetic);
+  assert.ok(synthetic, 'expected a synthetic vuln-app VM');
 });
 
 // ─── Done ───────────────────────────────────────────────────────────────────

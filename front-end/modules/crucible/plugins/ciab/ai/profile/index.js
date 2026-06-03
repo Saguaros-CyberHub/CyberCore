@@ -76,6 +76,14 @@ const CLIENT_TYPE_TEMPLATES = {
     risks: ['student data breach', 'ransomware', 'phishing'],
     compliance: ['FERPA', 'COPPA', 'CIPA'],
     criticalSystems: ['SIS', 'LMS', 'Email', 'Network Services']
+  },
+  Library: {
+    clientTypeName: 'Public / Academic Library',
+    industries: ['Municipal Public Library', 'County / Regional Library District', 'Academic / University Library'],
+    naics_hint: '519120',
+    risks: ['patron borrowing-record breach', 'public-access computer malware', 'ransomware', 'OPAC/website defacement'],
+    compliance: ['Library Records Confidentiality (state law)', 'CIPA', 'PCI-DSS (fines/fees)'],
+    criticalSystems: ['Koha ILS (Integrated Library System)', 'OPAC / Online Catalog', 'Patron Database', 'Public-Access Computers (Deep Freeze)', 'Print/Session Management', 'Public WiFi']
   }
 };
 
@@ -338,7 +346,7 @@ async function generateProfile(args) {
       ...buildToOptionsObj(buildItPrompt({ config, seed, employeeCount }), { model: llmModel, maxTokens: 6144, label: `${labelBase}:it`, temperature: branchTemp }),
     },
     {
-      ...buildToOptionsObj(buildNetworkPrompt({ config, seed }), { model: llmModel, maxTokens: 8192, label: `${labelBase}:network`, temperature: branchTemp }),
+      ...buildToOptionsObj(buildNetworkPrompt({ config, seed, employeeCount }), { model: llmModel, maxTokens: 8192, label: `${labelBase}:network`, temperature: branchTemp }),
     }
   ], { json: true });
 

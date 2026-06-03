@@ -95,6 +95,11 @@ const SUFFIX_POOLS = {
   K12: [
     'School District', 'Public Schools', 'Academy', 'County Schools',
     'Unified School District', 'Charter Academy', 'Community Schools'
+  ],
+  Library: [
+    'Public Library', 'Free Library', 'Memorial Library', 'County Library',
+    'Public Library District', 'Community Library', 'Library System',
+    'Regional Library', 'Township Public Library', 'Carnegie Library'
   ]
 };
 
@@ -236,6 +241,16 @@ const SERVER_HARDWARE = [
   { make: 'Cisco',   model: 'UCS C220 M6' }
 ];
 
+// Small-office NAS appliances — what tiny / cloud-leaning shops actually buy
+// instead of a rack of servers.
+const NAS_HARDWARE = [
+  { make: 'Synology', model: 'DiskStation DS1522+' },
+  { make: 'Synology', model: 'RackStation RS1221+' },
+  { make: 'Synology', model: 'DiskStation DS923+' },
+  { make: 'QNAP',     model: 'TS-873A' },
+  { make: 'QNAP',     model: 'TS-464' }
+];
+
 // Hostname-theme renderers — each takes a `prefix` (e.g. 'dc', 'fs', 'web')
 // and an index, returns a themed hostname.
 const HOSTNAME_RENDERERS = {
@@ -272,35 +287,126 @@ const SERVER_OS_POOL = [
   'Debian 12.4 Bookworm'
 ];
 
-// Build a deterministic server roster. ALWAYS includes web-01 so every
-// company has a public-facing web server for the vuln-app pipeline.
-// Other roles (dc, fs, sql, etc.) are picked based on client_type +
-// employee_count so a 25-person firm doesn't get 12 servers.
+// Build a deterministic server roster that reflects what an org of this SIZE,
+// DELIVERY MODE and TYPE would *actually* run on-prem. Nothing is mandatory:
+// a 10-person cloud-first non-profit can legitimately come back with zero
+// servers (just workstations + a router), while a 150-person on-prem shop
+// gets a full AD + file + app/sql + backup stack. There is deliberately NO
+// forced web server — the vuln-app pipeline deploys its own standalone VM.
 function buildServerRoster(runId, opts = {}) {
-  const { clientType = 'SMB', employeeCount = 50, hostnameTheme = 'numbered classic (dc-01, fs-01, app-erp-01, sql-01)' } = opts;
+  const {
+    clientType = 'SMB',
+    employeeCount = 50,
+    delivery = 'Hybrid',
+    maturity = 'Intermediate',
+    hostnameTheme = 'numbered classic (dc-01, fs-01, app-erp-01, sql-01)'
+  } = opts;
   const h = (salt) => hashStr(runId, salt);
   const renderer = HOSTNAME_RENDERERS[hostnameTheme] || HOSTNAME_RENDERERS['numbered classic (dc-01, fs-01, app-erp-01, sql-01)'];
   const ctx = { ...CODENAME_POOLS, site: ['sea','dal','nyc','hou','chi','phx','atl','den'][h('site') % 8], dept: 'corp' };
 
-  // Decide which roles this company has based on size + type
+  // Delivery posture drives how much lives on-prem vs in the cloud.
+  const deliv = String(delivery).toLowerCase();
+  const cloudFirst = deliv.startsWith('cloud');
+  const onPremHeavy = deliv.startsWith('on'); // 'On-Prem'
+  // Deterministic yes/no for the "it depends" calls (does this small shop keep
+  // a NAS? does this district still run an on-prem SIS?). Hashed → reproducible.
+  const coin = (salt, pct) => (h('coin:' + salt) % 100) < pct;
+  // Count real servers added so far (a NAS doesn't justify a backup server).
+  const realServers = () => roles.filter(r => r.prefix !== 'nas').length;
+
   const roles = [];
-  roles.push({ prefix: 'dc',    role_label: 'Domain Controller',          function: 'Primary Active Directory domain controller and DNS server',           windows: true });
-  if (employeeCount >= 60) {
-    roles.push({ prefix: 'dc',  role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover and load balancing',                     windows: true });
+
+  if (clientType === 'Library') {
+    // Staff-light, but a distinctive stack. Small branches are often run out of
+    // city/county IT (no own DC) and use a consortium-hosted Koha + standalone
+    // Deep Freeze; mid/large systems self-host. Public computers are NEVER
+    // domain-joined regardless.
+    const hasStaffDomain = !cloudFirst && employeeCount >= 18;
+    if (hasStaffDomain) {
+      roles.push({ prefix: 'dc', role_label: 'Domain Controller',           function: 'Staff Active Directory, DNS and DHCP — STAFF network only (public computers are not domain-joined)', windows: true });
+      if (employeeCount >= 45) {
+        roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary staff AD DC for a multi-branch system', windows: true });
+      }
+      roles.push({ prefix: 'fs', role_label: 'Staff File Server',           function: 'Staff shares: collection-development spreadsheets, programming flyers, HR/payroll documents', windows: true });
+    }
+    if (employeeCount >= 12 || onPremHeavy) {
+      roles.push({ prefix: 'koha', role_label: 'ILS Server (Koha)',         function: 'Koha integrated library system — circulation, cataloging and the patron database backend', linux: true });
+    }
+    if (employeeCount >= 15) {
+      roles.push({ prefix: 'pac', role_label: 'Public-Access Management Server', function: 'Faronics Deep Freeze Enterprise console + PC reservation/session timer + print release for public computers', windows: true });
+    }
+    if (employeeCount >= 30) {
+      roles.push({ prefix: 'proxy', role_label: 'E-Resource Proxy',         function: 'EZproxy server brokering authenticated patron access to subscription databases', linux: true });
+    }
+    if (!roles.some(r => r.prefix === 'fs') && employeeCount >= 8 && coin('libnas', 55)) {
+      roles.push({ prefix: 'nas', role_label: 'NAS / File Storage',         function: 'Synology NAS for staff shared files and local backup', windows: false });
+    }
+    if (realServers() >= 2 && !roles.some(r => r.prefix === 'nas')) {
+      roles.push({ prefix: 'bak', role_label: 'Backup Server',             function: 'Local backup target for the ILS and staff file server, with offsite replication', windows: false });
+    }
+
+  } else if (clientType === 'Utility_IT_OT') {
+    // Utilities are on-prem heavy and run real IT + OT. (OT assets — SCADA,
+    // historian, HMIs, PLCs — are added in the network branch's OT section.)
+    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for the corporate IT network', windows: true });
+    if (employeeCount >= 120) {
+      roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover', windows: true });
+    }
+    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Corporate file share for engineering drawings, compliance docs and staff files', windows: true });
+    roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the billing / CIS and GIS systems', windows: true });
+    if (employeeCount >= 100) {
+      roles.push({ prefix: 'rds', role_label: 'Remote Desktop Gateway', function: 'RDS gateway for on-call engineers accessing the IT network remotely', windows: true });
+    }
+    roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication', windows: false });
+
+  } else if (clientType === 'K12') {
+    // School districts run AD + file servers even when small; the SIS/LMS are
+    // increasingly cloud (PowerSchool SaaS, Google Classroom).
+    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for staff and student accounts', windows: true });
+    if (employeeCount >= 200) {
+      roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover across school sites', windows: true });
+    }
+    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Staff and student file shares and home directories', windows: true });
+    if (!cloudFirst && coin('sis', 60)) {
+      roles.push({ prefix: 'app', role_label: 'SIS Application Server', function: 'On-prem student information system application server', windows: true });
+      roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the student information system', windows: true });
+    }
+    roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Backup target for student records and staff shares with offsite replication', windows: false });
+
+  } else {
+    // SMB / Non-Profit / general. Non-profits lean hard on donated/discounted
+    // cloud (M365/Google) so their on-prem footprint is thin. Tiny or
+    // cloud-first orgs may have NO servers at all — just workstations, a
+    // firewall/router and maybe a NAS.
+    const npLean = clientType === 'NonProfit';
+    const dcMin = onPremHeavy ? 12 : (npLean ? 35 : 22);
+    const hasDomain = !cloudFirst && employeeCount >= dcMin;
+    if (hasDomain) {
+      roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS server', windows: true });
+      if (employeeCount >= 120) {
+        roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover and load balancing', windows: true });
+      }
+      if (onPremHeavy || employeeCount >= 30) {
+        roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Primary file share for all departments including project files', windows: true });
+      }
+      if (!npLean && employeeCount >= 70 && (onPremHeavy || coin('lob', 50))) {
+        roles.push({ prefix: 'app', role_label: 'Application Server', function: 'Hosts the on-prem line-of-business / practice-management application', windows: true });
+        roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the line-of-business application', windows: true });
+      }
+      if (employeeCount >= 100) {
+        roles.push({ prefix: 'rds', role_label: 'Remote Desktop Gateway', function: 'RDS gateway for after-hours and remote staff access', windows: true });
+      }
+    }
+    // NAS for small shops with no file server (very common in real SMBs/NPOs).
+    if (!roles.some(r => r.prefix === 'fs') && employeeCount >= 8 && coin('nas', cloudFirst ? 40 : 60)) {
+      roles.push({ prefix: 'nas', role_label: 'NAS / File Storage', function: 'Synology NAS for shared files and local backup', windows: false });
+    }
+    // Backup server only once there is real on-prem infra worth protecting.
+    if (realServers() >= 2 && employeeCount >= 35 && !roles.some(r => r.prefix === 'nas')) {
+      roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication', windows: false });
+    }
   }
-  roles.push({ prefix: 'fs',    role_label: 'File Server',                 function: 'Primary file share for all departments including project files',     windows: true });
-  // Web is MANDATORY — every company gets one (the vuln-app pipeline deploys to it).
-  roles.push({ prefix: 'web',   role_label: 'Web / App Server',            function: 'Internal web portal — used by staff for daily operations',           windows: false });
-  if (clientType !== 'NonProfit') {
-    roles.push({ prefix: 'sql', role_label: 'Database Server',             function: 'SQL Server backing the line-of-business application',                windows: true });
-  }
-  if (employeeCount >= 40) {
-    roles.push({ prefix: 'app', role_label: 'Application Server',          function: 'Hosts the line-of-business / practice management application',       windows: true });
-  }
-  if (employeeCount >= 50) {
-    roles.push({ prefix: 'rds', role_label: 'Remote Desktop Gateway',      function: 'RDS gateway for after-hours and remote staff access',                windows: true });
-  }
-  roles.push({ prefix: 'bak',   role_label: 'Backup Server',               function: 'Local backup target with offsite replication',                       windows: false });
 
   // Number duplicates per prefix
   const prefixCount = {};
@@ -308,11 +414,21 @@ function buildServerRoster(runId, opts = {}) {
     prefixCount[r.prefix] = (prefixCount[r.prefix] || 0) + 1;
     const idx = prefixCount[r.prefix];
     const hostname = renderer(r.prefix, idx, ctx);
-    const hw = SERVER_HARDWARE[h('hw' + hostname) % SERVER_HARDWARE.length];
-    const osPool = r.windows
-      ? SERVER_OS_POOL.filter(s => s.startsWith('Windows'))
-      : SERVER_OS_POOL;
-    const os = osPool[h('os' + hostname) % osPool.length];
+    const isNas = r.prefix === 'nas';
+    const hw = isNas
+      ? NAS_HARDWARE[h('hw' + hostname) % NAS_HARDWARE.length]
+      : SERVER_HARDWARE[h('hw' + hostname) % SERVER_HARDWARE.length];
+    let os;
+    if (isNas) {
+      os = hw.make === 'QNAP' ? 'QNAP QTS 5.1.5' : 'Synology DSM 7.2.1';
+    } else {
+      const osPool = r.linux
+        ? SERVER_OS_POOL.filter(s => !s.startsWith('Windows'))
+        : r.windows
+          ? SERVER_OS_POOL.filter(s => s.startsWith('Windows'))
+          : SERVER_OS_POOL;
+      os = osPool[h('os' + hostname) % osPool.length];
+    }
     return {
       hostname,
       role: r.role_label,
@@ -321,7 +437,7 @@ function buildServerRoster(runId, opts = {}) {
       function: r.function,
       make: hw.make,
       model: hw.model,
-      critical: r.prefix === 'dc' || r.prefix === 'fs' || r.prefix === 'sql' || r.prefix === 'app' || r.prefix === 'web'
+      critical: r.prefix === 'dc' || r.prefix === 'fs' || r.prefix === 'sql' || r.prefix === 'app' || r.prefix === 'web' || r.prefix === 'koha'
     };
   });
 }
@@ -472,7 +588,18 @@ COMPANY NAMING — AVOID OVERUSED LLM-DEFAULT NAMES:
     .map((n, i) => `  ${i + 1}. ${n}`)
     .join('\n');
 
-  const userPrompt = `Generate the organization profile.
+  const libraryOrgGuidance = config.clientType === 'Library' ? `
+
+LIBRARY-SPECIFIC REALISM (this is a public/academic library, NOT a for-profit business):
+- Leadership: the top role is "Library Director" (or "City/County Librarian", or "Dean of Libraries" for academic) — NOT a CEO/Owner. Governance is a "Board of Trustees" (public) or reporting to a Provost/parent institution (academic).
+- IT is THIN: usually ONE "Systems Librarian" / "IT Coordinator", or IT is shared with the parent city/county/university IT department. Do NOT invent a CISO/CIO for a library this size.
+- annual_revenue_range here means the annual OPERATING BUDGET, funded by a tax levy / municipal or county appropriation + state library aid + grants + a "Friends of the Library" group + fines/fees — NOT sales revenue. Keep it modest ($1M-5M for a small/mid library).
+- department_breakdown should use LIBRARY departments: Circulation, Reference/Adult Services, Children's & Youth Services, Technical Services (cataloging/acquisitions), IT/Systems, Administration. Most staff are in Circulation + public services; many are part-time pages/clerks.
+- critical_services should include: lending/circulation, the public catalog (OPAC), public-access computers + WiFi, e-resource/database access, and meeting/program spaces.
+- past_incidents that fit a library: a public-access PC used for fraud/illegal content, a ransomware hit on the staff network, accidental exposure of patron borrowing records, a phished circulation-desk login. Patron PRIVACY (borrowing history) is the crown jewel — state law protects it.
+- Stakeholders to favor: Library Director, Systems/IT Librarian, Head of Circulation, Head of Children's/Reference Services, a Board of Trustees member or Business Manager (budget authority).` : '';
+
+  const userPrompt = `Generate the organization profile.${libraryOrgGuidance}
 
 run_id: ${seed.run_id}
 client_type: ${config.clientType || 'SMB'} (${clientTypeName})
@@ -544,6 +671,7 @@ REALISM RULES (this is a training profile for student risk assessments — accur
 - Product TIER must match company size + budget. A 25-person professional-services firm does NOT run CrowdStrike Falcon Complete + Rubrik + Palo Alto Panorama. They run Microsoft 365 Business Premium + Defender, or Sophos Central, or Bitdefender GravityZone — and they backup to Synology/iDrive/Datto/Veeam Essentials.
 - Patch compliance percent must be PLAUSIBLE for the maturity: Low ≤ 70%, Intermediate 70-90%, High 90-98%. Almost never 100%.
 - Server COUNT scales with employee count: ~1 server per 10-20 employees for traditional shops, fewer for cloud-native. A 30-person firm should not have 12 on-prem servers.
+- Many small / cloud-first orgs run ZERO on-prem servers — identity is Entra/Google, files are OneDrive/SharePoint/Drive, and there's just a NAS at most. If the required-servers section below says to use an empty servers[] list, HONOR it and do not invent servers to fill space.
 - Endpoint OS mix should reflect real SMB patterns: most shops are 80-95% Windows; "all macOS" only for design/creative/dev studios under 30 people.
 - vendor_risk entries should reference REAL vendor types (MSP, accountant, payroll provider, cloud backup, SaaS app, building access vendor) — not fictional placeholders.
 - known_unknowns: include 2-4 genuine SMB gaps ("don't know how many shadow-IT apps employees are using", "unsure if all laptops have BitLocker", "no inventory of who has admin rights").
@@ -554,13 +682,33 @@ REALISM RULES (this is a training profile for student risk assessments — accur
 
   const flavor = buildFlavorBundle(seed.run_id);
   const roster = buildServerRoster(seed.run_id, {
-    clientType: config.clientType, employeeCount, hostnameTheme: flavor.hostname_theme
+    clientType: config.clientType, employeeCount,
+    delivery: seed.delivery, maturity: seed.maturity,
+    hostnameTheme: flavor.hostname_theme
   });
   const rosterBlock = roster.map(s =>
     `  - hostname: "${s.hostname}", role: "${s.role}", make: "${s.make}", model: "${s.model}", os: "${s.os}", function: "${s.function}"`
   ).join('\n');
+  const serversInstruction = roster.length
+    ? `REQUIRED SERVERS — your servers[] array MUST be EXACTLY this list, in this order, with these exact hostnames + make + model + os. You may write a more interesting function string per server but keep hostname/make/model/os/role verbatim:
+${rosterBlock}
+Do NOT add extra servers. Do NOT rename them. Do NOT omit any.`
+    : `SERVERS — this organization runs NO on-prem servers. Set "servers": [] (an empty array). Do NOT invent any servers. Reflect this in the rest of the profile: identity is cloud (Microsoft Entra ID or Google), email + files are SaaS (Microsoft 365 / Google Workspace), "delivery" is "Cloud", and "backups".method is "Cloud". The org runs on workstations + a firewall/router only.`;
 
-  const userPrompt = `Generate the IT environment.
+  const libraryItGuidance = config.clientType === 'Library' ? `
+
+LIBRARY-SPECIFIC REALISM — model BOTH the staff environment and the patron/public environment:
+- endpoints: the bulk of the fleet is PUBLIC-ACCESS, not staff. Count public-access computers, OPAC catalog look-up terminals, and self-checkout kiosks as shared_kiosks. Staff get a SMALL number of windows_desktops/laptops (roughly one per staff member). Example for a small library: windows_desktops ~10 (staff), shared_kiosks ~28 (public PCs + 4 OPAC terminals + 2 self-check), mobile a handful.
+- EVERY public-access computer runs Faronics Deep Freeze (reboot-to-restore "frozen" state) and is NOT domain-joined — it lives on an isolated public subnet. If a Public-Access Management server is listed below it is the Deep Freeze Enterprise console; if not, Deep Freeze is managed standalone/per-machine or via Faronics Cloud. State this in endpoint_protection or known_unknowns.
+- The ILS is Koha. If a Koha server is listed below it is self-hosted; if not, it is hosted by a library consortium / vendor (ByWater-style) and reached over the internet. Either way, do NOT substitute a commercial ILS.
+- SaaS / platforms realistic for a library (pick 3–5 that fit): OverDrive/Libby (e-books), OCLC WorldCat / cataloging, EBSCO or Gale or ProQuest databases, EZproxy or OpenAthens (e-resource auth), PaperCut (print management), Envisionware or Cassie (PC reservation/session), BiblioCommons or a Koha OPAC theme, a fines/fees payment processor (PCI scope), Niche Academy / LibGuides. AVOID a generic Slack+Zoom+Google lineup.
+- endpoint_protection: staff machines get real EDR; public PCs rely primarily on Deep Freeze + a basic AV. coverage_percent should reflect that public PCs are managed differently from staff PCs.
+- Library-flavored deliberate_weaknesses to consider: a public PC left "thawed" (unfrozen) for maintenance and forgotten; USB ports enabled on public PCs; the circulation desk sharing one staff login; Koha staff client reachable from the public subnet; default/weak Koha admin credentials; the self-check or print kiosk sitting on the STAFF VLAN; EZproxy misconfigured as an open proxy; patron records exportable without authentication.
+- known_unknowns that fit: "unsure which public PCs still have an active Deep Freeze license", "no inventory of which databases EZproxy still grants access to", "don't know if the old self-check vendor still has remote access".
+
+` : '';
+
+  const userPrompt = `Generate the IT environment.${libraryItGuidance}
 
 run_id: ${seed.run_id}
 employees_total: ${employeeCount}
@@ -581,34 +729,49 @@ REQUIRED PRODUCT ANCHORS — use these specific products (do NOT substitute):
 
 Other vendor/product choices (firewall, VPN, SaaS apps) should be CONSISTENT with the vendor ecosystem above — e.g. a Microsoft-heavy shop uses Microsoft 365 + OneDrive, an Apple-heavy shop uses Jamf + iCloud, a Cisco shop uses Webex + Cisco AnyConnect. AVOID always defaulting to the same SaaS lineup (Slack + Zoom + Google Drive). Pick a SaaS bundle that fits the anchored ecosystem.
 
-REQUIRED SERVERS — your servers[] array MUST be EXACTLY this list, in this order, with these exact hostnames + make + model + os. You may write a more interesting function string per server but keep hostname/make/model/os/role verbatim:
-${rosterBlock}
-Do NOT add extra servers. Do NOT rename them. Do NOT omit any.`;
+${serversInstruction}`;
 
   return { systemPrompt, userPrompt };
 }
 
 // ─── C: Network ───────────────────────────────────────────────────────────
 
-function buildNetworkPrompt({ config, seed }) {
+function buildNetworkPrompt({ config, seed, employeeCount: employeeCountArg }) {
   const tmpl = seed.template || {};
   const industry = tmpl.industry || 'Professional Services';
   const netConfig = config.network || {};
-  const subnetList = (netConfig.requiredSubnets || ['Management', 'Servers', 'Workstations', 'Guest'])
-    .map((s, i) => `${i + 1}) ${s}`).join('\n');
+  const isLibrary = config.clientType === 'Library';
   const exampleWsCount = Math.min(10, Math.max(5, Math.floor((seed.endpoint_count || 50) / 10)));
   const fwRulesMax = Math.min(seed.firewall_rules_range?.max || 25, 25);
   const weaknessMin = seed.weakness_range?.min || 3;
   const weaknessMax = seed.weakness_range?.max || 8;
-  const employeeCount = seed.employees?.max || seed.employees?.min || seed.endpoint_count || 50;
+  // Use the SAME picked employeeCount the IT branch used so both rosters match;
+  // fall back to the seed range only if the orchestrator didn't pass it.
+  const employeeCount = employeeCountArg || seed.employees?.max || seed.employees?.min || seed.endpoint_count || 50;
 
   // Build the SAME roster used by the IT branch so both branches produce
   // identical server lists. Without this they invent independent server
   // names and the IT/Assets/Network-Diagram tabs disagree.
   const _flavor = buildFlavorBundle(seed.run_id);
   const roster = buildServerRoster(seed.run_id, {
-    clientType: config.clientType, employeeCount, hostnameTheme: _flavor.hostname_theme
+    clientType: config.clientType, employeeCount,
+    delivery: seed.delivery, maturity: seed.maturity,
+    hostnameTheme: _flavor.hostname_theme
   });
+  const hasServers = roster.length > 0;
+
+  // Subnet plan adapts to what actually exists. A serverless cloud-first org
+  // has no Servers subnet; libraries always get a Public-Access subnet for
+  // patron computers, separate from staff workstations.
+  const defaultSubnets = isLibrary
+    ? (hasServers
+        ? ['Management', 'Servers', 'Staff-Workstations', 'Public-Access', 'Public-WiFi']
+        : ['Management', 'Staff-Workstations', 'Public-Access', 'Public-WiFi'])
+    : (hasServers
+        ? ['Management', 'Servers', 'Workstations', 'Guest']
+        : ['Workstations', 'Guest']);
+  const subnetList = (netConfig.requiredSubnets || defaultSubnets)
+    .map((s, i) => `${i + 1}) ${s}`).join('\n');
 
   // Challenge network mode — forces real VM IPs to be used as-is
   const cnData = config?.challenge_network;
@@ -638,6 +801,14 @@ OT assets (each must have hostname AND ip):
 - hmi-01 (OT-Control subnet)
 - historian-01 (OT-Control or DMZ)
 - plc-001..plc-003 (OT-Field subnet)` : '';
+
+  const librarySection = isLibrary ? `
+PUBLIC-ACCESS assets (in the Public-Access subnet — these are PATRON devices, NOT staff):
+- public-access computers: pac-pc-01 .. pac-pc-NN (the bulk of the public fleet; emit ~4-6 examples). Mark role="workstation", os="Windows 10 22H2" or "Windows 11 23H2". In their function note they run Faronics Deep Freeze (reboot-to-restore) and are NOT domain-joined.
+- OPAC catalog terminals: opac-01, opac-02 (locked-down catalog look-up stations).
+- self-checkout kiosks: selfcheck-01 (and selfcheck-02 for larger libraries).
+Staff workstations go in the Staff-Workstations subnet (circ-ws-01, ref-ws-01, child-ws-01, tech-svcs-ws-01, admin-ws-01, it-ws-01).
+SEGMENTATION REALISM: the Public-Access and Public-WiFi subnets must be Low trust_level. A realistic library weakness is that the public subnet can still reach something it shouldn't (e.g. the Koha staff client port, the print server, or a flat path to Staff-Workstations) — bake at least one such gap into the firewall rules.` : '';
 
   const systemPrompt = SYS_HEADER + `
 You are generating ONLY the network architecture: subnets, asset inventory, firewall, VPN. NO org bios, NO stakeholders, NO threats, NO diagram_text field.
@@ -678,6 +849,14 @@ REALISM RULES (this is a training profile for student risk assessments):
 
   const flavor = buildFlavorBundle(seed.run_id);
 
+  const wsSubnetName = isLibrary ? 'Staff-Workstations' : 'Workstations';
+  const wsExamples = isLibrary
+    ? 'circ-ws-01, ref-ws-02, child-ws-01, tech-svcs-ws-01, it-ws-01'
+    : 'admin-ws-01, ops-ws-02, acct-ws-01, front-desk-01, it-ws-01';
+  const wsAbbrevs = isLibrary
+    ? 'circ (circulation), ref (reference/adult), child (youth services), tech-svcs (cataloging/acquisitions), admin, it'
+    : 'admin, ops, sales, fin, hr, it, clinical, front-desk, warehouse, eng';
+
   const userPrompt = `Generate the network architecture.
 
 run_id: ${seed.run_id}
@@ -696,16 +875,18 @@ CORE INFRASTRUCTURE (in Management subnet):
 - firewall (e.g. fw-01)
 - switch-core (e.g. sw-core-01)
 
-SERVERS (in Servers subnet) — your assets[] entries with role="server" MUST be EXACTLY this list, in this order, with these exact hostnames + os. The function field can be expanded but hostnames/os are verbatim:
+${(hasServers || (isChallenge && realAssets.length > 0))
+  ? `SERVERS (in Servers subnet) — your assets[] entries with role="server" MUST be EXACTLY this list, in this order, with these exact hostnames + os. The function field can be expanded but hostnames/os are verbatim:
 ${serversBlock}
-Do NOT add extra servers. Do NOT rename. Do NOT omit. Assign sequential IPs within the Servers subnet starting at .10.
-${otSection}
+Do NOT add extra servers. Do NOT rename. Do NOT omit. Assign sequential IPs within the Servers subnet starting at .10.`
+  : `SERVERS — this organization runs NO on-prem servers. Do NOT emit any assets with role="server" and do NOT create a Servers subnet. The network is essentially workstations + a firewall + a switch + WiFi; identity and files live in the cloud (Entra/Google, OneDrive/SharePoint/Drive). This is a realistic flat, cloud-reliant small-org network.`}
+${otSection}${librarySection}
 
-WORKSTATIONS (Workstations subnet):
+WORKSTATIONS (${wsSubnetName} subnet):
 Emit ${exampleWsCount} EXAMPLE workstations using DEPARTMENT-BASED naming
-(admin-ws-01, ops-ws-02, acct-ws-01, front-desk-01, it-ws-01).
+(${wsExamples}).
 NOT sequential ws-001..ws-${String(exampleWsCount).padStart(3, '0')}.
-Use abbreviations appropriate for ${industry}: admin, ops, sales, fin, hr, it, clinical, front-desk, warehouse, eng.
+Use abbreviations appropriate for ${industry}: ${wsAbbrevs}.
 
 FIREWALL:
 - EXACTLY ${fwRulesMax} rules (no more).

@@ -284,8 +284,29 @@ function synthesizeSpecFromProfile({
   //   2. Any web-server in this lane's vms (covers asset-selection changes
   //      between profile generation and deploy — the cached target_hostname
   //      may not match the currently-selected web server hostname)
-  //   3. Append a standalone Linux vuln-app VM (last resort, only if no
-  //      web server was selected)
+  //   3. Append a DEDICATED standalone vuln-app VM. Most realistic profiles
+  //      have NO on-prem web server (small/cloud-first orgs), so this is the
+  //      common case, not a rare last resort. The standalone VM is cloned from
+  //      the SAME Linux web template a real web server would use, so Docker is
+  //      present and the install path is identical. The orchestrator registers
+  //      it in the lane's /etc/hosts so students reach the site by URL.
+  // Common payload shared by both the on-host and standalone install plans.
+  const vulnAppPayload = vulnApp ? {
+    install_script: vulnApp.install_script,
+    source_tree: vulnApp.source_tree || null,
+    dockerfile: vulnApp.dockerfile || null,
+    // Color palette lives in the generation_meta JSONB (no dedicated DB
+    // column). Read from there with a fallback to a top-level field for
+    // any in-memory callers that don't go through the DB round-trip.
+    color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
+      || vulnApp.color_palette || null,
+    // LLM-authored stylesheet (same JSONB round-trip as color_palette).
+    // The orchestrator inlines it into every page; null falls back to the
+    // themed buildBaseCss().
+    app_stylesheet: (vulnApp.generation_meta && vulnApp.generation_meta.app_stylesheet)
+      || vulnApp.app_stylesheet || null
+  } : null;
+
   let vulnAppInstall = null;
   if (vulnApp && vulnApp.install_script) {
     let targetVm = vulnApp.target_hostname
@@ -297,51 +318,42 @@ function synthesizeSpecFromProfile({
     if (targetVm) {
       vulnAppInstall = {
         target_vm: targetVm.name,
-        mode: vulnApp.delivery_mode,
-        install_script: vulnApp.install_script,
-        source_tree: vulnApp.source_tree || null,
-        dockerfile: vulnApp.dockerfile || null,
-        // Color palette lives in the generation_meta JSONB (no dedicated DB
-        // column). Read from there with a fallback to a top-level field for
-        // any in-memory callers that don't go through the DB round-trip.
-        color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
-          || vulnApp.color_palette || null,
-        // LLM-authored stylesheet (same JSONB round-trip as color_palette).
-        // The orchestrator inlines it into every page; null falls back to the
-        // themed buildBaseCss().
-        app_stylesheet: (vulnApp.generation_meta && vulnApp.generation_meta.app_stylesheet)
-          || vulnApp.app_stylesheet || null
+        mode: vulnApp.delivery_mode || 'docker',
+        ...vulnAppPayload
       };
-    } else if (vulnApp.delivery_mode === 'standalone_vm') {
-      // Caller asked for dedicated VM. Append one extra phantom VM that the
-      // orchestrator will clone from a base Ubuntu template.
+    } else {
+      // No web-server asset in this profile → give the app its own dedicated
+      // VM cloned from template 1005, the canonical baked "web-01" template
+      // (Debian 13 + Docker + Apache + PHP + SQLite + QEMU guest agent — see
+      // scripts/bake-web-template.sh). Docker is pre-baked, so the image
+      // build/run install path is identical to deploying onto a real web
+      // server. 1005 is baked directly on the Proxmox node, so it's always
+      // available even if the template catalog row isn't present.
+      const WEB_TEMPLATE_VMID = 1005;
+      const webTplRow = vmTemplateCatalog.find(t => Number(t.template_vmid) === WEB_TEMPLATE_VMID);
       vms.push({
         name: 'vuln-app',
         hostname: 'vuln-app',
-        template_vmid: 1003,             // base Ubuntu per cybercore_template_catalog seed
-        template_node: templateNode,
+        template_vmid: WEB_TEMPLATE_VMID,
+        template_node: (webTplRow && webTplRow.node) || templateNode,
         type: 'qemu',
         vm_offset: 600000 + vms.length * 10000,
+        // role 'server' (not 'web') so the lane's /etc/hosts builder, which
+        // keys the company-domain alias off role==='server' + an HTTP service,
+        // registers this VM's hostname for the company domain.
         role: 'server',
         os_family: 'linux',
+        os_version: null,
         services: ['80/HTTP'],
         post_clone_scripts: [],
         synthetic: true
       });
       vulnAppInstall = {
         target_vm: 'vuln-app',
-        mode: 'standalone_vm',
-        install_script: vulnApp.install_script,
-        source_tree: vulnApp.source_tree || null,
-        dockerfile: vulnApp.dockerfile || null,
-        color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
-          || vulnApp.color_palette || null,
-        app_stylesheet: (vulnApp.generation_meta && vulnApp.generation_meta.app_stylesheet)
-          || vulnApp.app_stylesheet || null
+        mode: vulnApp.delivery_mode || 'docker',
+        ...vulnAppPayload
       };
     }
-    // else: no web server and not standalone_vm → silently skip; vulnApp stays
-    // available in DB for next deploy that does include a web server.
   }
 
   return {

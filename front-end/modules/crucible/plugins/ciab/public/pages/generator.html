@@ -166,6 +166,7 @@
                     <option value="NonProfit">Non-Profit Organization</option>
                     <option value="Utility_IT_OT">Utility Company (IT/OT)</option>
                     <option value="K12">K-12 School District</option>
+                    <option value="Library">Public / Academic Library</option>
                   </select>
                   <span class="help-text">Determines organization size, industry options, and complexity.</span>
                 </div>
@@ -543,6 +544,18 @@
         ],
         defaults: { emp: [100, 2000], stak: [5, 10], end: [200, 5000], fw: [10, 30], weak: [4, 10] },
         hours: { beginner: 6, intermediate: 10, advanced: 16 }
+      },
+      Library: {
+        name: 'Public / Academic Library',
+        industries: [
+          { name: 'Municipal Public Library', compliance: ['Library Records Confidentiality (state law)', 'CIPA (E-rate)', 'PCI-DSS (fines/fees)'], risks: ['patron borrowing-record breach', 'public-access computer malware', 'ransomware', 'OPAC/website defacement'] },
+          { name: 'County / Regional Library District', compliance: ['Library Records Confidentiality (state law)', 'CIPA', 'PCI-DSS'], risks: ['patron PII breach', 'ransomware', 'public-computer abuse', 'shared ILS/consortium compromise'] },
+          { name: 'Academic / University Library', compliance: ['FERPA', 'Library Records Confidentiality', 'GDPR (international patrons)'], risks: ['researcher credential theft', 'e-resource proxy abuse', 'ransomware', 'patron data breach'] }
+        ],
+        // Staff headcount is SMALL, but endpoints run high because public-access
+        // computers, catalog terminals (OPACs) and self-checkout kiosks all count.
+        defaults: { emp: [8, 45], stak: [4, 6], end: [25, 110], fw: [3, 8], weak: [3, 6] },
+        hours: { beginner: 6, intermediate: 10, advanced: 14 }
       }
     };
 
