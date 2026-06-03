@@ -291,6 +291,10 @@ router.get('/:profileId', async (req, res) => {
             status: intake.status,
           }
         : null,
+      // Full intake payload so the dashboard can render an inline breakdown of
+      // everything the client submitted (clicked from the CIS IG1 Coverage card),
+      // avoiding a round-trip back to the intake form.
+      intake_payload: intake?.payload || null,
       report: {
         id: report.id,
         version: report.version,

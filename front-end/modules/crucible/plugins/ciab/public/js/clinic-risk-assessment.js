@@ -17,7 +17,10 @@
     cisramExpanded: null, // currently expanded safeguard_num (only one at a time)
     cisramSaveTimers: {}, // debounced field-save timers per safeguard_num
     cisramCollapsed: null, // Set<controlNum> of currently-collapsed controls; null until first render seeds it
+    frameworks: null,     // /frameworks catalog (cis_ig1 + nist_csf_2_0), lazy-loaded for the intake breakdown
   };
+
+  const CSF_HIDE_KEY = 'cra-hide-csf'; // localStorage: '1' => hide NIST CSF charts in Overview
 
   const CSF_FN_ORDER = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
   const CSF_FN_NAMES = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
@@ -79,6 +82,8 @@
     wireTabs();
     wireDrawer();
     wireReportButtons();
+    wireCsfToggle();
+    wireIntakeDrawer();
     document.getElementById('btnRefresh').addEventListener('click', () => loadAndRender());
 
     await loadAndRender();
@@ -212,6 +217,7 @@
     renderRadar();
     renderCisBars();
     renderCsfBars();
+    applyCsfVisibility();
     renderFindingsTable();
     renderCsfSliders();
     renderReportFields();
@@ -480,6 +486,196 @@
       yAxis: { type: 'category', data: CSF_FN_ORDER.map(k => CSF_FN_NAMES[k]), axisLabel: { fontSize: 11 } },
       series: [{ type: 'bar', data, barWidth: 18, label: { show: true, position: 'right', fontSize: 11, formatter: (p) => p.value.toFixed(1) } }],
     }, true);
+  }
+
+  // === NIST CSF visibility toggle (Overview) ===
+  // Hide/show the NIST CSF 2.0 Maturity radar and the Function Scores bar chart.
+  // Preference persists per browser in localStorage. When the function-scores
+  // card is hidden, the CIS IG1 Coverage card expands to full width.
+  function csfHidden() { return localStorage.getItem(CSF_HIDE_KEY) === '1'; }
+
+  function applyCsfVisibility() {
+    const hidden = csfHidden();
+    const radarRow = document.getElementById('csfRadarRow');
+    const barsCard = document.getElementById('csfBarsCard');
+    const cisRow   = document.getElementById('cisCsfRow');
+    if (radarRow) radarRow.style.display = hidden ? 'none' : '';
+    if (barsCard) barsCard.style.display = hidden ? 'none' : '';
+    // Drop the 2-column grid when the right-hand CSF card is gone so CIS goes full width.
+    if (cisRow) cisRow.classList.toggle('cols-2', !hidden);
+    const btn = document.getElementById('btnToggleCsf');
+    if (btn) btn.textContent = hidden ? 'Show NIST CSF' : 'Hide NIST CSF';
+    // ECharts can't measure a freshly-shown div until it's laid out.
+    if (!hidden) requestAnimationFrame(resizeAllCharts);
+  }
+
+  function wireCsfToggle() {
+    const btn = document.getElementById('btnToggleCsf');
+    if (!btn) return;
+    btn.addEventListener('click', () => {
+      localStorage.setItem(CSF_HIDE_KEY, csfHidden() ? '0' : '1');
+      applyCsfVisibility();
+    });
+  }
+
+  // === Intake breakdown drawer (opened from the CIS IG1 Coverage card) ===
+  const INTAKE_SECTION_LABELS = {
+    company: 'Company', network: 'Network & Assets', wireless: 'Wireless',
+    endpoint: 'Endpoints', email_web: 'Email & Web', access: 'Access & Identity',
+    data: 'Data', vuln_audit: 'Vulnerability & Audit', ig1: 'CIS IG1 Safeguards',
+    notes: 'Notes',
+  };
+  const INTAKE_SECTION_ORDER = ['company', 'network', 'wireless', 'endpoint', 'email_web', 'access', 'data', 'vuln_audit', 'ig1', 'notes'];
+  const MUTED_DASH = '<span style="color:var(--text-muted)">—</span>';
+
+  function humanizeKey(k) {
+    return String(k)
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase())
+      .replace(/\bId\b/g, 'ID').replace(/\bIp\b/g, 'IP').replace(/\bOs\b/g, 'OS')
+      .replace(/\bMfa\b/g, 'MFA').replace(/\bVpn\b/g, 'VPN').replace(/\bUrl\b/g, 'URL');
+  }
+
+  function formatIntakeValue(v) {
+    if (v === null || v === undefined || v === '') return MUTED_DASH;
+    if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+    if (Array.isArray(v)) return v.length ? v.map(x => escapeHtml(String(x))).join(', ') : MUTED_DASH;
+    if (typeof v === 'object') {
+      const parts = Object.entries(v)
+        .filter(([, val]) => val !== '' && val != null)
+        .map(([kk, val]) => `${escapeHtml(humanizeKey(kk))}: ${escapeHtml(String(val))}`);
+      return parts.length ? parts.join('; ') : MUTED_DASH;
+    }
+    return escapeHtml(String(v));
+  }
+
+  function renderKvSection(secVal) {
+    if (!secVal || typeof secVal !== 'object') {
+      if (secVal === '' || secVal == null) return '';
+      return `<div class="intake-kv"><div class="k">Value</div><div class="v">${escapeHtml(String(secVal))}</div></div>`;
+    }
+    const entries = Object.entries(secVal).filter(([k, v]) =>
+      !k.startsWith('_') && v !== '' && v != null && !(Array.isArray(v) && v.length === 0));
+    if (!entries.length) return '';
+    const rows = entries.map(([k, v]) =>
+      `<div class="k">${escapeHtml(humanizeKey(k))}</div><div class="v">${formatIntakeValue(v)}</div>`).join('');
+    return `<div class="intake-kv">${rows}</div>`;
+  }
+
+  function renderIg1Section(secVal) {
+    const cat = state.frameworks?.cis_ig1;
+    const ans = secVal || {};
+    const label = INTAKE_SECTION_LABELS.ig1;
+    if (!cat || !Array.isArray(cat.safeguards) || !cat.safeguards.length) {
+      const inner = renderKvSection(ans);
+      return inner ? `<div class="intake-section"><div class="sec-title">${escapeHtml(label)}</div>${inner}</div>` : '';
+    }
+    // Group safeguards by control number, preserving catalog order.
+    const groups = [];
+    const byControl = {};
+    for (const sg of cat.safeguards) {
+      if (!byControl[sg.control]) {
+        byControl[sg.control] = { control: sg.control, name: sg.control_name, items: [] };
+        groups.push(byControl[sg.control]);
+      }
+      byControl[sg.control].items.push(sg);
+    }
+    let html = `<div class="intake-section"><div class="sec-title">${escapeHtml(label)} ` +
+      `<span style="font-weight:400;text-transform:none;letter-spacing:normal;color:var(--text-muted)">(${cat.safeguards.length} safeguards)</span></div>`;
+    for (const g of groups) {
+      const rows = g.items.map(sg => {
+        const v = ans[`ig1_${sg.num}`];
+        const norm = (v === 'yes' || v === 'partial' || v === 'no') ? v : 'unknown';
+        const ansLabel = norm === 'unknown' ? 'Unanswered' : norm;
+        return `<div class="ig1-sg">` +
+          `<span class="num">${escapeHtml(sg.num)}</span>` +
+          `<span class="name">${escapeHtml(sg.name)}</span>` +
+          `<span class="ig1-ans ${norm}">${escapeHtml(ansLabel)}</span>` +
+          `</div>`;
+      }).join('');
+      html += `<div class="ig1-control"><div class="ctrl-name">${escapeHtml(String(g.control))}. ${escapeHtml(g.name || '')}</div>${rows}</div>`;
+    }
+    html += `</div>`;
+    return html;
+  }
+
+  function renderIntakeBreakdown() {
+    const body = document.getElementById('intakeBody');
+    const titleEl = document.getElementById('intakeDrawerTitle');
+    const b = state.bundle;
+    const company = b?.profile?.company_name || b?.intake?.cover_name || 'Client';
+    titleEl.textContent = `${company} — Intake Form`;
+
+    const payload = b?.intake_payload;
+    if (!payload || !payload.sections) {
+      body.innerHTML = `<div class="empty-state"><div class="big-icon">📋</div>No intake form has been submitted for this engagement yet.</div>`;
+      return;
+    }
+    const sections = payload.sections;
+    const cv = b.cis_coverage || {};
+
+    // Summary line — mirrors the CIS IG1 Coverage chart that was clicked.
+    let html = `<div class="intake-summary">` +
+      `<span class="pill ig1-ans yes">Yes ${cv.yes || 0}</span>` +
+      `<span class="pill ig1-ans partial">Partial ${cv.partial || 0}</span>` +
+      `<span class="pill ig1-ans no">No ${cv.no || 0}</span>` +
+      `<span class="pill ig1-ans unknown">Unanswered ${cv.unknown || 0}</span>` +
+      `<span class="pill" style="background:var(--primary,#1e40af);color:#fff;">IG1 Coverage ${cv.score != null ? cv.score + '%' : '—'}</span>` +
+      `</div>`;
+
+    // Intake meta (source / completion / status).
+    if (b.intake) {
+      html += `<div class="intake-section"><div class="intake-kv">` +
+        `<div class="k">Source</div><div class="v">${escapeHtml(b.intake.source === 'real_client' ? 'Real client' : 'Training')}</div>` +
+        `<div class="k">Completion</div><div class="v">${escapeHtml(String(b.intake.completion_percentage ?? '—'))}%</div>` +
+        `<div class="k">Status</div><div class="v">${escapeHtml(b.intake.status || '—')}</div>` +
+        `</div></div>`;
+    }
+
+    // Ordered sections first, then any extras present in the payload.
+    const keys = [
+      ...INTAKE_SECTION_ORDER.filter(k => k in sections),
+      ...Object.keys(sections).filter(k => !INTAKE_SECTION_ORDER.includes(k) && !k.startsWith('_')),
+    ];
+    for (const secKey of keys) {
+      const secVal = sections[secKey];
+      if (secKey === 'ig1') { html += renderIg1Section(secVal); continue; }
+      const inner = renderKvSection(secVal);
+      if (!inner) continue; // skip empty sections
+      const label = INTAKE_SECTION_LABELS[secKey] || humanizeKey(secKey);
+      html += `<div class="intake-section"><div class="sec-title">${escapeHtml(label)}</div>${inner}</div>`;
+    }
+
+    body.innerHTML = html;
+  }
+
+  function wireIntakeDrawer() {
+    const card = document.getElementById('cisCard');
+    if (card) card.addEventListener('click', openIntakeDrawer);
+    document.getElementById('btnCloseIntake')?.addEventListener('click', closeIntakeDrawer);
+    document.getElementById('intakeBackdrop')?.addEventListener('click', closeIntakeDrawer);
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && document.getElementById('intakeDrawer')?.classList.contains('open')) {
+        closeIntakeDrawer();
+      }
+    });
+  }
+
+  async function openIntakeDrawer() {
+    document.getElementById('intakeDrawer').classList.add('open');
+    document.getElementById('intakeBackdrop').classList.add('open');
+    document.getElementById('intakeBody').innerHTML = '<div class="empty-state">Loading…</div>';
+    // Lazy-load the IG1 catalog once so we can label/group safeguards.
+    if (!state.frameworks) {
+      try { state.frameworks = await api('GET', '/frameworks'); }
+      catch (_) { state.frameworks = { cis_ig1: null }; }
+    }
+    renderIntakeBreakdown();
+  }
+
+  function closeIntakeDrawer() {
+    document.getElementById('intakeDrawer').classList.remove('open');
+    document.getElementById('intakeBackdrop').classList.remove('open');
   }
 
   // Re-fit charts when their tab becomes visible (ECharts can't measure hidden divs).
