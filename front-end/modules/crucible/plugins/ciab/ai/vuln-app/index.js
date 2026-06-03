@@ -529,6 +529,10 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel, dif
     // Surface the palette to the orchestrator's CSS injector so the auto-
     // injected base.css gets themed to this company's brand.
     color_palette: concept.color_palette || null,
+    // The LLM-authored, app-specific stylesheet. The orchestrator inlines this
+    // into every page's <head> at build time (see injectBaseStyles). Falls back
+    // to the themed buildBaseCss() if the LLM omitted it.
+    app_stylesheet: concept.app_stylesheet || null,
     generation_meta: {
       source: 'claude_multistage',
       pipeline_version: 2,
@@ -540,6 +544,9 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel, dif
       // profile-to-spec.js reads it back to thread into vulnAppInstall so
       // the CSS injector can theme base.css to the company's brand.
       color_palette: concept.color_palette || null,
+      // Same round-trip rationale as color_palette: persisted here so a cached
+      // deploy re-inlines the LLM-authored stylesheet instead of falling back.
+      app_stylesheet: concept.app_stylesheet || null,
       title: concept.title,
       theme_summary: concept.theme_summary,
       tech_stack: concept.tech_stack,

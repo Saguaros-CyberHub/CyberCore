@@ -23,6 +23,7 @@ OUTPUT FORMAT — strict JSON only, no markdown fences:
   "tech_stack": "exact stack: 'PHP 8 + Apache + SQLite' | 'Python 3 + Flask + SQLite' | 'Node.js + Express + SQLite' | etc.",
   "primary_language": "php|python|node",
   "color_palette": { "primary": "#hex", "accent": "#hex", "bg": "#hex" },
+  "app_stylesheet": "COMPLETE professional CSS for the WHOLE app as one string (~150-280 lines). See STYLESHEET CONTRACT below — it is inlined into every page's <head> automatically.",
   "page_inventory": [
     {
       "path": "relative path like 'index.php' or 'app/routes/billing.py'",
@@ -193,6 +194,50 @@ PEDAGOGICAL VARIATION:
   /robots.txt and look at the disallowed paths"). Don't make stage 1 a
   mystery — it's the entry point to the whole chain.
 
+STYLESHEET CONTRACT — the "app_stylesheet" field:
+You author ONE complete, professional stylesheet for the whole app. The
+orchestrator INLINES it verbatim into every page's <head> as a <style> block
+at build time, so:
+  - DO NOT reference an external CSS file from your pages, and DO NOT rely on
+    the app's static-file serving for styling. Inlining means the CSS can never
+    404 — which is exactly why we do it (PHP docroot vs Flask /static vs Express
+    public/ all serve files differently, and a linked stylesheet kept dead-
+    linking on non-Express stacks). The pages just USE the classes below.
+  - Theme it from THIS app's color_palette. Define CSS custom properties at
+    :root (e.g. --primary, --accent, --bg) set to the palette hexes, then use
+    them throughout. Each company should feel like its own brand.
+  - Target ~150-280 lines. Looks like a real internal tool, not a design-award
+    entry. Clean, consistent, readable. This is a college course.
+
+The stylesheet MUST define this class vocabulary (the per-page generator is told
+to USE exactly these — if you rename them, pages render unstyled):
+  - Layout:    body (bg + system font stack), header.navbar (top bar w/ logo +
+               nav links), main (max-width ~1100px, centered, padding), footer.
+  - Cards:     .card (white bg, border, radius, shadow, padding).
+  - Forms:     label, input, textarea, select (full-width, padded, bordered);
+               button + .btn (primary), .btn-secondary, .btn-outline, .btn-danger.
+  - Tables:    table (full-width, collapsed borders, header bg, row hover).
+  - Alerts:    .alert + .alert-error / .alert-success / .alert-warning.
+  - Login:     .login-container (centered, single column) > .login-card
+               (max-width ~450px). See guardrails.
+  - Dashboard: .dashboard-grid (CSS grid, repeat(auto-fit, minmax(240px,1fr)))
+               > .stat-card > .stat-value + .stat-label.
+  - Badges:    .badge + .badge-pending / .badge-approved / .badge-rejected /
+               .badge-active.
+
+GUARDRAILS — bake these in with !important so a stray page class can't break
+layout (these are the exact mistakes that wrecked past labs):
+  - Login pages are SINGLE COLUMN and centered. .login-container { display:flex;
+    justify-content:center } and NEVER a multi-column/sidebar layout. Hide stray
+    sidebars on login: .login-container aside, .login-container .sidebar
+    { display:none !important }.
+  - .dashboard-grid stays a responsive auto-fit grid — never collapses to one
+    skinny column on desktop: use grid-template-columns: repeat(auto-fit,
+    minmax(240px, 1fr)) !important.
+  - body background fills the viewport (min-height:100vh) and uses --bg.
+  - Include a @media (max-width: 768px) block so it's usable on a narrow window
+    (stack nav, full-width cards).
+
 You will be called once per company; design something a student would remember.`;
 
 function buildConceptUserPrompt({ profile, webServer, deliveryMode, difficulty }) {
@@ -299,22 +344,22 @@ HARD CONSTRAINTS:
 5. Theme: every page header, navigation, copy, button label must reference the company name and theme from the design. NO generic "Welcome to the App" placeholders.
 6. Cross-link: when this page is a landing or nav-bearing page, link to the OTHER pages from the design's page_inventory.
 7. Seed data: when this is a setup/init script or a page that displays records, use the seed_data from the design.
-8. Style: CIAB auto-injects a professional base stylesheet at /ciab-base.css
-   into every HTML file's <head> at build time. It provides themed layout
-   for: header/navbar, main content area (max-width 1200px), cards (.card),
-   forms (label + input/textarea/select inherit clean styling automatically),
-   buttons (button + .btn + .btn-secondary + .btn-outline + .btn-danger),
-   tables (clean rows with hover), alerts (.alert + .alert-error/success/warning),
-   footer, login pages (.login-container > .login-card, single-column centered,
-   max-width 450px), dashboard grids (.dashboard-grid > .stat-card with
-   .stat-value/.stat-label), status badges (.badge-pending/approved/rejected/active).
-   It's themed automatically from the design's color_palette.
+8. Style: the design's app_stylesheet is INLINED into every HTML file's <head>
+   automatically at build time (as a <style> block). You do NOT link or
+   reference any CSS file — styling is already present on every page. It
+   provides themed layout for: header/navbar, main content area (centered,
+   max-width ~1100px), cards (.card), forms (label + input/textarea/select
+   inherit clean styling automatically), buttons (button + .btn + .btn-secondary
+   + .btn-outline + .btn-danger), tables (clean rows with hover), alerts (.alert
+   + .alert-error/success/warning), footer, login pages (.login-container >
+   .login-card, single-column centered, max-width ~450px), dashboard grids
+   (.dashboard-grid > .stat-card with .stat-value/.stat-label), status badges
+   (.badge-pending/approved/rejected/active). It's themed from color_palette.
 
-   YOUR JOB: write semantic HTML that USES these classes — don't reinvent
-   layout, don't add 3-column login wrappers, don't write inline grid CSS.
-   If you write your own stylesheet, ONLY add page-specific touches (custom
-   accent on a unique component) — not full layout or color theming. The
-   base.css already handles those, and overriding the layout has produced
+   YOUR JOB: write semantic HTML that USES exactly these classes — don't reinvent
+   layout, don't add 3-column login wrappers, don't write inline grid CSS, and
+   do NOT add your own <link rel="stylesheet"> or <style> block. The inlined
+   stylesheet already handles layout + theming; overriding it has produced
    broken visual rendering in past deploys.
    Standard structure for every HTML page:
      <body>

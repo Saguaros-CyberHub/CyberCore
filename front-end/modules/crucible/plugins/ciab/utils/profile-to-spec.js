@@ -305,7 +305,12 @@ function synthesizeSpecFromProfile({
         // column). Read from there with a fallback to a top-level field for
         // any in-memory callers that don't go through the DB round-trip.
         color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
-          || vulnApp.color_palette || null
+          || vulnApp.color_palette || null,
+        // LLM-authored stylesheet (same JSONB round-trip as color_palette).
+        // The orchestrator inlines it into every page; null falls back to the
+        // themed buildBaseCss().
+        app_stylesheet: (vulnApp.generation_meta && vulnApp.generation_meta.app_stylesheet)
+          || vulnApp.app_stylesheet || null
       };
     } else if (vulnApp.delivery_mode === 'standalone_vm') {
       // Caller asked for dedicated VM. Append one extra phantom VM that the
@@ -330,7 +335,9 @@ function synthesizeSpecFromProfile({
         source_tree: vulnApp.source_tree || null,
         dockerfile: vulnApp.dockerfile || null,
         color_palette: (vulnApp.generation_meta && vulnApp.generation_meta.color_palette)
-          || vulnApp.color_palette || null
+          || vulnApp.color_palette || null,
+        app_stylesheet: (vulnApp.generation_meta && vulnApp.generation_meta.app_stylesheet)
+          || vulnApp.app_stylesheet || null
       };
     }
     // else: no web server and not standalone_vm → silently skip; vulnApp stays

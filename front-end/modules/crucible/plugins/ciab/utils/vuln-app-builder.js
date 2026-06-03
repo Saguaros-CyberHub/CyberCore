@@ -360,55 +360,41 @@ function detectMissingRelativeImports(sourceTree, logTag) {
 }
 
 // ─── Professional base styles auto-injection ─────────────────────────────────
-// Inject a known-good CSS file into the source_tree and add a <link> tag to
-// every HTML/EJS file's <head> so the base styles ALWAYS load — regardless of
-// whether the LLM remembered to link its own stylesheet, or what weird inline
-// styles it added. The base.css is themed from concept.color_palette via CSS
-// custom properties, so each lab still feels like its own company while the
-// LAYOUT stays consistent and professional.
+// INLINE a known-good stylesheet into every HTML/template file's <head> as a
+// <style> block, so the styles ALWAYS render — regardless of how the app serves
+// static files. We deliberately do NOT drop an external .css + <link>: a linked
+// stylesheet assumes a URL-root static mount (Express's `public/` at `/`), which
+// is WRONG for PHP-Apache (docroot /var/www/html → /public/ciab-base.css) and
+// Flask (/static/...). Those mismatches made the linked stylesheet 404 and the
+// page render unstyled. An inline <style> has no path to get wrong.
 //
-// Loading order is base FIRST, then any LLM-generated stylesheets. The LLM's
-// CSS can override variables and most rules; the !important guards in base
-// catch the worst patterns (narrow login sidebars, broken grids, etc.).
-function injectBaseStyles(sourceTree, palette, logTag) {
+// Source of the CSS: the LLM authors one cohesive, app-specific stylesheet in
+// the concept stage (vulnAppInstall.app_stylesheet). buildBaseCss() is a themed
+// fallback for older cached apps generated before app_stylesheet existed.
+function injectBaseStyles(sourceTree, palette, appStylesheet, logTag) {
   if (!sourceTree || typeof sourceTree !== 'object') return;
 
   palette = palette || {};
-  const baseCss = buildBaseCss({
-    primary: palette.primary,
-    accent: palette.accent,
-    bg: palette.bg
-  });
-
-  // Decide where to drop the file. Conventions in the LLM-generated apps we've
-  // seen: public/*.css (Express + static), static/*.css (Flask), assets/*.css.
-  // Try to match the LLM's chosen layout; default to public/.
-  const cssDirs = ['public', 'static', 'assets'];
-  const detectedDir = cssDirs.find(d =>
-    Object.keys(sourceTree).some(k => k.startsWith(`${d}/`) && k.endsWith('.css'))
-  ) || 'public';
-  const baseCssKey = `${detectedDir}/ciab-base.css`;
-  sourceTree[baseCssKey] = baseCss;
-
-  // The href the HTML <link> tag will use. Express/Flask/etc serve `public/`
-  // (or `static/`) at the URL root, so 'public/foo.css' is served at '/foo.css'.
-  const baseHref = `/ciab-base.css`;
+  let css = String(appStylesheet || '').trim();
+  let cssSource = 'llm-authored';
+  if (!css) {
+    css = buildBaseCss({ primary: palette.primary, accent: palette.accent, bg: palette.bg });
+    cssSource = 'fallback base.css';
+  }
+  // Marker attribute lets us dedupe (skip files we already touched) without
+  // depending on a specific href, and makes the injected block easy to spot.
+  const styleBlock = `<style data-ciab-base>\n${css}\n</style>`;
 
   // Identify HTML/template files by CONTENT, not extension. The LLM picks
   // unpredictable extensions (.php, .ejs, .html, .vue, but also .htm, .tpl,
-  // .twig, weird mix), and matching a fixed extension list lost too many
-  // files. Content-based detection is robust against:
-  //   - new template engines we forget to whitelist
-  //   - extensions the LLM invents
-  //   - deployment-sync issues where the disk regex is stale
-  // We sniff the first 2KB of each file for HTML markup or common template
-  // language tags. Binary content (composer.json, .sql, .css, .js) doesn't
-  // match these patterns, so it's safely skipped.
+  // .twig, weird mix), and matching a fixed extension list lost too many files.
+  // We sniff the first 2KB for HTML markup or common template tags. Binary /
+  // non-HTML content (composer.json, .sql, .css, .js) doesn't match, so it's
+  // safely skipped.
   const HTML_OR_TEMPLATE_RE = /<(html|head|body|!doctype|\?php|%[=@-]?|script|div|h[1-6]\b)/i;
   const SKIP_KEYS_RE = /\.(css|js|mjs|cjs|ts|json|sql|md|txt|yml|yaml|toml|ini|env|lock|map|png|jpe?g|gif|svg|ico|woff2?|ttf|otf)$/i;
-  const linkTag = `<link rel="stylesheet" href="${baseHref}">`;
+  const alreadyHas = /data-ciab-base/;
   let injectedCount = 0;
-  const alreadyHas = new RegExp(`href=["']${baseHref}["']`);
 
   for (const [key, value] of Object.entries(sourceTree)) {
     // Fast-skip obvious non-template files by extension (cheap check).
@@ -420,25 +406,24 @@ function injectBaseStyles(sourceTree, palette, logTag) {
     if (alreadyHas.test(content)) continue;
 
     if (/<head[^>]*>/i.test(content)) {
-      content = content.replace(/(<head[^>]*>)/i, `$1\n  ${linkTag}`);
+      content = content.replace(/(<head[^>]*>)/i, `$1\n${styleBlock}`);
     } else if (/<html[^>]*>/i.test(content)) {
       // No <head> — add a minimal one right after <html>
-      content = content.replace(/(<html[^>]*>)/i, `$1\n<head>\n  ${linkTag}\n</head>`);
+      content = content.replace(/(<html[^>]*>)/i, `$1\n<head>\n${styleBlock}\n</head>`);
     } else {
-      // No <html> either — likely a partial / fragment. Prepend the link;
+      // No <html> either — likely a partial / fragment. Prepend the block;
       // it'll still apply once the partial is included.
-      content = `${linkTag}\n${content}`;
+      content = `${styleBlock}\n${content}`;
     }
     sourceTree[key] = content;
     injectedCount++;
   }
 
   console.log(
-    `${logTag} Injected base CSS at ${baseCssKey} (${(baseCss.length/1024).toFixed(1)}KB) ` +
-    `themed primary=${palette.primary || 'default'} accent=${palette.accent || 'default'} ` +
-    `bg=${palette.bg || 'default'}; linked into ${injectedCount} HTML file(s)`
+    `${logTag} Inlined ${cssSource} (${(css.length/1024).toFixed(1)}KB) into ${injectedCount} HTML file(s) ` +
+    `— themed primary=${palette.primary || 'default'} accent=${palette.accent || 'default'} bg=${palette.bg || 'default'}`
   );
-  // Diagnostic: when no HTML files were linked but we have other files, log the
+  // Diagnostic: when no HTML files were styled but we have other files, log the
   // source_tree keys so we can see WHY the regex missed. Most common cause is
   // the LLM generating paths the regex doesn't know about (e.g. mustache .ms,
   // vanilla .htm without the l), or the source_tree being passed in as a JSON
@@ -446,7 +431,7 @@ function injectBaseStyles(sourceTree, palette, logTag) {
   if (injectedCount === 0) {
     const keys = Object.keys(sourceTree);
     if (keys.length === 0) {
-      console.warn(`${logTag}   ⚠ source_tree is empty (${typeof sourceTree}) — nothing to link into`);
+      console.warn(`${logTag}   ⚠ source_tree is empty (${typeof sourceTree}) — nothing to style`);
     } else {
       console.warn(`${logTag}   ⚠ no HTML/template files matched. source_tree has ${keys.length} key(s): ${keys.slice(0, 20).join(', ')}${keys.length > 20 ? ` ... +${keys.length-20} more` : ''}`);
     }
@@ -643,11 +628,18 @@ async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } =
   // the repaired manifest.
   repairNodeSourceTree(vulnAppInstall.source_tree, logTag);
 
-  // Inject professional base CSS + <link> tags into every HTML/EJS file.
-  // Themed from the concept's color_palette so each company gets its own
-  // brand identity while the LAYOUT stays consistent and professional.
-  // The LLM's own styles still load AFTER and can layer custom touches.
-  injectBaseStyles(vulnAppInstall.source_tree, vulnAppInstall.color_palette, logTag);
+  // Inline the app's stylesheet into every HTML/template file's <head>. Uses
+  // the LLM-authored, color_palette-themed app_stylesheet (falling back to the
+  // themed base.css for older cached apps). Inlining — not linking an external
+  // file — guarantees the styles render on any stack (PHP/Flask/Express serve
+  // static files at different URL prefixes, which kept dead-linking the old
+  // <link href="/ciab-base.css">).
+  injectBaseStyles(
+    vulnAppInstall.source_tree,
+    vulnAppInstall.color_palette,
+    vulnAppInstall.app_stylesheet,
+    logTag
+  );
 
   // Static check: every relative require/import must point to a file the LLM
   // actually generated. Catches Stage-2-parallel-generation skew where one
@@ -722,6 +714,7 @@ module.exports = {
   // exported for reuse by the AI pipeline's self-healing retry pass and for testing
   detectMissingRelativeImports,
   repairNodeSourceTree,
+  injectBaseStyles,
   buildAndPackage,
   dockerAvailable,
   hashBundle,
