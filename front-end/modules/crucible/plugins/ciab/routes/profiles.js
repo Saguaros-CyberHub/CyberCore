@@ -347,7 +347,7 @@ async function callInlineGenerateProfile({
   custom_config = {},
   progress_id          // optional — when provided, server pushes step updates under this key
 } = {}) {
-  const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12'];
+  const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12', 'Library'];
   const validDifficulties = ['beginner', 'intermediate', 'advanced'];
   if (!validClientTypes.includes(client_type)) {
     throw Object.assign(new Error('Invalid client_type'), { statusCode: 400 });
@@ -376,6 +376,13 @@ const callN8nGenerateProfile = callInlineGenerateProfile;
 // POST /api/profiles/generate — thin wrapper around callInlineGenerateProfile
 router.post('/generate', authenticateToken, async (req, res) => {
   const progressId = req.body?.progress_id || null;
+  // Register the progress entry IMMEDIATELY so the client's poller always finds
+  // it (even if generation fails fast on validation, the catch below flips it to
+  // 'error'). Without this, a fast rejection leaves the poller hitting 404 in a
+  // tight loop until it gives up. See setProgress/run-status below.
+  if (progressId) {
+    setProgress(progressId, { step: 'queued', percent: 1, message: 'Queued…' });
+  }
   try {
     const profile = await callInlineGenerateProfile({ userId: req.user.userId, ...req.body });
     if (progressId) {

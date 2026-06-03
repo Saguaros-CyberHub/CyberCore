@@ -289,7 +289,7 @@ const generateNetworkDiagram = (data) => {
   // ── Count workstation assets per subnet ──
   // skipWsSubnets is populated after subnet classification to know which have servers
   let skipWsSubnets = new Set(); // filled later
-  const getWorkstationSummary = (subRange, forceSkip) => {
+  const getWorkstationSummary = (subRange, forceSkip, sub) => {
     if (!subRange || forceSkip) return [];
     // Never show workstations in infrastructure subnets
     const prefix = subRange.replace(/\/\d+$/, '').split('.').slice(0, 3).join('.');
@@ -299,6 +299,10 @@ const generateNetworkDiagram = (data) => {
       a.role === 'workstation' && a.ip && matchServerToSubnet(a.ip, subRange)
     );
     if (wsInSubnet.length === 0) return [];
+    // A public-access / patron subnet (e.g. a library's public computer lab):
+    // its "desktops" are patron-facing PUBLIC COMPUTERS, not staff desktops.
+    const subName = ((sub && (sub.name || '')) + ' ' + (sub && (sub.purpose || ''))).toLowerCase();
+    const isPublicAccess = /\b(public.?access|patron|public.?computer|public.?pc|public.?lab)\b/.test(subName);
     // Group by asset type
     const counts = {};
     wsInSubnet.forEach(ws => {
@@ -306,7 +310,7 @@ const generateNetworkDiagram = (data) => {
       const os = ws.os || 'Unknown';
       const key = type === 'laptop' && os.includes('macOS') ? 'macOS' :
                   type === 'laptop' ? 'Laptop' :
-                  type === 'desktop' ? 'Desktop' :
+                  type === 'desktop' ? (isPublicAccess ? 'Public Computer' : 'Desktop') :
                   type === 'kiosk' ? 'Kiosk' :
                   type === 'mobile' ? 'Mobile' : 'Workstation';
       counts[key] = (counts[key] || 0) + 1;
@@ -344,7 +348,7 @@ const generateNetworkDiagram = (data) => {
     });
     // If this subnet has servers or network devices matched, don't show workstations here
     const hasInfraDevices = matched.length > 0;
-    const wsSummary = getWorkstationSummary(subRange, hasInfraDevices);
+    const wsSummary = getWorkstationSummary(subRange, hasInfraDevices, sub);
     const netDevices = getNetworkDeviceSummary(subRange);
     const totalHosts = matched.length + wsSummary.reduce((s, w) => s + w.count, 0) + netDevices.length;
     const entry = { ...sub, matchedServers: matched, wsSummary, netDevices, totalHosts, trust };
@@ -916,6 +920,11 @@ if (endpointTotal > 0) {
   // Works across all company types: corporate, healthcare, education, manufacturing, retail, government, etc.
   const subnetWeights = wsSubnets.map(s => {
     const n = ((s.name || '') + ' ' + (s.purpose || '')).toLowerCase();
+    // ── Very high density: a library's public-access computer lab is the
+    //    densest part of the network — more machines than staff. Must be
+    //    checked BEFORE the generic guest/public rule below (which is for
+    //    corporate BYOD lobbies and is low-density). ──
+    if (/\b(public.?access|patron|public.?computer|public.?pc|public.?lab)\b/.test(n)) return { subnet: s, weight: 55 };
     // ── High density (35-45): primary user subnets where most endpoints live ──
     if (/\b(staff|employee|corporate|office|workstation|user|desktop|internal)\b/.test(n)) return { subnet: s, weight: 40 };
     if (/\b(clinical|nursing|medical|patient.care|ward)\b/.test(n)) return { subnet: s, weight: 40 }; // healthcare
@@ -950,6 +959,11 @@ if (endpointTotal > 0) {
   // The system pulls from the available endpoint pool accordingly.
   const getSubnetDevicePrefs = (subnetName) => {
     const n = subnetName.toLowerCase();
+    // Library public-access lab: rows of public computers (desktops) plus a
+    // few catalog/self-check kiosks. Checked before the generic guest/public
+    // rule (which is BYOD/mobile-only).
+    if (/\b(public.?access|patron|public.?computer|public.?pc|public.?lab)\b/.test(n))
+      return ['desktop', 'kiosk'];
     // Education
     if (/\b(student|classroom|lab|library|learning|academic)\b/.test(n))
       return ['desktop', 'kiosk', 'laptop']; // shared desktops, kiosks, some laptops

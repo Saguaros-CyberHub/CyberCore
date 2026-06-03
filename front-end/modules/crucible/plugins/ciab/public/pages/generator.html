@@ -835,6 +835,12 @@
 
       let polling = true;
       let pollCount = 0;
+      let got200 = false;
+      let consecutive404 = 0;
+      // If the entry never registers (request rejected before the server could
+      // track it, or expired), give up after this many straight 404s instead of
+      // polling forever and flooding the server log.
+      const MAX_404_BEFORE_GIVEUP = 12;
       const poll = async () => {
         if (!polling) return;
         pollCount++;
@@ -845,6 +851,8 @@
             credentials: 'include'
           });
           if (r.status === 200) {
+            got200 = true;
+            consecutive404 = 0;
             const s = await r.json();
             if (pollCount <= 3 || s.step === 'complete' || s.step === 'error') {
               console.log('[generator] poll #' + pollCount, s.step, s.percent + '%', s.message);
@@ -853,9 +861,17 @@
             status.textContent = s.message || s.step || 'Working…';
             if (s.step === 'complete' || s.step === 'error') return;
           } else if (r.status === 404) {
-            // entry not created yet — keep waiting
+            consecutive404++;
             if (pollCount <= 3) console.log('[generator] poll #' + pollCount, '404 (server not started yet)');
+            // Only bail on a sustained 404 streak with no prior success — a 404
+            // after we've seen progress just means the entry expired post-finish.
+            if (!got200 && consecutive404 >= MAX_404_BEFORE_GIVEUP) {
+              console.warn('[generator] giving up progress polling after ' + consecutive404 + ' consecutive 404s');
+              polling = false;
+              return;
+            }
           } else {
+            consecutive404 = 0;
             console.warn('[generator] poll #' + pollCount, 'HTTP', r.status);
           }
         } catch (e) {
