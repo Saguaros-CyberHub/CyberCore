@@ -250,6 +250,11 @@
           </select>
         </div>
         <div class="form-group">
+          <label>Max students *</label>
+          <input type="number" id="createCourseMaxStudents" min="1" max="200" value="30" required>
+          <span style="font-size: 0.75rem; color: var(--text-muted, #6b7280);">Reserves this many isolated VXLAN lanes (network capacity) up front. Cannot be increased without recreating the course.</span>
+        </div>
+        <div class="form-group">
           <label>Status</label>
           <select id="createCourseStatus">
             <option value="true">Active</option>
@@ -347,22 +352,9 @@
           <label>Student(s)</label>
           <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
         </div>
-        <div style="border-top: 1px solid var(--border-color, #e5e7eb); padding-top: 1rem; margin-top: 0.5rem;">
-          <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-muted, #6b7280); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.75rem;">Settings</div>
-          <div style="display: flex; flex-direction: column; gap: 0.6rem;">
-            <label style="display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem;">
-              <input type="checkbox" id="provisionCreateLane">
-              Create separate VXLAN lane per student
-            </label>
-            <label id="provisionSkipLaneRow" style="display: none; align-items: center; gap: 0.5rem; font-size: 0.9rem;">
-              <input type="checkbox" id="provisionSkipLane">
-              <span>
-                Dev mode — deploy directly on local network
-                <span style="font-size: 0.75rem; color: var(--text-muted, #6b7280); margin-left: 0.25rem;">(admin only, no VXLAN isolation)</span>
-              </span>
-            </label>
-          </div>
-        </div>
+        <p style="font-size: 0.8rem; color: var(--text-muted, #6b7280); margin: 0.25rem 0 0;">
+          Each selected student gets their own isolated VXLAN lane (gateway + workstation), drawn from this course's reserved network.
+        </p>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('provisionVMModal')">Cancel</button>
           <button class="btn btn-primary" onclick="provisionVMs()">Provision VMs</button>
@@ -612,6 +604,7 @@
         const code = document.getElementById('createCourseCode').value.trim();
         const instructorId = document.getElementById('createCourseInstructor').value;
         const isActive = document.getElementById('createCourseStatus').value === 'true';
+        const maxStudents = parseInt(document.getElementById('createCourseMaxStudents').value, 10);
 
         if (!courseName) {
           toast('Please enter a course name', true);
@@ -623,12 +616,19 @@
           return;
         }
 
+        if (!Number.isFinite(maxStudents) || maxStudents < 1 || maxStudents > 200) {
+          toast('Max students must be between 1 and 200', true);
+          return;
+        }
+
+        toast('Creating course and reserving its lab network…');
         await api('POST', '/courses', {
           course_name: courseName,
           description: description || null,
           code: code || null,
           instructor_id: instructorId,
-          is_active: isActive
+          is_active: isActive,
+          max_students: maxStudents
         });
 
         toast('Course created successfully!');
@@ -638,6 +638,7 @@
         document.getElementById('createCourseCode').value = '';
         document.getElementById('createCourseInstructor').value = '';
         document.getElementById('createCourseStatus').value = 'true';
+        document.getElementById('createCourseMaxStudents').value = '30';
         loadCourses();
       } catch (e) {
         toast('Error creating course: ' + e.message, true);
@@ -701,6 +702,7 @@
         deploying: ['#d97706', 'Deploying…'],
         stopped:   ['#6b7280', 'Stopped'],
         failed:    ['#e53e3e', 'Failed'],
+        error:     ['#e53e3e', 'Error'],
       };
       const [color, label] = map[state] || ['#6b7280', state || 'Unknown'];
       return `<span style="background:${color}20;color:${color};border-radius:4px;padding:2px 8px;font-size:0.78rem;font-weight:600;">${label}</span>`;
@@ -721,7 +723,7 @@
             <thead><tr>
               <th>Student</th>
               <th>VM Name</th>
-              <th>Node / VMID</th>
+              <th>Lane (VXLAN)</th>
               <th>IP</th>
               <th>State</th>
               <th>Actions</th>
@@ -731,26 +733,26 @@
           vms.forEach(v => {
             const studentName = [v.first_name, v.last_name].filter(Boolean).join(' ');
             const studentLabel = studentName ? `${escHtml(studentName)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(v.student_email)}</span>` : escHtml(v.student_email);
-            const nodeLabel = v.provider_node
-              ? `${escHtml(v.provider_node)}<br><span style="font-size:0.75rem;color:var(--text-muted);">VMID ${escHtml(String(v.provider_vmid || '—'))}</span>`
+            const laneLabel = v.vxlan_id
+              ? `<span style="font-size:0.75rem;color:var(--text-muted);">VXLAN ${escHtml(String(v.vxlan_id))}</span>`
               : '<span style="color:var(--text-muted);">—</span>';
             html += `<tr>
               <td>${studentLabel}</td>
               <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}</td>
-              <td style="font-size:0.85rem;">${nodeLabel}</td>
+              <td style="font-size:0.85rem;">${laneLabel}</td>
               <td style="font-size:0.85rem;">${v.ip_address ? escHtml(v.ip_address) : '<span style="color:var(--text-muted);">—</span>'}</td>
               <td>${_powerBadge(v.power_state)}</td>
               <td style="display:flex;gap:0.4rem;align-items:center;">
-                ${v.power_state === 'running' ? `<button class="btn btn-sm btn-outline" style="color:#2b6cb0;border-color:#2b6cb0;" onclick="openVMConsole('${escHtml(v.vm_instance_id)}')">Console</button>` : ''}
-                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.vm_instance_id)}')">Delete</button>
+                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:#2b6cb0;border-color:#2b6cb0;" onclick="openVMConsole('${escHtml(v.lane_id)}')">Console</button>` : ''}
+                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.lane_id)}')">Delete</button>
               </td>
             </tr>`;
           });
 
           html += `</tbody></table>`;
 
-          // Auto-refresh while any VM is still deploying
-          if (vms.some(v => v.power_state === 'deploying')) {
+          // Auto-refresh while any lane is still deploying
+          if (vms.some(v => v.lane_status === 'deploying')) {
             _vmRefreshTimer = setTimeout(loadVMManagement, 8000);
           }
         }
@@ -930,9 +932,6 @@
     let _provisionExistingVMs = [];
 
     async function showProvisionVMModal() {
-      const isAdmin = Auth && Auth.user && Auth.user.role === 'admin';
-      document.getElementById('provisionSkipLaneRow').style.display = isAdmin ? 'flex' : 'none';
-      if (!isAdmin) document.getElementById('provisionSkipLane').checked = false;
       showModal('provisionVMModal');
 
       // Load templates, students, and current VMs in parallel, then update eligibility once
@@ -991,7 +990,7 @@
 
       const occupied = new Set(
         _provisionExistingVMs
-          .filter(v => v.metadata && String(v.metadata.catalog_template_id) === String(templateId))
+          .filter(v => v.template_id && String(v.template_id) === String(templateId))
           .map(v => v.user_id)
       );
 
@@ -1028,14 +1027,11 @@
           return;
         }
 
-        const createLane = document.getElementById('provisionCreateLane').checked;
-        const skipLane   = document.getElementById('provisionSkipLane').checked;
-
+        // Each student gets their own isolated lane (gateway + workstation),
+        // drawn from the course's reserved VXLAN block.
         await api('POST', `/courses/${currentCourseId}/vms/provision`, {
           template_id: templateId,
           student_ids: selectedStudents,
-          create_separate_lanes: createLane,
-          skip_lane: skipLane
         });
 
         toast('VM provisioning started');
@@ -1099,21 +1095,15 @@
       }
     }
 
-    async function openVMConsole(vmInstanceId) {
+    async function openVMConsole(laneId) {
       try {
-        const res = await fetch(`/api/dashboard/vms/${vmInstanceId}/guac-session`, {
-          method: 'POST',
-          headers: { 'Authorization': `Bearer ${TOKEN()}` },
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+        // Lane-native: resolve the Guac connection from the lane's stored config.
+        const data = await api('GET', `/courses/${currentCourseId}/vms/${laneId}/console`);
 
         if (data.guacToken) {
           localStorage.setItem('GUAC_AUTH', JSON.stringify({
             authToken:            data.guacToken,
-            username:             data.username,
             dataSource:           data.dataSource,
-            availableDataSources: data.availableDataSources,
           }));
         } else if (data.clearGuacAuth) {
           localStorage.removeItem('GUAC_AUTH');
@@ -1125,11 +1115,11 @@
       }
     }
 
-    async function deleteVM(vmId) {
-      if (!confirm('Delete this VM?')) return;
+    async function deleteVM(laneId) {
+      if (!confirm('Delete this workstation lane (workstation + gateway)?')) return;
       try {
-        await api('DELETE', `/courses/${currentCourseId}/vms/${vmId}`);
-        toast('VM deleted');
+        await api('DELETE', `/courses/${currentCourseId}/vms/${laneId}`);
+        toast('Workstation lane deleted');
         loadVMManagement();
       } catch (e) {
         toast('Error deleting VM: ' + e.message, true);

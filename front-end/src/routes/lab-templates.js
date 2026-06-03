@@ -16,6 +16,7 @@ const { proxmoxAPI } = require('../utils/proxmox');
 const { getDefaultTemplateNode } = require('../utils/site-config');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const goadDeploy = require('../utils/goad-deploy');
+const { reserveLabNetwork, teardownLabNetwork } = require('../utils/lab-network-provision');
 
 const adminOnly = requireRole('admin');
 
@@ -323,85 +324,14 @@ router.put('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) 
 // DELETE /api/admin/lab-templates/:id — delete challenge + clean up SDN
 router.delete('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
-    // Get challenge info
-    const chalResult = await cybercoreQuery(
-      `SELECT * FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]
-    );
-    if (chalResult.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
-
-    const challenge = chalResult.rows[0];
-    const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : (challenge.spec || {});
-    const zoneAbbrev = spec.zone?.abbrev;
-    const vxlanBlock = spec.vxlan_block;
-
-    let vnetsRemoved = 0;
-    let zoneRemoved = false;
-
-    // Clean up VNets and SDN zone from Proxmox
-    if (vxlanBlock?.start && vxlanBlock?.end) {
-      // Check for active lanes using this challenge's VXLAN block
-      const activeLanes = await cybercoreQuery(
-        `SELECT COUNT(*) AS cnt FROM cybercore_lane
-         WHERE vxlan_id BETWEEN $1 AND $2 AND status IN ('active', 'deploying')`,
-        [vxlanBlock.start, vxlanBlock.end]
-      );
-
-      if (parseInt(activeLanes.rows[0].cnt) > 0) {
-        return res.status(400).json({
-          error: `Cannot delete: ${activeLanes.rows[0].cnt} active lane(s) are using this challenge's VXLAN block`
-        });
-      }
-
-      // Remove VNets
-      try {
-        const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
-        for (const vnet of vnets) {
-          if (vnet.tag >= vxlanBlock.start && vnet.tag <= vxlanBlock.end) {
-            try {
-              await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet.vnet}`);
-              vnetsRemoved++;
-            } catch (e) {
-              console.error(`[DeleteChallenge] Failed to remove VNet ${vnet.vnet}: ${e.message}`);
-            }
-          }
-        }
-      } catch (e) {
-        console.error(`[DeleteChallenge] Failed to query VNets: ${e.message}`);
-      }
-
-      // Remove SDN zone if it exists and has no remaining VNets
-      if (zoneAbbrev) {
-        try {
-          const remainingVnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
-          const zoneStillHasVnets = remainingVnets.some(v => v.zone === zoneAbbrev);
-          if (!zoneStillHasVnets) {
-            await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/zones/${zoneAbbrev}`);
-            zoneRemoved = true;
-          }
-        } catch (e) {
-          console.error(`[DeleteChallenge] Failed to remove zone ${zoneAbbrev}: ${e.message}`);
-        }
-      }
-
-      // Reload SDN if we changed anything
-      if (vnetsRemoved > 0 || zoneRemoved) {
-        try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (_) {}
-      }
-    }
-
-    // Delete the challenge record
-    await cybercoreQuery(`DELETE FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]);
-
-    console.log(`[DeleteChallenge] Deleted '${challenge.challenge_key}': ${vnetsRemoved} VNets removed, zone removed: ${zoneRemoved}`);
-
-    res.json({
-      success: true,
-      challenge_key: challenge.challenge_key,
-      vnets_removed: vnetsRemoved,
-      zone_removed: zoneRemoved
+    // Remove VNets + SDN zone and delete the challenge (refuses if active lanes
+    // still use the block). Shared with the CLE course-teardown path.
+    const result = await teardownLabNetwork(req.params.id, {
+      log: (m) => console.log(`[DeleteChallenge] ${m}`),
     });
+    res.json({ success: true, ...result });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 
@@ -441,9 +371,6 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
     // subnet_scheme: v1/v2 = single-subnet lanes; v3 = segmented "DMZ" lanes
     // (two SDN VNets per lane). Defaults to v1 for back-compat.
     const subnetScheme = ['v1', 'v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v1';
-    // A v3 lane's internal VNet uses tag = (vxlanId + this offset).
-    // MUST match V3_INTERNAL_TAG_OFFSET in front-end/src/routes/admin.js.
-    const V3_INTERNAL_TAG_OFFSET = 4000000;
 
     const numLanes = parseInt(max_lanes);
     if (numLanes < 1 || numLanes > 200) {
@@ -457,28 +384,7 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
     const statusUpdates = [];
     const pushStatus = (msg) => { statusUpdates.push(msg); console.log(`[CreateChallenge] ${msg}`); };
 
-    // 1. Find next available VXLAN block
-    pushStatus('Querying existing VXLAN blocks...');
-    const existingBlocks = await cybercoreQuery(
-      `SELECT
-        (spec->'vxlan_block'->>'start')::int AS vxlan_start,
-        (spec->'vxlan_block'->>'end')::int AS vxlan_end
-       FROM crucible_challenge
-       WHERE spec->'vxlan_block'->>'start' IS NOT NULL`
-    );
-
-    let maxEnd = 9999; // Default: first block starts at 10000
-    for (const row of existingBlocks.rows) {
-      if (row.vxlan_end && row.vxlan_end > maxEnd) maxEnd = row.vxlan_end;
-    }
-    const vxlanStart = maxEnd + 1;
-    const vxlanEnd = vxlanStart + numLanes - 1;
-    pushStatus(`Allocated VXLAN block: ${vxlanStart}–${vxlanEnd} (${numLanes} lanes)`);
-
-    // 2. Build spec with multi-VM support
-    const resolvedZone = finalZone;
-
-    // Build VMs array from input
+    // Build VMs array from input (multi-VM support).
     const specVMs = (vmsList && vmsList.length > 0)
       ? vmsList.map((vm, idx) => ({
           name: vm.name || `vm${idx + 1}`,
@@ -502,14 +408,10 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
         }];
 
     const spec = {
-      zone: { abbrev: resolvedZone },
       template_vmid: specVMs[0].template_vmid, // backward compat for single-VM deploy
       template_node: getDefaultTemplateNode(),
-      vxlan_block: { start: vxlanStart, end: vxlanEnd },
       vms: specVMs,
-      limits: {
-        max_concurrent_lanes: numLanes
-      }
+      limits: { max_concurrent_lanes: numLanes }
     };
 
     // GOAD: when goad.enabled=true, embed the GOAD config so deploy paths can
@@ -528,173 +430,30 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       };
     }
 
-    // 3. Insert challenge record into cybercore_db
-    pushStatus('Inserting challenge record...');
-    const insertResult = await cybercoreQuery(
-      `INSERT INTO crucible_challenge (challenge_key, name, description, difficulty, spec, status, subnet_scheme)
-       VALUES ($1, $2, $3, $4, $5::jsonb, 'active', $6)
-       RETURNING challenge_id, challenge_key`,
-      [challenge_key, name, description || null, difficultyInt, JSON.stringify(spec), subnetScheme]
-    );
-    const challengeId = insertResult.rows[0].challenge_id;
-    pushStatus(`Challenge created: ${challengeId}`);
-
-    // 4. Check if SDN zone exists, create if not
-    pushStatus('Checking SDN zones...');
-    const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
-    const zoneExists = zones.some(z => z.zone === finalZone);
-
-    if (!zoneExists) {
-      pushStatus(`Creating SDN zone '${finalZone}'...`);
-
-      // Get all cluster node IPs
-      const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
-      const nodeNames = nodeList.map(n => n.node).join(',');
-
-      // Build peer IPs — try to get from node status, fallback to known pattern
-      const peerIps = [];
-      for (const node of nodeList) {
-        try {
-          const nodeStatus = await proxmoxAPI('GET', `/api2/json/nodes/${node.node}/status`);
-          // Try to find the IP from network info
-          if (nodeStatus.network) {
-            for (const [, iface] of Object.entries(nodeStatus.network)) {
-              if (iface.address && !iface.address.startsWith('127.')) {
-                peerIps.push(iface.address);
-                break;
-              }
-            }
-          }
-        } catch (_) {}
-      }
-
-      // Fallback: use known Tailscale IPs if we couldn't get them dynamically
-      const peers = peerIps.length === nodeList.length
-        ? peerIps.join(',')
-        : nodeList.map((_, i) => `100.100.10.${10 + i}`).join(',');
-
-      // NOTE: deliberately NOT passing ipam: 'pve'. CyberCore manages lane IP
-      // space internally (192.18.0.0/24 via dnsmasq inside each lane's gateway LXC).
-      // Setting ipam: 'pve' here makes Proxmox SDN write per-VNet config files into
-      // /etc/dnsmasq.d/ on every node, which collides with the host network's
-      // boot-time post-up hooks and has crashed clusters at reboot. Leave ipam unset.
-      await proxmoxAPI('POST', '/api2/json/cluster/sdn/zones', {
-        zone: finalZone,
-        type: 'vxlan',
-        peers: peers
-      });
-      pushStatus(`SDN zone '${finalZone}' created with peers: ${peers}`);
-    } else {
-      pushStatus(`SDN zone '${finalZone}' already exists`);
-    }
-
-    // 5. Create VNets for each VXLAN ID in the block.
-    // v1/v2: one VNet per lane. v3: two per lane — external (tag=vxlanId) and
-    // internal (tag=vxlanId+offset) — so the segmented gateway can bridge them.
-    pushStatus(`Creating ${numLanes} lane(s) of VNets (${subnetScheme})...`);
-    let vnetsCreated = 0;
-
-    // Base-20 encode helper for VNet naming (matches N8N workflow)
-    const ALPHABET = 'abcdefghij0123456789';
-    function encodeBase20(n) {
-      if (n === 0) return 'a';
-      let s = '';
-      let x = n;
-      while (x > 0) {
-        s = ALPHABET[x % 20] + s;
-        x = Math.floor(x / 20);
-      }
-      return s.padStart(8, 'a');
-    }
-
-    for (let vxlanId = vxlanStart; vxlanId <= vxlanEnd; vxlanId++) {
-      // v3 lanes get a second (internal) VNet at the offset tag.
-      const tags = subnetScheme === 'v3'
-        ? [vxlanId, vxlanId + V3_INTERNAL_TAG_OFFSET]
-        : [vxlanId];
-
-      for (const tag of tags) {
-        const vnetName = encodeBase20(tag); // 8-char unique name
-
-        try {
-          await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
-            vnet: vnetName,
-            zone: finalZone,
-            tag,
-            alias: `${finalZone}-vnet-${tag}`
-          });
-          vnetsCreated++;
-        } catch (e) {
-          // VNet may already exist
-          if (!e.message.includes('already exists')) {
-            pushStatus(`Warning: VNet ${vnetName} (tag ${tag}): ${e.message}`);
-          }
-        }
-
-        // Rate limit: Proxmox can get overwhelmed with rapid API calls
-        if (vnetsCreated % 10 === 0 && vnetsCreated > 0) {
-          await new Promise(r => setTimeout(r, 500));
-        }
-      }
-    }
-    pushStatus(`${vnetsCreated} VNets created`);
-
-    // 6. Reload SDN configuration
-    pushStatus('Reloading SDN...');
-    await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
-    pushStatus('SDN reloaded');
-
-    // 6b. The SDN apply above is ASYNCHRONOUS — Proxmox returns immediately but
-    // the VNet bridges materialize on the nodes over the following seconds
-    // (longer the more VNets; a v3 challenge creates 2 per lane, so a 100-lane
-    // v3 challenge applies 200 VXLAN bridges). Poll until the LAST-created
-    // VNet(s) actually show up as interfaces, so a lane deploy that starts
-    // right after doesn't hit `bridge '<vnet>' does not exist`.
-    pushStatus('Waiting for SDN to materialize VNet bridges...');
-    try {
-      const checkNodes = await proxmoxAPI('GET', '/api2/json/nodes');
-      const checkNode = (checkNodes || [])[0] && (checkNodes || [])[0].node;
-      if (checkNode) {
-        const sampleVnets = [encodeBase20(vxlanEnd)];
-        if (subnetScheme === 'v3') {
-          sampleVnets.push(encodeBase20(vxlanEnd + V3_INTERNAL_TAG_OFFSET));
-        }
-        const deadline = Date.now() + 240000;   // 4 min cap
-        let allUp = false;
-        while (Date.now() < deadline) {
-          const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${checkNode}/network`);
-          const names = new Set((ifaces || []).map(i => i.iface));
-          if (sampleVnets.every(v => names.has(v))) { allUp = true; break; }
-          await new Promise(r => setTimeout(r, 4000));
-        }
-        pushStatus(allUp
-          ? `SDN VNet bridges are up on ${checkNode}.`
-          : 'WARNING: SDN bridges not confirmed within 4 min — run Datacenter → SDN → Apply and verify before deploying lanes.');
-      }
-    } catch (e) {
-      pushStatus(`SDN bridge readiness check skipped: ${e.message}`);
-    }
-
-    // 7. Update challenge with final VXLAN block (in case it wasn't set during insert)
-    await cybercoreQuery(
-      `UPDATE crucible_challenge SET
-        spec = jsonb_set(jsonb_set(COALESCE(spec, '{}'::jsonb),
-          '{vxlan_block,start}', to_jsonb($2::int), true),
-          '{vxlan_block,end}', to_jsonb($3::int), true),
-        updated_at = NOW()
-       WHERE challenge_id = $1`,
-      [challengeId, vxlanStart, vxlanEnd]
-    );
+    // Reserve the VXLAN block, insert the challenge, and create the SDN zone +
+    // VNets (one reload + bridge-materialization wait). Shared with CLE courses.
+    const reservation = await reserveLabNetwork({
+      challengeKey: challenge_key,
+      name,
+      description: description || null,
+      difficulty: difficultyInt,
+      subnetScheme,
+      maxLanes: numLanes,
+      spec,
+      zoneAbbrev: finalZone,
+      status: 'active',
+      log: pushStatus,
+    });
 
     pushStatus('Challenge creation complete!');
 
     res.json({
       success: true,
-      challenge_id: challengeId,
-      challenge_key,
-      zone_abbrev: finalZone,
-      vxlan_block: { start: vxlanStart, end: vxlanEnd },
-      vnets_created: vnetsCreated,
+      challenge_id: reservation.challenge_id,
+      challenge_key: reservation.challenge_key,
+      zone_abbrev: reservation.zone,
+      vxlan_block: reservation.vxlan_block,
+      vnets_created: reservation.vnetsCreated,
       steps: statusUpdates
     });
   } catch (error) {

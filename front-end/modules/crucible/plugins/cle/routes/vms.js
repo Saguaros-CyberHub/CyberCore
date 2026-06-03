@@ -1,7 +1,10 @@
 /**
- * CLE Plugin — VM Management Routes
- * Handles workstation VM provisioning for students
+ * CLE Plugin — VM Management Routes (lane-native)
  * Mounted at /api/cle/courses/:courseId/vms
+ *
+ * Workstations are provisioned as per-student cybercore_lane rows (gateway LXC +
+ * workstation VM) drawn from the course's reserved VXLAN block. cybercore_lane
+ * is the source of truth — no cybercore_resource / vm_instance / allocation.
  */
 
 const express = require('express');
@@ -9,67 +12,91 @@ const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
+const { getGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
+const laneProvision = require('../utils/lane-provision');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
+/** Guacamole client launch URL (base64("<connId>\0c\0<datasource>")). */
+function buildGuacLaunchUrl(connId) {
+  const base = (process.env.GUAC_PUBLIC_BASE_URL || '/guac').replace(/\/$/, '');
+  const clientToken = Buffer.from(`${connId}\0c\0${GUAC_DS}`).toString('base64');
+  return `${base}/#/client/${clientToken}`;
+}
+
+/** Verify the course exists and the caller may manage it. Returns the course row or null. */
+async function getManagedCourse(courseId, user) {
+  const isAdmin = user.role === 'admin';
+  const r = await query(
+    isAdmin
+      ? `SELECT course_id, challenge_id, challenge_key FROM cle_course WHERE course_id = $1`
+      : `SELECT course_id, challenge_id, challenge_key FROM cle_course WHERE course_id = $1 AND instructor_id = $2`,
+    isAdmin ? [courseId] : [courseId, user.userId]
+  );
+  return r.rows[0] || null;
+}
+
 /**
- * GET / — List provisioned workstation VMs for all students in this course.
- * Queries cybercore_allocation so it reflects VMs deployed via the workstations
- * deploy route (the actual Proxmox-backed flow).
+ * GET / — List provisioned workstation lanes for all students in this course.
+ * Reads cybercore_lane (source of truth) and live-syncs workstation power state.
  */
 router.get('/', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
-    const isAdmin = req.user.role === 'admin';
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
-    // Verify course access
-    const courseCheck = await query(
-      isAdmin
-        ? `SELECT course_id FROM cle_course WHERE course_id = $1`
-        : `SELECT course_id FROM cle_course WHERE course_id = $1 AND instructor_id = $2`,
-      isAdmin ? [courseId] : [courseId, req.user.userId]
+    // Enrolled students (CLE plugin DB) → look up their lanes (cybercore_db).
+    const enrolled = await query(
+      `SELECT user_id FROM cle_course_enrollment WHERE course_id = $1 AND status = 'active'`,
+      [courseId]
     );
-    if (courseCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'Course not found or access denied' });
-    }
-
-    // Get enrolled student IDs for this course
-    const enrolledResult = await query(`
-      SELECT user_id FROM cle_course_enrollment
-      WHERE course_id = $1 AND status = 'active'
-    `, [courseId]);
-    const enrolledIds = enrolledResult.rows.map(r => r.user_id);
-
+    const enrolledIds = enrolled.rows.map(r => r.user_id);
     if (enrolledIds.length === 0) return res.json({ vms: [] });
 
-    // Fetch workstation VMs allocated to any enrolled student
-    const vmsResult = await cybercoreQuery(`
-      SELECT
-        vi.vm_instance_id,
-        vi.power_state,
-        vi.provider_node,
-        vi.provider_vmid,
-        vi.ip_address::text AS ip_address,
-        r.name              AS vm_name,
-        r.status            AS resource_status,
-        r.metadata,
-        a.user_id,
-        a.starts_at         AS allocated_at,
-        u.email             AS student_email,
-        u.first_name,
-        u.last_name
-      FROM cybercore_allocation a
-      JOIN cybercore_resource r     ON r.resource_id = a.resource_id
-      JOIN cybercore_vm_instance vi ON vi.resource_id = r.resource_id
-      JOIN cybercore_user u         ON u.user_id = a.user_id
-      WHERE a.user_id = ANY($1)
-        AND (r.metadata->>'vm_category') = 'workstation'
-        AND vi.destroyed_at IS NULL
-        AND (a.ends_at IS NULL OR a.ends_at > NOW())
-      ORDER BY a.starts_at DESC
-    `, [enrolledIds]);
+    const lanesResult = await cybercoreQuery(`
+      SELECT l.lane_id, l.status, l.vxlan_id, l.config, l.created_at, l.user_id,
+             u.email AS student_email, u.first_name, u.last_name
+        FROM cybercore_lane l
+        JOIN cybercore_user u ON u.user_id = l.user_id
+       WHERE l.user_id = ANY($1)
+         AND l.config->>'course_id' = $2
+         AND l.status <> 'deleted'
+       ORDER BY l.created_at DESC
+    `, [enrolledIds, courseId]);
 
-    res.json({ vms: vmsResult.rows });
+    // Live power-state for the workstation VMs via a single cluster call.
+    let byVmid = {};
+    try {
+      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      for (const r of (resources || [])) byVmid[String(r.vmid)] = r;
+    } catch (_) { /* fall back to lane status if Proxmox is unreachable */ }
+
+    const vms = lanesResult.rows.map(row => {
+      const cfg = row.config || {};
+      const live = byVmid[String(cfg.workstation_vmid)];
+      const powerState = live
+        ? (live.status === 'running' ? 'running' : live.status === 'stopped' ? 'stopped' : live.status)
+        : (row.status === 'active' ? 'unknown' : row.status);
+      return {
+        lane_id:        row.lane_id,
+        lane_status:    row.status,                  // deploying | active | error
+        power_state:    row.status === 'active' ? powerState : row.status,
+        vxlan_id:       row.vxlan_id,
+        user_id:        row.user_id,
+        student_email:  row.student_email,
+        first_name:     row.first_name,
+        last_name:      row.last_name,
+        template_id:    cfg.template_id || null,
+        vm_name:        cfg.template_name || `cle-${row.vxlan_id}`,
+        ip_address:     cfg.ip || null,
+        has_console:    !!cfg.guac_connection_id,
+        created_at:     row.created_at,
+      };
+    });
+
+    res.json({ vms });
   } catch (error) {
     console.error('[CLE] Get VMs error:', error.message);
     res.status(500).json({ error: error.message });
@@ -77,94 +104,79 @@ router.get('/', instructorOnly, async (req, res) => {
 });
 
 /**
- * POST /provision — Provision workstation VMs for students
- * Delegates actual Proxmox provisioning to POST /api/workstations/:templateId/deploy
- * using forUserId so each VM is allocated to the student, not the instructor.
+ * POST /provision — Provision workstation lanes for students.
+ * Each student gets a gateway LXC + workstation VM on their own VXLAN, drawn
+ * from the course's reserved block. ≤3 deploy sequentially; >3 via the batch
+ * deployer. Responds immediately; lanes appear as they reach 'deploying'.
  */
 router.post('/provision', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { template_id, student_ids, skip_lane } = req.body;
-    const isAdmin = req.user.role === 'admin';
-    const skipLane = skip_lane === true && isAdmin;
+    const { template_id, student_ids } = req.body;
 
     if (!template_id || !Array.isArray(student_ids) || student_ids.length === 0) {
       return res.status(400).json({ error: 'template_id and non-empty student_ids array required' });
     }
 
-    // Verify course access — admins bypass the instructor_id ownership check
-    const courseCheck = await query(
-      isAdmin
-        ? `SELECT course_id FROM cle_course WHERE course_id = $1`
-        : `SELECT course_id FROM cle_course WHERE course_id = $1 AND instructor_id = $2`,
-      isAdmin ? [courseId] : [courseId, req.user.userId]
-    );
-    if (courseCheck.rows.length === 0) {
-      return res.status(403).json({ error: 'Course not found or access denied' });
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+    if (!course.challenge_id) {
+      return res.status(409).json({ error: 'Course has no reserved lab — recreate the course to provision its network' });
     }
 
-    // Validate template exists in the workstation catalog
-    const tplCheck = await cybercoreQuery(`
-      SELECT id FROM cybercore_template_catalog
-      WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
+    // Validate the workstation template.
+    const tpl = await cybercoreQuery(`
+      SELECT id, template_key, os_name, template_vmid, node, provider_type, metadata
+        FROM cybercore_template_catalog
+       WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
     `, [template_id]);
-    if (tplCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Template not found or not active' });
-    }
+    if (tpl.rows.length === 0) return res.status(404).json({ error: 'Template not found or not active' });
+    const template = tpl.rows[0];
 
-    const PORT = process.env.PORT || 3000;
-    const authHeader = req.headers.authorization;
-    const provisionedVMs = [];
+    // Resolve the course's reserved VXLAN block from its challenge.
+    const chal = await cybercoreQuery(
+      `SELECT challenge_key, spec FROM crucible_challenge WHERE challenge_id = $1`,
+      [course.challenge_id]
+    );
+    if (chal.rows.length === 0) return res.status(409).json({ error: 'Reserved lab challenge missing for this course' });
+    const spec = typeof chal.rows[0].spec === 'string' ? JSON.parse(chal.rows[0].spec) : (chal.rows[0].spec || {});
+    const challenge = { challenge_key: chal.rows[0].challenge_key, vxlan_block: spec.vxlan_block };
+
+    // Keep only enrolled students; pull their emails for Guac.
+    const enrolledRows = await cybercoreQuery(`
+      SELECT u.user_id, u.email
+        FROM cybercore_user u
+       WHERE u.user_id = ANY($1)
+    `, [student_ids]);
+    const emailById = {};
+    for (const r of enrolledRows.rows) emailById[r.user_id] = r.email;
+
+    const students = [];
     const failed = [];
-
-    // No stagger: the workstations deploy endpoint serializes the locked phase
-    // of clones per-template (see cloneTemplateSerialized in routes/workstations.js).
-    // Background tasks naturally queue on Proxmox's template lock state.
-
-    for (const studentId of student_ids) {
-      try {
-        // Verify student is enrolled in this course
-        const enrolled = await query(`
-          SELECT 1 FROM cle_course_enrollment
-          WHERE user_id = $1 AND course_id = $2 AND status = 'active'
-        `, [studentId, courseId]);
-
-        if (!enrolled.rows.length) {
-          console.warn(`[CLE] Student ${studentId} not enrolled in course ${courseId} — skipping`);
-          failed.push({ student_id: studentId, reason: 'not enrolled' });
-          continue;
-        }
-
-        // Delegate to the workstations deploy endpoint; forUserId allocates the VM to the student
-        const deployRes = await fetch(`http://127.0.0.1:${PORT}/api/workstations/${template_id}/deploy`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': authHeader,
-          },
-          body: JSON.stringify({ skipLane, forUserId: studentId }),
-        });
-
-        const result = await deployRes.json();
-        if (!deployRes.ok) {
-          console.error(`[CLE] Deploy failed for student ${studentId}:`, result.error);
-          failed.push({ student_id: studentId, reason: result.error || deployRes.status });
-          continue;
-        }
-
-        provisionedVMs.push({ student_id: studentId, vm_id: result.vmId, status: 'deploying' });
-      } catch (vmError) {
-        console.error(`[CLE] Error provisioning VM for student ${studentId}:`, vmError.message);
-        failed.push({ student_id: studentId, reason: vmError.message });
-      }
+    for (const sid of student_ids) {
+      const ok = await query(
+        `SELECT 1 FROM cle_course_enrollment WHERE user_id = $1 AND course_id = $2 AND status = 'active'`,
+        [sid, courseId]
+      );
+      if (!ok.rows.length) { failed.push({ student_id: sid, reason: 'not enrolled' }); continue; }
+      students.push({ id: sid, email: emailById[sid] || null });
     }
 
+    if (!students.length) {
+      return res.status(400).json({ error: 'No enrolled students to provision', failed });
+    }
+
+    // Respond now; deploy in the background (lanes surface via GET / polling).
     res.json({
       success: true,
-      message: `Provisioning started for ${provisionedVMs.length} of ${student_ids.length} VMs`,
-      vms: provisionedVMs,
+      message: `Provisioning started for ${students.length} student(s)`,
+      count: students.length,
       ...(failed.length ? { failed } : {}),
     });
+
+    laneProvision.provisionLanes({ courseId, challenge, template, students })
+      .then(result => console.log(`[CLE] Provision finished for course ${courseId}:`, JSON.stringify(result)))
+      .catch(err => console.error(`[CLE] Provision failed for course ${courseId}: ${err.message}`));
   } catch (error) {
     console.error('[CLE] Provision VMs error:', error.message);
     res.status(500).json({ error: error.message });
@@ -172,31 +184,65 @@ router.post('/provision', instructorOnly, async (req, res) => {
 });
 
 /**
- * DELETE /:vmId — Delete/deprovision a VM
+ * GET /:laneId/console — Return a Guacamole launch URL for a student's
+ * workstation, resolved from the lane's stored guac_connection_id.
  */
-router.delete('/:vmId', instructorOnly, async (req, res) => {
+router.get('/:laneId/console', instructorOnly, async (req, res) => {
   try {
-    const instructorId = req.user.userId;
-    const { courseId, vmId } = req.params;
-
-    // Verify instructor owns course
-    const courseOwner = await query(`
-      SELECT course_id FROM cle_course
-      WHERE course_id = $1 AND instructor_id = $2
-    `, [courseId, instructorId]);
-
-    if (courseOwner.rows.length === 0) {
-      return res.status(403).json({ error: 'Course not found or access denied' });
+    const { courseId, laneId } = req.params;
+    if (process.env.GUAC_ENABLED !== 'true') {
+      return res.status(503).json({ error: 'Remote console is not enabled on this instance.' });
     }
 
-    // Mark assignment as deleted
-    await query(`
-      UPDATE cle_user_vm_assignment
-      SET status = 'deleted', updated_at = NOW()
-      WHERE assignment_id = $1 AND course_id = $2
-    `, [vmId, courseId]);
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
-    res.json({ success: true, message: 'VM removed' });
+    const laneRes = await cybercoreQuery(
+      `SELECT config FROM cybercore_lane WHERE lane_id = $1 AND config->>'course_id' = $2 AND status <> 'deleted'`,
+      [laneId, courseId]
+    );
+    if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
+
+    const connId = laneRes.rows[0].config?.guac_connection_id;
+    if (!connId) return res.status(404).json({ error: 'No remote console is configured for this workstation yet' });
+
+    let guacToken = null;
+    try { guacToken = await getGuacToken(); } catch (e) {
+      console.warn(`[CLE] Guac token fetch failed: ${e.message}`);
+    }
+
+    res.json({
+      launchUrl: buildGuacLaunchUrl(connId),
+      connection_id: connId,
+      guac_url: GUAC_URL,
+      ...(guacToken ? { guacToken, dataSource: GUAC_DS } : { clearGuacAuth: true }),
+    });
+  } catch (error) {
+    console.error('[CLE] Console error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * DELETE /:laneId — Tear down a student's workstation lane (workstation +
+ * gateway + Guac connection + lane row).
+ */
+router.delete('/:laneId', instructorOnly, async (req, res) => {
+  try {
+    const { courseId, laneId } = req.params;
+
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    // Confirm the lane belongs to this course before destroying anything.
+    const laneRes = await cybercoreQuery(
+      `SELECT lane_id FROM cybercore_lane WHERE lane_id = $1 AND config->>'course_id' = $2`,
+      [laneId, courseId]
+    );
+    if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
+
+    await laneProvision.teardownLane(laneId);
+    res.json({ success: true, message: 'Workstation lane removed' });
   } catch (error) {
     console.error('[CLE] Delete VM error:', error.message);
     res.status(500).json({ error: error.message });

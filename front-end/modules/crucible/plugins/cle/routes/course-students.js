@@ -30,25 +30,23 @@ router.get('/', instructorOnly, async (req, res) => {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
-    // Get enrolled students with VM assignments
-    // Step 1: Get enrollments and VM counts from cle_db
+    // Get enrolled students
+    // Step 1: Get enrollments from cle_db
     const enrollmentsResult = await query(`
       SELECT
         e.user_id,
         e.enrollment_role,
         e.enrolled_at,
-        e.status,
-        COUNT(DISTINCT v.vm_instance_id) AS vm_count
+        e.status
       FROM cle_course_enrollment e
-      LEFT JOIN cle_user_vm_assignment v ON e.user_id = v.user_id AND e.course_id = v.course_id
       WHERE e.course_id = $1 AND e.status = 'active'
-      GROUP BY e.user_id, e.enrollment_role, e.enrolled_at, e.status
       ORDER BY e.enrolled_at DESC
     `, [courseId]);
 
-    // Step 2: Get user details from cybercore_db for all user_ids
+    // Step 2: Get user details + workstation-lane counts from cybercore_db
     const userIds = enrollmentsResult.rows.map(r => r.user_id);
     let userMap = {};
+    const laneCounts = {}; // user_id → count
     if (userIds.length > 0) {
       const usersResult = await cybercoreQuery(`
         SELECT user_id, email, first_name, last_name
@@ -58,6 +56,14 @@ router.get('/', instructorOnly, async (req, res) => {
       usersResult.rows.forEach(u => {
         userMap[u.user_id] = u;
       });
+
+      const lc = await cybercoreQuery(`
+        SELECT user_id, COUNT(*)::int AS vm_count
+          FROM cybercore_lane
+         WHERE user_id = ANY($1) AND config->>'course_id' = $2 AND status <> 'deleted'
+         GROUP BY user_id
+      `, [userIds, courseId]).catch(() => ({ rows: [] }));
+      lc.rows.forEach(r => { laneCounts[r.user_id] = r.vm_count; });
     }
 
     // Step 3: Merge user data with enrollments
@@ -69,7 +75,7 @@ router.get('/', instructorOnly, async (req, res) => {
       enrollment_role: e.enrollment_role,
       enrolled_at: e.enrolled_at,
       status: e.status,
-      vm_count: e.vm_count
+      vm_count: laneCounts[e.user_id] || 0
     }));
 
     res.json({ students });

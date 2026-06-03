@@ -40,18 +40,16 @@ router.get('/', async (req, res) => {
         e.course_id,
         e.enrollment_role,
         e.status,
-        e.enrolled_at,
-        COUNT(DISTINCT v.assignment_id) AS vm_count
+        e.enrolled_at
       FROM cle_course_enrollment e
-      LEFT JOIN cle_user_vm_assignment v ON e.user_id = v.user_id AND e.course_id = v.course_id
       WHERE e.course_id = ANY($1)
-      GROUP BY e.user_id, e.course_id, e.enrollment_role, e.status, e.enrolled_at
       ORDER BY e.enrolled_at DESC
     `, [courseIds]);
 
-    // Step 2: Get user details from cybercore_db
+    // Step 2: Get user details + workstation-lane counts from cybercore_db
     const userIds = [...new Set(enrollmentsResult.rows.map(r => r.user_id))];
     let userMap = {};
+    const laneCounts = {}; // `${user_id}::${course_id}` → count
     if (userIds.length > 0) {
       const usersResult = await cybercoreQuery(`
         SELECT user_id, email, first_name, last_name
@@ -61,6 +59,14 @@ router.get('/', async (req, res) => {
       usersResult.rows.forEach(u => {
         userMap[u.user_id] = u;
       });
+
+      const lc = await cybercoreQuery(`
+        SELECT user_id, config->>'course_id' AS course_id, COUNT(*)::int AS vm_count
+          FROM cybercore_lane
+         WHERE user_id = ANY($1) AND config->>'course_id' = ANY($2) AND status <> 'deleted'
+         GROUP BY user_id, config->>'course_id'
+      `, [userIds, courseIds]).catch(() => ({ rows: [] }));
+      lc.rows.forEach(r => { laneCounts[`${r.user_id}::${r.course_id}`] = r.vm_count; });
     }
 
     // Step 3: Merge user data with enrollments
@@ -73,7 +79,7 @@ router.get('/', async (req, res) => {
       enrollment_role: e.enrollment_role,
       status: e.status,
       enrolled_at: e.enrolled_at,
-      vm_count: e.vm_count
+      vm_count: laneCounts[`${e.user_id}::${e.course_id}`] || 0
     }));
 
     res.json({ students });
@@ -185,20 +191,28 @@ router.get('/:studentId', async (req, res) => {
         e.status,
         e.enrolled_at,
         e.completion_date,
-        COUNT(DISTINCT v.assignment_id) AS vm_count,
         COUNT(DISTINCT m.material_id) AS material_count
       FROM cle_course_enrollment e
       JOIN cle_course c ON e.course_id = c.course_id
-      LEFT JOIN cle_user_vm_assignment v ON e.user_id = v.user_id AND e.course_id = v.course_id
       LEFT JOIN cle_course_material m ON c.course_id = m.course_id
       WHERE e.user_id = $1 AND (c.instructor_id = $2 OR $3 = 'admin')
       GROUP BY e.enrollment_id, e.course_id, c.course_name, e.enrollment_role, e.status, e.enrolled_at, e.completion_date
     `, [studentId, instructorId, userRole]);
 
+    // Per-course workstation-lane count for this student (source of truth).
+    const laneCounts = {};
+    const lc = await cybercoreQuery(`
+      SELECT config->>'course_id' AS course_id, COUNT(*)::int AS vm_count
+        FROM cybercore_lane
+       WHERE user_id = $1 AND status <> 'deleted' AND config->>'course_id' IS NOT NULL
+       GROUP BY config->>'course_id'
+    `, [studentId]).catch(() => ({ rows: [] }));
+    lc.rows.forEach(r => { laneCounts[r.course_id] = r.vm_count; });
+
     res.json({
       student: {
         ...student,
-        enrollments: enrollmentsResult.rows
+        enrollments: enrollmentsResult.rows.map(e => ({ ...e, vm_count: laneCounts[e.course_id] || 0 }))
       }
     });
   } catch (error) {
