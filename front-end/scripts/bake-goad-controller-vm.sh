@@ -722,6 +722,20 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         hosts: domain
         gather_facts: no
         tasks:
+          # Some Windows hosts (notably srv02) bring WinRM up later than the
+          # DCs. If the play starts before a host's WinRM listener is ready,
+          # Ansible marks it `unreachable` on the very first task and the whole
+          # GOAD chain fails — even though the host comes up fine seconds later.
+          # wait_for_connection polls the connection and rides out a slow boot
+          # (it catches the not-yet-reachable state and retries to `timeout`),
+          # so a laggy host is WAITED FOR instead of instantly failed. Runs
+          # per-host in parallel, so hosts already up don't pay the wait.
+          - name: Wait for WinRM to come up (slow boots get marked unreachable, e.g. srv02)
+            ansible.builtin.wait_for_connection:
+              delay: 5
+              sleep: 10
+              timeout: 300
+
           - name: Compute lane gateway from host's IPv4 (.1 of /24)
             win_shell: |
               \$ip = (Get-NetIPAddress -AddressFamily IPv4 |
@@ -769,21 +783,94 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
                 Write-Host "Default route via \$expected already present"
               }
 
-          - name: Verify outbound HTTPS to PSGallery (TLS 1.2)
+          # The Windows template (1004) bakes a STATIC DNS of 8.8.8.8 (see
+          # bake-win-server-template.sh) so the VM is reachable during packer
+          # build. In a deployed lane that public resolver is usually
+          # unreachable — the lab's OPNsense egress filter blocks outbound DNS
+          # to anything but its own resolver — so name resolution times out and
+          # the egress check below fails even though the gateway has internet.
+          # Point DNS at the lane gateway (its dnsmasq forwards to the lab's
+          # sanctioned resolver). This is the SAME thing the GOAD common role
+          # does later (force_dns_server / dns_server=GW_IP); the preflight just
+          # needs it FIRST, before it tests egress.
+          - name: Point DNS at the lane gateway (template bakes 8.8.8.8, which the lab blocks)
+            win_shell: |
+              \$gw = '{{ lane_gw }}'
+              \$ifs = Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { \$_.IPAddress -like '10.*' -or \$_.IPAddress -like '192.*' } |
+                Where-Object { \$_.PrefixOrigin -ne 'WellKnown' }
+              foreach (\$i in \$ifs) {
+                Set-DnsClientServerAddress -InterfaceIndex \$i.InterfaceIndex -ServerAddresses \$gw -ErrorAction SilentlyContinue
+              }
+              Clear-DnsClientCache -ErrorAction SilentlyContinue
+              Write-Host "DNS set to \$gw on \$((\$ifs | Measure-Object).Count) adapter(s)"
+            changed_when: false
+
+          # Egress to PSGallery is INTERMITTENT on a cold lane: a deployed lane
+          # resolves + egresses fine once settled (verified by hand), but the
+          # preflight runs in an early-boot window — gateway still finishing its
+          # Tailscale bootstrap / netfilter reconcile, DC's route+DNS just
+          # changed — and the first attempt can hang past the timeout. Don't
+          # fail the whole 30-min GOAD chain on one cold-start blip: RETRY.
+          # Invoke-WebRequest -TimeoutSec keeps each attempt short (the old
+          # WebClient.DownloadString had a ~100s default timeout, so a single
+          # miss burned ~100s); `until`/retries rides out the transient.
+          - name: Verify outbound HTTPS to PSGallery (TLS 1.2, retried through cold-start)
             win_shell: |
               [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              try {
-                (New-Object System.Net.WebClient).DownloadString('https://www.powershellgallery.com/api/v2/') | Out-Null
-                'EGRESS_OK'
-              } catch {
-                throw "Egress preflight failed (lane gateway {{ lane_gw }} unreachable to internet?): \$(\$_.Exception.Message)"
-              }
+              Invoke-WebRequest -UseBasicParsing -Uri 'https://www.powershellgallery.com/api/v2/' -TimeoutSec 15 | Out-Null
+              'EGRESS_OK'
             register: egress_test
+            until: egress_test is succeeded
+            retries: 10
+            delay: 12
             changed_when: false
+            # On final exhaustion the task fails with the IWR error; that, plus
+            # this name, makes a genuine (non-transient) egress outage obvious.
 
           - name: Show egress result
             debug:
               msg: "{{ egress_test.stdout_lines | join(' | ') }}"
+
+          # ROOT CAUSE of the GOAD regression: GOAD "used to deploy fine" because
+          # the OLD Windows template had NuGet + PowerShellGet + the DSC/PKI
+          # modules PRE-INSTALLED, so upstream's online installs were all no-ops.
+          # The new sysprep-generalized template (bake-win-server-template.sh,
+          # vmid 1004) is clean, so those tasks now RUN online — and the very
+          # first, `Install-PackageProvider -Name NuGet -Force`, FAILS headlessly
+          # ("NoMatchFoundForProvider" + "NonInteractive mode ... Prompt
+          # functionality is not available"): bare `-Force` does NOT bootstrap the
+          # provider non-interactively — it needs `-ForceBootstrap`.
+          #
+          # Fix in ONE place: as Administrator (before the upstream roles run as
+          # vagrant), bootstrap NuGet correctly, trust PSGallery, and PRE-STAGE
+          # every PSGallery module the GOAD chain installs, machine-wide. The
+          # upstream `win_psmodule` / `Install-Module` tasks then find each module
+          # already present (state: present) and no-op — restoring the old
+          # template's behavior without re-baking Windows. Module list = every
+          # name from `grep win_psmodule|Install-Module` across the GOAD roles:
+          #   common:               ComputerManagementDsc, xNetworking
+          #   domain_controller/child_domain: xDnsServer, ActiveDirectoryDSC
+          #   adcs:                 PSPKI, xAdcsDeployment
+          # (PowerShellGet upgrade is left to upstream — it succeeds once NuGet is
+          # present.) PSGallery egress is verified just above. Retried for the
+          # same cold-start reason as the egress check.
+          - name: Pre-stage GOAD PS deps (NuGet + DSC/PKI modules) so upstream installs no-op
+            win_shell: |
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ForceBootstrap -Scope AllUsers | Out-Null
+              Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+              foreach (\$m in 'ComputerManagementDsc','xNetworking','xDnsServer','ActiveDirectoryDSC','PSPKI','xAdcsDeployment') {
+                if (-not (Get-Module -ListAvailable -Name \$m)) {
+                  Install-Module -Name \$m -Repository PSGallery -Force -AllowClobber -Scope AllUsers -ErrorAction Stop | Out-Null
+                }
+              }
+              'PSDEPS_OK'
+            register: psdeps
+            until: psdeps is succeeded
+            retries: 5
+            delay: 12
+            changed_when: false
       PFN
       echo ""
       echo ">>>>>>>>>>>>>>>>>>>>>> preflight-network.yml <<<<<<<<<<<<<<<<<<<<<<"

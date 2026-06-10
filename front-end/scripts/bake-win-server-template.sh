@@ -49,6 +49,13 @@ PROXMOX_BUILD_VLAN="${PROXMOX_BUILD_VLAN:-10}"
 # Override via env if your network differs.
 BUILD_STATIC_IP="${BUILD_STATIC_IP:-100.100.10.250}"
 BUILD_STATIC_PREFIX="${BUILD_STATIC_PREFIX:-24}"
+# Default gateway for the build VM. Without this the VM has an IP but NO route
+# off-subnet, so it can't reach the internet (DNS to 8.8.8.8 fails, every
+# download fails). Defaults to .1 of the build subnet — OVERRIDE via env if your
+# vlan-10 router is elsewhere (e.g. the Proxmox host itself if it NATs):
+#   BUILD_STATIC_GATEWAY=100.100.10.15 bash bake-win-server-template.sh
+BUILD_STATIC_GATEWAY="${BUILD_STATIC_GATEWAY:-$(echo "$BUILD_STATIC_IP" | sed -E 's/\.[0-9]+$/.1/')}"
+BUILD_DNS="${BUILD_DNS:-8.8.8.8}"
 GOAD_DIR="${GOAD_DIR:-/root/GOAD}"
 GOAD_REPO="${GOAD_REPO:-https://github.com/Orange-Cyberdefense/GOAD.git}"
 GOAD_REF="${GOAD_REF:-main}"
@@ -74,6 +81,7 @@ echo " VM storage    : $PROXMOX_STORAGE   (final template lands here)"
 echo " ISO storage   : ${ISO_STORAGE:-auto-detect}   (where ISOs live + autounattend ISOs go)"
 echo " Bridge / VLAN : $PROXMOX_BRIDGE${PROXMOX_BUILD_VLAN:+ / vlan $PROXMOX_BUILD_VLAN}"
 echo " Build IP      : $BUILD_STATIC_IP/$BUILD_STATIC_PREFIX  (assigned at first logon, must be reachable from host)"
+echo " Build GW/DNS  : $BUILD_STATIC_GATEWAY / $BUILD_DNS   (override BUILD_STATIC_GATEWAY if vlan-10 router differs)"
 echo " GOAD dir      : $GOAD_DIR"
 echo " Final VMID    : $FINAL_VMID"
 echo " Packer user   : $PACKER_USER"
@@ -220,6 +228,43 @@ if [ ! -f "$CLOUDBASE_MSI" ]; then
 fi
 echo "==> cloudbase-init MSI: $CLOUDBASE_MSI"
 
+# ---------- 3b. Vendor GOAD PowerShell modules offline ----------
+# The build VM can't reach PSGallery's download CDN / go.microsoft.com, so an
+# in-VM `Install-Module` fails (TCP connects but the actual downloads are
+# blocked). Instead we download the module .nupkgs HERE on the Proxmox host
+# (which has working internet — it just pulled packer/GOAD/the ISOs), bundle
+# them onto the scripts ISO under sysprep/psmodules/, and winprep extracts them
+# into the template's PSModulePath. THIS is what actually bakes the GOAD DSC/PKI
+# deps in so GOAD's ansible doesn't try (and fail) to install them online on
+# every deploy — the whole reason for pre-installing them. A .nupkg is just a
+# zip of the module, and the PSGallery v2 feed serves the latest at
+# /api/v2/package/<Name> (a plain HTTPS GET — no NuGet provider needed).
+PSMOD_DIR="$GOAD_PACKER_DIR/scripts/sysprep/psmodules"
+mkdir -p "$PSMOD_DIR"
+# Matches the set GOAD's ansible installs. xNetworking is the old name;
+# NetworkingDsc is its successor — bundle both so either playbook version is
+# satisfied offline.
+GOAD_PS_MODULES=(PackageManagement PowerShellGet ComputerManagementDsc xNetworking NetworkingDsc xDnsServer DnsServerDsc ActiveDirectoryDSC PSPKI xAdcsDeployment)
+echo "==> Vendoring GOAD PowerShell modules into $PSMOD_DIR ..."
+PSMOD_FAILED=()
+for m in "${GOAD_PS_MODULES[@]}"; do
+  out="$PSMOD_DIR/${m}.nupkg"
+  if [ -f "$out" ] && [ -s "$out" ]; then echo "    ${m}: cached ($(du -h "$out" | cut -f1))"; continue; fi
+  url="https://www.powershellgallery.com/api/v2/package/${m}"
+  if wget -q -L -O "${out}.tmp" "$url" && [ -s "${out}.tmp" ]; then
+    mv "${out}.tmp" "$out"
+    echo "    ${m}: $(du -h "$out" | cut -f1)"
+  else
+    rm -f "${out}.tmp"
+    PSMOD_FAILED+=("$m")
+    echo "    WARN: failed to download ${m} (host egress to powershellgallery.com?) — it won't be baked in"
+  fi
+done
+if [ ${#PSMOD_FAILED[@]} -gt 0 ]; then
+  echo "    NOTE: ${#PSMOD_FAILED[@]} module(s) failed to vendor: ${PSMOD_FAILED[*]}"
+  echo "          The build continues; GOAD would fall back to online install for those at deploy."
+fi
+
 # ---------- 4. Create dedicated Proxmox user + role for packer ----------
 # Always (re)set the password so it stays in sync with config.auto.pkrvars.hcl,
 # which we regenerate every run with a fresh random PACKER_USER_PW. Skipping
@@ -280,6 +325,8 @@ cat > "$GOAD_PACKER_DIR/scripts/cybercore-build-network.ps1" <<PS1
 \$ErrorActionPreference = "Continue"
 \$BuildIP = "$BUILD_STATIC_IP"
 \$BuildPrefix = "$BUILD_STATIC_PREFIX"
+\$BuildGW = "$BUILD_STATIC_GATEWAY"
+\$BuildDNS = "$BUILD_DNS"
 \$logFile = "C:\\cybercore-build.log"
 "\$(Get-Date) cybercore-build-network.ps1 starting" | Out-File \$logFile -Append
 
@@ -300,11 +347,18 @@ if (-not \$adapter) {
 Remove-NetIPAddress -InterfaceAlias \$adapter.Name -AddressFamily IPv4 -Confirm:\$false -ErrorAction SilentlyContinue
 Remove-NetRoute    -InterfaceAlias \$adapter.Name -AddressFamily IPv4 -Confirm:\$false -ErrorAction SilentlyContinue
 try {
-    New-NetIPAddress -InterfaceAlias \$adapter.Name -IPAddress \$BuildIP -PrefixLength \$BuildPrefix -ErrorAction Stop | Out-Null
-    Set-DnsClientServerAddress -InterfaceAlias \$adapter.Name -ServerAddresses 8.8.8.8
-    "\$(Get-Date) Set static IP \$BuildIP/\$BuildPrefix" | Out-File \$logFile -Append
+    New-NetIPAddress -InterfaceAlias \$adapter.Name -IPAddress \$BuildIP -PrefixLength \$BuildPrefix -DefaultGateway \$BuildGW -ErrorAction Stop | Out-Null
+    Set-DnsClientServerAddress -InterfaceAlias \$adapter.Name -ServerAddresses \$BuildDNS
+    "\$(Get-Date) Set static IP \$BuildIP/\$BuildPrefix gw \$BuildGW dns \$BuildDNS" | Out-File \$logFile -Append
 } catch {
     "\$(Get-Date) ERROR setting static IP: \$(\$_.Exception.Message)" | Out-File \$logFile -Append
+}
+# Verify outbound reachability so the log shows whether the gateway actually routes.
+try {
+    \$ping = Test-Connection -ComputerName \$BuildDNS -Count 2 -Quiet -ErrorAction SilentlyContinue
+    "\$(Get-Date) outbound ping to \$BuildDNS : \$ping" | Out-File \$logFile -Append
+} catch {
+    "\$(Get-Date) outbound ping check failed: \$(\$_.Exception.Message)" | Out-File \$logFile -Append
 }
 
 # Install qemu-guest-agent properly (upstream's Autounattend Order=16 is broken)
@@ -376,6 +430,41 @@ open(path, "w").write(content)
 print(f"    Injected into {path}", file=sys.stderr)
 PY
 
+# ---------- 5c-lang. Force English (en-US) locale in the answer files ----------
+# The Win Server 2019 OOBE has been coming up in FRENCH. The install ISO is
+# English (..._x64FRE_en-us — "FRE" = Free build, not French), so the French is
+# coming from GOAD's answer files — GOAD is by Orange Cyberdefense (a French
+# shop), so their unattends ship fr-FR locale + French keyboard. We rewrite EVERY
+# locale element to en-US + US keyboard (0409:00000409) in BOTH:
+#   - Autounattend.xml          -> governs the BUILD VM's Windows setup/OOBE
+#   - cloudbase-init-unattend.xml -> the sysprep /unattend that runs OOBE on each
+#                                    deployed CLONE (so clones aren't French)
+echo "==> Forcing English (en-US) locale in the answer files..."
+CLOUDBASE_UNATTEND="$GOAD_PACKER_DIR/scripts/sysprep/cloudbase-init-unattend.xml"
+python3 - "$AUTOUNATTEND_XML" "$CLOUDBASE_UNATTEND" <<'PY'
+import re, sys
+# Map each locale element to its English value. InputLocale uses the LCID form.
+repl = {
+    'UILanguage':         'en-US',
+    'UILanguageFallback': 'en-US',
+    'SystemLocale':       'en-US',
+    'UserLocale':         'en-US',
+    'InputLocale':        '0409:00000409',
+}
+for path in sys.argv[1:]:
+    try:
+        content = open(path).read()
+    except FileNotFoundError:
+        print(f"    (skip, not found: {path})", file=sys.stderr)
+        continue
+    n = 0
+    for tag, val in repl.items():
+        content, c = re.subn(rf'<{tag}>.*?</{tag}>', f'<{tag}>{val}</{tag}>', content, flags=re.DOTALL)
+        n += c
+    open(path, "w").write(content)
+    print(f"    Forced {n} locale element(s) to English in {path}", file=sys.stderr)
+PY
+
 # ---------- 5c2. Patch cloudbase-init.ps1 to use msiexec directly ----------
 # Upstream's cloudbase-init.ps1 invokes the .msi via Start-Process with the
 # msi as FilePath, relying on Windows' file-association to call msiexec.
@@ -384,9 +473,15 @@ PY
 # script (p2) then dies because the cloudbase-init service doesn't exist.
 # Fix: invoke msiexec.exe directly with proper args, and verify exit code.
 P1_PATH="$GOAD_PACKER_DIR/scripts/sysprep/cloudbase-init.ps1"
-if [ -f "$P1_PATH" ] && ! grep -q 'msiexec.exe' "$P1_PATH"; then
-  echo "==> Patching $P1_PATH to install MSI via msiexec.exe directly..."
-  cat > "$P1_PATH" <<'PS1A'
+# REGENERATE UNCONDITIONALLY every run. cloudbase-init.ps1 is a COMPLETE
+# replacement of upstream (PS1A here + winprep appended by 5c3) — we never need
+# its original content — so we always `cat >` it fresh. This is deliberately NOT
+# a "skip if marker present" guard: /root/GOAD is persisted, and a skip-guard
+# would keep STALE patched content (e.g. an old online winprep) whenever we
+# change PS1A/winprep between runs. Overwriting every run self-heals that.
+echo "==> (Re)writing $P1_PATH with the cloudbase-init msiexec installer (regenerated every run)..."
+cat > "$P1_PATH" <<'PS1A'
+# cybercore-msiexec-install (sentinel — do not remove; bake guard keys off this)
 # Patched by bake-win-server-template.sh — install Cloudbase-Init reliably.
 # Uses msiexec.exe directly (upstream's "Start-Process -FilePath foo.msi"
 # pattern silently fails in non-interactive contexts).
@@ -417,7 +512,113 @@ if (-not $svc) {
 }
 Write-Host "cloudbase-init service: $($svc.Status) ($($svc.StartType))"
 PS1A
-fi
+
+# ---------- 5c3. Append cybercore Windows prep (balloon + GOAD PS deps) -------
+# Two things baked into the template here, run by cloudbase-init.ps1 over WinRM
+# during the build (virtio CD still mounted) BEFORE sysprep, so every clone
+# inherits them:
+#
+#   (1) VirtIO Balloon SERVICE (blnsvr). Without it the guest never reports free
+#       memory to the balloon device, so Proxmox shows the VM at ~100% memory
+#       (e.g. "101.22% (12.15 of 12.00 GiB)"). Local + fast, no network.
+#
+#   (2) GOAD PowerShell deps — NuGet provider + the DSC/PKI modules the GOAD
+#       ansible chain installs. The OLD template had these pre-installed (so
+#       upstream's online installs were no-ops); the clean sysprep template
+#       doesn't, which made GOAD's `Install-PackageProvider`/`win_psmodule`
+#       tasks run online on every deploy. Baking them in restores that — BUT it
+#       needs PSGallery egress, which the build VLAN may not have.
+#
+# ORDER MATTERS: this is APPENDED *after* PS1A (the cloudbase-init install), not
+# prepended. We learned the hard way that prepending it ran the slow, network-
+# dependent module installs FIRST; on a build network without egress,
+# `Install-PackageProvider -ForceBootstrap` hangs, packer's elevated scheduled
+# task hits its time limit and is killed mid-winprep, and PS1A (the ESSENTIAL,
+# fully-local cloudbase-init install) never runs — yielding a template with no
+# cloudbase-init. Now cloudbase-init installs first (guaranteed), and the module
+# bake (2) installs OFFLINE from the bundle so it can't hang at all.
+#
+# UNCONDITIONAL append (no marker guard): 5c2 just rewrote $P1_PATH from scratch
+# (PS1A only), so appending winprep here exactly once yields PS1A + winprep every
+# run. A skip-guard would strand a STALE winprep on the persisted /root/GOAD.
+echo "==> Appending cybercore-winprep (balloon service + GOAD PS modules) to $P1_PATH..."
+cat >> "$P1_PATH" <<'PREP'
+
+# === cybercore-winprep (baked by bake-win-server-template.sh) =================
+# Runs AFTER the cloudbase-init install above. Everything here is best-effort and
+# MUST NOT block: cloudbase-init is already installed by this point.
+$ErrorActionPreference = "Continue"
+Write-Host "=== cybercore-winprep: VirtIO balloon service + GOAD PS deps ==="
+
+# (1) VirtIO Balloon service — accurate Proxmox memory reporting (local, fast).
+try {
+  $virtio = Get-WmiObject Win32_LogicalDisk -Filter "DriveType=5" |
+    Where-Object { Test-Path (Join-Path $_.DeviceID 'Balloon') } | Select-Object -First 1
+  if ($virtio) {
+    $base = Join-Path $virtio.DeviceID 'Balloon'
+    $inf = Get-ChildItem $base -Recurse -Filter 'balloon.inf' -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match '(2k19|2019|w10)' -and $_.FullName -match 'amd64' } | Select-Object -First 1
+    if (-not $inf) { $inf = Get-ChildItem $base -Recurse -Filter 'balloon.inf' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if ($inf) { & pnputil.exe /add-driver $inf.FullName /install | Out-Null; Write-Host "balloon driver: $($inf.FullName)" }
+    $bln = Get-ChildItem $base -Recurse -Filter 'blnsvr.exe' -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match '(2k19|2019|w10)' -and $_.FullName -match 'amd64' } | Select-Object -First 1
+    if (-not $bln) { $bln = Get-ChildItem $base -Recurse -Filter 'blnsvr.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if ($bln) {
+      Copy-Item $bln.FullName 'C:\Windows\System32\blnsvr.exe' -Force -ErrorAction SilentlyContinue
+      & 'C:\Windows\System32\blnsvr.exe' -i 2>&1 | Out-Null
+      Set-Service -Name 'BalloonService' -StartupType Automatic -ErrorAction SilentlyContinue
+      Start-Service -Name 'BalloonService' -ErrorAction SilentlyContinue
+      Write-Host "VirtIO BalloonService installed + started"
+    } else { Write-Host "WARN: blnsvr.exe not found on virtio CD" }
+  } else { Write-Host "WARN: no virtio CD with a Balloon dir found" }
+} catch { Write-Host "WARN: balloon setup failed: $($_.Exception.Message)" }
+
+# (2) GOAD PowerShell deps — install OFFLINE from the bundle on G:\. The build
+# VM can't reach PSGallery's download CDN, so the Proxmox host pre-downloaded the
+# module .nupkgs onto the scripts ISO (sysprep/psmodules -> G:\sysprep\psmodules).
+# A .nupkg is a zip of the module; we extract each straight into the machine
+# PSModulePath so GOAD's ansible finds them already present (Get-Module
+# -ListAvailable) and skips its online installs at deploy time. No network here.
+try {
+  $modDest = Join-Path $env:ProgramFiles 'WindowsPowerShell\Modules'
+  $bundle = $null
+  foreach ($d in (Get-WmiObject Win32_LogicalDisk -Filter "DriveType=5" | ForEach-Object { $_.DeviceID })) {
+    $cand = Join-Path $d 'sysprep\psmodules'
+    if (Test-Path $cand) { $bundle = $cand; break }
+  }
+  if (-not $bundle) {
+    Write-Host "WARN: no psmodules bundle found on any CD — DSC modules NOT baked (check host-side vendoring in bake-win-server-template.sh section 3b)."
+  } else {
+    Write-Host "Installing GOAD PS modules offline from $bundle"
+    foreach ($f in (Get-ChildItem $bundle -Filter *.nupkg)) {
+      try {
+        $zip = Join-Path $env:TEMP ($f.BaseName + '.zip')
+        Copy-Item $f.FullName $zip -Force
+        $ext = Join-Path $env:TEMP ('mod_' + $f.BaseName)
+        if (Test-Path $ext) { Remove-Item $ext -Recurse -Force }
+        Expand-Archive -Path $zip -DestinationPath $ext -Force   # .nupkg is a zip
+        Remove-Item $zip -Force
+        # ROOT manifest only (NOT -Recurse: nested DSCResources have their own .psd1)
+        $psd1 = Get-ChildItem $ext -Filter *.psd1 | Select-Object -First 1
+        if (-not $psd1) { Write-Host "WARN: no root .psd1 in $($f.Name) — skipping"; continue }
+        $name = $psd1.BaseName
+        $ver  = (Import-PowerShellDataFile $psd1.FullName).ModuleVersion
+        $target = Join-Path $modDest ("$name\$ver")
+        if (Test-Path (Join-Path $target "$name.psd1")) { Write-Host "module present: $name $ver"; continue }
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        # copy the module payload, excluding the nupkg packaging metadata
+        Get-ChildItem $ext -Force | Where-Object {
+          $_.Name -ne '_rels' -and $_.Name -ne 'package' -and $_.Name -ne '[Content_Types].xml' -and $_.Extension -ne '.nuspec'
+        } | Copy-Item -Destination $target -Recurse -Force
+        Write-Host "installed module (offline): $name $ver"
+      } catch { Write-Host "WARN: offline install $($f.Name) failed: $($_.Exception.Message)" }
+    }
+  }
+} catch { Write-Host "WARN: PS module offline bake failed: $($_.Exception.Message)" }
+Write-Host "=== cybercore-winprep done ==="
+# === end cybercore-winprep ===================================================
+PREP
+echo "    Appended cybercore-winprep to $P1_PATH (runs after the cloudbase-init install)"
 
 # ---------- 5d. Patch cloudbase-init-p2.ps1 to drop /mode:vm + capture logs ----------
 # Upstream's script invokes:
@@ -430,7 +631,13 @@ fi
 # hypervisor enlightenments) and dump the sysprep logs to C: so we can
 # survive a re-run failure.
 P2_PATH="$GOAD_PACKER_DIR/scripts/sysprep/cloudbase-init-p2.ps1"
-if grep -q '/mode:vm\|/generalize /oobe /unattend' "$P2_PATH" 2>/dev/null; then
+# Run if ANY of: /mode:vm still present, the old one-string unattend args, OR
+# the upstream (forward-slash) sysprep.exe call we rewrite below is still there.
+# The third term is what makes re-runs self-heal: an earlier pass on a persisted
+# $GOAD_DIR may have already run the seds (dropping /mode:vm, adding /shutdown)
+# but then aborted in PYFIX (the Python 3.13 re.sub bug), leaving the sysprep
+# call UNpatched. Without this term the gate would now be false and skip it.
+if grep -qE '/mode:vm|/generalize /oobe /unattend|system32/sysprep/sysprep\.exe' "$P2_PATH" 2>/dev/null; then
   echo "==> Patching $P2_PATH for sysprep flags + log capture..."
   # Remove /mode:vm; it's the most common cause of bogus sysprep exit codes
   sed -i 's| /mode:vm||g' "$P2_PATH"
@@ -464,11 +671,17 @@ new_cmd = (
     'start-process -FilePath "C:\\Windows\\System32\\Sysprep\\sysprep.exe" '
     '-ArgumentList "/generalize","/oobe","/shutdown","/unattend:C:\\unattend.xml" -wait'
 )
-content_new = old_cmd.sub(new_cmd, content)
+# Pass the replacement as a LAMBDA, not a string: re.sub treats a string
+# replacement as a template and interprets backslash sequences (\P, \C, \W,
+# \u...) — Python 3.13 raises "bad escape \P" on the Windows paths below. A
+# function replacement is returned verbatim. (Same trick patch-mssql.py uses.)
+content_new = old_cmd.sub(lambda m: new_cmd, content)
 if content_new != content:
     with open(path, 'w') as f:
         f.write(content_new)
     print(f"    Patched sysprep call in {path} to use no-spaces unattend path", file=sys.stderr)
+else:
+    print(f"    WARNING: sysprep-call pattern not matched in {path} (already patched?)", file=sys.stderr)
 PYFIX
   # If the file doesn't already capture logs, append a tee + log save block
   if ! grep -q 'cybercore-sysprep-log' "$P2_PATH"; then
@@ -487,6 +700,47 @@ Get-WinEvent -LogName "Setup" -MaxEvents 50 -ErrorAction SilentlyContinue |
 PSAPPEND
   fi
 fi
+
+# ---------- 5e. Sanitize ALL generated PowerShell to pure ASCII ----------
+# BULLETPROOFING: Windows PowerShell reads a no-BOM .ps1 as ANSI (system
+# codepage), NOT UTF-8. So any non-ASCII byte we write — e.g. an em-dash (—,
+# U+2014) in a comment or Write-Host string — gets mis-decoded on the guest into
+# bytes that CORRUPT TOKENIZATION, producing bogus "Unexpected token '}'" parse
+# errors that abort the ENTIRE script (and since PowerShell parses before
+# executing, that kills the cloudbase-init install at the top too — exactly the
+# failure we hit). Force every .ps1 we ship to pure ASCII so the guest parses it
+# identically regardless of codepage. Transliterate common typographic chars,
+# drop anything else. Verified against PowerShell's own parser in ANSI mode.
+echo "==> Sanitizing generated PowerShell scripts to ASCII (guards against codepage parse breakage)..."
+python3 - "$GOAD_PACKER_DIR/scripts" <<'PY'
+import sys, os, unicodedata
+root = sys.argv[1]
+trans = {0x2014:'-',0x2013:'-',0x2018:"'",0x2019:"'",0x201c:'"',0x201d:'"',
+         0x2026:'...',0x00a0:' ',0x2212:'-'}
+count = 0
+for dirpath, _, files in os.walk(root):
+    for fn in files:
+        if not fn.lower().endswith('.ps1'):
+            continue
+        p = os.path.join(dirpath, fn)
+        s = open(p, encoding='utf-8', errors='replace').read()
+        out = []
+        for ch in s:
+            o = ord(ch)
+            if o < 128:
+                out.append(ch)
+            elif o in trans:
+                out.append(trans[o])
+            else:
+                d = unicodedata.normalize('NFKD', ch).encode('ascii', 'ignore').decode('ascii')
+                out.append(d if d else '?')
+        new = ''.join(out)
+        if new != s:
+            open(p, 'w', encoding='ascii').write(new)
+            count += 1
+            print(f"    sanitized {p}", file=sys.stderr)
+print(f"    {count} PowerShell file(s) sanitized to ASCII", file=sys.stderr)
+PY
 
 # ---------- 6. Build the packer-side ISOs (autounattend + scripts) ----------
 echo "==> Running build_proxmox_iso.sh to generate autounattend / scripts ISOs..."
@@ -596,6 +850,47 @@ else
   sed -i "s|^[[:space:]]*winrm_host[[:space:]]*=.*|  winrm_host           = \"$BUILD_STATIC_IP\"|" "$PKRHCL"
 fi
 
+# Settle pause before the FIRST elevated provisioner (cloudbase-init.ps1).
+# Packer's elevated provisioner runs its wrapper (packer-elevated-shell-*.ps1)
+# via a scheduled task; if it fires while the box is still finalizing OOBE /
+# first-logon, the wrapper upload gets wiped and packer dies with
+# "...packer-elevated-shell-XXX.ps1 to the -File parameter does not exist". The
+# faster the VM boots, the wider the race — and our 6c/16GB bump made WinRM come
+# up sooner. A pause_before lets OOBE finish before the first elevated upload.
+# Targeted at the cloudbase-init.ps1 block only (the regex's literal-dot ".ps1"
+# does NOT match the cloudbase-init-p2.ps1 line). Idempotent via the marker.
+if ! grep -q 'cybercore-settle' "$PKRHCL"; then
+  echo "==> Adding settle pause_before to the first elevated provisioner..."
+  sed -i '/scripts.*sysprep\/cloudbase-init\.ps1"\]/i\    pause_before      = "90s" # cybercore-settle' "$PKRHCL"
+fi
+
+# ---------- 9b. Bump build-VM resources (cores / sockets / memory) ----------
+# Upstream GOAD's source block reads cores/memory/sockets from variables
+# (cores = "${var.vm_cpu_cores}" etc.), with a lean 2c/4096 MB default. The
+# proven-effective place to override is the pkvars file: a value there wins over
+# the variable default, and we KNOW packer reads it (-var-file=...pkvars.hcl).
+# So for each var we replace it in the pkvars file if present, else append it.
+# (We learned from a live build that sed-patching the source HCL did nothing —
+# it only holds "${var.vm_*}" references, not numbers.) Override via
+# BUILD_CORES / BUILD_SOCKETS / BUILD_MEMORY.
+BUILD_SOCKETS="${BUILD_SOCKETS:-1}"
+BUILD_CORES="${BUILD_CORES:-6}"
+BUILD_MEMORY="${BUILD_MEMORY:-16384}"
+echo "==> Bumping build VM resources to ${BUILD_SOCKETS}s/${BUILD_CORES}c/${BUILD_MEMORY}MB..."
+for _kv in "vm_sockets:$BUILD_SOCKETS" "vm_cpu_cores:$BUILD_CORES" "vm_memory:$BUILD_MEMORY"; do
+  _k="${_kv%%:*}"; _v="${_kv##*:}"
+  if grep -qE "^[[:space:]]*${_k}[[:space:]]*=" "$PKVARS_FILE"; then
+    # replace existing assignment (value may be quoted or bare)
+    sed -i -E "s|^([[:space:]]*${_k}[[:space:]]*=[[:space:]]*).*|\1\"${_v}\"|" "$PKVARS_FILE"
+  else
+    # not set in pkvars — append an override (wins over the variable default)
+    echo "${_k} = \"${_v}\"" >> "$PKVARS_FILE"
+  fi
+done
+echo "==> Build VM resources after patch (pkvars vm_* assignments take effect):"
+grep -nE "^[[:space:]]*(vm_cpu_cores|vm_sockets|vm_memory)[[:space:]]*=" "$PKVARS_FILE" \
+  || echo "   WARN: vm_* not found in $PKVARS_FILE after patch — check variable names"
+
 # ---------- 10. packer init / validate / build ----------
 echo "==> packer init..."
 packer init "$GOAD_PACKER_DIR"
@@ -629,29 +924,20 @@ if [ -z "$SRC_VMID" ]; then
 fi
 echo "==> packer-built template: VMID $SRC_VMID"
 
-# Proxmox doesn't have a direct "renumber" — we backup and restore as the new VMID
-DUMP_DIR=/var/lib/vz/dump
-mkdir -p "$DUMP_DIR"
-echo "==> Backing up template $SRC_VMID..."
-vzdump "$SRC_VMID" --dumpdir "$DUMP_DIR" --compress zstd >/dev/null
-DUMP_FILE=$(ls -t "$DUMP_DIR"/vzdump-qemu-${SRC_VMID}-*.vma.zst 2>/dev/null | head -1)
-if [ -z "$DUMP_FILE" ]; then
-  DUMP_FILE=$(ls -t "$DUMP_DIR"/vzdump-qemu-${SRC_VMID}-*.tar.zst 2>/dev/null | head -1)
-fi
-[ -n "$DUMP_FILE" ] || { echo "ERROR: vzdump did not produce an archive for VMID $SRC_VMID"; exit 1; }
-echo "==> Backup: $DUMP_FILE"
+# Proxmox has no native "renumber". CLONE the packer template to the target VMID
+# (a full clone makes it independent), then template it and destroy the
+# packer-side one. This replaced an old vzdump+qmrestore dance that failed with
+# a generic "job errors" — vzdump couldn't handle the template's cloud-init
+# cdrom (and risked filling local dump space with the ~40 GB image). Cloning is
+# what templates are FOR, so it's both simpler and far more reliable.
+echo "==> Cloning template $SRC_VMID -> $FINAL_VMID (full clone)..."
+qm clone "$SRC_VMID" "$FINAL_VMID" --full --name "WinServer2019-GOAD" --storage "$PROXMOX_STORAGE"
+qm set "$FINAL_VMID" \
+  --description "Win Server 2019 - GOAD packer build, sysprep-generalized, cloudbase-init + DSC/PKI modules baked in. Source: front-end/scripts/bake-win-server-template.sh"
+qm template "$FINAL_VMID"
 
 echo "==> Destroying packer-side template $SRC_VMID..."
 qm destroy "$SRC_VMID" --purge
-
-echo "==> Restoring as $FINAL_VMID..."
-qmrestore "$DUMP_FILE" "$FINAL_VMID" --storage "$PROXMOX_STORAGE"
-qm set "$FINAL_VMID" --name "WinServer2019-GOAD" \
-  --description "Win Server 2019 — GOAD packer build, sysprep-generalized, cloudbase-init enabled. Source: front-end/scripts/bake-win-server-template.sh"
-qm template "$FINAL_VMID"
-
-echo "==> Cleanup..."
-rm -f "$DUMP_FILE"
 
 # ---------- 12. Summary ----------
 echo ""

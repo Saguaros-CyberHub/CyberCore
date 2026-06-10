@@ -123,6 +123,7 @@ ENV_FILE=/etc/cybercore-gateway.env
 DNS_FORWARDER="${DNS_FORWARDER:-100.100.60.1}"   # OPNsense lab gateway
 LANE_DOMAIN="${LANE_DOMAIN:-cybercore.lan}"
 CONTROLLER_OCTET="${CONTROLLER_OCTET:-5}"        # GOAD controller — internal .5
+KALI_OCTET="${KALI_OCTET:-50}"                   # Kali attack box — external .50
 DHCP_START_OCTET="${DHCP_START_OCTET:-10}"
 DHCP_END_OCTET="${DHCP_END_OCTET:-200}"
 
@@ -207,7 +208,7 @@ sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 # left in place (harmless — no lan0 exists to match them).
 #
 # Strip any stale CyberCore-tagged rules first so re-runs stay clean.
-iptables-save | grep -vE 'GOAD-CONTROLLER-SSH|CYBERCORE-SEG|CYBERCORE-V3' | iptables-restore || true
+iptables-save | grep -vE 'GOAD-CONTROLLER-SSH|CYBERCORE-SEG|CYBERCORE-V3|CYBERCORE-LAB-DROP|CYBERCORE-LAB-DNS|CYBERCORE-IMAGE-PULL|CYBERCORE-KALI-RDP' | iptables-restore || true
 
 # 1. INPUT — let lane VMs reach the gateway's own services (DHCP, DNS, NTP,
 #    ping) on BOTH segments. Without the DHCP rule, `-P INPUT DROP` eats
@@ -241,6 +242,21 @@ iptables -A FORWARD -i int0 -o wan0 -m comment --comment "CYBERCORE-V3" -j ACCEP
 #     rule starts matching once tailscaled brings the device up below.
 iptables -A FORWARD -i ext0 -o tailscale0 -m comment --comment "CYBERCORE-V3" -j ACCEPT
 
+# 3b. Kali attack-box DNAT — forward wan0:3389 to the lane's Kali on ext0
+#     (.KALI_OCTET, pinned by admin.js via cloud-init ipconfig0). The
+#     group-deploy path points Guacamole at the gateway's wan0 IP:3389 and
+#     RELIES on this DNAT ("via gateway DNAT" in the deploy log); without it,
+#     student RDP to Kali fails. Mirrors v2's inline rule (bake-lane-gateway-v2.sh
+#     section 3) but targets ext0 instead of lan0. Static dst (Kali is pinned to
+#     .50), so no watcher is needed. The top-of-block strip removes any stale
+#     copy, so a plain append stays idempotent across reboots.
+KALI_IP="${EXT_BASE3}.${KALI_OCTET}"
+iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
+  -m comment --comment "CYBERCORE-KALI-RDP" -j DNAT --to-destination "${KALI_IP}:3389"
+iptables -A FORWARD -i wan0 -o ext0 -p tcp -d "${KALI_IP}" --dport 3389 \
+  -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT
+logger -t cybercore-firstboot "iptables: CYBERCORE-KALI-RDP DNAT wan0:3389 -> ${KALI_IP}:3389 (ext0)"
+
 # 4. FORWARD SEGMENTATION — drop all traffic between the external and
 #    internal segments. Inserted at the TOP of FORWARD so it wins over the
 #    accepts above. This is the v3 attack-path enforcement: Kali (ext0)
@@ -249,6 +265,55 @@ iptables -A FORWARD -i ext0 -o tailscale0 -m comment --comment "CYBERCORE-V3" -j
 #    the DMZ host's own NICs, so it is unaffected by these FORWARD rules.
 iptables -I FORWARD -i ext0 -o int0 -m comment --comment "CYBERCORE-SEG" -j DROP
 iptables -I FORWARD -i int0 -o ext0 -m comment --comment "CYBERCORE-SEG" -j DROP
+
+# 4a. LAB-PERIMETER CONTAINMENT + image-pull exception (mirrors v1/v2).
+#     The broad ext0/int0 -> wan0 accepts above would otherwise let lane VMs
+#     reach the ENTIRE lab — 100.100.0.0/16, which sits inside the Tailscale
+#     CGNAT range 100.64.0.0/10: the orchestrator, OPNsense, DNS, other lanes.
+#     v1/v2 block lane->lab at the perimeter; do the same here. Two critical
+#     differences from v1/v2:
+#       - Scope the DROP to `-o wan0` and to the LAB range (100.100.0.0/16),
+#         NOT the whole 100.64.0.0/10. In kernel mode the Tailnet IS 100.64/10
+#         reached via tailscale0 — a blanket /10 drop would kill ext0->tailscale0
+#         reverse shells. `-o wan0 -d 100.100.0.0/16` contains only lab-over-uplink.
+#       - These must sit ABOVE the broad ext0/int0 -> wan0 ACCEPTs, so they are
+#         INSERTED (`-I`), not appended. Image-pull is inserted last so it ends
+#         up above the lab DROP (lane -> orchestrator:80 wins).
+#
+#     dst MUST be the lab-internal IP (CYBERCORE_INTERNAL_URL, default
+#     100.100.20.50:80) — the same value vuln-app-builder.js embeds into
+#     install_script as LANE_ORCH_URL. The public CYBERCORE_ORCHESTRATOR_URL
+#     hostname would resolve to the wrong dst and miss every packet. Reply
+#     traffic rides the RELATED,ESTABLISHED accept above.
+ORCH_INTERNAL_HOST_FOR_IPT="$(echo "${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}" | sed -E 's|^https?://||; s|[:/].*$||')"
+# Containment: drop both segments -> lab range over the uplink.
+iptables -I FORWARD -i int0 -o wan0 -d 100.100.0.0/16 -m comment --comment "CYBERCORE-LAB-DROP" -j DROP
+iptables -I FORWARD -i ext0 -o wan0 -d 100.100.0.0/16 -m comment --comment "CYBERCORE-LAB-DROP" -j DROP
+# DNS exception — GOAD Windows VMs query a LAB resolver DIRECTLY during EARLY
+# provisioning, before the GOAD common role repoints them at the lane gateway's
+# dnsmasq. WHICH resolver varies across templates/runs (BAKE_DNS=100.100.0.1,
+# OPNsense 100.100.60.1, sometimes FreeIPA 100.100.20.20), so instead of
+# whitelisting each IP — and playing whack-a-mole when one is missed — allow DNS
+# (:53 ONLY) to the WHOLE lab range above the DROP. A blackholed DNS query is
+# exactly what made the GOAD "egress preflight" TIME OUT (DownloadString reported
+# a timeout, not a resolve error — the signature of dropped DNS packets, not a
+# dead resolver). Everything else to the lab (HTTP/SMB/orchestrator-admin/other
+# lanes) stays blocked by the DROP below. :53 to lab resolvers is a tiny hole.
+for SEG in int0 ext0; do
+  iptables -I FORWARD -i "$SEG" -o wan0 -d 100.100.0.0/16 -p udp --dport 53 \
+    -m comment --comment "CYBERCORE-LAB-DNS" -j ACCEPT
+  iptables -I FORWARD -i "$SEG" -o wan0 -d 100.100.0.0/16 -p tcp --dport 53 \
+    -m comment --comment "CYBERCORE-LAB-DNS" -j ACCEPT
+done
+# Exception: one hole per segment for the prebuilt vuln-app image pull. Inserted
+# AFTER the drops so they land above them (lower position number wins).
+iptables -I FORWARD -i int0 -o wan0 -s "${INT_NET}" -d "${ORCH_INTERNAL_HOST_FOR_IPT}" \
+  -p tcp --dport 80 -m conntrack --ctstate NEW \
+  -m comment --comment "CYBERCORE-IMAGE-PULL" -j ACCEPT
+iptables -I FORWARD -i ext0 -o wan0 -s "${EXT_NET}" -d "${ORCH_INTERNAL_HOST_FOR_IPT}" \
+  -p tcp --dport 80 -m conntrack --ctstate NEW \
+  -m comment --comment "CYBERCORE-IMAGE-PULL" -j ACCEPT
+logger -t cybercore-firstboot "iptables: CYBERCORE-LAB-DROP ext0/int0 -> 100.100.0.0/16 (-o wan0); CYBERCORE-IMAGE-PULL ext0/int0 -> ${ORCH_INTERNAL_HOST_FOR_IPT}:80"
 
 # 5. NAT both lane subnets out wan0.
 for NET in "$EXT_NET" "$INT_NET"; do
@@ -266,6 +331,19 @@ done
 if ! iptables -t nat -C POSTROUTING -s "$EXT_NET" -o tailscale0 -j MASQUERADE 2>/dev/null; then
   iptables -t nat -A POSTROUTING -s "$EXT_NET" -o tailscale0 -j MASQUERADE
 fi
+
+# 5b. Lab-range carve-out — applied EARLY here, and again after `tailscale up`
+#     below. The carve-out re-accepts lab traffic (100.100.0.0/16) on wan0 that
+#     Tailscale's kernel `ts-input` chain would otherwise drop (CGNAT anti-spoof;
+#     see the post-tailscale block for the full rationale). Applying it here too
+#     means the rule is PRESENT even when the Tailscale bootstrap can't reach the
+#     orchestrator and the post-tailscale block is delayed (or never runs, e.g.
+#     in the offline bake-verify clone). Idempotent delete+insert so the later
+#     re-assert can hoist it back above ts-input. The full match spec (-i wan0
+#     -s 100.100.0.0/16) makes the -D touch ONLY the carve-out, not the other
+#     CYBERCORE-V3 INPUT rules.
+iptables -D INPUT -i wan0 -s 100.100.0.0/16 -m comment --comment "CYBERCORE-V3" -j ACCEPT 2>/dev/null || true
+iptables -I INPUT 1 -i wan0 -s 100.100.0.0/16 -m comment --comment "CYBERCORE-V3" -j ACCEPT
 
 mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules-save
@@ -347,7 +425,7 @@ else
 fi
 unset BOOTSTRAP_RESP
 
-# --- Lab-range carve-out for kernel-mode Tailscale ---
+# --- Lab-range carve-out for kernel-mode Tailscale (re-assert) ---
 # Tailscale's kernel-mode `ts-input` chain DROPs any packet from
 # 100.64.0.0/10 arriving on a non-tailscale0 interface (its CGNAT
 # anti-spoof rule). The CyberCore lab is addressed in 100.100.0.0/16,
@@ -355,11 +433,15 @@ unset BOOTSTRAP_RESP
 # forwarder, the orchestrator) arriving on wan0 get dropped and dnsmasq
 # can never resolve upstream. Re-accept the lab range on wan0. This MUST
 # run after `tailscale up`: Tailscale inserts `-j ts-input` at INPUT
-# position 1, so ours is inserted at position 1 last, to sit above it.
+# position 1, so ours must be hoisted back to position 1 to sit above it.
+# (An early copy was applied in step 5b; here we delete + re-insert so it
+# lands above the ts-input that `tailscale up` just added.)
+iptables -D INPUT -i wan0 -s 100.100.0.0/16 -m comment --comment "CYBERCORE-V3" -j ACCEPT 2>/dev/null || true
 iptables -I INPUT 1 -i wan0 -s 100.100.0.0/16 -m comment --comment "CYBERCORE-V3" -j ACCEPT
 
-# Kali DNAT watcher is launched by a separate /etc/local.d/01-cybercore-kali-dnat.start
-# hook so OpenRC owns its lifecycle independently of firstboot.
+# Kali DNAT (wan0:3389 -> ext0 .KALI_OCTET) is installed inline above in
+# section 3b. (An earlier design moved it to a separate 01-cybercore-kali-dnat
+# hook that was never delivered, which left v3 lanes with no RDP DNAT.)
 
 logger -t cybercore-firstboot "rendered v3: ext0=${EXT_IP}/${EXT_PREFIX} int0=${INT_IP}/${INT_PREFIX} controller=${CONTROLLER_IP}"
 echo "[cybercore-firstboot] v3: ext0=${EXT_IP} int0=${INT_IP} controller=${CONTROLLER_IP}" >&2
@@ -373,7 +455,12 @@ FIRSTBOOT_EOF
 # with CYBERCORE_ORCHESTRATOR_URL=http://x.y.z.w:80 ./bake-... if running
 # without TLS in front.
 ORCH_URL_DEFAULT="${CYBERCORE_ORCHESTRATOR_URL:-https://saguaroscyberhub.org}"
-# Unquoted heredoc tag → ${ORCH_URL_DEFAULT} expands at bake time.
+# Lab-internal URL the LANE uses to pull prebuilt vuln-app images. MUST match
+# vuln-app-builder.js's LANE_ORCH_URL — firstboot's CYBERCORE-IMAGE-PULL rule
+# whitelists exactly this dst through the lab-perimeter DROP. If you change one,
+# change both. (front-end/modules/crucible/plugins/ciab/utils/vuln-app-builder.js)
+ORCH_INTERNAL_DEFAULT="${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}"
+# Unquoted heredoc tag → ${ORCH_URL_DEFAULT}/${ORCH_INTERNAL_DEFAULT} expand at bake time.
 cat > "$STAGING/cybercore-gateway.env" <<ENV_EOF
 # /etc/cybercore-gateway.env
 # Overrides for /etc/local.d/00-cybercore-firstboot.start (v3 segmented gateway).
@@ -400,6 +487,12 @@ DHCP_END_OCTET=200
 # at boot via GET <CYBERCORE_ORCHESTRATOR_URL>/api/lane-bootstrap. The v3
 # gateway advertises only the EXTERNAL segment's route.
 CYBERCORE_ORCHESTRATOR_URL=${ORCH_URL_DEFAULT}
+
+# Lab-internal URL the lane uses to pull prebuilt vuln-app images. Read by
+# firstboot's iptables block (CYBERCORE-IMAGE-PULL) to whitelist this exact
+# destination through the lab-perimeter DROP. Must match vuln-app-builder.js's
+# LANE_ORCH_URL — if you change one, change both.
+CYBERCORE_INTERNAL_URL=${ORCH_INTERNAL_DEFAULT}
 ENV_EOF
 
 # 2c. Placeholder dnsmasq.conf — replaced at boot by firstboot once ext0/int0
@@ -626,6 +719,26 @@ pct exec "$VERIFY_VMID" -- /bin/sh -c "test -c /dev/net/tun" 2>/dev/null \
   || { echo "FAIL: /dev/net/tun not present in CT (TUN passthrough did not survive clone)"; RENDERED_OK=0; }
 pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C INPUT -i wan0 -s 100.100.0.0/16 -m comment --comment CYBERCORE-V3 -j ACCEPT" 2>/dev/null \
   || { echo "FAIL: lab-range carve-out missing (Tailscale ts-input would drop lab DNS replies)"; RENDERED_OK=0; }
+# Lab-perimeter containment: both segments must be blocked from the lab range
+# over the uplink (contains lane attackers off lab infra, mirroring v1/v2).
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i ext0 -o wan0 -d 100.100.0.0/16 -m comment --comment CYBERCORE-LAB-DROP -j DROP" 2>/dev/null \
+  || { echo "FAIL: ext0 lab-perimeter DROP missing (lane could reach lab infra)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i int0 -o wan0 -d 100.100.0.0/16 -m comment --comment CYBERCORE-LAB-DROP -j DROP" 2>/dev/null \
+  || { echo "FAIL: int0 lab-perimeter DROP missing (lane could reach lab infra)"; RENDERED_OK=0; }
+# Lab DNS exception must sit ABOVE the DROP, else GOAD's early provisioning DNS
+# (a lab resolver, exact IP varies) is blackholed and the egress preflight times out.
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i int0 -o wan0 -d 100.100.0.0/16 -p udp --dport 53 -m comment --comment CYBERCORE-LAB-DNS -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: int0 lab-DNS exception missing (GOAD preflight DNS would be dropped)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i ext0 -o wan0 -d 100.100.0.0/16 -p udp --dport 53 -m comment --comment CYBERCORE-LAB-DNS -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: ext0 lab-DNS exception missing (GOAD preflight DNS would be dropped)"; RENDERED_OK=0; }
+# Image-pull exception: both segments must reach the orchestrator:80 for the
+# prebuilt vuln-app image pull. Use the same INTERNAL default firstboot uses so
+# a bake-time override (CYBERCORE_INTERNAL_URL=...) is verified against the real IP.
+EXPECTED_IMG_PULL_DST="$(echo "${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}" | sed -E 's|^https?://||; s|[:/].*$||')"
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i ext0 -o wan0 -s 10.99.0.0/24 -d ${EXPECTED_IMG_PULL_DST} -p tcp --dport 80 -m conntrack --ctstate NEW -m comment --comment CYBERCORE-IMAGE-PULL -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: ext0 image-pull ACCEPT missing (lane→${EXPECTED_IMG_PULL_DST}:80)"; RENDERED_OK=0; }
+pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -C FORWARD -i int0 -o wan0 -s 10.199.0.0/24 -d ${EXPECTED_IMG_PULL_DST} -p tcp --dport 80 -m conntrack --ctstate NEW -m comment --comment CYBERCORE-IMAGE-PULL -j ACCEPT" 2>/dev/null \
+  || { echo "FAIL: int0 image-pull ACCEPT missing (lane→${EXPECTED_IMG_PULL_DST}:80)"; RENDERED_OK=0; }
 pct exec "$VERIFY_VMID" -- /bin/sh -c "iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination 10.99.0.50:3389" 2>/dev/null \
   || { echo "FAIL: Kali DNAT rule missing for 10.99.0.50:3389"; RENDERED_OK=0; }
 
@@ -645,6 +758,9 @@ if [ "$RENDERED_OK" = "1" ]; then
   echo "    - tailnet egress      ext0 -> tailscale0 ACCEPT + MASQUERADE"
   echo "    - tailscale mode      kernel (/dev/net/tun passed through to the CT)"
   echo "    - lab carve-out       wan0 100.100.0.0/16 ACCEPT above ts-input"
+  echo "    - lab containment     ext0/int0 -> 100.100.0.0/16 (-o wan0) DROP"
+  echo "    - lab DNS hole        ext0/int0 -> 100.100.0.0/16:53 ACCEPT (above DROP)"
+  echo "    - image-pull hole     ext0/int0 -> orchestrator:80 ACCEPT (above DROP)"
   echo ""
   echo "  Used automatically by admin.js for subnet_scheme='v3' challenges."
   echo "==================================================================="

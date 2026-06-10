@@ -470,14 +470,20 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
  * Run /opt/goad-light/run.sh inside the controller. Blocks until the playbook
  * finishes (or fails). Returns the captured stdout/stderr.
  *
- * spec.goad.admin_user / admin_password represent the BAKE-TIME credentials
- * of the Windows Server template (typically 'Administrator' + the password
- * that was set when the Win VM template was built). These are used ONLY for
- * a one-time preflight inside run.sh that creates a 'vagrant' Administrators-
- * group user; after that, all subsequent ansible plays connect as
- * vagrant/vagrant. The Administrator password gets rotated to per-host
- * upstream values by ad-servers.yml without breaking WinRM, since vagrant
- * is the connection identity from then on.
+ * spec.goad.admin_user / admin_password are the INITIAL WinRM credentials the
+ * run.sh preflight authenticates with. They DEFAULT to vagrant/vagrant and you
+ * should almost never override them.
+ *
+ * Why vagrant, not the built-in Administrator: the Win Server template is
+ * sysprep /generalize /oobe'd (so each clone gets a fresh SID). OOBE on a
+ * generalized image DISABLES the built-in Administrator account, so connecting
+ * as Administrator fails with "ntlm: the specified credentials were rejected by
+ * the server" even when the password is right. GOAD bakes a SEPARATE local
+ * admin account, vagrant/vagrant, which survives generalize ENABLED — so it's
+ * the reliable connection identity. (vagrant is also GOAD's own ansible
+ * connection identity for every subsequent play, so this just aligns the
+ * preflight with the rest of the chain.) The vagrant password is ALWAYS
+ * 'vagrant' on the template.
  *
  * Per-host local Administrator passwords (different per VM, preserving PTH
  * teaching value) come from upstream's config.json verbatim — we no longer
@@ -486,13 +492,13 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
 async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, proxmoxAPI }) {
   const goad = spec.goad || {};
   const labName = goad.version || DEFAULT_LAB;
-  // initialUser / initialPassword: bake-time Win template credentials. Used
-  // only by the run.sh preflight to bootstrap the vagrant scaffolding user.
-  const initialUser = goad.admin_user || 'Administrator';
-  const initialPass = goad.admin_password;
-  if (!initialPass) {
-    throw new Error('spec.goad.admin_password is required (bake-time Win template Administrator password)');
-  }
+  // initialUser / initialPass: the account run.sh's preflight uses for the first
+  // WinRM connection. Default to vagrant/vagrant — the local-admin account GOAD
+  // bakes, which (unlike the built-in Administrator) stays ENABLED through
+  // sysprep /generalize /oobe. Overridable via spec.goad.admin_user/_password
+  // but should not be needed.
+  const initialUser = goad.admin_user || 'vagrant';
+  const initialPass = goad.admin_password || 'vagrant';
 
   // Build HOST_MAP as pipe-separated triples "name|ip|mac" so run.sh can
   // parse + write DHCP reservations on the gateway from inside the lane.
