@@ -337,7 +337,7 @@ router.delete('/lab-templates/:id', authenticateToken, adminOnly, async (req, re
 
 
 // ============================================================================
-// CREATE CHALLENGE (DB + SDN Zone + VNets — replaces N8N workflow)
+// CREATE CHALLENGE (DB + SDN Zone + VNets)
 // ============================================================================
 
 // POST /api/admin/create-lab — full challenge creation with SDN infrastructure
@@ -377,7 +377,7 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       return res.status(400).json({ error: 'max_lanes must be between 1 and 200' });
     }
 
-    // Map difficulty string to integer (matches N8N workflow convention)
+    // Map difficulty string to integer (1=easy … 5=impossible)
     const difficultyMap = { beginner: 1, easy: 1, intermediate: 2, medium: 2, hard: 3, advanced: 3, expert: 4, impossible: 5 };
     const difficultyInt = difficultyMap[(difficulty || 'intermediate').toLowerCase()] || 2;
 

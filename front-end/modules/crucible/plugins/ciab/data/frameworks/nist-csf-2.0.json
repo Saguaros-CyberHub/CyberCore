@@ -9,7 +9,7 @@
     {
       "id": "GV",
       "name": "Govern",
-      "color": "#7c3aed",
+      "color": "#ab0520",
       "description": "Establish and monitor the organization's cybersecurity risk management strategy, expectations, and policy.",
       "categories": [
         { "id": "GV.OC", "name": "Organizational Context", "description": "The circumstances — mission, expectations, dependencies, legal/regulatory — surrounding the cybersecurity risk decisions." },

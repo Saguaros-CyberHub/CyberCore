@@ -1,13 +1,12 @@
 /**
  * ai/examples/index.js — Inline answer-key (example) generator.
  * ============================================================================
- * Replaces the N8N E0→E4 example-generator pipeline. For each Part 1-8 the
- * instructor wants generated, we build a focused prompt from PART_DEFINITIONS
- * + profile context, fan out to Claude in parallel, then INSERT each result
- * directly into assessment_progress (replacing the store-example HTTP hop).
+ * For each Part 1-8 the instructor wants generated, we build a focused
+ * prompt from PART_DEFINITIONS + profile context, fan out to Claude in
+ * parallel, then INSERT each result directly into assessment_progress.
  *
- * Generation runs as background fire-and-forget (matching the old N8N
- * behavior) so the instructor's HTTP request returns immediately. Progress
+ * Generation runs as background fire-and-forget so the instructor's HTTP
+ * request returns immediately. Progress
  * tracking via the existing in-memory `activeGenerationJobs` Map in
  * instructor.js continues to work.
  */
@@ -125,7 +124,7 @@ async function generateOnePart({ partNumber, partDef, profileContext, model, lab
 
 /**
  * Generate answer-key content for the requested parts and INSERT each into
- * assessment_progress. Mirrors the contract the old N8N pipeline fulfilled.
+ * assessment_progress.
  *
  * @param {object} args
  * @param {string} args.profileId

@@ -47,7 +47,7 @@
       border-radius: 12px;
       padding: 24px;
       box-shadow: 0 1px 3px rgba(0,0,0,0.08);
-      border-left: 4px solid var(--card-accent, #3182ce);
+      border-left: 4px solid var(--card-accent, #0c234b);
       cursor: pointer;
       transition: all 0.2s ease;
       text-decoration: none;
@@ -173,8 +173,8 @@
     }
 
     .dashboard-menu-item.active {
-      color: var(--primary, #3182ce);
-      border-bottom-color: var(--primary, #3182ce);
+      color: var(--primary, #0c234b);
+      border-bottom-color: var(--primary, #0c234b);
     }
 
     /* Details/Dropdown styling */
@@ -244,13 +244,13 @@
     .dashboard-submenu-item:hover {
       background: rgba(0,0,0,0.04);
       color: var(--text-primary);
-      border-left-color: var(--primary, #3182ce);
+      border-left-color: var(--primary, #0c234b);
     }
 
     .dashboard-submenu-item.active {
       background: rgba(49,130,206,0.08);
-      color: var(--primary, #3182ce);
-      border-left-color: var(--primary, #3182ce);
+      color: var(--primary, #0c234b);
+      border-left-color: var(--primary, #0c234b);
       font-weight: 500;
     }
 
@@ -369,7 +369,7 @@
     }
 
     .vml-launch-btn {
-      background: var(--primary, #3182ce);
+      background: var(--primary, #0c234b);
       color: white;
       border: none;
       border-radius: 6px;
@@ -379,7 +379,7 @@
       cursor: pointer;
       transition: background 0.15s ease;
     }
-    .vml-launch-btn:hover:not(:disabled) { background: #2b6cb0; }
+    .vml-launch-btn:hover:not(:disabled) { background: var(--primary-light, #1e5288); }
     .vml-launch-btn:disabled {
       background: var(--gray-100, #edf2f7);
       color: var(--text-muted);
@@ -472,7 +472,7 @@
       width: 36px;
       height: 36px;
       border: 3px solid var(--border-color, #e2e8f0);
-      border-top-color: var(--primary, #3182ce);
+      border-top-color: var(--primary, #0c234b);
       border-radius: 50%;
       animation: vmc-spin 0.8s linear infinite;
     }
@@ -533,7 +533,7 @@
     .wks-badge-off     { background: #fed7d7; color: #9b2c2c; }
     .wks-badge-unk     { background: var(--gray-100,#f7fafc); color: var(--text-muted); }
     .wks-badge-pending   { background: #fef9c3; color: #854d0e; animation: wks-pulse 1s ease-in-out infinite; }
-    .wks-badge-deploying { background: #dbeafe; color: #1e40af; animation: wks-pulse 1s ease-in-out infinite; }
+    .wks-badge-deploying { background: rgba(30, 82, 136, 0.12); color: var(--primary-light, #1e5288); animation: wks-pulse 1s ease-in-out infinite; }
     .wks-badge-deleting  { background: #fed7d7; color: #9b2c2c; animation: wks-pulse 1s ease-in-out infinite; }
     .wks-badge-failed    { background: #fee2e2; color: #991b1b; }
     [data-theme="dark"] .wks-badge-on        { background: rgba(72,187,120,0.15); color: #68d391; }
@@ -549,14 +549,14 @@
                  box-shadow: 0 4px 16px rgba(0,0,0,0.15); opacity: 0; transform: translateY(8px);
                  transition: opacity 0.3s ease, transform 0.3s ease; pointer-events: auto; max-width: 340px; }
     .wks-toast-visible   { opacity: 1; transform: translateY(0); }
-    .wks-toast-info      { background: #1e40af; color: #fff; }
+    .wks-toast-info      { background: var(--primary, #0c234b); color: #fff; }
     .wks-toast-success   { background: #166534; color: #fff; }
     .wks-toast-error     { background: #991b1b; color: #fff; }
     .wks-dev-tag { font-size: 0.7rem; background: #fff7ed; color: #c2410c; border: 1px solid #f97316; border-radius: 4px; padding: 0 5px; font-weight: 600; }
     [data-theme="dark"] .wks-dev-tag { background: rgba(249,115,22,0.12); color: #fb923c; }
     .wks-type-badge { font-size: 0.7rem; border-radius: 4px; padding: 0 5px; font-weight: 600; }
-    .wks-type-vm  { background: #dbeafe; color: #1d4ed8; }
-    .wks-type-lxc { background: #ede9fe; color: #6d28d9; }
+    .wks-type-vm  { background: rgba(30, 82, 136, 0.12); color: var(--primary-light, #1e5288); }
+    .wks-type-lxc { background: rgba(171, 5, 32, 0.08); color: var(--accent-red, #ab0520); }
     [data-theme="dark"] .wks-type-vm  { background: rgba(91,140,255,0.15);  color: #7ba6ff; }
     [data-theme="dark"] .wks-type-lxc { background: rgba(167,139,250,0.15); color: #c4b5fd; }
     .wks-vm-owner { font-size: 0.72rem; color: var(--text-muted); background: var(--gray-100,#f7fafc); border-radius: 4px; padding: 0 5px; }

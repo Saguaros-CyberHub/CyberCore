@@ -3,8 +3,8 @@
 // ============================================================================
 
 function _providerTypeBadge(type) {
-  if (type === 'lxc')  return '<span style="background:#ede9fe;color:#6d28d9;border-radius:4px;padding:0 5px;font-size:0.72rem;font-weight:600;">LXC</span>';
-  if (type === 'qemu') return '<span style="background:#dbeafe;color:#1d4ed8;border-radius:4px;padding:0 5px;font-size:0.72rem;font-weight:600;">VM</span>';
+  if (type === 'lxc')  return '<span style="background:rgba(171, 5, 32, 0.08);color:var(--accent-red, #ab0520);border-radius:4px;padding:0 5px;font-size:0.72rem;font-weight:600;">LXC</span>';
+  if (type === 'qemu') return '<span style="background:rgba(30, 82, 136, 0.12);color:var(--primary-light, #1e5288);border-radius:4px;padding:0 5px;font-size:0.72rem;font-weight:600;">VM</span>';
   return '<span style="background:#f3f4f6;color:#6b7280;border-radius:4px;padding:0 5px;font-size:0.72rem;font-weight:600;">?</span>';
 }
 

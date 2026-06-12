@@ -106,7 +106,7 @@ async function getOrCreateIntakeForProfile(userId, profileId) {
   if (existing.rowCount > 0) return existing.rows[0];
 
   // Lazy-create an empty v1.2 intake. This handles profiles that pre-date
-  // unification and never ran through the n8n profile-gen path that emits
+  // unification and never ran through the profile-gen path that emits
   // a pre-filled payload.
   const profile = await pool.query(
     `SELECT id, company_name, profile_source FROM profiles WHERE id = $1`,

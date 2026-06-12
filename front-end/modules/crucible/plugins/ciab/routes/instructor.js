@@ -60,48 +60,6 @@ router.get('/generation-status/:profileId', authenticateToken, instructorOnly, (
   }
 });
 
-// POST /api/instructor/store-example — DEPRECATED.
-// Previously called by N8N's E4 node to write generated answer-key parts back.
-// As of the N8N removal, ai/examples writes directly to assessment_progress.
-// Kept callable for one release in case any external integration still posts here.
-router.post('/store-example', authenticateToken, instructorOnly, async (req, res) => {
-  try {
-    const { user_id, profile_id, part_number, part_name, content, output_option } = req.body;
-
-    if (!user_id || !profile_id || !part_number) {
-      return res.status(400).json({ error: 'Missing required fields: user_id, profile_id, part_number' });
-    }
-
-    // Parse output_option to build output_option_name
-    let optionNames = null;
-    try {
-      const keys = JSON.parse(output_option || '[]');
-      if (Array.isArray(keys)) {
-        optionNames = keys.join(', ');
-      }
-    } catch (_) {}
-
-    await query(`
-      INSERT INTO assessment_progress
-        (user_id, profile_id, part_number, part_name, content, output_option, output_option_name, status)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, 'reviewed')
-      ON CONFLICT (user_id, profile_id, part_number)
-      DO UPDATE SET
-        content = EXCLUDED.content,
-        output_option = EXCLUDED.output_option,
-        output_option_name = EXCLUDED.output_option_name,
-        status = 'reviewed',
-        updated_at = NOW()
-    `, [user_id, profile_id, part_number, part_name, content, output_option, optionNames]);
-
-    console.log(`[StoreExample] Stored part ${part_number} for profile ${profile_id}`);
-    res.json({ success: true, part_number });
-  } catch (error) {
-    console.error('[StoreExample] Error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Simple test endpoint
 router.get('/test', authenticateToken, async (req, res) => {
   try {
@@ -761,7 +719,7 @@ router.post('/generate-documents', authenticateToken, instructorOnly, async (req
 
     // Extract detailed data from full profile JSON
     // Data may be properly split (raw.network, raw.it, raw.threats) OR
-    // all merged into raw.threats (depends on N8N workflow execution)
+    // all merged into raw.threats (depends on how the profile was generated)
     const studentView = fullProfileData?.student_view?.raw || {};
     const threatsData = studentView?.threats || {};
     const networkData = studentView?.network || threatsData?.network || {};
@@ -813,7 +771,7 @@ router.post('/generate-documents', authenticateToken, instructorOnly, async (req
       weaknesses: deliberateWeaknesses.length || 0
     });
 
-    // Generate documents inline (profile-driven; replaces N8N webhook).
+    // Generate documents inline (profile-driven).
     // Output traces back to profile.assets[].services so real `nmap` against
     // the deployed lane matches the fake scan exactly.
     const { generateScanDocuments } = require('../ai/scan-documents');
@@ -1421,7 +1379,7 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
 
     const partsToGenerate = parts || [1, 2, 3, 4, 5, 6, 7, 8];
 
-    // ─── Delete old answer key rows, then fire N8N and respond immediately ───
+    // ─── Delete old answer key rows, then start generation and respond immediately ───
     try {
       const deleted = await query(
         `DELETE FROM assessment_progress WHERE user_id = $1 AND profile_id = $2`,
@@ -1523,7 +1481,7 @@ router.post('/generate-examples', authenticateToken, instructorOnly, async (req,
       success: true,
       status: 'generating',
       profile_id,
-      message: `Answer key generation started for ${partsToGenerate.length} parts (inline Claude, no N8N). You can leave this page.`
+      message: `Answer key generation started for ${partsToGenerate.length} parts (inline Claude). You can leave this page.`
     });
 
   } catch (error) {

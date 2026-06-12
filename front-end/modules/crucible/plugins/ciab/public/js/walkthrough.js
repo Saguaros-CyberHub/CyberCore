@@ -65,7 +65,7 @@ class Walkthrough {
       // Highlight target by raising it above overlay
       target.style.position = target.style.position || 'relative';
       target.style.zIndex = '9999';
-      target.style.boxShadow = '0 0 0 4px rgba(66, 153, 225, 0.6)';
+      target.style.boxShadow = '0 0 0 4px rgba(30, 82, 136, 0.6)';
       target.style.borderRadius = '8px';
       target.dataset.wtHighlighted = 'true';
 
@@ -106,7 +106,7 @@ class Walkthrough {
         </div>
         <div style="display: flex; gap: 0.5rem;">
           <button id="wt-skip" style="padding: 0.35rem 0.75rem; border-radius: 6px; border: 1px solid #e2e8f0; background: white; cursor: pointer; font-size: 0.8rem; color: #718096;">Skip</button>
-          <button id="wt-next" style="padding: 0.35rem 0.75rem; border-radius: 6px; border: none; background: #4299e1; color: white; cursor: pointer; font-size: 0.8rem; font-weight: 500;">${index === total - 1 ? 'Done' : 'Next'}</button>
+          <button id="wt-next" style="padding: 0.35rem 0.75rem; border-radius: 6px; border: none; background: var(--primary, #0c234b); color: white; cursor: pointer; font-size: 0.8rem; font-weight: 500;">${index === total - 1 ? 'Done' : 'Next'}</button>
         </div>
       </div>
     `;
@@ -184,8 +184,8 @@ const adminWalkthroughSteps = [
   {
     selector: '.tab-btn[onclick*="deploy"]',
     tab: 'deploy',
-    title: 'Deploy Environments',
-    text: 'Deploy group environments (batch of instructor + student accounts with optional VM lanes) or single lanes. The system will check cluster resources before allowing deployment.'
+    title: 'Deploy Lanes',
+    text: 'Deploy lanes — a batch of instructor + student accounts with optional VM lanes per student. The system will check cluster resources before allowing deployment.'
   },
   {
     selector: '.tab-btn[onclick*="lanes"]',

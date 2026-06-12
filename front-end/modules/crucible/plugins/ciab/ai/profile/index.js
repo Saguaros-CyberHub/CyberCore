@@ -1,8 +1,8 @@
 /**
- * ai/profile/index.js — Inline AI profile generator (replaces N8N pipeline).
+ * ai/profile/index.js — Inline AI profile generator.
  * ============================================================================
- * Replaces the entire E0→E1→E2→E3→E4 N8N flow plus the four parallel A2/B2/C2/D3
- * Claude API nodes. Single entrypoint: generateProfile({...config}) → {profile_id}.
+ * Runs the full E0→E4 pipeline plus the four parallel A/B/C/D Claude
+ * branches. Single entrypoint: generateProfile({...config}) → {profile_id}.
  *
  * Pipeline:
  *   1. Resolve client-type template + seed (analog of E0).
@@ -42,7 +42,7 @@ const {
 } = require('./validators');
 const { renderProfileHtml } = require('./render');
 
-// ─── Client-type templates (analog of N8N P0/E0 template tables) ──────────
+// ─── Client-type templates (P0/E0 template tables) ────────────────────────
 
 const CLIENT_TYPE_TEMPLATES = {
   SMB: {

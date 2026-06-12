@@ -69,7 +69,7 @@
     .tab.active { 
       color: var(--primary); 
       border-bottom-color: var(--primary);
-      background: rgba(59, 130, 246, 0.05);
+      background: rgba(30, 82, 136, 0.08);
     }
     
     .tab-content { display: none; }
@@ -91,8 +91,8 @@
     }
 
     .student-card.expanded {
-      border-color: var(--primary, #3b82f6);
-      box-shadow: 0 4px 16px rgba(59,130,246,0.12);
+      border-color: var(--primary, #0c234b);
+      box-shadow: 0 4px 16px rgba(30, 82, 136, 0.12);
     }
 
     .student-detail-panel {
@@ -247,7 +247,7 @@
     
     .document-card:hover {
       border-color: var(--primary);
-      background: rgba(59, 130, 246, 0.05);
+      background: rgba(30, 82, 136, 0.08);
     }
     
     .document-card .icon {
@@ -352,7 +352,7 @@
     .form-group textarea:focus {
       outline: none;
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+      box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1);
     }
     
     /* Review Modal */
@@ -677,7 +677,7 @@
           </div>
 
           <!-- AI Model Configuration Card -->
-          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 3px solid var(--primary, #3b82f6);">
+          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 3px solid var(--primary, #0c234b);">
             <h3 style="margin: 0 0 0.5rem 0;">🤖 AI Model Configuration</h3>
             <p style="color: var(--gray-600); margin: 0 0 1rem 0; font-size: 0.9rem;">Choose which AI model to use for generating answer keys and policy documents.</p>
             <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 1rem; align-items: end;">
@@ -1253,7 +1253,7 @@
         const instructorList = Object.entries(uniqueInstructors);
 
         return `
-        <div class="student-card ${isExpanded ? 'expanded' : ''}" data-student-id="${student.student_id}" style="${isExpanded ? 'border-color: var(--primary, #3b82f6); box-shadow: 0 4px 12px rgba(59,130,246,0.15);' : ''}">
+        <div class="student-card ${isExpanded ? 'expanded' : ''}" data-student-id="${student.student_id}" style="${isExpanded ? 'border-color: var(--primary, #0c234b); box-shadow: 0 4px 12px rgba(30, 82, 136, 0.15);' : ''}">
           <!-- Clickable header row -->
           <div style="display: flex; align-items: center; gap: 1rem; cursor: pointer;" onclick="toggleStudentPanel('${student.student_id}')">
             <div style="flex: 1;">
@@ -1288,7 +1288,7 @@
                 ).join('')
               : `<span style="font-size: 0.7rem; color: var(--gray-400);">No instructor</span>`}
             ${!isMyStudent
-              ? `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; background: #4299e1; color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); claimStudent('${student.student_id}')">+ Claim</button>`
+              ? `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; background: var(--primary, #0c234b); color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); claimStudent('${student.student_id}')">+ Claim</button>`
               : `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; border: 1px solid var(--border-color); color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); releaseStudent('${student.student_id}')">Release</button>`}
           </div>
 
@@ -1341,8 +1341,8 @@
         b.style.color = 'var(--gray-500)';
         b.style.borderBottomColor = 'transparent';
       });
-      btn.style.color = 'var(--primary, #3b82f6)';
-      btn.style.borderBottomColor = 'var(--primary, #3b82f6)';
+      btn.style.color = 'var(--primary, #0c234b)';
+      btn.style.borderBottomColor = 'var(--primary, #0c234b)';
 
       loadDetailSubtab(studentId, subtab);
     }
@@ -1357,8 +1357,8 @@
       if (card) {
         card.querySelectorAll('.detail-subtab').forEach(b => {
           const isActive = b.dataset.subtab === subtab;
-          b.style.color = isActive ? 'var(--primary, #3b82f6)' : 'var(--gray-500)';
-          b.style.borderBottomColor = isActive ? 'var(--primary, #3b82f6)' : 'transparent';
+          b.style.color = isActive ? 'var(--primary, #0c234b)' : 'var(--gray-500)';
+          b.style.borderBottomColor = isActive ? 'var(--primary, #0c234b)' : 'transparent';
         });
       }
 
@@ -1385,7 +1385,7 @@
             ${[1,2,3,4,5,6,7,8].map(partNum => {
               const p = data.progress.find(x => x.part_number === partNum);
               const status = p?.status || 'not_started';
-              const statusColors = { not_started: '#cbd5e0', in_progress: '#4299e1', submitted: 'var(--warning)', reviewed: 'var(--success)', revision_requested: 'var(--danger)' };
+              const statusColors = { not_started: '#cbd5e0', in_progress: 'var(--primary-light, #1e5288)', submitted: 'var(--warning)', reviewed: 'var(--success)', revision_requested: 'var(--danger)' };
               const statusLabels = { not_started: 'Not Started', in_progress: 'In Progress', submitted: 'Submitted', reviewed: 'Reviewed', revision_requested: 'Revision Needed' };
               return `
                 <div style="padding: 0.6rem 0.75rem; border-radius: 8px; border: 1px solid var(--border-color); border-left: 4px solid ${statusColors[status]};">
@@ -1452,7 +1452,7 @@
 
         container.innerHTML = studentLanes.map(l => {
           const cfg = l.config || {};
-          const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', suspended: '#9f7aea', pending: '#4299e1' };
+          const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', suspended: 'var(--primary, #0c234b)', pending: 'var(--primary-light, #1e5288)' };
           const inet = cfg.internet_enabled;
           return `
             <div style="padding: 0.75rem; background: var(--gray-50, #f7fafc); border-radius: 8px; margin-bottom: 0.5rem;">
@@ -1752,7 +1752,7 @@
       const noProfiles = (dashboardData.students || []).filter(s => !(s.generated_profiles || []).length);
       if (noProfiles.length > 0) {
         items.push(`
-          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: rgba(66, 153, 225, 0.12); border-radius: 8px; border-left: 4px solid #4299e1;">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: rgba(30, 82, 136, 0.12); border-radius: 8px; border-left: 4px solid var(--primary-light, #1e5288);">
             <div>
               <strong style="font-size: 0.9rem;">${noProfiles.length} student${noProfiles.length > 1 ? 's' : ''} without profiles</strong>
               <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.15rem;">
@@ -1926,7 +1926,7 @@
             </thead>
             <tbody>
               ${lanes.map(l => {
-                const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', pending: '#4299e1' };
+                const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', pending: 'var(--primary-light, #1e5288)' };
                 const statusColor = statusColors[l.status] || 'var(--text-muted)';
                 const inet = l.config?.internet_enabled;
                 return `
@@ -2365,11 +2365,11 @@
           </div>
 
           <div style="display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap;">
-            <button class="btn btn-sm btn-outline" style="border-color: #3182ce; color: #3182ce;" onclick="downloadPdfFromModal('${profileId}')">
+            <button class="btn btn-sm btn-outline" style="border-color: var(--primary-light, #1e5288); color: var(--primary-light, #1e5288);" onclick="downloadPdfFromModal('${profileId}')">
               📄 Download PDF
             </button>
             ${!hasPolicies ? `
-              <button class="btn btn-sm btn-outline" id="genPoliciesBtnModal" style="border-color: #805ad5; color: #805ad5;" onclick="generatePoliciesFromModal('${profileId}')">
+              <button class="btn btn-sm btn-outline" id="genPoliciesBtnModal" style="border-color: var(--primary, #0c234b); color: var(--primary, #0c234b);" onclick="generatePoliciesFromModal('${profileId}')">
                 📋 Generate Policies
               </button>
             ` : ''}
@@ -2458,7 +2458,7 @@
                 <strong>Security Policy Documents</strong>
                 <p style="margin: 0; font-size: 0.85rem; color: var(--gray-500);">Auto-generated organizational policies based on profile</p>
               </div>
-              <button type="button" class="btn btn-sm" id="generatePoliciesBtn2" style="background: #805ad5; color: white; border: none;" onclick="generatePoliciesForStudent()" disabled>
+              <button type="button" class="btn btn-sm" id="generatePoliciesBtn2" style="background: var(--primary, #0c234b); color: white; border: none;" onclick="generatePoliciesForStudent()" disabled>
                 📋 Generate Policies
               </button>
             </div>
@@ -3105,7 +3105,7 @@
       status.textContent = 'This may take a minute...';
       
       try {
-        // Call N8N webhook or API endpoint to generate documents
+        // Call API endpoint to generate documents
         const response = await fetch('/api/instructor/generate-documents', {
           method: 'POST',
           headers: {
@@ -3350,7 +3350,7 @@
       }
     }
 
-    // Poll every 30s to check if N8N has stored examples in the DB
+    // Poll every 30s to check if the generator has stored examples in the DB
     function pollForExamples(profileId) {
       if (activePollingInterval) clearInterval(activePollingInterval);
 
@@ -3368,7 +3368,7 @@
           return;
         }
         try {
-          // Check DB directly for examples (N8N stores them via E4 → store-example endpoint)
+          // Check DB directly for examples (the background generator inserts them as it goes)
           const response = await fetch(`/api/instructor/examples/${profileId}`, {
             headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
           });

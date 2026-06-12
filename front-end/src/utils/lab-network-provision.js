@@ -23,7 +23,7 @@ const { proxmoxAPI } = require('./proxmox');
 // V3_INTERNAL_TAG_OFFSET in utils/lane-networking.js.
 const V3_INTERNAL_TAG_OFFSET = 4000000;
 
-// Base-20 encode helper for VNet naming (matches the N8N workflow + create-lab).
+// Base-20 encode helper for VNet naming (matches the create-lab convention).
 const _ALPHABET = 'abcdefghij0123456789';
 function encodeBase20(n) {
   if (n === 0) return 'a';

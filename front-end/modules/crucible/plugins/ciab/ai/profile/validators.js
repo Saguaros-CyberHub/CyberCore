@@ -1,13 +1,11 @@
 /**
  * ai/profile/validators.js — Per-branch business validation + autofill.
  * ============================================================================
- * Distilled from front-end/N8N Workflow/UPGRADED_{A3,B3,C3,D4}_VALIDATE_*.js.
- *
  * The generic JSON-repair (truncation, escaping, brackets) lives in
  * llm-client.js. These functions handle BUSINESS validation:
  *   - department_breakdown sums to employees_total (A)
  *   - server OS strings have versions, SaaS not duplicated (B)
- *   - workstation autofill from examples (C — N8N's biggest delta-from-LLM)
+ *   - workstation autofill from examples (C — the biggest delta-from-LLM)
  *   - MITRE technique IDs are well-formed (D)
  *
  * Validators are best-effort: they LOG warnings and patch obvious gaps,
@@ -83,7 +81,7 @@ function validateNetwork(payload, ctx) {
   }
   const net = payload.network;
 
-  // 1. Workstation autofill — N8N's biggest delta-from-LLM. The prompt asks
+  // 1. Workstation autofill — the biggest delta-from-LLM. The prompt asks
   //    for 5-10 examples; we fill the rest programmatically up to endpoint_count.
   const targetTotal = ctx.endpointCount || 50;
   if (Array.isArray(net.assets)) {

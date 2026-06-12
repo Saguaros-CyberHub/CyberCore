@@ -14,7 +14,7 @@ function setScriptTypeFilter(type) {
     if (active) {
       b.style.background = scriptTypeFilterValue === 'baseline' ? '#16a34a'
                          : scriptTypeFilterValue === 'vulnerable' ? '#dc2626'
-                         : (getComputedStyle(document.documentElement).getPropertyValue('--primary') || '#1e40af');
+                         : (getComputedStyle(document.documentElement).getPropertyValue('--primary') || '#0c234b');
       b.style.color = '#fff';
     } else {
       b.style.background = 'var(--bg-card, #fff)';

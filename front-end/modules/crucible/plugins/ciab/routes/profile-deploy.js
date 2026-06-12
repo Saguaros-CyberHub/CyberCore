@@ -7,8 +7,8 @@
  *   (b) profile_id from a previously uploaded JSON  → /api/profiles/upload
  *   (c) one-step generate + deploy                  → /api/profiles/generate-and-deploy
  *
- * Lane deployment uses Proxmox API directly via lane-deploy.js — N8N is NOT
- * used here (N8N is only for profile/policy/scan generation in CIAB).
+ * Lane deployment uses the Proxmox API directly via lane-deploy.js;
+ * profile/policy/scan generation happens elsewhere in CIAB.
  *
  * Default subnet_scheme = 'v2' (subnet-agnostic 10.x.x.x lanes) — matches
  * where CIAB servers live today. v3 is honored if the admin explicitly picks

@@ -3,7 +3,7 @@
  * Interview Routes - AI-Powered Stakeholder Briefing Simulation
  * ============================================================================
  * Supports "all stakeholders" mode where the AI picks the right respondent
- * based on the question context. Uses N8N workflow for AI generation.
+ * based on the question context. Uses inline Claude for AI generation.
  */
 
 const express = require('express');
@@ -245,7 +245,7 @@ router.post('/:sessionId/message', authenticateToken, async (req, res) => {
 
     transcript.push({ role: 'student', message, timestamp: new Date().toISOString() });
 
-    // Generate AI response via N8N or Ollama fallback
+    // Generate AI response via inline Claude
     const orgContext = buildOrgContext(studentData);
     const aiResponse = await generateResponse(respondent, stakeholders, orgContext, transcript, message);
 
@@ -367,7 +367,7 @@ router.get('/stakeholders/:profileId', authenticateToken, async (req, res) => {
 });
 
 // ============================================================================
-// AI RESPONSE GENERATION — inline Claude (replaces N8N + Ollama fallback paths)
+// AI RESPONSE GENERATION — inline Claude
 // ============================================================================
 const llm = require('../../../../../src/utils/llm-client');
 

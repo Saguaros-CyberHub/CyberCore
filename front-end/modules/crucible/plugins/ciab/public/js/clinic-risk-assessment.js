@@ -24,7 +24,7 @@
 
   const CSF_FN_ORDER = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
   const CSF_FN_NAMES = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
-  const CSF_FN_COLORS = { GV: '#7c3aed', ID: '#0ea5e9', PR: '#16a34a', DE: '#d97706', RS: '#dc2626', RC: '#0891b2' };
+  const CSF_FN_COLORS = { GV: '#ab0520', ID: '#1e5288', PR: '#16a34a', DE: '#d97706', RS: '#dc2626', RC: '#0891b2' };
 
   // === API helpers ===
   function apiUrl(suffix) { return '/api/clinic-risk-assessment' + suffix; }
@@ -444,9 +444,9 @@
         type: 'radar',
         data: [{
           value, name: 'Maturity',
-          areaStyle: { color: 'rgba(30, 64, 175, 0.25)' },
-          lineStyle: { color: '#1e40af', width: 2 },
-          itemStyle: { color: '#1e40af' },
+          areaStyle: { color: 'rgba(12, 35, 75, 0.25)' },
+          lineStyle: { color: '#0c234b', width: 2 },
+          itemStyle: { color: '#0c234b' },
           label: { show: true, fontSize: 10, formatter: (p) => p.value.toFixed(1) },
         }],
       }],
@@ -640,7 +640,7 @@
       `<span class="pill ig1-ans partial">Partial ${cv.partial || 0}</span>` +
       `<span class="pill ig1-ans no">No ${cv.no || 0}</span>` +
       `<span class="pill ig1-ans unknown">Unanswered ${cv.unknown || 0}</span>` +
-      `<span class="pill" style="background:var(--primary,#1e40af);color:#fff;">IG1 Coverage ${cv.score != null ? cv.score + '%' : '—'}</span>` +
+      `<span class="pill" style="background:var(--primary,#0c234b);color:#fff;">IG1 Coverage ${cv.score != null ? cv.score + '%' : '—'}</span>` +
       `</div>`;
 
     // Intake meta (source / completion / status).
@@ -1704,7 +1704,7 @@
       host.innerHTML = `<p style="color:var(--text-muted); font-style:italic;">No scenarios match. Try clearing filters.</p>`;
       return;
     }
-    const catColor = c => ({ technical:'#0ea5e9', people:'#dc2626', process:'#d97706', physical:'#16a34a' })[c] || '#94a3b8';
+    const catColor = c => ({ technical:'#1e5288', people:'#dc2626', process:'#d97706', physical:'#16a34a' })[c] || '#94a3b8';
     host.innerHTML = filtered.map(s => `
       <div style="border:1px solid var(--border-color,#e2e8f0); border-radius:6px; padding:12px; margin-bottom:8px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">

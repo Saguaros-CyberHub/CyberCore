@@ -39,7 +39,7 @@
     }
     .progress-step:hover { transform: translateY(-2px); }
     .progress-step.completed { background: #c6f6d5; color: #276749; }
-    .progress-step.current { background: #bee3f8; color: #2c5282; border: 2px solid #3182ce; }
+    .progress-step.current { background: rgba(30, 82, 136, 0.12); color: var(--primary); border: 2px solid var(--primary-light); }
     .progress-step.locked { background: #edf2f7; color: #a0aec0; }
     .progress-step .step-num { font-weight: 700; font-size: 1.2em; }
     .progress-step .step-name { font-size: 0.85em; margin-top: 4px; }
@@ -48,11 +48,11 @@
     .profile-card {
       background: var(--bg-card, white); border-radius: 12px; padding: 20px;
       box-shadow: 0 4px 6px rgba(0,0,0,0.07); margin-bottom: 15px;
-      border-left: 4px solid #3182ce; transition: all 0.2s;
+      border-left: 4px solid var(--primary-light); transition: all 0.2s;
     }
     .profile-card:hover { transform: translateX(5px); box-shadow: 0 6px 12px rgba(0,0,0,0.1); }
     .profile-card-header { display: flex; justify-content: space-between; align-items: start; }
-    .profile-card-title { font-size: 1.2em; font-weight: 600; color: #1a365d; }
+    .profile-card-title { font-size: 1.2em; font-weight: 600; color: var(--primary); }
     .profile-card-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
     .profile-card-actions { display: flex; gap: 8px; margin-top: 15px; }
 
@@ -65,7 +65,7 @@
       background: var(--bg-card, white); padding: 20px; border-radius: 12px;
       text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    .quick-stat-value { font-size: 2em; font-weight: 700; color: #2c5282; }
+    .quick-stat-value { font-size: 2em; font-weight: 700; color: var(--primary); }
     .quick-stat-label { font-size: 0.85em; color: var(--text-muted, #64748b); margin-top: 5px; }
 
     /* Activity Feed */
@@ -80,10 +80,10 @@
       font-size: 1.2em; flex-shrink: 0;
     }
     .activity-icon.generate { background: #c6f6d5; }
-    .activity-icon.view { background: #bee3f8; }
+    .activity-icon.view { background: rgba(30, 82, 136, 0.12); }
     .activity-icon.complete { background: #faf089; }
     .activity-content { flex: 1; }
-    .activity-title { font-weight: 500; color: #1a365d; }
+    .activity-title { font-weight: 500; color: var(--primary); }
     .activity-time { font-size: 0.8em; color: #a0aec0; }
 
     /* Modal Styles */
@@ -102,7 +102,7 @@
       padding: 20px 25px; border-bottom: 1px solid #e2e8f0;
       display: flex; justify-content: space-between; align-items: center;
     }
-    .modal-title { font-size: 1.3em; font-weight: 600; color: #1a365d; }
+    .modal-title { font-size: 1.3em; font-weight: 600; color: var(--primary); }
     .modal-close { background: none; border: none; font-size: 1.5em; cursor: pointer; color: var(--text-muted, #64748b); }
     .modal-body { padding: 25px; max-height: 70vh; overflow-y: auto; }
     .modal-tabs { display: flex; gap: 5px; margin-bottom: 20px; }
@@ -110,7 +110,7 @@
       padding: 10px 20px; background: #edf2f7; border: none;
       border-radius: 8px; cursor: pointer; font-weight: 500;
     }
-    .modal-tab.active { background: #3182ce; color: white; }
+    .modal-tab.active { background: var(--primary); color: white; }
 
     /* Interview Simulator */
     .interview-panel {
@@ -122,22 +122,22 @@
       margin-bottom: 8px; transition: all 0.2s;
     }
     .stakeholder-item:hover { background: #edf2f7; }
-    .stakeholder-item.active { background: #bee3f8; border-left: 3px solid #3182ce; }
-    .stakeholder-item .name { font-weight: 600; color: #1a365d; }
+    .stakeholder-item.active { background: rgba(30, 82, 136, 0.12); border-left: 3px solid var(--primary-light); }
+    .stakeholder-item .name { font-weight: 600; color: var(--primary); }
     .stakeholder-item .role { font-size: 0.85em; color: var(--text-muted, #64748b); }
     .interview-chat { display: flex; flex-direction: column; height: 100%; }
     .interview-messages { flex: 1; overflow-y: auto; padding: 15px; background: var(--gray-50, #f8fafc); border-radius: 8px; }
     .interview-input { display: flex; gap: 10px; margin-top: 15px; }
     .interview-input input { flex: 1; padding: 12px; border: 1px solid #e2e8f0; border-radius: 8px; }
-    .interview-input button { padding: 12px 24px; background: #3182ce; color: white; border: none; border-radius: 8px; cursor: pointer; }
+    .interview-input button { padding: 12px 24px; background: var(--primary); color: white; border: none; border-radius: 8px; cursor: pointer; }
 
     /* Asset Table Enhanced */
     .asset-table { font-size: 0.9em; }
-    .asset-table th { background: #2c5282; color: white; padding: 10px 12px; }
+    .asset-table th { background: var(--primary); color: white; padding: 10px 12px; }
     .asset-table td { padding: 10px 12px; }
     .asset-table code { background: #edf2f7; padding: 2px 6px; border-radius: 4px; font-family: monospace; }
     .os-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.8em; }
-    .os-windows { background: #dbeafe; color: #1e40af; }
+    .os-windows { background: rgba(30, 82, 136, 0.12); color: var(--primary); }
     .os-linux { background: #fef3c7; color: #92400e; }
     .os-network { background: #d1fae5; color: #065f46; }
     
@@ -155,7 +155,7 @@
     }
     .info-item .value {
       font-weight: 600;
-      color: #1a365d;
+      color: var(--primary);
     }
 
     /* Policy Viewer Modal */
@@ -174,8 +174,8 @@
       margin-bottom: 6px; transition: all 0.2s; border-left: 3px solid transparent;
     }
     .policy-list-item:hover { background: var(--gray-100, #f1f5f9); }
-    .policy-list-item.active { background: #ebf4ff; border-left-color: #3182ce; }
-    .policy-list-item .policy-name { font-weight: 600; color: #1a365d; font-size: 0.92em; }
+    .policy-list-item.active { background: rgba(30, 82, 136, 0.12); border-left-color: var(--primary-light); }
+    .policy-list-item .policy-name { font-weight: 600; color: var(--primary); font-size: 0.92em; }
     .policy-list-item .policy-meta { font-size: 0.78em; color: var(--text-muted, #64748b); margin-top: 3px; }
     .policy-content-area {
       display: flex; align-items: center; justify-content: center;
@@ -945,7 +945,7 @@
           <p style="font-weight: 600; margin-bottom: 8px;">Generating Policy Documents...</p>
           <p style="font-size: 0.85em;">The AI is writing each policy document. This typically takes 1-3 minutes.</p>
           <div style="margin-top: 16px; width: 200px; height: 4px; background: #e2e8f0; border-radius: 2px; overflow: hidden;">
-            <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #3182ce, #63b3ed, #3182ce); background-size: 200%; animation: shimmer 1.5s infinite;"></div>
+            <div style="width: 100%; height: 100%; background: linear-gradient(90deg, #1e5288, #378dbd, #1e5288); background-size: 200%; animation: shimmer 1.5s infinite;"></div>
           </div>
         </div>
         <style>
@@ -967,7 +967,7 @@
         }
       } catch (error) {
         console.error('Error generating policies:', error);
-        if (typeof Toast !== 'undefined') Toast.error('Error', 'Failed to generate policies. Check that N8N is running and the workflow is active.');
+        if (typeof Toast !== 'undefined') Toast.error('Error', 'Failed to generate policies. Please try again.');
         contentArea.innerHTML = '<div class="policy-empty-state"><div class="icon">⚠️</div><p>Policy generation failed. Please try again.</p></div>';
         if (btn) { btn.disabled = false; btn.textContent = 'Generate Policies'; }
       }

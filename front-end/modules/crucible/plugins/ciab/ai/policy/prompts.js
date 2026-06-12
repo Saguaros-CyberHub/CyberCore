@@ -1,8 +1,6 @@
 /**
- * Policy generator prompts.
- * Ported from front-end/N8N Workflow/POLICY_P1_BUILD_PROMPTS.js — the per-policy
- * section/extra recipe tables. Kept as a separate file so future tweaks don't
- * touch the orchestrator.
+ * Policy generator prompts — the per-policy section/extra recipe tables.
+ * Kept as a separate file so future tweaks don't touch the orchestrator.
  */
 
 // Per-policy section recipe + context-injection notes. Lookup by case-insensitive

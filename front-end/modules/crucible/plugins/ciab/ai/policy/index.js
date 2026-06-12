@@ -1,10 +1,10 @@
 /**
- * ai/policy/index.js — Inline policy-document generator (replaces N8N workflow).
+ * ai/policy/index.js — Inline policy-document generator.
  * ============================================================================
  * Input:  the loaded profile JSON + difficulty + optional model
  * Output: { policies: [{name, slug, html, generation_time_ms, usage}], total_count, ... }
  *
- * Algorithm (ported from POLICY_P0/P1/P2/P3 N8N nodes):
+ * Algorithm:
  *   1. Walk the student_view.raw.threats structure to extract org/it/network/governance.
  *   2. For each policy in governance.policies_present, build a prompt via prompts.js.
  *   3. Fan out all prompts in parallel via llm.generateParallel — concurrency capped by
@@ -22,7 +22,6 @@ const { SYSTEM_PROMPT, buildUserPrompt } = require('./prompts');
 // ─── Context extraction ────────────────────────────────────────────────────
 /**
  * Walk the profile JSON and pull out the structured context the prompts need.
- * Matches the shape POLICY_P0_CONFIGURATION.js produced in N8N.
  *
  * @param {object} profileJson  loaded JSON (student_view.* structure)
  * @param {object} [defaults]   { difficulty? }

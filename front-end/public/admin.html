@@ -34,8 +34,8 @@
     }
     .stat-icon.guac { background: linear-gradient(135deg, #38a169, #2f855a); }
     .stat-icon.proxmox { background: linear-gradient(135deg, #e8692a, #c0511a); }
-    .stat-icon.conn { background: linear-gradient(135deg, #4299e1, #3182ce); }
-    .stat-icon.users { background: linear-gradient(135deg, #9f7aea, #805ad5); }
+    .stat-icon.conn { background: linear-gradient(135deg, var(--primary-light, #1e5288), var(--primary, #0c234b)); }
+    .stat-icon.users { background: linear-gradient(135deg, var(--accent-red, #ab0520), var(--accent-red-dark, #8b0015)); }
     .stat-icon.active { background: linear-gradient(135deg, #ed8936, #dd6b20); }
     .stat-content h3 { font-size: 1.6rem; font-weight: 700; color: var(--gray-900); margin: 0; }
     .stat-content p { font-size: 0.85rem; color: var(--gray-500); margin: 0.2rem 0 0; }
@@ -70,7 +70,7 @@
     .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
     .badge-green { background: #c6f6d5; color: #22543d; }
     .badge-red { background: #fed7d7; color: #9b2c2c; }
-    .badge-blue { background: #bee3f8; color: #2a4365; }
+    .badge-blue { background: rgba(30, 82, 136, 0.12); color: var(--primary-dark, #001c48); }
     .badge-yellow { background: #fefcbf; color: #744210; }
     .badge-gray { background: #edf2f7; color: #4a5568; }
 
@@ -111,7 +111,7 @@
     .status-dot.offline { background: #fc8181; }
 
     /* Protocol badge colors */
-    .proto-rdp { background: #bee3f8; color: #2a4365; }
+    .proto-rdp { background: rgba(30, 82, 136, 0.12); color: var(--primary-dark, #001c48); }
     .proto-ssh { background: #c6f6d5; color: #22543d; }
     .proto-vnc { background: #fefcbf; color: #744210; }
 
@@ -119,29 +119,29 @@
        DARK MODE OVERRIDES
        ============================================================================ */
     [data-theme="dark"] .stat-card {
-      background: #111527;
+      background: var(--bg-card);
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
     [data-theme="dark"] .tabs {
       border-bottom-color: rgba(99,130,255,0.12);
     }
     [data-theme="dark"] .tab-btn {
-      color: #8890b0;
+      color: var(--text-muted);
     }
     [data-theme="dark"] .tab-btn:hover {
-      color: #d8dde8;
+      color: var(--text-secondary);
     }
     [data-theme="dark"] .tab-btn.active {
-      color: #5b8cff;
-      border-bottom-color: #5b8cff;
+      color: var(--primary, #5c9fe6);
+      border-bottom-color: var(--primary, #5c9fe6);
     }
     [data-theme="dark"] .admin-table {
-      background: #111527;
+      background: var(--bg-card);
       box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
     [data-theme="dark"] .admin-table th {
       background: #0a0d1a;
-      color: #8890b0;
+      color: var(--text-muted);
     }
     [data-theme="dark"] .admin-table td {
       border-top-color: rgba(99,130,255,0.1);
@@ -180,7 +180,7 @@
       background: rgba(0,0,0,0.7);
     }
     [data-theme="dark"] .modal-content {
-      background: #111527;
+      background: var(--bg-card);
       color: #f0f2fa;
     }
     [data-theme="dark"] .form-group input,
@@ -325,7 +325,7 @@
         <div class="tabs">
           <button class="tab-btn active" onclick="switchTab('connections', this)">Connections</button>
           <button class="tab-btn" onclick="switchTab('sessions', this)">Active Sessions</button>
-          <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lane</button>
+          <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lanes</button>
           <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
           <button class="tab-btn" onclick="switchTab('actlog', this)">Activity Log</button>
@@ -371,11 +371,11 @@
 
         <!-- TAB: Deploy Lane -->
         <div class="tab-content" id="tab-deploy">
-          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start;">
+          <div style="max-width: 720px; margin: 0 auto;">
 
-            <!-- Group Deployment Form -->
+            <!-- Lane Deployment Form -->
             <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
-              <h3 style="margin: 0 0 0.5rem;">Deploy Group Environment</h3>
+              <h3 style="margin: 0 0 0.5rem;">Deploy Lanes</h3>
               <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
                 Create a batch of instructor + student accounts with a Guacamole connection group. Optionally deploy CyberHub lanes per student.
               </p>
@@ -421,55 +421,13 @@
                   Requires a challenge key and module above. Leave unchecked to only create user accounts.
                 </p>
                 <div id="laneDeployOptions" style="display: none; margin-top: 0.75rem;">
-                  <div id="laneCapacityInfo" style="padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.8rem; background: #ebf8ff; color: #2b6cb0; margin-bottom: 0.5rem;">
+                  <div id="laneCapacityInfo" style="padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.8rem; background: rgba(30, 82, 136, 0.12); color: var(--primary-light, #1e5288); margin-bottom: 0.5rem;">
                     Checking capacity...
                   </div>
-                  <div style="display: flex; align-items: center; gap: 0.5rem;">
-                    <input type="checkbox" id="deployGroupUseWebhook" style="width: auto;">
-                    <label for="deployGroupUseWebhook" style="margin: 0; font-size: 0.8rem;">Use N8N Webhook (testing/development)</label>
-                  </div>
                 </div>
               </div>
-              <button class="btn btn-primary" id="deployGroupBtn" onclick="deployGroup()" style="width: 100%;">Deploy Group</button>
+              <button class="btn btn-primary" id="deployGroupBtn" onclick="deployGroup()" style="width: 100%;">Deploy Lanes</button>
               <div id="deployGroupStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
-            </div>
-
-            <!-- Single Lane Deployment -->
-            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
-              <h3 style="margin: 0 0 0.5rem;">Deploy Single Lane</h3>
-              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
-                Deploy a CyberHub challenge lane for a single user (clones VMs, allocates VXLAN, starts environment).
-              </p>
-              <div class="form-group">
-                <label>Module</label>
-                <select id="deployModule" onchange="loadChallengesForSelect('deployModule', 'deployChallengeKey')">
-                  <option value="">Loading modules...</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label>Challenge Key</label>
-                <select id="deployChallengeKey" onchange="onChallengeSelected()">
-                  <option value="">Select a module first...</option>
-                </select>
-              </div>
-              <div class="form-group">
-                <label>Event ID (optional)</label>
-                <input type="text" id="deployEventId" placeholder="Leave blank for standalone">
-              </div>
-              <div style="display: flex; gap: 0.75rem; margin-bottom: 0.75rem;">
-                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; background: var(--gray-50);">
-                  <input type="checkbox" id="deploySingleAttackBox" style="width: auto;">
-                  <label for="deploySingleAttackBox" style="margin: 0; font-size: 0.85rem;">Include Attack Box (Kali)</label>
-                </div>
-                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; background: var(--gray-50);">
-                  <input type="checkbox" id="deployUseWebhook" style="width: auto;">
-                  <label for="deployUseWebhook" style="margin: 0; font-size: 0.85rem;">Use N8N Webhook</label>
-                </div>
-              </div>
-              <!-- Vuln Script Selector (loads when challenge selected) -->
-              <div id="deployVulnScriptPanel" style="display: none; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; max-height: 400px; overflow-y: auto;"></div>
-              <button class="btn btn-primary" id="deployBtn" onclick="deployLane()" style="width: 100%;">Deploy Lane</button>
-              <div id="deployStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
             </div>
           </div>
 
@@ -811,7 +769,7 @@
             <button class="btn btn-outline" onclick="loadCrucibleEvents()">Refresh</button>
             <div style="display:inline-flex; border:1px solid var(--border-color); border-radius:6px; overflow:hidden; font-size:0.8rem; flex-wrap:wrap;">
               <button class="crucible-type-filter active" data-type="" onclick="filterCrucibleEventsByType('')"
-                style="background:var(--primary,#1e40af);color:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">All</button>
+                style="background:var(--primary,#0c234b);color:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">All</button>
               <button class="crucible-type-filter" data-type="weekly"    onclick="filterCrucibleEventsByType('weekly')"
                 style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">📅 Weekly</button>
               <button class="crucible-type-filter" data-type="vuln"      onclick="filterCrucibleEventsByType('vuln')"
@@ -844,7 +802,7 @@
             <!-- Type filter: baseline vs vulnerable -->
             <div id="scriptTypeFilter" style="display: inline-flex; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; font-size: 0.8rem;">
               <button type="button" data-type=""           class="stf-btn active" onclick="setScriptTypeFilter('')"
-                      style="background: var(--primary, #1e40af); color: #fff; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">All</button>
+                      style="background: var(--primary, #0c234b); color: #fff; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">All</button>
               <button type="button" data-type="baseline"   class="stf-btn" onclick="setScriptTypeFilter('baseline')"
                       style="background: var(--bg-card); color: #166534; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">🛡️ Baseline</button>
               <button type="button" data-type="vulnerable" class="stf-btn" onclick="setScriptTypeFilter('vulnerable')"
@@ -1134,8 +1092,8 @@
         </div>
         <div class="form-group">
           <label>Challenge Key (for VXLAN block)</label>
-          <input type="text" id="tplChallengeKey" placeholder="e.g., metasploitable2-basic (created in N8N)">
-          <span style="font-size: 0.7rem; color: var(--gray-400);">Must match a challenge created via the "Add New Crucible Challenge" N8N workflow</span>
+          <input type="text" id="tplChallengeKey" placeholder="e.g., metasploitable2-basic">
+          <span style="font-size: 0.7rem; color: var(--gray-400);">Must match an existing challenge key (see the Challenges tab)</span>
         </div>
       </div>
 

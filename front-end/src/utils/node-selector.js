@@ -1,8 +1,8 @@
 /**
  * ============================================================================
  * NODE SELECTOR
- * Determines the best Proxmox node for VM deployment
- * Ported from N8N "Determine Best Node for Deployment" workflow
+ * Determines the best Proxmox node for VM deployment by scoring each
+ * node's available CPU and memory capacity.
  * ============================================================================
  */
 

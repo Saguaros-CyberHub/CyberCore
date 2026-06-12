@@ -399,7 +399,7 @@
   function renderIg1(b) {
     const c = b.cis_coverage;
     document.getElementById('ig1KpiGrid').innerHTML = [
-      { label: 'Coverage Score', value: `${c.score}%`, sub: `of ${c.total} safeguards`, color: '#1e40af' },
+      { label: 'Coverage Score', value: `${c.score}%`, sub: `of ${c.total} safeguards`, color: '#0c234b' },
       { label: 'Met (Yes)',      value: c.yes,     sub: 'fully implemented',    color: '#16a34a' },
       { label: 'Partial',        value: c.partial, sub: 'in progress',          color: '#d97706' },
       { label: 'Not Met',        value: c.no,      sub: 'remediation required', color: '#dc2626' }
@@ -467,16 +467,16 @@
       series: [{
         type: 'radar', symbolSize: 6,
         data: [{ value: fnIds.map(id => Number(scores[id] || 0)), name: 'Maturity',
-          areaStyle: { color: 'rgba(30, 64, 175, 0.15)' },
-          itemStyle: { color: '#1e40af' },
-          lineStyle: { color: '#1e40af', width: 2 },
+          areaStyle: { color: 'rgba(12, 35, 75, 0.15)' },
+          itemStyle: { color: '#0c234b' },
+          lineStyle: { color: '#0c234b', width: 2 },
           label: { show: true, formatter: v => v.value.toFixed(1), color: '#1e293b', fontWeight: 700 }
         }]
       }]
     });
 
     // Function bar chart
-    const colors = { GV: '#9333ea', ID: '#0ea5e9', PR: '#16a34a', DE: '#ea580c', RS: '#dc2626', RC: '#0891b2' };
+    const colors = { GV: '#ab0520', ID: '#1e5288', PR: '#16a34a', DE: '#ea580c', RS: '#dc2626', RC: '#0891b2' };
     const bar = echarts.init(document.getElementById('chartCsf'));
     charts.csf = bar;
     bar.setOption({

@@ -96,7 +96,7 @@
     }
 
     .part-item.active {
-      background: #dbeafe;
+      background: rgba(30, 82, 136, 0.12);
       border-color: var(--primary);
     }
 
@@ -119,11 +119,11 @@
     }
 
     .part-item.reviewed {
-      background: #ede9fe;
+      background: rgba(30, 82, 136, 0.12);
     }
 
     .part-item.reviewed .part-icon {
-      background: #7c3aed;
+      background: var(--primary);
       color: white;
     }
 
@@ -170,7 +170,7 @@
     }
 
     .part-status-badge.not-started { background: var(--gray-200); color: var(--gray-600); }
-    .part-status-badge.in-progress { background: #dbeafe; color: #1e40af; }
+    .part-status-badge.in-progress { background: rgba(30, 82, 136, 0.12); color: var(--primary); }
     .part-status-badge.submitted { background: #fef3c7; color: #92400e; }
     .part-status-badge.reviewed { background: #d1fae5; color: #065f46; }
 
@@ -309,7 +309,7 @@
 
     /* Instructions Box */
     .instructions-box {
-      background: linear-gradient(135deg, #eff6ff, #dbeafe);
+      background: linear-gradient(135deg, rgba(30, 82, 136, 0.06), rgba(30, 82, 136, 0.14));
       border-radius: var(--border-radius);
       padding: 1.25rem;
       border-left: 4px solid var(--primary);
@@ -359,7 +359,7 @@
 
     .output-option.selected {
       border-color: var(--primary);
-      background: #eff6ff;
+      background: rgba(30, 82, 136, 0.12);
     }
 
     .output-option-title {
@@ -391,7 +391,7 @@
     .content-editor:focus {
       outline: none;
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(30, 64, 175, 0.1);
+      box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1);
     }
 
     .editor-toolbar {
@@ -439,7 +439,7 @@
 
     .evidence-upload.drag-over {
       border-color: var(--primary);
-      background: #eff6ff;
+      background: rgba(30, 82, 136, 0.12);
     }
 
     .evidence-upload-icon {
@@ -548,7 +548,7 @@
 
 	.rich-editor:focus {
 	  border-color: var(--primary);
-	  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+	  box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1);
 	}
 
 	.rich-editor[data-placeholder]:empty:before {
@@ -710,11 +710,11 @@
 	   FEEDBACK SECTION
 	   ============================================================================ */
 	.feedback-section {
-	  border-left: 4px solid #7c3aed;
+	  border-left: 4px solid var(--primary);
 	}
 
 	.feedback-section .section-header {
-	  background: #ede9fe;
+	  background: rgba(30, 82, 136, 0.12);
 	}
 
 	.score-badge {
@@ -723,7 +723,7 @@
 	  background: var(--bg-card, white);
 	  border-radius: 1rem;
 	  font-weight: 700;
-	  color: #7c3aed;
+	  color: var(--primary);
 	  font-size: 1rem;
 	}
 
@@ -1064,7 +1064,7 @@
     .form-group textarea:focus {
       outline: none;
       border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+      box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1);
     }
     
     .form-group textarea {
@@ -1121,7 +1121,7 @@
       content: '';
       width: 6px;
       height: 6px;
-      background: #0ea5e9;
+      background: var(--primary-light);
       border-radius: 50%;
       flex-shrink: 0;
       margin-top: 0.5em;
@@ -1147,14 +1147,14 @@
       position: relative;
     }
     .option-card:hover {
-      border-color: #93c5fd;
-      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.08);
+      border-color: var(--primary-light);
+      box-shadow: 0 2px 8px rgba(30, 82, 136, 0.08);
       transform: translateY(-1px);
     }
     .option-card.selected {
-      border-color: #3b82f6;
-      background: linear-gradient(135deg, #eff6ff 0%, #f0f9ff 100%);
-      box-shadow: 0 0 0 1px #3b82f6, 0 2px 12px rgba(59, 130, 246, 0.12);
+      border-color: var(--primary-light);
+      background: linear-gradient(135deg, rgba(30, 82, 136, 0.10), rgba(30, 82, 136, 0.04));
+      box-shadow: 0 0 0 1px var(--primary-light), 0 2px 12px rgba(30, 82, 136, 0.12);
     }
     .option-card-header {
       display: flex;
@@ -1165,7 +1165,7 @@
       margin-top: 2px;
       width: 20px;
       height: 20px;
-      accent-color: #3b82f6;
+      accent-color: var(--primary-light);
       flex-shrink: 0;
       cursor: pointer;
     }
@@ -1191,13 +1191,13 @@
       border-radius: 8px;
     }
     .option-card.selected .option-deliverable-count {
-      background: #dbeafe;
-      color: #1d4ed8;
+      background: rgba(30, 82, 136, 0.12);
+      color: var(--primary);
     }
 
     .option-count-badge {
       font-size: 0.78rem;
-      background: #3b82f6;
+      background: var(--primary);
       color: white;
       padding: 0.2rem 0.65rem;
       border-radius: 12px;
@@ -1287,7 +1287,7 @@
     }
     .progress-bar-mini-fill {
       height: 100%;
-      background: #3b82f6;
+      background: var(--primary-light);
       border-radius: 3px;
       transition: width 0.3s ease;
     }
@@ -1333,7 +1333,7 @@
       flex-shrink: 0;
     }
     .deliverable-number.has-content {
-      background: #3b82f6;
+      background: var(--primary);
       color: white;
     }
     .deliverable-label-text {
@@ -1359,8 +1359,8 @@
       font-family: inherit;
     }
     .deliverable-editor:focus {
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+      border-color: var(--primary-light);
+      box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1);
       background: var(--bg-card, white);
     }
     .deliverable-editor:empty::before {

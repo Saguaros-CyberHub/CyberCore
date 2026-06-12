@@ -1,15 +1,15 @@
 /**
  * Profile pipeline prompts.
  * ============================================================================
- * Ported from front-end/N8N Workflow/UPGRADED_{A1,B1,C1,D1}_*.js — the four
- * parallel Claude branches that generate org / IT / network / threat profiles.
+ * Prompt builders for the four parallel Claude branches that generate
+ * org / IT / network / threat profiles (A1/B1/C1/D1).
  *
  * Each builder is a pure function: takes a normalized config+seed and returns
  * a { systemPrompt, userPrompt } pair. The system prompts are LARGE and
  * IDENTICAL across calls of the same branch → marked for prompt caching in
  * the orchestrator (90% cost drop after the first call in a 5-min window).
  *
- * Output schemas mirror what the existing N8N validators (A3/B3/C3/D4) expect
+ * Output schemas mirror what the validators (A3/B3/C3/D4) expect
  * downstream, so the rest of the pipeline (combine, store) doesn't change.
  */
 

@@ -5,7 +5,7 @@
  * onto the profile's web-server asset (or a dedicated VM if none).
  *
  * Two paths:
- *   1. Inline Claude via /src/utils/llm-client (default — N8N path removed).
+ *   1. Inline Claude via /src/utils/llm-client (default).
  *   2. Hardcoded vulnerable-PHP template fallback — used when ANTHROPIC_API_KEY
  *      is missing or the LLM call fails. Lets the deploy path still work end-to-end
  *      without an API key (handy for local dev).

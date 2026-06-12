@@ -35,12 +35,12 @@
     }
     
     .btn-primary {
-      background: #7c3aed;
+      background: var(--primary, #0c234b);
       color: white;
     }
-    
+
     .btn-primary:hover {
-      background: #6d28d9;
+      background: var(--primary-light, #1e5288);
     }
     
     .btn-secondary {
@@ -83,7 +83,7 @@
     
     .form-control:focus {
       outline: none;
-      border-color: #7c3aed;
+      border-color: var(--primary, #0c234b);
     }
     
     .form-row {
@@ -102,7 +102,7 @@
       padding: 1.5rem;
       box-shadow: 0 2px 8px rgba(0,0,0,0.06);
       margin-bottom: 1rem;
-      border-left: 4px solid #7c3aed;
+      border-left: 4px solid var(--primary, #0c234b);
     }
     
     .course-card h3 {

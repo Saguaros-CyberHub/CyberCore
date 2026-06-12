@@ -39,11 +39,11 @@
     .cra-tab-group .group-tabs { display: flex; gap: 4px; }
     .cra-tab { padding: 8px 14px 10px; cursor: pointer; border: 0; background: transparent; color: var(--text-secondary); font-size: 0.92rem; font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
     .cra-tab:hover { color: var(--text-primary); }
-    .cra-tab.active { color: var(--primary, #1e40af); border-bottom-color: var(--primary, #1e40af); }
+    .cra-tab.active { color: var(--primary, #0c234b); border-bottom-color: var(--primary, #0c234b); }
     /* Collapsible overview sections — charts resize on toggle (see JS) */
     details.cra-section { margin-top: 16px; }
     details.cra-section > summary { cursor: pointer; user-select: none; font-weight: 600; font-size: 0.95rem; color: var(--text-primary); padding: 6px 2px; list-style-position: inside; }
-    details.cra-section > summary:hover { color: var(--primary, #1e40af); }
+    details.cra-section > summary:hover { color: var(--primary, #0c234b); }
     details.cra-section > summary .sec-hint { font-weight: 400; font-size: 0.8rem; color: var(--text-muted); margin-left: 8px; }
     .cra-pane { display: none; }
     .cra-pane.active { display: block; }
@@ -51,7 +51,7 @@
     .cra-grid.cols-2 { grid-template-columns: 1fr 1fr; }
     .cra-grid.cols-4 { grid-template-columns: repeat(4, 1fr); }
     @media (max-width: 900px) { .cra-grid.cols-2, .cra-grid.cols-4 { grid-template-columns: 1fr; } }
-    .cra-stat-card { background: var(--bg-card, white); border-radius: 10px; padding: 16px 20px; border-left: 4px solid var(--accent, #3182ce); box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
+    .cra-stat-card { background: var(--bg-card, white); border-radius: 10px; padding: 16px 20px; border-left: 4px solid var(--accent, #1e5288); box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
     .cra-stat-card .label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-muted, #64748b); letter-spacing: 0.04em; }
     .cra-stat-card .value { font-size: 1.6rem; font-weight: 700; color: var(--text-primary); margin-top: 4px; }
     .cra-stat-card .hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
@@ -92,13 +92,13 @@
     .drawer footer { padding: 14px 20px; border-top: 1px solid var(--border-color, #e2e8f0); display: flex; justify-content: space-between; gap: 10px; }
     .drawer .slider-row { display: flex; align-items: center; gap: 10px; }
     .drawer .slider-row input[type=range] { flex: 1; }
-    .drawer .slider-row .val { width: 24px; text-align: center; font-weight: 600; color: var(--primary, #1e40af); }
+    .drawer .slider-row .val { width: 24px; text-align: center; font-weight: 600; color: var(--primary, #0c234b); }
     .drawer .group-title { font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; margin: 20px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
 
     .btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0); background: var(--bg-card, white); cursor: pointer; font: inherit; color: var(--text-primary); }
     .btn:hover { background: var(--bg-hover, #f8fafc); }
-    .btn.primary { background: var(--primary, #1e40af); border-color: var(--primary, #1e40af); color: white; }
-    .btn.primary:hover { background: var(--primary-dark, #1e3a8a); }
+    .btn.primary { background: var(--primary, #0c234b); border-color: var(--primary, #0c234b); color: white; }
+    .btn.primary:hover { background: var(--primary-dark, #001c48); }
     .btn.danger { color: var(--danger, #dc2626); border-color: var(--pill-open-bg); }
     .btn.danger:hover { background: var(--pill-open-bg); }
 
@@ -120,7 +120,7 @@
     .ram-row:last-child { border-bottom: 0; }
     .ram-row:hover { background: var(--bg-hover, #f8fafc); }
     .ram-row.expanded { background: var(--bg-hover, #f8fafc); }
-    .ram-row .num { font-weight: 600; color: var(--primary, #1e40af); font-size: 0.85rem; }
+    .ram-row .num { font-weight: 600; color: var(--primary, #0c234b); font-size: 0.85rem; }
     .ram-row .name { font-size: 0.875rem; color: var(--text-primary); }
     .ram-row .asset { font-size: 0.8rem; color: var(--text-muted, #64748b); }
     .ram-row .score { text-align:center; font-weight: 600; font-size: 0.85rem; }
@@ -144,8 +144,8 @@
 
     /* Clickable CIS IG1 Coverage card -> opens the intake breakdown drawer */
     .cis-clickable { cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s; }
-    .cis-clickable:hover { border-color: var(--primary, #1e40af); box-shadow: 0 2px 12px rgba(30,64,175,0.16); }
-    .view-intake-hint { float: right; font-size: 0.72rem; font-weight: 500; color: var(--primary, #1e40af); text-transform: none; letter-spacing: normal; }
+    .cis-clickable:hover { border-color: var(--primary, #0c234b); box-shadow: 0 2px 12px rgba(30, 82, 136, 0.16); }
+    .view-intake-hint { float: right; font-size: 0.72rem; font-weight: 500; color: var(--primary, #0c234b); text-transform: none; letter-spacing: normal; }
 
     /* Intake breakdown drawer */
     .intake-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px 0; }
@@ -164,7 +164,7 @@
     .ig1-control .ctrl-name { font-size: 0.82rem; font-weight: 600; color: var(--text-primary); margin: 0 0 6px 0; }
     .ig1-sg { display: grid; grid-template-columns: 48px 1fr auto; gap: 10px; align-items: center; padding: 5px 0; border-bottom: 1px dashed var(--border-color, #e2e8f0); font-size: 0.84rem; }
     .ig1-sg:last-child { border-bottom: 0; }
-    .ig1-sg .num { font-weight: 600; color: var(--primary, #1e40af); }
+    .ig1-sg .num { font-weight: 600; color: var(--primary, #0c234b); }
     .ig1-sg .name { color: var(--text-primary); }
 
     .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted, #64748b); }
@@ -240,8 +240,8 @@
             <div class="cra-grid cols-4" id="overviewStats"></div>
 
             <!-- Compliance posture callout — populated by JS from intake._meta.posture -->
-            <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:rgba(59,130,246,0.08); border-left:4px solid var(--primary, #1e40af);">
-              <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:var(--primary, #1e40af); text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
+            <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:rgba(30, 82, 136, 0.08); border-left:4px solid var(--primary, #0c234b);">
+              <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:var(--primary, #0c234b); text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
               <div style="font-size:1.05rem; font-weight:600; color:var(--text-primary, #1e293b); margin-top:4px;" id="postureTitle"></div>
               <div style="font-size:0.85rem; color:var(--text-muted, #64748b); margin-top:4px;" id="postureBody"></div>
             </div>
@@ -351,7 +351,7 @@
                   <input id="ramAcceptable" type="number" min="1" max="9" step="1"
                          style="width:60px; padding:6px 8px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; font: inherit; text-align:center; background:var(--bg-input, white); color:var(--text-primary);" />
                 </div>
-                <div class="cra-stat-card" style="border-left-color:#3b82f6; padding:10px 14px; margin:0;">
+                <div class="cra-stat-card" style="border-left-color:var(--primary-light); padding:10px 14px; margin:0;">
                   <div class="label">Scored</div>
                   <div class="value" id="ramScored" style="font-size:1.2rem">0 / 56</div>
                 </div>
@@ -405,7 +405,7 @@
               </div>
             </div>
             <div class="cra-grid cols-2" style="margin-bottom:16px;">
-              <div class="cra-stat-card" style="border-left-color:#1e40af;">
+              <div class="cra-stat-card" style="border-left-color:var(--primary);">
                 <div class="label">Readiness Score</div>
                 <div class="value" id="insScore">—</div>
                 <div class="hint" id="insScoreHint">of 100 possible points</div>

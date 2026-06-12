@@ -37,7 +37,6 @@ const {
 
 const adminOnly = requireRole('admin');
 
-const N8N_DEPLOY_WEBHOOK = process.env.N8N_DEPLOY_LANE_WEBHOOK || 'http://100.100.20.50:5678/webhook-test/6bcb6b80-01d9-41a4-86e5-c0747fef50db';
 
 // Legacy fallback password when generatePassword() is unavailable
 const GROUP_PASSWORD_FALLBACK = 'ClinicP@ssw0rd123!!';
@@ -49,7 +48,7 @@ const GROUP_PASSWORD_FALLBACK = 'ClinicP@ssw0rd123!!';
 
 router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { group_name, num_instructors, num_students, attack_boxes, challenge_key, module, deploy_lanes, use_webhook, confirm, vuln_scripts: groupVulnScripts } = req.body;
+    const { group_name, num_instructors, num_students, attack_boxes, challenge_key, module, deploy_lanes, confirm, vuln_scripts: groupVulnScripts } = req.body;
     if (!group_name || !num_students) {
       return res.status(400).json({ error: 'group_name and num_students required' });
     }
@@ -493,27 +492,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
           }
 
           progress.lanes[laneId] = { student: student.email, vxlan: vxlanId, node: bestNode, status: 'cloning', _startedAt: Date.now() };
-          console.log(`[Group ${group_name}] Deploying lane ${laneId} for ${student.email} on ${bestNode} (VXLAN ${vxlanId})${use_webhook ? ' via webhook' : ''}...`);
+          console.log(`[Group ${group_name}] Deploying lane ${laneId} for ${student.email} on ${bestNode} (VXLAN ${vxlanId})...`);
 
-          if (use_webhook) {
-            const webhookRes = await fetch(N8N_DEPLOY_WEBHOOK, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ user_id: student.id, challenge_key, module, event_id: null })
-            });
-            if (!webhookRes.ok) {
-              const errText = await webhookRes.text();
-              throw new Error(`N8N webhook failed (${webhookRes.status}): ${errText}`);
-            }
-            const webhookData = await webhookRes.json();
-            if (webhookData.lane_id || webhookData.laneId) {
-              console.log(`[Group ${group_name}] Webhook deployed lane for ${student.email}:`, webhookData);
-            }
-            await cybercoreQuery(
-              `UPDATE cybercore_lane SET status = 'active', updated_at = NOW() WHERE lane_id = $1`,
-              [laneId]
-            );
-          } else {
+          {
             const gatewayVmId = 100000 + vxlanId;
             const deployedVMs = [];
             // Captured during Guac connection creation, persisted into the

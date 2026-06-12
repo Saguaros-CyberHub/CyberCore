@@ -1,13 +1,11 @@
 /**
- * ai/profile/render.js -- Professional Client Profile HTML renderer.
- * Ported from the N8N "Professional Document Generator" workflow node (v4.1)
- * preserved at front-end/Info/Clinic-in-a-Box Profile Generator (API).json.
+ * ai/profile/render.js -- Professional Client Profile HTML renderer (v4.1).
  *
  * Pure function: takes the profile object built by ai/profile/index.js
  * combineProfile() and returns a full standalone HTML document string.
  *
- * The original generator handles both the split-branch shape and the
- * merged shape we emit via cascading || fallbacks -- no adapter needed.
+ * Handles both the split-branch shape and the merged shape we emit via
+ * cascading || fallbacks -- no adapter needed.
  */
 
 function renderProfileHtml(profile) {

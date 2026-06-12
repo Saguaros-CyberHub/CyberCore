@@ -5,7 +5,7 @@
   "description": "On-demand virtualization environments for student projects, research, and hands-on learning",
   "entry_url": "/cyberlabs/dashboard",
   "category": "module",
-  "color": "#4299e1",
+  "color": "#1e5288",
   "active": true,
   "display_order": 2,
   "routes": [

@@ -1,16 +1,16 @@
 /**
  * llm-client.js — Single Anthropic SDK wrapper used by every CyberCore AI flow.
  * ============================================================================
- * Replaces N8N HTTP webhooks with direct Anthropic SDK calls. Adds:
+ * Makes direct Anthropic SDK calls. Adds:
  *   - prompt caching (cache_control: ephemeral) on system prompts and large
  *     reusable context blocks — Anthropic caches for 5 min; ~90% input cost
  *     drop on cache hits.
  *   - model selector honoring the existing UI's `llmModel` field; defaults to
- *     claude-sonnet-4-5 (the model the N8N workflows targeted).
+ *     claude-sonnet-4-5.
  *   - concurrency limiter so 4-stage parallel profile gen doesn't exceed
  *     Anthropic's per-minute rate cap.
  *   - JSON repair (truncated strings, unbalanced braces, raw newlines inside
- *     strings) — the four fallback strategies the N8N E2 node implemented.
+ *     strings) — four fallback strategies applied in order.
  *   - retry with exponential backoff: 3 attempts on 429/5xx, 1 attempt on 4xx.
  *   - usage telemetry: input/output/cached-input tokens logged per call.
  *
@@ -54,7 +54,7 @@ function getClient() {
   if (_client) return _client;
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    throw new Error('ANTHROPIC_API_KEY not set — required for LLM calls (N8N webhooks have been removed)');
+    throw new Error('ANTHROPIC_API_KEY not set — required for LLM calls');
   }
   _client = new Anthropic.Anthropic({
     apiKey,
@@ -180,8 +180,7 @@ async function generate(opts = {}) {
 
 // ─── JSON repair ───────────────────────────────────────────────────────────
 /**
- * Repair common LLM JSON output issues. Mirrors the four-stage fallback the
- * N8N E2 node implemented:
+ * Repair common LLM JSON output issues using a four-stage fallback:
  *   1. Strip surrounding markdown code fences (```json ... ```).
  *   2. Try JSON.parse as-is.
  *   3. Repair: close unclosed strings, balance braces/brackets, escape raw

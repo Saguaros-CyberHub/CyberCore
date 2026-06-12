@@ -14,7 +14,7 @@
        PROGRESS OVERVIEW
        ============================================================================ */
     .progress-hero {
-      background: linear-gradient(135deg, #1e3a5f 0%, #2c5282 50%, #2b6cb0 100%);
+      background: linear-gradient(135deg, var(--primary-dark, #001c48) 0%, var(--primary, #0c234b) 50%, var(--primary-light, #1e5288) 100%);
       color: white;
       border-radius: 16px;
       padding: 2rem;
@@ -115,13 +115,13 @@
       overflow: hidden;
     }
     .part-card:hover {
-      border-color: #93c5fd;
-      box-shadow: 0 2px 12px rgba(59,130,246,0.08);
+      border-color: var(--primary-light);
+      box-shadow: 0 2px 12px rgba(30, 82, 136, 0.08);
       transform: translateY(-1px);
     }
     .part-card.status-submitted { border-left: 4px solid #f59e0b; }
     .part-card.status-reviewed { border-left: 4px solid #10b981; }
-    .part-card.status-in_progress, .part-card.status-in-progress { border-left: 4px solid #3b82f6; }
+    .part-card.status-in_progress, .part-card.status-in-progress { border-left: 4px solid var(--primary-light); }
     .part-card.status-revision_requested, .part-card.status-revision-requested { border-left: 4px solid #ef4444; }
 
     .part-card-top {
@@ -141,7 +141,7 @@
       font-size: 0.85rem;
     }
     .part-card-number.not-started { background: var(--gray-100, #f1f5f9); color: var(--text-muted, #94a3b8); }
-    .part-card-number.in-progress, .part-card-number.in_progress { background: #dbeafe; color: #1d4ed8; }
+    .part-card-number.in-progress, .part-card-number.in_progress { background: rgba(30, 82, 136, 0.12); color: var(--primary); }
     .part-card-number.submitted { background: #fef3c7; color: #92400e; }
     .part-card-number.reviewed { background: #d1fae5; color: #065f46; }
     .part-card-number.revision_requested, .part-card-number.revision-requested { background: #fee2e2; color: #991b1b; }
@@ -155,7 +155,7 @@
       letter-spacing: 0.04em;
     }
     .pill-not-started { background: var(--gray-100, #f1f5f9); color: var(--text-muted, #94a3b8); }
-    .pill-in-progress, .pill-in_progress { background: #dbeafe; color: #1d4ed8; }
+    .pill-in-progress, .pill-in_progress { background: rgba(30, 82, 136, 0.12); color: var(--primary); }
     .pill-submitted { background: #fef3c7; color: #92400e; }
     .pill-reviewed { background: #d1fae5; color: #065f46; }
     .pill-revision_requested, .pill-revision-requested { background: #fee2e2; color: #991b1b; }
@@ -192,8 +192,8 @@
     }
     .option-mini-tag {
       font-size: 0.7rem;
-      background: #eff6ff;
-      color: #3b82f6;
+      background: rgba(30, 82, 136, 0.12);
+      color: var(--primary);
       padding: 0.1rem 0.4rem;
       border-radius: 4px;
       white-space: nowrap;

@@ -10,7 +10,7 @@
   <link rel="stylesheet" href="/css/layout.css">
   <style>
     .nice-header {
-      background: linear-gradient(135deg, #1a365d, #2c5282);
+      background: linear-gradient(135deg, var(--primary-dark, #001c48), var(--primary, #0c234b));
       color: white;
       padding: 2rem;
       border-radius: 16px;
@@ -48,7 +48,7 @@
     .role-icon {
       width: 50px;
       height: 50px;
-      background: linear-gradient(135deg, #3182ce, #2c5282);
+      background: linear-gradient(135deg, var(--primary-light, #1e5288), var(--primary, #0c234b));
       border-radius: 12px;
       display: flex;
       align-items: center;
@@ -57,7 +57,7 @@
     }
     
     .role-info h3 {
-      color: var(--text-primary, #1a365d);
+      color: var(--text-primary, #0c234b);
       margin-bottom: 0.25rem;
     }
 
@@ -93,8 +93,8 @@
     }
     
     .progress-fill.tasks { background: linear-gradient(90deg, #38a169, #48bb78); }
-    .progress-fill.knowledge { background: linear-gradient(90deg, #3182ce, #4299e1); }
-    .progress-fill.skills { background: linear-gradient(90deg, #805ad5, #9f7aea); }
+    .progress-fill.knowledge { background: linear-gradient(90deg, #1e5288, #378dbd); }
+    .progress-fill.skills { background: linear-gradient(90deg, #0c234b, #1e5288); }
     
     .progress-text {
       font-size: 0.8rem;
@@ -350,7 +350,7 @@
         </div>
 
         <div class="export-section">
-          <h3 style="color: var(--text-primary, #1a365d); margin-bottom: 0.5rem;">📋 Export Your Progress</h3>
+          <h3 style="color: var(--text-primary, #0c234b); margin-bottom: 0.5rem;">📋 Export Your Progress</h3>
           <p style="color: var(--text-muted, #64748b); margin-bottom: 1rem;">Download your NICE Framework competency report for job applications and portfolio.</p>
           <button class="btn btn-primary" onclick="exportProgress()">📥 Download PDF Report</button>
         </div>

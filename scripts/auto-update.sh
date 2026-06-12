@@ -28,10 +28,6 @@ fi
 if ! docker volume ls | grep -q cybercore_redis_data; then
     log_msg "WARNING: cybercore-redis-data volume not found. Create it before updating."
 fi
-if ! docker volume ls | grep -q cybercore_n8n_data; then
-    log_msg "WARNING: cybercore-n8n-data volume not found. Create it before updating."
-fi
-
 log_msg "Checking for updates..."
 git fetch origin main >> "$LOG" 2>&1
 LOCAL=$(git rev-parse HEAD)
@@ -62,7 +58,7 @@ if git diff HEAD~1 HEAD -- 'config/postgres/*.sql' 'front-end/migrations/*.sql' 
     log_msg "Database schema changes detected; will run migrations after Postgres starts."
 fi
 
-# Stop services gracefully (allow DB to sync, n8n to save state)
+# Stop services gracefully (allow DB to sync)
 log_msg "Stopping services gracefully..."
 docker compose down >> "$LOG" 2>&1
 

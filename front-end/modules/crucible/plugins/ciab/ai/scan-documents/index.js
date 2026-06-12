@@ -6,9 +6,8 @@
  * real `nmap` scan against the deployed lane VMs will surface the same ports
  * the fake scan claims to see.
  *
- * No LLM calls. This replaces both the N8N webhook (N8N_DOCUMENT_GENERATOR_WEBHOOK)
- * and the hardcoded fallback generators in instructor.js:642-932. Pure JS,
- * sub-second latency, no API cost.
+ * No LLM calls. This replaces the hardcoded fallback generators in
+ * instructor.js:642-932. Pure JS, sub-second latency, no API cost.
  *
  * The previous generators always emitted MS17-010, BlueKeep, etc. regardless
  * of what services the profile declared — making fake-vs-real diffs glaring

@@ -32,49 +32,16 @@ const {
 
 const adminOnly = requireRole('admin');
 
-const N8N_DEPLOY_WEBHOOK = process.env.N8N_DEPLOY_LANE_WEBHOOK || 'http://100.100.20.50:5678/webhook-test/6bcb6b80-01d9-41a4-86e5-c0747fef50db';
-const N8N_TEARDOWN_WEBHOOK = process.env.N8N_TEARDOWN_LANE_WEBHOOK || 'http://100.100.20.50:5678/webhook-test/60949de5-d0f9-40bc-8441-5cf4f9b08048';
-
 
 // ============================================================================
 // LANE DEPLOYMENT
 // ============================================================================
 
 router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
-  const { challenge_key, module, event_id, use_webhook, attack_boxes, confirm, vuln_scripts: selectedVulnScripts } = req.body;
+  const { challenge_key, module, event_id, attack_boxes, confirm, vuln_scripts: selectedVulnScripts } = req.body;
   const user_id = req.body.user_id || req.user.userId;
   if (!challenge_key || !module) {
     return res.status(400).json({ error: 'challenge_key and module required' });
-  }
-
-  if (use_webhook) {
-    try {
-      console.log(`[Deploy] Using N8N webhook for ${challenge_key} (user: ${user_id})`);
-      const webhookRes = await fetch(N8N_DEPLOY_WEBHOOK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user_id, challenge_key, module, event_id: event_id || null })
-      });
-      if (!webhookRes.ok) {
-        const errText = await webhookRes.text();
-        throw new Error(`N8N webhook failed (${webhookRes.status}): ${errText}`);
-      }
-      const webhookData = await webhookRes.json();
-      console.log(`[Deploy] N8N webhook response:`, webhookData);
-      return res.json({
-        success: true,
-        method: 'webhook',
-        lane_id: webhookData.lane_id || webhookData.laneId || 'pending',
-        vxlan_id: webhookData.vxlan_id || webhookData.vxlanId || null,
-        vnet: webhookData.vnet || null,
-        challenge: challenge_key,
-        message: 'Lane deployment triggered via N8N webhook.',
-        webhook_response: webhookData
-      });
-    } catch (error) {
-      console.error('[Deploy] N8N webhook error:', error.message);
-      return res.status(502).json({ error: `Webhook failed: ${error.message}` });
-    }
   }
 
   try {
@@ -432,8 +399,6 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 // ============================================================================
 
 router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
-  const useWebhook = req.query.webhook === 'true';
-
   try {
     const laneResult = await cybercoreQuery(
       `SELECT lane_id, user_id, vxlan_id, name, status, config FROM cybercore_lane WHERE lane_id = $1`,
@@ -441,41 +406,6 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
     );
     if (laneResult.rows.length === 0) {
       return res.status(404).json({ error: 'Lane not found' });
-    }
-
-    if (useWebhook) {
-      const lane = laneResult.rows[0];
-      try {
-        console.log(`[Teardown] Using N8N webhook for lane ${lane.lane_id} (VXLAN ${lane.vxlan_id})`);
-        const webhookRes = await fetch(N8N_TEARDOWN_WEBHOOK, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            lane_id: lane.lane_id,
-            user_id: lane.user_id,
-            vxlan_id: lane.vxlan_id,
-            name: lane.name,
-            config: typeof lane.config === 'string' ? JSON.parse(lane.config) : lane.config
-          })
-        });
-        if (!webhookRes.ok) {
-          const errText = await webhookRes.text();
-          throw new Error(`N8N teardown webhook failed (${webhookRes.status}): ${errText}`);
-        }
-        const webhookData = await webhookRes.json();
-        console.log(`[Teardown] N8N webhook response:`, webhookData);
-        await cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = $1`, [lane.lane_id]);
-        return res.json({
-          success: true,
-          method: 'webhook',
-          lane_id: lane.lane_id,
-          vxlan_id: lane.vxlan_id,
-          webhook_response: webhookData
-        });
-      } catch (error) {
-        console.error('[Teardown] N8N webhook error:', error.message);
-        return res.status(502).json({ error: `Teardown webhook failed: ${error.message}` });
-      }
     }
 
     const lane = laneResult.rows[0];

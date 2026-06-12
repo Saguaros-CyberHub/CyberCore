@@ -15,7 +15,7 @@ const { pool } = require('../utils/db');
 const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
 
 const adminOnly = requireRole('admin');
-// Policy generation is handled by the N8N Policy Generator workflow
+// Policy generation is handled by the inline policy generator (ai/policy)
 // Template fallback available at: require('../../installed-plugins/crucible-plugins/ciab/utils/policy-templates')
 
 // ============================================================================
@@ -301,8 +301,8 @@ router.get('/', authenticateToken, async (req, res) => {
 });
 
 // ─── Inline Profile Generation Helper ──────────────────────────────────────
-// Replaces the old N8N webhook call. Same signature so admin's
-// generate-and-deploy endpoint (and other internal callers) don't change.
+// Same signature as the legacy helper so admin's generate-and-deploy
+// endpoint (and other internal callers) don't change.
 const { generateProfile } = require('../ai/profile');
 
 // ─── In-memory generation progress tracker ─────────────────────────────────
@@ -470,7 +470,7 @@ router.post('/upload', authenticateToken, adminOnly, express.json({ limit: '20mb
 });
 
 // ─── Admin: one-step generate + deploy ──────────────────────────────────────
-// Generates a profile via N8N, then immediately calls runProfileDeploy() from
+// Generates a profile inline, then immediately calls runProfileDeploy() from
 // the profile-deploy route module. Returns both profile_id and group_id so
 // the UI can switch straight into the lane-group status view.
 router.post('/generate-and-deploy', authenticateToken, adminOnly, async (req, res) => {
@@ -836,12 +836,12 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
 
     // ========== COVER PAGE ==========
     doc.moveDown(4);
-    doc.fontSize(32).font('Helvetica-Bold').fillColor('#1a365d')
+    doc.fontSize(32).font('Helvetica-Bold').fillColor('#0c234b')
        .text('Security Assessment', { align: 'center' });
     doc.fontSize(28).fillColor('#2d3748')
        .text('Document Package', { align: 'center' });
     doc.moveDown(1.5);
-    drawHR('#3182ce');
+    drawHR('#1e5288');
     doc.moveDown(1);
     doc.fontSize(18).font('Helvetica').fillColor('#2d3748')
        .text(p.company_name, { align: 'center' });
@@ -853,7 +853,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
     doc.moveDown(3);
 
     // TOC
-    doc.fillColor('#1a365d').fontSize(14).font('Helvetica-Bold')
+    doc.fillColor('#0c234b').fontSize(14).font('Helvetica-Bold')
        .text('Included Documents', { align: 'center' });
     doc.moveDown(0.5);
     const docLabels = { nmap: 'NMAP Network Discovery Scan', nessus: 'Nessus Vulnerability Scan', zap: 'ZAP Web Application Scan', policies: 'Security Policy Documents' };
@@ -880,7 +880,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
 
       // Section title bar
       doc.save();
-      doc.rect(LEFT - 10, doc.y - 5, pageW + 20, 35).fill('#1a365d');
+      doc.rect(LEFT - 10, doc.y - 5, pageW + 20, 35).fill('#0c234b');
       doc.fontSize(18).font('Helvetica-Bold').fillColor('#ffffff')
          .text(label, LEFT, doc.y + 2, { width: pageW });
       doc.restore();
@@ -946,7 +946,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
         });
 
         // Summary boxes
-        doc.fontSize(13).font('Helvetica-Bold').fillColor('#1a365d').text('Scan Summary');
+        doc.fontSize(13).font('Helvetica-Bold').fillColor('#0c234b').text('Scan Summary');
         doc.moveDown(0.4);
         const boxW = (pageW - 30) / 4;
         const boxY = doc.y;
@@ -981,7 +981,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
 
           doc.save();
           doc.roundedRect(LEFT, doc.y, pageW, 28, 4).fill('#edf2f7');
-          doc.fontSize(11).font('Helvetica-Bold').fillColor('#1a365d')
+          doc.fontSize(11).font('Helvetica-Bold').fillColor('#0c234b')
              .text(fqdn, LEFT + 8, doc.y + 4, { width: pageW - 16 });
           doc.fontSize(8).font('Helvetica').fillColor('#718096')
              .text(`IP: ${ip}  |  OS: ${os}  |  ${host.items.length} finding(s)`, LEFT + 8);
@@ -1144,7 +1144,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
 
         // Summary boxes
         if (summaryCounts.length > 0) {
-          doc.fontSize(13).font('Helvetica-Bold').fillColor('#1a365d').text('Alert Summary');
+          doc.fontSize(13).font('Helvetica-Bold').fillColor('#0c234b').text('Alert Summary');
           doc.moveDown(0.4);
           const boxW = (pageW - 30) / Math.max(summaryCounts.length, 1);
           const boxY = doc.y;
@@ -1177,7 +1177,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
         // Alert summary table
         if (alertRows.length > 0) {
           drawHR('#cbd5e0');
-          doc.fontSize(12).font('Helvetica-Bold').fillColor('#1a365d').text('Alert Summary Table');
+          doc.fontSize(12).font('Helvetica-Bold').fillColor('#0c234b').text('Alert Summary Table');
           doc.moveDown(0.4);
 
           const colW = [70, pageW - 200, 60, 55];
@@ -1218,7 +1218,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
         // Detailed findings
         if (findings.length > 0) {
           drawHR('#cbd5e0');
-          doc.fontSize(12).font('Helvetica-Bold').fillColor('#1a365d').text('Detailed Findings');
+          doc.fontSize(12).font('Helvetica-Bold').fillColor('#0c234b').text('Detailed Findings');
           doc.moveDown(0.5);
 
           const zapFindingColors = { high: '#e53e3e', medium: '#ed8936', low: '#4299e1', info: '#a0aec0', informational: '#a0aec0' };
@@ -1279,7 +1279,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
               doc.fontSize(7).font('Helvetica-Bold').fillColor('#718096')
                  .text(`Instances (${finding.instances.length}):`, fX);
               for (const inst of finding.instances.slice(0, 3)) {
-                doc.fontSize(7).font('Courier').fillColor('#3182ce');
+                doc.fontSize(7).font('Courier').fillColor('#1e5288');
                 const instStr = inst.length > 150 ? inst.substring(0, 150) + '...' : inst;
                 doc.text(instStr, fX + 8, doc.y, { width: pageW - 30 });
               }
@@ -1314,8 +1314,8 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
 
             doc.save();
             doc.roundedRect(LEFT, doc.y, pageW, 22, 4).fill('#edf2f7');
-            doc.rect(LEFT, doc.y, 4, 22).fill('#3182ce');
-            doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#1a365d')
+            doc.rect(LEFT, doc.y, 4, 22).fill('#1e5288');
+            doc.fontSize(9.5).font('Helvetica-Bold').fillColor('#0c234b')
                .text(headerText, LEFT + 12, doc.y + 5, { width: pageW - 20 });
             doc.restore();
             doc.y += 26;
@@ -1325,9 +1325,9 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
           if (line.startsWith('## ')) {
             ensureSpace(30);
             doc.moveDown(0.5);
-            doc.fontSize(14).font('Helvetica-Bold').fillColor('#1a365d')
+            doc.fontSize(14).font('Helvetica-Bold').fillColor('#0c234b')
                .text(line.replace(/^##\s*/, ''));
-            drawHR('#3182ce');
+            drawHR('#1e5288');
             continue;
           }
 
@@ -1335,7 +1335,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
           if (line.startsWith('> ')) {
             const bqText = line.replace(/^>\s*/, '').replace(/\*\*/g, '').replace(/\*/g, '');
             doc.save();
-            doc.rect(LEFT, doc.y, 3, 12).fill('#3182ce');
+            doc.rect(LEFT, doc.y, 3, 12).fill('#1e5288');
             doc.fontSize(7.5).font('Helvetica-Oblique').fillColor('#4a5568')
                .text(bqText, LEFT + 10, doc.y + 1, { width: pageW - 20 });
             doc.restore();
@@ -1346,7 +1346,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
           if (inCodeBlock) {
             const trimmed = line.trim();
             if (trimmed.startsWith('PORT') || trimmed.startsWith('Nmap scan report')) {
-              doc.fontSize(8).font('Helvetica-Bold').fillColor('#1a365d')
+              doc.fontSize(8).font('Helvetica-Bold').fillColor('#0c234b')
                  .text(line, LEFT + 6, doc.y, { width: pageW - 12 });
             } else if (/^\d+\/tcp/.test(trimmed) || /^\d+\/udp/.test(trimmed)) {
               doc.save();
@@ -1360,7 +1360,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
                  .text(line, LEFT + 10, doc.y, { width: pageW - 20 });
             } else if (trimmed.startsWith('TRACEROUTE')) {
               ensureSpace(20);
-              doc.fontSize(8).font('Helvetica-Bold').fillColor('#1a365d')
+              doc.fontSize(8).font('Helvetica-Bold').fillColor('#0c234b')
                  .text(line, LEFT + 6, doc.y, { width: pageW - 12 });
             } else {
               doc.fontSize(7).font('Courier').fillColor('#4a5568')
@@ -1395,7 +1395,7 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
              .text('No policy documents available.', { align: 'center' });
         } else {
           // Policy overview
-          doc.fontSize(13).font('Helvetica-Bold').fillColor('#1a365d')
+          doc.fontSize(13).font('Helvetica-Bold').fillColor('#0c234b')
              .text(`${policies.length} Policy Document(s)`);
           doc.moveDown(0.4);
 
@@ -1447,9 +1447,9 @@ router.get('/:id/documents/pdf', authenticateToken, async (req, res) => {
               // Section headers
               if (trimmed.startsWith('=== ') && trimmed.endsWith(' ===')) {
                 doc.moveDown(0.3);
-                doc.fontSize(13).font('Helvetica-Bold').fillColor('#1a365d')
+                doc.fontSize(13).font('Helvetica-Bold').fillColor('#0c234b')
                    .text(trimmed.replace(/^===\s*/, '').replace(/\s*===$/, ''));
-                drawHR('#3182ce');
+                drawHR('#1e5288');
                 continue;
               }
               if (trimmed.startsWith('--- ') && trimmed.endsWith(' ---')) {
@@ -1639,7 +1639,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 });
 
 module.exports = router;
-// Expose the N8N helper as a property of the router so other modules
+// Expose the profile-generation helper as a property of the router so other modules
 // (profile-deploy.js generate-and-deploy) can drive profile generation
 // without going through HTTP.
 module.exports.callN8nGenerateProfile = callN8nGenerateProfile;

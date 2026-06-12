@@ -7,6 +7,5 @@ node_modules
 # modules/crucible/plugins/ciab/data/frameworks).
 /data/
 /Info/
-/N8N Workflow/
 /migrations/
 *.md

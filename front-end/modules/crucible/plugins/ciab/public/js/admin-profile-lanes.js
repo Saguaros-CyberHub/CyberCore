@@ -394,7 +394,7 @@ async function runPreview() {
         ? '<em style="color:#38a169;">Vuln-app already generated for this profile — reusing cached source (no LLM cost).</em>'
         : (components ? '' : '<em>No LLM calls needed — vuln-app disabled.</em>');
       costHtml = `
-        <div style="margin-top:0.75rem; padding:0.75rem; background:#f8fafc; border-left:3px solid #1e40af; border-radius:4px;">
+        <div style="margin-top:0.75rem; padding:0.75rem; background:#f8fafc; border-left:3px solid var(--primary, #0c234b); border-radius:4px;">
           <div style="font-weight:700; margin-bottom:0.35rem;">
             Estimated cost: ${usdLabel} &nbsp;·&nbsp;
             Total VMs: ${t.vms.total} (${t.vms.per_lane}/lane) &nbsp;·&nbsp;

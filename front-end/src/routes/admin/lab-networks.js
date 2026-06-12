@@ -92,7 +92,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     const bestNode = bestNodeInfo.node;
     console.log(`[ChallengeNetwork] Selected node ${bestNode} for deployment (score: ${bestNodeInfo.score})`);
 
-    // Allocate VXLAN from the challenge's VXLAN block (set by "Add New Crucible Challenge" N8N workflow)
+    // Allocate VXLAN from the challenge's VXLAN block (set at challenge creation)
     const vxlanBlock = (spec.vxlan_block?.start && spec.vxlan_block?.end)
       ? spec.vxlan_block
       : { start: 10000, end: 10009 };
@@ -113,7 +113,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     }
     const vxlanId = vxlanResult.rows[0].vxlan_id;
 
-    // Find VNet — if it doesn't exist, create the SDN zone + VNet (like the N8N workflow does)
+    // Find VNet — if it doesn't exist, create the SDN zone + VNet
     let vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
     let vnet = vnets.find(v => v.tag === vxlanId);
 
@@ -682,51 +682,39 @@ router.post('/lab-networks/:laneId/generate-profile', authenticateToken, adminOn
       ? deployment.selected_scripts.filter(s => s.status === 'completed').map(s => s.script_slug)
       : [];
 
-    // Build N8N payload for challenge profile generation
-    const n8nWebhookUrl = process.env.N8N_CHALLENGE_PROFILE_WEBHOOK || 'http://localhost:5678/webhook-test/NetworkAIProfile';
+    // Generate the challenge profile inline (challenge_network mode pins the
+    // real VM hostnames/IPs into the generated network architecture).
+    console.log(`[ChallengeProfile] Generating profile for lane ${req.params.laneId} with ${allAssets.length} assets`);
+    console.log(`[ChallengeProfile] Real assets:`, realAssets.map(a => `${a.hostname}=${a.ip}`).join(', '));
+    console.log(`[ChallengeProfile] Deployed vulns:`, deployedVulns.join(', ') || 'none');
 
-    const payload = {
+    const { generateProfile } = require('../../../modules/crucible/plugins/ciab/ai/profile');
+    const profile = await generateProfile({
       user_id: laneUserId,
-      profile_type: 'challenge_network',
       client_type: client_type || 'SMB',
       industry: industry || 'Technology',
       difficulty: difficulty || 'intermediate',
       company_name: company_name || null,
-      llmModel: llm_model || 'gemini-2.5-flash',
-      lane_id: req.params.laneId,
-      asset_inventory: allAssets,
-      deployed_vulnerabilities: deployedVulns,
-      phantom_asset_count: phantomAssets.length,
-      real_asset_count: realAssets.length,
-      network_topology: {
-        vxlan_id: lane.vxlan_id || dvsNetwork.vxlan_id,
-        gateway_vm_id: laneConfig.gateway_vm_id || dvsNetwork.gateway_vm_id,
-        total_vms: vms.length
+      llmModel: llm_model || undefined,
+      custom_config: {
+        challenge_network: {
+          is_challenge: true,
+          real_assets: allAssets.filter(a => a.ip && a.ip !== 'pending'),
+          deployed_vulnerabilities: deployedVulns,
+          lane_id: req.params.laneId,
+          network_topology: {
+            vxlan_id: lane.vxlan_id || dvsNetwork.vxlan_id,
+            gateway_vm_id: laneConfig.gateway_vm_id || dvsNetwork.gateway_vm_id,
+            total_vms: vms.length
+          }
+        }
       }
-    };
-
-    // Call N8N webhook
-    console.log(`[ChallengeProfile] Triggering profile generation for lane ${req.params.laneId} with ${allAssets.length} assets`);
-    console.log(`[ChallengeProfile] Real assets:`, realAssets.map(a => `${a.hostname}=${a.ip}`).join(', '));
-    console.log(`[ChallengeProfile] Deployed vulns:`, deployedVulns.join(', ') || 'none');
-    const webhookResp = await fetch(n8nWebhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
     });
 
-    if (!webhookResp.ok) {
-      const errText = await webhookResp.text();
-      throw new Error(`N8N webhook failed (${webhookResp.status}): ${errText}`);
-    }
-
-    const webhookData = await webhookResp.json();
-
-    // If N8N returned a profile_id, link it
-    if (webhookData.profile_id) {
+    if (profile?.id) {
       await query(
         `UPDATE deployment_vuln_selections SET profile_id = $1, updated_at = NOW() WHERE id = $2`,
-        [webhookData.profile_id, deployment.id]
+        [profile.id, deployment.id]
       );
     }
 
@@ -736,11 +724,10 @@ router.post('/lab-networks/:laneId/generate-profile', authenticateToken, adminOn
 
     res.json({
       success: true,
-      profile_id: webhookData.profile_id || null,
+      profile_id: profile?.id || null,
       assets_included: allAssets.length,
       real_vms: realAssets.length,
-      phantom_hosts: phantomAssets.length,
-      webhook_response: webhookData
+      phantom_hosts: phantomAssets.length
     });
 
   } catch (error) {

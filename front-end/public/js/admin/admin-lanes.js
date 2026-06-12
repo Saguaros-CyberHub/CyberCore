@@ -1,89 +1,4 @@
 // ============================================================================
-// DEPLOY LANE
-// ============================================================================
-
-async function deployLane() {
-  const challenge_key = document.getElementById('deployChallengeKey').value.trim();
-  const module = document.getElementById('deployModule').value;
-  const event_id = document.getElementById('deployEventId').value.trim() || null;
-  const useWebhook = document.getElementById('deployUseWebhook').checked;
-  const attack_boxes = document.getElementById('deploySingleAttackBox').checked;
-  const status = document.getElementById('deployStatus');
-  const btn = document.getElementById('deployBtn');
-
-  if (!challenge_key) {
-    Toast.warning('Missing Fields', 'Challenge Key is required');
-    return;
-  }
-
-  btn.disabled = true;
-  btn.textContent = 'Checking resources...';
-  status.textContent = 'Running pre-flight resource check...';
-  status.style.color = 'var(--gray-500)';
-
-  try {
-    // Step 1: Get preview (no confirm flag)
-    const preview = await api('POST', '/deploy-lane', { challenge_key, module, event_id, use_webhook: useWebhook, attack_boxes });
-
-    if (preview.preview) {
-      // Show confirmation modal
-      btn.disabled = false;
-      btn.textContent = 'Deploy Lane';
-      status.textContent = '';
-      const vulnScripts = getSelectedScripts('deploy-script');
-      showDeployConfirmation(preview, () => deployLaneConfirmed(challenge_key, module, event_id, useWebhook, attack_boxes, vulnScripts));
-      return;
-    }
-
-    // If no preview came back (health check failed gracefully), treat as confirmed
-    handleDeployLaneSuccess(preview, challenge_key, status);
-  } catch (e) {
-    status.textContent = `Error: ${e.message}`;
-    status.style.color = '#e53e3e';
-    Toast.error('Deploy Failed', e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Deploy Lane';
-  }
-}
-
-async function deployLaneConfirmed(challenge_key, module, event_id, useWebhook, attack_boxes, vulnScripts = []) {
-  const status = document.getElementById('deployStatus');
-  const btn = document.getElementById('deployBtn');
-
-  btn.disabled = true;
-  btn.textContent = 'Deploying...';
-  const method = useWebhook ? 'N8N Webhook' : 'Native';
-  const extras = attack_boxes ? ' + Kali Attack Box' : '';
-  status.textContent = `Deploying lane${extras} via ${method} (cloning VMs, allocating VXLAN)...`;
-  status.style.color = 'var(--gray-500)';
-
-  try {
-    const data = await api('POST', '/deploy-lane', { challenge_key, module, event_id, use_webhook: useWebhook, attack_boxes, vuln_scripts: vulnScripts, confirm: true });
-    handleDeployLaneSuccess(data, challenge_key, status);
-  } catch (e) {
-    status.textContent = `Error: ${e.message}`;
-    status.style.color = '#e53e3e';
-    Toast.error('Deploy Failed', e.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Deploy Lane';
-  }
-}
-
-function handleDeployLaneSuccess(data, challenge_key, status) {
-  const via = data.method === 'webhook' ? ' (via N8N)' : '';
-  status.innerHTML = `
-    <strong style="color: #38a169;">Lane deployment started${via}!</strong><br>
-    Lane ID: <code style="background: var(--gray-100); padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">${data.lane_id}</code><br>
-    VXLAN: ${data.vxlan_id || 'N/A'} | VNet: ${data.vnet || 'N/A'} | Challenge: ${data.challenge || challenge_key}<br>
-    <span style="font-size: 0.8rem; color: var(--gray-500);">VMs cloning in background — check Active Lanes tab for status.</span>
-  `;
-  Toast.success('Lane Deploying', `${data.challenge || challenge_key}${via}. VMs will be ready in ~60 seconds.`);
-  loadClusterHealth();
-}
-
-// ============================================================================
 // ACTIVE LANES
 // ============================================================================
 
@@ -117,7 +32,7 @@ async function loadLanes() {
           ${lanes.map(l => {
             const statusColor = {
               active: '#38a169', deploying: '#d69e2e', error: '#e53e3e',
-              deleted: '#a0aec0', suspended: '#9f7aea', pending: '#4299e1'
+              deleted: '#a0aec0', suspended: '#1e5288', pending: '#378dbd'
             }[l.status] || '#718096';
             const cfg = typeof l.config === 'string' ? JSON.parse(l.config || '{}') : (l.config || {});
             const inet = cfg.internet_enabled;
@@ -139,7 +54,7 @@ async function loadLanes() {
                 <td>
                   ${l.status === 'active' ? `
                     <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" onclick="showRunScriptModal('${l.lane_id}', '${escHtml(l.name || '')}')">Run Script</button>
-                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #805ad5; border-color: #805ad5;" onclick="showGenerateChallengeProfileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Generate Profile</button>
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: var(--accent-red, #ab0520); border-color: var(--accent-red, #ab0520);" onclick="showGenerateChallengeProfileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Generate Profile</button>
                     <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #d69e2e; border-color: #d69e2e;" onclick="showPushFileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Push File</button>
                     <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #319795; border-color: #319795;" onclick="showModulesModal('${l.lane_id}', '${escHtml(l.name || '')}')">Modules${Array.isArray(cfg.attached_modules) && cfg.attached_modules.length > 0 ? ` (${cfg.attached_modules.length})` : ''}</button>
                   ` : ''}
@@ -561,10 +476,10 @@ async function renderScriptSelector(container, vms, selectorId, preselected = []
           <div class="${selectorId}-vm-tab" data-vm="${escHtml(vm.name)}"
             onclick="selectScriptVM('${selectorId}', '${escHtml(vm.name)}')"
             style="padding: 0.6rem 0.75rem; cursor: pointer; border-bottom: 1px solid var(--border-color); font-size: 0.8rem;
-                   ${i === 0 ? 'background: var(--bg-card); border-left: 3px solid #4299e1;' : 'border-left: 3px solid transparent;'}">
+                   ${i === 0 ? 'background: var(--bg-card); border-left: 3px solid var(--primary-light, #1e5288);' : 'border-left: 3px solid transparent;'}">
             <div style="font-weight: 600;">${escHtml(vm.name)}</div>
             <div style="font-size: 0.7rem; color: var(--gray-500);">${escHtml(vm.role || '')}${vm.os ? ' · ' + escHtml(vm.os) : ''}</div>
-            <div style="font-size: 0.65rem; color: #4299e1; margin-top: 0.15rem;" id="${selectorId}-vmcount-${escHtml(vm.name)}">${count} script${count !== 1 ? 's' : ''}</div>
+            <div style="font-size: 0.65rem; color: var(--primary-light, #1e5288); margin-top: 0.15rem;" id="${selectorId}-vmcount-${escHtml(vm.name)}">${count} script${count !== 1 ? 's' : ''}</div>
           </div>`;
         }).join('')}
       </div>
@@ -589,7 +504,7 @@ function selectScriptVM(selectorId, vmName) {
   document.querySelectorAll(`.${selectorId}-vm-tab`).forEach(tab => {
     const isActive = tab.dataset.vm === vmName;
     tab.style.background = isActive ? 'var(--bg-card)' : '';
-    tab.style.borderLeftColor = isActive ? '#4299e1' : 'transparent';
+    tab.style.borderLeftColor = isActive ? 'var(--primary-light, #1e5288)' : 'transparent';
   });
 
   // Find the container
@@ -621,7 +536,7 @@ function renderScriptPanelForVM(selectorId, vmName, container) {
   let html = `
     <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
       <input type="text" id="${selectorId}-search" placeholder="Search scripts..." oninput="filterScriptPanel('${selectorId}')" style="flex: 1; padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.8rem;">
-      <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #4299e1; color: #4299e1; background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'all')">All</button>
+      <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid var(--primary-light, #1e5288); color: var(--primary-light, #1e5288); background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'all')">All</button>
       <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid var(--border-color); color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'none')">None</button>
       <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #38a169; color: #38a169; background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'defaults')">Defaults</button>
     </div>`;
@@ -647,7 +562,7 @@ function renderScriptPanelForVM(selectorId, vmName, container) {
               </div>
               ${s.description ? `<div style="font-size: 0.7rem; color: var(--gray-500); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.3;">${escHtml(s.description)}</div>` : ''}
               <div style="display: flex; gap: 0.5rem; margin-top: 0.1rem;">
-                ${services ? `<span style="font-size: 0.6rem; color: #4299e1;">${escHtml(services)}</span>` : ''}
+                ${services ? `<span style="font-size: 0.6rem; color: var(--primary-light, #1e5288);">${escHtml(services)}</span>` : ''}
                 ${deps ? `<span style="font-size: 0.6rem; color: var(--gray-400);">deps: ${escHtml(deps)}</span>` : ''}
               </div>
             </div>
@@ -785,44 +700,6 @@ async function onGroupChallengeSelected() {
       : [{ name: challengeKey, role: 'Primary', os: 'Unknown', default_scripts: [] }];
 
     await renderScriptSelector(panel, vms, 'group-deploy-script', []);
-  } catch (e) {
-    panel.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error: ${e.message}</p>`;
-  }
-}
-
-async function onChallengeSelected() {
-  const panel = document.getElementById('deployVulnScriptPanel');
-  const challengeKey = document.getElementById('deployChallengeKey').value;
-  const module = document.getElementById('deployModule').value;
-
-  if (!challengeKey) {
-    panel.style.display = 'none';
-    return;
-  }
-
-  panel.innerHTML = '<p style="color: var(--gray-500); font-size: 0.85rem;">Loading challenge VMs...</p>';
-  panel.style.display = 'block';
-
-  try {
-    // Look up challenge_id from cached challenges
-    const challenges = cachedChallenges[module] || [];
-    const challenge = challenges.find(c => c.challenge_key === challengeKey);
-
-    if (!challenge || !challenge.challenge_id) {
-      // Fallback: show a basic single-VM selector
-      await renderScriptSelector(panel, [{ name: challengeKey, role: 'Primary', os: 'Windows' }], 'deploy-script', []);
-      return;
-    }
-
-    // Get full challenge details with spec
-    const fullChallenge = await api('GET', `/lab-templates/${challenge.challenge_id}`);
-    const rawSpec = fullChallenge.spec;
-    const spec = typeof rawSpec === 'string' ? JSON.parse(rawSpec) : (rawSpec || {});
-    const vms = (spec.vms || []).length > 0
-      ? spec.vms
-      : [{ name: challengeKey, role: 'Primary', os: 'Unknown', default_scripts: [] }];
-
-    await renderScriptSelector(panel, vms, 'deploy-script', []);
   } catch (e) {
     panel.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error: ${e.message}</p>`;
   }
@@ -1205,7 +1082,7 @@ async function generateChallengeProfileFromModal(laneId) {
   const llm_model = document.getElementById('chalProfileModel').value;
   const status = document.getElementById('chalProfileStatus');
 
-  status.innerHTML = '<strong style="color: var(--gray-500);">Sending to N8N for AI generation... This may take 1-3 minutes.</strong>';
+  status.innerHTML = '<strong style="color: var(--gray-500);">Generating AI profile... This may take 1-3 minutes.</strong>';
 
   try {
     const data = await api('POST', `/lab-networks/${laneId}/generate-profile`, {
@@ -1216,7 +1093,7 @@ async function generateChallengeProfileFromModal(laneId) {
       <strong style="color: #38a169;">Profile generation triggered!</strong><br>
       <span style="font-size: 0.8rem;">
         Assets included: ${data.assets_included} (${data.real_vms} real VMs + ${data.phantom_hosts} phantom hosts)<br>
-        ${data.profile_id ? `Profile ID: <code>${data.profile_id}</code>` : 'Profile ID will be assigned when N8N completes.'}
+        ${data.profile_id ? `Profile ID: <code>${data.profile_id}</code>` : 'Profile ID will be assigned when generation completes.'}
       </span>`;
 
     Toast.success('Profile Generating', `${data.assets_included} assets sent to AI`);
@@ -1302,7 +1179,7 @@ async function runSelectedScriptsOnLane(laneId) {
     try {
       await api('POST', `/lab-networks/${laneId}/run-script`, { vm_name: s.vm_name, script_slug: s.script_slug });
       sentCount++;
-      updateExecStatus(s.vm_name, s.script_slug, 'sent', '#4299e1');
+      updateExecStatus(s.vm_name, s.script_slug, 'sent', 'var(--info, #378dbd)');
     } catch (e) {
       updateExecStatus(s.vm_name, s.script_slug, `error: ${e.message}`, '#e53e3e');
     }
@@ -1444,7 +1321,7 @@ function toggleLaneDeployInfo() {
       info.textContent = 'Select a challenge above to check lane capacity.';
       return;
     }
-    info.style.background = '#ebf8ff'; info.style.color = '#2b6cb0';
+    info.style.background = 'rgba(30, 82, 136, 0.12)'; info.style.color = 'var(--primary-light, #1e5288)';
     info.textContent = `Will deploy ${numStudents} lanes (1 per student). Capacity checked on submit.`;
   }
 }
@@ -1458,7 +1335,6 @@ function getGroupDeployParams() {
     challenge_key: document.getElementById('deployGroupChallenge').value.trim() || null,
     module: document.getElementById('deployGroupModule').value,
     deploy_lanes: document.getElementById('deployLanes').checked,
-    use_webhook: document.getElementById('deployGroupUseWebhook').checked,
     vuln_scripts: getSelectedScripts('group-deploy-script')
   };
 }
@@ -1862,7 +1738,7 @@ async function loadModulesAndChallenges() {
       }
     }
 
-    const selects = ['deployModule', 'deployGroupModule'];
+    const selects = ['deployGroupModule'];
     selects.forEach(selId => {
       const sel = document.getElementById(selId);
       if (!sel) return;
@@ -1877,12 +1753,11 @@ async function loadModulesAndChallenges() {
         opt.textContent = m.name || m.key;
         sel.appendChild(opt);
       });
-      const challengeSelId = selId === 'deployModule' ? 'deployChallengeKey' : 'deployGroupChallenge';
-      loadChallengesForSelect(selId, challengeSelId);
+      loadChallengesForSelect(selId, 'deployGroupChallenge');
     });
   } catch (e) {
     console.error('Failed to load modules:', e);
-    ['deployModule', 'deployGroupModule'].forEach(id => {
+    ['deployGroupModule'].forEach(id => {
       const sel = document.getElementById(id);
       if (sel) sel.innerHTML = '<option value="crucible">Crucible (default)</option>';
     });

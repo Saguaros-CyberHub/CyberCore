@@ -13,7 +13,7 @@ function renderModuleCard(mod) {
   const href = isActive ? (mod.entry_url || '/' + mod.key) : '/' + mod.key;
 
   return `
-    <a href="${href}" class="module-card" style="--card-accent: ${mod.color || '#3182ce'}">
+    <a href="${href}" class="module-card" style="--card-accent: ${mod.color || '#0c234b'}">
       <div class="module-card-header">
         <div class="module-card-icon" style="--icon-bg: ${mod.color}15">${mod.icon || ''}</div>
         <div class="module-card-name">${mod.name}</div>

@@ -91,23 +91,23 @@ function buildPolicyHTML(title, ctx, bodyContent) {
   @media print { body { padding: 20px; } .no-print { display: none; } }
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: 'Segoe UI', 'Helvetica Neue', Arial, sans-serif; max-width: 850px; margin: 0 auto; padding: 40px 50px; color: #1a202c; line-height: 1.7; background: #fff; }
-  .doc-header { border-bottom: 3px solid #1a365d; padding-bottom: 20px; margin-bottom: 30px; }
+  .doc-header { border-bottom: 3px solid #0c234b; padding-bottom: 20px; margin-bottom: 30px; }
   .doc-header .org-name { color: #718096; font-size: 0.85em; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 4px; }
-  .doc-header h1 { color: #1a365d; font-size: 1.7em; margin-bottom: 8px; font-weight: 700; }
+  .doc-header h1 { color: #0c234b; font-size: 1.7em; margin-bottom: 8px; font-weight: 700; }
   .doc-meta { display: flex; gap: 12px; flex-wrap: wrap; }
   .doc-meta span { background: #f7fafc; border: 1px solid #e2e8f0; padding: 3px 12px; border-radius: 4px; font-size: 0.8em; color: #4a5568; }
-  h2 { color: #2c5282; margin-top: 32px; margin-bottom: 12px; font-size: 1.2em; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+  h2 { color: #1e5288; margin-top: 32px; margin-bottom: 12px; font-size: 1.2em; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
   h3 { color: #2d3748; margin-top: 22px; margin-bottom: 8px; font-size: 1.05em; }
   p { margin-bottom: 12px; }
   ul, ol { margin: 8px 0 12px 24px; }
   li { margin-bottom: 4px; }
   table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }
-  th { background: #1a365d; color: #fff; padding: 9px 12px; text-align: left; font-weight: 600; }
+  th { background: #0c234b; color: #fff; padding: 9px 12px; text-align: left; font-weight: 600; }
   td { padding: 8px 12px; border-bottom: 1px solid #e2e8f0; }
   tr:nth-child(even) td { background: #f7fafc; }
-  .callout { background: #ebf8ff; border-left: 4px solid #3182ce; padding: 12px 16px; margin: 14px 0; border-radius: 0 4px 4px 0; font-size: 0.92em; }
+  .callout { background: #ebf8ff; border-left: 4px solid #1e5288; padding: 12px 16px; margin: 14px 0; border-radius: 0 4px 4px 0; font-size: 0.92em; }
   .callout-warn { background: #fffbeb; border-left-color: #d69e2e; }
-  .doc-footer { margin-top: 44px; padding-top: 20px; border-top: 2px solid #1a365d; color: #718096; font-size: 0.82em; }
+  .doc-footer { margin-top: 44px; padding-top: 20px; border-top: 2px solid #0c234b; color: #718096; font-size: 0.82em; }
   .doc-footer p { margin-bottom: 4px; }
   .sig-block { display: flex; gap: 40px; margin-top: 20px; }
   .sig-line { flex: 1; border-top: 1px solid #a0aec0; padding-top: 6px; font-size: 0.85em; color: #718096; }

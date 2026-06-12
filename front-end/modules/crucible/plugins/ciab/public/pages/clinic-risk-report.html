@@ -12,8 +12,8 @@
   /* ─── Base ─────────────────────────────────────────────────────────── */
   * { box-sizing: border-box; }
   :root {
-    --primary:    #1e40af;
-    --primary-d:  #1e3a5f;
+    --primary:    #0c234b;
+    --primary-d:  #001c48;
     --text:       #1e293b;
     --text-mute:  #64748b;
     --border:     #e2e8f0;
@@ -65,7 +65,7 @@
 
   /* ─── Cover ────────────────────────────────────────────────────────── */
   .cover {
-    background: linear-gradient(180deg, var(--primary-d) 0%, #264971 70%, var(--primary) 100%);
+    background: linear-gradient(180deg, var(--primary-d) 0%, var(--primary) 70%, #1e5288 100%);
     color: white;
     padding: 60px 50px 50px 50px;
     position: relative;
@@ -158,7 +158,7 @@
   .callout {
     margin: 18px 0; padding: 14px 18px;
     border-radius: 6px; border-left: 4px solid var(--accent, var(--primary));
-    background: rgba(30, 64, 175, 0.06);
+    background: rgba(12, 35, 75, 0.06);
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
@@ -566,7 +566,7 @@
       Mirrors the questionnaire major cyber-insurance carriers (Coalition, At-Bay, Cowbell, Resilience) use during underwriting. Score below 65 typically triggers a sub-standard / restricted coverage offer or outright declination.
     </p>
     <div class="kpi-grid" style="grid-template-columns: 1fr 1fr;">
-      <div class="kpi-tile" style="--accent:#1e40af; grid-column: span 1;">
+      <div class="kpi-tile" style="--accent:#0c234b; grid-column: span 1;">
         <div class="label">Readiness Score</div>
         <div class="value" id="insuranceScoreValue">—</div>
         <div class="sub" id="insuranceScoreSub">of 100 possible points</div>

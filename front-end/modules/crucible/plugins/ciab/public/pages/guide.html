@@ -39,7 +39,7 @@
       font-size: 1.4rem;
       font-weight: 600;
       margin: 2rem 0 0.75rem;
-      color: #2b6cb0;
+      color: #0c234b;
       padding-bottom: 0.4rem;
       border-bottom: 1px solid #e2e8f0;
     }
@@ -61,7 +61,7 @@
     }
     .tip {
       background: #ebf8ff;
-      border-left: 4px solid #4299e1;
+      border-left: 4px solid #1e5288;
       padding: 0.75rem 1rem;
       border-radius: 0 8px 8px 0;
       margin: 1rem 0;
@@ -110,12 +110,12 @@
     .toc h3 { margin-top: 0; }
     .toc ul { list-style: none; margin-left: 0; }
     .toc li { margin-bottom: 0.3rem; }
-    .toc a { color: #2b6cb0; text-decoration: none; }
+    .toc a { color: #0c234b; text-decoration: none; }
     .toc a:hover { text-decoration: underline; }
     .back-link {
       display: inline-block;
       margin-bottom: 1.5rem;
-      color: #4299e1;
+      color: #1e5288;
       text-decoration: none;
       font-size: 0.9rem;
     }
@@ -188,14 +188,13 @@
       <li>Fill in the Group Name, number of instructors and students</li>
       <li>Select a Module and Challenge from the dropdowns</li>
       <li>Check "Deploy CyberHub Lanes" if you want VMs for each student</li>
-      <li>Click Deploy Group and confirm the resource preview</li>
+      <li>Click Deploy Lanes and confirm the resource preview</li>
       <li>Save the credentials from the results panel</li>
     </ol>
 
     <div class="warning"><strong>Note:</strong> Lane deployment takes 30-90 seconds per student (VMs are cloned sequentially). Check the Active Lanes tab for progress.</div>
 
-    <h3>Deploying a Single Lane</h3>
-    <p>For individual students, use the "Deploy Single Lane" form on the right side of the Deploy tab. Select a module, challenge, and click Deploy.</p>
+    <p>For an individual student, deploy with <em># of Students</em> set to 1.</p>
 
     <h2 id="managing">4. Managing Active Labs</h2>
     <p>The <strong>Active Lanes</strong> tab (admin) and <strong>Lab Environments</strong> tab (instructor) show all deployed lab environments.</p>
@@ -205,7 +204,7 @@
       <tr><td><span style="color: #38a169; font-weight: 600;">active</span></td><td>VMs are running and accessible</td></tr>
       <tr><td><span style="color: #d69e2e; font-weight: 600;">deploying</span></td><td>VMs are being cloned (wait 30-90 sec)</td></tr>
       <tr><td><span style="color: #e53e3e; font-weight: 600;">error</span></td><td>Deployment failed — check logs</td></tr>
-      <tr><td><span style="color: #4299e1; font-weight: 600;">pending</span></td><td>Queued for deployment</td></tr>
+      <tr><td><span style="color: #1e5288; font-weight: 600;">pending</span></td><td>Queued for deployment</td></tr>
     </table>
 
     <h3>Deleting a Lane</h3>

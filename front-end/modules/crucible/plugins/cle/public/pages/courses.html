@@ -20,14 +20,14 @@
     .course-item { 
       padding: 1rem; 
       margin-bottom: 0.75rem; 
-      border-left: 4px solid #7c3aed; 
-      background: var(--bg-hover, #f9fafb); 
+      border-left: 4px solid var(--primary, #0c234b);
+      background: var(--bg-hover, #f9fafb);
       border-radius: 8px; 
       cursor: pointer; 
       transition: all 0.2s;
     }
     .course-item:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.08); transform: translateX(4px); }
-    .course-item.active { background: #ede9fe; border-left-color: #6d28d9; }
+    .course-item.active { background: rgba(171, 5, 32, 0.08); border-left-color: var(--accent-red, #ab0520); }
     .course-item h4 { margin: 0 0 0.25rem; font-size: 0.95rem; color: #1f2937; }
     .course-item-meta { display: flex; justify-content: space-between; align-items: center; font-size: 0.8rem; color: var(--text-secondary); }
     .course-item-code { font-weight: 500; }
@@ -37,17 +37,17 @@
     .filter-title { font-weight: 600; margin-bottom: 1rem; font-size: 0.9rem; text-transform: uppercase; color: #6b7280; }
     .search-box { margin-bottom: 1rem; }
     .search-box input { display: block; width: 100%; padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
-    .search-box input:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1); }
+    .search-box input:focus { outline: none; border-color: var(--primary, #0c234b); box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1); }
     .filter-group { margin-bottom: 1.5rem; }
     .filter-checkbox { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; cursor: pointer; font-size: 0.9rem; }
     .filter-checkbox input { cursor: pointer; }
-    .filter-badge { display: inline-block; background: #dbeafe; color: #0c4a6e; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-left: 0.5rem; }
+    .filter-badge { display: inline-block; background: rgba(30, 82, 136, 0.12); color: var(--primary-dark, #001c48); padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.75rem; margin-left: 0.5rem; }
 
     /* Empty state for scrollable list */
     .courses-scroll .empty-state { text-align: center; padding: 2rem 1rem; font-size: 0.9rem; }
 
     .course-grid { display: none; }
-    .course-card { background: var(--card-bg, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-left: 4px solid #7c3aed; cursor: pointer; transition: all 0.2s; }
+    .course-card { background: var(--card-bg, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-left: 4px solid var(--primary, #0c234b); cursor: pointer; transition: all 0.2s; }
     .course-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.12); transform: translateY(-2px); }
     .course-card h3 { margin: 0 0 0.5rem; font-size: 1.1rem; }
     .course-meta { display: flex; gap: 1rem; font-size: 0.8rem; color: var(--text-secondary); margin: 0.75rem 0; flex-wrap: wrap; }
@@ -65,12 +65,12 @@
     .form-group { display: flex; flex-direction: column; }
     .form-group label { font-weight: 600; margin-bottom: 0.35rem; font-size: 0.9rem; }
     .form-group input, .form-group textarea, .form-group select { padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
-    .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: #7c3aed; box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.1); }
+    .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: var(--primary, #0c234b); box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1); }
     .form-group textarea { resize: vertical; min-height: 100px; }
     .form-buttons { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1rem; }
     .btn { padding: 0.6rem 1.2rem; border-radius: 6px; font-weight: 600; font-size: 0.9rem; cursor: pointer; border: none; }
-    .btn-primary { background: #7c3aed; color: white; }
-    .btn-primary:hover { background: #6d28d9; }
+    .btn-primary { background: var(--primary, #0c234b); color: white; }
+    .btn-primary:hover { background: var(--primary-light, #1e5288); }
     .btn-secondary { background: #f3f4f6; color: #1f2937; }
     .btn-secondary:hover { background: #e5e7eb; }
     .btn-danger { background: #ef4444; color: white; }
@@ -80,7 +80,7 @@
     .course-detail.active { display: block; }
     .detail-tabs { display: flex; gap: 0; border-bottom: 2px solid #e5e7eb; margin-bottom: 1.5rem; }
     .detail-tab { padding: 0.75rem 1rem; cursor: pointer; border-bottom: 3px solid transparent; font-weight: 500; color: var(--text-secondary); }
-    .detail-tab.active { color: #7c3aed; border-bottom-color: #7c3aed; }
+    .detail-tab.active { color: var(--accent-red, #ab0520); border-bottom-color: var(--accent-red, #ab0520); }
     .detail-tab-pane { display: none; }
     .detail-tab-pane.active { display: block; }
 
@@ -93,8 +93,8 @@
     .btn-outline { background: transparent; border: 1px solid #d1d5db; color: #374151; }
     .btn-outline:hover { background: #f3f4f6; }
 
-    .info-box { background: #eff6ff; border-left: 4px solid #3b82f6; padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
-    .info-box p { margin: 0; color: #1e40af; font-size: 0.9rem; }
+    .info-box { background: rgba(30, 82, 136, 0.1); border-left: 4px solid var(--primary-light, #1e5288); padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
+    .info-box p { margin: 0; color: var(--primary, #0c234b); font-size: 0.9rem; }
 
     .toast { position: fixed; bottom: 20px; right: 20px; background: #10b981; color: white; padding: 1rem 1.5rem; border-radius: 6px; z-index: 1000; }
     .toast.error { background: #ef4444; }
@@ -649,7 +649,7 @@
       const d = currentCourseData;
       document.getElementById('courseOverviewContent').innerHTML = `
         <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem;">
-          <h3 style="margin: 0 0 1rem; color: #7c3aed;">Course Information</h3>
+          <h3 style="margin: 0 0 1rem; color: var(--primary, #0c234b);">Course Information</h3>
           <p><strong>Code:</strong> ${escHtml(d.code || 'N/A')}</p>
           <p><strong>Description:</strong> ${escHtml(d.description || 'No description')}</p>
           <p><strong>Created:</strong> ${d.created_at ? new Date(d.created_at).toLocaleDateString() : 'N/A'}</p>
@@ -743,7 +743,7 @@
               <td style="font-size:0.85rem;">${v.ip_address ? escHtml(v.ip_address) : '<span style="color:var(--text-muted);">—</span>'}</td>
               <td>${_powerBadge(v.power_state)}</td>
               <td style="display:flex;gap:0.4rem;align-items:center;">
-                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:#2b6cb0;border-color:#2b6cb0;" onclick="openVMConsole('${escHtml(v.lane_id)}')">Console</button>` : ''}
+                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" onclick="openVMConsole('${escHtml(v.lane_id)}')">Console</button>` : ''}
                 <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.lane_id)}')">Delete</button>
               </td>
             </tr>`;

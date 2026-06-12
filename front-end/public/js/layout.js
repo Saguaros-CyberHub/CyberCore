@@ -339,18 +339,18 @@ const Layout = {
         width: 60px;
         height: 60px;
         border-radius: 50%;
-        background: linear-gradient(135deg, #3182ce, #2c5282);
+        background: linear-gradient(135deg, var(--primary, #0c234b), var(--primary-light, #1e5288));
         color: white;
         border: none;
         font-size: 1.5em;
         cursor: pointer;
-        box-shadow: 0 4px 15px rgba(49, 130, 206, 0.4);
+        box-shadow: 0 4px 15px rgba(30, 82, 136, 0.4);
         z-index: 9999;
         transition: all 0.3s ease;
       }
       .global-chat-toggle:hover {
         transform: scale(1.1);
-        box-shadow: 0 6px 20px rgba(49, 130, 206, 0.5);
+        box-shadow: 0 6px 20px rgba(30, 82, 136, 0.5);
       }
       .global-chat-toggle.active {
         background: #e53e3e;
@@ -383,7 +383,7 @@ const Layout = {
       /* Chat Header */
       .global-chat-header {
         padding: 15px 20px;
-        background: linear-gradient(135deg, #1a365d, #2c5282);
+        background: linear-gradient(135deg, var(--primary-dark, #001c48), var(--primary, #0c234b));
         color: white;
         display: flex;
         justify-content: space-between;
@@ -427,14 +427,14 @@ const Layout = {
         font-size: 0.9em;
       }
       .global-chat-messages .chat-message.user {
-        background: #3182ce;
+        background: var(--primary, #0c234b);
         color: white;
         margin-left: auto;
         border-bottom-right-radius: 4px;
       }
       .global-chat-messages .chat-message.assistant {
         background: white;
-        color: #1a365d;
+        color: var(--primary-dark, #001c48);
         border: 1px solid #e2e8f0;
         border-bottom-left-radius: 4px;
       }
@@ -482,13 +482,13 @@ const Layout = {
         transition: border-color 0.2s;
       }
       .global-chat-input:focus {
-        border-color: #3182ce;
+        border-color: var(--primary, #0c234b);
       }
       .global-chat-send {
         width: 45px;
         height: 45px;
         border-radius: 50%;
-        background: #3182ce;
+        background: var(--primary, #0c234b);
         color: white;
         border: none;
         font-size: 1.2em;
@@ -496,7 +496,7 @@ const Layout = {
         transition: background 0.2s;
       }
       .global-chat-send:hover {
-        background: #2c5282;
+        background: var(--primary-light, #1e5288);
       }
       .global-chat-send:disabled {
         background: #a0aec0;
