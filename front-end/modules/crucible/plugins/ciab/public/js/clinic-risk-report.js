@@ -19,6 +19,12 @@
   const CSF_FN = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
   const charts = {};
 
+  // SVG renderer: charts come out as vectors in Print → Save as PDF,
+  // so they are never rasterized/blurry the way canvas output is.
+  function initChart(el) {
+    return echarts.init(el, null, { renderer: 'svg' });
+  }
+
   // ── Bootstrap ──────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', boot);
 
@@ -63,6 +69,8 @@
     safe('snapshot delta',    () => renderSnapshotDelta(bundle));
     safe('CIS RAM',           () => renderCisRam(bundle));
     safe('detailed findings', () => renderDetailedFindings(bundle));
+    // Must run last — numbering + TOC depend on which sections are visible.
+    safe('contents & numbering', () => renumberSectionsAndToc());
 
     document.title = `Risk Assessment — ${bundle.profile.company_name || 'Profile'}`;
     requestAnimationFrame(() => Object.values(charts).forEach(c => c && c.resize && c.resize()));
@@ -144,11 +152,24 @@
     }).length;
     const csfAvg = (['GV','ID','PR','DE','RS','RC']
       .reduce((s, k) => s + (b.csf_scores[k] || 0), 0) / 6).toFixed(1);
+    const preparedBy = b.report.branding?.prepared_by || 'Clinic-in-a-Box Platform';
+    const setText = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = v;
+    };
 
     document.getElementById('coverCompany').textContent = name;
     document.getElementById('coverDate').textContent = `Prepared ${date}`;
     document.getElementById('hdrCompany').textContent = name;
     if (isTraining) document.getElementById('trainingBadge').style.display = '';
+
+    // Cover prepared-by + confidentiality, running footer, exec sign-off
+    setText('coverPreparedBy', `Prepared by ${preparedBy}`);
+    setText('confCompany', name);
+    setText('footerCompany', name);
+    setText('footerDate', date);
+    setText('signoffPreparedBy', preparedBy);
+    setText('signoffDate', date);
 
     document.getElementById('coverMeta').innerHTML = [
       ['Report ID',       reportId],
@@ -156,7 +177,7 @@
       ['Findings',        `${(b.findings || []).length} (${criticalCount} critical · ${highCount} high)`],
       ['IG1 Coverage',    `${b.cis_coverage.score}%`],
       ['CSF Maturity',    `${csfAvg} / 5`],
-      ['Prepared By',     b.report.branding?.prepared_by || 'Clinic-in-a-Box Platform']
+      ['Classification',  'Confidential']
     ].map(([k, v]) => `
       <div class="item">
         <div class="label">${escapeHtml(k)}</div>
@@ -292,7 +313,7 @@
     const maxCount = Math.max(1, ...data.map(d => d[2]));
     const el = document.getElementById(elId);
     if (!el) return null;
-    const chart = echarts.init(el);
+    const chart = initChart(el);
     chart.setOption({
       tooltip: { formatter: p =>
         `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1}: <b>${p.value[2]}</b> finding${p.value[2] === 1 ? '' : 's'}` },
@@ -344,7 +365,7 @@
         <div class="title">Projected risk reduction: ${reduction}%</div>
         <div class="body">
           Total inherent risk score (Σ L×I across all ${findings.length} findings): <strong>${inherentTotal}</strong>.
-          After the recommended treatments in Section 06 are implemented, projected residual is <strong>${residualTotal}</strong> —
+          After the recommended treatments in the Recommendations section are implemented, projected residual is <strong>${residualTotal}</strong> —
           a ${reduction}% reduction in aggregate exposure. Critical-band cells (red) should be empty or near-empty on the residual map if the treatment plan is sound.
         </div>`;
     } else if (scoredResidual.length < findings.length) {
@@ -412,7 +433,7 @@
     `).join('');
 
     // CIS bar chart
-    const chart = echarts.init(document.getElementById('chartCis'));
+    const chart = initChart(document.getElementById('chartCis'));
     charts.cis = chart;
     chart.setOption({
       grid: { left: 80, right: 40, top: 10, bottom: 20 },
@@ -453,7 +474,7 @@
     const fnIds = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
 
     // Radar
-    const radar = echarts.init(document.getElementById('chartRadar'));
+    const radar = initChart(document.getElementById('chartRadar'));
     charts.radar = radar;
     radar.setOption({
       tooltip: {},
@@ -477,7 +498,7 @@
 
     // Function bar chart
     const colors = { GV: '#ab0520', ID: '#1e5288', PR: '#16a34a', DE: '#ea580c', RS: '#dc2626', RC: '#0891b2' };
-    const bar = echarts.init(document.getElementById('chartCsf'));
+    const bar = initChart(document.getElementById('chartCsf'));
     charts.csf = bar;
     bar.setOption({
       grid: { left: 70, right: 50, top: 10, bottom: 20 },
@@ -755,6 +776,66 @@
     `;
   }
 
+  // ── Section numbering + Table of Contents ─────────────────────────
+  // Runs after every section has rendered (and decided its visibility).
+  // Numbers visible main sections 1..N, letters appendices A..Z, rewrites
+  // each section's kicker ("SECTION N") + h2 ("N. Title"), and builds the
+  // TOC to match. Page numbers are intentionally absent — Chromium print
+  // CSS cannot resolve them, and fake ones are worse than none.
+  function renumberSectionsAndToc() {
+    const defs = [
+      { sel: 'section.exec-dashboard' },
+      { sel: 'section.asset-register',      note: 'OCTAVE Allegro-Style' },
+      { sel: 'section.insurance-readiness', note: 'Underwriting Posture' },
+      { sel: 'section.snapshot-delta',      note: 'Engagement Progress' },
+      { sel: 'section.heatmap',             note: 'Inherent vs Residual' },
+      { sel: 'section.findings-table' },
+      { sel: 'section.ig1',                 note: 'CIS v8 Implementation Group 1' },
+      { sel: 'section.csf',                 note: 'Functional Posture' },
+      { sel: 'section.recommendations',     note: 'Prioritized Action Plan' },
+      { sel: 'section.ram-register',        note: 'CIS RAM v2.1 Workbook', appendix: true },
+      { sel: 'section.ram-treatment',       note: 'CIS RAM v2.1 Workbook', appendix: true },
+      { sel: 'section.detailed-findings',   appendix: true },
+      { sel: 'section.methodology',         note: 'How This Report Was Built', appendix: true }
+    ];
+    let sectionNum = 0, appendixNum = 0;
+    const entries = [];
+    defs.forEach(d => {
+      const sec = document.querySelector(d.sel);
+      if (!sec || sec.style.display === 'none') return;   // omit absent sections
+      const h2 = sec.querySelector('.section-header h2');
+      const kicker = sec.querySelector('.section-header .kicker');
+      if (!h2) return;
+      if (!sec.id) sec.id = 'sec-' + d.sel.replace('section.', '');
+      const baseTitle = h2.textContent.trim();
+      if (d.appendix) {
+        const letter = String.fromCharCode(65 + appendixNum++);  // A, B, C…
+        h2.textContent = `Appendix ${letter}. ${baseTitle}`;
+        if (kicker) kicker.textContent = d.note ? `Appendix ${letter} · ${d.note}` : `Appendix ${letter}`;
+        entries.push({ id: sec.id, num: `${letter}.`, title: baseTitle, appendix: true });
+      } else {
+        sectionNum++;
+        h2.textContent = `${sectionNum}. ${baseTitle}`;
+        if (kicker) kicker.textContent = d.note ? `Section ${sectionNum} · ${d.note}` : `Section ${sectionNum}`;
+        entries.push({ id: sec.id, num: `${sectionNum}.`, title: baseTitle, appendix: false });
+      }
+    });
+
+    const list = document.getElementById('tocList');
+    const tocSection = document.getElementById('tocSection');
+    if (!list || !tocSection || entries.length === 0) return;
+    const entryHtml = e => `
+      <li><a href="#${escapeHtml(e.id)}">
+        <span class="toc-num">${escapeHtml(e.num)}</span>
+        <span class="toc-title">${escapeHtml(e.title)}</span>
+      </a></li>`;
+    const main = entries.filter(e => !e.appendix);
+    const apps = entries.filter(e => e.appendix);
+    list.innerHTML = main.map(entryHtml).join('')
+      + (apps.length ? '<li class="toc-group">Appendices</li>' + apps.map(entryHtml).join('') : '');
+    tocSection.style.display = '';
+  }
+
   // ── Toolbar: POA&M CSV download ────────────────────────────────────
   function wireToolbarExtras() {
     const tb = document.querySelector('.toolbar');
@@ -790,4 +871,37 @@
   window.addEventListener('resize', () => {
     Object.values(charts).forEach(c => c && c.resize && c.resize());
   });
+
+  // ── Print handling ─────────────────────────────────────────────────
+  // The @media print CSS fixes each chart container to these exact pixel
+  // sizes (printable area ≈ 7.3in ≈ 700px). Resizing the ECharts instances
+  // to the same numbers before the print snapshot guarantees nothing is
+  // clipped or scaled. beforeprint covers Ctrl+P / menu printing; the
+  // toolbar button calls printReport() for the same effect.
+  const PRINT_CHART_SIZES = {
+    heatmap:         { width: 346, height: 240 },
+    heatmapResidual: { width: 346, height: 240 },
+    radar:           { width: 700, height: 300 },
+    cis:             { width: 700, height: 220 },
+    csf:             { width: 700, height: 220 }
+  };
+  function resizeChartsForPrint() {
+    Object.keys(charts).forEach(key => {
+      const c = charts[key];
+      if (!c || !c.resize) return;
+      const s = PRINT_CHART_SIZES[key] || { width: 700, height: 280 };
+      c.resize({ width: s.width, height: s.height });
+    });
+  }
+  function restoreChartsAfterPrint() {
+    Object.values(charts).forEach(c => {
+      if (c && c.resize) c.resize({ width: 'auto', height: 'auto' });
+    });
+  }
+  window.addEventListener('beforeprint', resizeChartsForPrint);
+  window.addEventListener('afterprint', restoreChartsAfterPrint);
+  window.printReport = function () {
+    resizeChartsForPrint();
+    window.print();
+  };
 })();

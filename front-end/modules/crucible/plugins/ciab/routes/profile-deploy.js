@@ -416,7 +416,9 @@ async function runProfileDeploy(opts) {
        RETURNING id`,
       [groupId, laneId, vxlanId, i + 1]
     );
-    laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId });
+    // studentUsername drives Proxmox VM names (`{vm}-{username}`, `kali-{username}`)
+    // so profile-deploy lanes read the same as group-deploy lanes in the cluster.
+    laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId, studentUsername: student.email.split('@')[0] });
   }
 
   // Extract the company's public domain from the profile JSON so the
@@ -685,11 +687,44 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
 
     const baseGroupName = group.group_name;
     const challengeKey = `ciab-profile-${group.profile_id.slice(0,8)}`;
+    // Provision one student per added lane — same pattern as the initial
+    // deploy in runProfileDeploy, continuing the studentN numbering from the
+    // lane_index sequence. Without this, added lanes belonged to the admin
+    // and never showed up in any student's My Workspaces.
+    const groupSlug = baseGroupName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const credentials = [];
     const laneAllocations = [];
     for (let i = 0; i < vxlanIds.length; i++) {
       const vxlanId = vxlanIds[i];
       const laneIndex = startIndex + i + 1;
-      const laneName = `ciab-${baseGroupName.toLowerCase().replace(/[^a-z0-9-]/g, '-').slice(0, 30)}-${laneIndex}`;
+
+      const studentId = uuidv4();
+      const email = `${groupSlug}-student${laneIndex}@clinic.local`;
+      const password = generatePassword();
+      const passwordHash = await bcrypt.hash(password, 12);
+      const userRow = await cybercoreQuery(
+        `INSERT INTO cybercore_user
+           (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
+         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, 'student', true, NOW())
+         ON CONFLICT (username) DO UPDATE SET
+           password_hash = EXCLUDED.password_hash,
+           password_alg  = 'bcrypt',
+           organization  = EXCLUDED.organization
+         RETURNING user_id`,
+        [studentId, email, email, passwordHash, 'Student', String(laneIndex), baseGroupName]
+      );
+      const effectiveId = userRow.rows[0].user_id;
+      credentials.push({ email, password, role: 'student' });
+      try {
+        await guacAPI('POST', '/users', { username: email, password, attributes: { disabled: null, timezone: 'America/Phoenix' } });
+      } catch (_) {
+        try {
+          await guacAPI('PUT', `/users/${encodeURIComponent(email)}`, { username: email, password, attributes: { disabled: null, timezone: 'America/Phoenix' } });
+        } catch (_) {}
+      }
+
+      const kaliVmid = 700000 + vxlanId;
+      const laneName = `kali-${groupSlug}-student${laneIndex}-${kaliVmid}`;
       // See note in runProfileDeploy — lane_group_id FKs to crucible_lane_group,
       // which CIAB does not populate. Group linkage lives in config.group_id.
       const laneInsert = await cybercoreQuery(
@@ -698,8 +733,12 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
          VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, NOW(), NOW())
          RETURNING lane_id`,
         [
-          req.user.userId, vxlanId, laneName,
-          JSON.stringify({ challenge_id: reservation.challenge_id, challenge_key: challengeKey, profile_lane_group: true, group_id: groupId }),
+          effectiveId, vxlanId, laneName,
+          JSON.stringify({
+            challenge_id: reservation.challenge_id, challenge_key: challengeKey,
+            profile_lane_group: true, group_id: groupId,
+            student_email: email, student_index: laneIndex
+          }),
           reservation.challenge_id
         ]
       );
@@ -709,7 +748,7 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
          VALUES ($1, $2, $3, $4, 'pending') RETURNING id`,
         [groupId, laneId, vxlanId, laneIndex]
       );
-      laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId });
+      laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId, studentUsername: email.split('@')[0] });
     }
 
     // Bump group num_lanes + flip status back to deploying
@@ -724,7 +763,10 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       added: laneAllocations.length,
       new_lanes: laneAllocations,
       total_lanes_now: parseInt(group.num_lanes, 10) + laneAllocations.length,
-      reservation: { max_students: reservation.max_students, start: vxlanBlock.start, end: vxlanBlock.end }
+      reservation: { max_students: reservation.max_students, start: vxlanBlock.start, end: vxlanBlock.end },
+      // One-time display, same as the initial deploy — cleartext passwords
+      // exist only in this response.
+      credentials
     });
 
     // Pull domain from the group's frozen snapshot for the /etc/hosts injection
@@ -889,6 +931,16 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
       || group.profile_snapshot?.domain_public
       || null;
 
+    // Recover the lane's student username so retried VMs keep the
+    // `{vm}-{student-username}` naming from the original deploy.
+    let retryStudentUsername = null;
+    try {
+      const laneRow = await cybercoreQuery(`SELECT config FROM cybercore_lane WHERE lane_id=$1`, [laneId]);
+      const laneCfg = typeof laneRow.rows[0]?.config === 'string'
+        ? JSON.parse(laneRow.rows[0].config || '{}') : (laneRow.rows[0]?.config || {});
+      if (laneCfg.student_email) retryStudentUsername = String(laneCfg.student_email).split('@')[0];
+    } catch (_) {}
+
     // Background: re-run that single lane
     const { createCloneSemaphore } = require('../../../../../src/utils/batch-deployer');
     setImmediate(() => {
@@ -909,7 +961,8 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
         module: 'ciab',
         domain: retryDomain,
         cloneSem: createCloneSemaphore(),
-        progress: null
+        progress: null,
+        studentUsername: retryStudentUsername
       }).catch(err => {
         console.error(`[CIAB ProfileDeploy] Retry of lane ${laneId} failed: ${err.message}`);
       });
@@ -930,14 +983,104 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     const group = groupRes.rows[0];
 
     const jobsRes = await query(
-      `SELECT lane_id, vm_ids FROM ciab_profile_lane_jobs WHERE group_id=$1`,
+      `SELECT lane_id, vxlan_id, vm_ids FROM ciab_profile_lane_jobs WHERE group_id=$1`,
       [req.params.groupId]
     );
+
+    // Collect the auto-provisioned student accounts BEFORE tearing lanes down
+    // (teardownLane deletes the cybercore_lane rows we'd otherwise read them
+    // from). Two sources, deduped:
+    //   1. cybercore_lane.user_id where the lane config marks it a
+    //      profile-lane-group lane with a student_email — the normal case.
+    //   2. cybercore_user rows whose organization is this group and whose
+    //      username matches the @clinic.local pattern — catches students whose
+    //      lane was already deleted individually via the admin Lanes tab.
+    // Only @clinic.local accounts are ever deleted, so a lane assigned to a
+    // real user can never take that user's account down with it.
+    const studentUsers = new Map();   // user_id -> username/email
+    const laneIds = jobsRes.rows.map(j => j.lane_id).filter(Boolean);
+    if (laneIds.length > 0) {
+      try {
+        const laneRows = await cybercoreQuery(
+          `SELECT l.user_id, l.config, u.username
+             FROM cybercore_lane l
+             JOIN cybercore_user u ON u.user_id = l.user_id
+            WHERE l.lane_id = ANY($1::uuid[])`,
+          [laneIds]
+        );
+        for (const row of laneRows.rows) {
+          const cfg = typeof row.config === 'string' ? JSON.parse(row.config || '{}') : (row.config || {});
+          if (cfg.profile_lane_group && /@clinic\.local$/i.test(row.username || '')) {
+            studentUsers.set(row.user_id, row.username);
+          }
+        }
+      } catch (e) {
+        console.warn(`[CIAB Teardown] lane->student lookup failed: ${e.message}`);
+      }
+    }
+    try {
+      const orgRows = await cybercoreQuery(
+        `SELECT user_id, username FROM cybercore_user
+          WHERE role = 'student' AND organization = $1 AND username LIKE '%@clinic.local'`,
+        [group.group_name]
+      );
+      for (const row of orgRows.rows) studentUsers.set(row.user_id, row.username);
+    } catch (e) {
+      console.warn(`[CIAB Teardown] org->student lookup failed: ${e.message}`);
+    }
 
     const errors = [];
     for (const job of jobsRes.rows) {
       const result = await teardownLane({ laneId: job.lane_id, vmIds: job.vm_ids || [] });
       if (result.errors && result.errors.length > 0) errors.push(...result.errors);
+    }
+
+    // ── Delete the auto-provisioned students + their Guacamole artifacts ──
+    const studentIds = [...studentUsers.keys()];
+    const studentEmails = [...studentUsers.values()];
+    if (studentIds.length > 0) {
+      // cybercore_allocation has CHECK (user_id IS NOT NULL OR group_key IS NOT NULL)
+      // and its user FK is ON DELETE SET NULL — deleting a user with allocations
+      // would violate the check and roll the user delete back. Purge first
+      // (same ordering as the group teardown in src/routes/admin/groups.js).
+      try {
+        await cybercoreQuery(
+          `DELETE FROM cybercore_allocation WHERE user_id = ANY($1::uuid[])`, [studentIds]
+        );
+      } catch (e) {
+        errors.push(`allocation cleanup: ${e.message}`);
+      }
+      try {
+        const r = await cybercoreQuery(
+          `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) AND username LIKE '%@clinic.local'`,
+          [studentIds]
+        );
+        console.log(`[CIAB Teardown] ${group.group_name}: deleted ${r.rowCount}/${studentIds.length} auto-provisioned student account(s)`);
+        if (r.rowCount < studentIds.length) {
+          errors.push(`only ${r.rowCount}/${studentIds.length} student accounts deleted — check FK constraints`);
+        }
+      } catch (e) {
+        errors.push(`student account cleanup: ${e.message}`);
+      }
+      // Guacamole accounts are keyed by email; best-effort.
+      for (const email of studentEmails) {
+        await guacAPI('DELETE', `/users/${encodeURIComponent(email)}`).catch(() => {});
+      }
+    }
+
+    // Guacamole Kali console connections are named "<group> - lane<vxlan> - Kali"
+    // (see lane-deploy.js). Delete every connection carrying this group's prefix.
+    try {
+      const conns = await guacAPI('GET', '/connections');
+      const prefix = `${group.group_name} - lane`;
+      for (const [id, conn] of Object.entries(conns || {})) {
+        if (conn && typeof conn.name === 'string' && conn.name.startsWith(prefix)) {
+          await guacAPI('DELETE', `/connections/${encodeURIComponent(id)}`).catch(e =>
+            errors.push(`guac connection ${conn.name}: ${e.message}`));
+        }
+      }
+    } catch (e) {
+      errors.push(`guac connection sweep: ${e.message}`);
     }
 
     // NOTE: we DO NOT delete the crucible_challenge here. Challenges are now
@@ -950,7 +1093,12 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     await query(`UPDATE ciab_profile_lane_groups SET status='deleted', updated_at=NOW() WHERE id=$1`,
                 [req.params.groupId]);
 
-    res.json({ success: true, group_id: req.params.groupId, errors: errors.length ? errors : undefined });
+    res.json({
+      success: true,
+      group_id: req.params.groupId,
+      students_deleted: studentIds.length,
+      errors: errors.length ? errors : undefined
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

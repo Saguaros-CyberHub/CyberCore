@@ -1204,9 +1204,16 @@ async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logT
 async function deployOneLaneFromSpec({
   laneId, jobId, spec, vxlanId, vnet, vnetInt, gatewayVmId, targetNode, templateNode,
   groupId, groupName, vulnAppInstall, attackBoxes, subnetScheme, module, cloneSem,
-  progress, domain
+  progress, domain, studentUsername = null
 }) {
   const logTag = `[CIAB Deploy ${groupName}]`;
+
+  // VM names follow the group-deploy convention (`{vm}-{student-username}`,
+  // `kali-{student-username}`) so profile-deploy lanes look the same in
+  // Proxmox as regular group lanes. Falls back to the VXLAN id when no
+  // student is attached (legacy lanes / add-lanes rows predating students).
+  const vmNameSuffix = String(studentUsername || vxlanId)
+    .replace(/[^a-z0-9-]/gi, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').toLowerCase();
 
   // Retry path: the batch normally prebuilds the image, but a single-lane
   // retry (called straight from the retry endpoint) may run after the group's
@@ -1280,7 +1287,7 @@ async function deployOneLaneFromSpec({
         if (vmType === 'lxc') {
           const r = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/lxc/${vmSpec.template_vmid}/clone`, {
             newid: vmId,
-            hostname: `${vmName}-${vxlanId}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(),
+            hostname: `${vmName}-${vmNameSuffix}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(),
             full: 1, target: targetNode,
             description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}\nVM: ${vmName}`
           });
@@ -1291,7 +1298,7 @@ async function deployOneLaneFromSpec({
         } else {
           const r = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/qemu/${vmSpec.template_vmid}/clone`, {
             newid: vmId,
-            name: `${vmName}-${vxlanId}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(),
+            name: `${vmName}-${vmNameSuffix}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(),
             full: 1, target: targetNode,
             description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}\nVM: ${vmName}`
           });
@@ -1315,7 +1322,7 @@ async function deployOneLaneFromSpec({
       await cloneSem.run(async () => {
         const r = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${KALI_TEMPLATE_VMID}/clone`, {
           newid: attackBoxVmId,
-          name: `kali-${vxlanId}`,
+          name: `kali-${vmNameSuffix}`.substring(0, 63),
           full: 1, target: targetNode,
           description: `CIAB Attack Box\nGroup: ${groupName}\nLane: ${laneId}`
         });
@@ -1672,6 +1679,7 @@ async function deployProfileLanesBatch({
     laneId: a.laneId,
     jobId: a.jobId,
     vxlanId: a.vxlanId,
+    studentUsername: a.studentUsername || null,
     laneName: formatLaneHostname({ vxlanId: a.vxlanId, laneName: `ciab-${groupName}` }),
     targetNode: nodeAssignments[i] || 'cyberhub-node-5'
   }));
@@ -1736,7 +1744,8 @@ async function deployProfileLanesBatch({
       module: moduleKey,
       cloneSem,
       progress,
-      domain
+      domain,
+      studentUsername: job.studentUsername
     });
   }, {
     concurrency,

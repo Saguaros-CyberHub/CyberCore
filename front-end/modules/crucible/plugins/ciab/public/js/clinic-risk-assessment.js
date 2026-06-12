@@ -18,6 +18,7 @@
     cisramSaveTimers: {}, // debounced field-save timers per safeguard_num
     cisramCollapsed: null, // Set<controlNum> of currently-collapsed controls; null until first render seeds it
     frameworks: null,     // /frameworks catalog (cis_ig1 + nist_csf_2_0), lazy-loaded for the intake breakdown
+    registerFilters: { search: '', status: 'all', severity: 'all', sortKey: null, sortDir: 'asc' }, // Risk Register toolbar (client-side filter/sort)
   };
 
   const CSF_HIDE_KEY = 'cra-hide-csf'; // localStorage: '1' => hide NIST CSF charts in Overview
@@ -25,6 +26,14 @@
   const CSF_FN_ORDER = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
   const CSF_FN_NAMES = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
   const CSF_FN_COLORS = { GV: '#ab0520', ID: '#1e5288', PR: '#16a34a', DE: '#d97706', RS: '#dc2626', RC: '#0891b2' };
+
+  // Inline stroke SVGs for the Overview stat cards (theme-tinted via currentColor).
+  const STAT_ICONS = {
+    clipboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="m9 13.5 2 2 4-4"/></svg>',
+    gauge:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>',
+    shield:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg>',
+    chart:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="16"/><line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/></svg>',
+  };
 
   // === API helpers ===
   function apiUrl(suffix) { return '/api/clinic-risk-assessment' + suffix; }
@@ -85,6 +94,8 @@
     wireCsfToggle();
     wireIntakeDrawer();
     wireOverviewSections();
+    wireHero();
+    wireRegisterToolbar();
     document.getElementById('btnRefresh').addEventListener('click', () => loadAndRender());
 
     await loadAndRender();
@@ -220,6 +231,8 @@
     renderCsfBars();
     applyCsfVisibility();
     renderFindingsTable();
+    renderTopRisks();
+    renderHero();
     renderCsfSliders();
     renderReportFields();
     renderCisRam();
@@ -266,14 +279,15 @@
     const ramTotals = state.cisram?.totals || { scored: 0, total: 56, reasonable: 0 };
 
     const cards = [
-      { label: 'CIS RAM Scored',    value: `${ramTotals.scored} / ${ramTotals.total}`, hint: `${ramTotals.reasonable} reasonable` },
-      { label: 'Avg Inherent Risk', value: avgRisk, hint: `${totalRows} entries, scale 1–9` },
-      { label: 'IG1 Coverage',      value: b.cis_coverage.score + '%', hint: `${b.cis_coverage.yes} yes · ${b.cis_coverage.partial} partial` },
-      { label: 'CSF Maturity',      value: csfAvg,  hint: `avg of ${csfNonZero.length} scored function${csfNonZero.length === 1 ? '' : 's'} (of 6), 0–5` },
+      { icon: 'clipboard', label: 'CIS RAM Scored',    value: `${ramTotals.scored} / ${ramTotals.total}`, hint: `${ramTotals.reasonable} reasonable` },
+      { icon: 'gauge',     label: 'Avg Inherent Risk', value: avgRisk, hint: `${totalRows} entries, scale 1–9` },
+      { icon: 'shield',    label: 'IG1 Coverage',      value: b.cis_coverage.score + '%', hint: `${b.cis_coverage.yes} yes · ${b.cis_coverage.partial} partial` },
+      { icon: 'chart',     label: 'CSF Maturity',      value: csfAvg,  hint: `avg of ${csfNonZero.length} scored function${csfNonZero.length === 1 ? '' : 's'} (of 6), 0–5` },
     ];
     const host = document.getElementById('overviewStats');
     host.innerHTML = cards.map(c => `
       <div class="cra-stat-card">
+        <span class="stat-icon" aria-hidden="true">${STAT_ICONS[c.icon] || ''}</span>
         <div class="label">${c.label}</div>
         <div class="value">${c.value}</div>
         <div class="hint">${c.hint}</div>
@@ -295,6 +309,197 @@
         calloutEl.style.display = 'none';
       }
     }
+  }
+
+  // === Executive hero (Overview banner) ===
+  // Programmatic tab switch used by the hero quick actions + checklist links.
+  function switchToTab(tab) {
+    document.querySelector(`.cra-tab[data-tab="${tab}"]`)?.click();
+  }
+
+  // Overall risk grade: weighted blend of (a) inverse avg inherent risk across
+  // findings + CIS RAM (40%), (b) CIS IG1 coverage % (25%), (c) NIST CSF
+  // maturity avg (20%), (d) insurance readiness score (15%). Weights are
+  // renormalized across whichever inputs are actually present.
+  function deriveOverallGrade(bundle, cisram, insurance) {
+    const clamp = v => Math.max(0, Math.min(100, v));
+    const parts = [];
+
+    // (a) Inverse of average inherent risk (1–9 scale → 0–100 goodness).
+    const findings = bundle?.findings || [];
+    const ramRisks = [];
+    for (const ctrl of (cisram?.controls || [])) {
+      for (const r of (ctrl.rows || [])) {
+        if (r.likelihood && (r.mission_impact || r.obligations_impact)) {
+          ramRisks.push((r.likelihood || 0) * Math.max(r.mission_impact || 0, r.obligations_impact || 0));
+        }
+      }
+    }
+    const risks = [
+      ...ramRisks,
+      ...findings.map(f => bandTo3(f.likelihood) * bandTo3(f.impact)),
+    ].filter(v => v > 0);
+    if (risks.length) {
+      const avg = risks.reduce((a, c) => a + c, 0) / risks.length;
+      parts.push({ key: 'risk', weight: 0.40, score: clamp(((9 - avg) / 8) * 100) });
+    }
+
+    // (b) CIS IG1 coverage — counted only when at least one safeguard was answered.
+    const cv = bundle?.cis_coverage;
+    if (cv && cv.total > 0 && ((cv.yes || 0) + (cv.partial || 0) + (cv.no || 0)) > 0) {
+      parts.push({ key: 'ig1', weight: 0.25, score: clamp(Number(cv.score) || 0) });
+    }
+
+    // (c) NIST CSF maturity (avg of scored functions, 0–5 → 0–100).
+    const csf = bundle?.csf_scores || {};
+    const fnScores = CSF_FN_ORDER.map(k => Number(csf[k]) || 0).filter(v => v > 0);
+    if (fnScores.length) {
+      const avg = fnScores.reduce((a, c) => a + c, 0) / fnScores.length;
+      parts.push({ key: 'csf', weight: 0.20, score: clamp((avg / 5) * 100) });
+    }
+
+    // (d) Insurance readiness (already 0–100), when the scorecard is saved.
+    if (insurance && insurance.readiness_score != null) {
+      parts.push({ key: 'insurance', weight: 0.15, score: clamp(Number(insurance.readiness_score) || 0) });
+    }
+
+    if (!parts.length) return { score: null, letter: '–', tone: 'none', parts };
+    const totalW = parts.reduce((a, p) => a + p.weight, 0);
+    const score = Math.round(parts.reduce((a, p) => a + p.score * (p.weight / totalW), 0));
+    const letter = score >= 90 ? 'A' : score >= 80 ? 'B' : score >= 70 ? 'C' : score >= 60 ? 'D' : 'F';
+    const tone = score >= 80 ? 'success' : score >= 70 ? 'warning' : 'danger';
+    return { score, letter, tone, parts };
+  }
+
+  // The 7 engagement milestones surfaced in the hero completeness meter.
+  function computeCompleteness() {
+    const b = state.bundle || {};
+    const report = b.report || {};
+    const ramTotals = state.cisram?.totals;
+    const csf = b.csf_scores || {};
+    const execDone = ['exec_summary', 'exec_current_posture', 'exec_top_risks', 'exec_progress', 'exec_decisions_needed']
+      .some(k => String(report[k] || '').trim().length > 0);
+    return [
+      { label: 'Record at least one asset',          done: (state.assets || []).length > 0,    tab: 'assets' },
+      { label: 'Log at least one finding',           done: (b.findings || []).length > 0,      tab: 'register' },
+      { label: 'Score 50%+ of CIS RAM safeguards',   done: !!ramTotals && ramTotals.total > 0 && (ramTotals.scored / ramTotals.total) >= 0.5, tab: 'cisram' },
+      { label: 'CSF maturity scored (auto or manual)', done: CSF_FN_ORDER.some(k => Number(csf[k]) > 0), tab: 'maturity' },
+      { label: 'Insurance scorecard saved',          done: !!(state.insurance && state.insurance.readiness_score != null), tab: 'insurance' },
+      { label: 'Executive summary written',          done: execDone,                            tab: 'report' },
+      { label: 'Baseline snapshot taken',            done: (state.snapshots || []).length > 0,  tab: 'snapshots' },
+    ];
+  }
+
+  function renderHero() {
+    const hero = document.getElementById('craHero');
+    if (!hero || !state.bundle) return;
+    const b = state.bundle;
+
+    // Grade chip + score
+    const grade = deriveOverallGrade(b, state.cisram, state.insurance);
+    const chip = document.getElementById('heroGradeChip');
+    if (chip) {
+      chip.textContent = grade.letter;
+      chip.className = 'grade-chip grade-' + grade.tone;
+    }
+    const scoreEl = document.getElementById('heroGradeScore');
+    if (scoreEl) scoreEl.textContent = grade.score == null ? '—' : grade.score;
+    const basisNames = { risk: 'inherent risk', ig1: 'IG1 coverage', csf: 'CSF maturity', insurance: 'insurance readiness' };
+    const basisEl = document.getElementById('heroGradeBasis');
+    if (basisEl) {
+      basisEl.textContent = grade.parts.length
+        ? 'Blend of ' + grade.parts.map(p => basisNames[p.key]).join(', ')
+        : 'Add findings or score safeguards to compute a grade';
+    }
+
+    // Engagement metadata (source badge lives here too — set by renderHeader)
+    const companyEl = document.getElementById('heroCompany');
+    if (companyEl) companyEl.textContent = b.profile?.company_name || b.intake?.cover_name || 'Untitled Engagement';
+    const metaEl = document.getElementById('heroMetaLine');
+    if (metaEl) {
+      metaEl.textContent = [
+        b.profile?.industry || 'Unspecified industry',
+        b.intake ? `Intake ${b.intake.completion_percentage ?? 0}% complete` : 'No intake yet',
+      ].join(' · ');
+    }
+
+    // Completeness meter + checklist
+    const items = computeCompleteness();
+    const done = items.filter(i => i.done).length;
+    const pct = Math.round((done / items.length) * 100);
+    const stepsEl = document.getElementById('heroStepsLabel');
+    if (stepsEl) stepsEl.textContent = `${done} of ${items.length} steps`;
+    const pctEl = document.getElementById('heroStepsPct');
+    if (pctEl) pctEl.textContent = pct + '%';
+    const fillEl = document.getElementById('heroMeterFill');
+    if (fillEl) fillEl.style.width = pct + '%';
+    const listEl = document.getElementById('heroChecklistItems');
+    if (listEl) {
+      listEl.innerHTML = items.map(i => i.done
+        ? `<li class="done"><span class="mark">✓</span><span>${escapeHtml(i.label)}</span></li>`
+        : `<li class="todo"><span class="mark">○</span><a href="#" data-goto="${i.tab}">${escapeHtml(i.label)}</a></li>`
+      ).join('');
+    }
+  }
+
+  function wireHero() {
+    document.getElementById('btnHeroReport')?.addEventListener('click', () => switchToTab('report'));
+    document.getElementById('btnHeroSnapshot')?.addEventListener('click', () => switchToTab('snapshots'));
+    // Delegated: checklist items are re-rendered on every refresh.
+    document.getElementById('heroChecklistItems')?.addEventListener('click', (e) => {
+      const link = e.target.closest('a[data-goto]');
+      if (!link) return;
+      e.preventDefault();
+      switchToTab(link.dataset.goto);
+    });
+  }
+
+  // === Top Risks panel (Overview) ===
+  function renderTopRisks() {
+    const host = document.getElementById('topRisksList');
+    if (!host || !state.bundle) return;
+    const findings = state.bundle.findings || [];
+
+    // Remediation progress: mitigated / total
+    const mitigated = findings.filter(f => f.status === 'mitigated').length;
+    const pct = findings.length ? Math.round((mitigated / findings.length) * 100) : 0;
+    const remFill = document.getElementById('remediationFill');
+    if (remFill) remFill.style.width = pct + '%';
+    const remLabel = document.getElementById('remediationLabel');
+    if (remLabel) remLabel.textContent = findings.length ? `${mitigated} of ${findings.length} mitigated (${pct}%)` : '—';
+
+    const top = findings
+      .filter(f => (f.status || 'open') === 'open')
+      .slice()
+      .sort((a, b) => (Number(b.inherent_risk) || 0) - (Number(a.inherent_risk) || 0))
+      .slice(0, 5);
+
+    if (!top.length) {
+      host.innerHTML = findings.length
+        ? `<div class="cra-empty compact"><div class="title">No open findings</div><div class="desc">Every finding on the register has been treated, accepted, or transferred.</div></div>`
+        : `<div class="cra-empty compact"><div class="title">No findings logged yet</div><div class="desc">Start the register from the threat library or add a finding manually.</div><button class="btn primary" data-cta="finding" type="button">+ Add Finding</button></div>`;
+      host.querySelector('[data-cta="finding"]')?.addEventListener('click', () => document.getElementById('btnAddFinding')?.click());
+      return;
+    }
+
+    host.innerHTML = top.map(f => {
+      const bucket = riskBucket(f.inherent_risk) || 'low';
+      const due = f.target_completion_date ? new Date(f.target_completion_date).toLocaleDateString() : 'no due date';
+      const owner = f.owner_name || f.owner_role || 'Unassigned';
+      return `
+        <div class="top-risk-row" data-id="${f.id}">
+          <span class="risk-badge risk-${bucket}">${f.inherent_risk ?? '—'}</span>
+          <span class="tr-code">${escapeHtml(f.finding_code || '—')}</span>
+          <div class="tr-main">
+            <div class="tr-title">${escapeHtml(f.title || '')}</div>
+            <div class="tr-sub">${escapeHtml(owner)} · due ${escapeHtml(due)}</div>
+          </div>
+          <span class="status-pill status-${f.status || 'open'}">${escapeHtml(f.status || 'open')}</span>
+        </div>`;
+    }).join('');
+    host.querySelectorAll('.top-risk-row').forEach(row => {
+      row.addEventListener('click', () => openDrawer(row.dataset.id));
+    });
   }
 
   // === ECharts helpers ===
@@ -712,24 +917,156 @@
     return 'low';
   }
 
+  // Status pills shown in the register toolbar (key → label).
+  const REGISTER_STATUSES = [['all', 'All'], ['open', 'Open'], ['mitigated', 'Mitigated'], ['accepted', 'Accepted'], ['transferred', 'Transferred']];
+
+  // Apply the register toolbar's filter + sort state over state.bundle.findings.
+  function getRegisterRows() {
+    const f = state.registerFilters;
+    const all = state.bundle?.findings || [];
+    let rows = all.filter(x => {
+      if (f.status !== 'all' && (x.status || 'open') !== f.status) return false;
+      if (f.severity !== 'all' && riskBucket(x.inherent_risk) !== f.severity) return false;
+      if (f.search) {
+        const q = f.search.toLowerCase();
+        const hay = [x.finding_code, x.title, x.owner_name, x.owner_role]
+          .map(v => String(v || '').toLowerCase()).join(' ');
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    if (f.sortKey) {
+      const dir = f.sortDir === 'desc' ? -1 : 1;
+      const getters = {
+        code:   x => String(x.finding_code || '').toLowerCase(),
+        title:  x => String(x.title || '').toLowerCase(),
+        risk:   x => x.inherent_risk == null ? null : Number(x.inherent_risk),
+        due:    x => x.target_completion_date ? new Date(x.target_completion_date).getTime() : null,
+        status: x => String(x.status || 'open'),
+      };
+      const get = getters[f.sortKey];
+      if (get) {
+        rows = rows.slice().sort((a, b) => {
+          const va = get(a), vb = get(b);
+          if (va == null && vb == null) return 0;
+          if (va == null) return 1;  // missing values always sort last
+          if (vb == null) return -1;
+          return va < vb ? -dir : va > vb ? dir : 0;
+        });
+      }
+    }
+    return rows;
+  }
+
+  function renderRegisterPills() {
+    const host = document.getElementById('regStatusPills');
+    if (!host) return;
+    const all = state.bundle?.findings || [];
+    const counts = { all: all.length, open: 0, mitigated: 0, accepted: 0, transferred: 0 };
+    for (const x of all) {
+      const s = x.status || 'open';
+      if (counts[s] != null) counts[s]++;
+    }
+    const active = state.registerFilters.status;
+    host.innerHTML = REGISTER_STATUSES.map(([k, label]) =>
+      `<button type="button" class="filter-pill ${active === k ? 'active' : ''}" data-status="${k}" aria-pressed="${active === k}">${label}<span class="pill-count">${counts[k] ?? 0}</span></button>`
+    ).join('');
+  }
+
+  function updateRegisterSortIndicators() {
+    const f = state.registerFilters;
+    document.querySelectorAll('#findingsTable th.sortable').forEach(th => {
+      const ind = th.querySelector('.sort-ind');
+      if (!ind) return;
+      ind.textContent = f.sortKey === th.dataset.sort ? (f.sortDir === 'asc' ? '▲' : '▼') : '';
+    });
+  }
+
+  // One-time wiring for the register toolbar; pill + header clicks are
+  // delegated so re-renders don't need to re-bind.
+  function wireRegisterToolbar() {
+    const search = document.getElementById('regSearch');
+    search?.addEventListener('input', () => {
+      state.registerFilters.search = search.value.trim();
+      renderFindingsTable();
+    });
+    document.getElementById('regSeverity')?.addEventListener('change', (e) => {
+      state.registerFilters.severity = e.target.value;
+      renderFindingsTable();
+    });
+    document.getElementById('regStatusPills')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-status]');
+      if (!btn) return;
+      state.registerFilters.status = btn.dataset.status;
+      renderFindingsTable();
+    });
+    document.querySelector('#findingsTable thead')?.addEventListener('click', (e) => {
+      const th = e.target.closest('th.sortable');
+      if (!th) return;
+      const f = state.registerFilters;
+      if (f.sortKey === th.dataset.sort) f.sortDir = f.sortDir === 'asc' ? 'desc' : 'asc';
+      else { f.sortKey = th.dataset.sort; f.sortDir = 'asc'; }
+      renderFindingsTable();
+    });
+  }
+
+  function clearRegisterFilters() {
+    state.registerFilters.search = '';
+    state.registerFilters.status = 'all';
+    state.registerFilters.severity = 'all';
+    const s = document.getElementById('regSearch');
+    if (s) s.value = '';
+    const sev = document.getElementById('regSeverity');
+    if (sev) sev.value = 'all';
+    renderFindingsTable();
+  }
+
   function renderFindingsTable() {
-    const findings = state.bundle.findings || [];
+    const all = state.bundle.findings || [];
+    const rows = getRegisterRows();
+    const filtered = rows.length !== all.length;
     document.getElementById('registerCount').textContent =
-      findings.length === 0 ? 'No findings yet.' : `${findings.length} finding${findings.length === 1 ? '' : 's'}`;
+      all.length === 0 ? 'No findings yet.'
+        : filtered ? `${rows.length} of ${all.length} finding${all.length === 1 ? '' : 's'} shown`
+        : `${all.length} finding${all.length === 1 ? '' : 's'}`;
+
+    renderRegisterPills();
+    updateRegisterSortIndicators();
 
     const tbody = document.getElementById('findingsTbody');
-    if (findings.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7"><div class="empty-state"><div class="big-icon">📋</div>No findings yet — click "+ Add Finding" to create one.</div></td></tr>`;
+    if (all.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9"><div class="cra-empty">
+        <div class="title">No findings yet</div>
+        <div class="desc">Document your first risk — add one manually or instantiate a scenario from the threat library.</div>
+        <button class="btn primary" data-cta="finding" type="button">+ Add Finding</button>
+      </div></td></tr>`;
+      tbody.querySelector('[data-cta="finding"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.getElementById('btnAddFinding')?.click();
+      });
       return;
     }
-    tbody.innerHTML = findings.map(f => `
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="9"><div class="cra-empty">
+        <div class="title">No findings match the current filters</div>
+        <button class="btn" data-cta="clear" type="button">Clear filters</button>
+      </div></td></tr>`;
+      tbody.querySelector('[data-cta="clear"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        clearRegisterFilters();
+      });
+      return;
+    }
+    tbody.innerHTML = rows.map(f => `
       <tr data-id="${f.id}">
         <td><strong>${escapeHtml(f.finding_code || '')}</strong></td>
-        <td>${escapeHtml(f.title || '')}</td>
+        <td class="td-title">${escapeHtml(f.title || '')}</td>
         <td>${escapeHtml(f.category || '—')}</td>
-        <td>${f.likelihood ?? '—'}</td>
-        <td>${f.impact ?? '—'}</td>
-        <td>${f.inherent_risk != null ? `<span class="risk-badge risk-${riskBucket(f.inherent_risk)}">${f.inherent_risk}</span>` : '—'}</td>
+        <td class="ta-num">${f.likelihood ?? '—'}</td>
+        <td class="ta-num">${f.impact ?? '—'}</td>
+        <td class="ta-num">${f.inherent_risk != null ? `<span class="risk-badge risk-${riskBucket(f.inherent_risk)}">${f.inherent_risk}</span>` : '—'}</td>
+        <td>${escapeHtml(f.owner_name || f.owner_role || '—')}</td>
+        <td>${f.target_completion_date ? new Date(f.target_completion_date).toLocaleDateString() : '—'}</td>
         <td><span class="status-pill status-${f.status || 'open'}">${escapeHtml(f.status || 'open')}</span></td>
       </tr>
     `).join('');
@@ -1071,6 +1408,7 @@
       recomputeRamTotals();
       // Re-render only the row + the visible totals + the heatmap (cheap).
       renderCisRam();
+      renderHero();
       if (state.activeTab === 'overview') {
         renderOverviewStats();
         renderHeatmap();
@@ -1120,6 +1458,7 @@
       const bundle = await (await fetch(`/api/cis-ram/${encodeURIComponent(state.profileId)}`, { credentials: 'same-origin' })).json();
       state.cisram = bundle;
       renderCisRam();
+      renderHero();
       if (state.activeTab === 'overview') {
         renderOverviewStats();
         renderHeatmap();
@@ -1308,6 +1647,7 @@
       renderSnapshots();
       renderDeloitteExec();
       enhanceFindingsTable();
+      renderHero(); // refresh grade + completeness now that assets/insurance/snapshots are in
     };
     wireAssetDrawer();
     wireLibraryModal();
@@ -1331,6 +1671,7 @@
         renderPoam();
         renderDeloitteExec();
         enhanceFindingsTable();
+        renderHero();
       }
     }, 500);
   });
@@ -1373,7 +1714,15 @@
       ? 'No assets yet. Every risk should trace back to one or more assets.'
       : `${assets.length} assets · ${assets.filter(a => a.criticality_tier === 1).length} Tier 1 (crown jewels)`;
     if (assets.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="6" style="padding:24px; text-align:center; color:var(--text-muted); font-style:italic;">No assets recorded yet. Click "+ Add Asset" to begin, or generate the answer key for AI-populated assets.</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="6"><div class="cra-empty">
+        <div class="title">No assets recorded yet</div>
+        <div class="desc">Every risk should trace back to an asset — start with the crown jewels, or generate the answer key for AI-populated assets.</div>
+        <button class="btn primary" data-cta="asset" type="button">+ Add Asset</button>
+      </div></td></tr>`;
+      tbody.querySelector('[data-cta="asset"]')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.getElementById('btnAddAsset')?.click();
+      });
       return;
     }
     const dcClass = c => `dc-${String(c || 'internal').toLowerCase()}`;
@@ -1462,6 +1811,7 @@
       closeAssetDrawer();
       await loadAssets();
       renderAssets();
+      renderHero();
       toast(id ? 'Asset updated' : 'Asset added');
     } catch (e) { toast('Save failed: ' + e.message, 4000); }
     finally { Utils.setBtnLoading(btn, false); }
@@ -1476,6 +1826,7 @@
       closeAssetDrawer();
       await loadAssets();
       renderAssets();
+      renderHero();
       toast('Asset deleted');
     } catch (e) { toast('Delete failed: ' + e.message, 4000); }
   }
@@ -1551,12 +1902,12 @@
       }
       const cur = r[c.k] || '';
       const optBtn = (val, lbl, color) =>
-        `<button type="button" class="ins-opt ${cur === val ? 'active' : ''}" data-k="${c.k}" data-v="${val}" style="padding:4px 12px; border:1px solid ${cur === val ? color : 'var(--border-color,#e2e8f0)'}; background:${cur === val ? color : 'white'}; color:${cur === val ? 'white' : 'var(--text-primary)'}; border-radius:4px; cursor:pointer; font-size:0.8rem; font-weight:600;">${lbl}</button>`;
+        `<button type="button" class="ins-opt ${cur === val ? 'active' : ''}" data-k="${c.k}" data-v="${val}" style="padding:4px 12px; border:1px solid ${cur === val ? color : 'var(--border-color,#e2e8f0)'}; background:${cur === val ? color : 'var(--bg-card, white)'}; color:${cur === val ? 'white' : 'var(--text-primary)'}; border-radius:4px; cursor:pointer; font-size:0.8rem; font-weight:600;">${lbl}</button>`;
       return `<div style="display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--border-color,#e2e8f0);">
         <div style="flex:1;">${escapeHtml(c.label)} <small style="color:var(--text-muted);">(${c.weight} pts)</small></div>
-        ${optBtn('yes', 'YES', '#16a34a')}
-        ${optBtn('partial', 'PARTIAL', '#d97706')}
-        ${optBtn('no', 'NO', '#dc2626')}
+        ${optBtn('yes', 'YES', 'var(--risk-low, #16a34a)')}
+        ${optBtn('partial', 'PARTIAL', 'var(--risk-medium, #d97706)')}
+        ${optBtn('no', 'NO', 'var(--risk-high, #dc2626)')}
       </div>`;
     }).join('');
     host.querySelectorAll('.ins-opt').forEach(btn => {
@@ -1596,6 +1947,7 @@
         const r = await api('PUT', `/${state.profileId}/insurance-readiness`, payload);
         state.insurance = r.readiness;
         renderInsurance();
+        renderHero();
         toast(`Saved — score ${r.readiness.readiness_score}/100 (${r.readiness.readiness_tier})`);
       } catch (e) { toast('Save failed: ' + e.message, 4000); }
       finally { Utils.setBtnLoading(btn, false); }
@@ -1665,6 +2017,7 @@
         await api('POST', `/${state.profileId}/snapshots`, { label });
         await loadSnapshots();
         renderSnapshots();
+        renderHero();
         toast('Snapshot saved');
       } catch (e) { toast('Snapshot failed: ' + e.message, 4000); }
       finally { Utils.setBtnLoading(btn, false); }

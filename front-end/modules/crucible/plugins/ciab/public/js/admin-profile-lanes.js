@@ -491,7 +491,7 @@ function copyCredsToClipboard() {
   const csv = 'email,password,role\n' +
     creds.map(c => `${c.email},"${String(c.password).replace(/"/g, '""')}",${c.role}`).join('\n');
   navigator.clipboard.writeText(csv).then(
-    () => renderBanner('deploy-result', 'success', '✅ Credentials copied as CSV. Paste into your spreadsheet.'),
+    () => Toast.success('Copied', 'Credentials copied as CSV. Paste into your spreadsheet.'),
     () => {
       // fallback if clipboard API blocked — alert() kept intentionally: it shows
       // the CSV in a selectable dialog so the admin can still copy it manually.
@@ -499,6 +499,42 @@ function copyCredsToClipboard() {
       alert(csv);
     }
   );
+}
+
+// One-time credentials modal — used by add-lanes (which lands on the Active
+// Groups tab where the deploy-result banner doesn't exist). Passwords are
+// only ever visible here; closing the modal discards them.
+function showCredsModal(credentials, title = 'One-time student credentials') {
+  if (!Array.isArray(credentials) || credentials.length === 0) return;
+  window._lastDeployCredentials = credentials;
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const rows = credentials.map(c =>
+    `<tr><td style="padding:0.3rem 0.6rem;"><code>${esc(c.email)}</code></td>` +
+    `<td style="padding:0.3rem 0.6rem;"><code>${esc(c.password)}</code></td>` +
+    `<td style="padding:0.3rem 0.6rem;">${esc(c.role)}</td></tr>`).join('');
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:400;display:flex;align-items:center;justify-content:center;padding:20px;';
+  overlay.innerHTML = `
+    <div style="background:var(--bg-card,#fff);color:var(--text-primary,#111827);border-radius:10px;max-width:580px;width:100%;max-height:80vh;overflow:auto;padding:1.25rem;box-shadow:0 10px 40px rgba(0,0,0,0.35);">
+      <strong style="color:var(--warning,#b45309);">⚠️ ${esc(title)} — copy these now</strong>
+      <p style="margin:0.5rem 0;font-size:0.875rem;">These passwords are NOT recoverable later. Re-deploying rotates them.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:0.875rem;">
+        <thead><tr>
+          <th style="text-align:left;padding:0.3rem 0.6rem;">Email</th>
+          <th style="text-align:left;padding:0.3rem 0.6rem;">Password</th>
+          <th style="text-align:left;padding:0.3rem 0.6rem;">Role</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <div style="display:flex;gap:0.5rem;margin-top:0.75rem;justify-content:flex-end;">
+        <button class="btn btn-secondary" onclick="copyCredsToClipboard()">📋 Copy as CSV</button>
+        <button class="btn btn-primary" data-close>Done</button>
+      </div>
+    </div>`;
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay || e.target.closest('[data-close]')) overlay.remove();
+  });
+  document.body.appendChild(overlay);
 }
 
 // ─── TAB 3: Active groups ──────────────────────────────────────────────────
@@ -637,6 +673,9 @@ async function promptAddLanes(groupId, profileId, groupName) {
       method: 'POST', body: { count }
     });
     Toast.success('Lanes Added', `Added ${result.added} lane${result.added===1?'':'s'} to ${groupName}. Now ${result.total_lanes_now} total.`);
+    // Each added lane gets its own auto-provisioned student — surface the
+    // one-time credentials before anything re-renders.
+    showCredsModal(result.credentials, `New student credentials for ${groupName}`);
     refreshGroups();
     setTimeout(() => loadGroupDetail(groupId), 1000);
   } catch (err) {

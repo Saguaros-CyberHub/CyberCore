@@ -173,6 +173,106 @@
     .cra-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 10px 18px; border-radius: 6px; font-size: 0.875rem; z-index: 300; opacity: 0; transition: opacity 0.2s; }
     .cra-toast.show { opacity: 1; }
     [data-theme="dark"] .cra-toast { background: var(--bg-card-elevated, #1a2040); border: 1px solid var(--border-color); }
+
+    /* ═══════════════════════════════════════════════════════════════
+       Commercial polish pass — buttons, cards, tables, hero, toolbar
+       ═══════════════════════════════════════════════════════════════ */
+
+    /* Pill-style buttons + smooth transitions + focus rings */
+    .btn { border-radius: 999px; padding: 7px 16px; font-weight: 500; font-size: 0.875rem; transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease; }
+    .btn:active { transform: translateY(1px); }
+    .btn:focus-visible, .cra-tab:focus-visible, .filter-pill:focus-visible { outline: 2px solid var(--primary-light, #5c9fe6); outline-offset: 2px; }
+    .cra-shell input:focus-visible, .cra-shell select:focus-visible, .cra-shell textarea:focus-visible,
+    .drawer input:focus-visible, .drawer select:focus-visible, .drawer textarea:focus-visible { outline: 2px solid var(--primary-light, #5c9fe6); outline-offset: 1px; }
+
+    /* Shared kicker + card head used by the new components */
+    .cra-kicker { font-size: 0.68rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-muted, #64748b); }
+    .cra-card { transition: box-shadow 0.15s ease, border-color 0.15s ease; }
+    .cra-card-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; padding: 14px 18px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .cra-card-head h3 { margin: 4px 0 0; font-size: 1rem; color: var(--text-primary); }
+
+    /* Refined stat cards: icon, larger value, hover lift */
+    .cra-stat-card { position: relative; border: 1px solid var(--border-color, #e2e8f0); transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease; }
+    .cra-stat-card:hover { transform: translateY(-2px); box-shadow: var(--shadow-md, 0 6px 16px rgba(15, 23, 42, 0.08)); }
+    .cra-stat-card .stat-icon { position: absolute; top: 14px; right: 14px; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; border-radius: 10px; color: var(--primary, #0c234b); background: rgba(30, 82, 136, 0.08); }
+    [data-theme="dark"] .cra-stat-card .stat-icon { background: rgba(92, 159, 230, 0.14); }
+    .cra-stat-card .stat-icon svg { width: 18px; height: 18px; }
+    .cra-stat-card .value { font-size: 1.85rem; letter-spacing: -0.02em; line-height: 1.15; }
+
+    /* Executive hero banner */
+    .cra-hero { display: grid; grid-template-columns: auto minmax(180px, 1.1fr) minmax(220px, 1fr) auto; gap: 28px; align-items: center; background: var(--bg-card, white); border: 1px solid var(--border-color, #e2e8f0); border-radius: 12px; padding: 20px 24px; box-shadow: var(--shadow-sm, 0 1px 3px rgba(15, 23, 42, 0.06)); margin-bottom: 16px; }
+    @media (max-width: 1100px) { .cra-hero { grid-template-columns: auto 1fr; } }
+    @media (max-width: 640px)  { .cra-hero { grid-template-columns: 1fr; } }
+    .hero-grade-block { display: flex; align-items: center; gap: 14px; }
+    .grade-chip { width: 64px; height: 64px; flex-shrink: 0; border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 2.1rem; font-weight: 800; color: #fff; letter-spacing: -0.02em; transition: background-color 0.15s ease; }
+    .grade-chip.grade-success { background: var(--success, #16a34a); }
+    .grade-chip.grade-warning { background: var(--warning, #d97706); }
+    .grade-chip.grade-danger  { background: var(--danger, #dc2626); }
+    .grade-chip.grade-none    { background: var(--text-muted, #94a3b8); }
+    .grade-detail .grade-num { font-size: 1.45rem; font-weight: 700; color: var(--text-primary); }
+    .grade-detail .grade-denom { font-size: 0.82rem; color: var(--text-muted, #64748b); margin-left: 3px; }
+    .grade-basis { font-size: 0.72rem; color: var(--text-muted, #64748b); margin-top: 3px; max-width: 190px; }
+    .hero-company-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .hero-company { font-size: 1.05rem; font-weight: 700; color: var(--text-primary); }
+    .hero-meta-line { font-size: 0.82rem; color: var(--text-secondary, #475569); margin-top: 3px; }
+    .hero-progress-top { display: flex; justify-content: space-between; gap: 10px; font-size: 0.8rem; color: var(--text-secondary, #475569); margin: 7px 0 5px; }
+    .hero-meter { height: 6px; border-radius: 999px; background: var(--border-color, #e2e8f0); overflow: hidden; }
+    .hero-meter-fill { height: 100%; width: 0; border-radius: 999px; background: var(--primary, #0c234b); transition: width 0.3s ease; }
+    details.hero-checklist { margin-top: 7px; }
+    details.hero-checklist summary { cursor: pointer; user-select: none; font-size: 0.75rem; font-weight: 600; color: var(--primary, #0c234b); }
+    .hero-checklist ul { list-style: none; margin: 8px 0 0; padding: 0; }
+    .hero-checklist li { display: flex; gap: 8px; align-items: baseline; font-size: 0.8rem; padding: 2px 0; }
+    .hero-checklist li .mark { width: 14px; text-align: center; flex-shrink: 0; }
+    .hero-checklist li.done { color: var(--text-muted, #64748b); }
+    .hero-checklist li.done .mark { color: var(--success, #16a34a); font-weight: 700; }
+    .hero-checklist li.todo a { color: var(--primary, #0c234b); text-decoration: none; font-weight: 500; }
+    .hero-checklist li.todo a:hover { text-decoration: underline; }
+    .hero-actions { display: flex; flex-direction: column; gap: 8px; }
+    .hero-actions .btn { white-space: nowrap; }
+    @media (max-width: 1100px) { .hero-actions { flex-direction: row; } }
+
+    /* Top Risks panel */
+    .top-risks-card { padding: 0; }
+    .remediation-wrap { flex: 0 1 320px; min-width: 200px; }
+    .remediation-top { display: flex; justify-content: space-between; gap: 10px; font-size: 0.75rem; color: var(--text-secondary, #475569); margin-bottom: 4px; }
+    .remediation-meter { height: 6px; border-radius: 999px; background: var(--border-color, #e2e8f0); overflow: hidden; }
+    .remediation-fill { height: 100%; width: 0; border-radius: 999px; background: var(--success, #16a34a); transition: width 0.3s ease; }
+    .top-risk-row { display: grid; grid-template-columns: 46px 90px minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 10px 18px; border-top: 1px solid var(--border-color, #e2e8f0); cursor: pointer; transition: background-color 0.15s ease; }
+    .top-risk-row:hover { background: var(--bg-card-hover, var(--bg-hover, #f8fafc)); }
+    .top-risk-row .tr-code { font-weight: 600; font-size: 0.82rem; color: var(--primary, #0c234b); }
+    .top-risk-row .tr-title { font-weight: 500; font-size: 0.875rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .top-risk-row .tr-sub { font-size: 0.75rem; color: var(--text-muted, #64748b); margin-top: 1px; }
+
+    /* Risk Register toolbar */
+    .cra-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .cra-toolbar .cra-search { flex: 1 1 220px; max-width: 320px; padding: 8px 14px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 999px; font: inherit; font-size: 0.875rem; background: var(--bg-input, white); color: var(--text-primary); transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+    .cra-toolbar .cra-search:focus { border-color: var(--primary-light, #5c9fe6); }
+    .filter-pills { display: flex; gap: 6px; flex-wrap: wrap; }
+    .filter-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border-color, #e2e8f0); background: var(--bg-card, white); color: var(--text-secondary, #475569); font: inherit; font-size: 0.8rem; font-weight: 500; cursor: pointer; transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease; }
+    .filter-pill:hover { border-color: var(--primary, #0c234b); color: var(--text-primary); }
+    .filter-pill.active { background: var(--primary, #0c234b); border-color: var(--primary, #0c234b); color: #fff; }
+    .filter-pill .pill-count { font-size: 0.7rem; font-weight: 700; background: rgba(148, 163, 184, 0.18); border-radius: 999px; padding: 1px 7px; }
+    .filter-pill.active .pill-count { background: rgba(255, 255, 255, 0.22); }
+    .cra-toolbar .cra-select { padding: 7px 12px; border: 1px solid var(--border-color, #e2e8f0); border-radius: 999px; font: inherit; font-size: 0.85rem; background: var(--bg-input, white); color: var(--text-primary); cursor: pointer; }
+
+    /* Premium tables: sticky thead, zebra rows, tighter density, numeric alignment */
+    .cra-table-wrap { padding: 0; overflow: auto; max-height: 65vh; }
+    .cra-table-wrap .findings-table thead th { position: sticky; top: 0; z-index: 2; box-shadow: inset 0 -1px 0 var(--border-color, #e2e8f0); border-bottom: 0; }
+    .findings-table th, .findings-table td { padding: 7px 12px; }
+    .findings-table tbody tr:nth-child(even) { background: rgba(148, 163, 184, 0.07); }
+    .findings-table tbody tr:hover { background: var(--bg-hover, #f1f5f9); }
+    .findings-table .ta-num { text-align: right; }
+    .findings-table td.td-title { max-width: 360px; }
+    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover { color: var(--text-primary); }
+    th.sortable .sort-ind { display: inline-block; width: 12px; margin-left: 2px; font-size: 0.6rem; color: var(--primary, #0c234b); }
+
+    /* Empty states with CTA */
+    .cra-empty { text-align: center; padding: 44px 20px; }
+    .cra-empty .title { font-weight: 600; font-size: 1rem; color: var(--text-primary); }
+    .cra-empty .desc { font-size: 0.85rem; color: var(--text-muted, #64748b); margin: 4px auto 0; max-width: 420px; }
+    .cra-empty .btn { margin-top: 14px; }
+    .cra-empty.compact { padding: 24px 16px; }
   </style>
 </head>
 <body>
@@ -200,7 +300,6 @@
               <div class="sub" id="craSubtitle"></div>
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
-              <span id="craSourceBadge" class="status-pill status-open" style="display:none"></span>
               <button class="btn" id="btnRefresh" title="Reload data" aria-label="Reload data">↻</button>
             </div>
           </div>
@@ -234,16 +333,65 @@
 
           <!-- OVERVIEW -->
           <div class="cra-pane active" id="pane-overview">
-            <div style="display:flex; justify-content:flex-end; gap:8px; margin-bottom:12px;">
-              <button class="btn" id="btnToggleCsf" type="button" title="Show or hide the NIST CSF maturity radar and function-score charts">Hide NIST CSF</button>
+            <!-- Executive hero: overall grade, engagement metadata, completeness, quick actions -->
+            <div class="cra-hero" id="craHero">
+              <div class="hero-grade-block">
+                <div class="grade-chip grade-none" id="heroGradeChip" title="Weighted blend: inherent risk 40% · IG1 coverage 25% · CSF maturity 20% · insurance readiness 15% (renormalized for available data)">–</div>
+                <div class="grade-detail">
+                  <div class="cra-kicker">Overall Risk Grade</div>
+                  <div><span class="grade-num" id="heroGradeScore">—</span><span class="grade-denom">/ 100</span></div>
+                  <div class="grade-basis" id="heroGradeBasis"></div>
+                </div>
+              </div>
+              <div class="hero-meta">
+                <div class="cra-kicker">Engagement</div>
+                <div class="hero-company-row">
+                  <span class="hero-company" id="heroCompany">—</span>
+                  <span id="craSourceBadge" class="status-pill status-open" style="display:none"></span>
+                </div>
+                <div class="hero-meta-line" id="heroMetaLine"></div>
+              </div>
+              <div class="hero-progress">
+                <div class="cra-kicker">Assessment Completeness</div>
+                <div class="hero-progress-top"><span id="heroStepsLabel">0 of 7 steps</span><span id="heroStepsPct">0%</span></div>
+                <div class="hero-meter"><div class="hero-meter-fill" id="heroMeterFill"></div></div>
+                <details class="hero-checklist" id="heroChecklist">
+                  <summary>View checklist</summary>
+                  <ul id="heroChecklistItems"></ul>
+                </details>
+              </div>
+              <div class="hero-actions">
+                <button class="btn primary" id="btnHeroReport" type="button">Open Report</button>
+                <button class="btn" id="btnHeroSnapshot" type="button">Take Snapshot</button>
+              </div>
             </div>
+
             <div class="cra-grid cols-4" id="overviewStats"></div>
+
+            <!-- Top open risks by inherent score + remediation progress -->
+            <div class="cra-card top-risks-card" id="topRisksCard" style="margin-top:16px;">
+              <div class="cra-card-head">
+                <div>
+                  <div class="cra-kicker">Priority Queue</div>
+                  <h3>Top Risks</h3>
+                </div>
+                <div class="remediation-wrap">
+                  <div class="remediation-top"><span>Remediation progress</span><span id="remediationLabel">—</span></div>
+                  <div class="remediation-meter"><div class="remediation-fill" id="remediationFill"></div></div>
+                </div>
+              </div>
+              <div id="topRisksList"></div>
+            </div>
 
             <!-- Compliance posture callout — populated by JS from intake._meta.posture -->
             <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:rgba(30, 82, 136, 0.08); border-left:4px solid var(--primary, #0c234b);">
               <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:var(--primary, #0c234b); text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
               <div style="font-size:1.05rem; font-weight:600; color:var(--text-primary, #1e293b); margin-top:4px;" id="postureTitle"></div>
               <div style="font-size:0.85rem; color:var(--text-muted, #64748b); margin-top:4px;" id="postureBody"></div>
+            </div>
+
+            <div style="display:flex; justify-content:flex-end; gap:8px; margin:16px 0 0;">
+              <button class="btn" id="btnToggleCsf" type="button" title="Show or hide the NIST CSF maturity radar and function-score charts">Hide NIST CSF</button>
             </div>
 
             <details class="cra-section" open id="secHeatmaps">
@@ -292,7 +440,7 @@
                 <button class="btn" id="btnAddAsset">+ Add Asset</button>
               </div>
             </div>
-            <div class="cra-card" style="padding:0; overflow-x:auto;">
+            <div class="cra-card cra-table-wrap">
               <table class="findings-table" id="assetsTable">
                 <thead>
                   <tr>
@@ -318,17 +466,29 @@
                 <button class="btn primary" id="btnAddFinding">+ Add Finding</button>
               </div>
             </div>
-            <div class="cra-card" style="padding:0; overflow-x:auto;">
+            <div class="cra-toolbar" id="registerToolbar">
+              <input type="search" id="regSearch" class="cra-search" placeholder="Search code, title, or owner…" aria-label="Search findings">
+              <div class="filter-pills" id="regStatusPills" role="group" aria-label="Filter by status"></div>
+              <select id="regSeverity" class="cra-select" aria-label="Filter by severity">
+                <option value="all">All severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+            <div class="cra-card cra-table-wrap">
               <table class="findings-table" id="findingsTable">
                 <thead>
                   <tr>
-                    <th>Code</th>
-                    <th>Title</th>
+                    <th class="sortable" data-sort="code">Code<span class="sort-ind"></span></th>
+                    <th class="sortable" data-sort="title">Title<span class="sort-ind"></span></th>
                     <th>Category</th>
-                    <th>L</th><th>I</th><th>Risk</th>
+                    <th class="ta-num">L</th><th class="ta-num">I</th>
+                    <th class="sortable ta-num" data-sort="risk">Risk<span class="sort-ind"></span></th>
                     <th>Owner</th>
-                    <th>Due</th>
-                    <th>Status</th>
+                    <th class="sortable" data-sort="due">Due<span class="sort-ind"></span></th>
+                    <th class="sortable" data-sort="status">Status<span class="sort-ind"></span></th>
                   </tr>
                 </thead>
                 <tbody id="findingsTbody"></tbody>
@@ -378,7 +538,7 @@
                 <button class="btn primary" id="btnDownloadPoam">⬇ Download POA&amp;M CSV</button>
               </div>
             </div>
-            <div class="cra-card" style="padding:0; overflow-x:auto;">
+            <div class="cra-card cra-table-wrap">
               <table class="findings-table" id="poamTable">
                 <thead>
                   <tr>
@@ -470,7 +630,7 @@
               </div>
             </div>
             <div id="snapshotDeltaSection"></div>
-            <div class="cra-card" style="padding:0; overflow-x:auto; margin-top:16px;">
+            <div class="cra-card cra-table-wrap" style="margin-top:16px;">
               <table class="findings-table">
                 <thead>
                   <tr>

@@ -67,9 +67,10 @@
   .cover {
     background: linear-gradient(180deg, var(--primary-d) 0%, var(--primary) 70%, #1e5288 100%);
     color: white;
-    padding: 60px 50px 50px 50px;
+    padding: 70px 50px 40px 50px;
     position: relative;
-    min-height: 4.5in;
+    min-height: 6.5in;
+    display: flex; flex-direction: column;
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
@@ -78,11 +79,12 @@
     color: #cbd5e1; margin-bottom: 16px;
   }
   .cover h1 {
-    font-size: 2.4rem; font-weight: 800; margin: 0 0 16px 0;
+    font-size: 2.5rem; font-weight: 800; margin: 0 0 18px 0;
     line-height: 1.1; color: white;
   }
-  .cover .company { font-size: 1.4rem; color: #e2e8f0; margin-bottom: 8px; }
+  .cover .company { font-size: 1.5rem; font-weight: 600; color: #e2e8f0; margin-bottom: 10px; }
   .cover .date    { font-size: 0.95rem; color: #bfdbfe; font-style: italic; }
+  .cover .prepared { font-size: 0.9rem; color: #cbd5e1; margin-top: 8px; }
   .cover .training-badge {
     position: absolute; top: 24px; right: 30px;
     background: #facc15; color: #1e1e1e;
@@ -90,15 +92,22 @@
     font-size: 0.7rem; font-weight: 700; letter-spacing: 0.1em;
   }
   .cover-meta {
-    background: white; padding: 30px 50px;
-    display: grid; grid-template-columns: 1fr 1fr; gap: 18px 30px;
+    margin-top: auto;
+    padding-top: 22px;
+    border-top: 1px solid rgba(255,255,255,0.25);
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px 28px;
   }
   .cover-meta .item { }
   .cover-meta .label {
     font-size: 0.65rem; font-weight: 700; letter-spacing: 0.15em;
-    color: var(--text-mute); text-transform: uppercase;
+    color: rgba(226,232,240,0.65); text-transform: uppercase;
   }
-  .cover-meta .value { font-size: 1rem; color: var(--text); margin-top: 4px; }
+  .cover-meta .value { font-size: 0.95rem; color: white; margin-top: 4px; }
+  .cover-confidential {
+    margin-top: 26px; padding-top: 14px;
+    border-top: 1px solid rgba(255,255,255,0.18);
+    font-size: 0.72rem; color: #94a3b8; line-height: 1.55;
+  }
 
   /* ─── Sections ─────────────────────────────────────────────────────── */
   section {
@@ -108,7 +117,7 @@
   .section-header {
     display: flex; align-items: flex-start; gap: 10px;
     margin-bottom: 24px; padding-bottom: 12px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 2px solid var(--primary);
   }
   .section-header .stripe {
     width: 4px; height: 36px; background: var(--primary); border-radius: 2px;
@@ -319,10 +328,6 @@
   }
   .heatmap-title.inherent { background: var(--crit); }
   .heatmap-title.residual { background: var(--ok); }
-  @media print {
-    .heatmap-pair { gap: 8px; }
-    .heatmap-col .chart { height: 240px !important; }
-  }
 
   /* ─── CIS RAM register ─────────────────────────────────────────────── */
   .ram-control { margin-bottom: 24px; break-inside: avoid; }
@@ -412,6 +417,42 @@
   .csf-fn-tile.weak { border-left: 3px solid var(--crit); }
   .csf-fn-tile.strong { border-left: 3px solid var(--ok); }
 
+  /* ─── Table of contents ────────────────────────────────────────────── */
+  .toc-list { list-style: none; margin: 0; padding: 0; }
+  .toc-list li { border-bottom: 1px solid var(--border); }
+  .toc-list li a {
+    display: flex; align-items: baseline; gap: 14px;
+    padding: 10px 2px; color: var(--text); text-decoration: none;
+    font-size: 0.95rem; font-weight: 500;
+  }
+  .toc-list li a:hover { color: var(--primary); }
+  .toc-list .toc-num {
+    min-width: 2em; color: var(--primary); font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+  .toc-list li.toc-group {
+    padding: 20px 2px 6px;
+    font-size: 0.65rem; font-weight: 700; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--text-mute);
+  }
+
+  /* ─── Sign-off block (consultancy approval) ────────────────────────── */
+  .signoff { margin-top: 30px; break-inside: avoid; }
+  .signoff-grid {
+    display: grid; grid-template-columns: 2fr 2fr 1.2fr; gap: 30px;
+    margin-top: 36px;
+  }
+  .signoff-field .rule { height: 28px; border-bottom: 1px solid var(--text); }
+  .signoff-field .label {
+    margin-top: 7px;
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--text-mute);
+  }
+  .signoff-field .name { margin-top: 2px; font-size: 0.8rem; color: var(--text); }
+
+  /* ─── Running print footer — hidden on screen, fixed in print ─────── */
+  .print-footer { display: none; }
+
   /* ─── Loading / error states ───────────────────────────────────────── */
   .loading { padding: 60px; text-align: center; color: var(--text-mute); }
   .error   { padding: 40px; text-align: center; color: var(--crit); }
@@ -420,22 +461,67 @@
   /* PRINT STYLES — when user picks "Save as PDF"                       */
   /* ──────────────────────────────────────────────────────────────────── */
   @media print {
+    /* Letter, ~0.6in sides, larger bottom margin to clear the running footer */
     @page {
       size: letter;
-      margin: 0.5in;
+      margin: 0.6in 0.6in 0.85in 0.6in;
     }
+    html { font-size: 10.5pt; }                 /* rem-based type scales with this */
     html, body { background: white !important; }
-    .toolbar, .no-print { display: none !important; }
+    body { line-height: 1.45; }
+    .toolbar, .no-print, .loading { display: none !important; }
     .report {
       box-shadow: none !important;
       margin: 0 !important;
       max-width: 100% !important;
+      /* Keeps the last page's content clear of the fixed footer. Chromium
+         cannot pad every page via CSS; the footer's solid white background
+         masks the rare mid-page collision instead. */
+      padding-bottom: 0.45in;
     }
-    section {
-      padding: 18pt 0;
-      break-inside: avoid-page;
+
+    /* Running footer — Chromium repeats position:fixed elements on every
+       printed page. Real page numbers are NOT possible in Chromium print
+       CSS (no @page margin boxes / counter(page)) — intentionally omitted. */
+    .print-footer {
+      display: flex; position: fixed; left: 0; right: 0; bottom: 0;
+      z-index: 10;
+      justify-content: space-between; align-items: baseline; gap: 12pt;
+      padding: 4pt 2pt 0 2pt;
+      background: white;
+      border-top: 1px solid var(--border);
+      font-size: 7.5pt; letter-spacing: 0.06em; color: var(--text-mute);
+      print-color-adjust: exact !important;
+      -webkit-print-color-adjust: exact !important;
     }
-    /* Sections that should start on a fresh page */
+
+    /* Cover fills page 1 exactly and paints OVER the fixed footer
+       (z-index 20 > footer's 10), so the cover stays artifact-free.
+       9.54in ≈ letter 11in − 0.6in top − 0.85in bottom margins. */
+    .cover {
+      z-index: 20;
+      height: 9.54in;
+      min-height: 0;
+      overflow: hidden;
+      padding: 0.55in 0.55in 0.4in 0.55in;
+      break-after: page;
+    }
+    .cover h1 { font-size: 26pt; }
+    .cover .company { font-size: 15pt; }
+
+    /* TOC sits alone on page 2 */
+    section.toc { break-after: page; }
+
+    section { padding: 14pt 0; border-top: 0; }
+    .section-header { margin-bottom: 12pt; break-inside: avoid; break-after: avoid; }
+    .section-header h2 { font-size: 16pt; }
+    .section-header .kicker { font-size: 7.5pt; }
+    section h3 { font-size: 11.5pt; break-after: avoid; }
+
+    /* Major chapter starts only — short sub-sections (asset register,
+       insurance, snapshot, treatment plan) flow naturally to avoid
+       half-empty pages; break-inside rules below keep their blocks whole. */
+    section.exec-dashboard,
     section.heatmap,
     section.findings-table,
     section.ig1,
@@ -446,20 +532,33 @@
     section.methodology {
       break-before: page;
     }
-    .cover { break-after: page; padding: 0.4in 0.4in 0.4in 0.4in; }
-    .cover-meta { padding: 0.25in 0.4in 0.4in 0.4in; }
-    .section-header { margin-bottom: 14pt; }
-    .section-header h2 { font-size: 18pt; }
-    section h3 { font-size: 11pt; }
-    .kpi-tile, .callout, .crit-card, .finding-card,
-    .treatment-card, .ram-control, table.findings thead,
-    .badge {
+
+    /* Page-break discipline */
+    thead { display: table-header-group; }     /* repeat headers on long tables */
+    tr { break-inside: avoid; }
+    .kpi-tile, .callout, .crit-card, .finding-card, .treatment-card,
+    .delta-tile, .csf-fn-tile, .exec-block, .signoff,
+    .rec-list li, .bullet-list li,
+    .chart, .heatmap-pair { break-inside: avoid !important; }
+    .ram-control { break-inside: auto; }       /* groups can exceed a page */
+    .ram-control h4 { break-after: avoid; }
+
+    /* Color fidelity */
+    .kpi-tile, .callout, .crit-card, .finding-card, .treatment-card,
+    .ram-control, table.findings thead, table.asset-table thead,
+    .badge, .heatmap-title, .cover, .delta-tile {
       print-color-adjust: exact !important;
       -webkit-print-color-adjust: exact !important;
     }
-    .chart { height: 280px !important; }
-    .finding-card, .treatment-card, .ram-control,
-    table.findings tr, .crit-card { break-inside: avoid !important; }
+
+    /* Charts: fixed pixel widths matching the 7.3in (≈700px) printable
+       area. clinic-risk-report.js resizes the ECharts instances to these
+       exact numbers in onbeforeprint, so nothing is clipped or scaled. */
+    .chart { width: 700px !important; height: 300px !important; margin-left: auto; margin-right: auto; }
+    .chart.small { height: 220px !important; }
+    .heatmap-pair { grid-template-columns: 346px 346px; gap: 8px; }
+    .heatmap-col .chart { width: 346px !important; height: 240px !important; margin: 0; }
+
     a { color: inherit; text-decoration: none; }
   }
 </style>
@@ -470,8 +569,8 @@
 <div class="toolbar no-print">
   <h1>Risk Assessment Report — <strong id="hdrCompany">Loading…</strong></h1>
   <span class="spacer"></span>
-  <span class="hint" id="printHint">Click Print → choose "Save as PDF" as destination</span>
-  <button onclick="window.print()" title="Open browser print dialog — pick 'Save as PDF' as the destination">🖨️ Print to PDF</button>
+  <span class="hint" id="printHint">Print → destination "Save as PDF" · turn off "Headers and footers" under More settings</span>
+  <button onclick="window.printReport ? window.printReport() : window.print()" title="Open browser print dialog — pick 'Save as PDF' as the destination">🖨️ Print to PDF</button>
   <button class="secondary" onclick="window.history.back()">← Back</button>
 </div>
 
@@ -480,21 +579,39 @@
   <!-- ─── COVER ─────────────────────────────────────────────────────── -->
   <div class="cover">
     <div class="training-badge" id="trainingBadge" style="display:none">TRAINING SAMPLE</div>
-    <div class="eyebrow">CYBERSECURITY RISK ASSESSMENT</div>
-    <h1>Risk Assessment Report</h1>
+    <div class="eyebrow">CONFIDENTIAL · RISK ADVISORY</div>
+    <h1>Cybersecurity Risk Assessment</h1>
     <div class="company" id="coverCompany">—</div>
     <div class="date" id="coverDate">—</div>
+    <div class="prepared" id="coverPreparedBy">—</div>
+    <div class="cover-meta" id="coverMeta">
+      <!-- populated by JS -->
+    </div>
+    <div class="cover-confidential">
+      CONFIDENTIALITY NOTICE — This document contains sensitive security findings and is prepared
+      exclusively for <span id="confCompany">the client organization</span>. It may not be copied,
+      forwarded, or disclosed to any third party without prior written authorization.
+    </div>
   </div>
-  <div class="cover-meta" id="coverMeta">
-    <!-- populated by JS -->
-  </div>
+
+  <!-- ─── TABLE OF CONTENTS (entries rendered by JS; absent sections omitted) ── -->
+  <section class="toc" id="tocSection" style="display:none">
+    <div class="section-header">
+      <div class="stripe"></div>
+      <div class="titles">
+        <div class="kicker">Cybersecurity Risk Assessment</div>
+        <h2>Contents</h2>
+      </div>
+    </div>
+    <ol class="toc-list" id="tocList"></ol>
+  </section>
 
   <!-- ─── EXECUTIVE DASHBOARD ──────────────────────────────────────── -->
   <section class="exec-dashboard">
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 01</div>
+        <div class="kicker">Section 1</div>
         <h2>Executive Dashboard</h2>
       </div>
     </div>
@@ -526,6 +643,28 @@
 
     <h3>Engagement Scope</h3>
     <table class="kv" id="scopeTable"></table>
+
+    <!-- Consultancy-style approval block -->
+    <div class="signoff">
+      <h3>Approval &amp; Sign-off</h3>
+      <div class="signoff-grid">
+        <div class="signoff-field">
+          <div class="rule"></div>
+          <div class="label">Prepared by</div>
+          <div class="name" id="signoffPreparedBy">&nbsp;</div>
+        </div>
+        <div class="signoff-field">
+          <div class="rule"></div>
+          <div class="label">Reviewed by</div>
+          <div class="name">&nbsp;</div>
+        </div>
+        <div class="signoff-field">
+          <div class="rule"></div>
+          <div class="label">Date</div>
+          <div class="name" id="signoffDate">&nbsp;</div>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ─── ASSET REGISTER (Tier 1) ──────────────────────────────────── -->
@@ -533,7 +672,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 02 · OCTAVE Allegro-style</div>
+        <div class="kicker">Section 2 · OCTAVE Allegro-Style</div>
         <h2>Asset Register</h2>
       </div>
     </div>
@@ -558,7 +697,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 07 · Underwriting Posture</div>
+        <div class="kicker">Section 3 · Underwriting Posture</div>
         <h2>Cyber-Insurance Readiness</h2>
       </div>
     </div>
@@ -589,7 +728,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 08 · Engagement Progress</div>
+        <div class="kicker">Section 4 · Engagement Progress</div>
         <h2>Snapshot Comparison — Current vs Prior Assessment</h2>
       </div>
     </div>
@@ -604,12 +743,12 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 02 · Inherent vs Residual</div>
+        <div class="kicker">Section 5 · Inherent vs Residual</div>
         <h2>Risk Heat Map</h2>
       </div>
     </div>
     <p style="font-size:0.85rem;color:var(--text-mute);margin-top:0;margin-bottom:14px;">
-      Two views of the same risk register. <strong>Inherent</strong> is the current exposure with controls as they exist today. <strong>Residual</strong> is the projected exposure after the recommended treatments (see Section 06) are implemented. Risks should visually migrate from the upper-right (red) toward the lower-left (blue).
+      Two views of the same risk register. <strong>Inherent</strong> is the current exposure with controls as they exist today. <strong>Residual</strong> is the projected exposure after the recommended treatments (see the Recommendations section) are implemented. Risks should visually migrate from the upper-right (red) toward the lower-left (blue).
     </p>
     <div class="heatmap-pair">
       <div class="heatmap-col">
@@ -631,7 +770,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 03</div>
+        <div class="kicker">Section 6</div>
         <h2>Findings — Sorted by Inherent Risk</h2>
       </div>
     </div>
@@ -664,7 +803,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 04 · CIS v8 Implementation Group 1</div>
+        <div class="kicker">Section 7 · CIS v8 Implementation Group 1</div>
         <h2>CIS Controls IG1 Compliance</h2>
       </div>
     </div>
@@ -680,7 +819,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 05 · Functional Posture</div>
+        <div class="kicker">Section 8 · Functional Posture</div>
         <h2>NIST CSF 2.0 Maturity</h2>
       </div>
     </div>
@@ -696,7 +835,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Section 06 · Prioritized Action Plan</div>
+        <div class="kicker">Section 9 · Prioritized Action Plan</div>
         <h2>Recommendations</h2>
       </div>
     </div>
@@ -717,7 +856,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Appendix · CIS RAM v2.1 Workbook</div>
+        <div class="kicker">Appendix A · CIS RAM v2.1 Workbook</div>
         <h2>Risk Register — All IG1 Safeguards</h2>
       </div>
     </div>
@@ -735,7 +874,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Appendix · Treatment Plan</div>
+        <div class="kicker">Appendix B · Treatment Plan</div>
         <h2>Treatment Plan — Items Requiring Attention</h2>
       </div>
     </div>
@@ -750,7 +889,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Appendix A</div>
+        <div class="kicker">Appendix C</div>
         <h2>Detailed Findings</h2>
       </div>
     </div>
@@ -762,7 +901,7 @@
     <div class="section-header">
       <div class="stripe"></div>
       <div class="titles">
-        <div class="kicker">Appendix B · How this report was built</div>
+        <div class="kicker">Appendix D · How This Report Was Built</div>
         <h2>Methodology</h2>
       </div>
     </div>
@@ -814,6 +953,14 @@
     </ul>
   </section>
 
+</div>
+
+<!-- Running footer — position:fixed repeats on every printed page in
+     Chromium; hidden on screen. The full-page cover paints over it on
+     page 1 (higher z-index), keeping the cover artifact-free. -->
+<div class="print-footer" aria-hidden="true">
+  <span>CONFIDENTIAL — Prepared for <span id="footerCompany">—</span></span>
+  <span id="footerDate">—</span>
 </div>
 
 <div id="loadingOverlay" class="loading">Loading report…</div>
