@@ -449,9 +449,9 @@ async function runDeploy() {
         `<td>${escapeHtml(c.role)}</td></tr>`
       ).join('');
       credsBlock = `
-        <div style="margin-top:1rem; background:#fffbea; border:2px solid #ecc94b; padding:1rem; border-radius:6px;">
-          <strong style="color:#744210;">⚠️ One-time student credentials — copy these now</strong>
-          <p style="margin:0.5rem 0; font-size:0.875rem; color:#744210;">These passwords are NOT recoverable. Re-deploying this group rotates them.</p>
+        <div style="margin-top:1rem; background:rgba(245,158,11,0.12); border:2px solid rgba(245,158,11,0.4); padding:1rem; border-radius:6px;">
+          <strong style="color:var(--warning, #744210);">⚠️ One-time student credentials — copy these now</strong>
+          <p style="margin:0.5rem 0; font-size:0.875rem; color:var(--text-secondary, #744210);">These passwords are NOT recoverable. Re-deploying this group rotates them.</p>
           <table style="width:100%; border-collapse:collapse; font-size:0.875rem; margin-top:0.5rem;">
             <thead><tr style="background:#744210; color:#fff;">
               <th style="padding:0.4rem 0.75rem; text-align:left;">Email</th>
@@ -492,7 +492,12 @@ function copyCredsToClipboard() {
     creds.map(c => `${c.email},"${String(c.password).replace(/"/g, '""')}",${c.role}`).join('\n');
   navigator.clipboard.writeText(csv).then(
     () => renderBanner('deploy-result', 'success', '✅ Credentials copied as CSV. Paste into your spreadsheet.'),
-    () => alert(csv)   // fallback if clipboard API blocked — show in dialog
+    () => {
+      // fallback if clipboard API blocked — alert() kept intentionally: it shows
+      // the CSV in a selectable dialog so the admin can still copy it manually.
+      Toast.warning('Clipboard Blocked', 'Showing credentials CSV in a dialog — copy it manually.');
+      alert(csv);
+    }
   );
 }
 
@@ -624,18 +629,18 @@ async function promptAddLanes(groupId, profileId, groupName) {
   const count = parseInt(answer, 10);
   if (!Number.isFinite(count) || count < 1) return;
   if (free != null && count > free) {
-    alert(`Cannot add ${count} — only ${free} slot${free===1?'':'s'} free in the profile's reservation.`);
+    Toast.error('Cannot Add Lanes', `Only ${free} slot${free===1?'':'s'} free in the profile's reservation.`);
     return;
   }
   try {
     const result = await apiCall(`/profile-deploy/groups/${groupId}/add-lanes`, {
       method: 'POST', body: { count }
     });
-    alert(`✅ Added ${result.added} lane${result.added===1?'':'s'} to ${groupName}. Now ${result.total_lanes_now} total.`);
+    Toast.success('Lanes Added', `Added ${result.added} lane${result.added===1?'':'s'} to ${groupName}. Now ${result.total_lanes_now} total.`);
     refreshGroups();
     setTimeout(() => loadGroupDetail(groupId), 1000);
   } catch (err) {
-    alert(`Add-lanes failed: ${err.message}`);
+    Toast.error('Add Lanes Failed', err.message);
   }
 }
 
@@ -644,17 +649,23 @@ async function retryLane(groupId, laneId) {
     await apiCall(`/profile-deploy/groups/${groupId}/retry/${laneId}`, { method: 'POST' });
     setTimeout(() => loadGroupDetail(groupId), 500);
   } catch (err) {
-    alert(`Retry failed: ${err.message}`);
+    Toast.error('Retry Failed', err.message);
   }
 }
 
 async function teardownGroup(groupId, name) {
-  if (!confirm(`Tear down group "${name}" and destroy all its lanes?`)) return;
+  if (!await Confirm.show({
+    title: 'Tear Down Group',
+    message: `Tear down group "${name}" and destroy all its lanes?`,
+    confirmText: 'Tear Down',
+    danger: true
+  })) return;
   try {
     await apiCall(`/profile-deploy/groups/${groupId}`, { method: 'DELETE' });
+    Toast.success('Teardown Started', `Group "${name}" is being torn down.`);
     refreshGroups();
   } catch (err) {
-    alert(`Teardown failed: ${err.message}`);
+    Toast.error('Teardown Failed', err.message);
   }
 }
 

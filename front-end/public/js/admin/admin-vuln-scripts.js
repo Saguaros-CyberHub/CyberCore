@@ -17,9 +17,9 @@ function setScriptTypeFilter(type) {
                          : (getComputedStyle(document.documentElement).getPropertyValue('--primary') || '#1e40af');
       b.style.color = '#fff';
     } else {
-      b.style.background = '#fff';
-      b.style.color = (b.dataset.type === 'baseline') ? '#166534'
-                    : (b.dataset.type === 'vulnerable') ? '#991b1b'
+      b.style.background = 'var(--bg-card, #fff)';
+      b.style.color = (b.dataset.type === 'baseline') ? 'var(--success, #166534)'
+                    : (b.dataset.type === 'vulnerable') ? 'var(--danger, #991b1b)'
                     : 'var(--gray-700, #2d3748)';
     }
   });

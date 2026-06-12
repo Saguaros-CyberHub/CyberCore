@@ -1370,3 +1370,38 @@ select.form-select {
   border-radius: 0.25rem;
   transition: width 0.3s ease;
 }
+
+/* ============================================================================
+   BUTTON LOADING SPINNER (Utils.setBtnLoading)
+   ============================================================================ */
+
+.btn-spinner {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  margin-right: 0.5em;
+  vertical-align: -0.125em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 0.6s linear infinite;
+}
+
+.btn-loading {
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+@keyframes btn-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Visible keyboard focus for all interactive elements */
+.btn:focus-visible,
+.tab-btn:focus-visible,
+a:focus-visible,
+button:focus-visible,
+[role="tab"]:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}

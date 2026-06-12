@@ -103,7 +103,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
     const challengeResult = await cybercoreQuery(
       `SELECT challenge_id, challenge_key, name, spec, difficulty, subnet_scheme
-       FROM ${module}_challenge
+       FROM ${module.replace(/[^a-z0-9_]/gi, '')}_challenge
        WHERE challenge_key = $1 AND status = 'active'`,
       [challenge_key]
     );
@@ -611,7 +611,7 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
 
     const challengeResult = await cybercoreQuery(
       `SELECT challenge_id, challenge_key, name, spec, subnet_scheme
-       FROM ${module}_challenge
+       FROM ${module.replace(/[^a-z0-9_]/gi, '')}_challenge
        WHERE challenge_key = $1 AND status = 'active'`,
       [challenge_key]
     );

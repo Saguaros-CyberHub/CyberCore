@@ -40,7 +40,7 @@ async function loadMergedUsers() {
                                       sched.override_active === false ? '<span class="badge badge-red">Override: OFF</span>' :
                                       '<span class="badge badge-gray">Using Schedule</span>';
                 scheduleHtml = `
-                  <div style="font-size: 0.8rem; margin-top: 0.5rem; padding: 0.5rem; background: #f7fafc; border-radius: 6px;">
+                  <div style="font-size: 0.8rem; margin-top: 0.5rem; padding: 0.5rem; background: var(--gray-50); border-radius: 6px;">
                     <strong>Schedule:</strong> ${days} ${sched.active_start}–${sched.active_end} (${sched.timezone}) ${overrideLabel}
                   </div>`;
               } else {
@@ -208,7 +208,7 @@ async function createCybercoreUser() {
 }
 
 async function deleteUser(username) {
-  if (!confirm(`Delete Guacamole user "${username}"?`)) return;
+  if (!await Confirm.show({ title: 'Delete User', message: `Delete Guacamole user "${username}"?`, confirmText: 'Delete', danger: true })) return;
   try {
     await api('DELETE', `/guac/users/${encodeURIComponent(username)}`);
     Toast.success('Deleted', `User "${username}" removed`);
@@ -283,7 +283,7 @@ async function loadClinicUsers() { await loadMergedUsers(); }
 
 async function toggleGroupActive(groupId, active) {
   const action = active ? 'enable' : 'disable';
-  if (!confirm(`${active ? 'Enable' : 'Disable'} all student accounts in this group?`)) return;
+  if (!await Confirm.show({ title: `${active ? 'Enable' : 'Disable'} Group Accounts`, message: `${active ? 'Enable' : 'Disable'} all student accounts in this group?`, confirmText: active ? 'Enable All' : 'Disable All', danger: !active })) return;
   try {
     const data = await api('PATCH', `/groups/${groupId}/toggle-active`, { active });
     Toast.success('Updated', `${data.students_updated} students ${action}d`);

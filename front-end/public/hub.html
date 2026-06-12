@@ -438,6 +438,7 @@
     }
     .vmc-tool-btn:hover  { background: var(--gray-100, #f7fafc); color: var(--text-primary); }
     .vmc-close-btn:hover { background: #fed7d7; color: #9b2c2c; border-color: #fc8181; }
+    [data-theme="dark"] .vmc-close-btn:hover { background: rgba(252,129,129,0.15); color: #fc8181; }
 
     /* When the panel is fullscreen, fill the screen and let the iframe fill the panel. */
     .vmc-panel:fullscreen { background: var(--bg-card, white); }
@@ -535,6 +536,12 @@
     .wks-badge-deploying { background: #dbeafe; color: #1e40af; animation: wks-pulse 1s ease-in-out infinite; }
     .wks-badge-deleting  { background: #fed7d7; color: #9b2c2c; animation: wks-pulse 1s ease-in-out infinite; }
     .wks-badge-failed    { background: #fee2e2; color: #991b1b; }
+    [data-theme="dark"] .wks-badge-on        { background: rgba(72,187,120,0.15); color: #68d391; }
+    [data-theme="dark"] .wks-badge-off,
+    [data-theme="dark"] .wks-badge-deleting,
+    [data-theme="dark"] .wks-badge-failed    { background: rgba(252,129,129,0.15); color: #fc8181; }
+    [data-theme="dark"] .wks-badge-pending   { background: rgba(246,173,85,0.15);  color: #f6ad55; }
+    [data-theme="dark"] .wks-badge-deploying { background: rgba(91,140,255,0.15);  color: #7ba6ff; }
     @keyframes wks-pulse { 0%,100% { opacity:1; } 50% { opacity:.55; } }
 
     /* Toast notifications */
@@ -546,17 +553,23 @@
     .wks-toast-success   { background: #166534; color: #fff; }
     .wks-toast-error     { background: #991b1b; color: #fff; }
     .wks-dev-tag { font-size: 0.7rem; background: #fff7ed; color: #c2410c; border: 1px solid #f97316; border-radius: 4px; padding: 0 5px; font-weight: 600; }
+    [data-theme="dark"] .wks-dev-tag { background: rgba(249,115,22,0.12); color: #fb923c; }
     .wks-type-badge { font-size: 0.7rem; border-radius: 4px; padding: 0 5px; font-weight: 600; }
     .wks-type-vm  { background: #dbeafe; color: #1d4ed8; }
     .wks-type-lxc { background: #ede9fe; color: #6d28d9; }
+    [data-theme="dark"] .wks-type-vm  { background: rgba(91,140,255,0.15);  color: #7ba6ff; }
+    [data-theme="dark"] .wks-type-lxc { background: rgba(167,139,250,0.15); color: #c4b5fd; }
     .wks-vm-owner { font-size: 0.72rem; color: var(--text-muted); background: var(--gray-100,#f7fafc); border-radius: 4px; padding: 0 5px; }
     .wks-scope-link { text-decoration: none; }
     .wks-scope-link:hover { text-decoration: underline; }
 
     .wks-btn-danger { color: #e53e3e; border-color: #fc8181; }
     .wks-btn-danger:hover { background: #fff5f5; }
+    [data-theme="dark"] .wks-btn-danger:hover { background: rgba(252,129,129,0.12); }
     .wks-btn-console { color: #0369a1; border-color: #7dd3fc; }
     .wks-btn-console:hover { background: #f0f9ff; }
+    [data-theme="dark"] .wks-btn-console { color: #7dd3fc; }
+    [data-theme="dark"] .wks-btn-console:hover { background: rgba(125,211,252,0.12); }
 
     .wks-empty { text-align: center; padding: 3rem 2rem; color: var(--text-secondary); }
     .wks-empty-icon { font-size: 2.5rem; margin-bottom: 0.75rem; }

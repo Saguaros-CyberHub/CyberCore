@@ -63,7 +63,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
         let preflightVmCount = 1;
         try {
           const pfResult = await cybercoreQuery(
-            `SELECT spec FROM ${module}_challenge WHERE challenge_key = $1 AND status = 'active'`, [challenge_key]
+            `SELECT spec FROM ${module.replace(/[^a-z0-9_]/gi, '')}_challenge WHERE challenge_key = $1 AND status = 'active'`, [challenge_key]
           );
           if (pfResult.rows.length > 0) {
             const pfSpec = typeof pfResult.rows[0].spec === 'string' ? JSON.parse(pfResult.rows[0].spec) : pfResult.rows[0].spec;
@@ -99,7 +99,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 
       const challengeResult = await cybercoreQuery(
         `SELECT challenge_id, challenge_key, name, spec, subnet_scheme
-         FROM ${module}_challenge
+         FROM ${module.replace(/[^a-z0-9_]/gi, '')}_challenge
          WHERE challenge_key = $1 AND status = 'active'`,
         [challenge_key]
       );
@@ -1074,7 +1074,7 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     if (groupChallengeKey && groupModule) {
       try {
         const specResult = await cybercoreQuery(
-          `SELECT spec FROM ${groupModule}_challenge WHERE challenge_key = $1 AND status = 'active'`,
+          `SELECT spec FROM ${String(groupModule).replace(/[^a-z0-9_]/gi, '')}_challenge WHERE challenge_key = $1 AND status = 'active'`,
           [groupChallengeKey]
         );
         if (specResult.rows.length > 0) {

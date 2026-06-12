@@ -40,7 +40,7 @@
     .info-box-title { font-weight: 600; color: var(--primary); margin-bottom: 0.25rem; font-size: 0.9rem; }
     .info-box-text { color: var(--gray-600); font-size: 0.85rem; }
     
-    .warning-box { background: #fffbeb; border-left: 3px solid #f59e0b; padding: 1rem; border-radius: 0.375rem; margin-bottom: 1.25rem; }
+    .warning-box { background: rgba(245, 158, 11, 0.12); border-left: 3px solid var(--warning); padding: 1rem; border-radius: 0.375rem; margin-bottom: 1.25rem; }
     .warning-box-title { font-weight: 600; color: #92400e; margin-bottom: 0.25rem; font-size: 0.9rem; }
     .warning-box-text { color: #78350f; font-size: 0.85rem; }
     
@@ -116,6 +116,10 @@
     [data-theme="dark"] .help-text {
       color: #5c6585;
     }
+
+    /* Real-client panel accent colors (referenced by inline var() usage below) */
+    #realClientPanel { --rc-accent: #9a3412; --rc-text: #431407; --rc-muted: #7c2d12; }
+    [data-theme="dark"] #realClientPanel { --rc-accent: #fdba74; --rc-text: #c8cee0; --rc-muted: #a8b1cc; }
   </style>
 </head>
 <body>
@@ -160,7 +164,7 @@
                 </div>
 
                 <div class="form-group">
-                  <label class="form-label">Client Type <span style="color: var(--error);">*</span></label>
+                  <label class="form-label">Client Type <span style="color: var(--danger);">*</span></label>
                   <select class="form-input" id="clientType" onchange="updatePreview()" required>
                     <option value="SMB">Small-Medium Business (SMB)</option>
                     <option value="NonProfit">Non-Profit Organization</option>
@@ -180,7 +184,7 @@
                 </div>
 
                 <div class="form-group">
-                  <label class="form-label">Difficulty <span style="color: var(--error);">*</span></label>
+                  <label class="form-label">Difficulty <span style="color: var(--danger);">*</span></label>
                   <select class="form-input" id="difficulty" onchange="updatePreview()" required>
                     <option value="beginner">Beginner (Group 1 - Secondary/Introductory)</option>
                     <option value="intermediate" selected>Intermediate (Group 2 - Post-Secondary)</option>
@@ -403,27 +407,27 @@
               </div>
 
               <!-- REAL-CLIENT FILLER PANEL (shown when ?real_intake_id=…&challenge_id=… is present) -->
-              <div id="realClientPanel" style="display:none; background: #fff7ed; border: 1px solid #fdba74; border-radius: 10px; padding: 1rem 1.25rem; margin-top: 1rem;">
+              <div id="realClientPanel" style="display:none; background: rgba(249, 115, 22, 0.08); border: 1px solid rgba(249, 115, 22, 0.35); border-radius: 10px; padding: 1rem 1.25rem; margin-top: 1rem;">
                 <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:0.5rem;">
-                  <strong style="color:#9a3412;">📨 Real-Client profile: <span id="realClientCover">—</span></strong>
-                  <a id="realClientIntakeLink" href="#" target="_blank" style="font-size:0.85rem; color:#9a3412;">View intake →</a>
+                  <strong style="color:var(--rc-accent);">📨 Real-Client profile: <span id="realClientCover">—</span></strong>
+                  <a id="realClientIntakeLink" href="#" target="_blank" style="font-size:0.85rem; color:var(--rc-accent);">View intake →</a>
                 </div>
-                <div id="realClientChallengeSummary" style="font-size: 0.85rem; color: #431407; margin-bottom: 0.75rem;"></div>
+                <div id="realClientChallengeSummary" style="font-size: 0.85rem; color: var(--rc-text); margin-bottom: 0.75rem;"></div>
 
-                <div style="background: white; border-radius: 8px; padding: 0.75rem 1rem; border: 1px dashed #fdba74;">
-                  <div style="font-weight:600; color:#9a3412; margin-bottom:0.5rem;">Filler assets (narrative only — not deployed)</div>
+                <div style="background: var(--bg-card); border-radius: 8px; padding: 0.75rem 1rem; border: 1px dashed rgba(249, 115, 22, 0.45);">
+                  <div style="font-weight:600; color:var(--rc-accent); margin-bottom:0.5rem;">Filler assets (narrative only — not deployed)</div>
                   <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.5rem 1rem;">
-                    <label style="font-size:0.8rem;">Windows Desktop <input type="number" min="0" value="0" id="fill_windows_desktop" style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">Windows Laptop  <input type="number" min="0" value="0" id="fill_windows_laptop"  style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">macOS           <input type="number" min="0" value="0" id="fill_macos"            style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">Linux Workstation <input type="number" min="0" value="0" id="fill_linux_workstation" style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">Printer         <input type="number" min="0" value="0" id="fill_printer"          style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">Mobile / BYOD   <input type="number" min="0" value="0" id="fill_mobile_byod"      style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">IoT             <input type="number" min="0" value="0" id="fill_iot"              style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">Server (Windows) <input type="number" min="0" value="0" id="fill_server_windows"  style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
-                    <label style="font-size:0.8rem;">Server (Linux)  <input type="number" min="0" value="0" id="fill_server_linux"     style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid #e2e8f0;"></label>
+                    <label style="font-size:0.8rem;">Windows Desktop <input type="number" min="0" value="0" id="fill_windows_desktop" style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">Windows Laptop  <input type="number" min="0" value="0" id="fill_windows_laptop"  style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">macOS           <input type="number" min="0" value="0" id="fill_macos"            style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">Linux Workstation <input type="number" min="0" value="0" id="fill_linux_workstation" style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">Printer         <input type="number" min="0" value="0" id="fill_printer"          style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">Mobile / BYOD   <input type="number" min="0" value="0" id="fill_mobile_byod"      style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">IoT             <input type="number" min="0" value="0" id="fill_iot"              style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">Server (Windows) <input type="number" min="0" value="0" id="fill_server_windows"  style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
+                    <label style="font-size:0.8rem;">Server (Linux)  <input type="number" min="0" value="0" id="fill_server_linux"     style="width:100%; padding:0.3rem; border-radius:4px; border:1px solid var(--border-color); background: var(--bg-input); color: var(--text-primary);"></label>
                   </div>
-                  <div id="realClientTotals" style="margin-top:0.75rem; font-size:0.85rem; color:#7c2d12;">Deployed (real): 0 · Filler: 0 · Total in profile: 0</div>
+                  <div id="realClientTotals" style="margin-top:0.75rem; font-size:0.85rem; color:var(--rc-muted);">Deployed (real): 0 · Filler: 0 · Total in profile: 0</div>
                 </div>
               </div>
 
@@ -477,7 +481,7 @@
                 <span class="preview-value" id="prevWeak">3-8</span>
               </div>
               
-              <div class="preview-item" style="margin-top:0.75rem; padding-top:0.75rem; border-top:1px solid var(--border, #e2e8f0);">
+              <div class="preview-item" style="margin-top:0.75rem; padding-top:0.75rem; border-top:1px solid var(--border-color);">
                 <span class="preview-label">Model</span>
                 <span class="preview-value" id="prevModel">Claude Sonnet 4.5</span>
               </div>
@@ -659,13 +663,13 @@
       const costEl = document.getElementById('prevCost');
       if (info.provider === 'ollama') {
         costEl.textContent = 'Free (local)';
-        costEl.style.color = '#38a169';
+        costEl.style.color = 'var(--success)';
       } else if (total < 0.01) {
         costEl.textContent = '< $0.01';
-        costEl.style.color = '#38a169';
+        costEl.style.color = 'var(--success)';
       } else {
         costEl.textContent = `~$${total.toFixed(2)}`;
-        costEl.style.color = total > 0.50 ? '#e53e3e' : total > 0.10 ? '#d69e2e' : '#38a169';
+        costEl.style.color = total > 0.50 ? 'var(--danger)' : total > 0.10 ? 'var(--warning)' : 'var(--success)';
       }
 
       const hint = document.getElementById('llmModelHint');

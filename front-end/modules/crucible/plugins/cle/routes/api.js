@@ -7,7 +7,8 @@
 const express = require('express');
 const router = express.Router();
 
-const { authenticateToken } = require('../../../../../src/middleware/auth');
+const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
+const instructorOnly = requireRole('instructor', 'admin');
 
 // CLE route modules
 const coursesRoutes = require('./courses');
@@ -21,8 +22,8 @@ const sessionRoutes = require('./sessions');
 
 // Global routes
 router.use('/api/cle/templates', authenticateToken, templatesRoutes);
-router.use('/api/cle/students', authenticateToken, studentRoutes);
-router.use('/api/cle/sessions', authenticateToken, sessionRoutes);
+router.use('/api/cle/students', authenticateToken, instructorOnly, studentRoutes);
+router.use('/api/cle/sessions', authenticateToken, instructorOnly, sessionRoutes);
 
 // Courses main route
 router.use('/api/cle/courses', authenticateToken, coursesRoutes);

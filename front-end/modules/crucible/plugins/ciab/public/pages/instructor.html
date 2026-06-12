@@ -664,26 +664,26 @@
         <!-- ============================================================ -->
         <div class="tab-content" id="tab-documents">
 
-          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <h3 style="margin: 0 0 0.5rem 0;">Profile Selection</h3>
             <p style="color: var(--gray-600); margin: 0 0 1rem 0; font-size: 0.9rem;">Select a profile to generate security documents, PDFs, or AI-generated answer keys.</p>
 
             <div class="form-group" style="margin: 0;">
               <label for="docProfileSelect" style="font-weight: 600;">Profile</label>
-              <select id="docProfileSelect" style="width: 100%; padding: 0.5rem; border: 1px solid var(--gray-300); border-radius: 4px;">
+              <select id="docProfileSelect" style="width: 100%; padding: 0.5rem; border: 1px solid var(--gray-300); border-radius: 4px; background: var(--bg-input); color: var(--text-primary);">
                 <option value="">-- Select a profile --</option>
               </select>
             </div>
           </div>
 
           <!-- AI Model Configuration Card -->
-          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 3px solid var(--primary, #3b82f6);">
+          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 3px solid var(--primary, #3b82f6);">
             <h3 style="margin: 0 0 0.5rem 0;">🤖 AI Model Configuration</h3>
             <p style="color: var(--gray-600); margin: 0 0 1rem 0; font-size: 0.9rem;">Choose which AI model to use for generating answer keys and policy documents.</p>
             <div style="display: grid; grid-template-columns: 1fr 1fr auto; gap: 1rem; align-items: end;">
               <div class="form-group" style="margin: 0;">
                 <label style="font-weight: 600; font-size: 0.85rem;">Model</label>
-                <select id="instructorLlmModel" onchange="updateInstructorCostEstimate()" style="width: 100%; padding: 0.5rem; border: 1px solid var(--gray-300); border-radius: 4px;">
+                <select id="instructorLlmModel" onchange="updateInstructorCostEstimate()" style="width: 100%; padding: 0.5rem; border: 1px solid var(--gray-300); border-radius: 4px; background: var(--bg-input); color: var(--text-primary);">
                   <optgroup label="Cloud APIs">
                     <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Recommended)</option>
                     <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
@@ -702,14 +702,14 @@
               </div>
               <div style="text-align: center; min-width: 100px;">
                 <div style="font-size: 0.75rem; color: var(--gray-500); font-weight: 600; margin-bottom: 0.25rem;">EST. COST</div>
-                <div id="instructorCostEstimate" style="font-size: 1.1rem; font-weight: 700; color: #38a169;">—</div>
+                <div id="instructorCostEstimate" style="font-size: 1.1rem; font-weight: 700; color: var(--success);">—</div>
                 <div id="instructorCostContext" style="font-size: 0.7rem; color: var(--gray-400); margin-top: 0.15rem;"></div>
               </div>
             </div>
           </div>
 
           <!-- Security Documents Card -->
-          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
               <div>
                 <h3 style="margin: 0 0 0.25rem 0;">🛡️ Security Scan Documents</h3>
@@ -739,14 +739,14 @@
           </div>
 
           <!-- Answer Key Card -->
-          <div style="background: white; border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-bottom: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
               <div>
                 <h3 style="margin: 0 0 0.25rem 0;">📝 AI Answer Key</h3>
                 <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">Generate example solutions for all 8 parts of the assessment using AI.</p>
               </div>
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
-                <span id="examplesCostBadge" style="font-size: 0.8rem; font-weight: 600; color: #38a169; background: #f0fff4; padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
+                <span id="examplesCostBadge" style="font-size: 0.8rem; font-weight: 600; color: var(--success); background: rgba(16, 185, 129, 0.12); padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
                 <button id="generateExamplesBtn" class="btn btn-primary" onclick="generateExamples()" disabled>
                   📝 Generate Answer Key
                 </button>
@@ -760,14 +760,14 @@
           </div>
 
           <!-- Policy Generation Card -->
-          <div style="background: white; border-radius: 8px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
+          <div style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
               <div>
                 <h3 style="margin: 0 0 0.25rem 0;">📋 Policy Documents</h3>
                 <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">Generate security policy documents based on the profile's governance framework.</p>
               </div>
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
-                <span id="policyCostBadge" style="font-size: 0.8rem; font-weight: 600; color: #38a169; background: #f0fff4; padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
+                <span id="policyCostBadge" style="font-size: 0.8rem; font-weight: 600; color: var(--success); background: rgba(16, 185, 129, 0.12); padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
                 <button id="generatePoliciesBtn" class="btn btn-primary" onclick="generatePoliciesForProfile()" disabled>
                   📋 Generate Policies
                 </button>
@@ -777,10 +777,10 @@
           </div>
 
           <!-- Vuln-App Cheat Sheet Card (admin only) -->
-          <div id="vulnCheatSheetCard" style="background: white; border-radius: 8px; padding: 1.5rem; margin-top: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid #e53e3e; display: none;">
+          <div id="vulnCheatSheetCard" style="background: var(--bg-card); border-radius: 8px; padding: 1.5rem; margin-top: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); border-left: 4px solid var(--danger); display: none;">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
               <div>
-                <h3 style="margin: 0 0 0.25rem 0;">🔓 Vuln-App Answer Key <span style="font-size: 0.7rem; background: #fed7d7; color: #c53030; padding: 0.15rem 0.5rem; border-radius: 1rem; font-weight: 600; vertical-align: middle;">INSTRUCTORS</span></h3>
+                <h3 style="margin: 0 0 0.25rem 0;">🔓 Vuln-App Answer Key <span style="font-size: 0.7rem; background: rgba(239, 68, 68, 0.15); color: var(--danger); padding: 0.15rem 0.5rem; border-radius: 1rem; font-weight: 600; vertical-align: middle;">INSTRUCTORS</span></h3>
                 <p style="color: var(--gray-600); margin: 0; font-size: 0.9rem;">View the attack chain, planted flags, seed credentials, and per-file vulnerability notes for this profile's deployed vuln-app.</p>
               </div>
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center;">
@@ -903,7 +903,7 @@
       <div class="modal-header" style="display: flex; align-items: center; justify-content: space-between;">
         <h3 style="margin: 0;">📝 Answer Key — <span id="answerKeyProfileName"></span></h3>
         <div style="display: flex; align-items: center; gap: 0.5rem;">
-          <button class="btn btn-sm" id="regenerateAnswerKeyBtn" onclick="regenerateAnswerKey()" style="font-size: 0.8rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent; display: none;">
+          <button class="btn btn-sm" id="regenerateAnswerKeyBtn" onclick="regenerateAnswerKey()" style="font-size: 0.8rem; border: 1px solid var(--danger); color: var(--danger); background: transparent; display: none;">
             🔄 Regenerate
           </button>
           <button class="btn btn-sm btn-primary" id="downloadPacketBtn" onclick="downloadPacketPdf()" style="font-size: 0.8rem;">
@@ -914,7 +914,7 @@
       </div>
       <div style="display: flex; flex: 1; overflow: hidden; gap: 0;">
         <!-- Part sidebar -->
-        <div id="answerKeySidebar" style="width: 220px; min-width: 220px; border-right: 1px solid #e2e8f0; overflow-y: auto; padding: 0.5rem 0;">
+        <div id="answerKeySidebar" style="width: 220px; min-width: 220px; border-right: 1px solid var(--border-color); overflow-y: auto; padding: 0.5rem 0;">
         </div>
         <!-- Content area -->
         <div id="answerKeyContent" style="flex: 1; overflow-y: auto; padding: 1.5rem;">
@@ -952,28 +952,30 @@
   <style>
     /* Vuln-app cheat sheet styles */
     .vcs-section { margin-bottom: 2rem; }
-    .vcs-section h4 { color: #2d3748; border-bottom: 2px solid #e53e3e; padding-bottom: 0.4rem; margin: 0 0 0.75rem 0; font-size: 1.05rem; }
-    .vcs-meta { background: #f7fafc; border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
-    .vcs-meta strong { color: #2d3748; }
-    .vcs-stage { background: #fff; border: 1px solid #e2e8f0; border-left: 4px solid #e53e3e; border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; }
+    .vcs-section h4 { color: var(--text-primary); border-bottom: 2px solid var(--danger); padding-bottom: 0.4rem; margin: 0 0 0.75rem 0; font-size: 1.05rem; }
+    .vcs-meta { background: var(--gray-50); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
+    .vcs-meta strong { color: var(--text-primary); }
+    .vcs-stage { background: var(--bg-card); border: 1px solid var(--border-color); border-left: 4px solid var(--danger); border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; }
     .vcs-stage-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
-    .vcs-stage-num { background: #e53e3e; color: #fff; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.85rem; }
-    .vcs-vuln-type { font-weight: 600; color: #2d3748; }
+    .vcs-stage-num { background: var(--danger); color: #fff; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.85rem; }
+    .vcs-vuln-type { font-weight: 600; color: var(--text-primary); }
     .vcs-field { margin: 0.4rem 0; font-size: 0.9rem; line-height: 1.5; }
-    .vcs-field-label { color: #718096; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; display: inline-block; min-width: 100px; }
-    .vcs-flag { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: #fffbea; border: 1px solid #ecc94b; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; color: #744210; }
+    .vcs-field-label { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; display: inline-block; min-width: 100px; }
+    .vcs-flag { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.4); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; color: #744210; }
     .vcs-creds-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
-    .vcs-creds-table th { background: #2d3748; color: #fff; padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
-    .vcs-creds-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #e2e8f0; }
-    .vcs-creds-table code { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: #edf2f7; padding: 0.1rem 0.3rem; border-radius: 3px; }
+    .vcs-creds-table th { background: var(--text-primary); color: var(--bg-card); padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+    .vcs-creds-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-color); }
+    .vcs-creds-table code { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: var(--gray-100); padding: 0.1rem 0.3rem; border-radius: 3px; }
     .vcs-files-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
-    .vcs-files-table th { background: #2d3748; color: #fff; padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
-    .vcs-files-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid #e2e8f0; vertical-align: top; }
+    .vcs-files-table th { background: var(--text-primary); color: var(--bg-card); padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+    .vcs-files-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-color); vertical-align: top; }
     .vcs-role-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
-    .vcs-role-primary { background: #fed7d7; color: #c53030; }
-    .vcs-role-pivot { background: #feebc8; color: #b7791f; }
-    .vcs-role-noise { background: #e2e8f0; color: #4a5568; }
-    .vcs-callout { background: #ebf8ff; border-left: 4px solid #3182ce; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.9rem; }
+    .vcs-role-primary { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+    .vcs-role-pivot { background: rgba(245, 158, 11, 0.15); color: #b7791f; }
+    .vcs-role-noise { background: var(--gray-200); color: var(--gray-600); }
+    .vcs-callout { background: rgba(49, 130, 206, 0.12); border-left: 4px solid var(--info); padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.9rem; }
+    [data-theme="dark"] .vcs-flag { color: var(--warning); }
+    [data-theme="dark"] .vcs-role-pivot { color: var(--warning); }
     @media print {
       body * { visibility: hidden; }
       #vulnCheatSheetModal, #vulnCheatSheetModal * { visibility: visible; }
@@ -985,18 +987,18 @@
 
   <style>
     .ak-part-item { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; transition: all 0.15s; font-size: 0.9em; }
-    .ak-part-item:hover { background: #f7fafc; }
-    .ak-part-item.active { background: #ebf8ff; border-left-color: #3182ce; font-weight: 600; }
-    .ak-part-item .part-num { color: #718096; font-size: 0.8em; }
+    .ak-part-item:hover { background: var(--gray-50); }
+    .ak-part-item.active { background: rgba(49, 130, 206, 0.12); border-left-color: var(--primary); font-weight: 600; }
+    .ak-part-item .part-num { color: var(--text-muted); font-size: 0.8em; }
     .ak-option-block { margin-bottom: 2rem; }
-    .ak-option-block h4 { color: #2d3748; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 12px; }
-    .ak-deliverable { background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
-    .ak-deliverable-label { font-size: 0.8em; color: #718096; margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .ak-option-block h4 { color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-bottom: 12px; }
+    .ak-deliverable { background: var(--gray-50); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+    .ak-deliverable-label { font-size: 0.8em; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
     .ak-deliverable-content { line-height: 1.6; }
     .ak-deliverable-content p { margin-bottom: 8px; }
     .ak-deliverable-content table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
-    .ak-deliverable-content th { background: #2d3748; color: #fff; padding: 6px 10px; text-align: left; }
-    .ak-deliverable-content td { padding: 6px 10px; border-bottom: 1px solid #e2e8f0; }
+    .ak-deliverable-content th { background: var(--text-primary); color: var(--bg-card); padding: 6px 10px; text-align: left; }
+    .ak-deliverable-content td { padding: 6px 10px; border-bottom: 1px solid var(--border-color); }
     .ak-deliverable-content ul, .ak-deliverable-content ol { margin: 6px 0 6px 20px; }
   </style>
 
@@ -1027,12 +1029,12 @@
 
     function formatCost(modelId, inputTokens, outputTokens) {
       const info = AI_MODEL_INFO[modelId] || { input: 0, output: 0, provider: 'unknown' };
-      if (info.provider === 'ollama') return { text: 'Free (local)', color: '#38a169' };
+      if (info.provider === 'ollama') return { text: 'Free (local)', color: 'var(--success)' };
       const total = (inputTokens / 1_000_000) * info.input + (outputTokens / 1_000_000) * info.output;
-      if (total < 0.01) return { text: '< $0.01', color: '#38a169' };
+      if (total < 0.01) return { text: '< $0.01', color: 'var(--success)' };
       return {
         text: `~$${total.toFixed(2)}`,
-        color: total > 0.50 ? '#e53e3e' : total > 0.10 ? '#d69e2e' : '#38a169'
+        color: total > 0.50 ? 'var(--danger)' : total > 0.10 ? 'var(--warning)' : 'var(--success)'
       };
     }
 
@@ -1050,7 +1052,7 @@
       if (exBadge) {
         exBadge.textContent = exCost.text;
         exBadge.style.color = exCost.color;
-        exBadge.style.background = exCost.color === '#38a169' ? '#f0fff4' : exCost.color === '#d69e2e' ? '#fffff0' : '#fff5f5';
+        exBadge.style.background = exCost.color === 'var(--success)' ? 'rgba(16, 185, 129, 0.12)' : exCost.color === 'var(--warning)' ? 'rgba(245, 158, 11, 0.12)' : 'rgba(239, 68, 68, 0.12)';
       }
 
       // Policies cost: ~5 policies * ~1.5K input + ~2.5K output each = ~7.5K in + ~12.5K out
@@ -1059,14 +1061,14 @@
       if (polBadge) {
         polBadge.textContent = polCost.text;
         polBadge.style.color = polCost.color;
-        polBadge.style.background = polCost.color === '#38a169' ? '#f0fff4' : polCost.color === '#d69e2e' ? '#fffff0' : '#fff5f5';
+        polBadge.style.background = polCost.color === 'var(--success)' ? 'rgba(16, 185, 129, 0.12)' : polCost.color === 'var(--warning)' ? 'rgba(245, 158, 11, 0.12)' : 'rgba(239, 68, 68, 0.12)';
       }
 
       // Overall cost display
       const costEl = document.getElementById('instructorCostEstimate');
       const contextEl = document.getElementById('instructorCostContext');
       if (info.provider === 'ollama') {
-        if (costEl) { costEl.textContent = 'Free'; costEl.style.color = '#38a169'; }
+        if (costEl) { costEl.textContent = 'Free'; costEl.style.color = 'var(--success)'; }
         if (contextEl) contextEl.textContent = 'Runs locally — no API cost';
       } else {
         // Total if both are generated
@@ -1267,7 +1269,7 @@
                 Parts
               </div>
               <div style="text-align: center; font-size: 0.75rem; color: var(--gray-500);">
-                <div style="font-weight: 700; font-size: 1rem; color: ${(student.pending_reviews || 0) > 0 ? '#d69e2e' : 'var(--gray-700)'};">${student.pending_reviews || 0}</div>
+                <div style="font-weight: 700; font-size: 1rem; color: ${(student.pending_reviews || 0) > 0 ? 'var(--warning)' : 'var(--gray-700)'};">${student.pending_reviews || 0}</div>
                 Pending
               </div>
               <div style="text-align: center; font-size: 0.75rem; color: var(--gray-500);">
@@ -1287,12 +1289,12 @@
               : `<span style="font-size: 0.7rem; color: var(--gray-400);">No instructor</span>`}
             ${!isMyStudent
               ? `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; background: #4299e1; color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); claimStudent('${student.student_id}')">+ Claim</button>`
-              : `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; border: 1px solid #cbd5e0; color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); releaseStudent('${student.student_id}')">Release</button>`}
+              : `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; border: 1px solid var(--border-color); color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); releaseStudent('${student.student_id}')">Release</button>`}
           </div>
 
           <!-- Expandable detail panel -->
           ${isExpanded ? `
-          <div class="student-detail-panel" style="margin-top: 1rem; border-top: 1px solid #e2e8f0; padding-top: 1rem;">
+          <div class="student-detail-panel" style="margin-top: 1rem; border-top: 1px solid var(--border-color); padding-top: 1rem;">
             <!-- Quick actions -->
             <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1rem;">
               <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); showAssignModal('${student.student_id}', '${student.student_email}', '${esc(displayName)}')">Assign Profile</button>
@@ -1303,7 +1305,7 @@
             </div>
 
             <!-- Sub-tabs -->
-            <div style="display: flex; gap: 0; border-bottom: 2px solid #e2e8f0; margin-bottom: 1rem;">
+            <div style="display: flex; gap: 0; border-bottom: 2px solid var(--border-color); margin-bottom: 1rem;">
               <button class="detail-subtab active" data-subtab="progress" onclick="event.stopPropagation(); switchDetailSubtab('${student.student_id}', 'progress', this)" style="padding: 0.5rem 1rem; border: none; background: none; font-size: 0.85rem; font-weight: 500; color: var(--gray-500); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;">Progress</button>
               <button class="detail-subtab" data-subtab="documents" onclick="event.stopPropagation(); switchDetailSubtab('${student.student_id}', 'documents', this)" style="padding: 0.5rem 1rem; border: none; background: none; font-size: 0.85rem; font-weight: 500; color: var(--gray-500); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;">Documents</button>
               <button class="detail-subtab" data-subtab="labs" onclick="event.stopPropagation(); switchDetailSubtab('${student.student_id}', 'labs', this)" style="padding: 0.5rem 1rem; border: none; background: none; font-size: 0.85rem; font-weight: 500; color: var(--gray-500); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px;">Labs</button>
@@ -1383,10 +1385,10 @@
             ${[1,2,3,4,5,6,7,8].map(partNum => {
               const p = data.progress.find(x => x.part_number === partNum);
               const status = p?.status || 'not_started';
-              const statusColors = { not_started: '#cbd5e0', in_progress: '#4299e1', submitted: '#d69e2e', reviewed: '#38a169', revision_requested: '#e53e3e' };
+              const statusColors = { not_started: '#cbd5e0', in_progress: '#4299e1', submitted: 'var(--warning)', reviewed: 'var(--success)', revision_requested: 'var(--danger)' };
               const statusLabels = { not_started: 'Not Started', in_progress: 'In Progress', submitted: 'Submitted', reviewed: 'Reviewed', revision_requested: 'Revision Needed' };
               return `
-                <div style="padding: 0.6rem 0.75rem; border-radius: 8px; border: 1px solid #e2e8f0; border-left: 4px solid ${statusColors[status]};">
+                <div style="padding: 0.6rem 0.75rem; border-radius: 8px; border: 1px solid var(--border-color); border-left: 4px solid ${statusColors[status]};">
                   <div style="font-weight: 600; font-size: 0.8rem;">Part ${partNum}</div>
                   <div style="font-size: 0.75rem; color: var(--gray-500);">${partNames[partNum] || ''}</div>
                   <div style="font-size: 0.7rem; margin-top: 0.25rem; color: ${statusColors[status]}; font-weight: 600;">${statusLabels[status]}</div>
@@ -1395,7 +1397,7 @@
             }).join('')}
           </div>`;
       } catch (e) {
-        container.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error loading progress: ${e.message}</p>`;
+        container.innerHTML = `<p style="color: var(--danger); font-size: 0.85rem;">Error loading progress: ${e.message}</p>`;
       }
     }
 
@@ -1450,13 +1452,13 @@
 
         container.innerHTML = studentLanes.map(l => {
           const cfg = l.config || {};
-          const statusColors = { active: '#38a169', deploying: '#d69e2e', error: '#e53e3e', suspended: '#9f7aea', pending: '#4299e1' };
+          const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', suspended: '#9f7aea', pending: '#4299e1' };
           const inet = cfg.internet_enabled;
           return `
             <div style="padding: 0.75rem; background: var(--gray-50, #f7fafc); border-radius: 8px; margin-bottom: 0.5rem;">
               <div style="display: flex; align-items: center; justify-content: space-between;">
                 <div>
-                  <span style="display: inline-block; padding: 0.1rem 0.4rem; border-radius: 8px; font-size: 0.7rem; font-weight: 600; color: white; background: ${statusColors[l.status] || '#718096'};">${l.status}</span>
+                  <span style="display: inline-block; padding: 0.1rem 0.4rem; border-radius: 8px; font-size: 0.7rem; font-weight: 600; color: white; background: ${statusColors[l.status] || 'var(--text-muted)'};">${l.status}</span>
                   <span style="font-size: 0.8rem; margin-left: 0.5rem;">VXLAN ${l.vxlan_id || '—'}</span>
                 </div>
                 <div style="display: flex; gap: 0.4rem; align-items: center;">
@@ -1474,7 +1476,7 @@
             </div>`;
         }).join('');
       } catch (e) {
-        container.innerHTML = `<p style="color: #e53e3e; font-size: 0.85rem;">Error: ${e.message}</p>`;
+        container.innerHTML = `<p style="color: var(--danger); font-size: 0.85rem;">Error: ${e.message}</p>`;
       }
     }
 
@@ -1490,7 +1492,7 @@
           ? entries.map(([k, v]) => `<span style="font-size: 0.75rem; margin-right: 0.75rem;"><strong>${k}:</strong> <code>${v}</code></span>`).join('')
           : '<span style="font-size: 0.75rem; color: var(--gray-400);">No IPs found</span>';
       } catch (e) {
-        ipContainer.innerHTML = '<span style="font-size: 0.75rem; color: #e53e3e;">Failed to load IPs</span>';
+        ipContainer.innerHTML = '<span style="font-size: 0.75rem; color: var(--danger);">Failed to load IPs</span>';
       }
     }
 
@@ -1576,7 +1578,7 @@
     }
 
     async function releaseStudent(studentId) {
-      if (!confirm('Remove this student from your roster?')) return;
+      if (!await Confirm.show({ title: 'Release Student', message: 'Remove this student from your roster?', confirmText: 'Release', danger: true })) return;
       try {
         await API.request(`/instructor/release-student/${studentId}`, { method: 'DELETE' });
         Toast.success('Released', 'Student removed from your roster');
@@ -1735,7 +1737,7 @@
       const pending = dashboardData.pending_submissions || [];
       if (pending.length > 0) {
         items.push(`
-          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: #fffbeb; border-radius: 8px; border-left: 4px solid #d69e2e;">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: rgba(245, 158, 11, 0.12); border-radius: 8px; border-left: 4px solid var(--warning);">
             <div>
               <strong style="font-size: 0.9rem;">${pending.length} submission${pending.length > 1 ? 's' : ''} awaiting review</strong>
               <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.15rem;">
@@ -1750,7 +1752,7 @@
       const noProfiles = (dashboardData.students || []).filter(s => !(s.generated_profiles || []).length);
       if (noProfiles.length > 0) {
         items.push(`
-          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: #ebf8ff; border-radius: 8px; border-left: 4px solid #4299e1;">
+          <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.75rem; background: rgba(66, 153, 225, 0.12); border-radius: 8px; border-left: 4px solid #4299e1;">
             <div>
               <strong style="font-size: 0.9rem;">${noProfiles.length} student${noProfiles.length > 1 ? 's' : ''} without profiles</strong>
               <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.15rem;">
@@ -1802,7 +1804,7 @@
             overrideStatus = schedule.override_active === true
               ? '<span class="badge badge-success" style="font-size: 0.7rem;">Override: ON</span>'
               : schedule.override_active === false
-              ? '<span class="badge badge-danger" style="font-size: 0.7rem; background: #fed7d7; color: #9b2c2c;">Override: OFF</span>'
+              ? '<span class="badge badge-danger" style="font-size: 0.7rem; background: rgba(239, 68, 68, 0.15); color: var(--danger);">Override: OFF</span>'
               : '';
             scheduleHtml = `
               <div style="font-size: 0.8rem; color: var(--gray-500); margin-top: 0.5rem;">
@@ -1813,7 +1815,7 @@
           }
 
           html += `
-            <div style="background: var(--gray-50, #f7fafc); border-radius: 10px; padding: 1rem; border: 1px solid #e2e8f0;">
+            <div style="background: var(--gray-50, #f7fafc); border-radius: 10px; padding: 1rem; border: 1px solid var(--border-color);">
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
                 <strong>${group.group_name}</strong>
                 <span style="font-size: 0.8rem; color: var(--gray-500);">${group.students} students</span>
@@ -1821,8 +1823,8 @@
               ${scheduleHtml}
               <div style="display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.75rem;">
                 <button class="btn btn-sm btn-outline" style="font-size: 0.7rem;" onclick="showScheduleModalInline('${group.id}', '${group.group_name.replace(/'/g, "\\'")}')">Set Schedule</button>
-                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; color: #38a169; border-color: #38a169;" onclick="instructorOverride('${group.id}', true)">Enable Access</button>
-                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; color: #e53e3e; border-color: #e53e3e;" onclick="instructorOverride('${group.id}', false)">Disable Access</button>
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; color: var(--success); border-color: var(--success);" onclick="instructorOverride('${group.id}', true)">Enable Access</button>
+                <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; color: var(--danger); border-color: var(--danger);" onclick="instructorOverride('${group.id}', false)">Disable Access</button>
                 ${hasSched && schedule.override_active !== null ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem;" onclick="instructorOverride('${group.id}', null)">Clear Override</button>` : ''}
               </div>
             </div>`;
@@ -1830,7 +1832,7 @@
         html += '</div>';
         container.innerHTML = html;
       } catch (e) {
-        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+        container.innerHTML = `<p style="color: var(--danger);">Error: ${e.message}</p>`;
       }
     }
 
@@ -1913,7 +1915,7 @@
         container.innerHTML = `
           <table style="width: 100%; border-collapse: collapse;">
             <thead>
-              <tr style="background: #f7fafc; font-size: 0.8rem; text-transform: uppercase; color: var(--gray-500);">
+              <tr style="background: var(--gray-50); font-size: 0.8rem; text-transform: uppercase; color: var(--gray-500);">
                 <th style="text-align: left; padding: 0.6rem 0.75rem;">Student</th>
                 <th style="text-align: left; padding: 0.6rem 0.75rem;">Status</th>
                 <th style="text-align: left; padding: 0.6rem 0.75rem;">VXLAN</th>
@@ -1924,11 +1926,11 @@
             </thead>
             <tbody>
               ${lanes.map(l => {
-                const statusColors = { active: '#38a169', deploying: '#d69e2e', error: '#e53e3e', pending: '#4299e1' };
-                const statusColor = statusColors[l.status] || '#718096';
+                const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', pending: '#4299e1' };
+                const statusColor = statusColors[l.status] || 'var(--text-muted)';
                 const inet = l.config?.internet_enabled;
                 return `
-                  <tr style="border-bottom: 1px solid #edf2f7;">
+                  <tr style="border-bottom: 1px solid var(--gray-100);">
                     <td style="padding: 0.6rem 0.75rem;">
                       <strong style="font-size: 0.9rem;">${l.student_name}</strong><br>
                       <code style="font-size: 0.75rem; color: var(--gray-500);">${l.student_email}</code>
@@ -1956,7 +1958,7 @@
             </tbody>
           </table>`;
       } catch (e) {
-        container.innerHTML = `<p style="color: #e53e3e;">Error: ${e.message}</p>`;
+        container.innerHTML = `<p style="color: var(--danger);">Error: ${e.message}</p>`;
       }
     }
 
@@ -1975,7 +1977,7 @@
           ).join('');
         }
       } catch (e) {
-        cell.innerHTML = `<span style="font-size: 0.75rem; color: #e53e3e;">Error</span>`;
+        cell.innerHTML = `<span style="font-size: 0.75rem; color: var(--danger);">Error</span>`;
       }
     }
 
@@ -2037,13 +2039,13 @@
 
           let overrideStatus = '';
           if (hasSched) {
-            if (schedule.override_active === true) overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:#c6f6d5;color:#22543d;">Override: Access ON</span>';
-            else if (schedule.override_active === false) overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:#fed7d7;color:#9b2c2c;">Override: Access OFF</span>';
-            else overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:#edf2f7;color:#4a5568;">Using Schedule</span>';
+            if (schedule.override_active === true) overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:rgba(16, 185, 129, 0.15);color:var(--success);">Override: Access ON</span>';
+            else if (schedule.override_active === false) overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:rgba(239, 68, 68, 0.15);color:var(--danger);">Override: Access OFF</span>';
+            else overrideStatus = '<span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:9999px;font-size:0.75rem;font-weight:600;background:var(--gray-100);color:var(--gray-600);">Using Schedule</span>';
           }
 
           html += `
-            <div style="background: var(--bg-card, #f7fafc); border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem; border: 1px solid #e2e8f0;">
+            <div style="background: var(--bg-card, #f7fafc); border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem; border: 1px solid var(--border-color);">
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
                 <h4 style="margin: 0;">${group.group_name} <span style="font-weight: 400; color: var(--gray-500); font-size: 0.85rem;">(${group.students} students)</span></h4>
                 ${overrideStatus}
@@ -2064,15 +2066,15 @@
               <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.75rem; margin-bottom: 0.75rem;">
                 <div>
                   <label style="font-weight: 600; font-size: 0.85rem;">Start Time</label>
-                  <input type="time" id="schedStart-${group.id}" value="${hasSched ? schedule.active_start : '08:00'}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid #e2e8f0;">
+                  <input type="time" id="schedStart-${group.id}" value="${hasSched ? schedule.active_start : '08:00'}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary);">
                 </div>
                 <div>
                   <label style="font-weight: 600; font-size: 0.85rem;">End Time</label>
-                  <input type="time" id="schedEnd-${group.id}" value="${hasSched ? schedule.active_end : '17:00'}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid #e2e8f0;">
+                  <input type="time" id="schedEnd-${group.id}" value="${hasSched ? schedule.active_end : '17:00'}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary);">
                 </div>
                 <div>
                   <label style="font-weight: 600; font-size: 0.85rem;">Timezone</label>
-                  <select id="schedTZ-${group.id}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid #e2e8f0;">
+                  <select id="schedTZ-${group.id}" style="width:100%;padding:0.4rem;border-radius:6px;border:1px solid var(--border-color);background:var(--bg-input);color:var(--text-primary);">
                     <option value="America/Chicago" ${(!hasSched || schedule.timezone === 'America/Chicago') ? 'selected' : ''}>Central</option>
                     <option value="America/New_York" ${hasSched && schedule.timezone === 'America/New_York' ? 'selected' : ''}>Eastern</option>
                     <option value="America/Denver" ${hasSched && schedule.timezone === 'America/Denver' ? 'selected' : ''}>Mountain</option>
@@ -2084,15 +2086,15 @@
 
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
                 <button class="btn btn-primary btn-sm" onclick="saveInstructorSchedule('${group.id}')">Save Schedule</button>
-                <button class="btn btn-outline btn-sm" style="color: #38a169; border-color: #38a169;" onclick="instructorOverride('${group.id}', true)">Enable Access Now</button>
-                <button class="btn btn-outline btn-sm" style="color: #e53e3e; border-color: #e53e3e;" onclick="instructorOverride('${group.id}', false)">Disable Access Now</button>
+                <button class="btn btn-outline btn-sm" style="color: var(--success); border-color: var(--success);" onclick="instructorOverride('${group.id}', true)">Enable Access Now</button>
+                <button class="btn btn-outline btn-sm" style="color: var(--danger); border-color: var(--danger);" onclick="instructorOverride('${group.id}', false)">Disable Access Now</button>
                 ${hasSched && schedule.override_active !== null ? `<button class="btn btn-outline btn-sm" onclick="instructorOverride('${group.id}', null)">Clear Override</button>` : ''}
               </div>
             </div>`;
         }
         container.innerHTML = html;
       } catch (e) {
-        container.innerHTML = `<p style="color: #e53e3e;">Error loading schedule: ${e.message}</p>`;
+        container.innerHTML = `<p style="color: var(--danger);">Error loading schedule: ${e.message}</p>`;
       }
     }
 
@@ -2377,7 +2379,7 @@
         console.error('Error loading documents:', error);
         listContainer.innerHTML = `
           <div style="text-align: center; padding: 1.5rem;">
-            <p style="color: #e74c3c;">Failed to load documents: ${error.message}</p>
+            <p style="color: var(--danger);">Failed to load documents: ${error.message}</p>
           </div>
         `;
       }
@@ -2450,7 +2452,7 @@
 
           <div style="margin-top: 1.25rem; padding-top: 1rem; border-top: 1px dashed var(--gray-300);">
             <label style="display: block; margin-bottom: 0.75rem; font-weight: 500;">Policy Documents:</label>
-            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: #f5f0ff; border: 1px solid #e2d6f3; border-radius: 8px;">
+            <div style="display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; background: rgba(128, 90, 213, 0.1); border: 1px solid rgba(128, 90, 213, 0.3); border-radius: 8px;">
               <span style="font-size: 1.5rem;">📋</span>
               <div style="flex: 1;">
                 <strong>Security Policy Documents</strong>
@@ -2520,15 +2522,15 @@
           const docIcons = { nessus: '🔍', zap: '🕷️', nmap: '🔌' };
           const docNames = { nessus: 'NESSUS Vulnerability Scan', zap: 'OWASP ZAP Report', nmap: 'NMAP Network Scan' };
 
-          statusDiv.style.background = '#d4edda';
+          statusDiv.style.background = 'rgba(16, 185, 129, 0.12)';
           statusDiv.innerHTML = `
-            <p style="margin: 0 0 1rem; color: #155724; font-weight: 500;">✅ Documents Generated Successfully!</p>
+            <p style="margin: 0 0 1rem; color: var(--success); font-weight: 500;">✅ Documents Generated Successfully!</p>
             <div style="display: flex; flex-direction: column; gap: 0.5rem;">
               ${docs.map(doc => `
-                <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: white; border: 1px solid #c3e6cb; border-radius: 6px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; background: var(--bg-card); border: 1px solid rgba(16, 185, 129, 0.3); border-radius: 6px;">
                   <div style="display: flex; align-items: center; gap: 0.5rem;">
                     <span>${docIcons[doc.type] || '📄'}</span>
-                    <span style="font-size: 0.85rem; color: #155724;">${docNames[doc.type] || doc.type}</span>
+                    <span style="font-size: 0.85rem; color: var(--success);">${docNames[doc.type] || doc.type}</span>
                   </div>
                   <button class="btn btn-sm btn-primary" onclick="downloadDocument('${doc.url}', '${doc.filename}')">
                     📥 Download
@@ -2560,8 +2562,8 @@
 
       } catch (error) {
         console.error('Failed to generate documents:', error);
-        statusDiv.style.background = '#f8d7da';
-        statusDiv.innerHTML = `<p style="margin: 0; color: #721c24;">❌ Error: ${error.message || 'Failed to generate documents'}</p>`;
+        statusDiv.style.background = 'rgba(239, 68, 68, 0.12)';
+        statusDiv.innerHTML = `<p style="margin: 0; color: var(--danger);">❌ Error: ${error.message || 'Failed to generate documents'}</p>`;
 
         generateBtn.innerHTML = '⚡ Generate Scan Documents';
         generateBtn.disabled = false;
@@ -2585,7 +2587,7 @@
         const data = await resp.json();
         if (data.success || data.policies) {
           btn.innerHTML = '✅ Policies Generated';
-          btn.style.background = '#38a169';
+          btn.style.background = 'var(--success)';
           Toast.success('Success', `${data.total_count || data.policies?.length || 0} policy document(s) generated`);
         } else {
           throw new Error(data.error || 'Failed to generate policies');
@@ -2838,10 +2840,10 @@
         const getStatusBadge = (status) => {
           const badges = {
             'not_started': '<span class="badge" style="background: var(--gray-200); color: var(--gray-600);">Not Started</span>',
-            'in_progress': '<span class="badge" style="background: #fff3cd; color: #856404;">In Progress</span>',
-            'submitted': '<span class="badge" style="background: #cce5ff; color: #004085;">Submitted</span>',
-            'reviewed': '<span class="badge" style="background: #d4edda; color: #155724;">Reviewed</span>',
-            'revision_requested': '<span class="badge" style="background: #f8d7da; color: #721c24;">Needs Revision</span>'
+            'in_progress': '<span class="badge" style="background: rgba(245, 158, 11, 0.15); color: var(--warning);">In Progress</span>',
+            'submitted': '<span class="badge" style="background: rgba(6, 182, 212, 0.15); color: var(--info);">Submitted</span>',
+            'reviewed': '<span class="badge" style="background: rgba(16, 185, 129, 0.15); color: var(--success);">Reviewed</span>',
+            'revision_requested': '<span class="badge" style="background: rgba(239, 68, 68, 0.15); color: var(--danger);">Needs Revision</span>'
           };
           return badges[status] || badges['not_started'];
         };
@@ -2899,7 +2901,7 @@
                     const score = part?.score;
                     
                     return `
-                      <div style="padding: 0.5rem; background: white; border-radius: 6px; border: 1px solid var(--gray-200); font-size: 0.8rem;">
+                      <div style="padding: 0.5rem; background: var(--bg-card); border-radius: 6px; border: 1px solid var(--gray-200); font-size: 0.8rem;">
                         <div style="font-weight: 500; margin-bottom: 0.25rem;">Part ${partNum}</div>
                         ${getStatusBadge(status)}
                         ${score !== null && score !== undefined ? `<div style="margin-top: 0.25rem; font-size: 0.75rem; color: var(--gray-500);">Score: ${score}</div>` : ''}
@@ -2929,7 +2931,7 @@
               ${intake_responses.map(ir => `
                 <div style="padding: 0.75rem; background: var(--gray-50); border-radius: 8px; margin-bottom: 0.5rem; display: flex; justify-content: space-between; align-items: center;">
                   <span>🏢 ${ir.profile_name || 'Unknown Profile'}</span>
-                  <span class="badge" style="background: ${ir.status === 'complete' ? '#d4edda' : '#fff3cd'}; color: ${ir.status === 'complete' ? '#155724' : '#856404'};">
+                  <span class="badge" style="background: ${ir.status === 'complete' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)'}; color: ${ir.status === 'complete' ? 'var(--success)' : 'var(--warning)'};">
                     ${ir.status === 'complete' ? '✓ Complete' : `In Progress (${ir.completion_percentage || 0}%)`}
                   </span>
                 </div>
@@ -3216,7 +3218,7 @@
       listDiv.innerHTML = `
         <div style="display: flex; flex-direction: column; gap: 1rem;">
           ${documents.map(doc => `
-            <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; background: white; border: 1px solid var(--gray-200); border-radius: 8px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 1rem; background: var(--bg-card); border: 1px solid var(--gray-200); border-radius: 8px;">
               <div style="display: flex; align-items: center; gap: 1rem;">
                 <div style="font-size: 2rem;">${docIcons[doc.type] || '📄'}</div>
                 <div>
@@ -3334,7 +3336,7 @@
 
         const data = await response.json();
         Toast.success('Generation Started', data.message || 'Answer key generation is running in the background.');
-        status.innerHTML = `<span style="color: #38a169;">Answer key generation running in background using <strong>${modelLabel}</strong>. You can leave this page — results will be saved automatically. Come back and refresh to view.</span>`;
+        status.innerHTML = `<span style="color: var(--success);">Answer key generation running in background using <strong>${modelLabel}</strong>. You can leave this page — results will be saved automatically. Come back and refresh to view.</span>`;
 
         // Poll for completion in background
         pollForExamples(profileId);
@@ -3362,7 +3364,7 @@
           const btn = document.getElementById('generateExamplesBtn');
           const status = document.getElementById('examplesStatus');
           if (btn) { btn.disabled = false; btn.textContent = '📝 Generate Answer Key'; }
-          if (status) status.innerHTML = '<span style="color: #d69e2e;">Generation may still be running. Refresh the page to check.</span>';
+          if (status) status.innerHTML = '<span style="color: var(--warning);">Generation may still be running. Refresh the page to check.</span>';
           return;
         }
         try {
@@ -3379,7 +3381,7 @@
             const btn = document.getElementById('generateExamplesBtn');
             const status = document.getElementById('examplesStatus');
             if (btn) { btn.disabled = false; btn.textContent = '📝 Generate Answer Key'; }
-            if (status) status.innerHTML = `<span style="color: #38a169;">Answer key ready! ${data.examples.length} parts generated and saved.</span>`;
+            if (status) status.innerHTML = `<span style="color: var(--success);">Answer key ready! ${data.examples.length} parts generated and saved.</span>`;
             document.getElementById('viewExamplesBtn').style.display = 'inline-flex';
             Toast.success('Answer Key Ready', `${data.examples.length} parts generated and saved.`);
           }
@@ -3473,10 +3475,10 @@
       // Meta header
       const diffBadge = data.difficulty
         ? `<span style="display:inline-block; padding:0.15rem 0.5rem; border-radius:1rem; font-size:0.75rem; font-weight:600; vertical-align:middle; ${
-            data.difficulty === 'easy' ? 'background:#c6f6d5; color:#22543d;' :
-            data.difficulty === 'medium' ? 'background:#feebc8; color:#7c2d12;' :
-            data.difficulty === 'hard' ? 'background:#fed7d7; color:#742a2a;' :
-            'background:#e2e8f0; color:#4a5568;'
+            data.difficulty === 'easy' ? 'background:rgba(16, 185, 129, 0.15); color:var(--success);' :
+            data.difficulty === 'medium' ? 'background:rgba(245, 158, 11, 0.15); color:var(--warning);' :
+            data.difficulty === 'hard' ? 'background:rgba(239, 68, 68, 0.15); color:var(--danger);' :
+            'background:var(--gray-200); color:var(--gray-600);'
           }">${escapeHtml(data.difficulty.toUpperCase())}</span>`
         : '';
       parts.push(`
@@ -3557,7 +3559,7 @@
         parts.push(`
           <div class="vcs-section">
             <h4>👨‍🏫 Instructor Notes</h4>
-            <div style="background: #f7fafc; padding: 1rem; border-radius: 6px; line-height: 1.6;">${escapeHtml(data.instructor_notes)}</div>
+            <div style="background: var(--gray-50); padding: 1rem; border-radius: 6px; line-height: 1.6;">${escapeHtml(data.instructor_notes)}</div>
           </div>
         `);
       }
@@ -3675,7 +3677,7 @@
       let html = `<h3 style="margin-bottom: 1rem;">Part ${example.part_number}: ${example.part_name}</h3>`;
 
       if (parsed.general_notes) {
-        html += `<p style="color: #718096; margin-bottom: 1.5rem; font-style: italic;">${escHtml(parsed.general_notes)}</p>`;
+        html += `<p style="color: var(--text-muted); margin-bottom: 1.5rem; font-style: italic;">${escHtml(parsed.general_notes)}</p>`;
       }
 
       for (const [optKey, deliverablesArr] of Object.entries(deliverables)) {
@@ -3780,11 +3782,11 @@
             <div style="text-align: center; padding: 3rem 1rem;">
               <div style="font-size: 3rem; margin-bottom: 1rem;">📝</div>
               <h3>No Answer Key Yet</h3>
-              <p style="color: #718096; margin-bottom: 1.5rem;">Generate an answer key for this profile. This creates example content for all 8 parts plus a completed intake form.</p>
+              <p style="color: var(--text-muted); margin-bottom: 1.5rem;">Generate an answer key for this profile. This creates example content for all 8 parts plus a completed intake form.</p>
               <button class="btn btn-primary" id="generateFromModalBtn" onclick="generateAnswerKeyFromModal()">
                 📝 Generate Answer Key
               </button>
-              <div id="generateFromModalStatus" style="margin-top: 1rem; color: #718096;"></div>
+              <div id="generateFromModalStatus" style="margin-top: 1rem; color: var(--text-muted);"></div>
             </div>`;
           document.getElementById('downloadPacketBtn').style.display = 'none';
           document.getElementById('regenerateAnswerKeyBtn').style.display = 'none';

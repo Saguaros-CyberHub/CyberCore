@@ -297,10 +297,11 @@ async function loadProfiles() {
     
     const select = document.getElementById('profileSelect');
     
+    const escapeHtml = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     select.innerHTML = '<option value="">-- Select a profile --</option>' +
       profiles.map(p => `
         <option value="${p.id}" ${p.id === currentProfileId ? 'selected' : ''}>
-          ${p.name || p.company_name || p.companyName || 'Unnamed Organization'}
+          ${escapeHtml(p.name || p.company_name || p.companyName || 'Unnamed Organization')}
         </option>
       `).join('');
   } catch (error) {
@@ -1528,8 +1529,8 @@ function editThreat(index) {
   }
 }
 
-function deleteThreat(index) {
-  if (confirm('Are you sure you want to delete this threat?')) {
+async function deleteThreat(index) {
+  if (await Confirm.show({ title: 'Delete this threat?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) {
     window.currentStructuredData.threats.splice(index, 1);
     refreshThreatsList();
     saveDraft();
@@ -1644,8 +1645,8 @@ function editVulnerability(index) {
   }
 }
 
-function deleteVulnerability(index) {
-  if (confirm('Are you sure you want to delete this vulnerability?')) {
+async function deleteVulnerability(index) {
+  if (await Confirm.show({ title: 'Delete this vulnerability?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) {
     window.currentStructuredData.vulnerabilities.splice(index, 1);
     refreshVulnerabilitiesList();
     saveDraft();
@@ -1759,8 +1760,8 @@ function editRisk(index) {
   }
 }
 
-function deleteRisk(index) {
-  if (confirm('Are you sure you want to delete this risk?')) {
+async function deleteRisk(index) {
+  if (await Confirm.show({ title: 'Delete this risk?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) {
     window.currentStructuredData.risks.splice(index, 1);
     refreshRisksList();
     saveDraft();
@@ -1922,8 +1923,8 @@ function editControl(index) {
   }
 }
 
-function deleteControl(index) {
-  if (confirm('Are you sure you want to delete this control?')) {
+async function deleteControl(index) {
+  if (await Confirm.show({ title: 'Delete this control?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true })) {
     window.currentStructuredData.controls.splice(index, 1);
     refreshControlsList();
     saveDraft();

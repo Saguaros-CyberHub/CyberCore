@@ -64,7 +64,7 @@ router.get('/generation-status/:profileId', authenticateToken, instructorOnly, (
 // Previously called by N8N's E4 node to write generated answer-key parts back.
 // As of the N8N removal, ai/examples writes directly to assessment_progress.
 // Kept callable for one release in case any external integration still posts here.
-router.post('/store-example', authenticateToken, async (req, res) => {
+router.post('/store-example', authenticateToken, instructorOnly, async (req, res) => {
   try {
     const { user_id, profile_id, part_number, part_name, content, output_option } = req.body;
 
@@ -892,7 +892,7 @@ router.post('/generate-documents', authenticateToken, instructorOnly, async (req
 });
 
 // GET /api/instructor/download/:profileId/:docType - Download a generated document
-router.get('/download/:profileId/:docType', authenticateToken, async (req, res) => {
+router.get('/download/:profileId/:docType', authenticateToken, instructorOnly, async (req, res) => {
   try {
     const { profileId, docType } = req.params;
     

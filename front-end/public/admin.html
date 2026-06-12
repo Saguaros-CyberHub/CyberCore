@@ -41,7 +41,7 @@
     .stat-content p { font-size: 0.85rem; color: var(--gray-500); margin: 0.2rem 0 0; }
 
     /* Tabs */
-    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0; }
+    .tabs { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; border-bottom: 2px solid var(--border-color); padding-bottom: 0; }
     .tab-btn {
       padding: 0.6rem 1.2rem; border: none; background: none;
       font-size: 0.9rem; font-weight: 500; color: var(--gray-500);
@@ -60,11 +60,11 @@
     }
     .admin-table th {
       text-align: left; padding: 0.75rem 1rem; font-size: 0.8rem;
-      text-transform: uppercase; color: var(--gray-500); background: #f7fafc;
+      text-transform: uppercase; color: var(--gray-500); background: var(--gray-50);
       font-weight: 600; letter-spacing: 0.03em;
     }
-    .admin-table td { padding: 0.75rem 1rem; font-size: 0.9rem; border-top: 1px solid #edf2f7; }
-    .admin-table tr:hover td { background: #f7fafc; }
+    .admin-table td { padding: 0.75rem 1rem; font-size: 0.9rem; border-top: 1px solid var(--border-light); }
+    .admin-table tr:hover td { background: var(--bg-card-hover); }
 
     /* Status badges */
     .badge { display: inline-block; padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
@@ -75,7 +75,7 @@
     .badge-gray { background: #edf2f7; color: #4a5568; }
 
     /* Connection tree */
-    .tree-group { margin-left: 1.5rem; border-left: 2px solid #e2e8f0; padding-left: 1rem; }
+    .tree-group { margin-left: 1.5rem; border-left: 2px solid var(--border-color); padding-left: 1rem; }
     .tree-item { padding: 0.5rem 0; display: flex; align-items: center; gap: 0.5rem; font-size: 0.9rem; }
     .tree-item .icon { font-size: 1rem; }
     .tree-item .name { font-weight: 500; }
@@ -101,7 +101,7 @@
     .form-group { margin-bottom: 1rem; }
     .form-group label { display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 0.3rem; color: var(--gray-700); }
     .form-group input, .form-group select {
-      width: 100%; padding: 0.5rem 0.75rem; border: 1px solid #e2e8f0;
+      width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border-color);
       border-radius: 8px; font-size: 0.9rem;
     }
 
@@ -201,16 +201,6 @@
       background: rgba(255,184,48,0.15);
       color: #ffb830;
     }
-    [data-theme="dark"] #tab-deploy > div > div[style*="background: white"] {
-      background: #111527 !important;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
-    }
-    [data-theme="dark"] #tab-deploy div[style*="background: #f7fafc"] {
-      background: #0a0d1a !important;
-    }
-    [data-theme="dark"] #tab-deploy div[style*="border: 1px solid #e2e8f0"] {
-      border-color: rgba(99,130,255,0.12) !important;
-    }
     [data-theme="dark"] #tab-deploy input,
     [data-theme="dark"] #tab-deploy select {
       background: #0a0d1a;
@@ -225,6 +215,24 @@
       background: #0a0d1a;
       border-color: rgba(99,130,255,0.12);
       color: #f0f2fa;
+    }
+    /* Intake-context panel: amber callout text needs lighter tones on dark */
+    [data-theme="dark"] #intakeContextPanel strong {
+      color: var(--warning) !important;
+    }
+    [data-theme="dark"] #intakeCtxBody {
+      color: var(--text-secondary) !important;
+    }
+    /* Script type filter buttons: admin-vuln-scripts.js re-applies light inline
+       colors on toggle, so dark mode needs !important guards */
+    [data-theme="dark"] #scriptTypeFilter .stf-btn:not(.active) {
+      background: var(--bg-card) !important;
+    }
+    [data-theme="dark"] #scriptTypeFilter .stf-btn[data-type="baseline"]:not(.active) {
+      color: var(--success) !important;
+    }
+    [data-theme="dark"] #scriptTypeFilter .stf-btn[data-type="vulnerable"]:not(.active) {
+      color: var(--danger) !important;
     }
     /* Toggle switch */
     .toggle-switch { position:relative; display:inline-block; width:40px; height:22px; flex-shrink:0; }
@@ -366,7 +374,7 @@
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start;">
 
             <!-- Group Deployment Form -->
-            <div style="background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
               <h3 style="margin: 0 0 0.5rem;">Deploy Group Environment</h3>
               <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
                 Create a batch of instructor + student accounts with a Guacamole connection group. Optionally deploy CyberHub lanes per student.
@@ -402,8 +410,8 @@
                 <label for="deployAttackBoxes" style="margin: 0;">Create Attack Boxes</label>
               </div>
               <!-- Vuln Script Selector for Group Deploy -->
-              <div id="groupDeployVulnScriptPanel" style="display: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; max-height: 400px; overflow-y: auto;"></div>
-              <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: #f7fafc;">
+              <div id="groupDeployVulnScriptPanel" style="display: none; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; max-height: 400px; overflow-y: auto;"></div>
+              <div style="border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: var(--gray-50);">
                 <div class="form-group" style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 0.5rem;">
                   <input type="checkbox" id="deployLanes" style="width: auto;" onchange="toggleLaneDeployInfo()">
                   <label for="deployLanes" style="margin: 0; font-weight: 600;">Deploy CyberHub Lanes</label>
@@ -427,7 +435,7 @@
             </div>
 
             <!-- Single Lane Deployment -->
-            <div style="background: white; border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
               <h3 style="margin: 0 0 0.5rem;">Deploy Single Lane</h3>
               <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1.25rem;">
                 Deploy a CyberHub challenge lane for a single user (clones VMs, allocates VXLAN, starts environment).
@@ -449,17 +457,17 @@
                 <input type="text" id="deployEventId" placeholder="Leave blank for standalone">
               </div>
               <div style="display: flex; gap: 0.75rem; margin-bottom: 0.75rem;">
-                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f7fafc;">
+                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; background: var(--gray-50);">
                   <input type="checkbox" id="deploySingleAttackBox" style="width: auto;">
                   <label for="deploySingleAttackBox" style="margin: 0; font-size: 0.85rem;">Include Attack Box (Kali)</label>
                 </div>
-                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; background: #f7fafc;">
+                <div style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; background: var(--gray-50);">
                   <input type="checkbox" id="deployUseWebhook" style="width: auto;">
                   <label for="deployUseWebhook" style="margin: 0; font-size: 0.85rem;">Use N8N Webhook</label>
                 </div>
               </div>
               <!-- Vuln Script Selector (loads when challenge selected) -->
-              <div id="deployVulnScriptPanel" style="display: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; max-height: 400px; overflow-y: auto;"></div>
+              <div id="deployVulnScriptPanel" style="display: none; border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; max-height: 400px; overflow-y: auto;"></div>
               <button class="btn btn-primary" id="deployBtn" onclick="deployLane()" style="width: 100%;">Deploy Lane</button>
               <div id="deployStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
             </div>
@@ -480,7 +488,7 @@
           <div class="action-bar">
             <button class="btn btn-outline" onclick="loadLanes()">Refresh</button>
             <button class="btn btn-outline" onclick="runReconcile()" id="btnReconcile" style="border-color:#ed8936; color:#ed8936;">Audit Proxmox</button>
-            <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+            <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
               <option value="">All Statuses</option>
               <option value="active">Active</option>
               <option value="deploying">Deploying</option>
@@ -508,8 +516,8 @@
         <!-- TAB: Activity Log -->
         <div class="tab-content" id="tab-actlog">
           <div class="action-bar">
-            <input type="text" id="actlogSearch" placeholder="Search actions, users..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem; width: 200px;">
-            <select id="actlogAction" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+            <input type="text" id="actlogSearch" placeholder="Search actions, users..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 200px;">
+            <select id="actlogAction" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
               <option value="">All Actions</option>
               <option value="login">Login</option>
               <option value="logout">Logout</option>
@@ -540,7 +548,7 @@
           </div>
 
           <!-- Real-Client Intake context panel (populated from ?from_intake_id=…) -->
-          <div id="intakeContextPanel" style="display:none; background: #fff7ed; border: 1px solid #fdba74; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem;">
+          <div id="intakeContextPanel" style="display:none; background: rgba(249, 115, 22, 0.1); border: 1px solid #fdba74; border-radius: 12px; padding: 1rem 1.25rem; margin-bottom: 1rem;">
             <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem; margin-bottom:0.5rem;">
               <strong style="color:#9a3412;">📨 Building challenge from real-client intake: <span id="intakeCtxCover">—</span></strong>
               <a id="intakeCtxLink" class="btn btn-sm btn-outline" href="#" target="_blank">View full intake →</a>
@@ -613,7 +621,7 @@
             </div>
 
             <!-- GOAD configuration card -->
-            <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 1rem; margin-top: 0.75rem; background: #fffbeb;">
+            <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 1rem; margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12);">
               <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
                 <input type="checkbox" id="chalGoadEnabled" onchange="onChalGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
                 <span style="font-weight: 600; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</span>
@@ -623,23 +631,23 @@
                 <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; font-size: 0.85rem;">
                   <div class="form-group" style="margin: 0;">
                     <label style="font-size: 0.75rem;">GOAD Version</label>
-                    <select id="chalGoadVersion" onchange="onChalGoadVersionChange()" style="width: 100%; padding: 0.4rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+                    <select id="chalGoadVersion" onchange="onChalGoadVersionChange()" style="width: 100%; padding: 0.4rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
                       <option value="GOAD-Light">Loading...</option>
                     </select>
                   </div>
                   <div class="form-group" style="margin: 0;">
                     <label style="font-size: 0.75rem;">Forest Domain (read-only)</label>
-                    <input type="text" id="chalGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
+                    <input type="text" id="chalGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
                   </div>
                   <div class="form-group" style="margin: 0;">
                     <label style="font-size: 0.75rem;">Child Subdomain (read-only)</label>
-                    <input type="text" id="chalGoadChild" value="tumamoc" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
+                    <input type="text" id="chalGoadChild" value="tumamoc" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
                   </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem;">
                   <div class="form-group" style="margin: 0;">
                     <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
-                    <input type="text" id="chalGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
+                    <input type="text" id="chalGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
                   </div>
                   <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.3rem;">
                     <input type="checkbox" id="chalGoadKali" checked onchange="onChalGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
@@ -651,7 +659,7 @@
             </div>
 
             <!-- VM Builder -->
-            <div style="border: 1px solid #e2e8f0; border-radius: 10px; padding: 1rem; margin-top: 0.75rem;">
+            <div style="border: 1px solid var(--border-color); border-radius: 10px; padding: 1rem; margin-top: 0.75rem;">
               <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.75rem;">
                 <h4 style="margin: 0; font-size: 0.95rem;">Virtual Machines</h4>
                 <button class="btn btn-sm btn-outline" onclick="addChallengeVM()">+ Add VM</button>
@@ -801,25 +809,25 @@
           <div class="action-bar" style="flex-wrap:wrap; gap:0.5rem; align-items:center;">
             <button class="btn btn-primary" onclick="showCreateCrucibleEventModal()">+ New Event</button>
             <button class="btn btn-outline" onclick="loadCrucibleEvents()">Refresh</button>
-            <div style="display:inline-flex; border:1px solid #e2e8f0; border-radius:6px; overflow:hidden; font-size:0.8rem; flex-wrap:wrap;">
+            <div style="display:inline-flex; border:1px solid var(--border-color); border-radius:6px; overflow:hidden; font-size:0.8rem; flex-wrap:wrap;">
               <button class="crucible-type-filter active" data-type="" onclick="filterCrucibleEventsByType('')"
-                style="background:var(--primary,#1e40af);color:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">All</button>
+                style="background:var(--primary,#1e40af);color:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">All</button>
               <button class="crucible-type-filter" data-type="weekly"    onclick="filterCrucibleEventsByType('weekly')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">📅 Weekly</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">📅 Weekly</button>
               <button class="crucible-type-filter" data-type="vuln"      onclick="filterCrucibleEventsByType('vuln')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">💀 Vuln Boxes</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">💀 Vuln Boxes</button>
               <button class="crucible-type-filter" data-type="groupctf"  onclick="filterCrucibleEventsByType('groupctf')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">🏁 Group CTF</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">🏁 Group CTF</button>
               <button class="crucible-type-filter" data-type="koth"      onclick="filterCrucibleEventsByType('koth')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">👑 KotH</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">👑 KotH</button>
               <button class="crucible-type-filter" data-type="redvsblue" onclick="filterCrucibleEventsByType('redvsblue')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">⚔️ RvB</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">⚔️ RvB</button>
               <button class="crucible-type-filter" data-type="ir"        onclick="filterCrucibleEventsByType('ir')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">🚨 IR/SOC</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">🚨 IR/SOC</button>
               <button class="crucible-type-filter" data-type="ctf_event" onclick="filterCrucibleEventsByType('ctf_event')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid #e2e8f0;">🎯 Events</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;border-right:1px solid var(--border-color);">🎯 Events</button>
               <button class="crucible-type-filter" data-type="byoctf"    onclick="filterCrucibleEventsByType('byoctf')"
-                style="background:#fff;border:0;padding:0.4rem 0.75rem;cursor:pointer;">🛠️ BYO CTF</button>
+                style="background:var(--bg-card);border:0;padding:0.4rem 0.75rem;cursor:pointer;">🛠️ BYO CTF</button>
             </div>
           </div>
           <div id="crucibleEventsList" style="margin-top:1rem;"></div>
@@ -830,17 +838,17 @@
           <div class="action-bar" style="flex-wrap: wrap; align-items: center; gap: 0.5rem;">
             <button class="btn btn-primary" onclick="showCreateScriptModal()">+ New Script</button>
             <button class="btn btn-outline" onclick="loadVulnScripts()">Refresh</button>
-            <select id="vulnScriptCategoryFilter" onchange="loadVulnScripts()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.85rem;">
+            <select id="vulnScriptCategoryFilter" onchange="loadVulnScripts()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
               <option value="">All Categories</option>
             </select>
             <!-- Type filter: baseline vs vulnerable -->
-            <div id="scriptTypeFilter" style="display: inline-flex; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; font-size: 0.8rem;">
+            <div id="scriptTypeFilter" style="display: inline-flex; border: 1px solid var(--border-color); border-radius: 6px; overflow: hidden; font-size: 0.8rem;">
               <button type="button" data-type=""           class="stf-btn active" onclick="setScriptTypeFilter('')"
-                      style="background: var(--primary, #1e40af); color: #fff; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid #e2e8f0;">All</button>
+                      style="background: var(--primary, #1e40af); color: #fff; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">All</button>
               <button type="button" data-type="baseline"   class="stf-btn" onclick="setScriptTypeFilter('baseline')"
-                      style="background: #fff; color: #166534; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid #e2e8f0;">🛡️ Baseline</button>
+                      style="background: var(--bg-card); color: #166534; border: 0; padding: 0.4rem 0.8rem; cursor: pointer; border-right: 1px solid var(--border-color);">🛡️ Baseline</button>
               <button type="button" data-type="vulnerable" class="stf-btn" onclick="setScriptTypeFilter('vulnerable')"
-                      style="background: #fff; color: #991b1b; border: 0; padding: 0.4rem 0.8rem; cursor: pointer;">☠️ Vulnerable</button>
+                      style="background: var(--bg-card); color: #991b1b; border: 0; padding: 0.4rem 0.8rem; cursor: pointer;">☠️ Vulnerable</button>
             </div>
             <span id="scriptListSummary" style="margin-left: auto; font-size: 0.8rem; color: var(--gray-500);"></span>
           </div>
@@ -857,25 +865,25 @@
               
               <div class="form-group">
                 <label>Site Display Name *</label>
-                <input type="text" id="settingsSiteName" placeholder="e.g., CyberHub, My Lab, etc." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem;">
+                <input type="text" id="settingsSiteName" placeholder="e.g., CyberHub, My Lab, etc." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
                 <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Appears in headers, page titles, and welcome messages. Default: "CyberHub"</p>
               </div>
               
               <div class="form-group">
                 <label>Logo URL</label>
-                <input type="text" id="settingsSiteLogo" placeholder="https://example.com/logo.png" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem;">
+                <input type="text" id="settingsSiteLogo" placeholder="https://example.com/logo.png" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
                 <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Logo image URL (shown in header)</p>
               </div>
               
               <div class="form-group">
                 <label>Favicon URL</label>
-                <input type="text" id="settingsSiteFavicon" placeholder="https://example.com/favicon.ico" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem;">
+                <input type="text" id="settingsSiteFavicon" placeholder="https://example.com/favicon.ico" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
                 <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Favicon URL (shown in browser tabs)</p>
               </div>
               
               <div class="form-group">
                 <label>Site Description</label>
-                <textarea id="settingsSiteDesc" placeholder="Enter site description..." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 0.9rem; min-height: 80px;"></textarea>
+                <textarea id="settingsSiteDesc" placeholder="Enter site description..." style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem; min-height: 80px;"></textarea>
                 <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Meta description for search engines</p>
               </div>
               
@@ -1001,7 +1009,7 @@
       </div>
       <div class="form-group">
         <label>Role *</label>
-        <select id="ccRole" style="padding: 0.5rem; border: 1px solid #cbd5e0; border-radius: 4px; font-size: 0.9rem;">
+        <select id="ccRole" style="padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.9rem;">
           <option value="user">User</option>
           <option value="student">Student</option>
           <option value="instructor">Instructor</option>
@@ -1062,11 +1070,11 @@
       <div class="form-group">
         <label>Type</label>
         <div style="display: flex; gap: 0.5rem;">
-          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid #e2e8f0; border-radius: 6px; cursor: pointer;" for="scriptTypeBaseline">
+          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer;" for="scriptTypeBaseline">
             <input type="radio" name="scriptType" id="scriptTypeBaseline" value="baseline">
             <span>🛡️ <strong>Baseline</strong> — deploys a service cleanly, no vulns baked in</span>
           </label>
-          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid #e2e8f0; border-radius: 6px; cursor: pointer;" for="scriptTypeVulnerable">
+          <label style="flex: 1; display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 0.7rem; border: 1px solid var(--border-color); border-radius: 6px; cursor: pointer;" for="scriptTypeVulnerable">
             <input type="radio" name="scriptType" id="scriptTypeVulnerable" value="vulnerable" checked>
             <span>☠️ <strong>Vulnerable</strong> — introduces weaknesses</span>
           </label>
@@ -1132,7 +1140,7 @@
       </div>
 
       <!-- GOAD configuration card -->
-      <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: #fffbeb;">
+      <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12);">
         <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
           <input type="checkbox" id="tplGoadEnabled" onchange="onTplGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
           <span style="font-weight: 600; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</span>
@@ -1148,17 +1156,17 @@
             </div>
             <div class="form-group" style="margin: 0;">
               <label style="font-size: 0.75rem;">Forest Domain (read-only)</label>
-              <input type="text" id="tplGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
+              <input type="text" id="tplGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
             </div>
             <div class="form-group" style="margin: 0;">
               <label style="font-size: 0.75rem;">Child Subdomain (read-only)</label>
-              <input type="text" id="tplGoadChild" value="tumamoc" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
+              <input type="text" id="tplGoadChild" value="tumamoc" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
             </div>
           </div>
           <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem;">
             <div class="form-group" style="margin: 0;">
               <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
-              <input type="text" id="tplGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:#f1f5f9; color:#64748b; cursor:not-allowed;">
+              <input type="text" id="tplGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
             </div>
             <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.3rem;">
               <input type="checkbox" id="tplGoadKali" checked onchange="onTplGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">

@@ -14,6 +14,9 @@ const SIG_ENCODING = 'hex';
 function getSecret() {
   const s = process.env.VULN_ASSETS_SECRET;
   if (!s || s.length < 16) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('[signed-url] VULN_ASSETS_SECRET is missing or too short — refusing to sign URLs with a predictable key in production. Generate one with `openssl rand -hex 32`.');
+    }
     if (!global.__vuln_assets_secret_warned__) {
       console.warn('[signed-url] VULN_ASSETS_SECRET is missing or too short. Using insecure fallback — set it in .env for production.');
       global.__vuln_assets_secret_warned__ = true;

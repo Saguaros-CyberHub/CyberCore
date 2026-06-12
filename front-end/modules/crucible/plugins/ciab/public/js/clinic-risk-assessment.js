@@ -84,6 +84,7 @@
     wireReportButtons();
     wireCsfToggle();
     wireIntakeDrawer();
+    wireOverviewSections();
     document.getElementById('btnRefresh').addEventListener('click', () => loadAndRender());
 
     await loadAndRender();
@@ -229,6 +230,8 @@
     const b = state.bundle;
     const cover = b.profile.company_name || b.intake?.cover_name || 'Untitled Engagement';
     document.getElementById('craCompanyName').textContent = cover;
+    const crumb = document.getElementById('craBreadcrumbName');
+    if (crumb) crumb.textContent = cover;
     const intakeStatus = b.intake ? `Intake: ${b.intake.completion_percentage}% (${b.intake.status})` : 'No intake yet';
     document.getElementById('craSubtitle').textContent =
       `${b.profile.industry || 'Unspecified industry'} · ${intakeStatus}`;
@@ -518,6 +521,23 @@
     });
   }
 
+  // Collapsible overview sections: ECharts renders 0×0 inside a closed
+  // <details>, so charts must resize when a section is opened. Also makes the
+  // CIS IG1 card (role=button) keyboard-operable.
+  function wireOverviewSections() {
+    document.querySelectorAll('details.cra-section').forEach(d => {
+      d.addEventListener('toggle', () => {
+        if (d.open) requestAnimationFrame(resizeAllCharts);
+      });
+    });
+    const cisCard = document.getElementById('cisCard');
+    if (cisCard) {
+      cisCard.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); cisCard.click(); }
+      });
+    }
+  }
+
   // === Intake breakdown drawer (opened from the CIS IG1 Coverage card) ===
   const INTAKE_SECTION_LABELS = {
     company: 'Company', network: 'Network & Assets', wireless: 'Wireless',
@@ -782,6 +802,8 @@
       control_refs:   parseControlRefs(document.getElementById('fControlRefs').value),
     };
     if (!body.title) { toast('Title is required'); return; }
+    const btn = document.getElementById('btnSaveFinding');
+    Utils.setBtnLoading(btn, true, 'Saving…');
     try {
       if (id) {
         await api('PUT', `/${encodeURIComponent(state.profileId)}/findings/${encodeURIComponent(id)}`, body);
@@ -794,13 +816,16 @@
       await loadAndRender();
     } catch (err) {
       toast('Save failed: ' + err.message, 4000);
+    } finally {
+      Utils.setBtnLoading(btn, false);
     }
   }
 
   async function deleteFinding() {
     const id = document.getElementById('findingId').value;
     if (!id) return;
-    if (!confirm('Delete this finding? This cannot be undone.')) return;
+    const ok = await Confirm.show({ title: 'Delete this finding?', message: 'This cannot be undone.', confirmText: 'Delete', danger: true });
+    if (!ok) return;
     try {
       await api('DELETE', `/${encodeURIComponent(state.profileId)}/findings/${encodeURIComponent(id)}`);
       toast('Finding deleted');
@@ -1134,12 +1159,16 @@
     document.querySelectorAll('#csfSliders input[type=range]').forEach(s => {
       csf_scores[s.dataset.fn] = parseFloat(s.value);
     });
+    const btn = document.getElementById('btnSaveCsf');
+    Utils.setBtnLoading(btn, true, 'Saving…');
     try {
       await api('PUT', `/${encodeURIComponent(state.profileId)}/report`, { csf_scores });
       toast('CSF scores saved');
       await loadAndRender();
     } catch (err) {
       toast('Save failed: ' + err.message, 4000);
+    } finally {
+      Utils.setBtnLoading(btn, false);
     }
   }
 
@@ -1161,21 +1190,19 @@
   function wireReportButtons() {
     document.getElementById('btnSaveCsf').addEventListener('click', saveCsfScores);
     document.getElementById('btnResetCsf').addEventListener('click', resetCsfScores);
-    document.getElementById('btnSaveSummary').addEventListener('click', async () => {
-      const exec_summary = document.getElementById('execSummary').value;
-      try {
-        await api('PUT', `/${encodeURIComponent(state.profileId)}/report`, { exec_summary });
-        toast('Summary saved');
-        state.bundle.report.exec_summary = exec_summary;
-      } catch (err) { toast('Save failed: ' + err.message, 4000); }
-    });
-    document.getElementById('btnFinalize').addEventListener('click', async () => {
-      if (!confirm('Mark this report as final? You can still edit afterwards.')) return;
+    // btnSaveSummary is wired in wireDeloitteExecSave() — it saves all 5 exec
+    // fields in one PUT. Binding it here too caused a duplicate request per click.
+    document.getElementById('btnFinalize').addEventListener('click', async (e) => {
+      const ok = await Confirm.show({ title: 'Mark report as final?', message: 'You can still edit afterwards.', confirmText: 'Mark Final' });
+      if (!ok) return;
+      const btn = e.currentTarget;
+      Utils.setBtnLoading(btn, true, 'Finalizing…');
       try {
         await api('PUT', `/${encodeURIComponent(state.profileId)}/report`, { status: 'final' });
         toast('Report marked final');
         await loadAndRender();
       } catch (err) { toast('Failed: ' + err.message, 4000); }
+      finally { Utils.setBtnLoading(btn, false); }
     });
     document.getElementById('btnExport').addEventListener('click', exportPdf);
     // Open the standalone HTML report in a new tab — student can hit
@@ -1427,6 +1454,8 @@
       description: document.getElementById('aDescription').value || null
     };
     if (!payload.name) { toast('Asset name required', 3000); return; }
+    const btn = document.getElementById('btnSaveAsset');
+    Utils.setBtnLoading(btn, true, 'Saving…');
     try {
       if (id) await api('PUT', `/${state.profileId}/assets/${id}`, payload);
       else    await api('POST', `/${state.profileId}/assets`, payload);
@@ -1435,10 +1464,13 @@
       renderAssets();
       toast(id ? 'Asset updated' : 'Asset added');
     } catch (e) { toast('Save failed: ' + e.message, 4000); }
+    finally { Utils.setBtnLoading(btn, false); }
   }
   async function deleteAsset() {
     const id = document.getElementById('assetId').value;
-    if (!id || !confirm('Delete this asset?')) return;
+    if (!id) return;
+    const ok = await Confirm.show({ title: 'Delete this asset?', message: 'Findings that reference it keep their data, but the asset link is removed.', confirmText: 'Delete', danger: true });
+    if (!ok) return;
     try {
       await api('DELETE', `/${state.profileId}/assets/${id}`);
       closeAssetDrawer();
@@ -1559,12 +1591,14 @@
       READINESS_CTRLS.forEach(c => {
         if (c.type === 'percent') payload[c.k] = parseInt(document.getElementById('ins_' + c.k)?.value) || 0;
       });
+      Utils.setBtnLoading(btn, true, 'Saving…');
       try {
         const r = await api('PUT', `/${state.profileId}/insurance-readiness`, payload);
         state.insurance = r.readiness;
         renderInsurance();
         toast(`Saved — score ${r.readiness.readiness_score}/100 (${r.readiness.readiness_tier})`);
       } catch (e) { toast('Save failed: ' + e.message, 4000); }
+      finally { Utils.setBtnLoading(btn, false); }
     });
   }
 
@@ -1597,7 +1631,7 @@
         const d = (Number(n)||0) - (Number(p)||0);
         const arr = d > 0 ? '▲' : d < 0 ? '▼' : '—';
         const cls = (opts.coverage ? (d > 0 ? 'down' : 'up') : (d > 0 ? 'up' : 'down'));  // coverage: up=good (green); findings: up=bad (red)
-        const color = cls === 'down' ? '#16a34a' : cls === 'up' ? '#dc2626' : '#94a3b8';
+        const color = cls === 'down' ? 'var(--risk-low)' : cls === 'up' ? 'var(--risk-high)' : 'var(--text-muted)';
         const sign = d > 0 ? '+' : '';
         return `<div class="cra-stat-card" style="margin:0; border-left-color:${color};">
           <div class="label">${escapeHtml(label)}</div>
@@ -1617,7 +1651,7 @@
           </div>
         </div>`;
     } else if (deltaHost) {
-      deltaHost.innerHTML = `<div class="cra-card" style="background:#f8fafc;"><p class="sub" style="margin:0;">Take at least 2 snapshots to see a delta comparison here.</p></div>`;
+      deltaHost.innerHTML = `<div class="cra-card" style="background:var(--bg-table-head, #f8fafc);"><p class="sub" style="margin:0;">Take at least 2 snapshots to see a delta comparison here.</p></div>`;
     }
   }
   function wireSnapshotTab() {
@@ -1626,12 +1660,14 @@
     btn.addEventListener('click', async () => {
       const label = prompt('Snapshot label?', `Snapshot ${new Date().toISOString().slice(0,10)}`);
       if (!label) return;
+      Utils.setBtnLoading(btn, true, 'Snapshotting…');
       try {
         await api('POST', `/${state.profileId}/snapshots`, { label });
         await loadSnapshots();
         renderSnapshots();
         toast('Snapshot saved');
       } catch (e) { toast('Snapshot failed: ' + e.message, 4000); }
+      finally { Utils.setBtnLoading(btn, false); }
     });
   }
 
@@ -1714,6 +1750,7 @@
     if (!btn || btn.dataset.wired) return;
     btn.dataset.wired = '1';
     btn.addEventListener('click', async () => {
+      Utils.setBtnLoading(btn, true, 'Saving…');
       try {
         const payload = {
           exec_summary: document.getElementById('execSummary').value,
@@ -1725,6 +1762,7 @@
         await api('PUT', `/${state.profileId}/report`, payload);
         toast('Exec summary saved');
       } catch (e) { toast('Save failed: ' + e.message, 4000); }
+      finally { Utils.setBtnLoading(btn, false); }
     }, { once: false });
   }
 

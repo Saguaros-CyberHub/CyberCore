@@ -69,8 +69,31 @@ router.post('/chat', optionalAuth, async (req, res) => {
 // POST /api/webhook/profile-complete - Callback from N8N when profile is done
 // ============================================================================
 
+// Legacy n8n callback. Generation now runs inline, so nothing first-party
+// calls this anymore. It writes attacker-chosen rows into profiles/intakes,
+// so it must not be reachable without proof of identity: callers must send
+// X-Webhook-Secret matching CIAB_WEBHOOK_SECRET. With no secret configured
+// the endpoint is disabled rather than open.
+const crypto = require('crypto');
+function verifyWebhookSecret(req, res) {
+  const expected = process.env.CIAB_WEBHOOK_SECRET;
+  if (!expected) {
+    res.status(503).json({ error: 'Webhook disabled: CIAB_WEBHOOK_SECRET not configured' });
+    return false;
+  }
+  const provided = String(req.headers['x-webhook-secret'] || '');
+  const a = crypto.createHash('sha256').update(provided).digest();
+  const b = crypto.createHash('sha256').update(expected).digest();
+  if (!crypto.timingSafeEqual(a, b)) {
+    res.status(401).json({ error: 'Invalid webhook secret' });
+    return false;
+  }
+  return true;
+}
+
 router.post('/webhook/profile-complete', async (req, res) => {
   try {
+    if (!verifyWebhookSecret(req, res)) return;
     const {
       userId,
       runId,

@@ -10,14 +10,41 @@
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
   <style>
+    /* Risk + status palette as tokens so dark mode can re-tint them */
+    :root {
+      --risk-low: #16a34a; --risk-medium: #d97706; --risk-high: #dc2626; --risk-critical: #7f1d1d;
+      --pill-open-bg: #fee2e2;    --pill-open-fg: #991b1b;
+      --pill-mitigated-bg: #dcfce7; --pill-mitigated-fg: #166534;
+      --pill-accepted-bg: #fef3c7; --pill-accepted-fg: #92400e;
+      --pill-transferred-bg: #dbeafe; --pill-transferred-fg: #1e40af;
+    }
+    [data-theme="dark"] {
+      --risk-critical: #991b1b;
+      --pill-open-bg: rgba(239,68,68,0.16);    --pill-open-fg: #fca5a5;
+      --pill-mitigated-bg: rgba(34,197,94,0.16); --pill-mitigated-fg: #86efac;
+      --pill-accepted-bg: rgba(245,158,11,0.16); --pill-accepted-fg: #fcd34d;
+      --pill-transferred-bg: rgba(59,130,246,0.16); --pill-transferred-fg: #93c5fd;
+    }
     .cra-shell { display: flex; flex-direction: column; gap: 16px; }
+    .cra-breadcrumb { font-size: 0.8rem; color: var(--text-muted); }
+    .cra-breadcrumb a { color: var(--primary); text-decoration: none; }
+    .cra-breadcrumb a:hover { text-decoration: underline; }
     .cra-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
     .cra-header h1 { margin: 0 0 4px 0; font-size: 1.5rem; }
     .cra-header .sub { color: var(--text-secondary); font-size: 0.9rem; }
-    .cra-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); margin-bottom: 16px; }
-    .cra-tab { padding: 10px 18px; cursor: pointer; border: 0; background: transparent; color: var(--text-secondary); font-size: 0.95rem; font-weight: 500; border-bottom: 2px solid transparent; }
+    .cra-tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--border-color, #e2e8f0); margin-bottom: 16px; overflow-x: auto; scrollbar-width: thin; }
+    .cra-tab-group { display: flex; flex-direction: column; flex-shrink: 0; }
+    .cra-tab-group + .cra-tab-group { border-left: 1px solid var(--border-color, #e2e8f0); padding-left: 18px; }
+    .cra-tab-group .group-label { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-muted); padding: 4px 4px 0; }
+    .cra-tab-group .group-tabs { display: flex; gap: 4px; }
+    .cra-tab { padding: 8px 14px 10px; cursor: pointer; border: 0; background: transparent; color: var(--text-secondary); font-size: 0.92rem; font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
     .cra-tab:hover { color: var(--text-primary); }
     .cra-tab.active { color: var(--primary, #1e40af); border-bottom-color: var(--primary, #1e40af); }
+    /* Collapsible overview sections — charts resize on toggle (see JS) */
+    details.cra-section { margin-top: 16px; }
+    details.cra-section > summary { cursor: pointer; user-select: none; font-weight: 600; font-size: 0.95rem; color: var(--text-primary); padding: 6px 2px; list-style-position: inside; }
+    details.cra-section > summary:hover { color: var(--primary, #1e40af); }
+    details.cra-section > summary .sec-hint { font-weight: 400; font-size: 0.8rem; color: var(--text-muted); margin-left: 8px; }
     .cra-pane { display: none; }
     .cra-pane.active { display: block; }
     .cra-grid { display: grid; gap: 16px; }
@@ -39,15 +66,15 @@
     .findings-table th { background: var(--bg-table-head, #f8fafc); font-weight: 600; color: var(--text-secondary); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
     .findings-table tr:hover { background: var(--bg-hover, #f8fafc); cursor: pointer; }
     .findings-table .risk-badge { display: inline-block; min-width: 24px; padding: 2px 6px; border-radius: 4px; font-weight: 600; text-align: center; color: white; font-size: 0.75rem; }
-    .risk-low    { background: #16a34a; }
-    .risk-medium { background: #d97706; }
-    .risk-high   { background: #dc2626; }
-    .risk-critical { background: #7f1d1d; }
+    .risk-low    { background: var(--risk-low); }
+    .risk-medium { background: var(--risk-medium); }
+    .risk-high   { background: var(--risk-high); }
+    .risk-critical { background: var(--risk-critical); }
     .status-pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.7rem; font-weight: 500; text-transform: uppercase; }
-    .status-open       { background: #fee2e2; color: #991b1b; }
-    .status-mitigated  { background: #dcfce7; color: #166534; }
-    .status-accepted   { background: #fef3c7; color: #92400e; }
-    .status-transferred{ background: #dbeafe; color: #1e40af; }
+    .status-open       { background: var(--pill-open-bg); color: var(--pill-open-fg); }
+    .status-mitigated  { background: var(--pill-mitigated-bg); color: var(--pill-mitigated-fg); }
+    .status-accepted   { background: var(--pill-accepted-bg); color: var(--pill-accepted-fg); }
+    .status-transferred{ background: var(--pill-transferred-bg); color: var(--pill-transferred-fg); }
 
     /* Drawer for add/edit finding */
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.4); z-index: 200; display: none; }
@@ -66,13 +93,14 @@
     .drawer .slider-row { display: flex; align-items: center; gap: 10px; }
     .drawer .slider-row input[type=range] { flex: 1; }
     .drawer .slider-row .val { width: 24px; text-align: center; font-weight: 600; color: var(--primary, #1e40af); }
+    .drawer .group-title { font-size: 0.78rem; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; margin: 20px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
 
     .btn { padding: 8px 14px; border-radius: 6px; border: 1px solid var(--border-color, #e2e8f0); background: var(--bg-card, white); cursor: pointer; font: inherit; color: var(--text-primary); }
     .btn:hover { background: var(--bg-hover, #f8fafc); }
     .btn.primary { background: var(--primary, #1e40af); border-color: var(--primary, #1e40af); color: white; }
     .btn.primary:hover { background: var(--primary-dark, #1e3a8a); }
-    .btn.danger { color: #dc2626; border-color: #fecaca; }
-    .btn.danger:hover { background: #fee2e2; }
+    .btn.danger { color: var(--danger, #dc2626); border-color: var(--pill-open-bg); }
+    .btn.danger:hover { background: var(--pill-open-bg); }
 
     .csf-slider-grid { display: grid; grid-template-columns: 120px 1fr 32px; gap: 10px; align-items: center; margin: 8px 0; }
     .csf-slider-grid .name { font-weight: 600; }
@@ -98,9 +126,9 @@
     .ram-row .score { text-align:center; font-weight: 600; font-size: 0.85rem; }
     .ram-row .reasonable { text-align:center; font-size:0.85rem; }
     .ram-row .score-badge { display:inline-block; min-width:24px; padding:2px 6px; border-radius: 4px; color: white; font-weight:600; }
-    .score-1, .score-2 { background: #16a34a; }
-    .score-3, .score-4 { background: #d97706; }
-    .score-6, .score-9 { background: #dc2626; }
+    .score-1, .score-2 { background: var(--risk-low); }
+    .score-3, .score-4 { background: var(--risk-medium); }
+    .score-6, .score-9 { background: var(--risk-high); }
     .score-empty { background: var(--gray-200, #e2e8f0); color: var(--text-muted, #64748b); }
     .ram-drawer { padding: 16px 16px 20px 16px; background: var(--bg-card, white); border-top: 1px dashed var(--border-color, #e2e8f0); display:none; }
     .ram-row.expanded + .ram-drawer { display: block; }
@@ -123,9 +151,9 @@
     .intake-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 18px 0; }
     .intake-summary .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 14px; font-size: 0.78rem; font-weight: 600; }
     .ig1-ans { display: inline-block; padding: 2px 9px; border-radius: 11px; font-size: 0.72rem; font-weight: 600; text-transform: capitalize; white-space: nowrap; }
-    .ig1-ans.yes     { background: #dcfce7; color: #166534; }
-    .ig1-ans.partial { background: #fef3c7; color: #92400e; }
-    .ig1-ans.no      { background: #fee2e2; color: #991b1b; }
+    .ig1-ans.yes     { background: var(--pill-mitigated-bg); color: var(--pill-mitigated-fg); }
+    .ig1-ans.partial { background: var(--pill-accepted-bg); color: var(--pill-accepted-fg); }
+    .ig1-ans.no      { background: var(--pill-open-bg); color: var(--pill-open-fg); }
     .ig1-ans.unknown { background: var(--bg-table-head, #f1f5f9); color: var(--text-muted, #64748b); }
     .intake-section { margin-bottom: 20px; }
     .intake-section > .sec-title { font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 8px 0; padding-bottom: 5px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
@@ -141,8 +169,10 @@
 
     .empty-state { text-align: center; padding: 40px 20px; color: var(--text-muted, #64748b); }
     .empty-state .big-icon { font-size: 2.5rem; margin-bottom: 8px; }
-    .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 10px 18px; border-radius: 6px; font-size: 0.875rem; z-index: 300; opacity: 0; transition: opacity 0.2s; }
-    .toast.show { opacity: 1; }
+    /* Lightweight inline toast — namespaced so it can't clash with the global .toast component */
+    .cra-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1e293b; color: white; padding: 10px 18px; border-radius: 6px; font-size: 0.875rem; z-index: 300; opacity: 0; transition: opacity 0.2s; }
+    .cra-toast.show { opacity: 1; }
+    [data-theme="dark"] .cra-toast { background: var(--bg-card-elevated, #1a2040); border: 1px solid var(--border-color); }
   </style>
 </head>
 <body>
@@ -163,6 +193,7 @@
 
       <div class="page-content">
         <div class="cra-shell" id="craShell">
+          <div class="cra-breadcrumb"><a href="/ciab/clinic-risk-assessment">Risk Assessments</a> <span aria-hidden="true">/</span> <span id="craBreadcrumbName">Assessment</span></div>
           <div class="cra-header">
             <div>
               <h1 id="craCompanyName">Loading…</h1>
@@ -170,20 +201,35 @@
             </div>
             <div style="display:flex; gap:8px; align-items:center;">
               <span id="craSourceBadge" class="status-pill status-open" style="display:none"></span>
-              <button class="btn" id="btnRefresh" title="Reload data">↻</button>
+              <button class="btn" id="btnRefresh" title="Reload data" aria-label="Reload data">↻</button>
             </div>
           </div>
 
           <div class="cra-tabs" role="tablist">
-            <button class="cra-tab active" data-tab="overview"  role="tab">Overview</button>
-            <button class="cra-tab" data-tab="assets"    role="tab">Assets</button>
-            <button class="cra-tab" data-tab="register"  role="tab">Risk Register</button>
-            <button class="cra-tab" data-tab="cisram"    role="tab">CIS RAM Workbook</button>
-            <button class="cra-tab" data-tab="poam"      role="tab">POA&amp;M</button>
-            <button class="cra-tab" data-tab="insurance" role="tab">Insurance</button>
-            <button class="cra-tab" data-tab="maturity"  role="tab">Maturity &amp; Controls</button>
-            <button class="cra-tab" data-tab="snapshots" role="tab">Snapshots</button>
-            <button class="cra-tab" data-tab="report"    role="tab">Report</button>
+            <div class="cra-tab-group">
+              <span class="group-label">Assess</span>
+              <div class="group-tabs">
+                <button class="cra-tab active" data-tab="overview"  role="tab">Overview</button>
+                <button class="cra-tab" data-tab="assets"    role="tab">Assets</button>
+                <button class="cra-tab" data-tab="register"  role="tab">Risk Register</button>
+              </div>
+            </div>
+            <div class="cra-tab-group">
+              <span class="group-label">Analyze</span>
+              <div class="group-tabs">
+                <button class="cra-tab" data-tab="cisram"    role="tab">CIS RAM</button>
+                <button class="cra-tab" data-tab="poam"      role="tab">POA&amp;M</button>
+                <button class="cra-tab" data-tab="insurance" role="tab">Insurance</button>
+                <button class="cra-tab" data-tab="maturity"  role="tab">Maturity</button>
+              </div>
+            </div>
+            <div class="cra-tab-group">
+              <span class="group-label">Deliver</span>
+              <div class="group-tabs">
+                <button class="cra-tab" data-tab="snapshots" role="tab">Snapshots</button>
+                <button class="cra-tab" data-tab="report"    role="tab">Report</button>
+              </div>
+            </div>
           </div>
 
           <!-- OVERVIEW -->
@@ -194,39 +240,45 @@
             <div class="cra-grid cols-4" id="overviewStats"></div>
 
             <!-- Compliance posture callout — populated by JS from intake._meta.posture -->
-            <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:#eff6ff; border-left:4px solid #1e40af;">
-              <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:#1e40af; text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
-              <div style="font-size:1.05rem; font-weight:600; color:#1e293b; margin-top:4px;" id="postureTitle"></div>
-              <div style="font-size:0.85rem; color:#64748b; margin-top:4px;" id="postureBody"></div>
+            <div id="postureCallout" style="display:none; margin-top:16px; padding:14px 18px; border-radius:8px; background:rgba(59,130,246,0.08); border-left:4px solid var(--primary, #1e40af);">
+              <div style="font-size:0.7rem; font-weight:700; letter-spacing:0.1em; color:var(--primary, #1e40af); text-transform:uppercase;" id="postureKicker">Compliance Posture</div>
+              <div style="font-size:1.05rem; font-weight:600; color:var(--text-primary, #1e293b); margin-top:4px;" id="postureTitle"></div>
+              <div style="font-size:0.85rem; color:var(--text-muted, #64748b); margin-top:4px;" id="postureBody"></div>
             </div>
 
-            <div class="cra-grid cols-2" style="margin-top:16px">
-              <div class="cra-card">
-                <h3>Risk Heat Map — Inherent (today)</h3>
-                <div class="cra-chart tall" id="chartHeatmap"></div>
+            <details class="cra-section" open id="secHeatmaps">
+              <summary>Risk Heat Maps <span class="sec-hint">inherent today vs. residual after treatment</span></summary>
+              <div class="cra-grid cols-2" style="margin-top:10px">
+                <div class="cra-card">
+                  <h3>Risk Heat Map — Inherent (today)</h3>
+                  <div class="cra-chart tall" id="chartHeatmap"></div>
+                </div>
+                <div class="cra-card">
+                  <h3>Risk Heat Map — Residual (post-treatment)</h3>
+                  <div class="cra-chart tall" id="chartHeatmapResidual"></div>
+                </div>
               </div>
-              <div class="cra-card">
-                <h3>Risk Heat Map — Residual (post-treatment)</h3>
-                <div class="cra-chart tall" id="chartHeatmapResidual"></div>
+            </details>
+            <details class="cra-section" open id="secFrameworks">
+              <summary>Framework Maturity &amp; Coverage <span class="sec-hint">NIST CSF 2.0 and CIS IG1</span></summary>
+              <div class="cra-grid" style="margin-top:10px; grid-template-columns: 1fr;" id="csfRadarRow">
+                <div class="cra-card">
+                  <h3>NIST CSF 2.0 Maturity</h3>
+                  <div class="cra-chart tall" id="chartRadar"></div>
+                </div>
               </div>
-            </div>
-            <div class="cra-grid" style="margin-top:16px; grid-template-columns: 1fr;" id="csfRadarRow">
-              <div class="cra-card">
-                <h3>NIST CSF 2.0 Maturity</h3>
-                <div class="cra-chart tall" id="chartRadar"></div>
-              </div>
-            </div>
 
-            <div class="cra-grid cols-2" style="margin-top:16px" id="cisCsfRow">
-              <div class="cra-card cis-clickable" id="cisCard" title="Click to view the client's full intake form">
-                <h3>CIS IG1 Coverage <span class="view-intake-hint">View intake →</span></h3>
-                <div class="cra-chart" id="chartCis"></div>
+              <div class="cra-grid cols-2" style="margin-top:16px" id="cisCsfRow">
+                <div class="cra-card cis-clickable" id="cisCard" role="button" tabindex="0" title="Click to view the client's full intake form">
+                  <h3>CIS IG1 Coverage <span class="view-intake-hint">View intake →</span></h3>
+                  <div class="cra-chart" id="chartCis"></div>
+                </div>
+                <div class="cra-card" id="csfBarsCard">
+                  <h3>NIST CSF Function Scores</h3>
+                  <div class="cra-chart" id="chartCsf"></div>
+                </div>
               </div>
-              <div class="cra-card" id="csfBarsCard">
-                <h3>NIST CSF Function Scores</h3>
-                <div class="cra-chart" id="chartCsf"></div>
-              </div>
-            </div>
+            </details>
           </div>
 
           <!-- ASSETS (Tier 1) -->
@@ -390,13 +442,13 @@
               <p class="sub">Classic quantitative risk formula: <code>SLE = AV × EF</code>, <code>ALE = SLE × ARO</code>. The single most-tested formula on Security+ / CISSP / CISA exams.</p>
               <div style="display:grid; grid-template-columns: 1fr 1fr 1fr auto; gap:10px; align-items:end;">
                 <label>Asset Value (USD)
-                  <input type="number" id="aleAV" placeholder="500000" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+                  <input type="number" id="aleAV" placeholder="500000" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit; background:var(--bg-input,white); color:var(--text-primary);">
                 </label>
                 <label>Exposure Factor (0.0 – 1.0)
-                  <input type="number" id="aleEF" step="0.05" min="0" max="1" placeholder="0.4" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+                  <input type="number" id="aleEF" step="0.05" min="0" max="1" placeholder="0.4" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit; background:var(--bg-input,white); color:var(--text-primary);">
                 </label>
                 <label>ARO (events / year)
-                  <input type="number" id="aleARO" step="0.05" min="0" placeholder="0.25" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit;">
+                  <input type="number" id="aleARO" step="0.05" min="0" placeholder="0.25" style="width:100%; padding:6px 8px; border:1px solid var(--border-color,#e2e8f0); border-radius:6px; font:inherit; background:var(--bg-input,white); color:var(--text-primary);">
                 </label>
                 <button class="btn primary" id="btnCalcAle">Calculate</button>
               </div>
@@ -491,7 +543,7 @@
   <aside class="drawer" id="drawer">
     <header>
       <h3 id="drawerTitle">Add Finding</h3>
-      <button class="btn" id="btnCloseDrawer">✕</button>
+      <button class="btn" id="btnCloseDrawer" aria-label="Close">✕</button>
     </header>
     <div class="body">
       <input type="hidden" id="findingId">
@@ -524,6 +576,7 @@
           </select>
         </div>
       </div>
+      <div class="group-title">Inherent Scoring</div>
       <div class="row2">
         <div class="field">
           <label>Likelihood (1–5)</label>
@@ -540,6 +593,7 @@
           </div>
         </div>
       </div>
+      <div class="group-title">Treatment &amp; Residual Risk</div>
       <div class="field">
         <label>Recommendation</label>
         <textarea id="fRecommendation" placeholder="What you'd advise the client to do."></textarea>
@@ -569,6 +623,7 @@
       </div>
 
       <!-- Threat source (NIST 800-30) -->
+      <div class="group-title">Threat &amp; Discovery</div>
       <div class="row2">
         <div class="field">
           <label>Threat Source (NIST 800-30)</label>
@@ -594,6 +649,7 @@
       </div>
 
       <!-- Owner / Reviewer / Date (Tier 1) -->
+      <div class="group-title">Ownership &amp; Timeline</div>
       <div class="row2">
         <div class="field">
           <label>Owner Role</label>
@@ -616,6 +672,7 @@
       </div>
 
       <!-- Evidence (Tier 1) -->
+      <div class="group-title">Evidence</div>
       <div class="field">
         <label>Evidence Observed</label>
         <textarea id="fEvidence" placeholder="Specific evidence: 'Saw 3/5 admin accounts without MFA in M365 admin center on 2026-05-23.'"></textarea>
@@ -672,13 +729,13 @@
   <aside class="drawer" id="libDrawer" style="width: 640px;">
     <header>
       <h3>Threat Scenario Library</h3>
-      <button class="btn" id="btnCloseLib">✕</button>
+      <button class="btn" id="btnCloseLib" aria-label="Close">✕</button>
     </header>
     <div class="body">
       <p class="sub" style="margin-top:0;">Browse canonical SMB risk scenarios. Click one to instantiate it as a new finding in your register — you can edit any field afterward.</p>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
-        <input type="text" id="libSearch" placeholder="Search scenarios…" style="flex:1; padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px;">
-        <select id="libCategory" style="padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px;">
+        <input type="text" id="libSearch" placeholder="Search scenarios…" style="flex:1; padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; background:var(--bg-input,white); color:var(--text-primary);">
+        <select id="libCategory" style="padding:8px 10px; border:1px solid var(--border-color, #e2e8f0); border-radius:6px; background:var(--bg-input,white); color:var(--text-primary);">
           <option value="">All categories</option>
           <option value="technical">Technical</option>
           <option value="process">Process</option>
@@ -695,7 +752,7 @@
   <aside class="drawer" id="assetDrawer">
     <header>
       <h3 id="assetDrawerTitle">Add Asset</h3>
-      <button class="btn" id="btnCloseAssetDrawer">✕</button>
+      <button class="btn" id="btnCloseAssetDrawer" aria-label="Close">✕</button>
     </header>
     <div class="body">
       <input type="hidden" id="assetId">
@@ -801,14 +858,14 @@
   <aside class="drawer" id="intakeDrawer" style="width: 720px;">
     <header>
       <h3 id="intakeDrawerTitle">Client Intake Form</h3>
-      <button class="btn" id="btnCloseIntake">✕</button>
+      <button class="btn" id="btnCloseIntake" aria-label="Close">✕</button>
     </header>
     <div class="body" id="intakeBody">
       <div class="empty-state">Loading…</div>
     </div>
   </aside>
 
-  <div class="toast" id="toast"></div>
+  <div class="cra-toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="/ciab/vendor/echarts.min.js"></script>
   <script src="/js/app.js"></script>

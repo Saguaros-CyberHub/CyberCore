@@ -75,7 +75,7 @@ function handleDeployLaneSuccess(data, challenge_key, status) {
   const via = data.method === 'webhook' ? ' (via N8N)' : '';
   status.innerHTML = `
     <strong style="color: #38a169;">Lane deployment started${via}!</strong><br>
-    Lane ID: <code style="background: #edf2f7; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">${data.lane_id}</code><br>
+    Lane ID: <code style="background: var(--gray-100); padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.8rem;">${data.lane_id}</code><br>
     VXLAN: ${data.vxlan_id || 'N/A'} | VNet: ${data.vnet || 'N/A'} | Challenge: ${data.challenge || challenge_key}<br>
     <span style="font-size: 0.8rem; color: var(--gray-500);">VMs cloning in background — check Active Lanes tab for status.</span>
   `;
@@ -98,7 +98,7 @@ async function loadLanes() {
     const lanes = await api('GET', url);
 
     if (lanes.length === 0) {
-      container.innerHTML = '<div style="background: white; border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No lanes found.</div>';
+      container.innerHTML = '<div style="background: var(--bg-card, white); border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No lanes found.</div>';
       return;
     }
 
@@ -250,7 +250,7 @@ async function runReconcile() {
     }
 
     panel.innerHTML = `
-      <div style="background:var(--card-bg, white); border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid ${statusColor};">
+      <div style="background:var(--bg-card, white); border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid ${statusColor};">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
           <h3 style="margin:0; font-size:1rem;">Proxmox Audit
             <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:12px; color:white; background:${statusColor}; margin-left:0.5rem;">${statusLabel}</span>
@@ -258,35 +258,35 @@ async function runReconcile() {
           <span style="font-size:0.75rem; color:var(--gray-400);">${r.timestamp}</span>
         </div>
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:0.75rem; margin-bottom:1rem;">
-          <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:var(--gray-50, #f7fafc); border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700;">${s.proxmox_cyberhub_vms}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Proxmox VMs</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:var(--bg, #f7fafc); border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:var(--gray-50, #f7fafc); border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700;">${s.db_active_lanes}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">DB Lanes</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:${s.orphaned_on_proxmox?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:${s.orphaned_on_proxmox?'rgba(229,62,62,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_on_proxmox?'#e53e3e':'inherit'};">${s.orphaned_on_proxmox}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned VMs</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:${s.stale_in_db?'#fffff0':'var(--bg, #f7fafc)'}; border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:${s.stale_in_db?'rgba(214,158,46,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700; color:${s.stale_in_db?'#d69e2e':'inherit'};">${s.stale_in_db}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Stale DB Records</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:${s.orphaned_zones?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:${s.orphaned_zones?'rgba(229,62,62,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_zones?'#e53e3e':'inherit'};">${s.orphaned_zones}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Zones</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:${s.orphaned_vnets?'#fffff0':'var(--bg, #f7fafc)'}; border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:${s.orphaned_vnets?'rgba(214,158,46,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700; color:${s.orphaned_vnets?'#d69e2e':'inherit'};">${s.orphaned_vnets}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned VNets</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:${(s.orphaned_disks||0)?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:${(s.orphaned_disks||0)?'rgba(229,62,62,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700; color:${(s.orphaned_disks||0)?'#e53e3e':'inherit'};">${s.orphaned_disks || 0}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Disks${(s.orphaned_disks_total_gb && parseFloat(s.orphaned_disks_total_gb) > 0) ? ` (${s.orphaned_disks_total_gb} GB)` : ''}</div>
           </div>
-          <div style="text-align:center; padding:0.5rem; background:${(s.orphaned_guac_connections||0)?'#fff5f5':'var(--bg, #f7fafc)'}; border-radius:8px;">
+          <div style="text-align:center; padding:0.5rem; background:${(s.orphaned_guac_connections||0)?'rgba(229,62,62,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700; color:${(s.orphaned_guac_connections||0)?'#e53e3e':'inherit'};">${s.orphaned_guac_connections || 0}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Guac Conns</div>
           </div>
@@ -351,7 +351,7 @@ async function runReconcile() {
 }
 
 async function destroyOrphanVM(vmid, node, type, btn) {
-  if (!confirm('Destroy VM ' + vmid + ' on ' + node + '? This cannot be undone.')) return;
+  if (!await Confirm.show({ title: 'Destroy VM', message: 'Destroy VM ' + vmid + ' on ' + node + '? This cannot be undone.', confirmText: 'Destroy', danger: true })) return;
   btn.disabled = true;
   btn.textContent = '...';
   try {
@@ -360,14 +360,14 @@ async function destroyOrphanVM(vmid, node, type, btn) {
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
   } catch (e) {
-    alert('Failed to destroy VM: ' + e.message);
+    Toast.error('Destroy Failed', 'Failed to destroy VM: ' + e.message);
     btn.disabled = false;
     btn.textContent = 'Destroy';
   }
 }
 
 async function destroyOrphanZone(zone, btn) {
-  if (!confirm('Destroy zone "' + zone + '" and ALL its VNets? This cannot be undone.')) return;
+  if (!await Confirm.show({ title: 'Destroy Zone', message: 'Destroy zone "' + zone + '" and ALL its VNets? This cannot be undone.', confirmText: 'Destroy', danger: true })) return;
   btn.disabled = true;
   btn.textContent = '...';
   try {
@@ -376,14 +376,14 @@ async function destroyOrphanZone(zone, btn) {
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
   } catch (e) {
-    alert('Failed to destroy zone: ' + e.message);
+    Toast.error('Destroy Failed', 'Failed to destroy zone: ' + e.message);
     btn.disabled = false;
     btn.textContent = 'Destroy Zone + VNets';
   }
 }
 
 async function destroyOrphanVNet(vnet, btn) {
-  if (!confirm('Delete VNet "' + vnet + '"?')) return;
+  if (!await Confirm.show({ title: 'Delete VNet', message: 'Delete VNet "' + vnet + '"?', confirmText: 'Delete', danger: true })) return;
   btn.disabled = true;
   btn.textContent = '...';
   try {
@@ -392,14 +392,14 @@ async function destroyOrphanVNet(vnet, btn) {
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
   } catch (e) {
-    alert('Failed: ' + e.message);
+    Toast.error('Failed', e.message);
     btn.disabled = false;
     btn.textContent = 'Delete';
   }
 }
 
 async function destroyOrphanDisk(node, storage, volid, btn) {
-  if (!confirm('Delete disk image "' + volid + '"? This frees the storage and cannot be undone.')) return;
+  if (!await Confirm.show({ title: 'Delete Disk Image', message: 'Delete disk image "' + volid + '"? This frees the storage and cannot be undone.', confirmText: 'Delete', danger: true })) return;
   btn.disabled = true;
   btn.textContent = '...';
   try {
@@ -408,7 +408,7 @@ async function destroyOrphanDisk(node, storage, volid, btn) {
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
   } catch (e) {
-    alert('Failed: ' + e.message);
+    Toast.error('Failed', e.message);
     btn.disabled = false;
     btn.textContent = 'Delete';
   }
@@ -416,7 +416,7 @@ async function destroyOrphanDisk(node, storage, volid, btn) {
 
 // Delete a single orphaned Guac connection. Called from event delegation below.
 async function destroyOrphanGuacConn(id, name, btn) {
-  if (!confirm('Delete Guacamole connection "' + (name || id) + '"?')) return;
+  if (!await Confirm.show({ title: 'Delete Connection', message: 'Delete Guacamole connection "' + (name || id) + '"?', confirmText: 'Delete', danger: true })) return;
   btn.disabled = true;
   btn.textContent = '...';
   try {
@@ -425,7 +425,7 @@ async function destroyOrphanGuacConn(id, name, btn) {
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
   } catch (e) {
-    alert('Failed: ' + e.message);
+    Toast.error('Failed', e.message);
     btn.disabled = false;
     btn.textContent = 'Delete';
   }
@@ -434,8 +434,8 @@ async function destroyOrphanGuacConn(id, name, btn) {
 async function sweepAllOrphanGuacConns(btn) {
   const panel = document.getElementById('reconcileResults');
   const rowBtns = Array.from(panel?.querySelectorAll('button.guac-conn-delete') || []);
-  if (rowBtns.length === 0) { alert('No connections to sweep.'); return; }
-  if (!confirm(`Delete all ${rowBtns.length} orphaned Guac connections? This cannot be undone.`)) return;
+  if (rowBtns.length === 0) { Toast.info('Nothing to Sweep', 'No connections to sweep.'); return; }
+  if (!await Confirm.show({ title: 'Sweep Guac Connections', message: `Delete all ${rowBtns.length} orphaned Guac connections? This cannot be undone.`, confirmText: 'Delete All', danger: true })) return;
   btn.disabled = true;
   btn.textContent = 'Sweeping...';
   let deleted = 0;
@@ -473,7 +473,7 @@ document.addEventListener('click', (e) => {
 });
 
 async function sweepAllOrphanDisks(btn) {
-  if (!confirm('Sweep ALL orphaned disks shown here? This runs serially and may take several minutes on Ceph/RBD storage.')) return;
+  if (!await Confirm.show({ title: 'Sweep Orphaned Disks', message: 'Sweep ALL orphaned disks shown here? This runs serially and may take several minutes on Ceph/RBD storage.', confirmText: 'Sweep All', danger: true })) return;
   btn.disabled = true;
   btn.textContent = 'Sweeping...';
   try {
@@ -488,14 +488,14 @@ async function sweepAllOrphanDisks(btn) {
     // Re-run the audit to refresh the table
     setTimeout(() => runReconcile(), 1500);
   } catch (e) {
-    alert('Sweep failed: ' + e.message);
+    Toast.error('Sweep Failed', e.message);
     btn.disabled = false;
     btn.textContent = 'Sweep All';
   }
 }
 
 async function markLaneDeleted(laneId, btn) {
-  if (!confirm('Mark this lane as deleted in the DB? The VXLAN will be freed for reuse.')) return;
+  if (!await Confirm.show({ title: 'Mark Lane Deleted', message: 'Mark this lane as deleted in the DB? The VXLAN will be freed for reuse.', confirmText: 'Mark Deleted', danger: true })) return;
   btn.disabled = true;
   btn.textContent = '...';
   try {
@@ -505,7 +505,7 @@ async function markLaneDeleted(laneId, btn) {
     btn.style.borderColor = '#38a169';
     loadLanes();
   } catch (e) {
-    alert('Failed: ' + e.message);
+    Toast.error('Failed', e.message);
     btn.disabled = false;
     btn.textContent = 'Mark Deleted';
   }
@@ -552,16 +552,16 @@ async function renderScriptSelector(container, vms, selectorId, preselected = []
       <strong style="font-size: 0.9rem;">Vulnerability Scripts</strong>
       <span id="${selectorId}-total" style="font-size: 0.75rem; color: var(--gray-500);">0 scripts selected</span>
     </div>
-    <div style="display: flex; gap: 0; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; min-height: 250px;">
+    <div style="display: flex; gap: 0; border: 1px solid var(--border-color); border-radius: 8px; overflow: hidden; min-height: 250px;">
       <!-- VM List (left sidebar) -->
-      <div id="${selectorId}-vmlist" style="width: 180px; min-width: 180px; background: #f7fafc; border-right: 1px solid #e2e8f0; overflow-y: auto; max-height: 350px;">
+      <div id="${selectorId}-vmlist" style="width: 180px; min-width: 180px; background: var(--gray-50); border-right: 1px solid var(--border-color); overflow-y: auto; max-height: 350px;">
         ${vms.map((vm, i) => {
           const count = (scriptSelections[selectorId][vm.name] || new Set()).size;
           return `
           <div class="${selectorId}-vm-tab" data-vm="${escHtml(vm.name)}"
             onclick="selectScriptVM('${selectorId}', '${escHtml(vm.name)}')"
-            style="padding: 0.6rem 0.75rem; cursor: pointer; border-bottom: 1px solid #e2e8f0; font-size: 0.8rem;
-                   ${i === 0 ? 'background: white; border-left: 3px solid #4299e1;' : 'border-left: 3px solid transparent;'}">
+            style="padding: 0.6rem 0.75rem; cursor: pointer; border-bottom: 1px solid var(--border-color); font-size: 0.8rem;
+                   ${i === 0 ? 'background: var(--bg-card); border-left: 3px solid #4299e1;' : 'border-left: 3px solid transparent;'}">
             <div style="font-weight: 600;">${escHtml(vm.name)}</div>
             <div style="font-size: 0.7rem; color: var(--gray-500);">${escHtml(vm.role || '')}${vm.os ? ' · ' + escHtml(vm.os) : ''}</div>
             <div style="font-size: 0.65rem; color: #4299e1; margin-top: 0.15rem;" id="${selectorId}-vmcount-${escHtml(vm.name)}">${count} script${count !== 1 ? 's' : ''}</div>
@@ -588,7 +588,7 @@ function selectScriptVM(selectorId, vmName) {
   // Update tab styles
   document.querySelectorAll(`.${selectorId}-vm-tab`).forEach(tab => {
     const isActive = tab.dataset.vm === vmName;
-    tab.style.background = isActive ? 'white' : '';
+    tab.style.background = isActive ? 'var(--bg-card)' : '';
     tab.style.borderLeftColor = isActive ? '#4299e1' : 'transparent';
   });
 
@@ -620,23 +620,23 @@ function renderScriptPanelForVM(selectorId, vmName, container) {
 
   let html = `
     <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">
-      <input type="text" id="${selectorId}-search" placeholder="Search scripts..." oninput="filterScriptPanel('${selectorId}')" style="flex: 1; padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+      <input type="text" id="${selectorId}-search" placeholder="Search scripts..." oninput="filterScriptPanel('${selectorId}')" style="flex: 1; padding: 0.3rem 0.6rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.8rem;">
       <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #4299e1; color: #4299e1; background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'all')">All</button>
-      <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #cbd5e0; color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'none')">None</button>
+      <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid var(--border-color); color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'none')">None</button>
       <button style="font-size: 0.7rem; padding: 0.2rem 0.5rem; border: 1px solid #38a169; color: #38a169; background: transparent; border-radius: 4px; cursor: pointer;" onclick="bulkSelectScripts('${selectorId}', '${escHtml(vmName)}', 'defaults')">Defaults</button>
     </div>`;
 
   for (const [cat, catScripts] of Object.entries(categories).sort((a, b) => a[0].localeCompare(b[0]))) {
     html += `
       <div class="script-cat-group" data-cat="${escHtml(cat)}" style="margin-bottom: 0.75rem;">
-        <div style="font-size: 0.7rem; color: var(--gray-500); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.3rem; padding-bottom: 0.2rem; border-bottom: 1px solid #edf2f7;">${escHtml(cat)}</div>
+        <div style="font-size: 0.7rem; color: var(--gray-500); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 0.3rem; padding-bottom: 0.2rem; border-bottom: 1px solid var(--border-light);">${escHtml(cat)}</div>
         ${catScripts.map(s => {
           const isChecked = selected.has(s.slug);
           const isDefault = (vm.default_scripts || []).includes(s.slug);
           const deps = (s.depends_on || []).join(', ');
           const services = (s.services_exposed || []).join(', ');
           return `
-          <label class="script-row" data-slug="${escHtml(s.slug)}" style="display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; transition: background 0.1s; margin-bottom: 1px;" onmouseenter="this.style.background='#f7fafc'" onmouseleave="this.style.background=''">
+          <label class="script-row" data-slug="${escHtml(s.slug)}" style="display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0.5rem; border-radius: 6px; cursor: pointer; transition: background 0.1s; margin-bottom: 1px;" onmouseenter="this.style.background='var(--bg-card-hover)'" onmouseleave="this.style.background=''">
             <input type="checkbox" ${isChecked ? 'checked' : ''}
               onchange="toggleScript('${selectorId}', '${escHtml(vmName)}', '${escHtml(s.slug)}', this.checked)"
               style="width: auto; margin-top: 0.15rem;">
@@ -1051,7 +1051,7 @@ async function attachModule(laneId, laneName) {
 }
 
 async function detachModule(laneId, moduleInstanceId, challengeKey) {
-  if (!confirm(`Detach module "${challengeKey}" from this lane?\n\nThe attached VMs will be STOPPED and DESTROYED. The rest of the lane is untouched.`)) return;
+  if (!await Confirm.show({ title: 'Detach Module', message: `Detach module "${challengeKey}" from this lane?\n\nThe attached VMs will be STOPPED and DESTROYED. The rest of the lane is untouched.`, confirmText: 'Detach', danger: true })) return;
   try {
     const data = await api('DELETE', `/lanes/${laneId}/modules/${moduleInstanceId}`);
     Toast.success('Detached', `${challengeKey} removed (${(data.destroyed || []).length} VM(s) destroyed)`);
@@ -1283,7 +1283,7 @@ async function runSelectedScriptsOnLane(laneId) {
     if (existing) existing.remove();
 
     outputs.innerHTML += `
-      <div id="${id}" style="margin-bottom: 0.75rem; border-bottom: 1px solid #edf2f7; padding-bottom: 0.75rem;">
+      <div id="${id}" style="margin-bottom: 0.75rem; border-bottom: 1px solid var(--border-light); padding-bottom: 0.75rem;">
         <div style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.25rem;">
           <span class="badge badge-blue" style="font-size: 0.65rem;">${escHtml(s.vm_name)}</span>
           <strong style="font-size: 0.8rem;">${escHtml(s.script_slug)}</strong>
@@ -1412,7 +1412,7 @@ async function toggleAdminInternet(laneId, enabled) {
 }
 
 async function deleteLane(laneId, laneName) {
-  if (!confirm(`DELETE lane "${laneName}"?\n\nThis will STOP and DESTROY the challenge VM and gateway container, then mark the lane as deleted.\n\nThis cannot be undone.`)) return;
+  if (!await Confirm.show({ title: 'Delete Lane', message: `DELETE lane "${laneName}"?\n\nThis will STOP and DESTROY the challenge VM and gateway container, then mark the lane as deleted.\n\nThis cannot be undone.`, confirmText: 'Delete Lane', danger: true })) return;
 
   try {
     const data = await api('DELETE', `/lanes/${laneId}`);
@@ -1535,7 +1535,7 @@ function handleDeployGroupSuccess(data, status) {
   let credsHtml = '';
   if (data.credentials && data.credentials.length > 0) {
     credsHtml = `
-      <div style="margin-top: 0.75rem; background: #fffbeb; border: 1px solid #f6e05e; border-radius: 8px; padding: 0.75rem;">
+      <div style="margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12); border: 1px solid #f6e05e; border-radius: 8px; padding: 0.75rem;">
         <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
           <strong style="font-size: 0.85rem; color: #b7791f;">Account Credentials (save these now!)</strong>
           <div style="display: flex; gap: 0.4rem;">
@@ -1625,7 +1625,7 @@ function startDeployProgressPoll(groupId, totalLanes, statusEl) {
         </strong>
         <span style="font-size: 0.85rem; font-weight: 600;">${state.completed}/${state.total} lanes</span>
       </div>
-      <div style="background: var(--border); border-radius: 4px; height: 20px; overflow: hidden; margin-bottom: 0.4rem;">
+      <div style="background: var(--border-color); border-radius: 4px; height: 20px; overflow: hidden; margin-bottom: 0.4rem;">
         <div style="display: flex; height: 100%;">
           <div style="width: ${succeededPct}%; background: #38a169; transition: width 0.3s;"></div>
           <div style="width: ${failedPct}%; background: #e53e3e; transition: width 0.3s;"></div>
@@ -1746,7 +1746,7 @@ async function loadDeployedGroups() {
     const groups = await api('GET', '/groups');
 
     if (groups.length === 0) {
-      container.innerHTML = '<div style="background: white; border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No deployed groups yet.</div>';
+      container.innerHTML = '<div style="background: var(--bg-card, white); border-radius: 12px; padding: 2rem; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,0.08); color: var(--gray-500);">No deployed groups yet.</div>';
       return;
     }
 
@@ -1784,7 +1784,7 @@ async function loadDeployedGroups() {
 }
 
 async function teardownGroup(groupId, groupName) {
-  if (!confirm(`TEARDOWN "${groupName}"?\n\nThis will DELETE all student/instructor accounts (both clinic DB and Guacamole) and the Guac connection group.\n\nThis cannot be undone.`)) return;
+  if (!await Confirm.show({ title: 'Teardown Group', message: `TEARDOWN "${groupName}"?\n\nThis will DELETE all student/instructor accounts (both clinic DB and Guacamole) and the Guac connection group.\n\nThis cannot be undone.`, confirmText: 'Teardown', danger: true })) return;
 
   try {
     const data = await api('DELETE', `/groups/${groupId}`);

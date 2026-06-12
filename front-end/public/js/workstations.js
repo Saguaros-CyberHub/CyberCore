@@ -144,7 +144,7 @@ const Workstations = (() => {
     } catch (err) {
       btn.disabled    = false;
       btn.textContent = 'Deploy';
-      alert('Deploy failed: ' + err.message);
+      Toast.error('Deploy Failed', err.message);
     }
   }
 
@@ -358,7 +358,7 @@ const Workstations = (() => {
 
       window.open(data.launchUrl, '_blank', 'noopener,noreferrer');
     } catch (err) {
-      alert('Console error: ' + err.message);
+      Toast.error('Console Error', err.message);
     }
   }
 
@@ -373,7 +373,7 @@ const Workstations = (() => {
     try {
       await _api('POST', `/${vmId}/action`, { action: actionName });
     } catch (err) {
-      alert(`Action "${actionName}" failed: ` + err.message);
+      Toast.error('Action Failed', `Action "${actionName}" failed: ` + err.message);
       _pollUntilSettled(vmId);
       return;
     }
@@ -405,7 +405,12 @@ const Workstations = (() => {
 
   async function confirmDelete(vmId) {
     const name = _myVms.find(v => v.vmId === vmId)?.name || vmId;
-    if (!confirm(`Delete workstation "${name}"? This permanently destroys the VM and cannot be undone.`)) return;
+    if (!await Confirm.show({
+      title: 'Delete Workstation',
+      message: `Delete workstation "${name}"? This permanently destroys the VM and cannot be undone.`,
+      confirmText: 'Delete',
+      danger: true,
+    })) return;
     const vm = _myVms.find(v => v.vmId === vmId);
     if (vm) {
       vm.powerState = 'deleting';
@@ -418,7 +423,7 @@ const Workstations = (() => {
       const el = document.getElementById('wksMyList');
       if (el) _renderMyWorkstations(el);
     } catch (err) {
-      alert('Delete failed: ' + err.message);
+      Toast.error('Delete Failed', err.message);
       _myLoaded = false;
       loadMyWorkstations(true);
     }
@@ -466,7 +471,7 @@ const Workstations = (() => {
   async function createSnapshot() {
     const name = document.getElementById('wksSnapNewName').value.trim();
     const desc = document.getElementById('wksSnapNewDesc').value.trim();
-    if (!name) { alert('Snapshot name is required'); return; }
+    if (!name) { Toast.warning('Missing Name', 'Snapshot name is required'); return; }
     const btn = document.getElementById('wksSnapCreateBtn');
     btn.disabled = true;
     try {
@@ -475,14 +480,19 @@ const Workstations = (() => {
       document.getElementById('wksSnapNewDesc').value = '';
       await _loadSnapshots();
     } catch (err) {
-      alert('Snapshot failed: ' + err.message);
+      Toast.error('Snapshot Failed', err.message);
     } finally {
       btn.disabled = false;
     }
   }
 
   async function rollback(snapname) {
-    if (!confirm(`Roll back to snapshot "${snapname}"? The VM will be stopped.`)) return;
+    if (!await Confirm.show({
+      title: 'Roll Back Snapshot',
+      message: `Roll back to snapshot "${snapname}"? The VM will be stopped.`,
+      confirmText: 'Roll Back',
+      danger: true,
+    })) return;
     try {
       await _api('POST', `/${_snapVmId}/rollback`, { snapname });
       const vm = _myVms.find(v => v.vmId === _snapVmId);
@@ -492,9 +502,9 @@ const Workstations = (() => {
         if (el) _renderMyWorkstations(el);
       }
       closeSnapshots();
-      alert('Rollback complete. The VM is now stopped — start it when ready.');
+      Toast.success('Rollback Complete', 'The VM is now stopped — start it when ready.');
     } catch (err) {
-      alert('Rollback failed: ' + err.message);
+      Toast.error('Rollback Failed', err.message);
     }
   }
 

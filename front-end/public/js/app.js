@@ -153,7 +153,7 @@ const Toast = {
 
   show(type, title, message, duration = 5000) {
     this.init();
-    
+
     const icons = {
       success: '✓',
       error: '✕',
@@ -161,15 +161,19 @@ const Toast = {
       info: 'ℹ'
     };
 
+    // Titles/messages often carry API error text — never trust it as HTML.
+    const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
+    toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
     toast.innerHTML = `
       <span class="toast-icon">${icons[type] || 'ℹ'}</span>
       <div class="toast-content">
-        <div class="toast-title">${title}</div>
-        <div class="toast-message">${message}</div>
+        <div class="toast-title">${esc(title)}</div>
+        <div class="toast-message">${esc(message)}</div>
       </div>
-      <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
+      <button class="toast-close" aria-label="Dismiss notification" onclick="this.parentElement.remove()">✕</button>
     `;
 
     this.container.appendChild(toast);
@@ -195,6 +199,53 @@ const Toast = {
 
   info(title, message) {
     return this.show('info', title, message);
+  }
+};
+
+/**
+ * Async confirmation modal — drop-in replacement for window.confirm().
+ * Usage: if (await Confirm.show({ title: 'Delete asset?', message: '…', danger: true })) { … }
+ * Reuses the shared .modal-overlay/.modal styles so dark mode just works.
+ */
+const Confirm = {
+  show({ title = 'Are you sure?', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+    return new Promise(resolve => {
+      const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay active';
+      overlay.innerHTML = `
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmModalTitle" style="max-width: 420px;">
+          <div class="modal-header">
+            <h3 class="modal-title" id="confirmModalTitle">${esc(title)}</h3>
+          </div>
+          <div class="modal-body">${esc(message)}</div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-action="cancel">${esc(cancelText)}</button>
+            <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-action="confirm">${esc(confirmText)}</button>
+          </div>
+        </div>
+      `;
+      const prevFocus = document.activeElement;
+      const close = result => {
+        overlay.remove();
+        document.removeEventListener('keydown', onKey);
+        if (prevFocus && prevFocus.focus) prevFocus.focus();
+        resolve(result);
+      };
+      const onKey = e => {
+        if (e.key === 'Escape') close(false);
+        if (e.key === 'Enter') close(true);
+      };
+      overlay.addEventListener('click', e => {
+        if (e.target === overlay) close(false);
+        const action = e.target.closest('[data-action]')?.dataset.action;
+        if (action === 'confirm') close(true);
+        if (action === 'cancel') close(false);
+      });
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(overlay);
+      overlay.querySelector('[data-action="confirm"]').focus();
+    });
   }
 };
 
@@ -349,6 +400,25 @@ const Utils = {
     if (el) {
       el.innerHTML = `<div class="error">${this.escapeHtml(message)}</div>`;
     }
+  },
+
+  // Toggle a button into a busy/loading state while an async action runs.
+  // Usage: Utils.setBtnLoading(btn, true, 'Saving…'); … Utils.setBtnLoading(btn, false);
+  setBtnLoading(btn, loading, busyText) {
+    if (!btn) return;
+    if (loading) {
+      btn.dataset.restoreHtml = btn.innerHTML;
+      btn.disabled = true;
+      btn.classList.add('btn-loading');
+      btn.innerHTML = `<span class="btn-spinner" aria-hidden="true"></span>${this.escapeHtml(busyText || 'Working…')}`;
+    } else {
+      btn.disabled = false;
+      btn.classList.remove('btn-loading');
+      if (btn.dataset.restoreHtml !== undefined) {
+        btn.innerHTML = btn.dataset.restoreHtml;
+        delete btn.dataset.restoreHtml;
+      }
+    }
   }
 };
 
@@ -382,5 +452,5 @@ const Validator = {
 
 // Export for module usage if needed
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { API, Toast, Auth, Utils, Validator };
+  module.exports = { API, Toast, Confirm, Auth, Utils, Validator };
 }
