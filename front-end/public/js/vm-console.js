@@ -68,6 +68,10 @@ const VmConsole = (() => {
 
   function _renderIframe(container, launchUrl) {
     _activeLaunchUrl = launchUrl;
+    // No sandbox attribute: Guacamole is same-origin (served behind /guacamole),
+    // so sandbox+allow-same-origin provided no isolation anyway — and sandboxing
+    // broke keyboard capture in the embedded client (typing only worked in the
+    // popped-out window).
     container.innerHTML = `
       <div class="vmc-panel">
         ${_toolbar('Remote Console', true)}
@@ -75,13 +79,23 @@ const VmConsole = (() => {
           <iframe
             src="${launchUrl}"
             class="vmc-iframe"
+            tabindex="0"
             allow="clipboard-read; clipboard-write; fullscreen; pointer-lock"
             referrerpolicy="no-referrer"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-downloads allow-modals"
           ></iframe>
         </div>
       </div>
     `;
+    // Guacamole's keyboard handler only sees keystrokes once the iframe's
+    // document has focus. Focus it on load and re-focus on any click inside
+    // the panel so the user can always just click the screen and type.
+    const frame = container.querySelector('.vmc-iframe');
+    if (frame) {
+      frame.addEventListener('load', () => { try { frame.focus(); } catch (_) {} });
+      container.querySelector('.vmc-iframe-wrap')?.addEventListener('mousedown', () => {
+        try { frame.focus(); } catch (_) {}
+      });
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────────────

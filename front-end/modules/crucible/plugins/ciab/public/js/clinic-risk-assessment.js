@@ -19,13 +19,36 @@
     cisramCollapsed: null, // Set<controlNum> of currently-collapsed controls; null until first render seeds it
     frameworks: null,     // /frameworks catalog (cis_ig1 + nist_csf_2_0), lazy-loaded for the intake breakdown
     registerFilters: { search: '', status: 'all', severity: 'all', sortKey: null, sortDir: 'asc' }, // Risk Register toolbar (client-side filter/sort)
+    forceLightCharts: false, // temporarily true while capturing PNGs for the white-paper PDF export
   };
 
   const CSF_HIDE_KEY = 'cra-hide-csf'; // localStorage: '1' => hide NIST CSF charts in Overview
 
   const CSF_FN_ORDER = ['GV', 'ID', 'PR', 'DE', 'RS', 'RC'];
   const CSF_FN_NAMES = { GV: 'Govern', ID: 'Identify', PR: 'Protect', DE: 'Detect', RS: 'Respond', RC: 'Recover' };
-  const CSF_FN_COLORS = { GV: '#ab0520', ID: '#1e5288', PR: '#16a34a', DE: '#d97706', RS: '#dc2626', RC: '#0891b2' };
+
+  // University of Arizona brand palette — single source of truth for chart colors.
+  const UA = {
+    blue: '#0c234b', midnight: '#001c48', azurite: '#1e5288', oasis: '#378dbd',
+    sky: '#81d3eb', red: '#ab0520', bloom: '#ef4056', leaf: '#70b865',
+  };
+
+  // Severity ramp shared by the heat maps, their legends, and the CSS
+  // --risk-* tokens (see the <style> block). `max` is the upper bound of the
+  // 1–25 L×I product covered by the band; dark variants are brightened so the
+  // tiles keep their punch on the dark card surface. The bands subdivide the
+  // register's riskBucket() tiers without ever contradicting them (e.g. every
+  // matrix "critical" cell is also a register "critical").
+  const SEVERITY_LEVELS = [
+    { key: 'low',      name: 'Low',      max: 4,  light: '#2f9e6e', dark: '#35a878' },
+    { key: 'guarded',  name: 'Guarded',  max: 9,  light: '#d9a514', dark: '#dfb02e' },
+    { key: 'elevated', name: 'Elevated', max: 14, light: '#e07b39', dark: '#e8904f' },
+    { key: 'high',     name: 'High',     max: 15, light: '#c43d4b', dark: '#d4525f' },
+    { key: 'critical', name: 'Critical', max: 25, light: '#8b0015', dark: '#aa1126' },
+  ];
+  function severityForScore(score) {
+    return SEVERITY_LEVELS.find(s => score <= s.max) || SEVERITY_LEVELS[SEVERITY_LEVELS.length - 1];
+  }
 
   // Inline stroke SVGs for the Overview stat cards (theme-tinted via currentColor).
   const STAT_ICONS = {
@@ -518,109 +541,197 @@
     state.charts = {};
   }
 
-  // Map a 1–5 likelihood/impact to a 1–3 band so free-form findings can render
-  // on the CIS RAM tri-factor heat map alongside CIS RAM rows.
+  // === Theme-aware chart styling ===
+  // Every option builder pulls its text/axis/grid/tooltip colors from here so
+  // light and dark mode stay consistent. A MutationObserver on
+  // html[data-theme] re-renders all charts when the user flips the theme.
+  function isDarkTheme() {
+    return !state.forceLightCharts && document.documentElement.dataset.theme === 'dark';
+  }
+
+  function chartTheme() {
+    const dark = isDarkTheme();
+    // The card surface color doubles as the "gap" between heat-map tiles so
+    // they read as rounded chips floating on the card.
+    let cardBg = '';
+    if (!state.forceLightCharts) {
+      try { cardBg = getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim(); } catch (_) {}
+    }
+    return {
+      dark,
+      capture: !!state.forceLightCharts,   // disables animation so getDataURL grabs a settled frame
+      text:      dark ? '#e8edf6' : '#1e293b',
+      textMuted: dark ? '#9aa8bd' : '#64748b',
+      gridLine:  dark ? 'rgba(148,163,184,0.16)' : 'rgba(100,116,139,0.16)',
+      splitAreaA: dark ? 'rgba(148,163,184,0.045)' : 'rgba(30,82,136,0.035)',
+      splitAreaB: 'rgba(0,0,0,0)',
+      emptyCell: dark ? 'rgba(148,163,184,0.09)' : 'rgba(100,116,139,0.08)',
+      cellGap:   cardBg || (dark ? '#111c33' : '#ffffff'),
+      barTrack:  dark ? 'rgba(148,163,184,0.10)' : 'rgba(100,116,139,0.08)',
+      neutral:   dark ? 'rgba(148,163,184,0.45)' : 'rgba(100,116,139,0.42)',
+      accent:    dark ? UA.oasis : UA.azurite,
+      tooltipBg:     dark ? '#101a30' : '#ffffff',
+      tooltipBorder: dark ? 'rgba(148,163,184,0.28)' : 'rgba(100,116,139,0.18)',
+      tooltipText:   dark ? '#e8edf6' : '#1e293b',
+      severity: (score) => { const s = severityForScore(score); return dark ? s.dark : s.light; },
+    };
+  }
+
+  // Shared tooltip chrome: card-style surface that flips with the theme.
+  function tooltipBase(t) {
+    return {
+      confine: true,
+      backgroundColor: t.tooltipBg,
+      borderColor: t.tooltipBorder,
+      borderWidth: 1,
+      padding: [10, 12],
+      textStyle: { color: t.tooltipText, fontSize: 12 },
+      extraCssText: 'border-radius:10px; box-shadow:0 10px 28px rgba(2,6,23,0.22); max-width:320px; white-space:normal;',
+    };
+  }
+
+  // Left→right gradient for horizontal bars (declarative form — no
+  // echarts.graphic dependency).
+  function horizGradient(from, to) {
+    return { type: 'linear', x: 0, y: 0, x2: 1, y2: 0, colorStops: [{ offset: 0, color: from }, { offset: 1, color: to }] };
+  }
+
+  // Map a 1–5 likelihood/impact to a 1–3 band — used by the Overview stat
+  // tiles and the overall grade so free-form findings can be averaged on the
+  // same 1–9 scale as CIS RAM tri-factor rows. (The heat maps render findings
+  // at their native 5×5 resolution and do not use this.)
   // 1→1, 2→1, 3→2, 4→2, 5→3 — keeps "5" rare and central-skews 3.
   function bandTo3(v) {
     if (!v) return 0;
     return Math.min(3, Math.ceil(v / 2));
   }
 
-  // === Heat map (FINDINGS-ONLY 3×3) ===
+  // === Risk heat maps (FINDINGS-ONLY, native 5×5) ===
   // Standard risk-assessment practice: the heat map plots IDENTIFIED RISKS
   // (entries on the risk register). CIS RAM safeguard scoring is presented
-  // separately in the Risk Register tab and CIS RAM Workbook tab — mixing
-  // the two scales (RAM 1-3 + findings 1-5→1-3) on one chart creates
-  // ambiguity. Both the on-screen dashboard and the printable report use
-  // the same algorithm so the numbers match.
-  function renderHeatmap() {
-    const c = getOrInitChart('chartHeatmap');
-    if (!c) return;
-    const findings = state.bundle.findings || [];
+  // separately in the CIS RAM Workbook tab. Findings carry native 1–5
+  // likelihood/impact scores, so the matrix renders at full 5×5 resolution.
+  // Tile color encodes the severity band of the cell's L×I product (not the
+  // count) — the count renders inside the tile; empty cells stay neutral so
+  // the page doesn't read "all green" when nothing has been logged.
+  const HEAT_L_WORDS = ['Rare', 'Unlikely', 'Possible', 'Likely', 'Almost certain'];
+  const HEAT_I_WORDS = ['Minimal', 'Minor', 'Moderate', 'Major', 'Severe'];
 
-    const grid = {};
-    const bump = (l, i) => {
-      if (!l || !i) return;
-      const k = `${l},${i}`;
-      grid[k] = (grid[k] || 0) + 1;
-    };
+  // Bucket findings into a 5×5 counts grid plus per-cell finding titles for
+  // the tooltip. lKey/iKey select inherent vs residual fields.
+  function buildHeatmapMatrix(findings, lKey, iKey) {
+    const counts = Array.from({ length: 5 }, () => Array(5).fill(0));
+    const titles = Array.from({ length: 5 }, () => Array.from({ length: 5 }, () => []));
+    let total = 0;
     for (const f of findings) {
-      bump(bandTo3(f.likelihood), bandTo3(f.impact));
+      const rawL = Number(f[lKey]), rawI = Number(f[iKey]);
+      if (!rawL || !rawI) continue;
+      const l = Math.min(5, Math.max(1, Math.round(rawL)));
+      const i = Math.min(5, Math.max(1, Math.round(rawI)));
+      counts[l - 1][i - 1]++;
+      titles[l - 1][i - 1].push(f.title || f.finding_code || 'Untitled finding');
+      total++;
     }
-
-    const data = [];
-    for (let l = 1; l <= 3; l++) {
-      for (let i = 1; i <= 3; i++) {
-        data.push([i - 1, l - 1, grid[`${l},${i}`] || 0]);
-      }
-    }
-    const maxCount = Math.max(1, ...data.map(d => d[2]));
-    c.setOption({
-      grid: { left: 100, right: 30, top: 20, bottom: 50 },
-      xAxis: { type: 'category', data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'], name: 'Impact', nameLocation: 'middle', nameGap: 28, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
-      yAxis: { type: 'category', data: ['1 Not Expected', '2 Foreseeable', '3 Expected'], name: 'Likelihood', nameLocation: 'middle', nameGap: 70, nameRotate: 90, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
-      visualMap: {
-        show: false,
-        min: 0, max: maxCount,
-        inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] }
-      },
-      tooltip: {
-        formatter: (p) => `Likelihood ${p.value[1] + 1} × Impact ${p.value[0] + 1} (risk ${(p.value[1] + 1) * (p.value[0] + 1)}): <b>${p.value[2]}</b> finding${p.value[2] === 1 ? '' : 's'}`,
-      },
-      series: [{
-        type: 'heatmap',
-        data,
-        label: { show: true, fontSize: 14, fontWeight: 700, formatter: (p) => p.value[2] || '' },
-        itemStyle: { borderColor: '#fff', borderWidth: 2 },
-      }],
-    }, true);
+    return { counts, titles, total };
   }
 
-  // === Residual heat map — same algorithm as renderHeatmap but uses
-  // residual_likelihood / residual_impact (post-treatment projection).
-  // Findings without residual scoring are excluded from this view.
-  function renderHeatmapResidual() {
-    const c = getOrInitChart('chartHeatmapResidual');
-    if (!c) return;
-    const findings = (state.bundle.findings || [])
-      .filter(f => f.residual_likelihood && f.residual_impact);
-
-    const grid = {};
-    const bump = (l, i) => {
-      if (!l || !i) return;
-      const k = `${l},${i}`;
-      grid[k] = (grid[k] || 0) + 1;
-    };
-    for (const f of findings) {
-      bump(bandTo3(f.residual_likelihood), bandTo3(f.residual_impact));
-    }
-
+  // Shared option builder so the inherent and residual matrices stay
+  // pixel-identical in style. x = likelihood (→), y = impact (↑).
+  function buildHeatmapOption(matrix, t, opts = {}) {
     const data = [];
-    for (let l = 1; l <= 3; l++) {
-      for (let i = 1; i <= 3; i++) {
-        data.push([i - 1, l - 1, grid[`${l},${i}`] || 0]);
+    for (let x = 0; x < 5; x++) {
+      for (let y = 0; y < 5; y++) {
+        const count = matrix.counts[x][y];
+        const score = (x + 1) * (y + 1);
+        data.push({
+          value: [x, y, count],
+          itemStyle: {
+            color: count > 0 ? t.severity(score) : t.emptyCell,
+            borderColor: t.cellGap,
+            borderWidth: 3,
+            borderRadius: 6,
+          },
+        });
       }
     }
-    const maxCount = Math.max(1, ...data.map(d => d[2]));
-    c.setOption({
-      grid: { left: 100, right: 30, top: 20, bottom: 50 },
-      xAxis: { type: 'category', data: ['1 Acceptable', '2 Unacceptable', '3 Catastrophic'], name: 'Impact', nameLocation: 'middle', nameGap: 28, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
-      yAxis: { type: 'category', data: ['1 Not Expected', '2 Foreseeable', '3 Expected'], name: 'Likelihood', nameLocation: 'middle', nameGap: 70, nameRotate: 90, axisLabel: { fontSize: 10 }, splitArea: { show: false } },
-      visualMap: {
-        show: false,
-        min: 0, max: maxCount,
-        inRange: { color: ['#e0f2fe', '#bae6fd', '#fcd34d', '#fb923c', '#dc2626', '#7f1d1d'] }
+    return {
+      animation: !t.capture,
+      animationDuration: 350,
+      grid: { left: 92, right: 14, top: 14, bottom: 64 },
+      xAxis: {
+        type: 'category', data: HEAT_L_WORDS,
+        name: 'Likelihood →', nameLocation: 'middle', nameGap: 46,
+        nameTextStyle: { color: t.textMuted, fontSize: 11, fontWeight: 700 },
+        axisLabel: { color: t.textMuted, fontSize: 9.5, interval: 0, lineHeight: 13, formatter: (v, i) => `${i + 1}\n${v}` },
+        axisTick: { show: false }, axisLine: { show: false }, splitArea: { show: false }, splitLine: { show: false },
       },
-      tooltip: {
-        formatter: (p) => `Residual L ${p.value[1] + 1} × I ${p.value[0] + 1}: <b>${p.value[2]}</b> finding${p.value[2] === 1 ? '' : 's'}`,
+      yAxis: {
+        type: 'category', data: HEAT_I_WORDS,
+        name: 'Impact ↑', nameLocation: 'middle', nameGap: 76, nameRotate: 90,
+        nameTextStyle: { color: t.textMuted, fontSize: 11, fontWeight: 700 },
+        axisLabel: { color: t.textMuted, fontSize: 9.5, formatter: (v, i) => `${i + 1} · ${v}` },
+        axisTick: { show: false }, axisLine: { show: false }, splitArea: { show: false }, splitLine: { show: false },
       },
+      tooltip: Object.assign(tooltipBase(t), {
+        formatter: (p) => {
+          const l = p.value[0] + 1, i = p.value[1] + 1, count = p.value[2];
+          const score = l * i;
+          const sev = severityForScore(score);
+          const head = `<div style="display:flex;align-items:center;gap:7px;font-weight:700;">` +
+            `<span style="width:10px;height:10px;border-radius:3px;background:${t.severity(score)};display:inline-block;"></span>` +
+            `${sev.name} · score ${score}</div>`;
+          const sub = `<div style="color:${t.textMuted};font-size:11px;margin:2px 0 4px;">` +
+            `${HEAT_L_WORDS[l - 1]} likelihood × ${HEAT_I_WORDS[i - 1].toLowerCase()} impact</div>`;
+          const countLine = `<div><b>${count}</b> finding${count === 1 ? '' : 's'}${opts.residual ? ' after treatment' : ''}</div>`;
+          const names = (matrix.titles[l - 1][i - 1] || []).slice(0, 3)
+            .map(name => `<div style="font-size:11px;margin-top:3px;">– ${escapeHtml(name)}</div>`).join('');
+          const more = count > 3 ? `<div style="font-size:11px;color:${t.textMuted};margin-top:3px;">+${count - 3} more</div>` : '';
+          return head + sub + countLine + names + more;
+        },
+      }),
       series: [{
         type: 'heatmap',
         data,
-        label: { show: true, fontSize: 14, fontWeight: 700, formatter: (p) => p.value[2] || '' },
-        itemStyle: { borderColor: '#fff', borderWidth: 2 },
+        label: {
+          show: true, fontSize: 13, fontWeight: 700, color: '#fff',
+          textShadowBlur: 4, textShadowColor: 'rgba(0,0,0,0.30)',
+          formatter: (p) => p.value[2] || '',
+        },
+        emphasis: { itemStyle: { shadowBlur: 10, shadowColor: 'rgba(2,6,23,0.35)' } },
       }],
-    }, true);
+    };
+  }
+
+  // Severity-chip legend rendered under each heat map (replaces the stock
+  // ECharts visualMap slider).
+  function renderSeverityLegend(hostId, note) {
+    const host = document.getElementById(hostId);
+    if (!host) return;
+    const t = chartTheme();
+    host.innerHTML = SEVERITY_LEVELS.map(s =>
+      `<span class="legend-chip"><span class="dot" style="background:${t.dark ? s.dark : s.light}"></span>${s.name}</span>`
+    ).join('') + (note ? `<span class="legend-note">${escapeHtml(note)}</span>` : '');
+  }
+
+  function renderHeatmap() {
+    const c = getOrInitChart('chartHeatmap');
+    if (!c || !state.bundle) return;
+    const matrix = buildHeatmapMatrix(state.bundle.findings || [], 'likelihood', 'impact');
+    c.setOption(buildHeatmapOption(matrix, chartTheme()), true);
+    renderSeverityLegend('legendHeatmap', `${matrix.total} finding${matrix.total === 1 ? '' : 's'} plotted`);
+  }
+
+  // Residual heat map — same builder, but uses residual_likelihood /
+  // residual_impact (post-treatment projection). Findings without residual
+  // scoring are excluded from this view.
+  function renderHeatmapResidual() {
+    const c = getOrInitChart('chartHeatmapResidual');
+    if (!c || !state.bundle) return;
+    const all = state.bundle.findings || [];
+    const scored = all.filter(f => f.residual_likelihood && f.residual_impact);
+    const matrix = buildHeatmapMatrix(scored, 'residual_likelihood', 'residual_impact');
+    c.setOption(buildHeatmapOption(matrix, chartTheme(), { residual: true }), true);
+    renderSeverityLegend('legendHeatmapResidual', `${matrix.total} of ${all.length} finding${all.length === 1 ? '' : 's'} residual-scored`);
   }
 
   // Pull all CIS RAM safeguard rows that have been scored (have inherent risk).
@@ -635,64 +746,189 @@
     return out;
   }
 
-  // === Radar ===
+  // === NIST CSF radar ===
   function renderRadar() {
     const c = getOrInitChart('chartRadar');
-    if (!c) return;
+    if (!c || !state.bundle) return;
+    const t = chartTheme();
     const scores = state.bundle.csf_scores || {};
-    const indicator = CSF_FN_ORDER.map(k => ({ name: CSF_FN_NAMES[k], max: 5 }));
+    const manual = state.bundle.report?.csf_scores_manual || {};
     const value = CSF_FN_ORDER.map(k => Number(scores[k]) || 0);
+    // Indicator names carry the function key; the axisName formatter expands
+    // them into a small-caps label with the score (✎ = manual override).
+    const indicator = CSF_FN_ORDER.map(k => ({ name: k, max: 5 }));
     c.setOption({
-      tooltip: {},
-      radar: { indicator, radius: '70%', axisName: { color: '#475569', fontSize: 11 } },
+      animation: !t.capture,
+      tooltip: Object.assign(tooltipBase(t), {
+        formatter: () => {
+          const rows = CSF_FN_ORDER.map((k, idx) => {
+            const src = (k in manual) ? 'manual' : 'auto';
+            return `<div style="display:flex;justify-content:space-between;gap:18px;margin-top:2px;">` +
+              `<span>${CSF_FN_NAMES[k]} <span style="color:${t.textMuted};font-size:10px;">(${src})</span></span>` +
+              `<b>${value[idx].toFixed(1)} / 5</b></div>`;
+          }).join('');
+          return `<div style="font-weight:700;margin-bottom:4px;">NIST CSF 2.0 Maturity</div>${rows}`;
+        },
+      }),
+      radar: {
+        indicator,
+        shape: 'polygon',
+        radius: '62%',
+        center: ['50%', '52%'],
+        splitNumber: 5,
+        axisName: {
+          formatter: (name) => {
+            const score = (Number(scores[name]) || 0).toFixed(1);
+            const mark = (name in manual) ? ' ✎' : '';
+            return `{fn|${(CSF_FN_NAMES[name] || name).toUpperCase()}}\n{val|${score}${mark}}`;
+          },
+          rich: {
+            fn:  { color: t.textMuted, fontSize: 10, fontWeight: 700, align: 'center' },
+            val: { color: t.text, fontSize: 12, fontWeight: 700, align: 'center', padding: [3, 0, 0, 0] },
+          },
+        },
+        splitArea: { show: true, areaStyle: { color: [t.splitAreaA, t.splitAreaB] } },
+        splitLine: { lineStyle: { color: t.gridLine } },
+        axisLine: { lineStyle: { color: t.gridLine } },
+      },
       series: [{
         type: 'radar',
+        symbol: 'circle',
+        symbolSize: 6,
         data: [{
           value, name: 'Maturity',
-          areaStyle: { color: 'rgba(12, 35, 75, 0.25)' },
-          lineStyle: { color: '#0c234b', width: 2 },
-          itemStyle: { color: '#0c234b' },
-          label: { show: true, fontSize: 10, formatter: (p) => p.value.toFixed(1) },
+          areaStyle: {
+            // Azurite → transparent wash so the polygon stays readable over the grid.
+            color: {
+              type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+              colorStops: [
+                { offset: 0, color: t.dark ? 'rgba(55,141,189,0.42)' : 'rgba(30,82,136,0.32)' },
+                { offset: 1, color: t.dark ? 'rgba(55,141,189,0.06)' : 'rgba(30,82,136,0.04)' },
+              ],
+            },
+          },
+          lineStyle: { color: t.accent, width: 2.5 },
+          itemStyle: { color: t.accent, borderColor: t.cellGap, borderWidth: 2 },
         }],
       }],
     }, true);
+    renderRadarLegend(manual);
+  }
+
+  // Legend row under the radar: series swatch + auto/manual provenance.
+  function renderRadarLegend(manual) {
+    const host = document.getElementById('legendRadar');
+    if (!host) return;
+    const t = chartTheme();
+    const manualCount = CSF_FN_ORDER.filter(k => k in manual).length;
+    host.innerHTML =
+      `<span class="legend-chip"><span class="dot" style="background:${t.accent};border-radius:999px;"></span>Maturity (0–5)</span>` +
+      (manualCount
+        ? `<span class="legend-chip">✎ ${manualCount} manual override${manualCount === 1 ? '' : 's'} — rest auto-derived from IG1</span>`
+        : `<span class="legend-chip" style="font-weight:500;">All scores auto-derived from IG1 intake</span>`) +
+      `<span class="legend-note">Outer ring = 5.0 (optimized)</span>`;
   }
 
   // === CIS coverage bars ===
   function renderCisBars() {
     const c = getOrInitChart('chartCis');
-    if (!c) return;
-    const cv = state.bundle.cis_coverage;
+    if (!c || !state.bundle) return;
+    const t = chartTheme();
+    const cv = state.bundle.cis_coverage || {};
+    const total = cv.total || 0;
+    const pct = v => total ? Math.round(((v || 0) / total) * 100) : 0;
+    // UA-blue gradient for implemented; Arizona Red reserved for the gap row.
+    const rows = [
+      { label: 'Yes',        value: cv.yes || 0,     color: horizGradient(UA.azurite, UA.oasis),  hint: 'Safeguard reported as implemented on intake' },
+      { label: 'Partial',    value: cv.partial || 0, color: horizGradient('#b58410', '#d9a514'),  hint: 'Partially implemented — counts half toward coverage' },
+      { label: 'No',         value: cv.no || 0,      color: horizGradient(UA.red, UA.bloom),      hint: 'Not implemented — these gaps drive findings' },
+      { label: 'Unanswered', value: cv.unknown || 0, color: t.neutral,                            hint: 'Not answered on intake — treat as unknown risk' },
+    ];
     c.setOption({
-      grid: { left: 80, right: 30, top: 20, bottom: 30 },
-      tooltip: {},
-      xAxis: { type: 'value', max: cv.total, axisLabel: { fontSize: 10 } },
-      yAxis: { type: 'category', data: ['Yes', 'Partial', 'No', 'Unanswered'], axisLabel: { fontSize: 11 } },
+      animation: !t.capture,
+      grid: { left: 92, right: 70, top: 14, bottom: 28 },
+      tooltip: Object.assign(tooltipBase(t), {
+        formatter: (p) => {
+          const r = rows[p.dataIndex];
+          return `<div style="font-weight:700;">${r.label}</div>` +
+            `<div style="margin-top:2px;"><b>${r.value}</b> of ${total} safeguards · ${pct(r.value)}%</div>` +
+            `<div style="color:${t.textMuted};font-size:11px;margin-top:2px;">${r.hint}</div>`;
+        },
+      }),
+      xAxis: {
+        type: 'value', max: total || 1,
+        axisLabel: { color: t.textMuted, fontSize: 10 },
+        splitLine: { lineStyle: { color: t.gridLine } },
+        axisLine: { show: false }, axisTick: { show: false },
+      },
+      yAxis: {
+        type: 'category', inverse: true, data: rows.map(r => r.label),
+        axisLabel: { color: t.textMuted, fontSize: 11, fontWeight: 600 },
+        axisLine: { show: false }, axisTick: { show: false },
+      },
       series: [{
         type: 'bar',
-        data: [
-          { value: cv.yes,     itemStyle: { color: '#16a34a' } },
-          { value: cv.partial, itemStyle: { color: '#d97706' } },
-          { value: cv.no,      itemStyle: { color: '#dc2626' } },
-          { value: cv.unknown, itemStyle: { color: '#94a3b8' } },
-        ],
-        label: { show: true, position: 'right', fontSize: 11, formatter: (p) => `${p.value} / ${cv.total}` },
-        barWidth: 22,
+        barWidth: 20,
+        showBackground: true,
+        backgroundStyle: { color: t.barTrack, borderRadius: [0, 10, 10, 0] },
+        data: rows.map(r => ({ value: r.value, itemStyle: { color: r.color, borderRadius: [0, 10, 10, 0] } })),
+        label: { show: true, position: 'right', color: t.text, fontWeight: 700, fontSize: 11, formatter: (p) => `${p.value} · ${pct(p.value)}%` },
       }],
     }, true);
   }
 
+  // === CSF function score bars ===
   function renderCsfBars() {
     const c = getOrInitChart('chartCsf');
-    if (!c) return;
+    if (!c || !state.bundle) return;
+    const t = chartTheme();
     const scores = state.bundle.csf_scores || {};
-    const data = CSF_FN_ORDER.map(k => ({ value: Number(scores[k]) || 0, itemStyle: { color: CSF_FN_COLORS[k] } }));
+    const manual = state.bundle.report?.csf_scores_manual || {};
+    const vals = CSF_FN_ORDER.map(k => Number(scores[k]) || 0);
     c.setOption({
-      grid: { left: 80, right: 30, top: 20, bottom: 30 },
-      tooltip: {},
-      xAxis: { type: 'value', max: 5 },
-      yAxis: { type: 'category', data: CSF_FN_ORDER.map(k => CSF_FN_NAMES[k]), axisLabel: { fontSize: 11 } },
-      series: [{ type: 'bar', data, barWidth: 18, label: { show: true, position: 'right', fontSize: 11, formatter: (p) => p.value.toFixed(1) } }],
+      animation: !t.capture,
+      grid: { left: 92, right: 60, top: 14, bottom: 28 },
+      tooltip: Object.assign(tooltipBase(t), {
+        formatter: (p) => {
+          const k = CSF_FN_ORDER[p.dataIndex];
+          const v = vals[p.dataIndex];
+          const src = (k in manual) ? 'manual override' : 'auto-derived from IG1';
+          const gap = (v > 0 && v < 2)
+            ? `<div style="color:${UA.bloom};font-size:11px;font-weight:600;margin-top:2px;">Priority gap — below 2.0</div>` : '';
+          return `<div style="font-weight:700;">${CSF_FN_NAMES[k]} (${k})</div>` +
+            `<div style="margin-top:2px;"><b>${v.toFixed(1)}</b> / 5 maturity</div>` +
+            `<div style="color:${t.textMuted};font-size:11px;margin-top:2px;">${src}</div>` + gap;
+        },
+      }),
+      xAxis: {
+        type: 'value', max: 5, interval: 1,
+        axisLabel: { color: t.textMuted, fontSize: 10 },
+        splitLine: { lineStyle: { color: t.gridLine } },
+        axisLine: { show: false }, axisTick: { show: false },
+      },
+      yAxis: {
+        type: 'category', inverse: true, data: CSF_FN_ORDER.map(k => CSF_FN_NAMES[k]),
+        axisLabel: { color: t.textMuted, fontSize: 11, fontWeight: 600 },
+        axisLine: { show: false }, axisTick: { show: false },
+      },
+      series: [{
+        type: 'bar',
+        barWidth: 16,
+        showBackground: true,
+        backgroundStyle: { color: t.barTrack, borderRadius: [0, 8, 8, 0] },
+        data: vals.map(v => ({
+          value: v,
+          itemStyle: {
+            // Arizona Red accent only for clearly failing functions (< 2.0).
+            color: (v > 0 && v < 2) ? horizGradient(UA.red, UA.bloom) : horizGradient(UA.azurite, UA.oasis),
+            borderRadius: [0, 8, 8, 0],
+          },
+        })),
+        label: {
+          show: true, position: 'right', color: t.text, fontWeight: 700, fontSize: 11,
+          formatter: (p) => `${p.value.toFixed(1)}${(CSF_FN_ORDER[p.dataIndex] in manual) ? ' ✎' : ''}`,
+        },
+      }],
     }, true);
   }
 
@@ -907,6 +1143,24 @@
   function resizeAllCharts() {
     Object.values(state.charts).forEach(c => { try { c.resize(); } catch (_) {} });
   }
+
+  // Rebuild every visualization with fresh chartTheme() colors (options bake
+  // colors in, so a resize alone isn't enough), then re-fit.
+  function rerenderAllVisuals() {
+    if (!state.bundle) return;
+    renderHeatmap();
+    renderHeatmapResidual();
+    renderRadar();
+    renderCisBars();
+    renderCsfBars();
+    requestAnimationFrame(resizeAllCharts);
+  }
+
+  // Watch html[data-theme] so charts and HTML legends restyle the moment the
+  // user toggles light/dark mode.
+  new MutationObserver((muts) => {
+    if (muts.some(m => m.attributeName === 'data-theme')) rerenderAllVisuals();
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
   // === Findings table ===
   function riskBucket(r) {
@@ -1250,8 +1504,8 @@
     return `<span class="score-badge ${scoreClass(v)}">${v == null ? '—' : v}</span>`;
   }
   function reasonableMark(row) {
-    if (row.is_reasonable === true)  return '<span title="Treatment residual ≤ acceptable" style="color:#16a34a;font-weight:700;">✓</span>';
-    if (row.is_reasonable === false) return '<span title="Treatment residual > acceptable — not yet reasonable" style="color:#dc2626;font-weight:700;">✗</span>';
+    if (row.is_reasonable === true)  return '<span title="Treatment residual ≤ acceptable" style="color:var(--risk-low, #2f9e6e);font-weight:700;">✓</span>';
+    if (row.is_reasonable === false) return '<span title="Treatment residual > acceptable — not yet reasonable" style="color:var(--risk-high, #c43d4b);font-weight:700;">✗</span>';
     return '<span style="color:var(--text-muted, #94a3b8);">—</span>';
   }
 
@@ -1578,14 +1832,23 @@
       cis_png:     'chartCis',
       csf_png:     'chartCsf',
     };
-    for (const [k, id] of Object.entries(map)) {
-      const c = state.charts[id];
-      if (!c) continue;
-      try {
-        out[k] = c.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' });
-      } catch (e) {
-        console.warn('chart capture failed for', id, e);
+    // The PDF composites charts onto white paper. If the dashboard is in dark
+    // mode, re-render with the light palette (and animations off) for the
+    // capture, then restore — otherwise light text vanishes on the page.
+    const wasDark = document.documentElement.dataset.theme === 'dark';
+    if (wasDark) { state.forceLightCharts = true; rerenderAllVisuals(); }
+    try {
+      for (const [k, id] of Object.entries(map)) {
+        const c = state.charts[id];
+        if (!c) continue;
+        try {
+          out[k] = c.getDataURL({ type: 'png', pixelRatio: 2, backgroundColor: '#ffffff' });
+        } catch (e) {
+          console.warn('chart capture failed for', id, e);
+        }
       }
+    } finally {
+      if (wasDark) { state.forceLightCharts = false; rerenderAllVisuals(); }
     }
     return out;
   }
@@ -1726,7 +1989,8 @@
       return;
     }
     const dcClass = c => `dc-${String(c || 'internal').toLowerCase()}`;
-    const tierColor = t => ({ 1: '#dc2626', 2: '#d97706', 3: '#0891b2' })[t] || '#94a3b8';
+    // Tier accent: crown jewels in Arizona Red, important in amber, standard in Oasis.
+    const tierColor = t => ({ 1: UA.red, 2: '#b58410', 3: UA.oasis })[t] || '#94a3b8';
     tbody.innerHTML = assets.map(a => `
       <tr style="cursor:pointer; border-left:3px solid ${tierColor(a.criticality_tier)};" data-asset-id="${a.id}">
         <td><strong>${escapeHtml(a.name)}</strong>${a.hostname ? `<br><small style="color:var(--text-muted)">${escapeHtml(a.hostname)}</small>` : ''}</td>
@@ -1905,9 +2169,9 @@
         `<button type="button" class="ins-opt ${cur === val ? 'active' : ''}" data-k="${c.k}" data-v="${val}" style="padding:4px 12px; border:1px solid ${cur === val ? color : 'var(--border-color,#e2e8f0)'}; background:${cur === val ? color : 'var(--bg-card, white)'}; color:${cur === val ? 'white' : 'var(--text-primary)'}; border-radius:4px; cursor:pointer; font-size:0.8rem; font-weight:600;">${lbl}</button>`;
       return `<div style="display:flex; align-items:center; gap:8px; padding:8px 0; border-bottom:1px solid var(--border-color,#e2e8f0);">
         <div style="flex:1;">${escapeHtml(c.label)} <small style="color:var(--text-muted);">(${c.weight} pts)</small></div>
-        ${optBtn('yes', 'YES', 'var(--risk-low, #16a34a)')}
-        ${optBtn('partial', 'PARTIAL', 'var(--risk-medium, #d97706)')}
-        ${optBtn('no', 'NO', 'var(--risk-high, #dc2626)')}
+        ${optBtn('yes', 'YES', 'var(--risk-low, #2f9e6e)')}
+        ${optBtn('partial', 'PARTIAL', 'var(--risk-medium, #b58410)')}
+        ${optBtn('no', 'NO', 'var(--risk-high, #c43d4b)')}
       </div>`;
     }).join('');
     host.querySelectorAll('.ins-opt').forEach(btn => {
@@ -1923,7 +2187,7 @@
     document.getElementById('insScore').textContent = r.readiness_score ?? '—';
     const tier = r.readiness_tier || '—';
     document.getElementById('insTier').textContent = tier;
-    const tierColors = { 'Insurable':'#16a34a','Conditional':'#d97706','Restricted':'#ea580c','Uninsurable':'#dc2626' };
+    const tierColors = { 'Insurable': '#2f9e6e', 'Conditional': '#b58410', 'Restricted': '#e07b39', 'Uninsurable': UA.red };
     const tierHints = {
       'Insurable':   'standard market — competitive premiums',
       'Conditional': 'sub-standard / restricted coverage',
@@ -2057,7 +2321,7 @@
       host.innerHTML = `<p style="color:var(--text-muted); font-style:italic;">No scenarios match. Try clearing filters.</p>`;
       return;
     }
-    const catColor = c => ({ technical:'#1e5288', people:'#dc2626', process:'#d97706', physical:'#16a34a' })[c] || '#94a3b8';
+    const catColor = c => ({ technical: UA.azurite, people: UA.red, process: '#b58410', physical: '#2f9e6e' })[c] || '#94a3b8';
     host.innerHTML = filtered.map(s => `
       <div style="border:1px solid var(--border-color,#e2e8f0); border-radius:6px; padding:12px; margin-bottom:8px;">
         <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:10px;">
@@ -2142,7 +2406,7 @@
             </div>
             <div>
               <div style="font-size:0.7rem; text-transform:uppercase; color:var(--text-muted); letter-spacing:0.1em; font-weight:700;">Annualized Loss Expectancy (ALE)</div>
-              <div style="font-size:1.6rem; font-weight:800; color:#dc2626;">${fmt(r.ale)}</div>
+              <div style="font-size:1.6rem; font-weight:800; color:var(--risk-high, #c43d4b);">${fmt(r.ale)}</div>
               <div style="font-size:0.75rem; color:var(--text-muted);">${r.breakdown.formula_ale} = ${fmt(r.sle)} × ${aro}</div>
             </div>
           </div>`;
@@ -2204,7 +2468,7 @@
       try {
         const r = await api('PUT', `/${state.profileId}/findings/${findingId}/owasp`, { factors });
         const el = document.getElementById('owaspResult');
-        el.innerHTML = `<strong>L=${r.rollup.likelihood_score} (${r.rollup.likelihood_band})</strong> · <strong>I=${r.rollup.impact_score} (${r.rollup.impact_band})</strong> → <strong style="color:#dc2626;">${r.rollup.severity}</strong>`;
+        el.innerHTML = `<strong>L=${r.rollup.likelihood_score} (${r.rollup.likelihood_band})</strong> · <strong>I=${r.rollup.impact_score} (${r.rollup.impact_band})</strong> → <strong style="color:var(--risk-high, #c43d4b);">${r.rollup.severity}</strong>`;
       } catch (e) { toast('OWASP scoring failed: ' + e.message, 4000); }
     });
     // FAIR Monte Carlo button
@@ -2259,7 +2523,7 @@
       // OWASP factors — load existing
       renderOwaspFactors(f?.owasp_factors || null);
       document.getElementById('owaspResult').innerHTML = f?.owasp_factors?._rollup
-        ? `<strong>L=${f.owasp_factors._rollup.likelihood_score} (${f.owasp_factors._rollup.likelihood_band})</strong> · <strong>I=${f.owasp_factors._rollup.impact_score} (${f.owasp_factors._rollup.impact_band})</strong> → <strong style="color:#dc2626;">${f.owasp_factors._rollup.severity}</strong>`
+        ? `<strong>L=${f.owasp_factors._rollup.likelihood_score} (${f.owasp_factors._rollup.likelihood_band})</strong> · <strong>I=${f.owasp_factors._rollup.impact_score} (${f.owasp_factors._rollup.impact_band})</strong> → <strong style="color:var(--risk-high, #c43d4b);">${f.owasp_factors._rollup.severity}</strong>`
         : '';
       // FAIR result
       const fq = f?.fair_quant;

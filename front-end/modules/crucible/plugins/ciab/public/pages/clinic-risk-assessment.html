@@ -10,20 +10,23 @@
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
   <style>
-    /* Risk + status palette as tokens so dark mode can re-tint them */
+    /* Risk + status palette as tokens so dark mode can re-tint them.
+       Severity ramp is shared with the ECharts heat maps (see chartTheme/SEVERITY_LEVELS in JS):
+       low #2f9e6e → guarded #d9a514 → elevated #e07b39 → high #c43d4b → critical #8b0015.
+       Badge tokens below use the white-text-safe members of that ramp. */
     :root {
-      --risk-low: #16a34a; --risk-medium: #d97706; --risk-high: #dc2626; --risk-critical: #7f1d1d;
-      --pill-open-bg: #fee2e2;    --pill-open-fg: #991b1b;
-      --pill-mitigated-bg: #dcfce7; --pill-mitigated-fg: #166534;
-      --pill-accepted-bg: #fef3c7; --pill-accepted-fg: #92400e;
-      --pill-transferred-bg: #dbeafe; --pill-transferred-fg: #1e40af;
+      --risk-low: #2f9e6e; --risk-medium: #b58410; --risk-high: #c43d4b; --risk-critical: #8b0015;
+      --pill-open-bg: #f9e0e3;    --pill-open-fg: #8b0015;
+      --pill-mitigated-bg: #ddf1e7; --pill-mitigated-fg: #1f7a52;
+      --pill-accepted-bg: #f8efd4; --pill-accepted-fg: #8a6116;
+      --pill-transferred-bg: #dde9f4; --pill-transferred-fg: #1e5288;
     }
     [data-theme="dark"] {
-      --risk-critical: #991b1b;
-      --pill-open-bg: rgba(239,68,68,0.16);    --pill-open-fg: #fca5a5;
-      --pill-mitigated-bg: rgba(34,197,94,0.16); --pill-mitigated-fg: #86efac;
-      --pill-accepted-bg: rgba(245,158,11,0.16); --pill-accepted-fg: #fcd34d;
-      --pill-transferred-bg: rgba(59,130,246,0.16); --pill-transferred-fg: #93c5fd;
+      --risk-low: #35a878; --risk-medium: #c08c12; --risk-high: #d4525f; --risk-critical: #a30f24;
+      --pill-open-bg: rgba(239,64,86,0.16);    --pill-open-fg: #f6a6b0;
+      --pill-mitigated-bg: rgba(47,158,110,0.18); --pill-mitigated-fg: #8fd9b8;
+      --pill-accepted-bg: rgba(217,165,20,0.16); --pill-accepted-fg: #ecc95e;
+      --pill-transferred-bg: rgba(55,141,189,0.18); --pill-transferred-fg: #81d3eb;
     }
     .cra-shell { display: flex; flex-direction: column; gap: 16px; }
     .cra-breadcrumb { font-size: 0.8rem; color: var(--text-muted); }
@@ -41,10 +44,13 @@
     .cra-tab:hover { color: var(--text-primary); }
     .cra-tab.active { color: var(--primary, #0c234b); border-bottom-color: var(--primary, #0c234b); }
     /* Collapsible overview sections — charts resize on toggle (see JS) */
-    details.cra-section { margin-top: 16px; }
-    details.cra-section > summary { cursor: pointer; user-select: none; font-weight: 600; font-size: 0.95rem; color: var(--text-primary); padding: 6px 2px; list-style-position: inside; }
+    details.cra-section { margin-top: 20px; }
+    details.cra-section > summary { display: flex; align-items: baseline; gap: 9px; cursor: pointer; user-select: none; font-weight: 600; font-size: 0.95rem; color: var(--text-primary); padding: 6px 2px; list-style: none; }
+    details.cra-section > summary::-webkit-details-marker { display: none; }
+    details.cra-section > summary::before { content: '▸'; flex-shrink: 0; font-size: 0.75rem; color: var(--text-muted, #64748b); transition: transform 0.15s ease; transform-origin: 45% 55%; }
+    details.cra-section[open] > summary::before { transform: rotate(90deg); }
     details.cra-section > summary:hover { color: var(--primary, #0c234b); }
-    details.cra-section > summary .sec-hint { font-weight: 400; font-size: 0.8rem; color: var(--text-muted); margin-left: 8px; }
+    details.cra-section > summary .sec-hint { font-weight: 400; font-size: 0.8rem; color: var(--text-muted); }
     .cra-pane { display: none; }
     .cra-pane.active { display: block; }
     .cra-grid { display: grid; gap: 16px; }
@@ -125,10 +131,11 @@
     .ram-row .asset { font-size: 0.8rem; color: var(--text-muted, #64748b); }
     .ram-row .score { text-align:center; font-weight: 600; font-size: 0.85rem; }
     .ram-row .reasonable { text-align:center; font-size:0.85rem; }
-    .ram-row .score-badge { display:inline-block; min-width:24px; padding:2px 6px; border-radius: 4px; color: white; font-weight:600; }
+    .ram-row .score-badge { display:inline-block; min-width:26px; padding:2px 7px; border-radius: 6px; color: white; font-weight:600; font-size: 0.78rem; }
     .score-1, .score-2 { background: var(--risk-low); }
     .score-3, .score-4 { background: var(--risk-medium); }
-    .score-6, .score-9 { background: var(--risk-high); }
+    .score-6 { background: var(--risk-high); }
+    .score-9 { background: var(--risk-critical); }
     .score-empty { background: var(--gray-200, #e2e8f0); color: var(--text-muted, #64748b); }
     .ram-drawer { padding: 16px 16px 20px 16px; background: var(--bg-card, white); border-top: 1px dashed var(--border-color, #e2e8f0); display:none; }
     .ram-row.expanded + .ram-drawer { display: block; }
@@ -273,6 +280,31 @@
     .cra-empty .desc { font-size: 0.85rem; color: var(--text-muted, #64748b); margin: 4px auto 0; max-width: 420px; }
     .cra-empty .btn { margin-top: 14px; }
     .cra-empty.compact { padding: 24px 16px; }
+
+    /* ═══════════════════════════════════════════════════════════════
+       Visualization cards — kicker + title + caption header, fixed-height
+       chart body, severity-chip legend pinned to the card bottom so all
+       cards in a grid row stay equal height.
+       ═══════════════════════════════════════════════════════════════ */
+    .chart-card { padding: 0; display: flex; flex-direction: column; }
+    .chart-card-head { padding: 16px 18px 12px; border-bottom: 1px solid var(--border-color, #e2e8f0); }
+    .chart-card-head h3 { margin: 3px 0 0; font-size: 1rem; color: var(--text-primary); }
+    .chart-caption { margin: 5px 0 0; font-size: 0.78rem; line-height: 1.45; color: var(--text-muted, #64748b); max-width: 62ch; }
+    .chart-card .cra-chart { flex-shrink: 0; }
+    .chart-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; padding: 10px 18px 14px; border-top: 1px solid var(--border-color, #e2e8f0); margin-top: auto; }
+    .legend-chip { display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; font-weight: 600; color: var(--text-secondary, #475569); }
+    .legend-chip .dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+    .legend-note { font-size: 0.72rem; color: var(--text-muted, #64748b); margin-left: auto; }
+
+    /* Drawer refinements: rounded panel, sticky header so context survives scroll */
+    .drawer { border-radius: 16px 0 0 16px; box-shadow: -12px 0 40px rgba(2, 6, 23, 0.18); }
+    .drawer header { position: sticky; top: 0; z-index: 5; background: var(--bg-card, white); border-radius: 16px 0 0 0; }
+    .drawer header h3 { font-size: 1.02rem; letter-spacing: -0.01em; }
+
+    /* CIS RAM workbook: row hover accent + softer section chrome */
+    .ram-control { border-radius: 10px; }
+    .ram-row:hover { box-shadow: inset 3px 0 0 var(--accent, #1e5288); }
+    .ram-row.expanded { box-shadow: inset 3px 0 0 var(--accent, #1e5288); }
   </style>
 </head>
 <body>
@@ -397,32 +429,55 @@
             <details class="cra-section" open id="secHeatmaps">
               <summary>Risk Heat Maps <span class="sec-hint">inherent today vs. residual after treatment</span></summary>
               <div class="cra-grid cols-2" style="margin-top:10px">
-                <div class="cra-card">
-                  <h3>Risk Heat Map — Inherent (today)</h3>
+                <div class="cra-card chart-card">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">Inherent Risk</div>
+                    <h3>Heat Map — Today</h3>
+                    <p class="chart-caption">Each tile counts register findings at that likelihood × impact, scored before any treatment. Read toward the top-right — that's where action is most urgent.</p>
+                  </div>
                   <div class="cra-chart tall" id="chartHeatmap"></div>
+                  <div class="chart-legend" id="legendHeatmap"></div>
                 </div>
-                <div class="cra-card">
-                  <h3>Risk Heat Map — Residual (post-treatment)</h3>
+                <div class="cra-card chart-card">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">Residual Risk</div>
+                    <h3>Heat Map — After Treatment</h3>
+                    <p class="chart-caption">The same findings re-plotted at their projected post-treatment scores. The visible drift toward the bottom-left is the value of the remediation plan.</p>
+                  </div>
                   <div class="cra-chart tall" id="chartHeatmapResidual"></div>
+                  <div class="chart-legend" id="legendHeatmapResidual"></div>
                 </div>
               </div>
             </details>
             <details class="cra-section" open id="secFrameworks">
               <summary>Framework Maturity &amp; Coverage <span class="sec-hint">NIST CSF 2.0 and CIS IG1</span></summary>
               <div class="cra-grid" style="margin-top:10px; grid-template-columns: 1fr;" id="csfRadarRow">
-                <div class="cra-card">
-                  <h3>NIST CSF 2.0 Maturity</h3>
+                <div class="cra-card chart-card">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">NIST CSF 2.0</div>
+                    <h3>Maturity Radar</h3>
+                    <p class="chart-caption">Program maturity 0–5 across the six CSF functions. A large, balanced polygon is strong; dents show where the program is thin. Hover for per-function detail.</p>
+                  </div>
                   <div class="cra-chart tall" id="chartRadar"></div>
+                  <div class="chart-legend" id="legendRadar"></div>
                 </div>
               </div>
 
               <div class="cra-grid cols-2" style="margin-top:16px" id="cisCsfRow">
-                <div class="cra-card cis-clickable" id="cisCard" role="button" tabindex="0" title="Click to view the client's full intake form">
-                  <h3>CIS IG1 Coverage <span class="view-intake-hint">View intake →</span></h3>
+                <div class="cra-card chart-card cis-clickable" id="cisCard" role="button" tabindex="0" title="Click to view the client's full intake form">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">CIS Controls</div>
+                    <h3>IG1 Safeguard Coverage <span class="view-intake-hint">View intake →</span></h3>
+                    <p class="chart-caption">How the 56 IG1 safeguards were answered on intake. Blue is implemented; red gaps are what drive findings onto the register.</p>
+                  </div>
                   <div class="cra-chart" id="chartCis"></div>
                 </div>
-                <div class="cra-card" id="csfBarsCard">
-                  <h3>NIST CSF Function Scores</h3>
+                <div class="cra-card chart-card" id="csfBarsCard">
+                  <div class="chart-card-head">
+                    <div class="cra-kicker">NIST CSF 2.0</div>
+                    <h3>Function Scores</h3>
+                    <p class="chart-caption">The radar's underlying numbers. Functions scoring below 2.0 are flagged red as priority gaps; ✎ marks a manual analyst override.</p>
+                  </div>
                   <div class="cra-chart" id="chartCsf"></div>
                 </div>
               </div>
@@ -515,7 +570,7 @@
                   <div class="label">Scored</div>
                   <div class="value" id="ramScored" style="font-size:1.2rem">0 / 56</div>
                 </div>
-                <div class="cra-stat-card" style="border-left-color:#16a34a; padding:10px 14px; margin:0;">
+                <div class="cra-stat-card" style="border-left-color:var(--risk-low, #2f9e6e); padding:10px 14px; margin:0;">
                   <div class="label">Reasonable</div>
                   <div class="value" id="ramReasonable" style="font-size:1.2rem">0 / 56</div>
                 </div>
@@ -570,7 +625,7 @@
                 <div class="value" id="insScore">—</div>
                 <div class="hint" id="insScoreHint">of 100 possible points</div>
               </div>
-              <div class="cra-stat-card" id="insTierTile" style="border-left-color:#dc2626;">
+              <div class="cra-stat-card" id="insTierTile" style="border-left-color:var(--risk-high, #c43d4b);">
                 <div class="label">Underwriter Tier</div>
                 <div class="value" id="insTier">—</div>
                 <div class="hint" id="insTierHint">— complete the scorecard</div>
@@ -708,7 +763,7 @@
     <div class="body">
       <input type="hidden" id="findingId">
       <div class="field">
-        <label>Title <span style="color:#dc2626">*</span></label>
+        <label>Title <span style="color:var(--risk-high, #c43d4b)">*</span></label>
         <input type="text" id="fTitle" placeholder="e.g., Endpoint MFA gap on remote workers">
       </div>
       <div class="field">
@@ -917,7 +972,7 @@
     <div class="body">
       <input type="hidden" id="assetId">
       <div class="field">
-        <label>Name <span style="color:#dc2626">*</span></label>
+        <label>Name <span style="color:var(--risk-high, #c43d4b)">*</span></label>
         <input type="text" id="aName" placeholder="e.g. corp-dc-01 / Customer Records / Executive Email">
       </div>
       <div class="row2">

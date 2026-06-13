@@ -61,14 +61,16 @@ function findConnectionByName(node, name) {
  * Single-attempt fetch of the VM's first non-loopback IPv4 from Proxmox.
  * Used for lazy IP refresh — no retry loop, VM is expected to already be running.
  */
-async function fetchCurrentVmIp(node, vmid, providerType) {
+async function fetchCurrentVmIps(node, vmid, providerType) {
+  const ips = [];
+  const usable = ip => ip && !ip.startsWith('127.') && !ip.startsWith('169.254.');
   try {
     if (providerType === 'lxc') {
       const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/lxc/${vmid}/interfaces`);
       for (const iface of (Array.isArray(ifaces) ? ifaces : [])) {
         if (iface.name === 'lo') continue;
         const ip = (iface.inet || '').split('/')[0];
-        if (ip && !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+        if (usable(ip)) ips.push(ip);
       }
     } else {
       const data = await proxmoxAPI('GET', `/api2/json/nodes/${node}/qemu/${vmid}/agent/network-get-interfaces`);
@@ -77,21 +79,30 @@ async function fetchCurrentVmIp(node, vmid, providerType) {
         if (iface.name === 'lo') continue;
         for (const addr of (iface['ip-addresses'] || [])) {
           const ip = addr['ip-address'];
-          if (addr['ip-address-type'] === 'ipv4' && ip &&
-              !ip.startsWith('127.') && !ip.startsWith('169.254.')) return ip;
+          if (addr['ip-address-type'] === 'ipv4' && usable(ip)) ips.push(ip);
         }
       }
     }
   } catch (_) {}
-  return null;
+  return ips;
 }
 
+// Lane-gateway WAN transit allocations live in 100.100.60.0/24. A VM with a
+// transit leg reports that NIC alongside its real address; the transit IP is
+// never the right RDP/VNC target for a workstation, so deprioritize it.
+const TRANSIT_RANGE = /^100\.100\.60\./;
+
 /**
- * If the VM's current IP differs from what Guacamole has stored, update the
- * connection in-place so the next RDP session reaches the right address.
+ * Lazy IP refresh. Only rewrites the stored Guacamole hostname when the
+ * stored IP is NO LONGER live on the VM — if it's still one of the VM's
+ * current addresses (or the admin pinned a hostname via the
+ * `cybercore-pin-hostname` connection attribute), leave it alone. This is
+ * what stops every console launch from stomping a manually corrected
+ * hostname back to whichever NIC the guest agent happens to list first.
  */
-async function refreshGuacHostname(connId, currentIp) {
+async function refreshGuacHostname(connId, currentIps) {
   try {
+    if (!Array.isArray(currentIps) || currentIps.length === 0) return;
     // Parameters require a separate API call — GET /connections/:id alone returns only summary.
     const [conn, params] = await Promise.all([
       guacAPI('GET', `/connections/${connId}`),
@@ -99,13 +110,23 @@ async function refreshGuacHostname(connId, currentIp) {
     ]);
     if (!params) return;
     const storedIp = params.hostname;
-    if (!storedIp || storedIp === currentIp) return;
+    if (!storedIp) return;
+    if (conn?.attributes?.['cybercore-pin-hostname'] === 'true') return;
+    if (currentIps.includes(storedIp)) return;   // stored IP still valid — keep it
+
+    // Stored IP is stale. Pick the best replacement: same /16 as the old IP
+    // first, then any non-transit address, then whatever is left.
+    const sameNet = storedIp.split('.').slice(0, 2).join('.') + '.';
+    const newIp = currentIps.find(ip => ip.startsWith(sameNet) && !TRANSIT_RANGE.test(ip))
+      || currentIps.find(ip => !TRANSIT_RANGE.test(ip))
+      || currentIps[0];
+    if (!newIp || newIp === storedIp) return;
 
     await guacAPI('PUT', `/connections/${connId}`, {
       ...conn,
-      parameters: { ...params, hostname: currentIp },
+      parameters: { ...params, hostname: newIp },
     });
-    console.log(`[guac-sessions] Updated connection ${connId} hostname: ${storedIp} → ${currentIp}`);
+    console.log(`[guac-sessions] Updated connection ${connId} hostname: ${storedIp} → ${newIp} (stale)`);
   } catch (err) {
     console.warn(`[guac-sessions] Could not refresh Guac hostname for ${connId}: ${err.message}`);
   }
@@ -350,12 +371,12 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     // refresh for lane VMs.
     const isLaneVm = vmRow.vm_category === 'lane_vm';
     if (!isLaneVm && vmRow.provider_node && vmRow.provider_vmid && vmRow.power_state === 'running') {
-      const currentIp = await fetchCurrentVmIp(
+      const currentIps = await fetchCurrentVmIps(
         vmRow.provider_node,
         vmRow.provider_vmid,
         vmRow.provider_type || 'qemu'
       );
-      if (currentIp) await refreshGuacHostname(connId, currentIp);
+      if (currentIps.length > 0) await refreshGuacHostname(connId, currentIps);
     }
 
     // Authenticate to Guacamole so the browser never sees the login prompt.
