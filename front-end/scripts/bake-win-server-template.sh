@@ -265,6 +265,77 @@ if [ ${#PSMOD_FAILED[@]} -gt 0 ]; then
   echo "          The build continues; GOAD would fall back to online install for those at deploy."
 fi
 
+# ---------- 3c. Vendor SQL Server Express media OFFLINE (for srv02) ----------
+# GOAD's mssql role otherwise runs the SSEI online installer on every srv02,
+# which downloads the ~270 MB SQL package from Microsoft AT DEPLOY TIME. That
+# per-lane download intermittently hiccups mid-install, leaving a partial
+# instance, and the role's retry then dies on "master.mdf already exists",
+# bricking the lane. Staging the media here makes the install fully LOCAL and
+# deterministic. No ansible patch is needed: the role already SKIPS its own
+# download when c:\setup\mssql\sql_installer.exe exists and installs from
+# /MEDIAPATH=c:\setup\mssql\media — we just drop those files into the template.
+#
+# Microsoft gates direct CDN GETs: the SSEI URL hands wget a ~512-byte redirect
+# stub, and there is NO stable public direct URL for the offline package
+# (SQLEXPR_x64_ENU.exe) -- it's produced by running the SSEI on Windows with
+# /Action=Download. So the RELIABLE path is to drop the offline installer once
+# into $SQL_MEDIA_SRC: on any Windows box, open the "SQL Server 2019 Express"
+# download page, click "Download Media" -> Express Core -> get SQLEXPR_x64_ENU.exe
+# (and SQLEXPR_x64_ENU.box if your version splits it), and copy it to that dir on
+# this node. We still best-effort auto-download (set SQL_EXPR_URL if you host it
+# internally), but every download is SIZE-VALIDATED so a redirect/error stub can
+# never be bundled (that would ship a broken installer into the template).
+SQL_MEDIA_SRC="${SQL_MEDIA_SRC:-$GOAD_PACKER_DIR/sql-media}"
+SQL_MEDIA_DEST="$GOAD_PACKER_DIR/scripts/sysprep/sqlmedia"
+SQL_SSEI_URL="${SQL_SSEI_URL:-https://go.microsoft.com/fwlink/?linkid=866658}"  # fwlink is stabler than the versioned path
+SQL_EXPR_URL="${SQL_EXPR_URL:-}"   # no reliable public direct URL; set if you mirror it internally
+SQL_BOX_URL="${SQL_BOX_URL:-}"
+rm -rf "$SQL_MEDIA_DEST"; mkdir -p "$SQL_MEDIA_DEST"
+# dl_sql URL DEST MIN_BYTES [optional] -- UA-spoofed, SIZE-VALIDATED, cached.
+dl_sql() {
+  local url="$1" dest="$2" min="$3" opt="${4:-}"
+  if [ -z "$url" ]; then [ "$opt" = "optional" ] && return 0 || return 1; fi
+  if [ -f "$dest" ] && [ "$(stat -c%s "$dest" 2>/dev/null || echo 0)" -ge "$min" ]; then
+    echo "    $(basename "$dest"): cached ($(du -h "$dest" | cut -f1))"; return 0; fi
+  echo "    downloading $(basename "$dest") ..."
+  if wget -q -L --tries=3 --timeout=180 --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -O "${dest}.tmp" "$url"; then
+    local sz; sz="$(stat -c%s "${dest}.tmp" 2>/dev/null || echo 0)"
+    if [ "$sz" -ge "$min" ]; then mv "${dest}.tmp" "$dest"; echo "      $(basename "$dest"): $(du -h "$dest" | cut -f1)"; return 0; fi
+    echo "      only ${sz} bytes (need >= ${min}) - redirect/error stub, discarding"
+  fi
+  rm -f "${dest}.tmp"
+  [ "$opt" = "optional" ] && { echo "      $(basename "$dest"): skipped (optional)"; return 0; }
+  return 1
+}
+echo "==> Staging SQL Server Express media into $SQL_MEDIA_DEST ..."
+# Accept either media variant the SSEI's "Download Media" produces:
+#   SQLEXPR_x64_ENU.exe     (Express Core: engine only)
+#   SQLEXPRADV_x64_ENU.exe  (Express Advanced: engine + Full-Text + RS)
+# GOAD's sql_conf.ini requests FEATURES=SQLENGINE,FULLTEXT, and Full-Text media
+# ships in ADVANCED -- so prefer SQLEXPRADV if both are present.
+shopt -s nullglob
+# 1) Prefer operator-provided files in $SQL_MEDIA_SRC (the reliable path).
+if [ -d "$SQL_MEDIA_SRC" ]; then
+  for f in "$SQL_MEDIA_SRC"/SQLEXPR*_x64_ENU.* "$SQL_MEDIA_SRC"/SQL2019-SSEI-Expr.exe; do
+    [ -f "$f" ] && cp -f "$f" "$SQL_MEDIA_DEST/" && echo "    using provided $(basename "$f") ($(du -h "$f" | cut -f1))"
+  done
+fi
+# 2) Best-effort fill in what's still missing (the SSEI usually works via fwlink;
+#    the offline package almost always needs the manual drop above).
+ls "$SQL_MEDIA_DEST"/SQL2019-SSEI-Expr.exe >/dev/null 2>&1 || dl_sql "$SQL_SSEI_URL" "$SQL_MEDIA_DEST/SQL2019-SSEI-Expr.exe" 1000000          || true
+ls "$SQL_MEDIA_DEST"/SQLEXPR*_x64_ENU.exe  >/dev/null 2>&1 || dl_sql "$SQL_EXPR_URL" "$SQL_MEDIA_DEST/SQLEXPR_x64_ENU.exe"   100000000 optional || true
+EXPR_PRESENT=$(ls "$SQL_MEDIA_DEST"/SQLEXPR*_x64_ENU.exe 2>/dev/null | head -1)
+shopt -u nullglob
+if [ -n "$EXPR_PRESENT" ]; then
+  echo "    SQL offline media present: $(basename "$EXPR_PRESENT") ($(du -sh "$SQL_MEDIA_DEST" | cut -f1)) - srv02 will install OFFLINE"
+else
+  rm -f "$SQL_MEDIA_DEST/SQL2019-SSEI-Expr.exe"   # don't stage the SSEI alone: it would still download at deploy
+  echo "    NOTE: no offline SQL media - srv02 will use the online SSEI install (today's behavior)."
+  echo "          Produce it once on any Windows box from the SSEI you already have:"
+  echo "            SQL2019-SSEI-Expr.exe /Action=Download /MEDIAPATH=C:\\sqlmedia /MEDIATYPE=Advanced /Quiet /Language=en-US"
+  echo "          then copy SQLEXPR*_x64_ENU.exe (+ .box if present) to: $SQL_MEDIA_SRC"
+fi
+
 # ---------- 4. Create dedicated Proxmox user + role for packer ----------
 # Always (re)set the password so it stays in sync with config.auto.pkrvars.hcl,
 # which we regenerate every run with a fresh random PACKER_USER_PW. Skipping
@@ -615,6 +686,34 @@ try {
     }
   }
 } catch { Write-Host "WARN: PS module offline bake failed: $($_.Exception.Message)" }
+
+# (3) SQL Server Express media - stage OFFLINE so srv02's GOAD mssql role
+# installs locally instead of downloading ~270MB per lane from Microsoft. The
+# role skips its own download when c:\setup\mssql\sql_installer.exe exists and
+# installs from /MEDIAPATH=c:\setup\mssql\media, so we just place the files.
+# These are inert files under c:\setup, so sysprep /generalize leaves them
+# intact (unlike an installed SQL instance, which generalize would break).
+try {
+  $sqlBundle = $null
+  foreach ($d in (Get-WmiObject Win32_LogicalDisk -Filter "DriveType=5" | ForEach-Object { $_.DeviceID })) {
+    $cand = Join-Path $d 'sysprep\sqlmedia'
+    if (Test-Path $cand) { $sqlBundle = $cand; break }
+  }
+  $sqlExpr = if ($sqlBundle) { Get-ChildItem $sqlBundle -Filter 'SQLEXPR*_x64_ENU.exe' -ErrorAction SilentlyContinue | Select-Object -First 1 } else { $null }
+  if ($sqlExpr) {
+    New-Item -ItemType Directory -Force -Path 'C:\setup\mssql\media' | Out-Null
+    # The SSEI's offline media (SQLEXPR[ADV]_x64_ENU.exe + optional .box) goes under /MEDIAPATH.
+    Get-ChildItem $sqlBundle -Filter 'SQLEXPR*_x64_ENU.*' -ErrorAction SilentlyContinue |
+      Copy-Item -Destination 'C:\setup\mssql\media' -Force
+    # The SSEI installer becomes sql_installer.exe so the role's win_get_url
+    # ("get the installer") sees it present and skips its own download.
+    $ssei = Get-ChildItem $sqlBundle -Filter 'SQL2019-SSEI-Expr.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($ssei) { Copy-Item $ssei.FullName 'C:\setup\mssql\sql_installer.exe' -Force }
+    $haveSsei = Test-Path 'C:\setup\mssql\sql_installer.exe'
+    Write-Host "Staged SQL media -> C:\setup\mssql (media=$($sqlExpr.Name) installer=$haveSsei)"
+  } else { Write-Host "no SQL offline media on CD - srv02 will use the online SSEI fallback" }
+} catch { Write-Host "WARN: SQL media stage failed: $($_.Exception.Message)" }
+
 Write-Host "=== cybercore-winprep done ==="
 # === end cybercore-winprep ===================================================
 PREP
