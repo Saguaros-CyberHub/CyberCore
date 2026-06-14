@@ -49,33 +49,41 @@ const CLIENT_TYPE_TEMPLATES = {
     clientTypeName: 'Small-Medium Business',
     industries: ['Professional Services', 'Retail', 'Manufacturing'],
     naics_hint: '541990',
-    risks: ['phishing', 'ransomware', 'insider threats'],
-    compliance: ['Industry Standards'],
-    criticalSystems: ['CRM', 'Email', 'Accounting']
+    risks: ['phishing / business email compromise', 'ransomware', 'unmanaged remote access (RDP/VPN)', 'insider threat'],
+    // Most SMBs have no statutory regime; PCI-DSS applies if they take cards.
+    // State breach-notification law is universal. Kept generic so it doesn't
+    // imply a compliance program the org likely lacks.
+    compliance: ['PCI-DSS (if card payments)', 'State data-breach notification law'],
+    criticalSystems: ['Line-of-business / ERP', 'Accounting (QuickBooks/Sage)', 'CRM', 'Email (M365/Google)', 'File shares']
   },
   NonProfit: {
     clientTypeName: 'Non-Profit Organization',
-    industries: ['Education', 'Healthcare', 'Social Services'],
+    industries: ['Human / Social Services', 'Arts & Culture', 'Environmental / Conservation', 'Community Health', 'Education / Youth Services'],
     naics_hint: '813219',
-    risks: ['donor data breach', 'phishing', 'budget constraints'],
-    compliance: ['IRS 990', 'state regs'],
-    criticalSystems: ['Donor Database', 'Email', 'Volunteer Portal']
+    risks: ['donor / PII data breach', 'phishing / wire fraud', 'grant-funded budget constraints (security underspend)', 'over-broad volunteer access'],
+    // NPOs are cloud/donation-heavy: PCI if they process gifts online, state
+    // charity/breach law, HIPAA only if they run clinical/health programs.
+    compliance: ['PCI-DSS (online donations)', 'State data-breach / charitable-solicitation law'],
+    criticalSystems: ['Donor CRM (Blackbaud Raiser\'s Edge / Salesforce NPSP / Bloomerang)', 'Accounting (QuickBooks / Sage Intacct)', 'Email (M365/Google nonprofit)', 'Grant-management / case-management system']
   },
   Utility_IT_OT: {
     clientTypeName: 'Utility (IT/OT)',
-    industries: ['Water', 'Power', 'Gas Distribution'],
+    industries: ['Municipal Water / Wastewater', 'Electric Distribution Co-op', 'Natural Gas Distribution'],
     naics_hint: '221310',
-    risks: ['SCADA compromise', 'OT lateral movement', 'ransomware'],
-    compliance: ['NERC CIP', 'TSA'],
-    criticalSystems: ['SCADA', 'Historian', 'Billing', 'GIS']
+    risks: ['SCADA / HMI compromise', 'flat IT-to-OT path (no DMZ)', 'unpatched legacy OT (Windows 7/Server 2008)', 'ransomware halting billing/operations', 'remote-access vendor into OT'],
+    // Water utilities: AWWA + EPA/America's Water Infrastructure Act risk
+    // assessments. Electric: NERC CIP only for bulk-power (most distribution
+    // co-ops are below the threshold). All: TSA/CISA guidance, state PUC.
+    compliance: ['AWWA / EPA AWIA risk assessment (water)', 'NERC CIP (bulk electric only)', 'CISA / state PUC guidance'],
+    criticalSystems: ['SCADA master / HMI', 'Historian', 'PLCs / RTUs', 'CIS / billing', 'GIS']
   },
   K12: {
     clientTypeName: 'K-12 School District',
-    industries: ['Education'],
+    industries: ['Public School District', 'Public Charter School Network'],
     naics_hint: '611110',
-    risks: ['student data breach', 'ransomware', 'phishing'],
-    compliance: ['FERPA', 'COPPA', 'CIPA'],
-    criticalSystems: ['SIS', 'LMS', 'Email', 'Network Services']
+    risks: ['student PII / records breach (FERPA)', 'ransomware (districts are a top target)', 'phishing of staff payroll/W-2', 'content-filter bypass', '1:1 device / Chromebook sprawl'],
+    compliance: ['FERPA', 'CIPA (E-rate content filtering)', 'COPPA', 'State student-data-privacy law'],
+    criticalSystems: ['SIS (PowerSchool / Infinite Campus)', 'LMS (Google Classroom / Canvas)', 'Content filter (GoGuardian/Securly/Lightspeed)', 'Email (Google Workspace / M365 EDU)', 'Food-service / transportation systems']
   },
   Library: {
     clientTypeName: 'Public / Academic Library',
@@ -158,7 +166,11 @@ function buildConfig({
       clientTypeName: tmpl.clientTypeName,
       organization_overrides: orgOverrides,
       challenge_network: custom_config?.challenge_network || null,
-      network: { requiredSubnets: custom_config?.required_subnets || ['Management', 'Servers', 'Workstations', 'Guest'] }
+      // Only pin required subnets when the admin explicitly supplies them.
+      // Otherwise leave it null so buildNetworkPrompt picks the vertical-aware
+      // default subnet plan (Purdue-model for utilities, student/staff VLANs
+      // for K-12, public-access for libraries, flat LAN+Guest for SMB).
+      network: { requiredSubnets: custom_config?.required_subnets || null }
     },
     seed: {
       run_id: seedToken,

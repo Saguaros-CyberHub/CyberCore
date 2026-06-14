@@ -545,9 +545,15 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                       net0: `virtio,bridge=${vnetExtName}`,
                       net1: `virtio,bridge=${vnetIntName}`
                     });
+                    // Dual-homed DMZ host sits at .240 on both segments. It used
+                    // to be pinned to .50, but the gateway firstboot reserves
+                    // ext .50 for Kali's RDP DNAT (wan0:3389 → ext.50) — so the
+                    // two collided and student RDP landed on the web host, not
+                    // Kali. .240 is above the gateway's DHCP pool (.10–.200), so
+                    // no lease can claim it and no gateway re-bake is needed.
                     await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                      ipconfig0:  `ip=${net.lanExt.base3}.50/24,gw=${net.lanExt.gatewayIp}`,
-                      ipconfig1:  `ip=${net.lanInt.base3}.50/24`,
+                      ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
+                      ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
                       nameserver: net.lanExt.gatewayIp,
                       citype:     'nocloud'
                     });
@@ -589,8 +595,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               });
 
               console.log(`[Group ${group_name}] Configuring cloud-init for ${attackBoxVmId} (user: ${studentUsername})...`);
+              // Pin Kali to <lane-ext>.50 — the gateway firstboot bakes a static
+              // DNAT (wan0:3389 → <ext-base>.50:3389), so the attack box MUST sit
+              // at .50 or RDP through the gateway lands on an empty address.
+              // Without this Kali takes a DHCP lease (.10–.200) and the console
+              // breaks. Mirrors the v3 DMZ challenge-VM ipconfig0 pin above.
+              // laneSubnetBase is the external segment for v3, the lane subnet
+              // for v2 — the v2 bake DNATs to <lane>.50 too, so this is correct
+              // for both schemes.
               await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/config`, {
                 net0: `virtio,bridge=${vnet.vnet}`,
+                ipconfig0: `ip=${laneSubnetBase}.50/24,gw=${laneSubnetBase}.1`,
                 ciuser: studentUsername,
                 cipassword: studentPassword,
                 nameserver: `${laneSubnetBase}.1`
@@ -663,8 +678,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               }
 
               if (!kaliIp) {
-                console.warn(`[Group ${group_name}] Could not get Kali IP via guest agent — using fallback`);
-                kaliIp = `${laneSubnetBase}.100`;
+                // Kali is pinned to .50 via ipconfig0 above, so that's the
+                // correct fallback when the guest agent is slow to answer —
+                // and it matches the gateway's wan0:3389 → .50 DNAT target.
+                console.warn(`[Group ${group_name}] Could not get Kali IP via guest agent — using pinned .50`);
+                kaliIp = `${laneSubnetBase}.50`;
               }
               console.log(`[Group ${group_name}] Kali IP: ${kaliIp}`);
 

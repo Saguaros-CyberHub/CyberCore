@@ -278,13 +278,14 @@ const CODENAME_POOLS = {
 };
 
 const SERVER_OS_POOL = [
-  'Windows Server 2019 Standard 10.0.17763.5122',
-  'Windows Server 2022 Standard 10.0.20348.2113',
-  'Windows Server 2019 Datacenter 10.0.17763.5122',
-  'Ubuntu Server 22.04.3 LTS',
+  'Windows Server 2019 Standard 10.0.17763.5830',
+  'Windows Server 2022 Standard 10.0.20348.2402',
+  'Windows Server 2019 Datacenter 10.0.17763.5830',
+  'Windows Server 2016 Standard 10.0.14393.6796',
+  'Ubuntu Server 22.04.4 LTS',
   'Ubuntu Server 20.04.6 LTS',
-  'Red Hat Enterprise Linux 8.8',
-  'Debian 12.4 Bookworm'
+  'Red Hat Enterprise Linux 9.3',
+  'Debian 12.5 Bookworm'
 ];
 
 // Build a deterministic server roster that reflects what an org of this SIZE,
@@ -347,30 +348,42 @@ function buildServerRoster(runId, opts = {}) {
     }
 
   } else if (clientType === 'Utility_IT_OT') {
-    // Utilities are on-prem heavy and run real IT + OT. (OT assets — SCADA,
-    // historian, HMIs, PLCs — are added in the network branch's OT section.)
-    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for the corporate IT network', windows: true });
+    // Utilities are on-prem heavy and run a real corporate IT stack PLUS an OT
+    // environment. These are the CORPORATE IT servers only — the OT assets
+    // (SCADA master, historian, HMIs, PLCs/RTUs) are added by the network
+    // branch's OT section so they land on segregated OT subnets, not here.
+    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for the corporate IT network (separate from the OT/SCADA domain)', windows: true });
     if (employeeCount >= 120) {
       roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover', windows: true });
     }
-    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Corporate file share for engineering drawings, compliance docs and staff files', windows: true });
-    roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the billing / CIS and GIS systems', windows: true });
-    if (employeeCount >= 100) {
-      roles.push({ prefix: 'rds', role_label: 'Remote Desktop Gateway', function: 'RDS gateway for on-call engineers accessing the IT network remotely', windows: true });
+    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Corporate file share for engineering drawings, AWWA/compliance docs and staff files', windows: true });
+    roles.push({ prefix: 'cis', role_label: 'CIS / Billing Application Server', function: 'Customer Information System and utility billing application (meter-to-cash)', windows: true });
+    roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the CIS/billing and work-order systems', windows: true });
+    if (employeeCount >= 60) {
+      roles.push({ prefix: 'gis', role_label: 'GIS Server', function: 'Esri ArcGIS server for the distribution-network / asset map and outage data', windows: true });
     }
-    roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication', windows: false });
+    if (employeeCount >= 100) {
+      roles.push({ prefix: 'rds', role_label: 'Remote Desktop / Jump Host', function: 'RDS gateway for on-call engineers reaching the IT network remotely (often the only documented path toward OT)', windows: true });
+    }
+    roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication for corporate IT (OT backups are frequently absent — a realistic gap)', windows: false });
 
   } else if (clientType === 'K12') {
     // School districts run AD + file servers even when small; the SIS/LMS are
-    // increasingly cloud (PowerSchool SaaS, Google Classroom).
-    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for staff and student accounts', windows: true });
+    // increasingly cloud (PowerSchool SaaS, Google Classroom) but the district
+    // still runs local infra at the central office / data closet per building.
+    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for staff and student accounts (often synced to Google Workspace / Entra)', windows: true });
     if (employeeCount >= 200) {
       roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover across school sites', windows: true });
     }
-    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Staff and student file shares and home directories', windows: true });
-    if (!cloudFirst && coin('sis', 60)) {
-      roles.push({ prefix: 'app', role_label: 'SIS Application Server', function: 'On-prem student information system application server', windows: true });
+    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Staff and teacher file shares and home directories', windows: true });
+    if (!cloudFirst && coin('sis', 50)) {
+      // Some districts still self-host the SIS (Infinite Campus on-prem,
+      // older PowerSchool installs); most have moved to SaaS.
+      roles.push({ prefix: 'sis', role_label: 'SIS Application Server', function: 'On-prem student information system (Infinite Campus / legacy PowerSchool) application server', windows: true });
       roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the student information system', windows: true });
+    }
+    if (employeeCount >= 150) {
+      roles.push({ prefix: 'print', role_label: 'Print / Deployment Server', function: 'Print services plus SCCM/MDT or PaperCut and imaging for staff Windows machines', windows: true });
     }
     roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Backup target for student records and staff shares with offsite replication', windows: false });
 
@@ -437,7 +450,7 @@ function buildServerRoster(runId, opts = {}) {
       function: r.function,
       make: hw.make,
       model: hw.model,
-      critical: r.prefix === 'dc' || r.prefix === 'fs' || r.prefix === 'sql' || r.prefix === 'app' || r.prefix === 'web' || r.prefix === 'koha'
+      critical: ['dc', 'fs', 'sql', 'app', 'web', 'koha', 'cis', 'gis', 'sis'].includes(r.prefix)
     };
   });
 }
@@ -599,7 +612,41 @@ LIBRARY-SPECIFIC REALISM (this is a public/academic library, NOT a for-profit bu
 - past_incidents that fit a library: a public-access PC used for fraud/illegal content, a ransomware hit on the staff network, accidental exposure of patron borrowing records, a phished circulation-desk login. Patron PRIVACY (borrowing history) is the crown jewel — state law protects it.
 - Stakeholders to favor: Library Director, Systems/IT Librarian, Head of Circulation, Head of Children's/Reference Services, a Board of Trustees member or Business Manager (budget authority).` : '';
 
-  const userPrompt = `Generate the organization profile.${libraryOrgGuidance}
+  const k12OrgGuidance = config.clientType === 'K12' ? `
+
+K-12 SPECIFIC REALISM (this is a public school district, NOT a business):
+- Leadership: the top role is "Superintendent" — NOT a CEO/Owner. Technology is led by a "Director of Technology" / "Technology Coordinator" (or a CTO only in large districts); governance is an elected "Board of Education". Finance is a "Business Manager" / "CFO/CSBO".
+- annual_revenue_range means the annual OPERATING BUDGET (per-pupil funding × enrollment + state/federal aid + E-rate). employees_total is STAFF (teachers + admin + support), separate from the much larger STUDENT enrollment — mention enrollment in business_model.
+- department_breakdown should use district functions: Instruction/Teaching, Administration, Operations (facilities/transportation/food service), Technology/IT, Student Services. Teachers dominate the count.
+- critical_services: instruction/LMS, the SIS (grades/attendance/records), email, the content filter (CIPA), student devices, food-service & transportation.
+- past_incidents that fit: a ransomware incident closing schools for days, a staff phishing → payroll/W-2 fraud, exposure of student records (FERPA), a content-filter bypass. Student PII + FERPA are the crown jewels.
+- Stakeholders to favor: Superintendent, Director of Technology, Business Manager, a Principal, a Board member.` : '';
+
+  const utilityOrgGuidance = config.clientType === 'Utility_IT_OT' ? `
+
+UTILITY SPECIFIC REALISM (a small municipal/co-op water or electric utility):
+- Leadership: the top role is "General Manager" (co-op) or "Utility Director" / "Public Works Director" (municipal) — NOT a CEO. Governance is a board of directors (co-op) or city council / utility board. Operations is led by an "Operations Manager" / "Chief Plant Operator"; engineering by a "Chief Engineer".
+- IT/OT split: there is usually a small IT team AND a separate operations/SCADA group — they often do NOT coordinate (a classic finding). Security ownership is ambiguous.
+- annual_revenue_range = utility rate revenue (modest for a small system). employees_total is small relative to the physical plant.
+- department_breakdown: Operations/Plant, Engineering, Field Crews, Customer Service/Billing, IT, Administration.
+- critical_services: continuous water/power delivery, SCADA control, metering & billing, outage response, regulatory/water-quality reporting.
+- past_incidents that fit: a ransomware hit on the billing/IT network, an OT scare (a remote-access alert on the SCADA network), a near-miss water-quality alarm. Loss of process control / public safety is the crown-jewel risk.
+- Stakeholders to favor: General Manager, Operations Manager / Chief Operator, IT Manager, a SCADA/automation engineer, the Business/Finance Manager.
+- regulatory_timeline should reference REAL deadlines: an AWWA/EPA AWIA risk-and-resilience assessment or emergency-response-plan recertification, a state PUC filing, or a water-quality report (CCR) — not generic compliance.` : '';
+
+  const nonProfitOrgGuidance = config.clientType === 'NonProfit' ? `
+
+NON-PROFIT SPECIFIC REALISM (a 501(c)(3), NOT a business):
+- Leadership: the top role is "Executive Director" — NOT a CEO/Owner. Governance is a volunteer "Board of Directors" (often hands-on, sometimes a security blind spot). IT is part-time staff, a tech-savvy volunteer, or an outsourced MSP — do NOT invent a CISO/CIO.
+- annual_revenue_range means the annual OPERATING BUDGET / total revenue, funded by donations, grants, program fees and events — keep it modest and note restricted vs unrestricted funds in business_model.
+- department_breakdown: Programs/Services (the majority), Development/Fundraising, Administration/Finance, IT (often 0-1), Volunteers/Outreach.
+- critical_services: program/service delivery, donor & gift processing, grant compliance/reporting, volunteer coordination.
+- past_incidents that fit: a BEC/wire-fraud attempt against finance, a phished email account, donor-data exposure from a misconfigured CRM or a lost spreadsheet. The donor database (PII + giving history) is the crown jewel.
+- Stakeholders to favor: Executive Director, Director of Development/Fundraising, Finance/Operations Manager, a part-time IT person or MSP contact, a Board Treasurer.` : '';
+
+  const verticalOrgGuidance = libraryOrgGuidance + k12OrgGuidance + utilityOrgGuidance + nonProfitOrgGuidance;
+
+  const userPrompt = `Generate the organization profile.${verticalOrgGuidance}
 
 run_id: ${seed.run_id}
 client_type: ${config.clientType || 'SMB'} (${clientTypeName})
@@ -708,7 +755,43 @@ LIBRARY-SPECIFIC REALISM — model BOTH the staff environment and the patron/pub
 
 ` : '';
 
-  const userPrompt = `Generate the IT environment.${libraryItGuidance}
+  const k12ItGuidance = config.clientType === 'K12' ? `
+
+K-12 SPECIFIC REALISM — districts are Google- or Microsoft-EDU shops with huge 1:1 fleets:
+- endpoints: the STUDENT fleet dominates and is mostly ChromeOS Chromebooks (1:1). Put the bulk in a way that reflects ChromeOS (note Chromebooks in known_unknowns or function text since the schema lacks a chromeos bucket — DO NOT inflate windows_desktops to represent them; keep windows counts to STAFF machines and describe the Chromebook count in known_unknowns, e.g. "≈900 student Chromebooks managed in Google Admin, not in this Windows count"). Staff use Windows 11/10 laptops+desktops.
+- SaaS realistic for K-12 (pick 3–5): Google Workspace for Education (or Microsoft 365 A3/A5), the SIS (PowerSchool / Infinite Campus / Skyward), an LMS (Google Classroom / Canvas / Schoology), a content filter + monitoring (GoGuardian / Securly / Lightspeed — CIPA), Clever or ClassLink (rostering/SSO), a special-ed/IEP system, a food-service POS. sso_enabled is often TRUE here (Clever/ClassLink/Google SSO) — unlike SMBs.
+- endpoint_protection: Chromebooks rely on ChromeOS sandboxing + Google Admin (no traditional EDR); staff Windows get Defender or a district EDR. coverage_percent should reflect that the student fleet is "managed" but not EDR-covered.
+- deliberate_weaknesses that fit K-12: staff reuse weak passwords / no MFA for staff (very common); the SIS or grade server reachable from the student network; shared classroom/lab logins; teacher-shared Google Drive with student PII; default creds on cameras/door controllers/projectors; content filter bypassable on guest WiFi; an old on-prem server (library catalog, yearbook) unpatched.
+- known_unknowns that fit: "no MFA on staff email — phishing risk for W-2/payroll", "unsure how many personal devices are on staff WiFi", "no inventory of third-party ed-tech apps teachers signed up for (data-privacy/COPPA gap)".
+
+` : '';
+
+  const utilityItGuidance = config.clientType === 'Utility_IT_OT' ? `
+
+UTILITY (IT/OT) SPECIFIC REALISM — a small corporate IT shop bolted onto a sensitive OT/SCADA environment:
+- This branch is the CORPORATE IT side. The OT assets (SCADA, HMIs, historian, PLCs) are modeled in the NETWORK branch — here, only REFERENCE them as dependencies/known_unknowns; do not list PLCs as servers.
+- endpoints: mostly Windows desktops in the office (billing/CIS, engineering, dispatch, admin). A handful of ruggedized laptops/tablets for field crews (meter reading, locates). Keep counts modest — utilities are staff-light relative to asset count.
+- SaaS / systems realistic for a utility (pick 3–5): the CIS/billing platform (Tyler Technologies / Cayenta / NISC for co-ops), Esri ArcGIS Online, a work-order/CMMS (Cityworks / Cartegraph), Microsoft 365 or Google, a SCADA vendor support portal, an OMS (outage management). data_sensitivity High for CIS (customer PII + payment data).
+- vendor_risk MUST include the SCADA/automation integrator — they typically hold standing remote access into OT. last_assessment "Never" is realistic and is a key finding.
+- deliberate_weaknesses that fit a utility: no IT/OT segmentation (flat path to SCADA); the SCADA integrator's always-on remote access (TeamViewer/AnyDesk or a dedicated modem/VPN) with no MFA; unpatched legacy Windows on HMIs/historian (patching risks an outage); no EDR and no backups on OT; shared operator login at the control HMI; default SNMP/community strings on field gear.
+- known_unknowns that fit: "no current inventory of OT/SCADA assets and firmware", "unsure whether OT is actually air-gapped or just assumed to be", "don't know which vendors still have dial-in/VPN to the plant".
+
+` : '';
+
+  const nonProfitItGuidance = config.clientType === 'NonProfit' ? `
+
+NON-PROFIT SPECIFIC REALISM — lean, cloud/donation-heavy, chronically under-resourced on IT/security:
+- NPOs run almost entirely on DONATED/discounted cloud (TechSoup): Microsoft 365 nonprofit or Google for Nonprofits. On-prem footprint is thin — often ZERO servers, identity in Entra/Google, files in OneDrive/SharePoint/Drive.
+- SaaS realistic for a non-profit (pick 3–5): a donor CRM (Blackbaud Raiser's Edge NXT / Salesforce NPSP / Bloomerang / DonorPerfect), an online-giving / payment processor (Classy / Givebutter / Stripe — PCI scope, data_sensitivity High), accounting (QuickBooks Online / Sage Intacct), a volunteer/case-management system, Mailchimp/Constant Contact, Canva, Zoom/Teams. The donor CRM is the crown jewel.
+- IT is run by a part-time staffer, a board volunteer, or an outsourced MSP — reflect this in patch_management (Manual or Ad-hoc) and physical_security (few controls). coverage_percent and compliance_rate should be on the LOWER end.
+- deliberate_weaknesses that fit a non-profit: no MFA on the donor CRM or finance email (wire-fraud / BEC risk); ex-volunteers/board members with lingering access; shared logins for the giving platform; donor PII exported to spreadsheets on personal devices; no DPA with ed-tech/marketing vendors; the MSP holds admin with no oversight.
+- known_unknowns that fit: "no offboarding process for volunteers/board members", "unsure who has admin on the donor CRM", "don't know if the giving page is PCI-compliant (handled by the processor?)".
+
+` : '';
+
+  const verticalItGuidance = libraryItGuidance + k12ItGuidance + utilityItGuidance + nonProfitItGuidance;
+
+  const userPrompt = `Generate the IT environment.${verticalItGuidance}
 
 run_id: ${seed.run_id}
 employees_total: ${employeeCount}
@@ -760,16 +843,33 @@ function buildNetworkPrompt({ config, seed, employeeCount: employeeCountArg }) {
   });
   const hasServers = roster.length > 0;
 
-  // Subnet plan adapts to what actually exists. A serverless cloud-first org
-  // has no Servers subnet; libraries always get a Public-Access subnet for
-  // patron computers, separate from staff workstations.
-  const defaultSubnets = isLibrary
-    ? (hasServers
-        ? ['Management', 'Servers', 'Staff-Workstations', 'Public-Access', 'Public-WiFi']
-        : ['Management', 'Staff-Workstations', 'Public-Access', 'Public-WiFi'])
-    : (hasServers
-        ? ['Management', 'Servers', 'Workstations', 'Guest']
-        : ['Workstations', 'Guest']);
+  // Subnet plan adapts to vertical + what actually exists. A serverless
+  // cloud-first org has no Servers subnet; libraries always get a Public-Access
+  // subnet for patron computers; utilities get a Purdue-model IT/OT split; K-12
+  // gets the student/staff/admin/guest/IoT VLAN layout districts actually run.
+  const isUtility = config.clientType === 'Utility_IT_OT';
+  const isK12 = config.clientType === 'K12';
+  let defaultSubnets;
+  if (isLibrary) {
+    defaultSubnets = hasServers
+      ? ['Management', 'Servers', 'Staff-Workstations', 'Public-Access', 'Public-WiFi']
+      : ['Management', 'Staff-Workstations', 'Public-Access', 'Public-WiFi'];
+  } else if (isUtility) {
+    // Corporate IT (Purdue L4/L5) + an IT/OT DMZ (L3.5) + OT control (L2/L3)
+    // and OT field (L1/L0). Lower-maturity utilities collapse OT-DMZ — that
+    // missing layer is itself a realistic finding the prompt calls out.
+    defaultSubnets = ['Management', 'Servers', 'Corporate-Workstations', 'IT-OT-DMZ', 'OT-Control', 'OT-Field', 'Guest'];
+  } else if (isK12) {
+    // Districts segment students from staff and isolate the data-center; a
+    // dedicated IoT/AV VLAN carries projectors, APs, cameras, door controllers.
+    defaultSubnets = hasServers
+      ? ['Management', 'Servers', 'Staff', 'Student', 'Guest-WiFi', 'IoT-AV']
+      : ['Management', 'Staff', 'Student', 'Guest-WiFi', 'IoT-AV'];
+  } else {
+    defaultSubnets = hasServers
+      ? ['Management', 'Servers', 'Workstations', 'Guest']
+      : ['Workstations', 'Guest'];
+  }
   const subnetList = (netConfig.requiredSubnets || defaultSubnets)
     .map((s, i) => `${i + 1}) ${s}`).join('\n');
 
@@ -796,11 +896,14 @@ ${realAssets.map(a => `  - hostname: "${a.hostname}", ip: "${a.ip}"`).join('\n')
   }
 
   const otSection = config.clientType === 'Utility_IT_OT' ? `
-OT assets (each must have hostname AND ip):
-- scada-server (OT-Control subnet)
-- hmi-01 (OT-Control subnet)
-- historian-01 (OT-Control or DMZ)
-- plc-001..plc-003 (OT-Field subnet)` : '';
+OT / ICS ASSETS — these are NOT corporate IT; place them on the OT subnets, role="ot" (or role="server" only for the SCADA/historian Windows hosts). Each MUST have a hostname AND a static IP inside its subnet:
+- scada-01: SCADA master / control server (OT-Control subnet). os="Windows Server 2016 Standard 10.0.14393.6796" or a vendor build (e.g. "Windows Server 2019 (Wonderware/AVEVA System Platform)"). critical=true.
+- hmi-01, hmi-02: operator HMI workstations (OT-Control subnet). os="Windows 10 IoT Enterprise LTSC 2021" or, realistically for an under-funded utility, an unpatched "Windows 7 Professional SP1 6.1.7601" — a legacy-OS finding.
+- historian-01: process historian (OT-Control subnet, or the IT-OT-DMZ if maturity is higher). os="Windows Server 2019 Standard 10.0.17763.5830". critical=true.
+- eng-ws-01: engineering workstation running PLC programming software (TIA Portal / RSLogix). OT-Control subnet.
+- plc-01..plc-03: PLCs/RTUs at lift stations / substations (OT-Field subnet). role="ot", os="Embedded (Allen-Bradley ControlLogix)" or "Embedded (Siemens S7-1500)". No general-purpose OS.
+- poll-01: a polling/comms front-end or RTU gateway bridging OT-Field to OT-Control (OT-Field or OT-Control).
+SEGMENTATION REALISM (bake at least one of these in as a deliberate weakness): the IT-OT-DMZ is often missing or bypassed, so corporate Workstations/Servers can reach OT-Control directly; the historian or SCADA host is dual-homed across IT and OT; a vendor keeps an always-on remote-access path (TeamViewer/AnyDesk or a flat IPSec tunnel) straight into OT-Control; OT hosts run unpatched legacy Windows because patching risks an outage; OT has no EDR and no backups.` : '';
 
   const librarySection = isLibrary ? `
 PUBLIC-ACCESS assets (in the Public-Access subnet — these are PATRON devices, NOT staff):
@@ -809,6 +912,14 @@ PUBLIC-ACCESS assets (in the Public-Access subnet — these are PATRON devices, 
 - self-checkout kiosks: selfcheck-01 (and selfcheck-02 for larger libraries).
 Staff workstations go in the Staff-Workstations subnet (circ-ws-01, ref-ws-01, child-ws-01, tech-svcs-ws-01, admin-ws-01, it-ws-01).
 SEGMENTATION REALISM: the Public-Access and Public-WiFi subnets must be Low trust_level. A realistic library weakness is that the public subnet can still reach something it shouldn't (e.g. the Koha staff client port, the print server, or a flat path to Staff-Workstations) — bake at least one such gap into the firewall rules.` : '';
+
+  const k12Section = isK12 ? `
+K-12 SUBNET / ASSET REALISM — model the way districts actually segment:
+- The Student VLAN is the LARGEST subnet (1:1 Chromebooks dominate). Most student endpoints are ChromeOS, so size it generously — use a /23 or /22 if the device count exceeds 250, not a /24. role="workstation", os="ChromeOS 122" for the examples (chromebook-cart-3-07, stu-cb-0142 style names). These are managed via the Google Admin console, NOT domain-joined.
+- The Staff VLAN holds teacher/admin Windows machines (teacher-ws-rm210, office-ws-01, nurse-ws-01, library-ws-01) — os="Windows 11 23H2" or "Windows 10 22H2", domain-joined.
+- The IoT-AV VLAN carries non-computer endpoints: interactive projectors/panels, classroom APs, IP cameras, door-access controllers, PA/intercom, HVAC controllers. role="network" or "ot", os="Embedded". A classic finding: cameras/door controllers with default creds, or the IoT VLAN flat to Staff.
+- A district content filter is MANDATORY for E-rate/CIPA — reflect it as either a cloud filter (GoGuardian / Securly / Lightspeed for Chromebooks) or an on-prem filter appliance; note it in a firewall comment or asset. A realistic weakness: the content filter is bypassable on the Guest-WiFi or via a personal hotspot.
+- SEGMENTATION REALISM (bake ≥1 in): Student VLAN can reach the Staff/Servers subnet (should be blocked); the SIS/grade server is reachable from the Student VLAN; Guest-WiFi is not isolated from internal; cameras/door controllers sit on a routable VLAN with default credentials.` : '';
 
   const systemPrompt = SYS_HEADER + `
 You are generating ONLY the network architecture: subnets, asset inventory, firewall, VPN. NO org bios, NO stakeholders, NO threats, NO diagram_text field.
@@ -833,7 +944,7 @@ Required output schema:
 Hard rules:
 - Internal addressing is RFC1918 ONLY (10.x.x.x, 172.16-31.x.x, 192.168.x.x).
 - Every asset MUST have a static IP that falls within its subnet's CIDR.
-- Use a /24 subnet for Workstations.
+- Default to a /24 for a user/workstation subnet; size UP to a /23 or /22 when the device count for that subnet exceeds ~250 (e.g. a 1:1 student VLAN), and DOWN to a /26-/28 for small infra/OT/management segments. The CIDR must actually fit the hosts placed in it.
 - Firewall fields are EXACTLY: src, dst, port, proto, comment (not source/destination/protocol/description).
 - Use ONE default-deny rule at the end of the rule list — do NOT emit a separate deny rule per subnet.
 - Each rule must be UNIQUE.
@@ -841,7 +952,7 @@ Hard rules:
 
 REALISM RULES (this is a training profile for student risk assessments):
 - Subnet count and VLAN sophistication must match maturity. Low-maturity shops often have a FLAT network (just LAN + Guest WiFi); high-maturity shops have proper segmentation.
-- assets[].os should be REALISTIC versions actually still in production: Windows 10 22H2 (very common), Windows 11 23H2, Ubuntu 22.04 LTS, Windows Server 2019/2022, macOS 14 Sonoma. Avoid years-old patch levels unless the deliberate weakness is "running unpatched OS".
+- assets[].os should be REALISTIC versions actually still in production: Windows 11 23H2/22H2, Windows 10 22H2 (still very common), Ubuntu 22.04 LTS, Windows Server 2019/2022, macOS 14 Sonoma, ChromeOS (education 1:1 fleets). Avoid years-old patch levels unless the deliberate weakness is "running unpatched OS" — in which case use a concrete EOL build (Windows 7 SP1, Windows Server 2008 R2, Windows 10 21H2) on a SPECIFIC host and call it out as the weakness, not network-wide.
 - Public IP from RFC 5737 (203.0.113.x — already provided). Do NOT use real-world public IPs.
 - Firewall rules: real SMBs have UNTIDY rule lists with descriptive but inconsistent names. Some rules will have weakness baked in (port 3389 RDP open to ANY, SMB outbound allowed everywhere, MGMT access not restricted to MGMT subnet). At least 2 rules should look like "added by Bob in 2022 — purpose unclear".
 - assets[].function field should be human-readable role descriptions, not technical jargon. E.g. "Primary file share for Accounting + HR" not just "SMB share".
@@ -849,12 +960,19 @@ REALISM RULES (this is a training profile for student risk assessments):
 
   const flavor = buildFlavorBundle(seed.run_id);
 
-  const wsSubnetName = isLibrary ? 'Staff-Workstations' : 'Workstations';
+  const wsSubnetName = isLibrary ? 'Staff-Workstations'
+    : isK12 ? 'Staff'
+    : isUtility ? 'Corporate-Workstations'
+    : 'Workstations';
   const wsExamples = isLibrary
     ? 'circ-ws-01, ref-ws-02, child-ws-01, tech-svcs-ws-01, it-ws-01'
+    : isK12 ? 'teacher-ws-rm210, office-ws-01, nurse-ws-01, library-ws-01, it-ws-01'
+    : isUtility ? 'billing-ws-01, eng-ws-02, ops-ws-01, gis-ws-01, admin-ws-01'
     : 'admin-ws-01, ops-ws-02, acct-ws-01, front-desk-01, it-ws-01';
   const wsAbbrevs = isLibrary
     ? 'circ (circulation), ref (reference/adult), child (youth services), tech-svcs (cataloging/acquisitions), admin, it'
+    : isK12 ? 'teacher, office, nurse, library, counselor, sped, admin, it'
+    : isUtility ? 'billing, eng (engineering), ops (operations), gis, dispatch, admin, it'
     : 'admin, ops, sales, fin, hr, it, clinical, front-desk, warehouse, eng';
 
   const userPrompt = `Generate the network architecture.
@@ -880,7 +998,7 @@ ${(hasServers || (isChallenge && realAssets.length > 0))
 ${serversBlock}
 Do NOT add extra servers. Do NOT rename. Do NOT omit. Assign sequential IPs within the Servers subnet starting at .10.`
   : `SERVERS — this organization runs NO on-prem servers. Do NOT emit any assets with role="server" and do NOT create a Servers subnet. The network is essentially workstations + a firewall + a switch + WiFi; identity and files live in the cloud (Entra/Google, OneDrive/SharePoint/Drive). This is a realistic flat, cloud-reliant small-org network.`}
-${otSection}${librarySection}
+${otSection}${librarySection}${k12Section}
 
 WORKSTATIONS (${wsSubnetName} subnet):
 Emit ${exampleWsCount} EXAMPLE workstations using DEPARTMENT-BASED naming
@@ -964,6 +1082,15 @@ Hard rules:
 
   const flavor = buildFlavorBundle(seed.run_id);
 
+  const VERTICAL_THREAT_ANCHORS = {
+    Utility_IT_OT: 'At least ONE scenario must cross from IT into OT/SCADA — e.g. phished corporate user → lateral movement → the IT/OT boundary (or lack of one) → HMI/historian/SCADA host. Reference the OT hosts (scada-01, hmi-01, historian-01, plc-xx) from the network summary. The crown-jewel impact is loss of process control / safety, not just data loss. Consider the SCADA integrator\'s remote access as an initial vector.',
+    K12: 'Scenarios should center on student-PII/FERPA exposure and ransomware (school districts are a top ransomware target). At least one phishing scenario targeting staff payroll/W-2 or the SIS. Reference the SIS/grade server and staff (not student) hosts as the high-value targets; student Chromebooks are low-value, low-privilege.',
+    Library: 'The crown jewel is patron borrowing records (state-protected privacy). At least one scenario should pivot from the public-access subnet (untrusted patron PCs) toward the Koha ILS / patron database or the staff network. Consider malware on a "thawed" public PC and an open EZproxy.',
+    NonProfit: 'The crown jewels are the donor CRM (donor PII) and finance/payment systems. Favor BEC/wire-fraud and credential-phishing scenarios (no MFA on the CRM/finance email), and a lingering-access insider (ex-volunteer/board member). Ransomware is plausible but the headline impact is donor-data breach + donor trust.',
+    SMB: 'Keep scenarios SMB-scale and opportunistic: phishing → credential theft → ransomware via an exposed RDP/VPN, or BEC against finance. No nation-state APTs. The impact is operational downtime + the cost of recovery for a small business.'
+  };
+  const verticalThreatAnchor = VERTICAL_THREAT_ANCHORS[config.clientType] || VERTICAL_THREAT_ANCHORS.SMB;
+
   const userPrompt = `Generate the threat profile.
 
 run_id: ${seed.run_id}
@@ -972,6 +1099,9 @@ risks_to_cover: ${risks.join(', ')}
 maturity: ${seed.maturity || 'Intermediate'}
 difficulty: ${difficulty}
 scenarios_count: ${range.min}–${range.max}
+
+VERTICAL THREAT FOCUS (${config.clientType || 'SMB'}):
+  ${verticalThreatAnchor}
 
 PRIMARY THREAT-ACTOR FLAVOR for this company (anchor at LEAST one scenario to this archetype):
   ${flavor.threat_actor_flavor}
