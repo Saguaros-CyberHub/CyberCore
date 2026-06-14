@@ -199,6 +199,9 @@ const PART_OPTIONS = {
 // Track selected options per part (loaded from progress.output_option)
 let selectedOptions = {};
 
+// Track which tab is active in the deliverable tab bar, per part
+let activeDeliverableTabs = {};
+
 // ============================================================================
 // INITIALIZATION
 // ============================================================================
@@ -508,55 +511,63 @@ function renderDeliverableWorkAreas(partNumber) {
     `;
   }
 
+  // Ensure the active tab is valid for this part
+  if (!activeDeliverableTabs[partNumber] || !selected.includes(activeDeliverableTabs[partNumber])) {
+    activeDeliverableTabs[partNumber] = selected[0];
+  }
+  const activeKey = activeDeliverableTabs[partNumber];
   const savedContent = deliverableContent[partNumber] || {};
 
-  return `
-    <div class="work-areas-container">
-      ${selected.map(optKey => {
-        const opt = partOpts.options.find(o => o.key === optKey);
-        if (!opt) return '';
-        const optContent = savedContent[optKey] || [];
-        const filledCount = opt.deliverables.filter((_, i) => (optContent[i] || '').replace(/<[^>]*>/g, '').trim().length > 0).length;
-        const total = opt.deliverables.length;
-        const pct = total > 0 ? Math.round((filledCount / total) * 100) : 0;
-        const isComplete = filledCount === total;
+  // Build tab buttons
+  const tabs = selected.map(optKey => {
+    const opt = partOpts.options.find(o => o.key === optKey);
+    if (!opt) return '';
+    const optContent = savedContent[optKey] || [];
+    const filledCount = opt.deliverables.filter((_, i) =>
+      (optContent[i] || '').replace(/<[^>]*>/g, '').trim().length > 0
+    ).length;
+    const total = opt.deliverables.length;
+    const isActive = optKey === activeKey;
+    const isComplete = filledCount === total && total > 0;
+    const badgeClass = isComplete ? 'complete' : filledCount > 0 ? 'partial' : '';
+    return `
+      <button class="deliverable-tab${isActive ? ' active' : ''}"
+              onclick="switchDeliverableTab(${partNumber}, '${optKey}')"
+              data-option-key="${optKey}"
+              title="${opt.name}">
+        <span class="tab-label">${opt.name}</span>
+        <span class="tab-badge ${badgeClass}">${filledCount}/${total}</span>
+      </button>
+    `;
+  }).join('');
 
-        return `
-          <div class="work-area" data-option="${optKey}">
-            <div class="work-area-header" onclick="toggleWorkArea(this)">
-              <div class="work-area-header-left">
-                <span class="work-area-toggle">&#9660;</span>
-                <span class="work-area-title">${opt.name}</span>
-              </div>
-              <div class="work-area-header-right">
-                <div class="deliverable-progress">
-                  <div class="progress-bar-mini">
-                    <div class="progress-bar-mini-fill ${isComplete ? 'complete' : ''}" style="width:${pct}%"></div>
-                  </div>
-                  <span>${filledCount}/${total}</span>
-                </div>
-              </div>
-            </div>
-            <div class="work-area-body">
-              ${opt.deliverables.map((del, i) => {
-                const val = optContent[i] || '';
-                const hasContent = val.replace(/<[^>]*>/g, '').trim().length > 0;
-                return `
-                  <div class="deliverable-item">
-                    <div class="deliverable-label">
-                      <span class="deliverable-number ${hasContent ? 'has-content' : ''}">${i + 1}</span>
-                      <span class="deliverable-label-text">${del}</span>
-                    </div>
-                    <div class="deliverable-editor" contenteditable="true"
-                         data-option="${optKey}" data-del-index="${i}"
-                         data-placeholder="Write your response for this deliverable...">${val}</div>
-                  </div>
-                `;
-              }).join('')}
-            </div>
-          </div>
-        `;
-      }).join('')}
+  // Build the active tab's deliverable panel
+  const activeOpt = partOpts.options.find(o => o.key === activeKey);
+  const activeContent = savedContent[activeKey] || [];
+  const panel = activeOpt ? activeOpt.deliverables.map((del, i) => {
+    const val = activeContent[i] || '';
+    const hasContent = val.replace(/<[^>]*>/g, '').trim().length > 0;
+    return `
+      <div class="deliverable-item">
+        <div class="deliverable-label">
+          <span class="deliverable-number ${hasContent ? 'has-content' : ''}">${i + 1}</span>
+          <span class="deliverable-label-text">${del}</span>
+        </div>
+        <div class="deliverable-editor" contenteditable="true"
+             data-option="${activeKey}" data-del-index="${i}"
+             data-placeholder="Write your response for this deliverable...">${val}</div>
+      </div>
+    `;
+  }).join('') : '';
+
+  return `
+    <div class="deliverable-tabs-container" id="deliverableWorkAreas-${partNumber}">
+      <div class="deliverable-tab-bar" role="tablist">
+        ${tabs}
+      </div>
+      <div class="deliverable-tab-panel">
+        ${panel}
+      </div>
     </div>
   `;
 }
@@ -581,6 +592,39 @@ function renderGeneralNotes(partNumber) {
 
 function toggleWorkArea(headerEl) {
   headerEl.closest('.work-area').classList.toggle('collapsed');
+}
+
+function switchDeliverableTab(partNumber, optionKey) {
+  collectDeliverableContentFromDOM(partNumber);
+  activeDeliverableTabs[partNumber] = optionKey;
+  const container = document.getElementById(`deliverableWorkAreas-${partNumber}`);
+  if (container) {
+    container.outerHTML = renderDeliverableWorkAreas(partNumber);
+    initializeDeliverableEditors();
+  }
+}
+
+function updateTabProgress(partNumber, optionKey) {
+  const partOpts = PART_OPTIONS[partNumber];
+  if (!partOpts) return;
+  const opt = partOpts.options.find(o => o.key === optionKey);
+  if (!opt) return;
+
+  const editors = document.querySelectorAll(`.deliverable-editor[data-option="${optionKey}"]`);
+  let filled = 0;
+  editors.forEach(ed => { if (ed.innerText.trim().length > 0) filled++; });
+  const total = opt.deliverables.length;
+  const isComplete = filled === total && total > 0;
+  const badgeClass = isComplete ? 'complete' : filled > 0 ? 'partial' : '';
+
+  const tab = document.querySelector(`.deliverable-tab[data-option-key="${optionKey}"]`);
+  if (tab) {
+    const badge = tab.querySelector('.tab-badge');
+    if (badge) {
+      badge.textContent = `${filled}/${total}`;
+      badge.className = `tab-badge ${badgeClass}`;
+    }
+  }
 }
 
 function toggleOption(partNumber, optionKey) {
@@ -625,13 +669,34 @@ function collectDeliverableContentFromDOM(partNumber) {
   }
 }
 
+function computePartStatus(partNumber) {
+  const selected = selectedOptions[partNumber] || [];
+  if (selected.length > 0) return 'in_progress';
+  const content = deliverableContent[partNumber] || {};
+  const hasContent = Object.entries(content).some(([key, val]) => {
+    if (key === 'general_notes') return typeof val === 'string' && val.replace(/<[^>]*>/g, '').trim().length > 0;
+    if (Array.isArray(val)) return val.some(html => (html || '').replace(/<[^>]*>/g, '').trim().length > 0);
+    return false;
+  });
+  return hasContent ? 'in_progress' : 'not_started';
+}
+
 async function saveSelectedOptions() {
   try {
     const optionsData = JSON.stringify(selectedOptions[currentPart] || []);
+    const status = computePartStatus(currentPart);
     await API.progress.update(currentProfileId, currentPart, {
       output_option: optionsData,
-      status: 'in_progress'
+      status
     });
+    const existing = currentProgress.find(p => p.part_number === currentPart);
+    if (existing) {
+      existing.output_option = optionsData;
+      existing.status = status;
+    } else {
+      currentProgress.push({ part_number: currentPart, output_option: optionsData, status });
+    }
+    renderPartsList();
   } catch (error) {
     console.error('Failed to save options:', error);
   }
@@ -1092,7 +1157,7 @@ async function saveDraft() {
     await API.progress.update(currentProfileId, currentPart, {
       content: content,
       output_option: optionsData,
-      status: 'in_progress'
+      status: computePartStatus(currentPart)
     });
 
     showAutoSaveStatus('saved');
@@ -1388,9 +1453,8 @@ function initializeDeliverableEditors() {
         const numEl = ed.closest('.deliverable-item')?.querySelector('.deliverable-number');
         if (numEl) numEl.classList.toggle('has-content', hasContent);
 
-        // Update the progress bar in the work area header
-        const workArea = ed.closest('.work-area');
-        if (workArea) updateWorkAreaProgress(workArea);
+        // Update the tab badge progress
+        updateTabProgress(currentPart, optKey);
       }
     });
   });
@@ -2091,3 +2155,4 @@ window.saveControl = saveControl;
 // Options & Work Areas
 window.toggleOption = toggleOption;
 window.toggleWorkArea = toggleWorkArea;
+window.switchDeliverableTab = switchDeliverableTab;
