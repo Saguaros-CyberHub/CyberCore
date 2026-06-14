@@ -153,6 +153,21 @@ async function getUserGuacToken(guacUser, guacPassword) {
 }
 
 // ============================================================================
+// Defense-in-depth for the workspace list: a lane VM (metadata.vm_category =
+// 'lane_vm') should only appear while its lane still exists and is not torn
+// down. Even if a teardown path forgets to delete the cybercore_resource row,
+// this hides the orphaned "ghost card" the moment the cybercore_lane row is
+// gone or flips to deleted/error. Non-lane VMs (workstations) are unaffected.
+// Text comparison (lane_id::text) avoids casting arbitrary metadata to uuid.
+const LIVE_LANE_FILTER = `(
+  r.metadata->>'vm_category' IS DISTINCT FROM 'lane_vm'
+  OR EXISTS (
+    SELECT 1 FROM cybercore_lane l
+    WHERE l.lane_id::text = r.metadata->>'lane_id'
+      AND l.status NOT IN ('deleted', 'error')
+  )
+)`;
+
 // GET /api/dashboard/vms
 // Returns VMs that the requesting user is authorized to access.
 // Admins/instructors see every active VM (with ownerEmail) by default. They
@@ -198,6 +213,7 @@ router.get('/vms', authenticateToken, async (req, res) => {
         WHERE r.type   = 'vm'
           AND r.status != 'retired'
           AND vi.destroyed_at IS NULL
+          AND ${LIVE_LANE_FILTER}
         ORDER BY r.module_key, r.name
       `);
     } else {
@@ -221,6 +237,7 @@ router.get('/vms', authenticateToken, async (req, res) => {
         WHERE r.type   = 'vm'
           AND r.status != 'retired'
           AND vi.destroyed_at IS NULL
+          AND ${LIVE_LANE_FILTER}
         ORDER BY r.module_key, r.name
       `, [userId]);
     }

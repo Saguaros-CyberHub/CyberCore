@@ -21,6 +21,7 @@ const { selectBestNode } = require('../../utils/node-selector');
 const goadDeploy = require('../../utils/goad-deploy');
 const tailscale = require('../../utils/tailscale');
 const attachedModules = require('../../utils/attached-modules');
+const { guacAPI } = require('../../utils/guacamole');
 const {
   V3_INTERNAL_TAG_OFFSET,
   ATTACK_BOX_VMID_OFFSET,
@@ -470,6 +471,39 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
     }
 
     await tailscale.deleteLaneDevices({ vxlanId }).catch(() => {});
+
+    // Remove the lane's "My Workspaces" records. Deploy registers each lane VM
+    // in cybercore_resource (+ vm_instance + allocation, which cascade on the
+    // resource delete). Deleting a lane individually from the Active Lanes tab
+    // used to skip this — unlike the group "Tear Down" — leaving orphaned
+    // lane_vm resources that kept showing as ghost cards with dead consoles.
+    // Grab the Guac connection IDs first so we can delete those too.
+    let laneGuacConnIds = [];
+    try {
+      const cr = await cybercoreQuery(
+        `SELECT vi.metadata->>'guac_connection_id' AS cid
+           FROM cybercore_vm_instance vi
+           JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+          WHERE r.metadata->>'vm_category' = 'lane_vm'
+            AND r.metadata->>'lane_id' = $1
+            AND vi.metadata->>'guac_connection_id' IS NOT NULL`,
+        [lane.lane_id]
+      );
+      laneGuacConnIds = cr.rows.map(x => x.cid).filter(Boolean);
+    } catch (e) {
+      errors.push(`Workspace console lookup: ${e.message}`);
+    }
+
+    await cybercoreQuery(
+      `DELETE FROM cybercore_resource
+        WHERE metadata->>'vm_category' = 'lane_vm'
+          AND metadata->>'lane_id' = $1`,
+      [lane.lane_id]
+    ).catch(e => errors.push(`Workspace resource cleanup: ${e.message}`));
+
+    for (const cid of laneGuacConnIds) {
+      await guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`).catch(() => {});
+    }
 
     await cybercoreQuery(
       `DELETE FROM cybercore_lane WHERE lane_id = $1`,
