@@ -569,6 +569,58 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
     console.warn(`[GOAD] mssql FULLTEXT strip failed (non-fatal): ${err.message}`);
   }
 
+  // ---- mssql offline-install fix #2: SSEI -> extracted setup.exe ----------
+  // The role's "Install the database" runs sql_installer.exe (the SQL SSEI
+  // bootstrapper) with /MEDIAPATH. The SSEI is an ONLINE downloader: /MEDIAPATH
+  // expects the SSEI's *own* downloaded media tree, not the standalone SQLEXPR
+  // self-extractor we stage, so it phones home, the lane has no internet, and it
+  // hangs until the 2h watchdog (confirmed 2026-06-15). Fix, proven end-to-end on
+  // srv02 (SETUP_EXIT=0): extract the SQLEXPR media once (/q /x:) and run the
+  // extracted setup.exe with /QUIET — fully offline. Drop /HIDEPROGRESSBAR and
+  // /MEDIAPATH: both are SSEI-only flags that real setup.exe rejects ("the setting
+  // 'HIDEPROGRESSBAR' specified is not recognized"). We rewrite the single
+  // win_command task into a win_shell (the surrounding become/runas, retries and
+  // failed_when still apply). Shipped base64-encoded so the embedded PowerShell
+  // survives shell quoting; the Python edits /opt/goad before run.sh renders it.
+  // Idempotent (keys off the cybercore-offline-mssql marker). Best-effort.
+  try {
+    const installPatchPy = `import re, sys
+P = "/opt/goad/ansible/roles/mssql/tasks/main.yml"
+s = open(P).read()
+if "cybercore-offline-mssql" in s:
+    print("mssql install task already patched"); sys.exit(0)
+block = '''  win_shell: |
+    # cybercore-offline-mssql: install SQL from extracted media via setup.exe (no SSEI / no network)
+    $ErrorActionPreference = "Stop"
+    $base  = Join-Path (Join-Path $env:SystemDrive "setup") "mssql"
+    $media = Join-Path (Join-Path $base "media") "SQLEXPR_x64_ENU.exe"
+    $ex    = Join-Path $base "extracted"
+    $setup = Join-Path $ex "setup.exe"
+    $conf  = Join-Path $base "sql_conf.ini"
+    if (-not (Test-Path $media)) { Write-Error ("no offline SQL media: " + $media); exit 1 }
+    if (-not (Test-Path $setup)) { Start-Process -Wait -FilePath $media -ArgumentList "/q",("/x:" + $ex) }
+    if (-not (Test-Path $setup)) { Write-Error "extraction produced no setup.exe"; exit 1 }
+    $proc = Start-Process -Wait -PassThru -FilePath $setup -ArgumentList ("/configurationfile=" + $conf),"/IACCEPTSQLSERVERLICENSETERMS","/QUIET"
+    Write-Output ("SETUP_EXIT=" + $proc.ExitCode)
+    if ($proc.ExitCode -eq 3010) { exit 0 }
+    exit $proc.ExitCode'''
+pat = re.compile("^ *win_command:.*sql_installer.exe.*$", re.MULTILINE)
+s2, n = pat.subn(block, s)
+if n != 1:
+    print("WARN: expected 1 sql_installer.exe win_command, found %d - NOT patching" % n); sys.exit(0)
+open(P, "w").write(s2)
+print("patched mssql install task -> offline setup.exe")
+`;
+    const b64 = Buffer.from(installPatchPy, "utf8").toString("base64");
+    const { pid: installPatchPid } = await agentExecArgv(bestNode, controllerVmId,
+      ['/bin/bash', '-c',
+        `echo ${b64} | base64 -d > /tmp/cc-mssql-install.py && python3 /tmp/cc-mssql-install.py`],
+      proxmoxAPI);
+    await pollExecStatus(bestNode, controllerVmId, installPatchPid, 20000);
+  } catch (err) {
+    console.warn(`[GOAD] mssql install-command patch failed (non-fatal): ${err.message}`);
+  }
+
   // Fire-and-forget — we don't care about this PID's status afterward.
   await agentExecArgv(bestNode, controllerVmId,
     ['/bin/bash', '-c', wrappedCmd],
