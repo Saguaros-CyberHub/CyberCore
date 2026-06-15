@@ -1,7 +1,7 @@
 /**
  * ai/scan-documents/index.js — Profile-driven scan document generator.
  * ============================================================================
- * Generates NMAP XML, NESSUS XML, and ZAP HTML for a CIAB profile. Output is
+ * Generates NMAP Markdown, NESSUS XML, and ZAP HTML for a CIAB profile. Output is
  * entirely deterministic and derived from profile.assets[].services — so a
  * real `nmap` scan against the deployed lane VMs will surface the same ports
  * the fake scan claims to see.
@@ -90,74 +90,248 @@ function assetIp(asset) {
   return `10.10.${(h >> 8) & 0xFF}.${(h & 0xFF) || 10}`;
 }
 
-// ─── NMAP XML generator ───────────────────────────────────────────────────
+// ─── NMAP Markdown generator ──────────────────────────────────────────────
+// Emits a realistic, human-readable `nmap -sV -sC -O` text report wrapped in a
+// Markdown document — the same shape an analyst would paste from a terminal.
+// Every host/port/finding still traces back to profile.assets[].services, so a
+// real scan of the deployed lane matches this fake report and the Nessus XML.
 
-function generateNmap({ profileData, companyName, domain }) {
-  const timestamp = Math.floor(Date.now() / 1000);
-  const targets = scannableAssets(profileData);
-  if (targets.length === 0) {
-    // Edge case: no scannable assets — emit a valid empty scan rather than fail.
-    return wrapNmapEmpty(timestamp);
-  }
-
-  const hostBlocks = targets.map(asset => {
-    const ip = assetIp(asset);
-    const hostname = asset.hostname || 'unknown';
-    const fqdn = domain ? `${hostname}.${domain}` : hostname;
-    const os = asset.os || '';
-    const ports = buildHostPorts(asset);
-
-    const portXml = ports.map(p => `      <port protocol="${p.protocol}" portid="${p.port}">
-        <state state="${p.state}" reason="syn-ack" reason_ttl="64"/>
-        <service name="${xmlEsc(p.service)}"${p.product ? ` product="${xmlEsc(p.product)}"` : ''}${p.version ? ` version="${xmlEsc(p.version)}"` : ''} method="probed" conf="10"/>
-      </port>`).join('\n');
-
-    const osBlock = os ? `    <os>
-      <osmatch name="${xmlEsc(os)}" accuracy="96">
-        <osclass type="${asset.role === 'network' ? 'router' : 'server'}" vendor="${xmlEsc(guessOsVendor(os))}" osfamily="${xmlEsc(guessOsFamily(os))}" accuracy="96"/>
-      </osmatch>
-    </os>` : '';
-
-    return `  <host starttime="${timestamp}" endtime="${timestamp + 5}">
-    <status state="up" reason="syn-ack" reason_ttl="64"/>
-    <address addr="${xmlEsc(ip)}" addrtype="ipv4"/>
-    <hostnames>
-      <hostname name="${xmlEsc(fqdn)}" type="PTR"/>
-    </hostnames>
-    <ports>
-${portXml}
-    </ports>
-${osBlock}
-    <uptime seconds="${Math.floor(Math.random() * 1_000_000 + 100_000)}" lastboot="${new Date(timestamp * 1000 - 86400 * 1000).toUTCString()}"/>
-  </host>`;
-  }).join('\n');
-
-  const scanArgs = 'nmap -sV -sC -O -oX scan.xml';
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nmaprun>
-<!-- Scan target: ${xmlEsc(companyName)} (${xmlEsc(domain || 'internal')}) -->
-<nmaprun scanner="nmap" args="${xmlEsc(scanArgs)}" start="${timestamp}" startstr="${new Date(timestamp * 1000).toUTCString()}" version="7.94" xmloutputversion="1.05">
-  <scaninfo type="syn" protocol="tcp" numservices="1000" services="1-1000"/>
-  <verbose level="0"/>
-  <debugging level="0"/>
-${hostBlocks}
-  <runstats>
-    <finished time="${timestamp + 60}" timestr="${new Date((timestamp + 60) * 1000).toUTCString()}" summary="Nmap done; ${targets.length} IP addresses (${targets.length} hosts up) scanned in 60.00 seconds" elapsed="60.00" exit="success"/>
-    <hosts up="${targets.length}" down="0" total="${targets.length}"/>
-  </runstats>
-</nmaprun>`;
+// Right-pad to a fixed column width (terminal-style alignment).
+function pad(s, width) {
+  s = String(s == null ? '' : s);
+  return s.length >= width ? s + ' ' : s + ' '.repeat(width - s.length);
 }
 
-function wrapNmapEmpty(timestamp) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE nmaprun>
-<nmaprun scanner="nmap" args="nmap -sV scan.xml" start="${timestamp}" version="7.94" xmloutputversion="1.05">
-  <scaninfo type="syn" protocol="tcp" numservices="1000" services="1-1000"/>
-  <runstats>
-    <finished time="${timestamp + 1}" summary="Nmap done; 0 IP addresses scanned" elapsed="1.0" exit="success"/>
-    <hosts up="0" down="0" total="0"/>
-  </runstats>
-</nmaprun>`;
+// Deterministic pseudo-random helpers seeded by a string — keeps re-runs stable
+// for a given asset (no flapping MAC/latency between regenerations).
+function strSeed(s) {
+  return String(s || '').split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 0);
+}
+function fakeMac(asset) {
+  const seed = strSeed(asset.hostname || asset.ip || 'host');
+  const byte = (n) => (((seed >> (n * 5)) & 0xFF) | 0x01).toString(16).toUpperCase().padStart(2, '0');
+  const vendor = asset.role === 'network' ? '(Netgate)' : '(VMware)';
+  return `${byte(0)}:${byte(1)}:${byte(2)}:${byte(3)}:${byte(4)}:${byte(5)} ${vendor}`;
+}
+function fakeLatency(asset) {
+  const seed = strSeed(asset.hostname || asset.ip || 'host');
+  return (0.05 + (seed % 400) / 100).toFixed(4); // 0.05 – 4.05 s
+}
+
+// Render the OS-detection block shown after the port table.
+function osDetectionBlock(asset) {
+  const os = asset.os || '';
+  if (!os) return '';
+  const isNet = asset.role === 'network';
+  const family = guessOsFamily(os);
+  const vendor = guessOsVendor(os);
+  const cpePart = family === 'Windows'
+    ? 'cpe:/o:microsoft:windows'
+    : family === 'Linux'
+      ? 'cpe:/o:linux:linux_kernel'
+      : `cpe:/o:${vendor.toLowerCase()}:${family.toLowerCase()}`;
+  return [
+    `Device type: ${isNet ? 'firewall|switch|router' : 'general purpose'}`,
+    `Running: ${os}`,
+    `OS CPE: ${cpePart}`,
+    `OS details: ${os}`,
+    `Network Distance: 2 hops`
+  ].join('\n');
+}
+
+// Map a normalized service to realistic nmap host-script (NSE) output. Vuln
+// blocks reuse the CVE/severity knowledge so they stay consistent with Nessus;
+// info blocks (smb-security-mode, rdp-ntlm-info, ...) mirror what -sC emits.
+function nmapScriptBlocks(ports, asset, domain) {
+  const blocks = [];
+  const normSet = new Set(ports.map(p => p.normalized));
+  const hostUpper = String(asset.hostname || 'HOST').toUpperCase();
+  const fqdn = domain ? `${asset.hostname}.${domain}` : (asset.hostname || 'host');
+  const netbiosDomain = (domain ? domain.split('.')[0] : 'WORKGROUP').toUpperCase().slice(0, 15);
+
+  // Per-service VULNERABLE blocks, derived from the shared finding knowledge.
+  for (const p of ports) {
+    for (const f of getFindings(p.normalized)) {
+      if (f.severity < 3) continue; // only High/Critical surface as nmap vuln scripts
+      const scriptId = f.name.toLowerCase().includes('ms17-010') ? 'smb-vuln-ms17-010'
+        : f.name.toLowerCase().includes('bluekeep') ? 'rdp-vuln-cve2019-0708'
+        : `${p.normalized}-vuln-${(f.cves[0] || f.plugin_id).toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+      const cve = f.cves[0] || '';
+      blocks.push([
+        `| ${scriptId}:`,
+        `|     VULNERABLE:`,
+        `|     ${f.name}`,
+        `|       State: VULNERABLE`,
+        cve ? `|       IDs:  CVE:${cve}` : null,
+        `|       Risk factor: ${severityName(f.severity).toUpperCase()}  CVSS: ${f.cvss}`,
+        `|         ${f.description}`,
+        cve ? `|       References:` : null,
+        cve ? `|         https://cve.mitre.org/cgi-bin/cvename.cgi?name=${cve}` : null,
+        `|`
+      ].filter(Boolean).join('\n'));
+    }
+  }
+
+  // Standard -sC informational scripts, keyed off the services present.
+  if (normSet.has('smb')) {
+    blocks.push([
+      `| smb-security-mode:`,
+      `|     account_used: guest`,
+      `|     authentication_level: user`,
+      `|     challenge_response: supported`,
+      `|     message_signing: disabled (dangerous, but default)`,
+      `|       WARNING: SMB message signing is not enforced.`,
+      `|`
+    ].join('\n'));
+  }
+  if (normSet.has('rdp')) {
+    blocks.push([
+      `| rdp-ntlm-info:`,
+      `|     Target_Name: ${netbiosDomain}`,
+      `|     NetBIOS_Domain_Name: ${netbiosDomain}`,
+      `|     NetBIOS_Computer_Name: ${hostUpper}`,
+      `|     DNS_Domain_Name: ${domain || 'localdomain'}`,
+      `|     DNS_Computer_Name: ${fqdn}`,
+      `|     NOTE: Network Level Authentication (NLA) is NOT required`,
+      `|       WARNING: Remote Desktop accessible without NLA - susceptible to MITM`,
+      `|`
+    ].join('\n'));
+  }
+  if (normSet.has('http') || normSet.has('https')) {
+    blocks.push([
+      `| http-methods:`,
+      `|     Supported Methods: GET HEAD POST OPTIONS TRACE`,
+      `|       WARNING: TRACE method is enabled.`,
+      `|`,
+      `| http-security-headers:`,
+      `|     MISSING HEADERS:`,
+      `|       X-Frame-Options: MISSING`,
+      `|       Content-Security-Policy: MISSING`,
+      `|       Strict-Transport-Security: MISSING`,
+      `|`
+    ].join('\n'));
+  }
+  if (normSet.has('ssh')) {
+    blocks.push([
+      `| ssh2-enum-algos:`,
+      `|     kex_algorithms: (3)`,
+      `|         curve25519-sha256`,
+      `|         diffie-hellman-group14-sha256`,
+      `|         diffie-hellman-group14-sha1`,
+      `|     encryption_algorithms: (4)`,
+      `|         chacha20-poly1305@openssh.com`,
+      `|         aes256-ctr`,
+      `|         aes128-cbc`,
+      `|         3des-cbc`,
+      `|       WARNING: Weak algorithms supported: diffie-hellman-group14-sha1, 3des-cbc, aes*-cbc`,
+      `|`
+    ].join('\n'));
+  }
+  if (normSet.has('ftp')) {
+    blocks.push([
+      `| ftp-anon:`,
+      `|     Anonymous FTP login allowed (FTP code 230)`,
+      `|`
+    ].join('\n'));
+  }
+  return blocks;
+}
+
+// Render one host's full nmap report code block.
+function nmapHostBlock(asset, domain) {
+  const ip = assetIp(asset);
+  const hostname = asset.hostname || 'unknown';
+  const fqdn = domain ? `${hostname}.${domain}` : hostname;
+  const ports = buildHostPorts(asset);
+
+  const lines = [];
+  lines.push(`Nmap scan report for ${fqdn} (${ip})`);
+  lines.push(`Host is up (${fakeLatency(asset)}s latency).`);
+  lines.push(`MAC Address: ${fakeMac(asset)}`);
+  const shown = ports.length;
+  lines.push(`Not shown: ${65535 - shown} closed tcp ports (reset)`);
+  lines.push('');
+  lines.push(`${pad('PORT', 11)}${pad('STATE', 9)}${pad('SERVICE', 17)}VERSION`);
+  for (const p of ports) {
+    const version = [p.product, p.version].filter(Boolean).join(' ');
+    lines.push(`${pad(`${p.port}/${p.protocol}`, 11)}${pad(p.state, 9)}${pad(p.service, 17)}${version}`);
+  }
+  const osBlock = osDetectionBlock(asset);
+  if (osBlock) { lines.push(''); lines.push(osBlock); }
+
+  const scripts = nmapScriptBlocks(ports, asset, domain);
+  if (scripts.length) {
+    lines.push('');
+    lines.push('Host script results:');
+    lines.push(scripts.join('\n'));
+  }
+
+  // Traceroute through the gateway (first network asset if present).
+  lines.push('');
+  lines.push(`TRACEROUTE (using port ${ports[0] ? ports[0].port : 80}/tcp)`);
+  lines.push(`HOP  RTT       ADDRESS`);
+  lines.push(`1    ${fakeLatency(asset)}ms  ${fqdn} (${ip})`);
+
+  return lines.join('\n');
+}
+
+function generateNmap({ profileData, companyName, domain }) {
+  const targets = scannableAssets(profileData);
+  const scanDate = new Date().toUTCString();
+  const scanArgs = `nmap -sS -sV -sC -O -A --script=vuln,safe -T4 -p- ${domain || 'targets'}`;
+
+  const header = [
+    `# ${companyName} — Network Vulnerability Scan (NMAP)`,
+    '',
+    `> **Engagement:** Internal authorized vulnerability assessment`,
+    `> **Scan Date:** ${scanDate}`,
+    `> **Domain:** \`${domain || 'internal'}\``,
+    `> **Hosts scanned:** ${targets.length}`,
+    '',
+    '```',
+    `root@scanner:~# ${scanArgs}`,
+    '',
+    `Starting Nmap 7.94SVN ( https://nmap.org ) at ${scanDate}`,
+    `NSE: Loaded 156 scripts for scanning.`,
+    `Initiating SYN Stealth Scan`,
+    `Scanning ${targets.length} hosts [65535 ports/host]`,
+    '```',
+    '',
+    ''
+  ].join('\n');
+
+  if (targets.length === 0) {
+    return header + '\n_No scannable server or network assets declared in this profile — nothing to scan._\n';
+  }
+
+  const hostSections = targets.map(asset => {
+    const hostname = asset.hostname || 'unknown';
+    const role = asset.role === 'network' ? 'Network Appliance' : (asset.role_label || 'Server');
+    const desc = asset.description || asset.purpose || role;
+    const env = asset.os ? `\n> *IT Environment:* **${hostname}** running **${asset.os}** (Role: ${desc})\n` : '';
+    return [
+      `### ${hostname} (${assetIp(asset)}) — ${desc} [CRITICAL]`,
+      env,
+      '```',
+      nmapHostBlock(asset, domain),
+      '```'
+    ].join('\n');
+  }).join('\n\n');
+
+  const footer = [
+    '',
+    '',
+    '```',
+    `NSE: Script Post-scanning.`,
+    `OS and Service detection performed.`,
+    `Nmap done: ${targets.length} IP addresses (${targets.length} hosts up) scanned in 374.36 seconds`,
+    '```',
+    '',
+    `_Simulated scan output derived from profile asset inventory for a cybersecurity training exercise._`,
+    ''
+  ].join('\n');
+
+  return header + hostSections + footer;
 }
 
 function guessOsVendor(os) {
@@ -435,9 +609,9 @@ function generateScanDocuments({ profileData, companyName, domain, types }) {
     if (t === 'nmap') {
       docs.push({
         type: 'nmap',
-        filename: `${safeName}_nmap_scan.xml`,
+        filename: `${safeName}_nmap_scan.md`,
         content: generateNmap({ profileData, companyName, domain }),
-        mime: 'application/xml'
+        mime: 'text/markdown'
       });
     } else if (t === 'nessus') {
       docs.push({

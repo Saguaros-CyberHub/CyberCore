@@ -275,6 +275,43 @@ write_files:
       BAKE_VMID=$VMID
       BAKE_TOOLSET=$KALI_TOOLSET
 
+  # Guarantee /etc/resolv.conf points at the lane gateway on EVERY boot. The
+  # gateway (default route, <base>.1) runs the split-horizon dnsmasq — it
+  # resolves the AD zone via the lane DCs and forwards everything else — so it
+  # is the only correct resolver. Its IP is per-lane, so we derive it at runtime
+  # from the default route rather than baking a fixed IP that's wrong on every
+  # other lane. We feed it to resolvconf (installed above) instead of writing
+  # /etc/resolv.conf directly, so it coexists with dhclient's record and never
+  # clobbers the resolv.conf -> /run/resolvconf symlink. This is the
+  # belt-and-suspenders for any deploy path that assigns a STATIC IP (no
+  # dhclient to publish DNS); works identically on v2 and v3 lanes.
+  - path: /usr/local/sbin/cybercore-resolv-gw.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      # Wait for the default route to appear (network up), then publish the
+      # lane gateway as the DNS server via resolvconf.
+      for i in \$(seq 1 30); do
+        GW=\$(ip -4 route show default 2>/dev/null | awk '/default/{print \$3; exit}')
+        [ -n "\$GW" ] && break
+        sleep 2
+      done
+      [ -z "\$GW" ] && exit 0
+      printf 'nameserver %s\n' "\$GW" | resolvconf -a lo.cybercore-gw
+  - path: /etc/systemd/system/cybercore-resolv-gw.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Point resolv.conf at the lane gateway (split-horizon DNS)
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/sbin/cybercore-resolv-gw.sh
+      RemainAfterExit=yes
+      [Install]
+      WantedBy=multi-user.target
+
 runcmd:
   # Install the Kali toolset metapackage (separate from cloud-init 'packages:'
   # so the failure mode is isolated; toolset install can take 20+ minutes).
@@ -300,6 +337,9 @@ runcmd:
   - [ systemctl, enable, xrdp-sesman ]
   - [ systemctl, enable, qemu-guest-agent ]
   - [ systemctl, enable, ssh ]
+  # Baked resolv.conf guarantee: point DNS at the lane gateway on every boot,
+  # regardless of static vs DHCP IP assignment (see the write_files script).
+  - [ systemctl, enable, cybercore-resolv-gw.service ]
   - [ systemctl, start, xrdp ]
   - [ systemctl, start, xrdp-sesman ]
 

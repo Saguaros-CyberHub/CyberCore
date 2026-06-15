@@ -57,30 +57,36 @@ test('asset with no services emits no ports', () => {
 });
 
 console.log('\ngenerateNmap');
-test('produces valid XML with profile-declared ports only', () => {
-  const xml = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
-  assert.ok(xml.startsWith('<?xml'));
-  // Declared ports show up
-  assert.match(xml, /portid="445"/);
-  assert.match(xml, /portid="3389"/);
-  assert.match(xml, /portid="80"/);
+test('produces a Markdown report with profile-declared ports only', () => {
+  const md = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
+  assert.match(md, /^# TestCo/);
+  assert.match(md, /Nmap scan report/);
+  // Declared ports show up in the port table
+  assert.match(md, /^445\/tcp/m);
+  assert.match(md, /^3389\/tcp/m);
+  assert.match(md, /^80\/tcp/m);
   // Workstation/peripheral are EXCLUDED — no port 9100 etc.
-  assert.ok(!xml.includes('WS-EMP-01'), 'workstation should not appear in scan');
-  assert.ok(!xml.includes('portid="9100"'), 'peripheral printer port should not appear');
+  assert.ok(!md.includes('WS-EMP-01'), 'workstation should not appear in scan');
+  assert.ok(!md.includes('9100/tcp'), 'peripheral printer port should not appear');
 });
 test('only includes ports the assets declared (no inventing 22 on DC-01)', () => {
-  const xml = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
+  const md = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
   // DC-01 declared 445/3389/88/389. It did NOT declare port 22 — so no SSH on DC-01 in scan.
-  const dcSection = xml.slice(xml.indexOf('DC-01'), xml.indexOf('WEB-01'));
-  assert.ok(!dcSection.includes('portid="22"'), 'DC-01 must not show SSH (not declared)');
+  const dcSection = md.slice(md.indexOf('DC-01'), md.indexOf('WEB-01'));
+  assert.ok(!dcSection.includes('22/tcp'), 'DC-01 must not show SSH (not declared)');
+});
+test('vuln scripts trace back to declared services (MS17-010 on SMB host)', () => {
+  const md = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
+  assert.match(md, /smb-vuln-ms17-010/);
+  assert.match(md, /VULNERABLE/);
 });
 test('hostname FQDN includes domain', () => {
-  const xml = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
-  assert.match(xml, /DC-01\.test\.local/);
+  const md = generateNmap({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local' });
+  assert.match(md, /DC-01\.test\.local/);
 });
 test('declared IP is used', () => {
-  const xml = generateNmap({ profileData: FIXTURE, companyName: 'TestCo' });
-  assert.match(xml, /addr="10\.10\.5\.10"/);
+  const md = generateNmap({ profileData: FIXTURE, companyName: 'TestCo' });
+  assert.match(md, /\(10\.10\.5\.10\)/);
 });
 
 console.log('\ngenerateNessus');
@@ -128,7 +134,7 @@ test('respects types filter', () => {
 });
 test('filenames are slugified company name', () => {
   const docs = generateScanDocuments({ profileData: FIXTURE, companyName: 'Test Co. LLC!', types: ['nmap'] });
-  assert.match(docs[0].filename, /^test_co__llc__nmap_scan\.xml$/);
+  assert.match(docs[0].filename, /^test_co__llc__nmap_scan\.md$/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
