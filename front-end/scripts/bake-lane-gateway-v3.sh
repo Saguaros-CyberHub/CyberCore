@@ -226,9 +226,14 @@ done
 iptables -I INPUT -i int0 -s "${CONTROLLER_IP}" -p tcp --dport 22 \
   -m comment --comment "GOAD-CONTROLLER-SSH" -j ACCEPT
 
-# 3. FORWARD — return traffic, then both segments out to the internet.
+# 3. FORWARD — both segments out to the internet. Return traffic is handled by a
+#    RELATED,ESTABLISHED accept added in section 4c, NOT here: it MUST sit ABOVE
+#    the containment DROPs (4/4a), and those are inserted (`-I`) at the top of the
+#    chain. Appending the stateful accept here left it BELOW the LAB-DROP, which
+#    dropped the REPLY half of the Kali RDP DNAT (Kali on ext0 answering Guac on
+#    the 100.100.0.0/16 backbone) — student RDP consoles showed "remote desktop
+#    server unreachable" even though the inbound SYN reached Kali. See 4c.
 #    `-P FORWARD DROP` is the default, so these explicit accepts are required.
-iptables -A FORWARD -m conntrack --ctstate RELATED,ESTABLISHED -m comment --comment "CYBERCORE-V3" -j ACCEPT
 iptables -A FORWARD -i ext0 -o wan0 -m comment --comment "CYBERCORE-V3" -j ACCEPT
 iptables -A FORWARD -i int0 -o wan0 -m comment --comment "CYBERCORE-V3" -j ACCEPT
 
@@ -251,11 +256,29 @@ iptables -A FORWARD -i ext0 -o tailscale0 -m comment --comment "CYBERCORE-V3" -j
 #     .50), so no watcher is needed. The top-of-block strip removes any stale
 #     copy, so a plain append stays idempotent across reboots.
 KALI_IP="${EXT_BASE3}.${KALI_OCTET}"
-iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
-  -m comment --comment "CYBERCORE-KALI-RDP" -j DNAT --to-destination "${KALI_IP}:3389"
+# Idempotent + self-verifying DNAT install. The top-of-script
+# `iptables-save | grep | iptables-restore` strip can mishandle the nat table on
+# this nf_tables-backend gateway (a full `iptables -t nat -S` reports the table
+# "incompatible", and `nft` isn't installed), and on at least one gateway
+# firstbooted across BOTH v2 and v3 the DNAT ended up silently MISSING while the
+# FORWARD accept survived — student RDP then dead-ends on an un-DNAT'd wan0:3389
+# and Guac shows "remote desktop server unreachable". Per-chain ops DO work here,
+# so don't trust the bulk strip for this rule: explicitly delete any stale copy,
+# add fresh, then VERIFY and log an ERROR on failure so it can never vanish
+# silently again (the missing rule is otherwise invisible until a student tries
+# to connect).
+DNAT_SPEC="-i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination ${KALI_IP}:3389"
+while iptables -t nat -C PREROUTING $DNAT_SPEC 2>/dev/null; do
+  iptables -t nat -D PREROUTING $DNAT_SPEC
+done
+iptables -t nat -A PREROUTING $DNAT_SPEC
 iptables -A FORWARD -i wan0 -o ext0 -p tcp -d "${KALI_IP}" --dport 3389 \
   -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT
-logger -t cybercore-firstboot "iptables: CYBERCORE-KALI-RDP DNAT wan0:3389 -> ${KALI_IP}:3389 (ext0)"
+if iptables -t nat -C PREROUTING $DNAT_SPEC 2>/dev/null; then
+  logger -t cybercore-firstboot "iptables: CYBERCORE-KALI-RDP DNAT wan0:3389 -> ${KALI_IP}:3389 (ext0) [verified]"
+else
+  logger -t cybercore-firstboot "ERROR: CYBERCORE-KALI-RDP DNAT FAILED to install -> ${KALI_IP}:3389 (nat table state?); student RDP to Kali will NOT work"
+fi
 
 # 4. FORWARD SEGMENTATION — drop all traffic between the external and
 #    internal segments. Inserted at the TOP of FORWARD so it wins over the
@@ -314,6 +337,19 @@ iptables -I FORWARD -i ext0 -o wan0 -s "${EXT_NET}" -d "${ORCH_INTERNAL_HOST_FOR
   -p tcp --dport 80 -m conntrack --ctstate NEW \
   -m comment --comment "CYBERCORE-IMAGE-PULL" -j ACCEPT
 logger -t cybercore-firstboot "iptables: CYBERCORE-LAB-DROP ext0/int0 -> 100.100.0.0/16 (-o wan0); CYBERCORE-IMAGE-PULL ext0/int0 -> ${ORCH_INTERNAL_HOST_FOR_IPT}:80"
+
+# 4c. STATEFUL RETURN — accept established/related traffic ABOVE the containment
+#     drops. Sections 4/4a inserted SEG/LAB-DROP at the top of FORWARD with `-I`,
+#     which also placed them above the return accept that section 3 used to
+#     append. That dropped the REPLY half of the Kali RDP DNAT (Kali ext0 ->
+#     Guac on 100.100.0.0/16): the inbound SYN reached Kali but the SYN-ACK was
+#     dropped, so RDP timed out ("remote desktop server unreachable"). Insert the
+#     stateful accept LAST so it lands at position 1, above EVERY drop. NEW
+#     lane->backbone connections still hit the DROP (only return traffic for
+#     already-permitted flows passes), so the anti-pivot containment is intact.
+iptables -I FORWARD 1 -m conntrack --ctstate RELATED,ESTABLISHED \
+  -m comment --comment "CYBERCORE-V3" -j ACCEPT
+logger -t cybercore-firstboot "iptables: CYBERCORE-V3 stateful return accept hoisted to FORWARD pos 1 (above LAB-DROP)"
 
 # 5. NAT both lane subnets out wan0.
 for NET in "$EXT_NET" "$INT_NET"; do

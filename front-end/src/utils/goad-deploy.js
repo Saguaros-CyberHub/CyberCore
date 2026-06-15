@@ -154,7 +154,12 @@ const GOAD_LABS = {
 const INFRA_IP_OCTETS = {
   gateway:    1,
   controller: 5,
-  Kali:       20
+  // Ext-segment attack box. .50 matches the gateway RDP DNAT (KALI_OCTET=50 in
+  // bake-lane-gateway-v2/v3.sh) and the .50 DHCP-pool exclusion. Was 20 — an
+  // orphan that never worked: the reservation it produced sat on the INTERNAL
+  // segment (Kali lives on EXTERNAL) and the clone never carried the matching
+  // MAC, so nothing was reachable at .20. .50 is what every enforcing path uses.
+  Kali:       50
 };
 
 // Per-role resource defaults applied to Windows VM clones at deploy time.
@@ -342,7 +347,10 @@ async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, lan
   // Controller — always (every lab uses one)
   lines.push(`dhcp-host=${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)},${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)},goad-controller`);
 
-  // Optional Kali (always pinned to .20 across all labs)
+  // Optional Kali (pinned to .50 via INFRA_IP_OCTETS.Kali; ext segment for v3).
+  // NOTE: this legacy helper is unused (deployGoadLane writes reservations via
+  // prep.sh) and is NOT ext-segment aware — do not revive it for v3 without
+  // passing the external base, or Kali's reservation lands on the wrong subnet.
   if (spec.goad.include_kali !== false) {
     lines.push(`dhcp-host=${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)},${buildIp(laneSubnetBase, INFRA_IP_OCTETS.Kali)},kali`);
   }
@@ -489,8 +497,12 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
  * teaching value) come from upstream's config.json verbatim — we no longer
  * patch them.
  */
-async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, proxmoxAPI }) {
+async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI }) {
   const goad = spec.goad || {};
+  // Kali sits on the EXTERNAL segment (ext0 for v3); GOAD VMs/controller use
+  // laneSubnetBase (internal for v3). Defaults to laneSubnetBase for the
+  // single-segment v1/v2 case where ext == int.
+  const kaliBase = extSubnetBase || laneSubnetBase;
   const labName = goad.version || DEFAULT_LAB;
   // initialUser / initialPass: the account run.sh's preflight uses for the first
   // WinRM connection. Default to vagrant/vagrant — the local-admin account GOAD
@@ -513,7 +525,8 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   }
   triples.push(`goad-controller|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
   if (goad.include_kali !== false) {
-    triples.push(`kali|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
+    // Kali on the EXTERNAL segment (kaliBase), NOT laneSubnetBase (internal for v3).
+    triples.push(`kali|${buildIp(kaliBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
   }
   const hostMap = triples.join(',');
 
@@ -705,7 +718,7 @@ async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
  */
 async function deployGoadLane({
   lane, spec, module, vnet, vxlanId, gatewayVmId, bestNode, templateNode,
-  laneSubnetBase, deployedVMs, proxmoxAPI, waitForTask, query
+  laneSubnetBase, extSubnetBase, deployedVMs, proxmoxAPI, waitForTask, query
 }) {
   if (!spec?.goad?.enabled) return null;
   if (!laneSubnetBase) {
@@ -739,7 +752,8 @@ async function deployGoadLane({
   const triples = Object.entries(macs).map(([n, i]) => `${n}|${i.static_ip}|${i.mac}`);
   triples.push(`goad-controller|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
   if (spec.goad.include_kali !== false) {
-    triples.push(`kali|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
+    // Kali on the EXTERNAL segment (extSubnetBase), NOT laneSubnetBase (internal for v3).
+    triples.push(`kali|${buildIp(extSubnetBase || laneSubnetBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
   }
   const hostMap = triples.join(',');
 
@@ -792,7 +806,7 @@ async function deployGoadLane({
   let playbookResult;
   let provisioningError = null;
   try {
-    playbookResult = await runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, proxmoxAPI });
+    playbookResult = await runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI });
     console.log(`[GOAD] Playbook completed for lane ${lane.lane_id}`);
   } catch (err) {
     provisioningError = err.message;

@@ -595,17 +595,20 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               });
 
               console.log(`[Group ${group_name}] Configuring cloud-init for ${attackBoxVmId} (user: ${studentUsername})...`);
-              // Pin Kali to <lane-ext>.50 — the gateway firstboot bakes a static
-              // DNAT (wan0:3389 → <ext-base>.50:3389), so the attack box MUST sit
-              // at .50 or RDP through the gateway lands on an empty address.
-              // Without this Kali takes a DHCP lease (.10–.200) and the console
-              // breaks. Mirrors the v3 DMZ challenge-VM ipconfig0 pin above.
-              // laneSubnetBase is the external segment for v3, the lane subnet
-              // for v2 — the v2 bake DNATs to <lane>.50 too, so this is correct
-              // for both schemes.
+              // Give Kali its lane-ext .50 via a DHCP RESERVATION, not a static
+              // cloud-init pin. The clone gets the deterministic MAC
+              // macForOctet(INFRA_IP_OCTETS.Kali) so the gateway's dnsmasq (fed by
+              // goadDeploy's prep.sh hostMap, which reserves <ext>.50 for that MAC)
+              // hands it .50 — matching the gateway RDP DNAT (wan0:3389 -> ext.50).
+              // Why DHCP and not the old `ipconfig0: ip=<ext>.50/24` static pin:
+              // the Kali cloud image's hotplug-DHCP helper (cloud-ifupdown) raced
+              // the static config and won, leaving Kali on a random lease; and the
+              // static path never populated /etc/resolv.conf (no resolvconf), so
+              // DNS broke. DHCP fixes both — the reservation makes the lease
+              // deterministic, and dnsmasq hands out itself (.1) as the resolver.
               await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/config`, {
-                net0: `virtio,bridge=${vnet.vnet}`,
-                ipconfig0: `ip=${laneSubnetBase}.50/24,gw=${laneSubnetBase}.1`,
+                net0: `virtio=${goadDeploy.macForOctet(goadDeploy.INFRA_IP_OCTETS.Kali, vxlanId)},bridge=${vnet.vnet}`,
+                ipconfig0: `ip=dhcp`,
                 ciuser: studentUsername,
                 cipassword: studentPassword,
                 nameserver: `${laneSubnetBase}.1`
@@ -636,7 +639,8 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                 await goadDeploy.deployGoadLane({
                   lane: { lane_id: laneId },
                   spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
-                  bestNode, templateNode, laneSubnetBase: goadSubnetBase, deployedVMs,
+                  bestNode, templateNode, laneSubnetBase: goadSubnetBase,
+                  extSubnetBase: laneSubnetBase, deployedVMs,
                   proxmoxAPI, waitForTask, query: cybercoreQuery
                 });
               } catch (goadErr) {

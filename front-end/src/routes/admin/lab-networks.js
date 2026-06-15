@@ -384,7 +384,8 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
             await goadDeploy.deployGoadLane({
               lane: { lane_id: laneId },
               spec, module: challengeModule, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, laneSubnetBase: goadSubnetBase, deployedVMs,
+              bestNode, templateNode, laneSubnetBase: goadSubnetBase,
+              extSubnetBase: laneSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
           } catch (goadErr) {
