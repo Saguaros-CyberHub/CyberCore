@@ -547,6 +547,28 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   const innerCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)} > ${logPath} 2>&1; echo \\$? > ${donePath}`;
   const wrappedCmd = `rm -f ${donePath}; nohup setsid sh -c "${innerCmd}" </dev/null >/dev/null 2>&1 &`;
 
+  // ---- mssql offline-install fix (strip FULLTEXT) -----------------------
+  // GOAD's mssql role renders sql_conf.ini with FEATURES=SQLENGINE,FULLTEXT.
+  // Full-Text Search is NOT in Express *Core* media (SQLEXPR_x64_ENU.exe) — only
+  // in *Advanced* (SQLEXPRADV). srv02 installs from the engine-only Core media we
+  // stage offline in template 1004, and the lane has no internet, so the SSEI
+  // bootstrapper hangs forever assembling media (extracts RulesEng, never reaches
+  // setup.exe / Detail.txt) trying to fetch the missing FullText component — the
+  // 2h watchdog then kills the run. GOAD doesn't use full-text search. The
+  // ansible roles live under /opt/goad (the orchestration scripts are the only
+  // thing under /opt/goad-light), so patch the role config there before the
+  // playbook renders it. Covers MSSQL_2019 + MSSQL_2022 templates, and strips
+  // FULLTEXT regardless of feature order. Idempotent; safe to re-run.
+  try {
+    const { pid: patchPid } = await agentExecArgv(bestNode, controllerVmId,
+      ['/bin/bash', '-c',
+        `find /opt/goad -name 'sql_conf.ini.MSSQL_*.j2' -exec sed -i -E -e '/^FEATURES=/s/,FULLTEXT//' -e '/^FEATURES=/s/FULLTEXT,//' {} +`],
+      proxmoxAPI);
+    await pollExecStatus(bestNode, controllerVmId, patchPid, 15000);
+  } catch (err) {
+    console.warn(`[GOAD] mssql FULLTEXT strip failed (non-fatal): ${err.message}`);
+  }
+
   // Fire-and-forget — we don't care about this PID's status afterward.
   await agentExecArgv(bestNode, controllerVmId,
     ['/bin/bash', '-c', wrappedCmd],
