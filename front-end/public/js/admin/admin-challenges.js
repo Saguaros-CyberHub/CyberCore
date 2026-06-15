@@ -201,9 +201,15 @@ async function onChalGoadToggle() {
     const labKey = document.getElementById('chalGoadVersion').value;
     const includeKali = document.getElementById('chalGoadKali').checked;
     challengeVMs = buildGoadVmRows(labKey, includeKali);
+    if (document.getElementById('chalGoadPrebaked')?.checked) _blankChalGoadTemplateIds();
     renderChallengeVMs();
     if (typeof Toast !== 'undefined') Toast.info('GOAD enabled', `VM list set to ${labKey} topology`);
   } else {
+    // Turn off the pre-baked sub-mode along with GOAD.
+    const pb = document.getElementById('chalGoadPrebaked');
+    if (pb) pb.checked = false;
+    const pbc = document.getElementById('chalGoadPrebakedConfig');
+    if (pbc) pbc.style.display = 'none';
     if (_preChalGoadVMs !== null) {
       challengeVMs = _preChalGoadVMs;
       _preChalGoadVMs = null;
@@ -221,8 +227,30 @@ function onChalGoadVersionChange() {
   if (document.getElementById('chalGoadEnabled').checked) {
     const includeKali = document.getElementById('chalGoadKali').checked;
     challengeVMs = buildGoadVmRows(labKey, includeKali);
+    if (document.getElementById('chalGoadPrebaked')?.checked) _blankChalGoadTemplateIds();
     renderChallengeVMs();
   }
+}
+// Pre-baked golden-image sub-mode: clone provisioned VMs instead of running
+// ansible. Reveals the fixed-subnet inputs, forces the segmented v3 topology
+// (baked AD has full per-segment IPs), and blanks the catalog's base
+// template_vmid so the admin must enter each machine's golden-image VMID.
+function onChalGoadPrebakedToggle() {
+  const on = document.getElementById('chalGoadPrebaked').checked;
+  const cfg = document.getElementById('chalGoadPrebakedConfig');
+  if (cfg) cfg.style.display = on ? 'block' : 'none';
+  if (on) {
+    const scheme = document.getElementById('newChalSubnetScheme');
+    if (scheme && scheme.value !== 'v3') { scheme.value = 'v3'; onChalSubnetSchemeChange(); }
+    _blankChalGoadTemplateIds();
+    renderChallengeVMs();
+    if (typeof Toast !== 'undefined') Toast.info('Pre-baked mode', 'Enter each machine\'s golden-image Template VMID in the VM list');
+  }
+}
+// Blank GOAD rows' template_vmid (keep Kali's) so the catalog's base template
+// (e.g. 1004) isn't mistaken for the golden image. Caller re-renders.
+function _blankChalGoadTemplateIds() {
+  challengeVMs.forEach(vm => { if (vm.name !== 'Kali') vm.template_vmid = ''; });
 }
 function onChalGoadKaliToggle() {
   if (!document.getElementById('chalGoadEnabled').checked) return;
@@ -238,7 +266,7 @@ function onChalGoadKaliToggle() {
 }
 function readChalGoadFields() {
   if (!document.getElementById('chalGoadEnabled').checked) return null;
-  return {
+  const goad = {
     enabled:         true,
     version:         document.getElementById('chalGoadVersion').value || 'GOAD-Light',
     domain:          document.getElementById('chalGoadDomain').value.trim() || 'cybersaguaros.local',
@@ -247,6 +275,13 @@ function readChalGoadFields() {
     admin_password:  document.getElementById('chalGoadPassword').value || 'vagrant',
     include_kali:    document.getElementById('chalGoadKali').checked
   };
+  if (document.getElementById('chalGoadPrebaked')?.checked) {
+    goad.prebaked = true;
+    const int = (document.getElementById('chalGoadFixedInt').value || '').trim();
+    const ext = (document.getElementById('chalGoadFixedExt').value || '').trim();
+    goad.fixed_subnet = { int, ext: ext || int };
+  }
+  return goad;
 }
 function resetChalGoadFields() {
   _preChalGoadVMs = null;
@@ -254,6 +289,10 @@ function resetChalGoadFields() {
   if (cb) cb.checked = false;
   const cfg = document.getElementById('chalGoadConfig');
   if (cfg) cfg.style.display = 'none';
+  const pb = document.getElementById('chalGoadPrebaked');
+  if (pb) pb.checked = false;
+  const pbc = document.getElementById('chalGoadPrebakedConfig');
+  if (pbc) pbc.style.display = 'none';
 }
 
 // Network-topology selector — updates the helper text under the dropdown.
@@ -292,6 +331,25 @@ async function createChallenge() {
   if (validVMs.length === 0) {
     Toast.warning('Missing', 'Add at least one VM with a Template VMID');
     return;
+  }
+
+  // Pre-baked GOAD: every AD machine must carry its golden-image VMID and the
+  // fixed subnet must be set, or the lane clones the wrong template / wrong base.
+  if (goad?.prebaked) {
+    const fi = goad.fixed_subnet?.int, fe = goad.fixed_subnet?.ext;
+    if (!fi) {
+      Toast.warning('Missing subnet', 'Pre-baked GOAD needs a fixed internal subnet (e.g., 10.167.161)');
+      return;
+    }
+    if (fe && fe === fi) {
+      Toast.warning('Subnet clash', 'Internal and external subnets must differ (e.g., 10.167.161 vs 10.39.161) — the v3 gateway can\'t route both segments on the same /24');
+      return;
+    }
+    const missing = challengeVMs.filter(vm => vm.name !== 'Kali' && !vm.template_vmid).map(vm => vm.name || '(unnamed)');
+    if (missing.length) {
+      Toast.warning('Missing template VMIDs', `Enter the golden-image Template VMID for: ${missing.join(', ')}`);
+      return;
+    }
   }
 
   // Build VM specs array — auto-assign offsets (600000, 610000, 620000, ...)

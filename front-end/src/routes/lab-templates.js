@@ -428,6 +428,19 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
         admin_password:   goad.admin_password   || 'vagrant',
         include_kali:     goad.include_kali !== false  // default true
       };
+      // Pre-baked ("GOAD-Like") mode: clone golden images instead of running the
+      // ~90-min ansible bake. fixed_subnet pins the base the images were
+      // provisioned on so every lane reuses it (deployPrebakedGoadLane +
+      // applyFixedSubnet rely on these two fields being present on the spec).
+      if (goad.prebaked) {
+        spec.goad.prebaked = true;
+        if (goad.fixed_subnet && goad.fixed_subnet.int) {
+          spec.goad.fixed_subnet = {
+            int: String(goad.fixed_subnet.int).trim(),
+            ext: String(goad.fixed_subnet.ext || goad.fixed_subnet.int).trim()
+          };
+        }
+      }
     }
 
     // Reserve the VXLAN block, insert the challenge, and create the SDN zone +

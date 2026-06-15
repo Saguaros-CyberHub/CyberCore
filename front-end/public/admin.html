@@ -613,6 +613,32 @@
                   </div>
                 </div>
                 <p id="chalGoadVersionDesc" style="font-size: 0.72rem; color: var(--gray-500); margin: 0.5rem 0 0 0;"></p>
+
+                <!-- Pre-baked golden-image mode -->
+                <div style="margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+                  <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer; margin: 0;">
+                    <input type="checkbox" id="chalGoadPrebaked" onchange="onChalGoadPrebakedToggle()" style="width: 16px; height: 16px; cursor: pointer; margin: 0;">
+                    <span style="font-weight: 600; font-size: 0.85rem;">&#9889; Pre-baked golden images (deploy in minutes, not ~90 min)</span>
+                  </label>
+                  <p style="font-size: 0.72rem; color: var(--gray-500); margin: 0.3rem 0 0 1.6rem;">
+                    Clone already-provisioned GOAD VMs instead of running ansible. Enter each machine's <strong>golden-image Template VMID</strong> in the VM list below, and pin the subnet the images were baked on.
+                  </p>
+                  <div id="chalGoadPrebakedConfig" style="display: none; margin-top: 0.5rem; padding-left: 1.6rem;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; font-size: 0.85rem;">
+                      <div class="form-group" style="margin: 0;">
+                        <label style="font-size: 0.75rem;">Fixed Internal Subnet (GOAD AD) — first 3 octets</label>
+                        <input type="text" id="chalGoadFixedInt" value="10.167.161" placeholder="e.g., 10.167.161" style="font-size: 0.85rem; font-family: monospace;">
+                      </div>
+                      <div class="form-group" style="margin: 0;">
+                        <label style="font-size: 0.75rem;">Fixed External Subnet (Kali/BYOD) — first 3 octets</label>
+                        <input type="text" id="chalGoadFixedExt" value="10.39.161" placeholder="e.g., 10.39.161" style="font-size: 0.85rem; font-family: monospace;">
+                      </div>
+                    </div>
+                    <p style="font-size: 0.72rem; color: #c05621; margin: 0.4rem 0 0 0;">
+                      Every pre-baked lane reuses this exact subnet (safe — v3 lanes are VXLAN-isolated). It <strong>must</strong> match the base the golden image's AD/DNS was provisioned on. Network Topology is forced to <strong>v3</strong>.
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
 

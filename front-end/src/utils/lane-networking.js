@@ -249,6 +249,25 @@ async function configureLaneTailscale({ subnetScheme, vxlanId, wanIp, laneName, 
   }
 }
 
+/**
+ * Override a lane's IP addressing with a FIXED subnet base, leaving the per-lane
+ * VNet/VXLAN (the isolation boundary) untouched. Used by pre-baked "GOAD-Like"
+ * challenges: a golden-image AD has full IPs (<base>.10, DNS A/SRV records,
+ * DC-locator data) hardwired to the subnet it was provisioned on, so every lane
+ * MUST reuse that exact base. Safe because v3 lanes are VXLAN-isolated —
+ * identical subnets behind separate gateways never collide. Mutates + returns net.
+ */
+function applyFixedSubnet(net, isV3, fixedInt, fixedExt) {
+  const mk = (base) => ({ base3: base, cidr: `${base}.0/24`, gatewayIp: `${base}.1` });
+  if (isV3) {
+    if (fixedInt && net.lanInt) net.lanInt = { ...net.lanInt, ...mk(fixedInt) };
+    if (fixedExt && net.lanExt) net.lanExt = { ...net.lanExt, ...mk(fixedExt) };
+  } else if (fixedInt && net.lan) {
+    net.lan = { ...net.lan, ...mk(fixedInt) };
+  }
+  return net;
+}
+
 module.exports = {
   V2_LANE_GATEWAY_VMID,
   V3_LANE_GATEWAY_VMID,
@@ -265,5 +284,6 @@ module.exports = {
   v3InternalSubnet,
   resolveGatewayVmid,
   resolveLaneNetworking,
+  applyFixedSubnet,
   configureLaneTailscale,
 };

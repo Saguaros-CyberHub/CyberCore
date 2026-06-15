@@ -338,7 +338,7 @@ function buildLaneNet0(vmSpec, vnetName, mac, nicModel) {
  * IP, emits a single dnsmasq config snippet at /etc/dnsmasq.d/lane-reservations.conf
  * inside the gateway LXC.
  */
-async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, laneSubnetBase }) {
+async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase }) {
   if (!spec?.goad?.enabled) return;
 
   const labName = spec.goad.version || DEFAULT_LAB;
@@ -347,12 +347,14 @@ async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, lan
   // Controller — always (every lab uses one)
   lines.push(`dhcp-host=${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)},${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)},goad-controller`);
 
-  // Optional Kali (pinned to .50 via INFRA_IP_OCTETS.Kali; ext segment for v3).
-  // NOTE: this legacy helper is unused (deployGoadLane writes reservations via
-  // prep.sh) and is NOT ext-segment aware — do not revive it for v3 without
-  // passing the external base, or Kali's reservation lands on the wrong subnet.
+  // Optional Kali (.50 via INFRA_IP_OCTETS.Kali). Kali lives on the EXTERNAL
+  // segment, so its reservation uses extSubnetBase (falls back to laneSubnetBase
+  // for single-segment v1/v2). This writer is the reservation path for the
+  // pre-baked ("GOAD-Like") deploy — there is no controller running prep.sh in
+  // that mode, so reservations are pushed straight into the gateway here.
   if (spec.goad.include_kali !== false) {
-    lines.push(`dhcp-host=${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)},${buildIp(laneSubnetBase, INFRA_IP_OCTETS.Kali)},kali`);
+    const kaliBase = extSubnetBase || laneSubnetBase;
+    lines.push(`dhcp-host=${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)},${buildIp(kaliBase, INFRA_IP_OCTETS.Kali)},kali`);
   }
 
   // Lab VMs
@@ -848,9 +850,112 @@ async function deployGoadLane({
   return { controllerVmId, playbookResult };
 }
 
+// Full path so QEMU guest-agent CreateProcess resolves it regardless of the
+// guest's PATH. Windows Server 2019 always ships PowerShell 5.1 here.
+const WIN_PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+
+/**
+ * Pre-baked ("GOAD-Like") lane HEAL — runs AFTER the caller (groups.js) has
+ * already (a) stripped cloud-init from the GOAD clones so their baked hostnames
+ * survive, (b) written the gateway DHCP reservations, and (c) started the VMs
+ * straight onto their reserved IPs. The VMs are GOLDEN IMAGES that were already
+ * GOAD-provisioned, so there is NO controller and NO ansible (no ~90-min bake).
+ *
+ * The only thing a freshly-cloned forest needs is a DNS/replication kick: the
+ * clone gave each DC a new VM-GenerationID, which resets its InvocationID and
+ * leaves its SRV/_msdcs records stale, so the DCs can't locate each other until
+ * they re-register and force a sync. This reproduces — automatically — the
+ * sequence proven by hand on the 49010/49020 test clones:
+ *   ipconfig /registerdns + nltest /dsregdns + restart Netlogon/DNS  → repadmin /syncall
+ * Members need NO repair: with cloud-init stripped their baked hostname matches
+ * their AD account, so the secure channel is healthy on boot (we only verify).
+ *
+ * REQUIRES the challenge to pin a fixed subnet (applyFixedSubnet in the caller)
+ * so every lane reuses the base the golden image was baked on. Best-effort: a
+ * heal step failing is logged, not thrown — the lane is already booted, and a
+ * manual repadmin re-run is the fallback. Returns null for non-prebaked.
+ */
+async function deployPrebakedGoadLane({
+  lane, spec, vxlanId, gatewayVmId, bestNode, laneSubnetBase, extSubnetBase, deployedVMs, proxmoxAPI
+}) {
+  if (!spec?.goad?.enabled || !spec?.goad?.prebaked) return null;
+  const labName = spec.goad.version || DEFAULT_LAB;
+  const labDef = GOAD_LABS[labName] || GOAD_LABS[DEFAULT_LAB];
+  console.log(`[GOAD] Pre-baked lane ${lane.lane_id} (vxlan ${vxlanId}) — golden images; post-clone heal (no controller/ansible)`);
+
+  // Tag each cloned QEMU VM with its lab role (match on lowercased name).
+  const tagged = (deployedVMs || [])
+    .filter(v => v.type === 'qemu')
+    .map(v => ({ ...v, labVm: labDef.vms.find(lv => lv.name.toLowerCase() === String(v.name).toLowerCase()) }))
+    .filter(v => v.labVm && v.labVm.role !== 'linux');
+  const dcs     = tagged.filter(v => v.labVm.role === 'dc');
+  const members = tagged.filter(v => v.labVm.role === 'member');
+
+  // Run a PowerShell one-liner inside a Windows clone via the guest agent.
+  const winPS = async (vm, script, timeoutMs = 120000) => {
+    const { pid } = await agentExecArgv(vm.node, vm.vm_id,
+      [WIN_PS, '-NoProfile', '-NonInteractive', '-Command', script], proxmoxAPI);
+    return pollExecStatus(vm.node, vm.vm_id, pid, timeoutMs);
+  };
+
+  // 1. Wait for each DC's guest agent, then let NTDS + DNS finish starting.
+  for (const dc of dcs) {
+    const ok = await waitForGuestAgent(dc.node, dc.vm_id, 300000);
+    if (!ok) console.warn(`[GOAD] prebaked: DC ${dc.name} (${dc.vm_id}) guest agent not ready in 5m — heal may be incomplete`);
+  }
+  if (dcs.length) await sleep(90000);
+
+  // 2. Re-publish each DC's SRV/_msdcs records (clean up the GenID-reset
+  //    InvocationID so the DCs can locate each other again).
+  for (const dc of dcs) {
+    try {
+      await winPS(dc, "ipconfig /registerdns | Out-Null; nltest /dsregdns; Restart-Service Netlogon -Force; Start-Sleep -Seconds 5; Restart-Service DNS -Force; 'reregistered'", 90000);
+      console.log(`[GOAD] prebaked: ${dc.name} DNS/SRV records re-registered`);
+    } catch (err) { console.warn(`[GOAD] prebaked: re-register ${dc.name} failed: ${err.message}`); }
+  }
+  if (dcs.length) await sleep(45000);  // let the refreshed records propagate
+
+  // 3. Force replication both ways across every partition.
+  for (const dc of dcs) {
+    try { await winPS(dc, 'repadmin /syncall /AdeP', 120000); }
+    catch (err) { console.warn(`[GOAD] prebaked: repadmin /syncall on ${dc.name} failed: ${err.message}`); }
+  }
+
+  // 4. Log replication health (best-effort) so a bad heal is visible in logs.
+  if (dcs[0]) {
+    try {
+      const r = await winPS(dcs[0], 'repadmin /replsummary', 60000);
+      const out = (r.stdout || '').trim();
+      console.log(`[GOAD] prebaked: replication summary —\n${out}`);
+      if (/[1-9]\d*\s*\/\s*\d+/.test(out.replace(/0\s*\/\s*\d+/g, ''))) {
+        console.warn(`[GOAD] prebaked: replsummary shows non-zero failures — inspect ${dcs[0].name}`);
+      }
+    } catch (err) { console.warn(`[GOAD] prebaked: replsummary failed: ${err.message}`); }
+  }
+
+  // 5. Verify member secure channels. With cloud-init stripped at clone time the
+  //    baked hostname is intact, so each should report True without any repair.
+  for (const m of members) {
+    const ok = await waitForGuestAgent(m.node, m.vm_id, 180000);
+    if (!ok) { console.warn(`[GOAD] prebaked: member ${m.name} guest agent not ready — skipping verify`); continue; }
+    try {
+      const r = await winPS(m, '"$(hostname) securechannel=$(Test-ComputerSecureChannel)"', 60000);
+      const out = (r.stdout || '').trim();
+      console.log(`[GOAD] prebaked: member ${m.name} → ${out}`);
+      if (/securechannel=False/i.test(out)) {
+        console.warn(`[GOAD] prebaked: member ${m.name} secure channel BROKEN — confirm cloud-init was stripped so the hostname stayed as baked (e.g. TUC-SRV02), not the clone's VM name`);
+      }
+    } catch (err) { console.warn(`[GOAD] prebaked: secure-channel verify ${m.name} failed: ${err.message}`); }
+  }
+
+  console.log(`[GOAD] prebaked: lane ${lane.lane_id} heal complete (${dcs.length} DC, ${members.length} member)`);
+  return { prebaked: true, dcCount: dcs.length, memberCount: members.length };
+}
+
 module.exports = {
   // High-level
   deployGoadLane,
+  deployPrebakedGoadLane,
   // Per-lane MAC/IP lookup table (called from admin.js once per lane)
   prepareGoadMacs,
   // Net0 string builder (called from admin.js inside the VM clone loop)

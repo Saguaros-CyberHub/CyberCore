@@ -31,6 +31,7 @@ const {
   KALI_TEMPLATE_VMID,
   resolveGatewayVmid,
   resolveLaneNetworking,
+  applyFixedSubnet,
   configureLaneTailscale,
   formatLaneGatewayNet0,
 } = require('../../utils/lane-networking');
@@ -427,6 +428,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               });
               if (gwCloneResult) await waitForTask(sourceNode, gwCloneResult);
               const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+              // Pre-baked ("GOAD-Like") lanes pin a fixed subnet so the gateway's
+              // ext0/int0 land on the same base the golden-image AD was baked on.
+              if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
+                applyFixedSubnet(net, subnetScheme === 'v3', spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
+              }
               if (subnetScheme === 'v3') {
                 await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
                   net0: formatLaneGatewayNet0(net.wan),
@@ -502,6 +508,10 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             let kaliGuacConnId = null;
             const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
             const isV3 = subnetScheme === 'v3';
+            // Pre-baked lanes reuse the golden image's exact subnet (see Phase 1b).
+            if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
+              applyFixedSubnet(net, isV3, spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
+            }
             const vnetExtName = vnet.vnet;
             const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
             const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
@@ -567,6 +577,33 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
                     if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
                     if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
                     await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
+
+                    // Pre-baked golden images are already fully provisioned +
+                    // domain-joined. Proxmox regenerates a cloud-init ISO on every
+                    // clone, and cloudbase-init then applies the clone's VM name as
+                    // the Windows hostname — which silently breaks a member's domain
+                    // secure channel, because its baked AD account (e.g. TUC-SRV02$)
+                    // no longer matches its renamed host. Domain controllers are
+                    // immune (Windows refuses to rename a DC), which is exactly why
+                    // only members broke in testing. Strip the cloud-init drive so
+                    // the baked hostname + whole identity survive the clone untouched;
+                    // the reserved IP still arrives via the deterministic MAC on net0.
+                    if (spec.goad?.prebaked && isGoadVm) {
+                      try {
+                        const cfg = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`);
+                        const ciKey = cfg && Object.keys(cfg).find(k =>
+                          /^(ide|sata|scsi|virtio)\d+$/.test(k) &&
+                          typeof cfg[k] === 'string' && /cloudinit/i.test(cfg[k]));
+                        if (ciKey) {
+                          await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, { delete: ciKey });
+                          console.log(`[Group ${group_name}] Pre-baked ${vmName}: stripped cloud-init drive ${ciKey} (preserve baked hostname)`);
+                        } else {
+                          console.log(`[Group ${group_name}] Pre-baked ${vmName}: no cloud-init drive found to strip`);
+                        }
+                      } catch (err) {
+                        console.warn(`[Group ${group_name}] Pre-baked ${vmName}: cloud-init strip failed (member secure channel may break): ${err.message}`);
+                      }
+                    }
                   }
                 }
               });
@@ -626,6 +663,26 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             progress.lanes[laneId].status = 'starting';
             await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
             await new Promise(r => setTimeout(r, 5000));
+
+            // Pre-baked lanes: write the gateway DHCP reservations BEFORE the GOAD
+            // VMs boot, so each Windows clone comes up directly on its reserved IP
+            // (DC01=.10, DC02=.11, …) and never registers DNS at a wrong address.
+            // (Normal lanes get reservations later from the controller's prep.sh
+            // inside deployGoadLane; pre-baked has no controller, so it's done here
+            // — and it must precede the start loop below, which is the whole point.)
+            if (spec.goad?.prebaked && spec.goad?.enabled) {
+              await new Promise(r => setTimeout(r, 5000)); // let the gateway LXC settle before pct push
+              try {
+                await goadDeploy.writeDhcpReservations({
+                  gatewayVmId, bestNode, spec, vxlanId,
+                  laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase
+                });
+                console.log(`[Group ${group_name}] Pre-baked: DHCP reservations written to gateway ${gatewayVmId} before VM boot`);
+              } catch (err) {
+                console.warn(`[Group ${group_name}] Pre-baked: writeDhcpReservations failed (clones may land on dynamic IPs): ${err.message}`);
+              }
+            }
+
             for (const dvm of deployedVMs) {
               const startPath = dvm.type === 'lxc'
                 ? `/api2/json/nodes/${dvm.node}/lxc/${dvm.vm_id}/status/start`
@@ -636,13 +693,25 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             if (spec.goad?.enabled) {
               progress.lanes[laneId].status = 'provisioning_goad';
               try {
-                await goadDeploy.deployGoadLane({
-                  lane: { lane_id: laneId },
-                  spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
-                  bestNode, templateNode, laneSubnetBase: goadSubnetBase,
-                  extSubnetBase: laneSubnetBase, deployedVMs,
-                  proxmoxAPI, waitForTask, query: cybercoreQuery
-                });
+                if (spec.goad?.prebaked) {
+                  // Golden-image lane: clones are already GOAD-provisioned, so just
+                  // write reservations + bounce onto the baked IPs. No controller,
+                  // no ansible, no ~90-min bake.
+                  await goadDeploy.deployPrebakedGoadLane({
+                    lane: { lane_id: laneId },
+                    spec, vxlanId, gatewayVmId, bestNode,
+                    laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase,
+                    deployedVMs, proxmoxAPI
+                  });
+                } else {
+                  await goadDeploy.deployGoadLane({
+                    lane: { lane_id: laneId },
+                    spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
+                    bestNode, templateNode, laneSubnetBase: goadSubnetBase,
+                    extSubnetBase: laneSubnetBase, deployedVMs,
+                    proxmoxAPI, waitForTask, query: cybercoreQuery
+                  });
+                }
               } catch (goadErr) {
                 console.error(`[Group ${group_name}] GOAD provisioning failed for ${student.email}: ${goadErr.message}`);
               }
