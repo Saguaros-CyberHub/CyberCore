@@ -163,7 +163,7 @@ function findGoadLab(key) {
 
 // Convert a lab's VM list into challengeVMs / templateVMs row shape.
 // Kali (optional) appended at the end.
-function buildGoadVmRows(labKey, includeKali) {
+function buildGoadVmRows(labKey, includeKali, includeDmz) {
   const lab = findGoadLab(labKey);
   if (!lab) return [];
   const rows = lab.vms.map(v => ({
@@ -174,6 +174,14 @@ function buildGoadVmRows(labKey, includeKali) {
     services:      '',
     default_scripts: ''
   }));
+  // v3 pre-baked labs need the dual-homed DMZ pivot (web01) so the attacker has
+  // a path from the external segment into the internal AD network. It's a Linux
+  // vuln-app host (role 'dmz'), NOT a GOAD AD member — the deploy dual-homes it
+  // and pins it to .240 via cloud-init (its cloud-init is kept, not stripped).
+  // template_vmid stays blank: the admin supplies the golden web01 image VMID.
+  if (includeDmz) {
+    rows.push({ name: 'web01', role: 'dmz', os: 'Linux (Debian)', template_vmid: '', services: '80/HTTP', default_scripts: '' });
+  }
   if (includeKali) {
     rows.push({ name: 'Kali', role: 'attacker', os: 'Kali Linux', template_vmid: 1699, services: '', default_scripts: '' });
   }
@@ -200,8 +208,9 @@ async function onChalGoadToggle() {
     if (_preChalGoadVMs === null) _preChalGoadVMs = challengeVMs.slice();
     const labKey = document.getElementById('chalGoadVersion').value;
     const includeKali = document.getElementById('chalGoadKali').checked;
-    challengeVMs = buildGoadVmRows(labKey, includeKali);
-    if (document.getElementById('chalGoadPrebaked')?.checked) _blankChalGoadTemplateIds();
+    const prebaked = document.getElementById('chalGoadPrebaked')?.checked;
+    challengeVMs = buildGoadVmRows(labKey, includeKali, prebaked);
+    if (prebaked) _blankChalGoadTemplateIds();
     renderChallengeVMs();
     if (typeof Toast !== 'undefined') Toast.info('GOAD enabled', `VM list set to ${labKey} topology`);
   } else {
@@ -226,8 +235,9 @@ function onChalGoadVersionChange() {
   if (desc && lab) desc.textContent = lab.description || '';
   if (document.getElementById('chalGoadEnabled').checked) {
     const includeKali = document.getElementById('chalGoadKali').checked;
-    challengeVMs = buildGoadVmRows(labKey, includeKali);
-    if (document.getElementById('chalGoadPrebaked')?.checked) _blankChalGoadTemplateIds();
+    const prebaked = document.getElementById('chalGoadPrebaked')?.checked;
+    challengeVMs = buildGoadVmRows(labKey, includeKali, prebaked);
+    if (prebaked) _blankChalGoadTemplateIds();
     renderChallengeVMs();
   }
 }
@@ -242,10 +252,17 @@ function onChalGoadPrebakedToggle() {
   if (on) {
     const scheme = document.getElementById('newChalSubnetScheme');
     if (scheme && scheme.value !== 'v3') { scheme.value = 'v3'; onChalSubnetSchemeChange(); }
-    _blankChalGoadTemplateIds();
-    renderChallengeVMs();
-    if (typeof Toast !== 'undefined') Toast.info('Pre-baked mode', 'Enter each machine\'s golden-image Template VMID in the VM list');
   }
+  // Rebuild the VM list so the DMZ pivot (web01) is added when pre-baked is on
+  // and removed when off. Only meaningful while GOAD itself is enabled.
+  if (document.getElementById('chalGoadEnabled')?.checked) {
+    const labKey = document.getElementById('chalGoadVersion').value;
+    const includeKali = document.getElementById('chalGoadKali').checked;
+    challengeVMs = buildGoadVmRows(labKey, includeKali, on);
+    if (on) _blankChalGoadTemplateIds();
+    renderChallengeVMs();
+  }
+  if (on && typeof Toast !== 'undefined') Toast.info('Pre-baked mode', 'Enter each golden-image Template VMID — including web01 (the DMZ pivot)');
 }
 // Blank GOAD rows' template_vmid (keep Kali's) so the catalog's base template
 // (e.g. 1004) isn't mistaken for the golden image. Caller re-renders.
