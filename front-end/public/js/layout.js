@@ -235,9 +235,11 @@ const Layout = {
       const nav = document.getElementById('sidebarNav');
       if (nav) {
         nav.innerHTML = this.buildNavHTML(data.modules || [], data.plugins || []);
-        const subnavSection = nav.querySelector('.module-subnav');
-        if (subnavSection) {
-          nav.scrollTop = subnavSection.offsetTop - 8;
+        const activeModuleItem = nav.querySelector('.nav-item.active:not(.subnav-item)');
+        if (activeModuleItem) {
+          const navRect = nav.getBoundingClientRect();
+          const itemRect = activeModuleItem.getBoundingClientRect();
+          nav.scrollTop = nav.scrollTop + itemRect.top - navRect.top - 8;
         }
       }
 
