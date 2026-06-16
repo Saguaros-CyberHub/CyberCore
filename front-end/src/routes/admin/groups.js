@@ -664,25 +664,6 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
             await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
             await new Promise(r => setTimeout(r, 5000));
 
-            // Pre-baked lanes: write the gateway DHCP reservations BEFORE the GOAD
-            // VMs boot, so each Windows clone comes up directly on its reserved IP
-            // (DC01=.10, DC02=.11, …) and never registers DNS at a wrong address.
-            // (Normal lanes get reservations later from the controller's prep.sh
-            // inside deployGoadLane; pre-baked has no controller, so it's done here
-            // — and it must precede the start loop below, which is the whole point.)
-            if (spec.goad?.prebaked && spec.goad?.enabled) {
-              await new Promise(r => setTimeout(r, 5000)); // let the gateway LXC settle before pct push
-              try {
-                await goadDeploy.writeDhcpReservations({
-                  gatewayVmId, bestNode, spec, vxlanId,
-                  laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase
-                });
-                console.log(`[Group ${group_name}] Pre-baked: DHCP reservations written to gateway ${gatewayVmId} before VM boot`);
-              } catch (err) {
-                console.warn(`[Group ${group_name}] Pre-baked: writeDhcpReservations failed (clones may land on dynamic IPs): ${err.message}`);
-              }
-            }
-
             for (const dvm of deployedVMs) {
               const startPath = dvm.type === 'lxc'
                 ? `/api2/json/nodes/${dvm.node}/lxc/${dvm.vm_id}/status/start`

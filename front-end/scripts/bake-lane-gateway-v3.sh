@@ -190,6 +190,16 @@ dhcp-host=kali,${EXT_BASE3}.${KALI_OCTET}
 dhcp-range=set:intnet,${INT_BASE3}.${DHCP_START_OCTET},${INT_BASE3}.${DHCP_END_OCTET},255.255.255.0,12h
 dhcp-option=tag:intnet,option:router,${INT_BASE3}.1
 dhcp-option=tag:intnet,option:dns-server,${INT_BASE3}.1
+# Pre-baked GOAD golden images keep their baked Windows hostnames and DHCP for
+# their AD-expected internal IPs. Reserve by hostname (same mechanism as the
+# Kali line above) so each lands on its exact octet DETERMINISTICALLY — not by
+# DHCP-request order, which could otherwise swap the two DCs' IPs and break the
+# baked AD. Octets match goad-deploy.js GOAD_LABS; hostnames come from the lab's
+# config.json. Harmless on non-GOAD v3 lanes (no client sends these names).
+# Add a line here for any other pre-baked lab's hosts.
+dhcp-host=TUC-DC01,${INT_BASE3}.10
+dhcp-host=TUC-DC02,${INT_BASE3}.11
+dhcp-host=TUC-SRV02,${INT_BASE3}.22
 
 dhcp-authoritative
 
@@ -275,8 +285,17 @@ KALI_IP="${EXT_BASE3}.${KALI_OCTET}"
 # silently again (the missing rule is otherwise invisible until a student tries
 # to connect).
 DNAT_SPEC="-i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination ${KALI_IP}:3389"
-while iptables -t nat -C PREROUTING $DNAT_SPEC 2>/dev/null; do
-  iptables -t nat -D PREROUTING $DNAT_SPEC
+# Strip ANY pre-existing :3389 DNAT in PREROUTING — not just our own commented
+# one. A stray, uncommented DNAT (observed once: a leftover wan0:3389 → srv02
+# from this gateway's churn) sits AHEAD of ours in PREROUTING and silently eats
+# every student RDP, sending it to the wrong host. The old narrow `-C/-D` loop
+# only removed our exact rule, so it couldn't clear a stray. `iptables -S` prints
+# each rule; swap -A→-D to delete it. Loop until no :3389 DNAT remains, then add
+# ours as the sole one. (Idempotent across reboots: ours is stripped + re-added.)
+while true; do
+  _stray="$(iptables -t nat -S PREROUTING 2>/dev/null | grep -- '--dport 3389' | grep -m1 'DNAT')"
+  [ -z "$_stray" ] && break
+  iptables -t nat $(echo "$_stray" | sed 's/^-A /-D /') 2>/dev/null || break
 done
 iptables -t nat -A PREROUTING $DNAT_SPEC
 iptables -A FORWARD -i wan0 -o ext0 -p tcp -d "${KALI_IP}" --dport 3389 \
