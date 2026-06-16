@@ -15,7 +15,6 @@ function renderModuleCard(mod) {
   return `
     <a href="${href}" class="module-card" style="--card-accent: ${mod.color || '#0c234b'}">
       <div class="module-card-header">
-        <div class="module-card-icon" style="--icon-bg: ${mod.color}15">${mod.icon || ''}</div>
         <div class="module-card-name">${mod.name}</div>
       </div>
       <div class="module-card-desc">${mod.description || ''}</div>
