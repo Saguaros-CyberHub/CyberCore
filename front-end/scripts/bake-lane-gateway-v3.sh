@@ -178,6 +178,13 @@ expand-hosts
 dhcp-range=set:extnet,${EXT_BASE3}.${DHCP_START_OCTET},${EXT_BASE3}.${DHCP_END_OCTET},255.255.255.0,12h
 dhcp-option=tag:extnet,option:router,${EXT_BASE3}.1
 dhcp-option=tag:extnet,option:dns-server,${EXT_BASE3}.1
+# Reserve <ext-base>.<KALI_OCTET> for the Kali attack box on the EXTERNAL segment.
+# Match is by the hostname the client sends in its DHCPREQUEST — Kali always
+# identifies as "kali" — so it deterministically lands on .50 with no per-deploy
+# setup, matching the CYBERCORE-KALI-RDP wan0:3389 DNAT installed below. v2 had
+# this in its single scope; v3 was missing it, so the attack box DHCP'd a random
+# ext IP and the .50 DNAT pointed at nothing. Mirrors bake-lane-gateway-v2.sh:167.
+dhcp-host=kali,${EXT_BASE3}.${KALI_OCTET}
 
 # Internal segment — GOAD Active Directory VMs + controller.
 dhcp-range=set:intnet,${INT_BASE3}.${DHCP_START_OCTET},${INT_BASE3}.${DHCP_END_OCTET},255.255.255.0,12h

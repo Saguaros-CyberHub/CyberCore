@@ -31,6 +31,9 @@
 // The controller VM in turn SSHes into the lane gateway (192.18.0.1) to
 // write DHCP reservations, using a keypair baked into both templates.
 const { agentExec, pollExecStatus, waitForGuestAgent } = require('./script-executor');
+// pct exec/push into the lane gateway LXC (used by writeDhcpReservations to drop
+// the per-lane dnsmasq reservation file). Same module attached-modules.js uses.
+const nodeSsh = require('./node-ssh');
 
 /**
  * Run an argv-style command inside a QEMU VM via the guest agent.
