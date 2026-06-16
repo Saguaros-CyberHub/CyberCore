@@ -293,7 +293,11 @@ DNAT_SPEC="-i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -
 # each rule; swap -A→-D to delete it. Loop until no :3389 DNAT remains, then add
 # ours as the sole one. (Idempotent across reboots: ours is stripped + re-added.)
 while true; do
-  _stray="$(iptables -t nat -S PREROUTING 2>/dev/null | grep -- '--dport 3389' | grep -m1 'DNAT')"
+  # `|| true` is REQUIRED: firstboot runs under `set -e`, and when no :3389 DNAT
+  # exists yet (the normal case before we add ours) the final grep exits 1 — an
+  # assignment from a failing command substitution would abort the ENTIRE
+  # firstboot here, leaving the gateway with no NAT/segmentation/DNS rules.
+  _stray="$(iptables -t nat -S PREROUTING 2>/dev/null | grep -- '--dport 3389' | grep -m1 'DNAT' || true)"
   [ -z "$_stray" ] && break
   iptables -t nat $(echo "$_stray" | sed 's/^-A /-D /') 2>/dev/null || break
 done
@@ -596,6 +600,23 @@ pct push "$TMP_VMID" "$STAGING/dnsmasq.conf.placeholder" /etc/dnsmasq.conf --per
 
 echo "==> Pushing /etc/conf.d/tailscale (kernel networking mode)..."
 pct push "$TMP_VMID" "$STAGING/conf.d-tailscale" /etc/conf.d/tailscale --perms 0644
+
+# 2d2. Remove the legacy v1/v2 gateway local.d scripts inherited from the base
+#      template (1692/1694). These run at boot AFTER our 00-cybercore-firstboot.start
+#      ('00' sorts first, so they run LAST and win) and re-render a flat-subnet
+#      gateway — including a wan0:3389 DNAT to the lane's INTERNAL primary
+#      (.10/.22), which clobbers the verified Kali .50 DNAT and silently breaks
+#      student RDP on every v3 lane. Our v3 firstboot renders the COMPLETE dnsmasq
+#      + iptables set, so these are pure legacy cruft. (The bake's verify step at
+#      the end re-checks NAT/segmentation/DNS/DNAT, so if any of these were load-
+#      bearing it would fail loudly rather than ship silently.)
+echo "==> Removing legacy v1/v2 local.d scripts (they run after ours and clobber the v3 DNAT)..."
+pct exec "$TMP_VMID" -- /bin/sh -c '
+  for f in 50-gateway.start firewall.start 50-gateway.start.v1.bak; do
+    if [ -e "/etc/local.d/$f" ]; then rm -f "/etc/local.d/$f" && echo "  removed /etc/local.d/$f"; fi
+  done
+  echo "  remaining local.d:"; ls /etc/local.d/
+'
 
 # 2e. Rework /etc/network/interfaces: rename the inherited lan0 stanza to
 #     ext0 and add an int0 stanza, both `inet manual` so Proxmox's per-deploy

@@ -936,19 +936,40 @@ async function deployPrebakedGoadLane({
     } catch (err) { console.warn(`[GOAD] prebaked: replsummary failed: ${err.message}`); }
   }
 
-  // 5. Verify member secure channels. With cloud-init stripped at clone time the
-  //    baked hostname is intact, so each should report True without any repair.
+  // 5. Heal member secure channels (ACTIVE, not just a check). Members boot at
+  //    the same time as the DCs, so their Netlogon tries to establish the secure
+  //    channel BEFORE the DCs finish settling, fails, and backs off into a
+  //    "broken" state — which is why a one-shot Test-ComputerSecureChannel was
+  //    intermittently False. The machine password is valid (atomic clone, baked
+  //    hostname preserved by the cloud-init strip), so we just need to FORCE
+  //    Netlogon to re-establish against the now-healed DCs and retry until it
+  //    takes. Restarting Netlogon rebuilds the secure channel from the stored
+  //    machine password — no credentials and no reboot required.
   for (const m of members) {
     const ok = await waitForGuestAgent(m.node, m.vm_id, 180000);
-    if (!ok) { console.warn(`[GOAD] prebaked: member ${m.name} guest agent not ready — skipping verify`); continue; }
-    try {
-      const r = await winPS(m, '"$(hostname) securechannel=$(Test-ComputerSecureChannel)"', 60000);
-      const out = (r.stdout || '').trim();
-      console.log(`[GOAD] prebaked: member ${m.name} → ${out}`);
-      if (/securechannel=False/i.test(out)) {
-        console.warn(`[GOAD] prebaked: member ${m.name} secure channel BROKEN — confirm cloud-init was stripped so the hostname stayed as baked (e.g. TUC-SRV02), not the clone's VM name`);
+    if (!ok) { console.warn(`[GOAD] prebaked: member ${m.name} guest agent not ready — skipping`); continue; }
+    let healed = false;
+    for (let attempt = 1; attempt <= 6 && !healed; attempt++) {
+      try {
+        const r = await winPS(m,
+          'Restart-Service Netlogon -Force -ErrorAction SilentlyContinue; Start-Sleep -Seconds 6; ' +
+          '"$(hostname) sc=$(Test-ComputerSecureChannel -ErrorAction SilentlyContinue)"',
+          90000);
+        const out = (r.stdout || '').trim();
+        if (/sc=True/i.test(out)) {
+          healed = true;
+          console.log(`[GOAD] prebaked: member ${m.name} secure channel OK (${out}; attempt ${attempt})`);
+          break;
+        }
+        console.warn(`[GOAD] prebaked: member ${m.name} secure channel not up yet (attempt ${attempt}/6): ${out}`);
+      } catch (err) {
+        console.warn(`[GOAD] prebaked: member ${m.name} heal attempt ${attempt} errored: ${err.message}`);
       }
-    } catch (err) { console.warn(`[GOAD] prebaked: secure-channel verify ${m.name} failed: ${err.message}`); }
+      if (!healed) await sleep(15000);  // let DC02 finish settling, then re-nudge
+    }
+    if (!healed) {
+      console.warn(`[GOAD] prebaked: member ${m.name} secure channel STILL broken after 6 attempts — the machine password may have genuinely drifted; run Test-ComputerSecureChannel -Repair -Credential <domain admin> on it`);
+    }
   }
 
   console.log(`[GOAD] prebaked: lane ${lane.lane_id} heal complete (${dcs.length} DC, ${members.length} member)`);
