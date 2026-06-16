@@ -157,6 +157,25 @@ const Layout = {
       return mod.key === effectiveModule || entryKey === effectiveModule;
     };
 
+    const subnavData = this._subnavs[effectiveModule];
+    const subnav = subnavData?.items;
+
+    const buildSubnav = () => {
+      if (!subnav) return '';
+      let s = `<div class="nav-section module-subnav">`;
+      subnav.forEach(item => {
+        if (item.roles && !item.roles.includes(user?.role)) return;
+        const active = activeSubPage === item.page ? 'active' : '';
+        const onclick = item.onclick ? ` onclick="${item.onclick}"` : '';
+        s += `<a href="${item.url}" class="nav-item subnav-item ${active}"${onclick}>
+          <span>${item.label}</span>
+          ${item.page === 'profiles' ? '<span class="nav-badge" id="profileCount">0</span>' : ''}
+        </a>`;
+      });
+      s += `</div>`;
+      return s;
+    };
+
     let html = '';
 
     // Modules section
@@ -166,9 +185,9 @@ const Layout = {
       modules.forEach(mod => {
         const active = isModuleActive(mod) ? 'active' : '';
         html += `<a href="${mod.entry_url}" class="nav-item ${active}">
-          <span class="icon">${mod.icon || ''}</span>
           <span>${mod.name}</span>
         </a>`;
+        if (active) html += buildSubnav();
       });
       html += `</div>`;
     }
@@ -180,30 +199,9 @@ const Layout = {
       plugins.forEach(mod => {
         const active = isModuleActive(mod) ? 'active' : '';
         html += `<a href="${mod.entry_url}" class="nav-item ${active}">
-          <span class="icon">${mod.icon || ''}</span>
           <span>${mod.name}</span>
         </a>`;
-      });
-      html += `</div>`;
-    }
-
-    // Context sub-navigation (show when inside a module that has sub-pages)
-    const subnavData = this._subnavs[effectiveModule];
-    const subnav = subnavData?.items;
-    if (subnav) {
-      html += `<div class="nav-section module-subnav">
-        <div class="nav-section-title">${subnavData?.label || effectiveModule}</div>`;
-      subnav.forEach(item => {
-        // Role filtering
-        if (item.roles && !item.roles.includes(user?.role)) return;
-
-        const active = activeSubPage === item.page ? 'active' : '';
-        const onclick = item.onclick ? ` onclick="${item.onclick}"` : '';
-        html += `<a href="${item.url}" class="nav-item subnav-item ${active}"${onclick}>
-          <span class="icon">${item.icon}</span>
-          <span>${item.label}</span>
-          ${item.page === 'profiles' ? '<span class="nav-badge" id="profileCount">0</span>' : ''}
-        </a>`;
+        if (active) html += buildSubnav();
       });
       html += `</div>`;
     }
@@ -237,6 +235,10 @@ const Layout = {
       const nav = document.getElementById('sidebarNav');
       if (nav) {
         nav.innerHTML = this.buildNavHTML(data.modules || [], data.plugins || []);
+        const subnavSection = nav.querySelector('.module-subnav');
+        if (subnavSection) {
+          nav.scrollTop = subnavSection.offsetTop - 8;
+        }
       }
 
       // Load profile count if CIAB sub-nav is visible
