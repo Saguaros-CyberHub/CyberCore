@@ -993,10 +993,13 @@
     .ak-option-block { margin-bottom: 2rem; }
     .ak-option-block h4 { color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-bottom: 12px; }
     .ak-deliverable { background: var(--gray-50); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
-    .ak-deliverable-label { font-size: 0.8em; color: var(--text-muted); margin-bottom: 6px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    .ak-deliverable-label { font-size: 0.95em; color: var(--text-primary); margin-bottom: 8px; font-weight: 700; }
     .ak-deliverable-content { line-height: 1.6; }
     .ak-deliverable-content p { margin-bottom: 8px; }
-    .ak-deliverable-content table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
+    .ak-deliverable-content table, .ak-md-table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.88em; }
+    .ak-md-table th { background: var(--gray-100); font-weight: 700; text-align: left; padding: 7px 10px; border: 1px solid var(--border-color); }
+    .ak-md-table td { padding: 6px 10px; border: 1px solid var(--border-color); vertical-align: top; }
+    .ak-md-table tr:nth-child(even) td { background: var(--gray-50); }
     .ak-deliverable-content th { background: var(--text-primary); color: var(--bg-card); padding: 6px 10px; text-align: left; }
     .ak-deliverable-content td { padding: 6px 10px; border-bottom: 1px solid var(--border-color); }
     .ak-deliverable-content ul, .ak-deliverable-content ol { margin: 6px 0 6px 20px; }
@@ -1046,8 +1049,8 @@
       const providerEl = document.getElementById('instructorProviderLabel');
       if (providerEl) providerEl.textContent = info.providerLabel || modelId;
 
-      // Examples cost: 8 parts * ~2K input + ~3K output each = ~16K in + ~24K out
-      const exCost = formatCost(modelId, 16000, 24000);
+      // Examples cost: 8 parts * ~1.5K input + ~9K output each (per-deliverable format) = ~12K in + ~72K out
+      const exCost = formatCost(modelId, 12000, 72000);
       const exBadge = document.getElementById('examplesCostBadge');
       if (exBadge) {
         exBadge.textContent = exCost.text;
@@ -1071,8 +1074,8 @@
         if (costEl) { costEl.textContent = 'Free'; costEl.style.color = 'var(--success)'; }
         if (contextEl) contextEl.textContent = 'Runs locally — no API cost';
       } else {
-        // Total if both are generated
-        const totalCost = formatCost(modelId, 23500, 36500);
+        // Total if both are generated: examples (12K in + 72K out) + policies (7.5K in + 12.5K out)
+        const totalCost = formatCost(modelId, 19500, 84500);
         if (costEl) { costEl.textContent = totalCost.text; costEl.style.color = totalCost.color; }
         if (contextEl) contextEl.textContent = 'examples + policies';
       }
@@ -3685,16 +3688,33 @@
         html += `<div class="ak-option-block">`;
         html += `<h4>${optName}</h4>`;
 
-        if (Array.isArray(deliverablesArr)) {
+        const items = deliverablesArr?.items;
+        if (Array.isArray(items) && items.length > 0) {
+          // New format: { title, items: [{ label, content }, ...] }
+          items.forEach(item => {
+            html += `
+              <div class="ak-deliverable">
+                <div class="ak-deliverable-label">${item.label || ''}</div>
+                <div class="ak-deliverable-content">${renderMarkdown(item.content || '')}</div>
+              </div>`;
+          });
+        } else if (Array.isArray(deliverablesArr)) {
+          // Legacy: flat array
           deliverablesArr.forEach((del, i) => {
+            const delContent = typeof del === 'object' ? (del.content || del.title || '') : del;
             html += `
               <div class="ak-deliverable">
                 <div class="ak-deliverable-label">Deliverable ${i + 1}</div>
-                <div class="ak-deliverable-content">${del}</div>
+                <div class="ak-deliverable-content">${renderMarkdown(delContent)}</div>
               </div>`;
           });
         } else if (typeof deliverablesArr === 'string') {
-          html += `<div class="ak-deliverable"><div class="ak-deliverable-content">${deliverablesArr}</div></div>`;
+          html += `<div class="ak-deliverable"><div class="ak-deliverable-content">${renderMarkdown(deliverablesArr)}</div></div>`;
+        } else if (deliverablesArr && typeof deliverablesArr === 'object') {
+          const delContent = deliverablesArr.content || deliverablesArr.title || '';
+          if (delContent) {
+            html += `<div class="ak-deliverable"><div class="ak-deliverable-content">${renderMarkdown(delContent)}</div></div>`;
+          }
         }
 
         html += `</div>`;
@@ -3707,6 +3727,54 @@
       const div = document.createElement('div');
       div.textContent = str;
       return div.innerHTML;
+    }
+
+    function renderMarkdown(text) {
+      if (!text) return '';
+      const lines = text.split('\n');
+      const out = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        // Detect markdown table: line starts and ends with |
+        if (/^\|.+\|$/.test(line.trim())) {
+          const tableLines = [];
+          while (i < lines.length && /^\|/.test(lines[i].trim())) {
+            tableLines.push(lines[i]);
+            i++;
+          }
+          // First row = headers, second row = separator, rest = body
+          const rows = tableLines.filter(l => !/^\|[\s\-:|]+\|$/.test(l.trim()));
+          const parseCells = l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+          if (rows.length > 0) {
+            let tbl = '<table class="ak-md-table"><thead><tr>';
+            parseCells(rows[0]).forEach(h => { tbl += `<th>${h}</th>`; });
+            tbl += '</tr></thead><tbody>';
+            rows.slice(1).forEach(r => {
+              tbl += '<tr>';
+              parseCells(r).forEach(c => { tbl += `<td>${c}</td>`; });
+              tbl += '</tr>';
+            });
+            tbl += '</tbody></table>';
+            out.push(tbl);
+          }
+        } else {
+          // Inline formatting: **bold**, *italic*, bullet lists
+          let l = escHtml(line)
+            .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*(.+?)\*/g, '<em>$1</em>');
+          if (/^(\*|-|\d+\.) /.test(line.trim())) {
+            out.push(`<li>${l.replace(/^(\*|-|\d+\.) /, '')}</li>`);
+          } else if (l.trim() === '') {
+            out.push('<br>');
+          } else {
+            out.push(`<p style="margin:0 0 0.5rem 0">${l}</p>`);
+          }
+          i++;
+        }
+      }
+      // Wrap consecutive <li> in <ul>
+      return out.join('\n').replace(/(<li>.*?<\/li>\n?)+/gs, match => `<ul style="margin:0.25rem 0 0.5rem 1.25rem;padding:0">${match}</ul>`);
     }
 
     // ============================================================================

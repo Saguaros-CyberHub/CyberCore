@@ -16,7 +16,7 @@ const { pool } = require('../../utils/db');
 
 // ─── System prompt — cached across all parts of a single batch ────────────
 
-const SYSTEM_PROMPT = `You are generating answer-key content for a Clinic-in-a-Box cybersecurity assessment course. The course has 8 numbered parts, each with several "options" (deliverable types). For one given option you must produce realistic, complete deliverable content that an instructor could share with students as a high-quality example.
+const SYSTEM_PROMPT = `You are generating answer-key content for a Clinic-in-a-Box cybersecurity assessment course. The course has 8 numbered parts, each with several "options" (deliverable types). Each option has multiple named deliverables. You must produce a separate, realistic answer for each individual deliverable.
 
 Output format — STRICT JSON ONLY (no markdown, no code fences, no prose around it):
 
@@ -24,16 +24,19 @@ Output format — STRICT JSON ONLY (no markdown, no code fences, no prose around
   "deliverables": {
     "<option_key>": {
       "title": "string (the option name)",
-      "content": "string (the actual deliverable content, fully written out, ready to share)"
+      "items": [
+        { "label": "string (exact deliverable name from the list)", "content": "string (the answer for this specific deliverable)" },
+        ...one object per deliverable in the option
+      ]
     }
-    // ...one entry per requested option_key
   }
 }
 
 Rules:
-- "content" must be substantive — multi-paragraph prose, tables (use markdown table syntax inside the string), bulleted lists where appropriate. Treat it as a sample submission an instructor would grade.
-- Reference the actual company name, industry, assets, and stakeholders from the profile context. Don't write generic templates.
-- Keep each deliverable's content under ~1500 words.
+- Produce one "items" entry per deliverable listed under that option — do not combine them.
+- Each "content" should be 2–4 focused paragraphs or a concise table/list. Treat it as a sample submission an instructor would use to grade a student.
+- Reference the actual company name, industry, assets, and stakeholders from the profile context. Do not write generic templates.
+- Keep each individual deliverable's content under ~500 words.
 - Do NOT include any markdown wrapping, code fences, or commentary outside the JSON object.
 `;
 
@@ -85,11 +88,11 @@ function buildPartPrompt(partNumber, partDef, profileContext) {
 COMPANY CONTEXT:
 ${buildContextSummary(profileContext)}
 
-GENERATE deliverable content for EACH of the following options:
+GENERATE answer-key content for EACH option and EACH deliverable listed below. Every deliverable must appear as its own "items" entry with the exact label shown.
 
 ${optionsText}
 
-Output JSON with one entry per option_key under "deliverables". Each entry's "content" should be a complete, instructor-ready answer-key example tailored to the company context above.`;
+Output JSON with one entry per option_key under "deliverables". Each entry must have an "items" array with one object per deliverable, in order. Tailor every answer to the company context above.`;
 }
 
 // ─── Generate one part ───────────────────────────────────────────────────
@@ -165,7 +168,7 @@ async function generateExamples({ profileId, userId, profileContext, parts, part
   for (const r of results) {
     if (!r.ok) { failed++; continue; }
     try {
-      const content = JSON.stringify(r.deliverables);
+      const content = JSON.stringify({ is_example: true, deliverables: r.deliverables });
       const outputOption = JSON.stringify(r.optionKeys);
       const optionNames = r.optionKeys.join(', ');
       await pool.query(`
