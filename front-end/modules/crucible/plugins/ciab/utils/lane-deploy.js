@@ -951,12 +951,20 @@ function buildPrebuiltInstallScript({ url, imageTag }) {
     '  systemctl stop "$svc" 2>/dev/null || service "$svc" stop 2>/dev/null || true',
     '  systemctl disable "$svc" 2>/dev/null || true',
     'done',
-    // -e PORT=80: most Node frameworks (Express, Fastify, Hapi, Nest) and
-    // Python frameworks read this env var. When the LLM writes
-    // `app.listen(process.env.PORT || 3000)` we still get the app on host :80
-    // without remapping. Apps that hardcode a different port slip through
-    // this — the build-time smoke HTTP probe catches that case before ship.
+    // Start with PORT=80 env var so well-behaved apps bind to 80.
+    // Then detect the actual listening port inside the container and remap
+    // the host binding to 80:<actual_port> so Kali can always reach it on :80.
     `docker run -d --restart=always --name vuln-app -e PORT=80 -p 80:80 ${shellQuoteArg(imageTag)}`,
+    'sleep 3',
+    // Detect what port the app actually bound to inside the container.
+    // ss/netstat shows LISTEN sockets; pick the lowest non-22 TCP port.
+    'ACTUAL_PORT=$(docker exec vuln-app sh -c \'ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null\' | awk \'/LISTEN/{print $4}\' | grep -oE \'[0-9]+$\' | grep -v \'^22$\' | sort -n | head -1)',
+    // If app is NOT on 80, recreate the container with the correct mapping.
+    'if [ -n "$ACTUAL_PORT" ] && [ "$ACTUAL_PORT" != "80" ]; then',
+    '  echo "[ciab] vuln-app bound to port $ACTUAL_PORT, remapping 80->$ACTUAL_PORT"',
+    `  docker rm -f vuln-app`,
+    `  docker run -d --restart=always --name vuln-app -e PORT=80 -p 80:$ACTUAL_PORT ${shellQuoteArg(imageTag)}`,
+    'fi',
     'rm -f /tmp/vuln-app.tar.gz',
     'echo "[ciab] vuln-app running"'
   ].join('\n');
