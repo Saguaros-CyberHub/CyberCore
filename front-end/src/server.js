@@ -349,6 +349,27 @@ async function initializeSettingsTable() {
   }
 }
 
+/**
+ * Ensure the MFA columns exist on cybercore_user. The config/postgres init
+ * scripts only run on a fresh database, so existing deployments need these
+ * added idempotently at startup (mirrors the lazy table-init pattern above).
+ */
+async function ensureMfaColumns() {
+  try {
+    const { cybercoreQuery } = require('./utils/cybercore-db');
+    await cybercoreQuery(`
+      ALTER TABLE cybercore_user
+        ADD COLUMN IF NOT EXISTS mfa_enabled        BOOLEAN NOT NULL DEFAULT FALSE,
+        ADD COLUMN IF NOT EXISTS mfa_secret         BYTEA,
+        ADD COLUMN IF NOT EXISTS mfa_recovery_codes JSONB,
+        ADD COLUMN IF NOT EXISTS mfa_enrolled_at    TIMESTAMPTZ
+    `);
+    console.log('✅ MFA columns ensured on cybercore_user');
+  } catch (err) {
+    console.warn('⚠️  Could not ensure MFA columns:', err.message);
+  }
+}
+
 async function syncVmTemplateNodes() {
   try {
     const { cybercoreQuery } = require('./utils/cybercore-db');
@@ -386,6 +407,9 @@ async function start() {
 
     // Initialize settings table after plugins have created their databases
     await initializeSettingsTable();
+
+    // Ensure MFA columns exist on cybercore_user (idempotent)
+    await ensureMfaColumns();
 
     // Sync template node locations from live Proxmox cluster
     await syncVmTemplateNodes();

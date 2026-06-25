@@ -12,8 +12,9 @@ const jwt = require('jsonwebtoken');
 const { v4: uuidv4 } = require('uuid');
 const { body, validationResult } = require('express-validator');
 const { cybercoreQuery } = require('../utils/cybercore-db');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, authenticateStage, authenticateEnrollOrSession } = require('../middleware/auth');
 const { ensureGuacAccount } = require('../utils/guacamole');
+const mfa = require('../utils/mfa');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 
@@ -71,6 +72,44 @@ function generateTokens(user) {
   );
 
   return { accessToken };
+}
+
+// Short-lived (5 min) token carrying a `stage` claim ('mfa' | 'enroll'). It is
+// NOT a session — the stage middleware refuses it on normal protected routes.
+function generateStageToken(user, stage) {
+  return jwt.sign(
+    { sub: user.user_id, email: user.email, role: user.role, stage },
+    process.env.JWT_SECRET,
+    { expiresIn: '5m' }
+  );
+}
+
+// Set the 7-day session cookie (same options used by register/login).
+function setSessionCookie(res, accessToken) {
+  res.cookie('token', accessToken, {
+    httpOnly: true,
+    secure: process.env.COOKIE_SECURE === 'true',
+    sameSite: 'lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000
+  });
+}
+
+// Enforcement scope from cybercore_site_settings: 'privileged' (admins +
+// instructors, the default) or 'all'. Tolerates a missing settings table.
+async function getMfaScope() {
+  try {
+    const r = await cybercoreQuery(
+      `SELECT value FROM cybercore_site_settings WHERE key = 'mfa_required_scope'`
+    );
+    const v = r.rows[0]?.value;
+    return v === 'all' ? 'all' : 'privileged';
+  } catch {
+    return 'privileged';
+  }
+}
+
+function isMfaRequired(role, scope) {
+  return scope === 'all' || role === 'admin' || role === 'instructor';
 }
 
 // ============================================================================
@@ -173,7 +212,7 @@ router.post('/login', loginValidation, async (req, res) => {
     const { email, password } = req.body;
 
     const result = await cybercoreQuery(
-      `SELECT user_id, email, password_hash, first_name, last_name, role, organization, status, active
+      `SELECT user_id, email, password_hash, first_name, last_name, role, organization, status, active, mfa_enabled
        FROM cybercore_user WHERE email = $1 OR username = $1`,
       [email]
     );
@@ -195,6 +234,20 @@ router.post('/login', loginValidation, async (req, res) => {
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
+    // ── Second factor gate ────────────────────────────────────────────────
+    // Password is correct, but don't grant a session yet if MFA applies.
+    if (user.mfa_enabled) {
+      // User has TOTP — require the code. Step 2 lands at /auth/login/mfa.
+      return res.json({ mfa_required: true, mfa_token: generateStageToken(user, 'mfa') });
+    }
+
+    const scope = await getMfaScope();
+    if (isMfaRequired(user.role, scope)) {
+      // Required but not enrolled — force enrollment before any session.
+      return res.json({ enrollment_required: true, enroll_token: generateStageToken(user, 'enroll') });
+    }
+    // ──────────────────────────────────────────────────────────────────────
+
     // Update last auth timestamp
     await cybercoreQuery(
       'UPDATE cybercore_user SET last_auth_at = NOW() WHERE user_id = $1',
@@ -202,13 +255,7 @@ router.post('/login', loginValidation, async (req, res) => {
     );
 
     const { accessToken } = generateTokens(user);
-
-    res.cookie('token', accessToken, {
-      httpOnly: true,
-      secure: process.env.COOKIE_SECURE === 'true',
-      sameSite: 'lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000
-    });
+    setSessionCookie(res, accessToken);
 
     res.json({
       message: 'Login successful',
@@ -226,6 +273,216 @@ router.post('/login', loginValidation, async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed. Please try again.' });
+  }
+});
+
+/**
+ * POST /api/auth/login/mfa
+ * Step 2 of login: verify a TOTP (or recovery) code using the short-lived
+ * mfa-stage token from step 1, then issue the real session.
+ */
+router.post('/login/mfa', authenticateStage('mfa'), async (req, res) => {
+  try {
+    if (!mfa.mfaKey()) return res.status(500).json({ error: 'MFA encryption key not configured' });
+
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Authentication code is required' });
+
+    const userId = req.user.userId;
+    const result = await cybercoreQuery(
+      `SELECT user_id, email, first_name, last_name, role, organization, status, active, mfa_enabled,
+              CASE WHEN mfa_secret IS NOT NULL THEN pgp_sym_decrypt(mfa_secret, $2)::text END AS mfa_secret,
+              mfa_recovery_codes
+       FROM cybercore_user WHERE user_id = $1`,
+      [userId, mfa.mfaKey()]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid session' });
+
+    const user = result.rows[0];
+    if (!user.active || user.status !== 'active') {
+      return res.status(403).json({ error: 'Account is deactivated. Please contact support.' });
+    }
+    if (!user.mfa_enabled || !user.mfa_secret) {
+      return res.status(400).json({ error: 'MFA is not enabled for this account' });
+    }
+
+    let ok = mfa.verifyTotp(code, user.mfa_secret);
+    let usedRecovery = false;
+    if (!ok) {
+      const idx = mfa.matchRecoveryCode(code, user.mfa_recovery_codes);
+      if (idx >= 0) {
+        ok = true;
+        usedRecovery = true;
+        const codes = user.mfa_recovery_codes;
+        codes[idx].used = true;
+        await cybercoreQuery(
+          'UPDATE cybercore_user SET mfa_recovery_codes = $1 WHERE user_id = $2',
+          [JSON.stringify(codes), userId]
+        );
+      }
+    }
+    if (!ok) return res.status(401).json({ error: 'Invalid authentication code' });
+
+    await cybercoreQuery('UPDATE cybercore_user SET last_auth_at = NOW() WHERE user_id = $1', [userId]);
+
+    const { accessToken } = generateTokens(user);
+    setSessionCookie(res, accessToken);
+
+    res.json({
+      message: 'Login successful',
+      user: {
+        id: user.user_id,
+        email: user.email,
+        firstName: user.first_name,
+        lastName: user.last_name,
+        role: user.role,
+        organization: user.organization
+      },
+      token: accessToken,
+      ...(usedRecovery ? {
+        recovery_code_used: true,
+        recovery_codes_remaining: user.mfa_recovery_codes.filter(c => !c.used).length
+      } : {})
+    });
+  } catch (error) {
+    console.error('MFA login error:', error);
+    res.status(500).json({ error: 'Login failed. Please try again.' });
+  }
+});
+
+/**
+ * POST /api/auth/mfa/setup
+ * Begin TOTP enrollment. Accepts a full session (self-enroll) or an enroll-stage
+ * token (forced enrollment). Generates + stores an encrypted secret (not yet
+ * enabled) and returns the otpauth URI + QR for the authenticator app.
+ */
+router.post('/mfa/setup', authenticateEnrollOrSession, async (req, res) => {
+  try {
+    if (!mfa.mfaKey()) return res.status(500).json({ error: 'MFA encryption key not configured' });
+
+    const userId = req.user.userId;
+    const r = await cybercoreQuery(
+      'SELECT email, mfa_enabled FROM cybercore_user WHERE user_id = $1', [userId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    if (r.rows[0].mfa_enabled) {
+      return res.status(409).json({ error: 'MFA is already enabled. Disable or reset it first.' });
+    }
+
+    const secret = mfa.generateSecret();
+    await cybercoreQuery(
+      'UPDATE cybercore_user SET mfa_secret = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
+      [secret, mfa.mfaKey(), userId]
+    );
+
+    const otpauthUri = mfa.keyUri(r.rows[0].email, secret);
+    const qr = await mfa.qrDataUrl(otpauthUri);
+    res.json({ otpauth_url: otpauthUri, qr_data_url: qr, secret });
+  } catch (error) {
+    console.error('MFA setup error:', error);
+    res.status(500).json({ error: 'Could not start MFA setup' });
+  }
+});
+
+/**
+ * POST /api/auth/mfa/verify
+ * Finish enrollment: verify a code against the pending secret, flip mfa_enabled
+ * on, generate recovery codes (returned once). On a forced (enroll-stage)
+ * enrollment, also issues the real session so the user lands logged in.
+ */
+router.post('/mfa/verify', authenticateEnrollOrSession, async (req, res) => {
+  try {
+    if (!mfa.mfaKey()) return res.status(500).json({ error: 'MFA encryption key not configured' });
+
+    const { code } = req.body;
+    if (!code) return res.status(400).json({ error: 'Authentication code is required' });
+
+    const userId = req.user.userId;
+    const r = await cybercoreQuery(
+      `SELECT email, first_name, last_name, role, organization, mfa_enabled,
+              CASE WHEN mfa_secret IS NOT NULL THEN pgp_sym_decrypt(mfa_secret, $2)::text END AS mfa_secret
+       FROM cybercore_user WHERE user_id = $1`,
+      [userId, mfa.mfaKey()]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const user = r.rows[0];
+    if (user.mfa_enabled) return res.status(409).json({ error: 'MFA is already enabled' });
+    if (!user.mfa_secret) return res.status(400).json({ error: 'Start MFA setup first' });
+    if (!mfa.verifyTotp(code, user.mfa_secret)) {
+      return res.status(401).json({ error: 'Invalid authentication code' });
+    }
+
+    const { plain, stored } = mfa.makeRecoveryCodes();
+    await cybercoreQuery(
+      'UPDATE cybercore_user SET mfa_enabled = TRUE, mfa_recovery_codes = $1, mfa_enrolled_at = NOW() WHERE user_id = $2',
+      [JSON.stringify(stored), userId]
+    );
+
+    // Forced enrollment came in without a session — log them in now.
+    let extra = {};
+    if (req.mfaStage === 'enroll') {
+      await cybercoreQuery('UPDATE cybercore_user SET last_auth_at = NOW() WHERE user_id = $1', [userId]);
+      const { accessToken } = generateTokens({ user_id: userId, email: user.email, role: user.role });
+      setSessionCookie(res, accessToken);
+      extra = {
+        token: accessToken,
+        user: {
+          id: userId, email: user.email, firstName: user.first_name,
+          lastName: user.last_name, role: user.role, organization: user.organization
+        }
+      };
+    }
+
+    res.json({ message: 'MFA enabled', recovery_codes: plain, ...extra });
+  } catch (error) {
+    console.error('MFA verify error:', error);
+    res.status(500).json({ error: 'Could not enable MFA' });
+  }
+});
+
+/**
+ * POST /api/auth/mfa/disable
+ * Turn off MFA for the logged-in user. Requires a current TOTP/recovery code,
+ * and is refused when MFA is required for the user's role.
+ */
+router.post('/mfa/disable', authenticate, async (req, res) => {
+  try {
+    if (!mfa.mfaKey()) return res.status(500).json({ error: 'MFA encryption key not configured' });
+
+    const { code } = req.body;
+    const userId = req.user.userId;
+    const r = await cybercoreQuery(
+      `SELECT role, mfa_enabled,
+              CASE WHEN mfa_secret IS NOT NULL THEN pgp_sym_decrypt(mfa_secret, $2)::text END AS mfa_secret,
+              mfa_recovery_codes
+       FROM cybercore_user WHERE user_id = $1`,
+      [userId, mfa.mfaKey()]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const user = r.rows[0];
+    if (!user.mfa_enabled) return res.status(400).json({ error: 'MFA is not enabled' });
+
+    const scope = await getMfaScope();
+    if (isMfaRequired(user.role, scope)) {
+      return res.status(403).json({ error: 'MFA is required for your role and cannot be disabled.' });
+    }
+
+    let ok = mfa.verifyTotp(code, user.mfa_secret);
+    if (!ok && mfa.matchRecoveryCode(code, user.mfa_recovery_codes) >= 0) ok = true;
+    if (!ok) return res.status(401).json({ error: 'Invalid authentication code' });
+
+    await cybercoreQuery(
+      `UPDATE cybercore_user
+          SET mfa_enabled = FALSE, mfa_secret = NULL, mfa_recovery_codes = NULL, mfa_enrolled_at = NULL
+        WHERE user_id = $1`,
+      [userId]
+    );
+    res.json({ message: 'MFA disabled' });
+  } catch (error) {
+    console.error('MFA disable error:', error);
+    res.status(500).json({ error: 'Could not disable MFA' });
   }
 });
 
@@ -248,7 +505,7 @@ router.post('/logout', authenticate, async (req, res) => {
 router.get('/me', authenticate, async (req, res) => {
   try {
     const result = await cybercoreQuery(
-      `SELECT user_id, email, first_name, last_name, role, organization, created_at, last_auth_at
+      `SELECT user_id, email, first_name, last_name, role, organization, created_at, last_auth_at, mfa_enabled
        FROM cybercore_user WHERE user_id = $1`,
       [req.user.userId]
     );
@@ -258,6 +515,7 @@ router.get('/me', authenticate, async (req, res) => {
     }
 
     const user = result.rows[0];
+    const mfaScope = await getMfaScope();
 
     res.json({
       user: {
@@ -268,7 +526,9 @@ router.get('/me', authenticate, async (req, res) => {
         role: user.role,
         organization: user.organization,
         createdAt: user.created_at,
-        lastLogin: user.last_auth_at
+        lastLogin: user.last_auth_at,
+        mfaEnabled: user.mfa_enabled === true,
+        mfaRequired: isMfaRequired(user.role, mfaScope)
       }
     });
   } catch (error) {

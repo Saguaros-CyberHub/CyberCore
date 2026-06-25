@@ -101,6 +101,39 @@ const API = {
         method: 'PUT',
         body: { currentPassword, newPassword }
       });
+    },
+
+    // Step 2 of login: verify a TOTP/recovery code with the short-lived
+    // mfa-stage token returned by login(). Returns the full session on success.
+    async loginMfa(mfaToken, code) {
+      return API.request('/auth/login/mfa', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${mfaToken}` },
+        body: { code }
+      });
+    },
+
+    // Begin TOTP enrollment. Pass a stageToken for forced enrollment (login
+    // page); omit it for self-enrollment (uses the logged-in session).
+    async mfaSetup(stageToken) {
+      return API.request('/auth/mfa/setup', {
+        method: 'POST',
+        ...(stageToken ? { headers: { Authorization: `Bearer ${stageToken}` } } : {})
+      });
+    },
+
+    // Finish enrollment by verifying a code. Returns recovery_codes (once), plus
+    // a session token when this was a forced (stageToken) enrollment.
+    async mfaVerify(code, stageToken) {
+      return API.request('/auth/mfa/verify', {
+        method: 'POST',
+        ...(stageToken ? { headers: { Authorization: `Bearer ${stageToken}` } } : {}),
+        body: { code }
+      });
+    },
+
+    async mfaDisable(code) {
+      return API.request('/auth/mfa/disable', { method: 'POST', body: { code } });
     }
   },
 

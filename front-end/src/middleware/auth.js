@@ -115,9 +115,71 @@ function optionalAuth(req, res, next) {
   }
 }
 
+/**
+ * Strictly authenticate a short-lived stage token (Authorization: Bearer only).
+ * Stage tokens carry a `stage` claim ('mfa' or 'enroll') and must NEVER be
+ * accepted as a full session — used for the second step of login.
+ * Exposes req.user and req.mfaStage. Does not read the session cookie.
+ */
+function authenticateStage(stage) {
+  return (req, res, next) => {
+    try {
+      const authHeader = req.headers.authorization;
+      const token = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+      if (!token) {
+        return res.status(401).json({ error: 'Authentication required', code: 'NO_TOKEN' });
+      }
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      if (decoded.stage !== stage) {
+        return res.status(401).json({ error: 'Invalid token for this step', code: 'WRONG_STAGE' });
+      }
+      req.user = { userId: decoded.sub, email: decoded.email, role: decoded.role };
+      req.mfaStage = decoded.stage;
+      next();
+    } catch (error) {
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({ error: 'This step expired. Please sign in again.', code: 'TOKEN_EXPIRED' });
+      }
+      return res.status(401).json({ error: 'Invalid authentication token', code: 'INVALID_TOKEN' });
+    }
+  };
+}
+
+/**
+ * Accept EITHER a full session (cookie or bearer JWT with no stage claim) OR an
+ * 'enroll' stage token. Lets MFA setup/verify serve both the self-enrolling
+ * logged-in user and the forced-enrollment (not-yet-logged-in) user.
+ * Sets req.user and req.mfaStage (null for a full session).
+ */
+function authenticateEnrollOrSession(req, res, next) {
+  try {
+    let token = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) token = authHeader.substring(7);
+    if (!token && req.cookies && req.cookies.token) token = req.cookies.token;
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required', code: 'NO_TOKEN' });
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.stage && decoded.stage !== 'enroll') {
+      return res.status(401).json({ error: 'Invalid token for this step', code: 'WRONG_STAGE' });
+    }
+    req.user = { userId: decoded.sub, email: decoded.email, role: decoded.role };
+    req.mfaStage = decoded.stage || null;
+    next();
+  } catch (error) {
+    if (error.name === 'TokenExpiredError') {
+      return res.status(401).json({ error: 'Session expired. Please sign in again.', code: 'TOKEN_EXPIRED' });
+    }
+    return res.status(401).json({ error: 'Invalid authentication token', code: 'INVALID_TOKEN' });
+  }
+}
+
 module.exports = {
   authenticate,
   authenticateToken: authenticate,
   requireRole,
-  optionalAuth
+  optionalAuth,
+  authenticateStage,
+  authenticateEnrollOrSession
 };

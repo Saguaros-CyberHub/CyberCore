@@ -104,6 +104,7 @@ async function loadMergedUsers() {
           <th>Role</th>
           <th>Group</th>
           <th>Clinic Status</th>
+          <th>MFA</th>
           <th>Guac Status</th>
           <th>Last Login</th>
           <th>Actions</th>
@@ -118,12 +119,14 @@ async function loadMergedUsers() {
               <td><span class="badge ${u.role === 'admin' ? 'badge-red' : u.role === 'instructor' ? 'badge-blue' : u.role === 'guac-only' ? 'badge-yellow' : 'badge-gray'}">${u.role}</span></td>
               <td style="font-size: 0.8rem;">${u.group_name ? escHtml(u.group_name) : '<span style="color: var(--gray-400);">—</span>'}</td>
               <td>${u.is_guac_only ? '<span style="color: var(--gray-400);">—</span>' : (u.is_active ? '<span class="badge badge-green">Active</span>' : '<span class="badge badge-red">Disabled</span>')}</td>
+              <td>${u.is_guac_only ? '<span style="color: var(--gray-400);">—</span>' : (u.mfa_enabled ? '<span class="badge badge-green">On</span>' : '<span class="badge badge-gray">Off</span>')}</td>
               <td>${u.guac_exists ? (u.guac_disabled ? '<span class="badge badge-red">Disabled</span>' : '<span class="badge badge-green">Active</span>') : '<span style="color: var(--gray-400);">No account</span>'}</td>
               <td style="font-size: 0.8rem;">${u.last_login ? new Date(u.last_login).toLocaleString() : (u.guac_last_active ? new Date(u.guac_last_active).toLocaleString() : '<span style="color: var(--gray-400);">Never</span>')}</td>
               <td style="display: flex; gap: 0.3rem; flex-wrap: wrap;">
                 ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="viewPermissions('${escHtml(u.email)}')">Perms</button>` : ''}
                 ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="resetPassword('${escHtml(u.email)}')">Reset PW</button>` : ''}
                 ${u.guac_exists && !isProtected ? `<button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteUser('${escHtml(u.email)}')">Delete Guac</button>` : ''}
+                ${(!u.is_guac_only && u.mfa_enabled) ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="resetMfa('${u.id}', '${escHtml(u.email)}')">Reset MFA</button>` : ''}
               </td>
             </tr>`;
           }).join('')}
@@ -353,6 +356,20 @@ async function resetPassword(username) {
   try {
     await api('PUT', `/guac/users/${encodeURIComponent(username)}/password`, { password: newPw });
     Toast.success('Password Reset', `Password updated for "${username}"`);
+  } catch (e) { Toast.error('Error', e.message); }
+}
+
+async function resetMfa(userId, email) {
+  if (!await Confirm.show({
+    title: 'Reset MFA',
+    message: `Clear MFA for "${email}"? They'll be required to set up a new authenticator at next login.`,
+    confirmText: 'Reset MFA',
+    danger: true
+  })) return;
+  try {
+    await api('POST', `/users/${encodeURIComponent(userId)}/mfa/reset`);
+    Toast.success('MFA Reset', `${email} must re-enroll at next login`);
+    loadMergedUsers();
   } catch (e) { Toast.error('Error', e.message); }
 }
 

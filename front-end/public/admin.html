@@ -886,6 +886,24 @@
               <button class="btn btn-primary" onclick="saveModuleSettings()" style="width: 100%; margin-top: 1rem;">Save Changes</button>
               <div id="moduleSettingsStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
             </div>
+
+            <!-- Security / MFA Enforcement -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">🔐 Multi-Factor Authentication</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">Choose who must use TOTP. Admins and instructors are always required; this widens it.</p>
+
+              <div class="form-group">
+                <label>MFA is required for</label>
+                <select id="settingsMfaScope" style="width: 100%; padding: 0.6rem 0.75rem; border: 1px solid var(--border-color); border-radius: 8px; font-size: 0.9rem;">
+                  <option value="privileged">Admins &amp; Instructors (default)</option>
+                  <option value="all">All users</option>
+                </select>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">Required users who haven't enrolled are forced to set up MFA at their next login.</p>
+              </div>
+
+              <button class="btn btn-primary" onclick="saveMfaScope()" style="width: 100%; margin-top: 1rem;">Save Changes</button>
+              <div id="mfaScopeStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
           </div>
         </div>
 
