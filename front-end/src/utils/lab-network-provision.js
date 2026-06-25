@@ -23,6 +23,19 @@ const { proxmoxAPI } = require('./proxmox');
 // V3_INTERNAL_TAG_OFFSET in utils/lane-networking.js.
 const V3_INTERNAL_TAG_OFFSET = 4000000;
 
+// Proxmox SDN zone IDs must match [a-z][a-z0-9]{0,7}: lowercase, start with a
+// letter, ≤8 chars. Sanitize an arbitrary string (challenge key, UUID slice,
+// admin input) into a valid zone id. A leading non-letter is prefixed with 'z'
+// so UUID-derived ids (which start with a digit ~62.5% of the time) don't get
+// rejected with a 400 at zone-create time.
+function sanitizeZoneAbbrev(raw) {
+  let s = String(raw || '').replace(/[^a-z0-9]/gi, '').toLowerCase();
+  if (!/^[a-z]/.test(s)) s = `z${s}`;
+  return s.substring(0, 8);
+}
+
+const ZONE_RE = /^[a-z][a-z0-9]{0,7}$/;
+
 // Base-20 encode helper for VNet naming (matches the create-lab convention).
 const _ALPHABET = 'abcdefghij0123456789';
 function encodeBase20(n) {
@@ -221,8 +234,12 @@ async function reserveLabNetwork({
     throw new Error('maxLanes must be between 1 and 200');
   }
 
-  const zone = (zoneAbbrev || challengeKey.replace(/[^a-z0-9]/gi, '').substring(0, 8)).toLowerCase();
-  if (!/^[a-z0-9]{1,8}$/.test(zone)) throw new Error('zone abbreviation must be 1-8 alphanumeric characters');
+  const zone = sanitizeZoneAbbrev(zoneAbbrev || challengeKey);
+  // Final assertion — sanitizeZoneAbbrev should always satisfy this, but guard
+  // against an empty/degenerate input slipping a bad name through to Proxmox.
+  if (!ZONE_RE.test(zone)) {
+    throw new Error('zone abbreviation must be 1-8 alphanumeric characters starting with a letter');
+  }
 
   log('Querying existing VXLAN blocks...');
   const block = await allocateVxlanBlock(numLanes);
@@ -244,9 +261,22 @@ async function reserveLabNetwork({
   const challengeId = ins.rows[0].challenge_id;
   log(`Challenge created: ${challengeId}`);
 
-  const infra = await ensureSdnZoneAndVnets({
-    zone, vxlanStart: block.start, vxlanEnd: block.end, subnetScheme: scheme, log,
-  });
+  let infra;
+  try {
+    infra = await ensureSdnZoneAndVnets({
+      zone, vxlanStart: block.start, vxlanEnd: block.end, subnetScheme: scheme, log,
+    });
+  } catch (err) {
+    // The challenge row (and its VXLAN block reservation) is already committed.
+    // If the SDN provisioning fails, undo it so we don't leak an orphaned
+    // challenge + permanently-allocated block. Best-effort: surface the
+    // original error regardless of cleanup outcome.
+    log(`SDN provisioning failed (${err.message}); rolling back challenge ${challengeId}`);
+    await teardownLabNetwork(challengeId, { force: true, log }).catch((e) =>
+      log(`Rollback of challenge ${challengeId} failed: ${e.message}`)
+    );
+    throw err;
+  }
 
   return {
     challenge_id: challengeId,
@@ -297,6 +327,7 @@ async function teardownLabNetwork(challengeId, { force = false, log = () => {} }
 
 module.exports = {
   V3_INTERNAL_TAG_OFFSET,
+  sanitizeZoneAbbrev,
   encodeBase20,
   allocateVxlanBlock,
   countActiveLanesInBlock,

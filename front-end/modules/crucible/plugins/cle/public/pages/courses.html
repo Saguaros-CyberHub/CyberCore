@@ -263,7 +263,7 @@
         </div>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('createCourseModal')">Cancel</button>
-          <button class="btn btn-primary" onclick="createCourse()">Create Course</button>
+          <button class="btn btn-primary" id="createCourseBtn" onclick="createCourse()">Create Course</button>
         </div>
       </div>
     </div>
@@ -597,30 +597,39 @@
       }
     }
 
+    let creatingCourse = false;
     async function createCourse() {
+      // Reserving the lab network (SDN reload + bridge wait) takes tens of
+      // seconds; guard against double-submit creating duplicate courses.
+      if (creatingCourse) return;
+
+      const courseName = document.getElementById('createCourseName').value.trim();
+      const description = document.getElementById('createCourseDesc').value.trim();
+      const code = document.getElementById('createCourseCode').value.trim();
+      const instructorId = document.getElementById('createCourseInstructor').value;
+      const isActive = document.getElementById('createCourseStatus').value === 'true';
+      const maxStudents = parseInt(document.getElementById('createCourseMaxStudents').value, 10);
+
+      if (!courseName) {
+        toast('Please enter a course name', true);
+        return;
+      }
+
+      if (!instructorId) {
+        toast('Please select an instructor', true);
+        return;
+      }
+
+      if (!Number.isFinite(maxStudents) || maxStudents < 1 || maxStudents > 200) {
+        toast('Max students must be between 1 and 200', true);
+        return;
+      }
+
+      const btn = document.getElementById('createCourseBtn');
+      creatingCourse = true;
+      if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
+
       try {
-        const courseName = document.getElementById('createCourseName').value.trim();
-        const description = document.getElementById('createCourseDesc').value.trim();
-        const code = document.getElementById('createCourseCode').value.trim();
-        const instructorId = document.getElementById('createCourseInstructor').value;
-        const isActive = document.getElementById('createCourseStatus').value === 'true';
-        const maxStudents = parseInt(document.getElementById('createCourseMaxStudents').value, 10);
-
-        if (!courseName) {
-          toast('Please enter a course name', true);
-          return;
-        }
-
-        if (!instructorId) {
-          toast('Please select an instructor', true);
-          return;
-        }
-
-        if (!Number.isFinite(maxStudents) || maxStudents < 1 || maxStudents > 200) {
-          toast('Max students must be between 1 and 200', true);
-          return;
-        }
-
         toast('Creating course and reserving its lab network…');
         await api('POST', '/courses', {
           course_name: courseName,
@@ -642,6 +651,9 @@
         loadCourses();
       } catch (e) {
         toast('Error creating course: ' + e.message, true);
+      } finally {
+        creatingCourse = false;
+        if (btn) { btn.disabled = false; btn.textContent = 'Create Course'; }
       }
     }
 

@@ -17,6 +17,7 @@ const { query } = require('../../utils/db');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../../utils/proxmox');
 const { getDefaultTemplateNode } = require('../../utils/site-config');
+const { sanitizeZoneAbbrev } = require('../../utils/lab-network-provision');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
@@ -120,8 +121,9 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     if (!vnet) {
       console.log(`[ChallengeNetwork] VNet for tag ${vxlanId} not found — creating SDN infrastructure...`);
 
-      // Determine zone abbreviation from spec or challenge_key
-      const zoneAbbrev = spec.zone?.abbrev || template.challenge_key?.substring(0, 8)?.replace(/[^a-z0-9]/gi, '').substring(0, 8) || 'chlng001';
+      // Determine zone abbreviation from spec (authoritative, already sanitized
+      // at creation) or derive a valid one from challenge_key as a fallback.
+      const zoneAbbrev = spec.zone?.abbrev || sanitizeZoneAbbrev(template.challenge_key || 'chlng001');
 
       // Check if the SDN zone exists
       const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');

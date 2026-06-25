@@ -28,6 +28,7 @@ const { waitForGuestAgent, executeScriptsOnVM, guestFileWrite, agentExec, pollEx
 const { selectBestNode } = require('../../../../../src/utils/node-selector');
 const { runBatch, createCloneSemaphore, distributeAcrossNodes } = require('../../../../../src/utils/batch-deployer');
 const { guacAPI } = require('../../../../../src/utils/guacamole');
+const { sanitizeZoneAbbrev } = require('../../../../../src/utils/lab-network-provision');
 const { ensureVulnImage } = require('./vuln-app-builder');
 
 const {
@@ -335,10 +336,7 @@ async function deleteProfileChallenge(profileId) {
       }
 
       // Derive zone the same way ensureSdnZoneAndVnets does, then drop it if empty.
-      const zoneAbbrev = challengeKey
-        .replace(/[^a-z0-9]/gi, '')
-        .substring(0, 8)
-        .toLowerCase();
+      const zoneAbbrev = sanitizeZoneAbbrev(challengeKey);
       const remainingVnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
       const zoneStillHasVnets = (remainingVnets || []).some(v => v.zone === zoneAbbrev);
       if (!zoneStillHasVnets && zoneAbbrev) {
@@ -442,12 +440,9 @@ async function ensureSdnZoneAndVnets({ vxlanIds, subnetScheme, challengeKey, log
   const missingTags = [...requiredTags].filter(t => !existingTags.has(t));
   if (missingTags.length === 0) return;
 
-  // Zone name: 8-char alphanumeric, derived from challenge_key. Strip dashes,
-  // truncate, lowercase. ('ciab-profile-abc12345' → 'ciabprof')
-  const zoneAbbrev = ((challengeKey || 'ciabprof')
-    .replace(/[^a-z0-9]/gi, '')
-    .substring(0, 8)
-    .toLowerCase()) || 'ciabprof';
+  // Zone name: ≤8-char alphanumeric, letter-leading, derived from challenge_key.
+  // ('ciab-profile-abc12345' → 'ciabprof'). Must match the teardown derivation.
+  const zoneAbbrev = sanitizeZoneAbbrev(challengeKey || 'ciabprof');
 
   // Create zone if missing
   const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');

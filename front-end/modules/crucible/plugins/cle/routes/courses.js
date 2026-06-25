@@ -24,7 +24,7 @@ async function attachLaneCounts(courseRows) {
   const ids = courseRows.map(c => c.course_id);
   const counts = await cybercoreQuery(
     `SELECT config->>'course_id' AS course_id, COUNT(*)::int AS vm_count
-       FROM cybercore_lane
+        FROM cybercore_lane
       WHERE config->>'course_id' = ANY($1) AND status <> 'deleted'
       GROUP BY 1`,
     [ids]
@@ -181,21 +181,25 @@ router.post('/', adminOnly, async (req, res) => {
     // + the SDN zone & VNets created once here (the only SDN reload). Student
     // workstation lanes are later drawn from this block at provision time.
     const id8 = String(course.course_id).replace(/-/g, '').substring(0, 8);
+    // Proxmox SDN zone IDs must start with a letter (regex [a-z][a-z0-9]{0,7}),
+    // but a UUID's first hex char is a digit ~62.5% of the time. Prefix a fixed
+    // letter and take 7 hex chars to stay within the 8-char limit.
+    const zoneAbbrev = `cle-${id8.substring(0, 7)}`;
     const reservation = await reserveLabNetwork({
       challengeKey: `cle-course-${id8}`,
       name: `CLE: ${course_name}`,
       description: `Workstation lab for CLE course ${course_name}`,
       subnetScheme: 'v2',
       maxLanes: maxStudents,
-      zoneAbbrev: id8,
+      zoneAbbrev,
       spec: { cle: true, course_id: course.course_id, purpose: 'cle_course_workstations' },
       log: (m) => console.log(`[CLE] Course lab: ${m}`),
     });
 
     await query(`
       UPDATE cle_course
-         SET challenge_id = $1, challenge_key = $2, subnet_scheme = $3, updated_at = NOW()
-       WHERE course_id = $4
+          SET challenge_id = $1, challenge_key = $2, subnet_scheme = $3, updated_at = NOW()
+        WHERE course_id = $4
     `, [reservation.challenge_id, reservation.challenge_key, reservation.subnet_scheme, course.course_id]);
 
     res.status(201).json({

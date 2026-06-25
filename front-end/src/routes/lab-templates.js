@@ -16,7 +16,7 @@ const { proxmoxAPI } = require('../utils/proxmox');
 const { getDefaultTemplateNode } = require('../utils/site-config');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const goadDeploy = require('../utils/goad-deploy');
-const { reserveLabNetwork, teardownLabNetwork } = require('../utils/lab-network-provision');
+const { reserveLabNetwork, teardownLabNetwork, sanitizeZoneAbbrev } = require('../utils/lab-network-provision');
 
 const adminOnly = requireRole('admin');
 
@@ -360,10 +360,12 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       return res.status(400).json({ error: 'At least one VM with a template_vmid is required' });
     }
 
-    // Validate zone_abbrev: 1-8 alphanumeric chars (auto-generated if not provided)
-    const finalZone = (zone_abbrev || challenge_key.replace(/[^a-z0-9]/gi, '').substring(0, 8)).toLowerCase();
-    if (!/^[a-z0-9]{1,8}$/.test(finalZone)) {
-      return res.status(400).json({ error: 'zone_abbrev must be 1-8 alphanumeric characters' });
+    // Derive the SDN zone id: ≤8 alphanumerics, letter-leading (Proxmox rejects
+    // a leading digit). sanitizeZoneAbbrev coerces both admin input and the
+    // challenge_key fallback into a valid id.
+    const finalZone = sanitizeZoneAbbrev(zone_abbrev || challenge_key);
+    if (!/^[a-z][a-z0-9]{0,7}$/.test(finalZone)) {
+      return res.status(400).json({ error: 'zone_abbrev must be 1-8 alphanumeric characters starting with a letter' });
     }
 
     const moduleKey = (module || 'crucible').toLowerCase();
