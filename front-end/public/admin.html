@@ -350,6 +350,7 @@
         <div class="tab-content" id="tab-users">
           <div class="action-bar">
             <button class="btn btn-primary" onclick="showCreateCybercoreUserModal()">+ New User</button>
+            <button class="btn btn-primary" onclick="showBatchUsersModal()">+ Create Batch Users</button>
             <button class="btn btn-primary" onclick="showCreateUserModal()">+ New Guac User</button>
             <button class="btn btn-outline" onclick="loadMergedUsers()">Refresh</button>
           </div>
@@ -1006,6 +1007,53 @@
       </div>
       <div id="ccStatus"></div>
       <button class="btn btn-primary" onclick="createCybercoreUser()">Create User</button>
+    </div>
+  </div>
+
+  <!-- Batch User Creation Modal -->
+  <div class="modal-overlay" id="batchUsersModal">
+    <div class="modal-content" style="max-width: 680px;">
+      <div class="modal-header">
+        <h3>Create Batch Users</h3>
+        <button class="modal-close" onclick="closeModal('batchUsersModal')">&times;</button>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+        <div class="form-group">
+          <label>Role <span style="font-size: 0.8rem; color: var(--gray-500);">(applied to all)</span></label>
+          <select id="batchRole" style="padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.9rem; width: 100%;">
+            <option value="student">Student</option>
+            <option value="user">User</option>
+            <option value="instructor">Instructor</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Organization <span style="font-size: 0.8rem; color: var(--gray-500);">(applied to all)</span></label>
+          <input type="text" id="batchOrganization" placeholder="Company or School" value="Independent">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Roster *</label>
+        <p style="font-size: 0.8rem; color: var(--gray-500); margin: 0 0 0.4rem;">
+          One person per line, comma- or tab-separated (paste straight from a spreadsheet):<br>
+          <code style="font-size: 0.78rem;">email, first name, last name, password</code><br>
+          Only <strong>email</strong> is required. Username is generated from the email; a random
+          password is generated when the last column is blank. A header row is detected and skipped.
+        </p>
+        <textarea id="batchRoster" rows="9" placeholder="jdoe@arizona.edu, Jane, Doe
+msmith@arizona.edu, Mark, Smith"
+          style="width: 100%; font-family: monospace; font-size: 0.85rem; padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px;"></textarea>
+      </div>
+
+      <div id="batchStatus"></div>
+      <div id="batchResults" style="margin-top: 0.75rem;"></div>
+
+      <div style="display: flex; gap: 0.5rem; margin-top: 0.75rem;">
+        <button class="btn btn-primary" id="batchCreateBtn" onclick="createBatchUsers()">Create Users</button>
+        <button class="btn btn-outline" onclick="closeModal('batchUsersModal')">Close</button>
+      </div>
     </div>
   </div>
 

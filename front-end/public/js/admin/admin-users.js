@@ -207,6 +207,137 @@ async function createCybercoreUser() {
   }
 }
 
+// ============================================================================
+// BATCH USER CREATION
+// ============================================================================
+
+function showBatchUsersModal() {
+  document.getElementById('batchRole').value = 'student';
+  document.getElementById('batchOrganization').value = 'Independent';
+  document.getElementById('batchRoster').value = '';
+  document.getElementById('batchStatus').innerHTML = '';
+  document.getElementById('batchResults').innerHTML = '';
+  document.getElementById('batchUsersModal').classList.add('active');
+}
+
+// Parse the pasted roster into user rows. Each line is comma- or tab-separated:
+//   email, first name, last name, password
+// Only email is required; a header row (first cell === "email") is skipped.
+function parseRoster(text) {
+  const rows = [];
+  const lines = text.split(/\r?\n/);
+  lines.forEach((raw, idx) => {
+    const line = raw.trim();
+    if (!line) return;
+    const cells = (line.includes('\t') ? line.split('\t') : line.split(',')).map(c => c.trim());
+    // Skip a header row like "email, first, last, password"
+    if (idx === 0 && cells[0] && cells[0].toLowerCase() === 'email') return;
+    rows.push({
+      line: idx + 1,
+      email: cells[0] || '',
+      firstName: cells[1] || null,
+      lastName: cells[2] || null,
+      password: cells[3] || null,
+    });
+  });
+  return rows;
+}
+
+async function createBatchUsers() {
+  const statusEl = document.getElementById('batchStatus');
+  const resultsEl = document.getElementById('batchResults');
+  const btn = document.getElementById('batchCreateBtn');
+
+  const role = document.getElementById('batchRole').value;
+  const organization = document.getElementById('batchOrganization').value.trim() || 'Independent';
+  const users = parseRoster(document.getElementById('batchRoster').value);
+
+  if (users.length === 0) {
+    statusEl.innerHTML = '<p style="color: #e53e3e; margin-top: 0.5rem;">Paste at least one user (email required).</p>';
+    return;
+  }
+
+  statusEl.innerHTML = `<p style="color: var(--gray-500); margin-top: 0.5rem;">Creating ${users.length} user(s)…</p>`;
+  resultsEl.innerHTML = '';
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+
+  try {
+    const data = await api('POST', '/users/batch', { users, defaults: { role, organization } });
+    statusEl.innerHTML = '';
+    renderBatchResults(data);
+    const { created, failed } = data.summary;
+    if (failed === 0) Toast.success('Batch Complete', `${created} user(s) created`);
+    else Toast.warning('Batch Complete', `${created} created, ${failed} failed`);
+    loadMergedUsers();
+  } catch (e) {
+    statusEl.innerHTML = `<p style="color: #e53e3e; margin-top: 0.5rem;">Error: ${e.message}</p>`;
+    Toast.error('Error', e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Create Users';
+  }
+}
+
+function renderBatchResults(data) {
+  const { summary, created, failed } = data;
+  const resultsEl = document.getElementById('batchResults');
+  let html = `<h4 style="margin: 0.5rem 0;">Results: ${summary.created} created, ${summary.failed} failed (of ${summary.total})</h4>`;
+
+  if (created.length) {
+    html += `
+      <div style="display: flex; align-items: center; gap: 0.5rem; margin: 0.5rem 0;">
+        <strong style="font-size: 0.85rem;">Created accounts</strong>
+        <button class="btn btn-sm btn-outline" style="font-size: 0.7rem;" onclick="copyBatchCredentials()">Copy credentials</button>
+        <span style="font-size: 0.75rem; color: var(--gray-500);">Generated passwords are shown once — copy them now.</span>
+      </div>
+      <table class="admin-table" style="font-size: 0.82rem;">
+        <thead><tr><th>Email</th><th>Username</th><th>Role</th><th>Password</th></tr></thead>
+        <tbody>
+          ${created.map(u => `
+            <tr>
+              <td><code style="font-size: 0.78rem;">${escHtml(u.email)}</code></td>
+              <td><code style="font-size: 0.78rem;">${escHtml(u.username)}</code></td>
+              <td><span class="badge badge-gray">${escHtml(u.role)}</span></td>
+              <td>${u.generated_password
+                ? `<code style="font-size: 0.78rem;">${escHtml(u.generated_password)}</code>`
+                : '<span style="color: var(--gray-400);">set by you</span>'}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  if (failed.length) {
+    html += `
+      <strong style="font-size: 0.85rem; display: block; margin: 0.75rem 0 0.4rem; color: #e53e3e;">Skipped rows</strong>
+      <table class="admin-table" style="font-size: 0.82rem;">
+        <thead><tr><th>Line</th><th>Email</th><th>Reason</th></tr></thead>
+        <tbody>
+          ${failed.map(f => `
+            <tr>
+              <td>${f.line}</td>
+              <td><code style="font-size: 0.78rem;">${escHtml(f.email)}</code></td>
+              <td style="color: #e53e3e;">${escHtml(f.error)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>`;
+  }
+
+  // Stash created credentials for the copy button.
+  window._batchCreated = created;
+  resultsEl.innerHTML = html;
+}
+
+function copyBatchCredentials() {
+  const created = window._batchCreated || [];
+  if (!created.length) return;
+  const lines = ['email,username,password'];
+  created.forEach(u => lines.push(`${u.email},${u.username},${u.generated_password || ''}`));
+  navigator.clipboard.writeText(lines.join('\n'))
+    .then(() => Toast.success('Copied', `${created.length} credential(s) copied as CSV`))
+    .catch(() => Toast.error('Error', 'Could not copy to clipboard'));
+}
+
 async function deleteUser(username) {
   if (!await Confirm.show({ title: 'Delete User', message: `Delete Guacamole user "${username}"?`, confirmText: 'Delete', danger: true })) return;
   try {

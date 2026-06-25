@@ -13,8 +13,19 @@ const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { query } = require('../../utils/db');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { logActivity } = require('../../middleware/activity-logger');
+const { generatePassword } = require('../../utils/password-generator');
 
 const adminOnly = requireRole('admin');
+
+const VALID_ROLES = ['user', 'student', 'instructor', 'admin'];
+
+// Derive a login username from an email local-part: lowercase, keep only safe
+// characters. Caller is responsible for de-duplicating against existing names.
+function deriveUsername(email) {
+  const local = String(email || '').split('@')[0] || '';
+  const base = local.toLowerCase().replace(/[^a-z0-9._-]/g, '');
+  return base || 'user';
+}
 
 
 // ============================================================================
@@ -363,6 +374,115 @@ router.post('/users', authenticateToken, adminOnly, async (req, res) => {
     });
   } catch (error) {
     console.error('[Users] Create error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// BATCH USER CREATION
+// ----------------------------------------------------------------------------
+// Create many users in one request (e.g. a roster pasted by an instructor).
+// Each row is processed independently: a bad/duplicate row is reported in
+// `failed` without aborting the rest. Auto-generates a username from the email
+// and a random password when one isn't supplied — generated passwords are
+// returned once so the admin can distribute them.
+// ============================================================================
+
+router.post('/users/batch', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { users, defaults } = req.body;
+
+    if (!Array.isArray(users) || users.length === 0) {
+      return res.status(400).json({ error: 'users must be a non-empty array' });
+    }
+    if (users.length > 500) {
+      return res.status(400).json({ error: 'batch is limited to 500 users at a time' });
+    }
+
+    const defaultRole = (defaults && defaults.role) || 'student';
+    const defaultOrg = (defaults && String(defaults.organization || '').trim()) || 'Independent';
+    if (!VALID_ROLES.includes(defaultRole)) {
+      return res.status(400).json({ error: `Invalid default role: ${defaultRole}` });
+    }
+
+    // Preload existing usernames/emails so we can de-dupe in memory (and across
+    // rows within this same batch) without a query per row.
+    const existing = await cybercoreQuery('SELECT LOWER(username) AS u, LOWER(email) AS e FROM cybercore_user');
+    const usedUsernames = new Set(existing.rows.map(r => r.u));
+    const usedEmails = new Set(existing.rows.map(r => r.e));
+
+    const created = [];
+    const failed = [];
+
+    for (let i = 0; i < users.length; i++) {
+      const row = users[i] || {};
+      const lineNo = row.line || (i + 1);
+      const email = String(row.email || '').trim();
+
+      try {
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          throw new Error('valid email is required');
+        }
+        const emailLc = email.toLowerCase();
+        if (usedEmails.has(emailLc)) throw new Error('email already exists');
+
+        const role = row.role ? String(row.role).toLowerCase() : defaultRole;
+        if (!VALID_ROLES.includes(role)) throw new Error(`invalid role "${role}"`);
+
+        const organization = (row.organization && String(row.organization).trim()) || defaultOrg;
+        const firstName = row.firstName ? String(row.firstName).trim() : null;
+        const lastName = row.lastName ? String(row.lastName).trim() : null;
+
+        // Username: caller-supplied or derived from email, then made unique.
+        let username = (row.username && String(row.username).trim().toLowerCase()) || deriveUsername(email);
+        if (usedUsernames.has(username)) {
+          let n = 2;
+          while (usedUsernames.has(`${username}${n}`)) n++;
+          username = `${username}${n}`;
+        }
+
+        const providedPassword = row.password ? String(row.password) : null;
+        const password = providedPassword || generatePassword();
+        const passwordHash = bcrypt.hashSync(password, 10);
+
+        const result = await cybercoreQuery(
+          `INSERT INTO cybercore_user
+           (username, email, first_name, last_name, organization, role, password_hash, password_alg, status, active, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'bcrypt', 'active', TRUE, NOW(), NOW())
+           RETURNING user_id, username, email, role`,
+          [username, email, firstName, lastName, organization, role, passwordHash]
+        );
+
+        usedUsernames.add(username);
+        usedEmails.add(emailLc);
+
+        const u = result.rows[0];
+        created.push({
+          user_id: u.user_id,
+          username: u.username,
+          email: u.email,
+          role: u.role,
+          // Only surface auto-generated passwords; if the admin supplied one
+          // they already have it and we avoid echoing it back.
+          generated_password: providedPassword ? null : password,
+        });
+      } catch (e) {
+        failed.push({ line: lineNo, email: email || '(blank)', error: e.message });
+      }
+    }
+
+    logActivity(req, 'users_batch_created', 'cybercore_user', null, {
+      total: users.length, created: created.length, failed: failed.length,
+    });
+
+    res.json({
+      summary: { total: users.length, created: created.length, failed: failed.length },
+      created,
+      failed,
+    });
+  } catch (error) {
+    console.error('[Users] Batch create error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
