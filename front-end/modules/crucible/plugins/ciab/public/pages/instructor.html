@@ -2190,11 +2190,11 @@
               </div>
               <select id="assignStudentProfile" class="form-input" required>
                 <option value="">-- Select from all profiles --</option>
-                ${allProfiles.map(p => `
-                  <option value="${p.id}">
-                    ${p.company_name || p.name || 'Unnamed Profile'}
-                  </option>
-                `).join('')}
+                ${allProfiles.map(p => {
+                  const name = p.companyName || p.company_name || p.name;
+                  const extras = [p.industry, p.difficulty].filter(Boolean).join(' | ');
+                  return `<option value="${p.id}">${name ? `🏢 ${name}${extras ? ` — ${extras}` : ''}` : `Profile ${(p.id||'').substring(0,8)}`}</option>`;
+                }).join('')}
               </select>
             `}
           </div>
