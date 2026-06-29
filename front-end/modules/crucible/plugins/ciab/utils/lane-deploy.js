@@ -1498,6 +1498,7 @@ async function deployOneLaneFromSpec({
         }
       }
 
+      let guacConnId = null;
       if (kaliIp) {
         try {
           // Idempotent upsert: a previous deploy of the same lane leaves a
@@ -1537,13 +1538,62 @@ async function deployOneLaneFromSpec({
             // including the refreshed hostname so the stale IP from the
             // previous deploy gets overwritten.
             await guacAPI('PUT', `/connections/${encodeURIComponent(foundId)}`, connBody);
+            guacConnId = foundId;
             console.log(`${logTag} Guac connection refreshed for lane ${vxlanId}: ${connName} → ${kaliIp}:3389 (id=${foundId})`);
           } else {
-            await guacAPI('POST', '/connections', connBody);
+            const created = await guacAPI('POST', '/connections', connBody);
+            guacConnId = created?.identifier || null;
             console.log(`${logTag} Guac connection created for lane ${vxlanId}: ${connName} → ${kaliIp}:3389`);
           }
         } catch (gErr) {
           console.warn(`${logTag} Guac connection failed for lane ${vxlanId}: ${gErr.message}`);
+        }
+      }
+
+      // Register Kali in cybercore so it surfaces in My Workspaces as a full RDP desktop
+      if (guacConnId) {
+        try {
+          const laneRow = await cybercoreQuery(
+            `SELECT user_id FROM cybercore_lane WHERE lane_id = $1`, [laneId]
+          );
+          const studentUserId = laneRow.rows[0]?.user_id;
+          if (studentUserId) {
+            const resourceRes = await cybercoreQuery(`
+              INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
+              VALUES ('vm', 'ciab', $1, 'allocated', $2::jsonb)
+              RETURNING resource_id
+            `, [
+              `Kali - ${groupName}`,
+              JSON.stringify({
+                vm_category:   'lane_vm',
+                provider_type: 'qemu',
+                template_name: 'Kali (Attack Box)',
+                lane_id:       laneId,
+                group_id:      groupId,
+                group_name:    groupName,
+                vxlan_id:      vxlanId
+              })
+            ]);
+            const resourceId = resourceRes.rows[0].resource_id;
+
+            await cybercoreQuery(`
+              INSERT INTO cybercore_vm_instance
+                (resource_id, provider, provider_node, provider_vmid, power_state, metadata)
+              VALUES ($1, 'proxmox', $2, $3, 'running', $4::jsonb)
+            `, [
+              resourceId, targetNode, String(attackBoxVmId),
+              JSON.stringify({ provider_type: 'qemu', guac_connection_id: guacConnId })
+            ]);
+
+            await cybercoreQuery(`
+              INSERT INTO cybercore_allocation (resource_id, user_id, purpose)
+              VALUES ($1, $2, 'lane_vm')
+            `, [resourceId, studentUserId]);
+
+            console.log(`${logTag} Kali registered in cybercore (resource ${resourceId}) for lane ${vxlanId}`);
+          }
+        } catch (regErr) {
+          console.warn(`${logTag} Kali cybercore registration failed: ${regErr.message}`);
         }
       }
     }
@@ -1810,6 +1860,21 @@ async function teardownLane({ laneId, vmIds }) {
     } catch (e) {
       errors.push(`destroy ${type} ${vmid}: ${e.message}`);
     }
+  }
+
+  // Clean up cybercore resource/vm_instance/allocation records for this lane's Kali VM
+  try {
+    const rRes = await cybercoreQuery(
+      `SELECT resource_id FROM cybercore_resource WHERE metadata->>'lane_id' = $1`,
+      [laneId]
+    );
+    for (const row of rRes.rows) {
+      await cybercoreQuery(`DELETE FROM cybercore_allocation WHERE resource_id = $1`, [row.resource_id]);
+      await cybercoreQuery(`DELETE FROM cybercore_vm_instance WHERE resource_id = $1`, [row.resource_id]);
+      await cybercoreQuery(`DELETE FROM cybercore_resource WHERE resource_id = $1`, [row.resource_id]);
+    }
+  } catch (e) {
+    errors.push(`cybercore resource cleanup: ${e.message}`);
   }
 
   await cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id=$1`, [laneId]).catch(() => {});
