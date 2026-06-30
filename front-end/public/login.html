@@ -20,27 +20,81 @@
       
       <div class="auth-body">
         <div id="errorAlert" class="alert alert-danger" style="display: none;"></div>
-        
-        <form id="loginForm">
-          <div class="form-group">
-            <label class="form-label" for="email">Email Address</label>
-            <input type="email" class="form-input" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
-            <div class="form-error" id="emailError"></div>
+
+        <!-- Step 1: email + password -->
+        <div id="loginStep">
+          <form id="loginForm">
+            <div class="form-group">
+              <label class="form-label" for="email">Email Address</label>
+              <input type="email" class="form-input" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+              <div class="form-error" id="emailError"></div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="password">Password</label>
+              <input type="password" class="form-input" id="password" name="password" placeholder="••••••••" required autocomplete="current-password">
+              <div class="form-error" id="passwordError"></div>
+            </div>
+
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="submitBtn">
+              Sign In
+            </button>
+          </form>
+
+          <div class="auth-footer">
+            <p>Don't have an account? <a href="/register">Create one</a></p>
           </div>
-          
-          <div class="form-group">
-            <label class="form-label" for="password">Password</label>
-            <input type="password" class="form-input" id="password" name="password" placeholder="••••••••" required autocomplete="current-password">
-            <div class="form-error" id="passwordError"></div>
+        </div>
+
+        <!-- Step 2a: TOTP code prompt (MFA already enrolled) -->
+        <div id="mfaStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Enter the 6-digit code from your authenticator app. You can also use a recovery code.
+          </p>
+          <form id="mfaForm">
+            <div class="form-group">
+              <label class="form-label" for="mfaCode">Authentication Code</label>
+              <input type="text" class="form-input" id="mfaCode" placeholder="123456" inputmode="text"
+                     autocomplete="one-time-code" autofocus>
+              <div class="form-error" id="mfaCodeError"></div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="mfaSubmitBtn">Verify</button>
+          </form>
+          <div class="auth-footer">
+            <p><a href="#" id="mfaBackLink">← Back to sign in</a></p>
           </div>
-          
-          <button type="submit" class="btn btn-primary btn-block btn-lg" id="submitBtn">
-            Sign In
-          </button>
-        </form>
-        
-        <div class="auth-footer">
-          <p>Don't have an account? <a href="/register">Create one</a></p>
+        </div>
+
+        <!-- Step 2b: forced TOTP enrollment -->
+        <div id="enrollStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Your account requires multi-factor authentication. Scan this QR code with an
+            authenticator app (Google Authenticator, Authy, 1Password…), then enter the code to finish.
+          </p>
+          <div style="text-align: center; margin-bottom: 1rem;">
+            <img id="enrollQr" alt="MFA QR code" style="width: 220px; height: 220px;">
+            <div style="font-size: 0.8rem; color: var(--text-secondary, #777); margin-top: 0.5rem;">
+              Can't scan? Enter this key manually:<br>
+              <code id="enrollSecret" style="font-size: 0.8rem; word-break: break-all;"></code>
+            </div>
+          </div>
+          <form id="enrollForm">
+            <div class="form-group">
+              <label class="form-label" for="enrollCode">Authentication Code</label>
+              <input type="text" class="form-input" id="enrollCode" placeholder="123456" inputmode="numeric" autocomplete="one-time-code">
+              <div class="form-error" id="enrollCodeError"></div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="enrollSubmitBtn">Verify &amp; Continue</button>
+          </form>
+        </div>
+
+        <!-- Recovery codes shown once after enrollment -->
+        <div id="recoveryStep" style="display: none;">
+          <div class="alert alert-success" style="margin-bottom: 1rem;">
+            MFA is enabled. Save these one-time recovery codes somewhere safe — each works once if you lose your device. <strong>They won't be shown again.</strong>
+          </div>
+          <pre id="recoveryCodes" style="background: var(--bg-muted, #f4f4f6); padding: 0.75rem; border-radius: 6px; font-size: 0.9rem; line-height: 1.7; text-align: center;"></pre>
+          <button class="btn btn-primary btn-block btn-lg" id="recoveryContinueBtn">Continue to Dashboard</button>
         </div>
       </div>
     </div>
@@ -77,10 +131,14 @@
 
     document.addEventListener('DOMContentLoaded', () => {
       loadSiteConfig();
-      
+
       const form = document.getElementById('loginForm');
       const submitBtn = document.getElementById('submitBtn');
       const errorAlert = document.getElementById('errorAlert');
+
+      // Short-lived stage tokens held in memory only (never localStorage).
+      let mfaToken = null;
+      let enrollToken = null;
 
       // Check if redirected due to expired session
       if (Utils.getQueryParam('expired')) {
@@ -88,57 +146,134 @@
         errorAlert.style.display = 'block';
       }
 
+      function showError(msg) {
+        errorAlert.textContent = msg || 'Something went wrong';
+        errorAlert.style.display = 'block';
+      }
+      function clearError() { errorAlert.style.display = 'none'; }
+      function showStep(id) {
+        ['loginStep', 'mfaStep', 'enrollStep', 'recoveryStep'].forEach(s => {
+          document.getElementById(s).style.display = s === id ? '' : 'none';
+        });
+      }
+      function finishLogin(token) {
+        if (token) localStorage.setItem('token', token);
+        Toast.success('Welcome!', 'Signed in successfully');
+        setTimeout(() => { window.location.href = '/hub'; }, 500);
+      }
+
+      // ── Step 1: password ──────────────────────────────────────────────────
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
-        
         const email = document.getElementById('email').value.trim();
         const password = document.getElementById('password').value;
 
-        // Clear errors
-        errorAlert.style.display = 'none';
+        // Drop any stale session token so it can't override the stage-token
+        // Authorization header on the MFA/enrollment step calls.
+        localStorage.removeItem('token');
+
+        clearError();
         document.getElementById('emailError').textContent = '';
         document.getElementById('passwordError').textContent = '';
 
-        // Validate
         let hasError = false;
-        
         if (!Validator.email(email)) {
           document.getElementById('emailError').textContent = 'Please enter a valid email address';
           hasError = true;
         }
-        
         if (!Validator.required(password)) {
           document.getElementById('passwordError').textContent = 'Password is required';
           hasError = true;
         }
-
         if (hasError) return;
 
-        // Submit
         submitBtn.disabled = true;
         submitBtn.textContent = 'Signing in...';
 
         try {
           const result = await API.auth.login(email, password);
-          
-          // Store the token in localStorage
-          if (result.token) {
-            localStorage.setItem('token', result.token);
+
+          if (result.mfa_required) {
+            mfaToken = result.mfa_token;
+            showStep('mfaStep');
+            document.getElementById('mfaCode').focus();
+            return;
           }
-          
-          // Success - redirect to dashboard
-          Toast.success('Welcome!', 'Signed in successfully');
-          setTimeout(() => {
-            window.location.href = '/hub';
-          }, 500);
-          
+          if (result.enrollment_required) {
+            enrollToken = result.enroll_token;
+            await beginEnrollment();
+            return;
+          }
+          finishLogin(result.token);
         } catch (error) {
-          errorAlert.textContent = error.message || 'Invalid email or password';
-          errorAlert.style.display = 'block';
+          showError(error.message || 'Invalid email or password');
+        } finally {
           submitBtn.disabled = false;
           submitBtn.textContent = 'Sign In';
         }
       });
+
+      // ── Step 2a: TOTP code (already enrolled) ─────────────────────────────
+      document.getElementById('mfaForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const code = document.getElementById('mfaCode').value.trim();
+        const btn = document.getElementById('mfaSubmitBtn');
+        if (!code) { document.getElementById('mfaCodeError').textContent = 'Enter your code'; return; }
+        document.getElementById('mfaCodeError').textContent = '';
+        btn.disabled = true; btn.textContent = 'Verifying...';
+        try {
+          const result = await API.auth.loginMfa(mfaToken, code);
+          finishLogin(result.token);
+        } catch (error) {
+          showError(error.message || 'Invalid code');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Verify';
+        }
+      });
+
+      document.getElementById('mfaBackLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        mfaToken = null;
+        clearError();
+        showStep('loginStep');
+      });
+
+      // ── Step 2b: forced enrollment ────────────────────────────────────────
+      async function beginEnrollment() {
+        clearError();
+        showStep('enrollStep');
+        try {
+          const setup = await API.auth.mfaSetup(enrollToken);
+          document.getElementById('enrollQr').src = setup.qr_data_url;
+          document.getElementById('enrollSecret').textContent = setup.secret;
+        } catch (error) {
+          showError(error.message || 'Could not start MFA setup');
+          showStep('loginStep');
+        }
+      }
+
+      document.getElementById('enrollForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const code = document.getElementById('enrollCode').value.trim();
+        const btn = document.getElementById('enrollSubmitBtn');
+        if (!code) { document.getElementById('enrollCodeError').textContent = 'Enter the code'; return; }
+        document.getElementById('enrollCodeError').textContent = '';
+        btn.disabled = true; btn.textContent = 'Verifying...';
+        try {
+          const result = await API.auth.mfaVerify(code, enrollToken);
+          if (result.token) localStorage.setItem('token', result.token);
+          document.getElementById('recoveryCodes').textContent = (result.recovery_codes || []).join('\n');
+          showStep('recoveryStep');
+        } catch (error) {
+          showError(error.message || 'Invalid code');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Verify & Continue';
+        }
+      });
+
+      document.getElementById('recoveryContinueBtn').addEventListener('click', () => finishLogin(null));
     });
   </script>
 </body>

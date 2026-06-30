@@ -23,8 +23,25 @@ async function loadSiteSettings() {
     if (logoInput) logoInput.value = logoUrl;
     if (faviconInput) faviconInput.value = faviconUrl;
     if (descInput) descInput.value = description;
+
+    const mfaScopeSelect = document.getElementById('settingsMfaScope');
+    if (mfaScopeSelect) mfaScopeSelect.value = data.mfa_required_scope === 'all' ? 'all' : 'privileged';
   } catch (e) {
     console.warn('[Settings] Could not load site settings:', e.message);
+  }
+}
+
+async function saveMfaScope() {
+  const scope = document.getElementById('settingsMfaScope').value;
+  const status = document.getElementById('mfaScopeStatus');
+  status.innerHTML = '<strong style="color: var(--gray-500);">Saving...</strong>';
+  try {
+    await api('PATCH', '/settings/mfa', { mfa_required_scope: scope });
+    status.innerHTML = `<strong style="color: #38a169;">✓ Saved</strong>`;
+    Toast.success('MFA Policy Saved', scope === 'all' ? 'MFA now required for all users' : 'MFA required for admins & instructors');
+  } catch (e) {
+    status.innerHTML = `<strong style="color: #e53e3e;">Error:</strong> ${escHtml(e.message)}`;
+    Toast.error('Save Failed', e.message);
   }
 }
 

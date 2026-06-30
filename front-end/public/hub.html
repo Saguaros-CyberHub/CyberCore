@@ -749,7 +749,13 @@
 
         <div id="settingsContent" style="display: none;">
           <h2>Settings</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
+          <div style="background: var(--bg-card, #fff); border: 1px solid var(--border-color, #e5e7eb); border-radius: 10px; padding: 1.25rem; max-width: 620px;">
+            <h3 style="margin: 0 0 0.25rem;">🔐 Two-Factor Authentication (MFA)</h3>
+            <p style="color: var(--text-secondary, #666); font-size: 0.9rem; margin: 0 0 1rem;">
+              Protect your account with a time-based code from an authenticator app.
+            </p>
+            <div id="mfaPanel"><p style="color: var(--text-secondary, #888);">Loading…</p></div>
+          </div>
         </div>
       </div>
     </main>
@@ -934,8 +940,105 @@
         if (page === 'workspaces-myworkspaces') Workstations.loadMyWorkstations();
       }
 
+      // Load MFA status when opening Settings
+      if (page === 'settings' && typeof loadMfaSettings === 'function') {
+        loadMfaSettings();
+      }
+
       // Scroll to top
       document.querySelector('.page-content').scrollTop = 0;
+    }
+  </script>
+
+  <!-- MFA (two-factor) self-service -->
+  <script>
+    function esc(s) {
+      return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+        ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    }
+
+    async function loadMfaSettings() {
+      const panel = document.getElementById('mfaPanel');
+      panel.innerHTML = '<p style="color: var(--text-secondary, #888);">Loading…</p>';
+      try {
+        const { user } = await API.auth.me();
+        if (user.mfaEnabled) {
+          const disableBtn = user.mfaRequired
+            ? `<p style="color: var(--text-secondary, #888); font-size: 0.85rem;">MFA is required for your role and can't be turned off.</p>`
+            : `<button class="btn btn-outline btn-sm" onclick="disableMfa()">Disable MFA</button>`;
+          panel.innerHTML = `
+            <p><span class="badge badge-green" style="background:#16a34a;color:#fff;padding:0.15rem 0.5rem;border-radius:6px;">Enabled</span></p>
+            ${disableBtn}`;
+        } else {
+          panel.innerHTML = `
+            <p>Status: <strong>Not enabled</strong>${user.mfaRequired ? ' <span style="color:#b45309;">(required for your role)</span>' : ''}</p>
+            <button class="btn btn-primary btn-sm" onclick="startMfaEnroll()">Enable MFA</button>`;
+        }
+      } catch (e) {
+        panel.innerHTML = `<p style="color:#dc2626;">Could not load MFA status: ${esc(e.message)}</p>`;
+      }
+    }
+
+    async function startMfaEnroll() {
+      const panel = document.getElementById('mfaPanel');
+      panel.innerHTML = '<p style="color: var(--text-secondary, #888);">Generating secret…</p>';
+      try {
+        const setup = await API.auth.mfaSetup();
+        panel.innerHTML = `
+          <p style="font-size:0.9rem;">Scan this with your authenticator app, then enter the 6-digit code.</p>
+          <div style="text-align:center;margin:0.5rem 0;">
+            <img src="${esc(setup.qr_data_url)}" alt="MFA QR" style="width:200px;height:200px;">
+            <div style="font-size:0.78rem;color:var(--text-secondary,#777);margin-top:0.4rem;">
+              Manual key: <code style="word-break:break-all;">${esc(setup.secret)}</code>
+            </div>
+          </div>
+          <div style="display:flex;gap:0.5rem;align-items:center;max-width:320px;">
+            <input type="text" id="mfaEnrollCode" placeholder="123456" inputmode="numeric"
+                   style="flex:1;padding:0.5rem;border:1px solid var(--border-color,#ccc);border-radius:6px;">
+            <button class="btn btn-primary btn-sm" id="mfaEnrollVerifyBtn" onclick="submitMfaEnroll()">Verify</button>
+          </div>
+          <p style="margin-top:0.5rem;"><a href="#" onclick="loadMfaSettings();return false;">Cancel</a></p>
+          <div id="mfaEnrollError" style="color:#dc2626;font-size:0.85rem;margin-top:0.4rem;"></div>`;
+        document.getElementById('mfaEnrollCode').focus();
+      } catch (e) {
+        panel.innerHTML = `<p style="color:#dc2626;">${esc(e.message)}</p>`;
+      }
+    }
+
+    async function submitMfaEnroll() {
+      const code = document.getElementById('mfaEnrollCode').value.trim();
+      const errEl = document.getElementById('mfaEnrollError');
+      const btn = document.getElementById('mfaEnrollVerifyBtn');
+      errEl.textContent = '';
+      if (!code) { errEl.textContent = 'Enter the code from your app'; return; }
+      btn.disabled = true; btn.textContent = 'Verifying…';
+      try {
+        const result = await API.auth.mfaVerify(code);
+        const codes = (result.recovery_codes || []).join('\n');
+        document.getElementById('mfaPanel').innerHTML = `
+          <div style="background:#ecfdf5;border:1px solid #16a34a;border-radius:8px;padding:0.75rem;margin-bottom:0.75rem;font-size:0.88rem;">
+            MFA is now enabled. Save these one-time recovery codes — each works once if you lose your device. <strong>They won't be shown again.</strong>
+          </div>
+          <pre style="background:var(--bg-muted,#f4f4f6);padding:0.75rem;border-radius:6px;text-align:center;line-height:1.7;">${esc(codes)}</pre>
+          <button class="btn btn-primary btn-sm" onclick="loadMfaSettings()">Done</button>`;
+        if (typeof Toast !== 'undefined') Toast.success('MFA enabled', 'Two-factor authentication is on');
+      } catch (e) {
+        errEl.textContent = e.message || 'Invalid code';
+        btn.disabled = false; btn.textContent = 'Verify';
+      }
+    }
+
+    async function disableMfa() {
+      const code = prompt('Enter a current authenticator code (or a recovery code) to disable MFA:');
+      if (!code) return;
+      try {
+        await API.auth.mfaDisable(code.trim());
+        if (typeof Toast !== 'undefined') Toast.success('MFA disabled', 'Two-factor authentication is off');
+        loadMfaSettings();
+      } catch (e) {
+        if (typeof Toast !== 'undefined') Toast.error('Error', e.message);
+        else alert(e.message);
+      }
     }
   </script>
 </body>

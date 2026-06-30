@@ -37,7 +37,7 @@ router.get('/users', authenticateToken, adminOnly, async (req, res) => {
     // Get users from cybercore_user (single source of truth)
     const usersResult = await cybercoreQuery(
       `SELECT user_id AS id, email, first_name, last_name, role, organization,
-              active AS is_active, last_auth_at AS last_login, created_at
+              active AS is_active, last_auth_at AS last_login, created_at, mfa_enabled
        FROM cybercore_user
        ORDER BY created_at DESC`
     );
@@ -82,6 +82,7 @@ router.get('/settings', authenticateToken, adminOnly, async (req, res) => {
     let siteLogoUrl = null;
     let siteFaviconUrl = null;
     let siteDescription = null;
+    let mfaRequiredScope = 'privileged';
 
     try {
       const result = await cybercoreQuery('SELECT key, value FROM cybercore_site_settings');
@@ -90,6 +91,7 @@ router.get('/settings', authenticateToken, adminOnly, async (req, res) => {
         if (row.key === 'site_logo_url') siteLogoUrl = row.value;
         if (row.key === 'site_favicon_url') siteFaviconUrl = row.value;
         if (row.key === 'site_description') siteDescription = row.value;
+        if (row.key === 'mfa_required_scope') mfaRequiredScope = row.value === 'all' ? 'all' : 'privileged';
       });
     } catch (err) {
       console.warn('[Settings] Could not fetch site settings:', err.message);
@@ -131,7 +133,7 @@ router.get('/settings', authenticateToken, adminOnly, async (req, res) => {
       console.warn('[Settings] Could not fetch cybercore_module:', err.message);
     }
 
-    res.json({ site_name: siteName, site_logo_url: siteLogoUrl, site_favicon_url: siteFaviconUrl, site_description: siteDescription, modules });
+    res.json({ site_name: siteName, site_logo_url: siteLogoUrl, site_favicon_url: siteFaviconUrl, site_description: siteDescription, mfa_required_scope: mfaRequiredScope, modules });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -483,6 +485,64 @@ router.post('/users/batch', authenticateToken, adminOnly, async (req, res) => {
     });
   } catch (error) {
     console.error('[Users] Batch create error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// MFA ENFORCEMENT
+// ============================================================================
+
+// PATCH /api/admin/settings/mfa — set who must use MFA.
+//   scope: 'privileged' (admins + instructors, default) | 'all'
+router.patch('/settings/mfa', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { mfa_required_scope } = req.body;
+    if (!['privileged', 'all'].includes(mfa_required_scope)) {
+      return res.status(400).json({ error: "mfa_required_scope must be 'privileged' or 'all'" });
+    }
+
+    await cybercoreQuery(`
+      CREATE TABLE IF NOT EXISTS cybercore_site_settings (
+        key VARCHAR(255) PRIMARY KEY,
+        value TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await cybercoreQuery(
+      `INSERT INTO cybercore_site_settings (key, value) VALUES ('mfa_required_scope', $1)
+       ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`,
+      [mfa_required_scope]
+    );
+
+    logActivity(req, 'settings_update', 'mfa_required_scope', null, { mfa_required_scope });
+    res.json({ success: true, mfa_required_scope });
+  } catch (error) {
+    console.error('[Settings] MFA scope update error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/users/:id/mfa/reset — clear a user's MFA, forcing
+// re-enrollment at their next login (help-desk recovery for a lost device).
+router.post('/users/:id/mfa/reset', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await cybercoreQuery(
+      `UPDATE cybercore_user
+          SET mfa_enabled = FALSE, mfa_secret = NULL, mfa_recovery_codes = NULL, mfa_enrolled_at = NULL
+        WHERE user_id = $1
+        RETURNING user_id, email`,
+      [id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    logActivity(req, 'user_mfa_reset', 'cybercore_user', id, { email: result.rows[0].email });
+    res.json({ success: true, message: `MFA reset for ${result.rows[0].email}` });
+  } catch (error) {
+    console.error('[Users] MFA reset error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
