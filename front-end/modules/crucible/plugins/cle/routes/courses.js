@@ -54,6 +54,7 @@ router.get('/', instructorOnly, async (req, res) => {
           c.description,
           c.instructor_id,
           c.is_active,
+          c.provision_status,
           c.created_at,
           COUNT(DISTINCT e.user_id) AS student_count
         FROM cle_course c
@@ -70,6 +71,7 @@ router.get('/', instructorOnly, async (req, res) => {
           c.description,
           c.instructor_id,
           c.is_active,
+          c.provision_status,
           c.created_at,
           COUNT(DISTINCT e.user_id) AS student_count
         FROM cle_course c
@@ -107,6 +109,7 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
           c.description,
           c.instructor_id,
           c.is_active,
+          c.provision_status,
           c.created_at,
           c.updated_at,
           COUNT(DISTINCT e.user_id) AS student_count
@@ -124,6 +127,7 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
           c.description,
           c.instructor_id,
           c.is_active,
+          c.provision_status,
           c.created_at,
           c.updated_at,
           COUNT(DISTINCT e.user_id) AS student_count
@@ -150,7 +154,6 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
  * POST /api/cle/courses — Create a new course
  */
 router.post('/', adminOnly, async (req, res) => {
-  let createdCourseId = null;
   try {
     const { course_name, description, code, instructor_id, is_active, max_students } = req.body;
 
@@ -168,29 +171,51 @@ router.post('/', adminOnly, async (req, res) => {
       return res.status(400).json({ error: 'max_students must be an integer between 1 and 200' });
     }
 
-    // Create the course row first so we can key the reserved lab to its id.
+    // Create the course row up front in the 'provisioning' state and return
+    // immediately. Reserving the lab (SDN zone + VNets + bridge-readiness wait)
+    // takes tens of seconds to minutes — longer than the edge proxy will hold
+    // the request open — so the reservation runs in the background and flips
+    // provision_status to 'ready'/'failed' when it finishes. The UI shows an
+    // "Initializing" label until then.
     const createResult = await query(`
-      INSERT INTO cle_course (course_name, description, code, instructor_id, is_active, max_students)
-      VALUES ($1, $2, $3, $4, $5, $6)
-      RETURNING course_id, course_name, description, code, instructor_id, is_active, max_students, created_at
+      INSERT INTO cle_course (course_name, description, code, instructor_id, is_active, max_students, provision_status)
+      VALUES ($1, $2, $3, $4, $5, $6, 'provisioning')
+      RETURNING course_id, course_name, description, code, instructor_id, is_active, max_students, provision_status, created_at
     `, [course_name, description || null, code || null, instructor_id, is_active !== false, maxStudents]);
     const course = createResult.rows[0];
-    createdCourseId = course.course_id;
 
-    // Reserve the course's lab: a crucible_challenge row sizing the VXLAN block
-    // + the SDN zone & VNets created once here (the only SDN reload). Student
-    // workstation lanes are later drawn from this block at provision time.
-    const id8 = String(course.course_id).replace(/-/g, '').substring(0, 8);
-    // Proxmox SDN zone IDs must start with a letter (regex [a-z][a-z0-9]{0,7}),
-    // but a UUID's first hex char is a digit ~62.5% of the time. Prefix a fixed
-    // letter and take 7 hex chars to stay within the 8-char limit.
-    const zoneAbbrev = `cle-${id8.substring(0, 7)}`;
+    // Fire-and-forget: provision the lab network out of band.
+    provisionCourseLab(course).catch((err) =>
+      console.error('[CLE] Background lab provision crashed:', err.message)
+    );
+
+    res.status(201).json(course);
+  } catch (error) {
+    console.error('[CLE] Create course error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Reserve a course's lab network in the background, then mark the course ready.
+ * Runs detached from the create request (which has already returned). On
+ * success: links the crucible_challenge + flips provision_status to 'ready'.
+ * On failure: marks 'failed' — reserveLabNetwork self-cleans any partially
+ * created SDN infra, so no challenge_id is left dangling on the course.
+ */
+async function provisionCourseLab(course) {
+  const id8 = String(course.course_id).replace(/-/g, '').substring(0, 8);
+  // Proxmox SDN zone IDs must start with a letter (regex [a-z][a-z0-9]{0,7}),
+  // but a UUID's first hex char is a digit ~62.5% of the time. Prefix a fixed
+  // letter and take 7 hex chars to stay within the 8-char limit.
+  const zoneAbbrev = `cle-${id8.substring(0, 7)}`;
+  try {
     const reservation = await reserveLabNetwork({
       challengeKey: `cle-course-${id8}`,
-      name: `CLE: ${course_name}`,
-      description: `Workstation lab for CLE course ${course_name}`,
+      name: `CLE: ${course.course_name}`,
+      description: `Workstation lab for CLE course ${course.course_name}`,
       subnetScheme: 'v2',
-      maxLanes: maxStudents,
+      maxLanes: course.max_students,
       zoneAbbrev,
       spec: { cle: true, course_id: course.course_id, purpose: 'cle_course_workstations' },
       log: (m) => console.log(`[CLE] Course lab: ${m}`),
@@ -198,26 +223,19 @@ router.post('/', adminOnly, async (req, res) => {
 
     await query(`
       UPDATE cle_course
-          SET challenge_id = $1, challenge_key = $2, subnet_scheme = $3, updated_at = NOW()
+          SET challenge_id = $1, challenge_key = $2, subnet_scheme = $3,
+              provision_status = 'ready', updated_at = NOW()
         WHERE course_id = $4
     `, [reservation.challenge_id, reservation.challenge_key, reservation.subnet_scheme, course.course_id]);
-
-    res.status(201).json({
-      ...course,
-      challenge_id: reservation.challenge_id,
-      challenge_key: reservation.challenge_key,
-      vxlan_block: reservation.vxlan_block,
-    });
+    console.log(`[CLE] Course lab ready: ${course.course_id}`);
   } catch (error) {
-    console.error('[CLE] Create course error:', error.message);
-    // Roll back the course row if the lab reservation failed — don't leave a
-    // course without its reserved network.
-    if (createdCourseId) {
-      await query(`DELETE FROM cle_course WHERE course_id = $1`, [createdCourseId]).catch(() => {});
-    }
-    res.status(500).json({ error: error.message });
+    console.error(`[CLE] Course lab provision failed for ${course.course_id}:`, error.message);
+    await query(`
+      UPDATE cle_course SET provision_status = 'failed', updated_at = NOW()
+        WHERE course_id = $1
+    `, [course.course_id]).catch(() => {});
   }
-});
+}
 
 /**
  * PATCH /api/cle/courses/:courseId — Update course details

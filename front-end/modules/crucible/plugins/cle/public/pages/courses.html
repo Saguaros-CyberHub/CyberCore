@@ -56,6 +56,10 @@
     .badge-active { background: #d1fae5; color: #065f46; }
     .badge-draft { background: #fef3c7; color: #92400e; }
     .badge-archived { background: #e5e7eb; color: #4b5563; }
+    .badge-provisioning { background: #fef3c7; color: #92400e; }
+    .badge-failed { background: #fee2e2; color: #991b1b; }
+    .badge-provisioning .spinner { display: inline-block; width: 0.6rem; height: 0.6rem; margin-right: 0.3rem; border: 2px solid #92400e; border-top-color: transparent; border-radius: 50%; vertical-align: -1px; animation: badge-spin 0.7s linear infinite; }
+    @keyframes badge-spin { to { transform: rotate(360deg); } }
 
     .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.4); z-index: 999; align-items: center; justify-content: center; }
     .modal-overlay.active { display: flex; }
@@ -439,11 +443,24 @@
 
         // Update filter counts
         updateFilterCounts();
-        
+
         // Render courses
         renderCoursesList();
+
+        // While any course's lab is still provisioning in the background, keep
+        // refreshing so its "Initializing…" label flips to ready on its own.
+        scheduleProvisionPoll();
       } catch (e) {
         document.getElementById('coursesList').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    let provisionPollTimer = null;
+    function scheduleProvisionPoll() {
+      const stillProvisioning = allCourses.some(c => c.provision_status === 'provisioning');
+      if (provisionPollTimer) { clearTimeout(provisionPollTimer); provisionPollTimer = null; }
+      if (stillProvisioning) {
+        provisionPollTimer = setTimeout(loadCourses, 5000);
       }
     }
 
@@ -454,23 +471,38 @@
       document.getElementById('inactiveCount').textContent = inactiveCourses;
     }
 
-    function renderCoursesList() {
-      const coursesList = document.getElementById('coursesList');
-      
-      if (allCourses.length === 0) {
-        coursesList.innerHTML = '<div class="empty-state"><p>No courses assigned. Contact your administrator.</p></div>';
-        return;
-      }
+    // Status label shown while a course's lab network is still being reserved
+    // in the background (provision_status !== 'ready'). Returns '' when ready.
+    function courseStatusBadge(c) {
+      if (c.provision_status === 'provisioning')
+        return '<div class="course-item-meta"><span class="badge badge-provisioning"><span class="spinner"></span>Initializing…</span></div>';
+      if (c.provision_status === 'failed')
+        return '<div class="course-item-meta"><span class="badge badge-failed">Setup failed</span></div>';
+      return '';
+    }
 
-      coursesList.innerHTML = allCourses.map(c => `
+    function courseItemHtml(c) {
+      return `
         <div class="course-item" onclick="selectCourse('${c.course_id}', this)">
           <h4>${escHtml(c.course_name)}</h4>
           <div class="course-item-meta">
             <span class="course-item-code">${escHtml(c.code || 'No code')}</span>
             <span>👥 ${c.student_count || 0} | 🖥️ ${c.vm_count || 0}</span>
           </div>
+          ${courseStatusBadge(c)}
         </div>
-      `).join('');
+      `;
+    }
+
+    function renderCoursesList() {
+      const coursesList = document.getElementById('coursesList');
+
+      if (allCourses.length === 0) {
+        coursesList.innerHTML = '<div class="empty-state"><p>No courses assigned. Contact your administrator.</p></div>';
+        return;
+      }
+
+      coursesList.innerHTML = allCourses.map(courseItemHtml).join('');
     }
 
     function selectCourse(courseId, element) {
@@ -507,15 +539,7 @@
         return;
       }
 
-      coursesList.innerHTML = filtered.map(c => `
-        <div class="course-item" onclick="selectCourse('${c.course_id}', this)">
-          <h4>${escHtml(c.course_name)}</h4>
-          <div class="course-item-meta">
-            <span class="course-item-code">${escHtml(c.code || 'No code')}</span>
-            <span>👥 ${c.student_count || 0} | 🖥️ ${c.vm_count || 0}</span>
-          </div>
-        </div>
-      `).join('');
+      coursesList.innerHTML = filtered.map(courseItemHtml).join('');
     }
 
     async function viewCourse(courseId) {
@@ -599,8 +623,9 @@
 
     let creatingCourse = false;
     async function createCourse() {
-      // Reserving the lab network (SDN reload + bridge wait) takes tens of
-      // seconds; guard against double-submit creating duplicate courses.
+      // Guard against a double-click submitting twice and creating duplicates.
+      // The lab network is reserved in the background after this returns; the
+      // new course shows an "Initializing…" label until it's ready.
       if (creatingCourse) return;
 
       const courseName = document.getElementById('createCourseName').value.trim();
@@ -630,7 +655,7 @@
       if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
 
       try {
-        toast('Creating course and reserving its lab network…');
+        toast('Creating course…');
         await api('POST', '/courses', {
           course_name: courseName,
           description: description || null,
@@ -640,7 +665,7 @@
           max_students: maxStudents
         });
 
-        toast('Course created successfully!');
+        toast('Course created — initializing its lab network…');
         closeModal('createCourseModal');
         document.getElementById('createCourseName').value = '';
         document.getElementById('createCourseDesc').value = '';

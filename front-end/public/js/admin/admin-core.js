@@ -89,20 +89,28 @@ async function loadClusterHealth() {
       statusEl.className = 'badge badge-green';
     }
 
-    // Ceph storage bar (cluster-wide, shown above per-node gauges)
+    // Ceph storage bars (cluster-wide, shown above per-node gauges). When more
+    // than one pool exists they sit side by side, left to right, on their own
+    // full-width row. Fall back to the single `ceph` entry for older responses.
     const gauges = document.getElementById('clusterNodeGauges');
+    const cephPools = (health.cephPools && health.cephPools.length)
+      ? health.cephPools
+      : (health.ceph ? [health.ceph] : []);
     let cephHtml = '';
-    if (health.ceph) {
-      const c = health.ceph;
-      cephHtml = `
-        <div style="background: #f7fafc; border-radius: 8px; padding: 0.6rem 0.75rem; grid-column: 1 / -1;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem;">
-            <span style="font-weight: 600; font-size: 0.8rem;">Ceph Storage <span style="font-weight: 400; color: var(--gray-500);">(${c.storage})</span></span>
+    if (cephPools.length) {
+      const poolCards = cephPools.map(c => `
+        <div style="background: #f7fafc; border-radius: 8px; padding: 0.6rem 0.75rem;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.3rem; gap: 0.5rem;">
+            <span style="font-weight: 600; font-size: 0.8rem;">Ceph Storage <span style="font-weight: 400; color: var(--gray-500);">(${escHtml(c.storage)})</span></span>
             <span style="font-size: 0.8rem; font-weight: 600; color: ${gaugeColor(c.pct)};">${c.used_tb} / ${c.total_tb} TiB (${c.pct}%)</span>
           </div>
           <div style="background: #e2e8f0; border-radius: 4px; height: 8px;">
             <div style="background: ${gaugeColor(c.pct)}; height: 100%; border-radius: 4px; width: ${c.pct}%; transition: width 0.5s;"></div>
           </div>
+        </div>`).join('');
+      cephHtml = `
+        <div style="grid-column: 1 / -1; display: grid; grid-template-columns: repeat(${cephPools.length}, 1fr); gap: 0.75rem;">
+          ${poolCards}
         </div>`;
     }
 

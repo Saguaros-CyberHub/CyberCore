@@ -56,20 +56,29 @@ async function getClusterHealth(proxmoxAPI) {
     }
   }
 
-  // Pass 3: Get Ceph/shared storage usage from storage resources
-  // Look for RBD/Ceph storage entries in cluster resources
-  let ceph = null;
-  const storageResources = resources.filter(r => r.type === 'storage');
-  // Find the primary VM storage pool (RBD type, or the one named vmpool)
-  const rdbStorages = storageResources.filter(r =>
-    r.storage === 'vmpool' || r.plugintype === 'rbd'
+  // Pass 3: Get Ceph/shared storage usage from storage resources.
+  // Proxmox reports one storage row per (node, pool); collapse to one entry per
+  // pool name since every node reports the same cluster-wide Ceph stats. The
+  // dashboard used to grab rdbStorages[0], but Proxmox's row order isn't stable,
+  // so with more than one pool (e.g. vmpool + targetpool) the display flipped
+  // between them on each poll. Surface every pool in a stable order instead.
+  const rbdStorages = resources.filter(r =>
+    r.type === 'storage' && (r.plugintype === 'rbd' || r.storage === 'vmpool')
   );
-  if (rdbStorages.length > 0) {
-    // Use the first matching entry (all nodes report the same Ceph pool stats)
-    const s = rdbStorages[0];
+  // Stable order: the primary VM pool first, then the rest alphabetically.
+  rbdStorages.sort((a, b) => {
+    if (a.storage === 'vmpool') return -1;
+    if (b.storage === 'vmpool') return 1;
+    return String(a.storage).localeCompare(String(b.storage));
+  });
+  const cephPools = [];
+  const seenPools = new Set();
+  for (const s of rbdStorages) {
+    if (seenPools.has(s.storage)) continue;
+    seenPools.add(s.storage);
     const maxdisk = Number(s.maxdisk || 0);
     const disk = Number(s.disk || 0);
-    ceph = {
+    cephPools.push({
       storage: s.storage,
       used_bytes: disk,
       total_bytes: maxdisk,
@@ -78,8 +87,11 @@ async function getClusterHealth(proxmoxAPI) {
       used_tb: Math.round(disk / (1024 ** 4) * 100) / 100,
       total_tb: Math.round(maxdisk / (1024 ** 4) * 100) / 100,
       pct: maxdisk > 0 ? Math.round((disk / maxdisk) * 100) : 0
-    };
+    });
   }
+  // Primary pool drives the per-node disk display + storage warning (VMs live
+  // on vmpool); fall back to the first pool if vmpool isn't present.
+  const ceph = cephPools.find(p => p.storage === 'vmpool') || cephPools[0] || null;
 
   // Apply Ceph storage percentage to each node's disk display (since VMs live on Ceph, not local)
   const nodeList = Object.values(nodes);
@@ -105,6 +117,7 @@ async function getClusterHealth(proxmoxAPI) {
     nodes: nodeList,
     totalVMs,
     ceph,
+    cephPools,
     thresholds: {
       max_memory_pct: MAX_NODE_MEMORY_PCT,
       max_storage_pct: MAX_NODE_STORAGE_PCT,
