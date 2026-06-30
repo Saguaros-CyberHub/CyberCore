@@ -266,7 +266,14 @@
         document.getElementById('headerUser').textContent = user.email || '';
       }
 
-      await loadType('weekly');
+      // Honor ?type= from the sidebar dropdown (defaults to weekly), and sync
+      // the in-page Challenge Types nav highlight to match.
+      const paramType = new URLSearchParams(window.location.search).get('type');
+      const initialType = (paramType && TYPE_META[paramType]) ? paramType : 'weekly';
+      currentType = initialType;
+      document.querySelectorAll('.type-nav-item').forEach(i =>
+        i.classList.toggle('active', i.dataset.type === initialType));
+      await loadType(initialType);
     });
   </script>
 </body>

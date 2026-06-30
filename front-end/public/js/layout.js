@@ -73,6 +73,12 @@ const Layout = {
   // Detect which sub-page is active (for context sub-nav)
   getActiveSubPage() {
     const path = this.currentPage;
+    // Crucible challenge types are selected via ?type= on the dashboard; the
+    // dashboard defaults to 'weekly' when no type is present.
+    if (this.getActiveModule() === 'crucible') {
+      const type = new URLSearchParams(window.location.search).get('type');
+      return type || 'weekly';
+    }
     // Handle both /ciab/dashboard and legacy /dashboard
     if (path.includes('dashboard')) return 'dashboard';
     if (path.includes('profile') || path.includes('my-profiles')) return 'profiles';
@@ -160,6 +166,13 @@ const Layout = {
     const subnavData = this._subnavs[effectiveModule];
     const subnav = subnavData?.items;
 
+    // A module/plugin only gets the dropdown arrow if it actually has a submenu.
+    const hasSubnav = (mod) => {
+      const entryKey = (mod.entry_url || '').split('/').filter(Boolean)[0];
+      const sn = this._subnavs[mod.key] || this._subnavs[entryKey];
+      return !!(sn && sn.items && sn.items.length);
+    };
+
     const buildSubnav = () => {
       if (!subnav) return '';
       let s = `<div class="nav-section module-subnav">`;
@@ -184,7 +197,8 @@ const Layout = {
         <div class="nav-section-title">Modules</div>`;
       modules.forEach(mod => {
         const active = isModuleActive(mod) ? 'active' : '';
-        html += `<a href="${mod.entry_url}" class="nav-item ${active}">
+        const subnavClass = hasSubnav(mod) ? 'has-subnav' : '';
+        html += `<a href="${mod.entry_url}" class="nav-item ${active} ${subnavClass}">
           <span>${mod.name}</span>
         </a>`;
         if (active) html += buildSubnav();
@@ -198,7 +212,8 @@ const Layout = {
         <div class="nav-section-title">Plugins</div>`;
       plugins.forEach(mod => {
         const active = isModuleActive(mod) ? 'active' : '';
-        html += `<a href="${mod.entry_url}" class="nav-item ${active}">
+        const subnavClass = hasSubnav(mod) ? 'has-subnav' : '';
+        html += `<a href="${mod.entry_url}" class="nav-item ${active} ${subnavClass}">
           <span>${mod.name}</span>
         </a>`;
         if (active) html += buildSubnav();
@@ -230,23 +245,26 @@ const Layout = {
         data = await API.modules.list();
         this._modules = data;
         this._subnavs = data.subnavs || {};
+        // Persist across full page navigations so a transient failure (e.g. an
+        // /api/ rate-limit during quick navigation) doesn't collapse the menu.
+        try { sessionStorage.setItem('cyberhub-modules', JSON.stringify(data)); } catch (_) {}
       }
 
-      const nav = document.getElementById('sidebarNav');
-      if (nav) {
-        nav.innerHTML = this.buildNavHTML(data.modules || [], data.plugins || []);
-        const activeModuleItem = nav.querySelector('.nav-item.active:not(.subnav-item)');
-        if (activeModuleItem) {
-          const navRect = nav.getBoundingClientRect();
-          const itemRect = activeModuleItem.getBoundingClientRect();
-          nav.scrollTop = nav.scrollTop + itemRect.top - navRect.top - 8;
-        }
-      }
+      this.renderNav(data);
 
       // Load profile count if CIAB sub-nav is visible
       this.loadProfileCount();
     } catch (e) {
-      // Fallback: show hub link if modules fail to load
+      // The fetch failed — fall back to the last-known-good module list so the
+      // menu stays usable. Only show the bare Home link if we've never had one.
+      let cached = null;
+      try { cached = JSON.parse(sessionStorage.getItem('cyberhub-modules')); } catch (_) {}
+      if (cached) {
+        this._subnavs = cached.subnavs || {};
+        this.renderNav(cached);
+        this.loadProfileCount();
+        return;
+      }
       const nav = document.getElementById('sidebarNav');
       if (nav) {
         nav.innerHTML = `
@@ -257,6 +275,20 @@ const Layout = {
             </a>
           </div>`;
       }
+    }
+  },
+
+  // Render the nav sections from a modules payload and scroll the active item
+  // into view. Shared by the live fetch and the cached fallback.
+  renderNav(data) {
+    const nav = document.getElementById('sidebarNav');
+    if (!nav) return;
+    nav.innerHTML = this.buildNavHTML(data.modules || [], data.plugins || []);
+    const activeModuleItem = nav.querySelector('.nav-item.active:not(.subnav-item)');
+    if (activeModuleItem) {
+      const navRect = nav.getBoundingClientRect();
+      const itemRect = activeModuleItem.getBoundingClientRect();
+      nav.scrollTop = nav.scrollTop + itemRect.top - navRect.top - 8;
     }
   },
 

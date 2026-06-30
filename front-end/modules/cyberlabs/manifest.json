@@ -3,7 +3,7 @@
   "name": "CyberLabs",
   "icon": "\ud83e\uddea",
   "description": "On-demand virtualization environments for student projects, research, and hands-on learning",
-  "entry_url": "/cyberlabs/dashboard",
+  "entry_url": "/cyberlabs",
   "category": "module",
   "color": "#1e5288",
   "active": true,

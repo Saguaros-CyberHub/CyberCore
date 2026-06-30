@@ -89,8 +89,8 @@
   transition: color 0.3s ease;
 }
 
-/* Triangle arrow */
-.nav-item::before {
+/* Triangle arrow — only on items that actually have a submenu (dropdown) */
+.nav-item.has-subnav::before {
   content: '';
   position: absolute;
   left: 10px;
@@ -102,7 +102,11 @@
   border-bottom: 5px solid transparent;
   border-left: 7px solid rgba(255, 255, 255, 0.2);
   z-index: 2;
-  transition: border-left-color 0.3s ease;
+  transition: border-left-color 0.3s ease, transform 0.25s ease;
+}
+/* Rotate the arrow down when its module is expanded (active) */
+.nav-item.has-subnav.active::before {
+  transform: translateY(-50%) rotate(90deg);
 }
 
 /* Red carpet fill */

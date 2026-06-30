@@ -3,7 +3,7 @@
   "name": "The Forge",
   "icon": "\u2692\ufe0f",
   "description": "Malware analysis and sandbox environment",
-  "entry_url": "/forge/dashboard",
+  "entry_url": "/forge",
   "category": "module",
   "color": "#ed8936",
   "active": true,

@@ -23,5 +23,19 @@
     }
   ],
   "staticDir": "public",
-  "staticMountPath": "/crucible"
+  "staticMountPath": "/crucible",
+  "subnav": {
+    "label": "Challenge Types",
+    "items": [
+      { "label": "📅 Weekly Challenges", "url": "/crucible/dashboard?type=weekly", "page": "weekly" },
+      { "label": "💀 Vulnerable Boxes", "url": "/crucible/dashboard?type=vuln", "page": "vuln" },
+      { "label": "🏁 Group CTF", "url": "/crucible/dashboard?type=groupctf", "page": "groupctf" },
+      { "label": "👑 King of the Hill", "url": "/crucible/dashboard?type=koth", "page": "koth" },
+      { "label": "⚔️ Red vs Blue", "url": "/crucible/dashboard?type=redvsblue", "page": "redvsblue" },
+      { "label": "🚨 IR / SOC Sim", "url": "/crucible/dashboard?type=ir", "page": "ir" },
+      { "label": "🎯 CTF Events", "url": "/crucible/dashboard?type=ctf_event", "page": "ctf_event" },
+      { "label": "🛠️ BYO CTF", "url": "/crucible/dashboard?type=byoctf", "page": "byoctf" },
+      { "label": "🏆 Leaderboard", "url": "/crucible/dashboard?type=leaderboard", "page": "leaderboard" }
+    ]
+  }
 }
