@@ -1,457 +1,170 @@
-# CyberHub Plugin Development Guide
+# CyberHub Module & Plugin Guide
 
-This guide covers how to create, develop, and deploy plugins for the CyberHub platform.
+CyberHub's Express app ([front-end/src/server.js](../front-end/src/server.js)) discovers its feature areas at boot via [front-end/src/module-loader.js](../front-end/src/module-loader.js) — there is no separate plugin framework, CLI, or `src/core/` package. This doc describes that loader as it actually behaves.
 
-## Quick Start: 5-Minute Plugin
+There are two levels:
+
+- **Modules** — top-level feature areas under [front-end/modules/](../front-end/modules/) (`crucible`, `cyberlabs`, `forge`, `library`, `university`, `cyberwiki`, `archive`).
+- **Plugins** — nested under a module's own `plugins/` subdirectory, e.g. [front-end/modules/crucible/plugins/ciab/](../front-end/modules/crucible/plugins/ciab/) and `.../crucible/plugins/cle/`. Structurally identical to modules, just discovered one level deeper and tagged with `parent_module`.
+
+## How discovery works
+
+On every app start, `module-loader.js`:
+
+1. Reads every directory in `front-end/modules/`. Each one **must** have a `manifest.json` or it's skipped with a warning.
+2. If the manifest has a `database` block, provisions that database (creates it if missing, runs `migrations/*.sql` in filename order, then calls `setPool()` on `utils/db.js` inside that module/plugin if it exports one).
+3. Upserts the manifest into the `cybercore_module` table (drives the sidebar and `GET /api/modules`).
+4. Mounts each entry in `routes[]` at its `mountPath` with `app.use(...)`.
+5. Serves `staticDir` at `staticMountPath` if present.
+6. Recurses into `<module>/plugins/*/manifest.json` and repeats steps 2–5 for each plugin, setting `parent_module` to the owning module's directory name.
+
+**There is no enable/disable switch, no CLI, and no hot reload.** `manifest.active` only sets the `active` column in `cybercore_module` (used to hide/show things in the UI) — routes are mounted unconditionally at startup regardless of that flag. To actually remove a module or plugin's routes, delete or rename its directory and restart the app.
+
+## manifest.json reference
+
+Fields actually read by the loader (see real examples: [modules/crucible/manifest.json](../front-end/modules/crucible/manifest.json), [modules/crucible/plugins/ciab/manifest.json](../front-end/modules/crucible/plugins/ciab/manifest.json)):
+
+```jsonc
+{
+  "key": "my-plugin",            // unique; primary key in cybercore_module
+  "name": "My Plugin",
+  "icon": "🔌",                   // emoji shown in sidebar
+  "description": "One-line description shown in the module grid",
+  "entry_url": "/my-plugin/dashboard",
+  "category": "plugin",          // "module" for top-level modules, "plugin" for nested ones
+  "color": "#48bb78",
+  "active": true,
+  "display_order": 10,
+  // "parent_module" is set automatically by the loader for plugins — don't set it by hand
+
+  "routes": [
+    { "file": "routes/pages.js", "mountPath": "/my-plugin" },
+    { "file": "routes/api.js",   "mountPath": "/" }
+  ],
+
+  "staticDir": "public",
+  "staticMountPath": "/my-plugin",
+
+  "database": {                  // omit entirely if you don't need your own DB
+    "name": "my_plugin_db",
+    "migrations": "migrations"
+  },
+
+  "subnav": {
+    "label": "My Plugin",
+    "items": [
+      { "label": "Dashboard", "icon": "📊", "url": "/my-plugin/dashboard", "page": "dashboard" },
+      { "label": "Admin",     "icon": "🚀", "url": "/my-plugin/admin",    "page": "admin", "roles": ["admin"] }
+    ]
+  }
+}
+```
+
+Notes:
+- `routes[].mountPath` is whatever you pass to `app.use()` — mount API routes at `/` and let the router itself define paths like `/api/my-plugin/...`, or mount at a prefix directly. Look at an existing plugin's `routes/api.js` for the convention it uses.
+- `subnav.items[].roles` is enforced by the frontend sidebar renderer, not the loader — always also gate the actual route handlers server-side with `requireRole`.
+- Each module/plugin gets its own real Postgres **database** if it declares one (not just a table prefix) — e.g. the Crucible `ciab` plugin owns `clinic_db`, `cle` owns `cle_db`. Core platform tables (`cybercore_user`, `cybercore_module`, etc.) live in `cybercore_db`; see the main [README](../README.md#database-schema-overview).
+
+## Creating a new module
 
 ```bash
-# 1. Create your plugin directory
-mkdir -p src/installed-plugins/[module]-plugins/[plugin-name]
-
-# 2. Create required files
-mkdir -p src/installed-plugins/[module]-plugins/[plugin-name]/routes
-mkdir -p src/installed-plugins/[module]-plugins/[plugin-name]/services
-
-# 3. Create manifest.json
-# See template below
-
-# 4. Create routes/index.js
-# See template below
-
-# 5. Restart the server
-npm start
-
-# 6. Your plugin routes are now available at:
-# /api/[module]/[plugin-name]
+mkdir -p front-end/modules/my-module/routes
 ```
 
----
-
-## Plugin Structure
-
-### Minimal Plugin (Required)
-
-```
-src/installed-plugins/[module]-plugins/[plugin-name]/
-├── routes/
-│   └── index.js           # Express router (REQUIRED)
-└── manifest.json          # Plugin metadata (REQUIRED)
-```
-
-### Full-Featured Plugin (Recommended)
-
-```
-src/installed-plugins/[module]-plugins/[plugin-name]/
-├── routes/
-│   └── index.js           # Express router
-├── services/
-│   ├── data.js            # Database operations
-│   ├── validation.js      # Input validation
-│   └── helpers.js         # Utility functions
-├── ui/
-│   ├── pages/
-│   │   └── page.html
-│   ├── css/
-│   │   └── styles.css
-│   └── js/
-│       └── app.js
-├── migrations/
-│   └── 001_init.sql       # Database schema
-├── hooks.js               # Lifecycle hooks
-├── manifest.json          # Plugin metadata
-└── README.md              # Documentation
-```
-
----
-
-## File Templates
-
-### 1. manifest.json
+`front-end/modules/my-module/manifest.json` (minimal):
 
 ```json
 {
-  "name": "my-plugin",
-  "version": "1.0.0",
-  "description": "My awesome plugin",
-  "author": "Your Name",
-  "module": "crucible",
-  "enabled": true,
-  
-  "homepage": "https://github.com/yourusername/my-plugin",
-  
-  "routes": {
-    "basePath": "/api/crucible/my-plugin",
-    "description": "Plugin routes automatically prefixed"
-  },
-  
-  "ui": {
-    "pages": [
-      { "path": "/my-page", "file": "ui/pages/my-page.html" }
-    ],
-    "description": "Frontend pages served by the plugin"
-  },
-  
-  "hooks": [
-    "onEnable",
-    "onDisable",
-    "onInit"
-  ],
-  
-  "dependencies": {
-    "core": ">=1.0.0"
-  },
-  
-  "config": {
-    "debug": false,
-    "timeout": 30000
-  },
-  
-  "keywords": [
-    "crucible",
-    "assessment"
+  "key": "my-module",
+  "name": "My Module",
+  "category": "module",
+  "active": true,
+  "routes": [
+    { "file": "routes/pages.js", "mountPath": "/my-module" }
   ]
 }
 ```
 
-### 2. routes/index.js (Minimal)
+`front-end/modules/my-module/routes/pages.js`:
 
 ```javascript
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../../../core/middleware/auth');
+const { authenticateToken, requireRole } = require('../../../src/middleware/auth');
 
-/**
- * GET /api/[module]/[plugin-name]/
- */
-router.get('/', authenticateToken, async (req, res) => {
-  try {
-    res.json({
-      success: true,
-      message: 'Plugin is working!',
-      userId: req.user.userId
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+router.get('/dashboard', authenticateToken, (req, res) => {
+  res.json({ success: true, userId: req.user.userId });
+});
+
+router.get('/admin', authenticateToken, requireRole('admin'), (req, res) => {
+  res.json({ success: true });
 });
 
 module.exports = router;
 ```
 
-### 3. routes/index.js (Full Example)
+Restart the app (`npm start` / restart the `cybercore-app` container) — there's no hot reload, the loader only runs at startup.
+
+## Creating a new plugin (nested under an existing module)
+
+Same shape, one level deeper, e.g. under `crucible`:
+
+```bash
+mkdir -p front-end/modules/crucible/plugins/my-plugin/routes
+```
+
+`front-end/modules/crucible/plugins/my-plugin/manifest.json`:
+
+```json
+{
+  "key": "my-plugin",
+  "name": "My Plugin",
+  "category": "plugin",
+  "active": true,
+  "routes": [
+    { "file": "routes/api.js", "mountPath": "/api/crucible/my-plugin" }
+  ]
+}
+```
+
+`front-end/modules/crucible/plugins/my-plugin/routes/api.js` — note the middleware path is one level deeper than a top-level module (`routes/` → plugin dir → `plugins/` → module dir → `modules/` → `front-end/`, so five `../`):
 
 ```javascript
 const express = require('express');
 const router = express.Router();
-const { authenticateToken, requireRole } = require('../../../core/middleware/auth');
-const { getData, saveData } = require('../services/data');
-const { validate } = require('../services/validation');
+const { authenticateToken } = require('../../../../../src/middleware/auth');
 
-/**
- * GET /api/crucible/my-plugin/
- */
 router.get('/', authenticateToken, async (req, res) => {
-  try {
-    const data = await getData(req.user.userId);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/crucible/my-plugin/save
- */
-router.post('/save', authenticateToken, async (req, res) => {
-  try {
-    // Validate input
-    const errors = await validate(req.body);
-    if (errors.length > 0) {
-      return res.status(400).json({ errors });
-    }
-
-    const result = await saveData(req.user.userId, req.body);
-    res.json({ success: true, data: result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * GET /api/crucible/my-plugin/admin/report
- * Admin-only endpoint
- */
-router.get('/admin/report', requireRole('admin'), async (req, res) => {
-  try {
-    const report = await generateReport();
-    res.json({ success: true, report });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  res.json({ success: true, message: 'Plugin is working!', userId: req.user.userId });
 });
 
 module.exports = router;
 ```
 
-### 4. services/data.js
+## Middleware & utils available to routes
 
 ```javascript
-const { query } = require('../../../utils/db');
+// front-end/src/middleware/auth.js
+const { authenticateToken, requireRole, optionalAuth } = require('.../src/middleware/auth');
 
-/**
- * Get data for a user
- */
-async function getData(userId) {
-  const result = await query(
-    'SELECT * FROM my_plugin_data WHERE user_id = $1',
-    [userId]
-  );
-  return result.rows;
-}
+// front-end/src/middleware/errorHandler.js
+const { asyncHandler } = require('.../src/middleware/errorHandler');
 
-/**
- * Save data for a user
- */
-async function saveData(userId, data) {
-  const result = await query(
-    'INSERT INTO my_plugin_data (user_id, data) VALUES ($1, $2) RETURNING *',
-    [userId, JSON.stringify(data)]
-  );
-  return result.rows[0];
-}
+// front-end/src/middleware/activity-logger.js
+const { logActivity } = require('.../src/middleware/activity-logger');
 
-module.exports = { getData, saveData };
+// front-end/src/utils/db.js — cybercore_db pool (core tables)
+const { query } = require('.../src/utils/db');
+
+// front-end/src/utils/cybercore-db.js — same pool, used internally by the loader
 ```
 
-### 5. hooks.js
+If your module/plugin has its own database, give it a local `utils/db.js` that exports a `setPool(pool)` function — the loader calls it automatically after running migrations, and your routes/services can then import that local `db.js` to query their own database instead of `cybercore_db`. See [modules/crucible/plugins/ciab/utils/db.js](../front-end/modules/crucible/plugins/ciab/utils/db.js) for a real example.
 
-```javascript
-/**
- * Called when plugin is enabled
- */
-async function onEnable(manifest) {
-  console.log(`✅ Plugin enabled: v${manifest.version}`);
-  // Initialize resources
-}
+## Best practices
 
-/**
- * Called when plugin is disabled
- */
-async function onDisable(manifest) {
-  console.log(`⏸️  Plugin disabled`);
-  // Cleanup resources
-}
-
-/**
- * Called when system initializes
- */
-async function onInit(app, manifest) {
-  console.log(`🔌 Plugin initialized`);
-}
-
-module.exports = { onEnable, onDisable, onInit };
-```
-
-### 6. migrations/001_init.sql
-
-```sql
-CREATE TABLE IF NOT EXISTS my_plugin_data (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id),
-  data JSONB,
-  created_at TIMESTAMP DEFAULT NOW(),
-  updated_at TIMESTAMP DEFAULT NOW()
-);
-
-CREATE INDEX ON my_plugin_data(user_id);
-CREATE INDEX ON my_plugin_data(created_at);
-```
-
----
-
-## Managing Plugins
-
-### List All Plugins
-
-```bash
-npm run plugin:list
-```
-
-### Enable a Plugin
-
-```bash
-npm run plugin:enable crucible/my-plugin
-```
-
-### Disable a Plugin
-
-```bash
-npm run plugin:disable crucible/my-plugin
-```
-
----
-
-## Best Practices
-
-### 1. **Separation of Concerns**
-- Keep routes minimal (just HTTP handling)
-- Move business logic to `services/`
-- Keep data access in separate functions
-
-### 2. **Authentication**
-- Always use `authenticateToken` middleware on protected routes
-- Use `requireRole('admin')` for admin-only endpoints
-- Never skip authentication for sensitive operations
-
-### 3. **Error Handling**
-- Wrap async code in try/catch
-- Return appropriate HTTP status codes
-- Return `{ error: 'message' }` on failure
-
-### 4. **Database**
-- Use prepared statements (parameterized queries)
-- Define schema in `migrations/`
-- Use consistent naming: `plugin_name_table_name`
-
-### 5. **Configuration**
-- Use `process.env` for secrets
-- Define defaults in `manifest.json`
-- Document all config options
-
-### 6. **Logging**
-- Use console.log for important events
-- Prefix logs with plugin name: `[my-plugin]`
-- Include timestamps for debugging
-
-### 7. **API Design**
-- Use RESTful conventions (GET/POST/PUT/DELETE)
-- Return consistent JSON format:
-  ```json
-  {
-    "success": true/false,
-    "data": {...},
-    "error": "message"
-  }
-  ```
-- Document all endpoints in README
-
----
-
-## Example Plugin
-
-See `src/installed-plugins/example-plugins/demo-plugin/` for a complete example:
-
-```bash
-# List plugins
-npm run plugin:list
-
-# Test the demo plugin
-curl http://localhost:3000/api/example/demo-plugin/info
-```
-
----
-
-## Deployment Checklist
-
-- [ ] `manifest.json` created and valid JSON
-- [ ] `routes/index.js` exports Express router
-- [ ] All endpoints tested and working
-- [ ] Authentication applied where needed
-- [ ] Error handling on all endpoints
-- [ ] Database migrations created (if needed)
-- [ ] README.md with documentation
-- [ ] Plugin disabled by default in manifest if still beta
-- [ ] No hardcoded secrets (use .env)
-- [ ] Plugin key follows naming: `module/plugin-name`
-
----
-
-## Troubleshooting
-
-### Plugin Routes Not Loading
-
-```bash
-# 1. Check plugin is enabled in manifest.json
-# 2. Verify directory structure: src/installed-plugins/[module]-plugins/[plugin]/routes/index.js
-# 3. Restart server: npm start
-# 4. Check server console for load errors
-```
-
-### Authentication Not Working
-
-```bash
-# Make sure to import and use the middleware:
-const { authenticateToken } = require('../../../core/middleware/auth');
-router.get('/', authenticateToken, (req, res) => { ... });
-```
-
-### Database Queries Failing
-
-```javascript
-// ✅ Correct (parameterized)
-const result = await query(
-  'SELECT * FROM table WHERE id = $1',
-  [id]
-);
-
-// ❌ Wrong (SQL injection risk)
-const result = await query(`SELECT * FROM table WHERE id = ${id}`);
-```
-
----
-
-## API Reference
-
-### Middleware
-
-```javascript
-// Authentication (required token)
-const { authenticateToken } = require('../../../core/middleware/auth');
-
-// Role checking
-const { requireRole } = require('../../../core/middleware/auth');
-
-// Error handler
-const { asyncHandler, AppError } = require('../../../core/middleware/errorHandler');
-
-// Activity logging
-const { logActivity } = require('../../../core/middleware/activity-logger');
-```
-
-### Database
-
-```javascript
-// Query database
-const { query } = require('../../../utils/db');
-const result = await query('SELECT * FROM table WHERE id = $1', [id]);
-```
-
-### Utils
-
-```javascript
-// UUID generation
-const { v4: uuidv4 } = require('uuid');
-const id = uuidv4();
-```
-
----
-
-## Getting Help
-
-- Check the example plugin: `src/installed-plugins/example-plugins/demo-plugin/`
-- Review existing plugins in `src/installed-plugins/*/`
-- Look at core routes: `src/routes/`
-- Check CyberHub documentation
-
-## Contributing
-
-Ready to share your plugin with the community? Great!
-
-1. Create a GitHub repository
-2. Add your plugin structure
-3. Include comprehensive README
-4. Submit PR or issue to CyberHub
-
----
-
-**Happy Plugin Development! 🔌**
+- Keep route handlers thin — push queries into a module/plugin-local `services/` or `utils/` file.
+- Always gate protected routes with `authenticateToken`, and admin/instructor-only routes with `requireRole(...)`.
+- Use parameterized queries (`query('... WHERE id = $1', [id])`) — never string-interpolate into SQL.
+- Namespace your own tables/database by module or plugin key to avoid collisions with core `cybercore_*` tables.
+- Don't hardcode secrets — read from `process.env` and document new variables in [example.env](../example.env).

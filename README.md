@@ -6,249 +6,281 @@ This repository contains CyberCore service configuration, database schema, orche
 
 ## Responsibilities
 
-- User provisioning and identity mapping
-- Profile database (badges, allocations, progress, achievements)
-- Inter-module orchestration via webhooks and API calls
+- User provisioning, authentication (local + Keycloak), and MFA
+- System-of-record database (modules, resources, allocations, badges, VM inventory)
+- Direct orchestration of lab infrastructure: Proxmox (VM/lane lifecycle), Tailscale (per-lane VPN/routing), Guacamole (clientless remote access)
+- Module and plugin discovery/mounting for CyberHub's feature areas (Crucible, CyberLabs, Forge, University, Library, CyberWiki, Archive)
 - Audit logs and activity tracking
-- Triggering and monitoring workflows across modules via n8n
 
 ## Flowchart
 
 ```mermaid
 flowchart LR
-  %% Clients / Auth
-  HUB[Hub / UI] -->|Authorization: Bearer JWT| N8N["n8n Webhook<br/>User Mgmt & Orchestration"]
+  %% Clients
+  BROWSER["Browser<br/>Hub UI"]
+
+  %% Edge
+  subgraph EDGE["Edge"]
+    CADDY["Caddy<br/>reverse proxy, auto HTTPS"]
+  end
+  BROWSER -->|JWT / session cookie| CADDY
+
+  %% Application
+  subgraph APP["CyberCore App (Express/Node)"]
+    API["REST API<br/>auth, modules, admin, lanes"]
+    LOADER["Module + Plugin Loader<br/>manifest.json discovery"]
+  end
+  CADDY -->|"/ "| API
+  CADDY -->|"/guacamole/*"| GUAC
 
   %% Fast Path (Ephemeral)
   subgraph FAST["Fast Path (Ephemeral)"]
-    RDS["Redis<br/>TTL cache, counters, idempotency"]
+    RDS["Redis<br/>sessions, cache, idempotency"]
   end
-  N8N <--> RDS
+  API <--> RDS
 
   %% System of Record
   subgraph SOR["System of Record"]
-    PG["PostgreSQL<br/>users, roles, sessions, audit"]
+    PG["PostgreSQL<br/>cybercore_db + per-plugin DBs"]
   end
-  N8N <--> PG
+  API <--> PG
+  LOADER --> PG
 
-  %% Infrastructure & Modules
-  subgraph INFRA["Infrastructure & Modules"]
-    PVE["Proxmox / SDN"]
-    OPN["OPNsense / WG & routes"]
-    CEPH["Ceph RBD"]
-    LMS["Moodle / University"]
+  %% Remote Access
+  subgraph REMOTE["Remote Access"]
+    GUAC["Guacamole<br/>web client"]
+    GUACD["guacd<br/>RDP/VNC/SSH proxy"]
   end
-  N8N -->|provision / teardown| PVE
-  N8N -->|network access / lanes| OPN
-  PVE -->|VM disks| CEPH
-  N8N -->|enroll / badges| LMS
+  GUAC <--> GUACD
+  API -->|provision sessions| GUAC
 
-  %% Observability
-  subgraph OBS["Observability"]
-    PRM["Prometheus"]
-    GRAF["Grafana"]
+  %% Infrastructure Providers
+  subgraph INFRA["Infrastructure Providers"]
+    PVE["Proxmox<br/>VM/lane clone, start, destroy"]
+    TS["Tailscale<br/>per-lane auth keys, routes"]
+    OPN["OPNsense<br/>lab network segmentation"]
   end
-  PRM <-->|scrape metrics| N8N
-  GRAF --- PRM
+  API -->|clone / start / destroy| PVE
+  API -->|mint lane auth keys| TS
+  GUACD -->|RDP/VNC/SSH| PVE
+  PVE --- OPN
+
+  %% External Services
+  subgraph EXT["External Services"]
+    CLAUDE["Anthropic API<br/>AI profile/vuln-app generation"]
+    FTP["FTP (vsftpd)<br/>profile delivery"]
+  end
+  API -->|CIAB plugin| CLAUDE
+  API -->|CIAB plugin| FTP
 ```
 
 ## Architecture Notes
 
-CyberCore follows a simple control-plane pattern:
+CyberCore follows a simple control-plane pattern, with the Express app itself acting as the orchestrator (there is no separate workflow engine):
 
-- PostgreSQL is the system of record for users, modules, resources, allocations, and audit history.
-- Redis is an ephemeral fast path for workflow idempotency, counters, TTL caches, and queue coordination.
-- n8n executes workflows that implement provisioning, teardown, synchronization, and module-specific operations.
-- External systems such as Proxmox, OPNsense, Ceph, and Moodle are treated as providers. CyberCore stores references and state, then drives changes through workflows.
+- PostgreSQL (`cybercore_db`) is the system of record for users, modules, resources, allocations, badges, and VM/lane inventory. Modules and plugins that need their own schema (e.g. the Crucible `ciab` and `cle` plugins) get their own auto-provisioned database, declared in their `manifest.json`.
+- Redis backs sessions (via `connect-redis`) and is available as a general-purpose ephemeral cache.
+- The app talks directly to providers over their native APIs: Proxmox (clone/start/destroy lab VMs and lanes), Tailscale (mint per-lane VPN auth keys for lane gateways), and Guacamole (provision remote-desktop connections backed by `guacd`).
+- Caddy terminates TLS (automatic Let's Encrypt) and reverse-proxies to the app and to Guacamole; see [docs/offline-mode.md](docs/offline-mode.md) for running without HTTPS.
+- OPNsense enforces network segmentation for lab lanes at the infrastructure layer; CyberCore does not call an OPNsense API directly today.
+- The Anthropic API powers AI-assisted features in the Crucible `ciab` plugin (risk-assessment interviews, profile/vuln-app generation).
 
 ## Database Schema Overview
 
-### Table: `app_user`
+Schema lives in [config/postgres/](config/postgres/); `001_init_db.sql` creates the core tables below, `003_cyberhub_modules.sql` adds display metadata, and `config/postgres/modules/*.sql` adds per-module tables (applied selectively based on `CORE_ENABLED_MODULES`). All core tables are prefixed `cybercore_`.
+
+### Table: `cybercore_user`
 
 - user_id (UUID, PK, generated)
 - username (unique)
 - email (unique, case-insensitive)
-- first_name
-- last_name
+- first_name, last_name
+- organization
+- email_verified (bool)
 - auth_provider (local, keycloak)
-- password_hash (nullable, local auth only)
-- password_alg (nullable, local auth only)
+- password_hash, password_alg (nullable, local auth only)
 - status (active, inactive, suspended, banned, deleted)
-- active (y/n)
-- created_on
-- updated_on
-- last_auth_on
+- active (bool)
+- role (user, student, admin, instructor)
+- group_key (FK → cybercore_group)
+- guac_password (encrypted, for auto-provisioned Guacamole connections)
+- created_at, updated_at, last_auth_at
+- mfa_enabled, mfa_secret, mfa_recovery_codes, mfa_enrolled_at (TOTP MFA, added idempotently at app startup)
 
-### Table: `app_group`
+### Table: `cybercore_group`
 
-- key (PK, text; e.g., cyberlabs, crucible, library, forge, wiki, university)
+- key (PK, text; e.g., cyberlabs, crucible, library, forge, cyberwiki, university, archive)
 - label (friendly name)
-- created_on
+- created_at
 
-### Table: `user_group`
+### Table: `cybercore_user_group`
 
-- user_id (FK → app_user)
-- group_key (FK → app_group)
+- user_id (FK → cybercore_user)
+- group_key (FK → cybercore_group)
 - PK: (user_id, group_key)
 
-### Table: `module`
+### Table: `cybercore_module`
 
-- key (PK, text; e.g., cyberlabs, crucible, library, forge, wiki, university)
-- name (display name)
-- active (y/n)
+- key (PK, text; e.g., cyberlabs, crucible, library, forge, cyberwiki, university, archive, and plugin keys like ciab)
+- name, icon, description, entry_url, category (module/plugin), color, display_order, parent_module
+- active (bool)
+- Upserted at startup by the module/plugin loader from each `manifest.json` — this table drives the sidebar and `/api/modules`.
 
-### Table: `resource`
+### Table: `cybercore_resource`
 
 - resource_id (UUID, PK)
 - type (vm, network, dataset, vpn_account)
-- module_key (FK → module)
+- module_key (FK → cybercore_module)
 - name (unique within module)
-- provider_ref (external ID, e.g., VMID, Ceph ID)
+- provider_ref (external ID, e.g., Proxmox VMID)
 - metadata (JSONB; flexible spec data like vCPU, RAM, storage)
-- status (available, provisioning, allocated, error, retired)
-- created_on
-- updated_on
+- status (available, provisioning, allocated, deleting, error, retired)
+- created_at, updated_at
 
-### Table: `allocation`
+### Table: `cybercore_allocation`
 
 - allocation_id (UUID, PK)
-- resource_id (FK → resource)
-- user_id (nullable FK → app_user)
-- group_key (nullable FK → app_group)
-- starts_at
-- ends_at
+- resource_id (FK → cybercore_resource)
+- user_id (nullable FK → cybercore_user)
+- group_key (nullable FK → cybercore_group)
+- starts_at, ends_at
 - purpose (lab, ctf, course, project, etc.)
-- quota_units (numeric quota like vCPU-hours, GB, etc.)
-- metadata (JSONB; flexible extras)
+- quota_units
+- metadata (JSONB)
 - CHECK (user_id IS NOT NULL OR group_key IS NOT NULL)
 
-### Table: `badge`
+### Table: `cybercore_badge` / `cybercore_user_badge`
 
-- badge_id (UUID, PK)
-- key (unique, text; e.g., intro_ctf, cyberlabs_vm_master, wiki_contributor)
-- name (display name)
-- description (text)
-- module_key (nullable FK → module; null = global badge)
-- icon_url (nullable; path to badge image)
-- active (y/n)
-- created_on
+- `cybercore_badge`: badge_id (PK), key (unique), name, description, module_key (nullable — null = global badge), icon_url, active, created_at
+- `cybercore_user_badge`: user_id + badge_id (composite PK), earned_at, awarded_by, metadata
 
-### Table: `user_badge`
+### Tables: `cybercore_vm_template` / `cybercore_vm_instance` / `cybercore_template_catalog`
 
-- user_id (FK → app_user)
-- badge_id (FK → badge)
-- earned_at (timestamp)
-- awarded_by (nullable FK → app_user; who granted it)
-- metadata (JSONB; e.g., evidence, score)
-- PK: (user_id, badge_id)
+Track Proxmox VM templates and live instances used by lab provisioning: template catalog (OS images, workstation templates, lane-networking/gateway templates, challenge templates), per-module template definitions, and instance records (power state, provider node/VMID, hostname, IP, lifecycle timestamps).
+
+### Tables: `cybercore_event` / `cybercore_lane`
+
+Events (e.g. a CTF event or course run) and the per-user/per-event network lanes (VXLAN-isolated) provisioned for them, with status tracking (`pending` → `deploying` → `active` → `suspended`/`error`/`deleted`).
+
+### Other core tables
+
+- `deployed_groups` / `account_schedules` — admin batch-deploy tracking and time-gated group account access windows.
+- `lane_bootstrap_tokens` — single-use bootstrap payloads delivered to lane gateways on first boot.
+
+### Plugin-owned databases
+
+Plugins that declare a `database` block in their `manifest.json` get an entirely separate, auto-provisioned Postgres database (not just a table prefix) — e.g. the Crucible `ciab` plugin owns `clinic_db`, and `cle` owns `cle_db`. See [docs/PLUGIN_GUIDE.md](docs/PLUGIN_GUIDE.md).
 
 ## Quick Start
 
 ### Run Docker Compose
 
 ```bash
-docker compose -f cybercore-compose.yml up -d
+cp example.env .env   # fill in the REPLACE_ME values
+docker compose up -d
 ```
+
+See [docs/offline-mode.md](docs/offline-mode.md) for running without a public domain (LAN or localhost-only modes).
 
 ### Web Interfaces
 
-- Adminer (Database): http://localhost:8080
-- n8n (Workflows): http://localhost:5678
+- CyberHub (via Caddy): https://\<CYBERHUB_HOST\> (or `http://localhost` in offline mode)
+- Guacamole remote console: same origin, at `/guacamole/`
+- Adminer (Database): http://localhost:8181
+- CyberHub app directly (local debugging only, bypasses Caddy): http://127.0.0.1:3000
 
 ## Service Overview
 
-| Service | Port | Description |
-|---------|------|-------------|
-| PostgreSQL | 5432 | Main database (CyberCore system of record) |
-| Redis | 6379 | Ephemeral cache, counters, idempotency, queues |
-| n8n | 5678 | Workflow automation and orchestration |
-| Adminer | 8080 | Database web interface |
-
-Run `./cybercore.sh` to access the interactive management interface.
-
-## Services Included
-
-When you start services through the CLI or scripts, the following are launched:
-
-1. PostgreSQL Database (`cybercore-postgres`)
-   - Port: 5432
-   - Database: cyberhub_core
-   - Username: cyberhub
-   - Password: cyberpass
-
-2. Adminer Web Interface
-   - URL: http://localhost:8080
-   - Use database credentials above to connect
+| Service | Container | Port(s) | Description |
+|---------|-----------|---------|--------------|
+| Caddy | cybercore-caddy | 80, 443 | Reverse proxy, automatic HTTPS |
+| CyberHub app | cybercore-app | 127.0.0.1:3000 | Express/Node application (API + server-rendered pages) |
+| PostgreSQL | cybercore-postgres | 5432 | System of record (`cybercore_db` + per-plugin databases) |
+| Redis | cybercore-redis | 6379 | Sessions, cache, idempotency |
+| Guacamole + guacd | cybercore-guacamole, cybercore-guacd | (internal only) | Clientless remote desktop gateway, proxied by Caddy at `/guacamole/` |
+| Adminer | cybercore-adminer | 8181 | Database web interface |
+| FTP (vsftpd) | cybercore-ftp | 21, 21100-21110 | Profile delivery |
 
 ## Environment Variables
 
-### Database Settings
+Copy [example.env](example.env) to `.env` and fill in the `REPLACE_ME` values. Notable groups:
 
 ```bash
-DB_HOST=your-postgres-host                   # Default: localhost
-DB_PORT=5432                                 # Default: 5432
-DB_NAME=your_database_name                   # Required
-DB_USER=your_username                        # Required
-DB_PASSWORD=your_password                    # Required
+# Core DB (single source of truth)
+CORE_DB_USER=cyberhub
+CORE_DB_PASSWORD=REPLACE_ME
+CORE_DB_NAME=cybercore_db
+CORE_ENABLED_MODULES=crucible,cyberlabs,forge,library,university,wiki
+
+# App security
+JWT_SECRET=REPLACE_ME
+SESSION_SECRET=REPLACE_ME
+VULN_ASSETS_SECRET=REPLACE_ME   # required in production (signed /vuln-assets URLs)
+
+# Guacamole (runs inside the compose stack)
+GUAC_ADMIN_USER=guacadmin
+GUAC_ADMIN_PASSWORD=REPLACE_ME
+GUAC_DB_PASSWORD=REPLACE_ME
+GUAC_ENCRYPT_KEY=REPLACE_ME      # openssl rand -hex 32
+MFA_ENCRYPT_KEY=REPLACE_ME       # openssl rand -hex 32 (falls back to GUAC_ENCRYPT_KEY)
+
+# Proxmox
+PROXMOX_API_URL=https://your-proxmox-host:8006
+PROXMOX_TOKEN_ID=root@pam!clinic-app-token
+PROXMOX_TOKEN_SECRET=REPLACE_ME
+
+# Tailscale (per-lane VPN auth keys — used by lane bootstrap v2)
+TAILSCALE_OAUTH_CLIENT_ID=REPLACE_ME
+TAILSCALE_OAUTH_CLIENT_SECRET=REPLACE_ME
+TAILSCALE_TAILNET=REPLACE_ME
+
+# Anthropic API (AI-assisted features in the Crucible ciab plugin)
+ANTHROPIC_API_KEY=REPLACE_ME
+LLM_DEFAULT_MODEL=claude-sonnet-4-5
+
+# FTP
+FTP_USER=cybercore
+FTP_PASSWORD=REPLACE_ME
 ```
-
-### n8n Settings
-
-```bash
-N8N_ENCRYPTION_KEY=your-32-char-key          # Required (generated if not set)
-N8N_WEBHOOK_URL=http://localhost:5678        # Default webhook URL
-```
-
-## Database Schema
-
-The PostgreSQL database includes tables for:
-
-- User profiles and authentication
-- Module registration and module awareness
-- Resources and provider references
-- Allocations and lifetime tracking
-- Badges and achievements
-- Activity and audit logs
-- Session management
 
 ## Monitoring and Logs
 
-CyberCore should be operated with basic observability in place. The system should capture:
+There is no bundled metrics stack (no Prometheus/Grafana) — operate this with whatever host-level or Docker-log-based monitoring your environment already has. Application logs are written by [front-end/src/utils/logger.js](front-end/src/utils/logger.js) (`LOG_LEVEL`, `LOG_DIR` env vars) and `console.*` calls are routed through it. Watch:
 
-- Workflow execution history and failures (n8n)
-- Database health and slow queries (PostgreSQL)
-- Queue and cache health (Redis)
-- Provider health checks for Proxmox, OPNsense, and module APIs where applicable
+- Application logs (`docker logs cybercore-app`) for request errors, module/plugin load failures, and provisioning errors (Proxmox, Tailscale, Guacamole)
+- PostgreSQL health (`docker logs cybercore-postgres`, slow queries)
+- Redis health (`docker logs cybercore-redis`)
+- Caddy logs for TLS/reverse-proxy issues (`docker logs cybercore-caddy`)
 
-Log levels are typically:
-
-- INFO: Successful operations
-- WARNING: Non-critical issues
-- ERROR: Operation failures
-- DEBUG: Detailed debugging information
+Log levels: INFO (successful operations), WARN (non-critical issues), ERROR (operation failures), DEBUG (detailed debugging, opt-in via `LOG_LEVEL=debug`).
 
 ## Troubleshooting
 
 ### Common Issues
 
 1. Database connection errors:
-   - Verify PostgreSQL is running: `docker ps | grep postgres`
-   - Check credentials in `.env`
-   - Ensure the database exists
+   - Verify PostgreSQL is running and healthy: `docker ps | grep cybercore-postgres`
+   - Check credentials in `.env` (`CORE_DB_USER`/`CORE_DB_PASSWORD`/`CORE_DB_NAME`)
+   - Ensure the database exists and init scripts in `config/postgres/` ran without error: `docker logs cybercore-postgres`
 
-2. n8n workflow issues:
-   - Check n8n logs: `docker logs cybercore-n8n-webhook`
-   - Verify the encryption key is set
-   - Ensure Redis is running if using queue mode
+2. App fails to start or modules don't load:
+   - Check app logs: `docker logs cybercore-app`
+   - Verify each module under `front-end/modules/*` has a valid `manifest.json`
+   - Confirm Postgres and Redis are healthy first — the app depends on both
 
-3. Container startup failures:
+3. Guacamole / remote console issues:
+   - Check `docker logs cybercore-guacamole` and `docker logs cybercore-guacd`
+   - Verify `GUAC_DB_PASSWORD` and `GUAC_ENCRYPT_KEY` are set and match between `.env` and the running containers
+   - Confirm `cybercore-guacamole-init` completed successfully (one-shot schema job)
+
+4. Container startup failures:
    - Check Docker is running
-   - Verify port availability
-   - Review logs: `docker compose -f cybercore-compose.yml logs`
+   - Verify port availability (80/443 for Caddy, 5432, 6379, 8181, 21)
+   - Review logs: `docker compose logs`
 
-4. Permission errors:
+5. Permission errors:
    - Ensure proper file permissions on data directories
-   - Check Docker socket permissions
+   - Check Docker socket permissions (the app container mounts `/var/run/docker.sock` for the CIAB vuln-app builder)
    - Verify the user is in the docker group
 
 ## Support
