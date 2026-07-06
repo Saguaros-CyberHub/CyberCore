@@ -10,9 +10,28 @@ These scripts bring a clean Proxmox host up to a running CyberCore and manage it
 2. **`scripts/setup.sh`** — post-install production readiness. Fills any remaining secrets, hardens permissions, validates configs, and on a Proxmox node creates the module transit gateways (`--gateways`) and lab templates (`--templates`); `--infra` does both. Idempotent; re-run any time.
 3. **`start.sh` / `stop.sh`** (project root) — bring the docker compose stack and the transit-gateway LXCs up/down together (`--stack-only` / `--gateways-only` to scope).
 
-### Transit gateway model
+### Network fabric: SDN, transit gateways & lane gateways
 
-Each module's transit network is a **pure L2 bridge** on the host (no IP, no host NAT). The gateway itself is an **unprivileged Alpine LXC** whose `lan0` owns the module gateway IP and provides DHCP/DNS/NAT/anti-breakout. `wan0` is an ordinary static LAN port (Proxmox-managed, so it survives reboots). The module transit gateways are the primary deployment path; some challenges not yet adapted to run behind them are a later concern.
+Two independent layers do two jobs: **SDN/VXLAN** gives each lane an isolated L2 segment, and the **gateway LXCs** provide L3 (routing/NAT/DHCP/firewall) and chain those segments out to the infrastructure. Every packet from a challenge VM to the internet crosses **two gateway LXCs**, each doing NAT + a restrictive firewall — a compromised VM must break two routers to reach anything real.
+
+```
+challenge VMs ─ lane VNet (SDN/VXLAN, L2) ─ lane-gw LXC ─ module transit net (/16, L2) ─ module-gw LXC ─ vmbr0 ─ infra/internet
+   192.18.0.x        per-lane isolated         192.18.0.1        100.10x.0.0/16              100.10x.0.1
+```
+
+**1. SDN VXLAN — L2 isolation (app-managed, not the playbooks).**
+When a lab is created, `front-end/src/utils/lab-network-provision.js` reserves a VXLAN block (one id per lane), creates a Proxmox SDN zone (`type: vxlan`) with one VNet per lane, then `PUT /cluster/sdn` to apply. Each VNet materializes as a bridge on the nodes and is its own broadcast domain over VXLAN — so hundreds of lanes can all reuse `192.18.0.0/24` without colliding, and lanes stay L2-isolated even across nodes. (`install.sh` preflight checks the SDN API for this reason.)
+
+**2. Module transit gateway — per-module L3 boundary (one Alpine LXC per module).**
+Built from `{module}-gateway.yml`. `lan0` owns the module gateway IP on the module's **pure-L2 bridge** (the host bridge has no IP/NAT); `wan0` uplinks to `vmbr0`/infra. It runs dnsmasq (DHCP+DNS), chrony (NTP), and iptables that NAT the `/16` out `wan0` and enforce **anti-breakout** — `FORWARD` from `lan0` to `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, the mgmt net, *all* module `/16`s, and the VPN range is dropped; only internet egress + return traffic passes. It also lets the Guacamole host reach lane gateways on `3389`/`22` for remote-desktop DNAT.
+
+**3. Lane gateway — per-lane L3 boundary (one Alpine LXC cloned per lane).**
+Cloned from `{module}-lane-gw-template.yml` and re-IP'd at deploy. `lan0` → the lane's SDN VNet, owns `192.18.0.1/24`, serves DHCP/DNS to the challenge VMs. `wan0` → the module transit net, with an address derived deterministically from the lane's `vxlan_id` mapped into the module `/16` (`front-end/src/utils/lane-networking.js`), default route = the module gateway. So the lane gateway NATs `192.18.0.0/24` → transit, and the module gateway NATs transit → infra (double NAT, two-tier isolation). Same hardened firewall, plus per-lane DNAT rules so Guacamole reaches specific VMs (e.g. `3389`→`192.18.0.10`).
+
+**Scheme variants.**
+- **v1 (transit-gateway model, primary):** lane-gw `wan0` on the module `/16`, routed through the module gateway. This is what the module transit gateways exist for.
+- **v2 (VMID 1694):** lane-gw `wan0` goes **directly** onto the v2 lab network (`100.100.60.0/24`, VLAN 60 on `vmbr0`), bypassing the module transit gateway. Simpler, single NAT — used by challenges not yet adapted to run behind the module gateways.
+- **v3 (VMID 1695):** segmented DMZ — two SDN VNets per lane (external + internal, internal tag = `vxlan_id + 4,000,000`) and a 3-NIC lane gateway (`wan0`/`ext0`/`int0`) that drops all ext↔int traffic, so an attacker must pivot through a dual-homed host (GOAD/AD topology).
 
 ### `proxmox-templates/gateway-templates/` layout
 
