@@ -101,6 +101,11 @@ services:
       JWT_EXPIRES_IN: 7d
       SESSION_SECRET: ${SESSION_SECRET}
       COOKIE_SECURE: "false"
+      # Encryption keys for pgcrypto (pgp_sym_encrypt) at-rest secrets.
+      # These MUST be passed through or guac_password / MFA secrets can't be
+      # written and mfaKey() returns null (500 on /api/auth/mfa/setup).
+      GUAC_ENCRYPT_KEY: ${GUAC_ENCRYPT_KEY}
+      MFA_ENCRYPT_KEY: ${MFA_ENCRYPT_KEY:-${GUAC_ENCRYPT_KEY}}
       # Anthropic API — all AI generation (profile gen, policy gen, examples,
       # chat, interview, vuln-app). See front-end/src/utils/llm-client.js.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
