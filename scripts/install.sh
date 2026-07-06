@@ -7,7 +7,7 @@
 # target Proxmox host:
 #
 #   git clone <this repo> /root/CyberCore && cd /root/CyberCore
-#   sudo ./install.sh
+#   sudo ./scripts/install.sh
 #
 # What this does:
 #   1. Preflight checks (root, Proxmox VE, vmbr0, SDN availability)
@@ -31,8 +31,9 @@
 # ============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"   # this script lives in scripts/
+REPO_ROOT="$(cd "$SELF_DIR/.." && pwd)"                    # project root is one level up
+cd "$REPO_ROOT"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -88,7 +89,7 @@ confirm_or_die() {
 preflight() {
   section "Preflight checks"
 
-  [ "$(id -u)" -eq 0 ] || die "Must run as root (sudo ./install.sh)."
+  [ "$(id -u)" -eq 0 ] || die "Must run as root (sudo ./scripts/install.sh)."
   command -v pveversion >/dev/null 2>&1 || die "pveversion not found — this doesn't look like a Proxmox VE host."
   command -v pvesh      >/dev/null 2>&1 || die "pvesh not found."
   command -v pveum       >/dev/null 2>&1 || die "pveum not found."
@@ -151,10 +152,12 @@ collect_networking() {
   ask V2_SUBNET  "v2 lab network subnet base"   "100.100.60"
   ask V2_GATEWAY "v2 lab network gateway IP"    "100.100.60.1"
 
-  info "v1-scheme module transit networks (dedicated NAT'd bridges this script creates)."
+  info "Module transit networks (L2 bridges this script creates; the gateway IP lives on the LXC)."
+  # Subnets match the README + the {module}-gateway.yml playbooks:
+  #   100.101 = cyberlabs, 100.102 = crucible, 100.103 = forge
   ask CRUCIBLE_GW  "crucible transit gateway (/16)"  "100.102.0.1"
-  ask CYBERLABS_GW "cyberlabs transit gateway (/16)" "100.103.0.1"
-  ask FORGE_GW     "forge transit gateway (/16)"     "100.104.0.1"
+  ask CYBERLABS_GW "cyberlabs transit gateway (/16)" "100.101.0.1"
+  ask FORGE_GW     "forge transit gateway (/16)"     "100.103.0.1"
 }
 
 collect_storage() {
@@ -346,48 +349,31 @@ setup_ssh_keys() {
   fi
 }
 
-# Creates a dedicated Linux bridge (no physical ports — isolated/internal),
-# assigns it the module's gateway IP, and NATs it out the default route
-# interface. This is new, additive host networking (not touching vmbr0), so
-# it can't cut off management/SSH connectivity the way editing vmbr0 could.
+# Creates a dedicated Linux bridge (no physical ports — isolated/internal) as a
+# pure L2 segment: NO IP address and NO host NAT. The module's transit gateway
+# is an Alpine LXC (created by setup.sh --gateways) whose lan0 owns the gateway
+# IP and does DHCP/DNS/NAT/anti-breakout. Keeping the bridge L2-only avoids a
+# duplicate-IP conflict with that LXC. This is additive host networking (not
+# touching vmbr0), so it can't cut off management/SSH connectivity.
 create_module_bridge() {
   local module="$1" bridge="$2" gateway="$3"
   if ip link show "$bridge" >/dev/null 2>&1; then
     log "Bridge '$bridge' ($module) already exists — leaving as-is."
     return
   fi
-  log "Creating transit bridge '$bridge' for module '$module' ($gateway/16)..."
+  log "Creating L2 transit bridge '$bridge' for module '$module' (gateway ${gateway} lives on the LXC)..."
   pvesh create "/nodes/${NODE_NAME}/network" -type bridge -iface "$bridge" \
-    -autostart 1 -address "$gateway" -netmask 16 >/dev/null
-  local backup_path="/etc/network/interfaces.bak-$(date +%s)"
-  cp -a /etc/network/interfaces "$backup_path"
-
-  local egress
-  egress="$(ip route show default | awk 'NR==1{print $5}')"
-  # Append NAT hooks directly to the stanza pvesh just wrote.
-  awk -v br="$bridge" -v eg="$egress" '
-    { print }
-    $0 ~ "^iface "br" inet static" && !done {
-      print "    post-up   iptables -t nat -A POSTROUTING -o " eg " -j MASQUERADE"
-      print "    post-down iptables -t nat -D POSTROUTING -o " eg " -j MASQUERADE"
-      done=1
-    }
-  ' /etc/network/interfaces > /etc/network/interfaces.new
-  mv /etc/network/interfaces.new /etc/network/interfaces
-
-  echo 1 > /proc/sys/net/ipv4/ip_forward
-  echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-cybercore.conf
+    -autostart 1 >/dev/null
 
   if command -v ifreload >/dev/null 2>&1; then
     if ! ifreload -a; then
-      warn "ifreload failed applying '$bridge' — restoring previous /etc/network/interfaces. Check the bridge manually."
-      cp -a "$backup_path" /etc/network/interfaces
+      warn "ifreload failed applying '$bridge' — check the bridge manually."
       return
     fi
   else
-    warn "ifreload not found — bridge '$bridge' is written to /etc/network/interfaces but not yet applied. Run 'systemctl restart networking' or reboot."
+    warn "ifreload not found — bridge '$bridge' is written but not yet applied. Run 'systemctl restart networking' or reboot."
   fi
-  log "Bridge '$bridge' up with NAT via $egress."
+  log "L2 bridge '$bridge' up (no IP/NAT — the module gateway LXC provides L3)."
 }
 
 setup_module_bridges() {
@@ -601,7 +587,7 @@ deploy_repo_to_vm() {
   rsync -az --delete \
     -e "ssh -i $INSTALL_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null" \
     --exclude '.git' --exclude 'node_modules' --exclude 'logs' \
-    "$SCRIPT_DIR/" "root@${VM_IP}:/opt/cybercore/"
+    "$REPO_ROOT/" "root@${VM_IP}:/opt/cybercore/"
   log "Repo synced to /opt/cybercore on the orchestrator VM."
 }
 
@@ -610,6 +596,21 @@ bring_up_stack() {
   _vm_ssh 'command -v docker >/dev/null 2>&1 || (curl -fsSL https://get.docker.com | sh)'
   _vm_ssh "cd /opt/cybercore && docker compose up -d"
   log "docker compose up -d issued. This can take several minutes on first run (image builds, DB init)."
+}
+
+# Host-side production readiness: clean dev artifacts, then create the module
+# transit gateways and lab templates on this Proxmox node. setup.sh reads the
+# .env / config/site.json install.sh just wrote. Best-effort — the orchestrator
+# VM + stack are already up, so a setup.sh hiccup shouldn't fail the install.
+run_host_setup() {
+  section "Handing off to setup.sh (gateways + templates)"
+  [ -x "$SELF_DIR/setup.sh" ] || { warn "setup.sh not found/executable — skipping infra provisioning."; return 0; }
+  if [ "${SKIP_SETUP:-0}" = "1" ]; then
+    info "SKIP_SETUP=1 — not running setup.sh. Run it later: sudo ./scripts/setup.sh --infra"
+    return 0
+  fi
+  "$SELF_DIR/setup.sh" --infra --yes \
+    || warn "setup.sh reported issues — review its output; re-run with 'sudo ./scripts/setup.sh --infra'."
 }
 
 # ---------------------------------------------------------------------------
@@ -625,15 +626,17 @@ print_summary() {
   Adminer:           http://${VM_IP}:8181
   Guacamole:         http://${VM_IP}/guacamole/  (guacadmin / ${GUAC_ADMIN_PASSWORD})
 
-  Generated secrets live in .env at $SCRIPT_DIR/.env (mode 600) — back it up.
+  Generated secrets live in .env at $REPO_ROOT/.env (mode 600) — back it up.
 
-  NOT done for you:
-    - VM template baking (Windows/Kali/web/etc.) — see front-end/scripts/bake-*.sh
-      and their headers for what each one does and how long it takes.
-    - Ceph pool creation — '${STORAGE_POOL}' $( [ "${CREATE_STORAGE:-0}" = "1" ] && echo "was created as a plain directory, replace with real Ceph/LVM for production" || echo "was assumed to already exist and was verified present" ).
-    - OPNsense firewall rules — assumed pre-existing external infrastructure.
-    - Joining additional Proxmox nodes into a cluster.
-    - DNS records for ${CYBERHUB_HOST}.
+  setup.sh ran automatically after the stack came up — it created the module
+  transit gateway LXCs and lab templates (lane gateways + rocky-base). Re-run
+  any time with 'sudo ./scripts/setup.sh --infra'. Challenge templates are separate
+  (front-end/scripts/bake-*.sh).
+
+  Adding Proxmox nodes later: install.sh provisions only this node. For a new
+  node, run 'sudo ./scripts/setup.sh --gateways --templates' on it and recreate the
+  module L2 bridges there so lanes can schedule on it (templates + bridges are
+  per-node unless you're on shared storage).
 
 EOF
 }
@@ -662,6 +665,8 @@ main() {
   wait_for_vm_ssh
   deploy_repo_to_vm
   bring_up_stack
+
+  run_host_setup
 
   print_summary
 }

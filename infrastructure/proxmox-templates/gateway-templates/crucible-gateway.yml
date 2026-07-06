@@ -1,0 +1,17 @@
+---
+# Crucible module transit gateway. Thin wrapper — the shared logic lives in
+# _common/module-gateway-*.yml so all three modules stay in sync. Run directly
+# (ansible-playbook crucible-gateway.yml) or via setup.sh --gateways.
+- name: Crucible Module Transit Gateway
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    module_name: crucible
+    module_subnet_base: "100.102"
+  vars_files:
+    - _common/module-gateway-vars.yml
+  handlers:
+    - import_tasks: _common/module-gateway-handlers.yml
+  tasks:
+    - import_tasks: _common/module-gateway-tasks.yml

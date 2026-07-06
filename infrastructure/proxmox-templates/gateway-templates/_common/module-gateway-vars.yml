@@ -1,0 +1,82 @@
+---
+# Shared vars for the module transit gateways. module_name and module_subnet_base
+# are set per module in the wrapper playbook (kept out of here on purpose).
+# Interfaces inside the LXC
+wan_if: "wan0"
+lan_if: "lan0"
+# When true the playbook writes /etc/network/interfaces itself. Under
+# Proxmox-managed LXCs (setup.sh) addressing is set via pct config, so this
+# is passed false and wan0/lan0 are treated as ordinary static LAN ports.
+manage_interfaces: true
+wan_mode: dhcp                  # dhcp | static  (only used when manage_interfaces)
+
+# Module subnet (/16) — everything derived from module_subnet_base.
+lan_gw: "{{ module_subnet_base }}.0.1"
+lan_cidr: "{{ lan_gw }}/16"
+lan_net: "{{ module_subnet_base }}.0.0/16"
+lan_pool_start: "{{ module_subnet_base }}.0.10"
+lan_pool_end: "{{ module_subnet_base }}.255.254"
+lan_netmask: "255.255.0.0"   # /16
+
+# Management subnets (SSH troubleshooting access)
+mgmt_subnets:
+  - "100.100.30.0/24" # Trusted VLAN
+  - "10.0.254.0/24" # Admin VPN range
+mgmt_ssh_port: 22
+
+# DHCP/DNS model A: clients use gateway as DNS, gateway forwards upstream
+# Module gateways get WAN DNS from DHCP and forward via /etc/resolv.conf
+# Lanes get told to use the module gateway as their DNS
+dhcp_dns_servers: ["{{ lan_gw }}"]   # lanes get module gateway as DNS
+dhcp_lease_time: "12h"
+
+# Module gateway coordination (prevent inter-module/inter-lane leakage)
+module_gateway_ip: "{{ lan_gw }}"    # this gateway's own management IP
+transit_zone: "{{ lan_net }}"        # this module's transit zone (for blocking other lanes)
+
+# SIEM/logging export (optional)
+siem_server: ""        # e.g., "100.102.20.50" (leave blank to disable forwarding) | will implement in a later version
+syslog_port: 514
+
+# Anti-breakout for module hosts (block reaching internal/private ranges +
+# mgmt subnets + ALL module transit networks + lane). Own module included —
+# intra-module isolation is also enforced by the transit_zone drop below.
+blocked_cidrs:
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "100.64.0.0/10"        # CGNAT range
+  - "100.100.0.0/16"       # Management/Infrastructure networks
+  - "100.101.0.0/16"       # CyberLabs module network
+  - "100.102.0.0/16"       # Crucible module network
+  - "100.103.0.0/16"       # Forge module network
+  - "100.104.0.0/16"       # reserved module network
+  - "192.18.0.0/24"        # Lane network
+  - "10.0.254.0/24"        # Admin VPN range
+
+# Guacamole RDP server (for remote desktop access)
+guac_server_ip: "100.100.70.10"           # e.g., "100.100.50.10" (leave blank to disable RDP forwarding)
+
+# Allowed outbound traffic from lane to uplink (NEW connections)
+allow_out_tcp_ports: [80, 443, 22]
+allow_out_udp_ports: [123]
+allow_icmp_forward: true
+block_direct_dns_to_wan: true
+block_direct_ntp_to_wan: true
+allow_all_outbound_tcp: true
+
+# Persist iptables at /etc/iptables/rules-save
+iptables_rules_path: "/etc/iptables/rules-save"
+
+# dnsmasq config
+dnsmasq_leasefile: "/var/lib/misc/dnsmasq.leases"
+dnsmasq_dropin_dir: "/etc/dnsmasq.d"
+dnsmasq_dropin_file: "/etc/dnsmasq.d/50-gateway.conf"
+
+# Chrony config
+chrony_conf_path: "/etc/chrony/chrony.conf"
+
+# rsyslog config (drop-in approach)
+rsyslog_dropin_dir: "/etc/rsyslog.d"
+rsyslog_dropin_file: "/etc/rsyslog.d/50-gateway.conf"
+

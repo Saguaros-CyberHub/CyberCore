@@ -1,0 +1,16 @@
+---
+# Forge lane gateway template. Thin wrapper — shared logic in _common/lane-gw-*.yml.
+# One sealed template per module; the app clones it per lane and re-IPs at deploy.
+- name: Forge Lane Gateway Template
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    module_name: forge
+    module_subnet_base: "100.103"
+  vars_files:
+    - _common/lane-gw-vars.yml
+  handlers:
+    - import_tasks: _common/lane-gw-handlers.yml
+  tasks:
+    - import_tasks: _common/lane-gw-tasks.yml

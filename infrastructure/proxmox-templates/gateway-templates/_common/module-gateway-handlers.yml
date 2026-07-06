@@ -1,0 +1,22 @@
+---
+# Shared handlers for the module transit gateways.
+- name: restart dnsmasq
+  command: rc-service dnsmasq restart
+  failed_when: false
+
+- name: restart iptables
+  command: rc-service iptables restart
+  failed_when: false
+
+- name: restart chrony
+  command: rc-service chronyd restart
+  failed_when: false
+
+- name: restart rsyslog
+  command: rc-service rsyslog restart
+  failed_when: false
+
+- name: restart sshd
+  command: rc-service sshd restart
+  failed_when: false
+

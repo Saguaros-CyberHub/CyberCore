@@ -2,6 +2,33 @@
 
 This is the folder containing all the infrastructure-related scripts, Ansible playbooks, Docker Compose files, etc.
 
+## Provisioning & lifecycle scripts
+
+These scripts bring a clean Proxmox host up to a running CyberCore and manage its lifecycle. Run them from the repo root, as root. `install.sh`/`setup.sh` live in `scripts/`; `start.sh`/`stop.sh` live at the project root:
+
+1. **`scripts/install.sh`** — bootstraps a Proxmox VE host: creates the API user/token, SSH keys, the orchestrator VM (runs the docker compose stack), the per-module **L2** transit bridges, and writes `config/site.json` + `.env`. It calls `scripts/setup.sh --infra` automatically at the end (set `SKIP_SETUP=1` to defer).
+2. **`scripts/setup.sh`** — post-install production readiness. Fills any remaining secrets, hardens permissions, validates configs, and on a Proxmox node creates the module transit gateways (`--gateways`) and lab templates (`--templates`); `--infra` does both. Idempotent; re-run any time.
+3. **`start.sh` / `stop.sh`** (project root) — bring the docker compose stack and the transit-gateway LXCs up/down together (`--stack-only` / `--gateways-only` to scope).
+
+### Transit gateway model
+
+Each module's transit network is a **pure L2 bridge** on the host (no IP, no host NAT). The gateway itself is an **unprivileged Alpine LXC** whose `lan0` owns the module gateway IP and provides DHCP/DNS/NAT/anti-breakout. `wan0` is an ordinary static LAN port (Proxmox-managed, so it survives reboots). The module transit gateways are the primary deployment path; some challenges not yet adapted to run behind them are a later concern.
+
+### `proxmox-templates/gateway-templates/` layout
+
+The three module gateways and three lane-gateway templates share one copy of their logic. Each per-module file is a thin wrapper that sets only its `module_name` / `module_subnet_base` and imports the shared tasks/handlers/vars from `_common/`:
+
+| Module | Subnet | Gateway playbook | Lane-gw template |
+|---|---|---|---|
+| cyberlabs | `100.101.0.0/16` | `cyberlabs-gateway.yml` | `cyberlabs-lane-gw-template.yml` |
+| crucible | `100.102.0.0/16` | `crucible-gateway.yml` | `crucible-lane-gw-template.yml` |
+| forge | `100.103.0.0/16` | `forge-gateway.yml` | `forge-lane-gw-template.yml` |
+
+- `_common/module-gateway-{tasks,handlers,vars}.yml` — shared body for the module transit gateways.
+- `_common/lane-gw-{tasks,handlers,vars}.yml` — shared body for the lane-gateway templates.
+
+Edit shared behavior in `_common/`; edit a module's subnet only in its wrapper. Run standalone with e.g. `ansible-playbook crucible-gateway.yml`, or let `setup.sh --gateways` create and configure them. Both wrappers gate `/etc/network/interfaces` behind `manage_interfaces` (setup passes `false`, since Proxmox manages the LXC's addressing).
+
 ## Virtualization
 
 ![alt text](https://github.com/echumley/Saguaros-CyberHub/blob/main/resources/images/CyberHub-Virtualization-v1.0.png?raw=true)
@@ -21,7 +48,6 @@ The CyberHub bare-metal cluster will each host a set of nested virtualization en
 - Network monitoring
 - OS download/update caching
 - Reverse proxy
-- Keycloak
 - NetBox Labs Enterprise
 - Password manager
 - Secrets manager
@@ -32,7 +58,7 @@ This is a general layout of the network.
 
 ![Saguaros CyberLab Network](https://github.com/echumley/Saguaros-CyberHub/blob/main/resources/images/CyberLabs-Network-v1.0.png?raw=true)
 
-*NOTE: The CyberHub heavily utilizes nested virtualization (planned) and network segmentation via SDNs, VLANs, and VXLANs*
+*NOTE: The CyberHub heavily utilizes network segmentation via SDNs, VLANs, and VXLANs*
 
 ### Subnets
 
@@ -159,8 +185,5 @@ Utilize separate keys for each service, but during the initial deployment we're 
 NOTE: These keys are not publically available, and until we implement a better secret manager, just create these keys or modify the Ansible/Docker/Terraform config files.
 
 - `saguaros-admin-key`
+- `saguaros-crucible-key`
 - `saguaros-ansible-key`
-
-## CyberLabs Nested Cluster
-
-To be continued...
