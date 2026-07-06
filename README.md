@@ -210,7 +210,7 @@ Copy [example.env](example.env) to `.env` and fill in the `REPLACE_ME` values. N
 CORE_DB_USER=cyberhub
 CORE_DB_PASSWORD=REPLACE_ME
 CORE_DB_NAME=cybercore_db
-CORE_ENABLED_MODULES=crucible,cyberlabs,forge,library,university,wiki
+CORE_ENABLED_MODULES=crucible,cyberlabs,forge,library,university,cyberwiki,archive
 
 # App security
 JWT_SECRET=REPLACE_ME

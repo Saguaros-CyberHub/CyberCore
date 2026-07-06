@@ -18,7 +18,9 @@ On every app start, `module-loader.js`:
 5. Serves `staticDir` at `staticMountPath` if present.
 6. Recurses into `<module>/plugins/*/manifest.json` and repeats steps 2–5 for each plugin, setting `parent_module` to the owning module's directory name.
 
-**There is no enable/disable switch, no CLI, and no hot reload.** `manifest.active` only sets the `active` column in `cybercore_module` (used to hide/show things in the UI) — routes are mounted unconditionally at startup regardless of that flag. To actually remove a module or plugin's routes, delete or rename its directory and restart the app.
+**There is no CLI and no hot reload** — everything below only takes effect on the next app startup. For top-level modules, `manifest.active` only sets the `active` column in `cybercore_module` (used to hide/show things in the UI) — a top-level module's routes are always mounted regardless of that flag, so to actually remove a module's routes you still have to delete or rename its directory.
+
+**Plugins are different**: setting `"active": false` in a plugin's `manifest.json` (e.g. `modules/crucible/plugins/ciab/manifest.json`) makes the loader skip provisioning its database and mounting its routes/static assets/subnav entirely — it's still upserted into `cybercore_module` (as inactive, for bookkeeping) but otherwise fully dark. This is the mechanism an installer/admin should use to turn a plugin off without deleting its directory.
 
 ## manifest.json reference
 

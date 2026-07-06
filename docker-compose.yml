@@ -101,6 +101,10 @@ services:
       JWT_EXPIRES_IN: 7d
       SESSION_SECRET: ${SESSION_SECRET}
       COOKIE_SECURE: "false"
+      # HMAC key for /vuln-assets signed download URLs (see utils/signed-url.js).
+      VULN_ASSETS_SECRET: ${VULN_ASSETS_SECRET}
+      # Encrypts TOTP/MFA secrets at rest; falls back to GUAC_ENCRYPT_KEY if unset.
+      MFA_ENCRYPT_KEY: ${MFA_ENCRYPT_KEY}
       # Anthropic API — all AI generation (profile gen, policy gen, examples,
       # chat, interview, vuln-app). See front-end/src/utils/llm-client.js.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
@@ -132,8 +136,8 @@ services:
       TAILSCALE_TAILNET: ${TAILSCALE_TAILNET}
       TAILSCALE_LANE_TAG: ${TAILSCALE_LANE_TAG:-tag:lane}
       # Rate Limiting
-      RATE_LIMIT_WINDOW_MS: 900000
-      RATE_LIMIT_MAX_REQUESTS: 100
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-900000}
+      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-100}
     # External DNS so api.tailscale.com (and any other public hostnames the
     # orchestrator hits) resolve. Lab DNS at 100.100.0.1 doesn't recurse to
     # the public internet, so fetch() throws EAI_AGAIN on Tailscale calls

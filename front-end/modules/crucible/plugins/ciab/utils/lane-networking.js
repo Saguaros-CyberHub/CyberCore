@@ -1,49 +1,65 @@
 /**
  * Lane Networking Helpers (CIAB-local)
  * ============================================================================
- * Mirrored from front-end/src/routes/admin.js — kept in sync manually.
+ * Same algorithms as front-end/src/utils/lane-networking.js, duplicated here
+ * (instead of imported) so the CIAB plugin stays self-contained even if a
+ * future refactor moves/removes the shared copy. Both files now read the
+ * actual networking topology from config/site.json via site-config.js, so
+ * there's a single source of truth for values — only the subnet-math
+ * functions themselves are duplicated, not the config.
  *
- * These are the small, stable per-deploy networking primitives used by the
- * CIAB profile-deploy orchestrator. We duplicate them here (instead of
- * importing from admin.js) so the CIAB plugin remains self-contained: if a
- * future refactor removes them from admin.js, CIAB still works. Long-term,
- * these should move to /src/utils/lane-networking.js and both call sites
- * should import the shared copy.
- *
- * If you change the algorithms here, update admin.js too (or the other way).
+ * If you change the algorithms here, update src/utils/lane-networking.js too
+ * (or the other way).
  */
 
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI, waitForTask } = require('../../../../../src/utils/proxmox');
 const tailscale = require('../../../../../src/utils/tailscale');
+const { getModuleNetworks, getV2LabNetwork, getV1LanSubnet } = require('../../../../../src/utils/site-config');
 
-// ─── Constants (mirror admin.js) ────────────────────────────────────────────
+// ─── Constants (mirror src/utils/lane-networking.js) ────────────────────────
 const V2_LANE_GATEWAY_VMID = 1694;
 const V3_LANE_GATEWAY_VMID = 1695;
 const V3_INTERNAL_TAG_OFFSET = 4000000;
 const ATTACK_BOX_VMID_OFFSET = 700000;
 const KALI_TEMPLATE_VMID = 1699;
 
-const V2_LAB_NETWORK = {
-  bridge: 'vmbr0',
-  vlanTag: 60,
-  subnetBase: '100.100.60',
-  gateway: '100.100.60.1',
-  cidr: '/24'
-};
+// Topology is declared in config/site.json under cluster.networking — resolved
+// lazily (not at module load) so a missing/late-written site.json doesn't
+// crash require() at boot, only whichever call actually needs a value.
+let _TRANSIT_BY_MODULE = null;
+let _V2_LAB_NETWORK    = null;
 
-// v1 per-module transit gateways. Only crucible is live today.
-const TRANSIT_BY_MODULE = {
-  crucible: { bridge: 'crucible', gateway: '100.102.0.1', subnetBase: '100.102', cidr: '/16' }
-};
+function _transitByModule() {
+  if (!_TRANSIT_BY_MODULE) {
+    const nets = getModuleNetworks();
+    _TRANSIT_BY_MODULE = {};
+    for (const [mod, n] of Object.entries(nets)) {
+      if (n.gateway) {
+        _TRANSIT_BY_MODULE[mod] = { bridge: n.bridge, gateway: n.gateway, subnetBase: n.subnet_base, cidr: n.cidr };
+      }
+    }
+  }
+  return _TRANSIT_BY_MODULE;
+}
+
+function _v2LabNetwork() {
+  if (!_V2_LAB_NETWORK) {
+    const n = getV2LabNetwork();
+    _V2_LAB_NETWORK = { bridge: n.bridge, vlanTag: n.vlan_tag, subnetBase: n.subnet_base, gateway: n.gateway, cidr: n.cidr };
+  }
+  return _V2_LAB_NETWORK;
+}
 
 // ─── Subnet math ────────────────────────────────────────────────────────────
 
 function laneUplinkConfig(module, vxlanId) {
-  const t = TRANSIT_BY_MODULE[module];
+  const map = _transitByModule();
+  const t = map[module];
   if (!t) {
     throw new Error(`No transit gateway configured for module '${module}'. ` +
-      `Configured modules: ${Object.keys(TRANSIT_BY_MODULE).join(', ')}`);
+      `Configured modules: ${Object.keys(map).join(', ')}. ` +
+      `Add the module under cluster.networking.module_networks in config/site.json once the transit LXC is up.`);
   }
   const high = (vxlanId >> 8) & 0xFF;
   const low  = vxlanId & 0xFF;
@@ -51,12 +67,13 @@ function laneUplinkConfig(module, vxlanId) {
 }
 
 function v2WanConfig(vxlanId) {
+  const net = _v2LabNetwork();
   const offset = 10 + (vxlanId % 240);
   return {
-    bridge:  V2_LAB_NETWORK.bridge,
-    vlanTag: V2_LAB_NETWORK.vlanTag,
-    ip:      `${V2_LAB_NETWORK.subnetBase}.${offset}${V2_LAB_NETWORK.cidr}`,
-    gw:      V2_LAB_NETWORK.gateway
+    bridge:  net.bridge,
+    vlanTag: net.vlanTag,
+    ip:      `${net.subnetBase}.${offset}${net.cidr}`,
+    gw:      net.gateway
   };
 }
 
@@ -98,9 +115,10 @@ function resolveLaneNetworking(subnetScheme, module, vxlanId) {
   if (subnetScheme === 'v2') {
     return { wan: v2WanConfig(vxlanId), lan: v2LaneSubnet(vxlanId) };
   }
+  const v1Lan = getV1LanSubnet();
   return {
     wan: laneUplinkConfig(module, vxlanId),
-    lan: { base3: '192.18.0', cidr: '192.18.0.0/24', gatewayIp: '192.18.0.1', netmask24: '255.255.255.0' }
+    lan: { base3: v1Lan.base3, cidr: v1Lan.cidr, gatewayIp: v1Lan.gateway_ip, netmask24: v1Lan.netmask24 }
   };
 }
 

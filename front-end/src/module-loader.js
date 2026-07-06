@@ -122,9 +122,17 @@ async function loadModulePlugins(app, moduleName, modulePath, moduleManifest) {
     }
 
     const pluginManifest = JSON.parse(fs.readFileSync(pluginManifestPath, 'utf8'));
-    
+
     // Set parent module reference
     pluginManifest.parent_module = moduleName;
+
+    if (pluginManifest.active === false) {
+      console.log(`    ⏸  Plugin disabled: ${pluginManifest.name} (${pluginManifest.key})`);
+      // Still registered (as inactive) so it's accounted for in cybercore_module,
+      // but no database, routes, or static assets are mounted for it.
+      await registerModule(pluginManifest);
+      continue;
+    }
 
     console.log(`    ✓ Plugin: ${pluginManifest.name} (${pluginManifest.key})`);
 
