@@ -362,18 +362,27 @@ router.post('/mfa/setup', authenticateEnrollOrSession, async (req, res) => {
 
     const userId = req.user.userId;
     const r = await cybercoreQuery(
-      'SELECT email, mfa_enabled FROM cybercore_user WHERE user_id = $1', [userId]
+      `SELECT email, mfa_enabled,
+              CASE WHEN mfa_secret IS NOT NULL THEN pgp_sym_decrypt(mfa_secret, $2)::text END AS mfa_secret
+       FROM cybercore_user WHERE user_id = $1`,
+      [userId, mfa.mfaKey()]
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     if (r.rows[0].mfa_enabled) {
       return res.status(409).json({ error: 'MFA is already enabled. Disable or reset it first.' });
     }
 
-    const secret = mfa.generateSecret();
-    await cybercoreQuery(
-      'UPDATE cybercore_user SET mfa_secret = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
-      [secret, mfa.mfaKey(), userId]
-    );
+    // Reuse the pending secret if enrollment was already started. Regenerating
+    // it on every call silently invalidates whatever the user already scanned,
+    // so a retried login (which re-triggers forced enrollment) never verifies.
+    let secret = r.rows[0].mfa_secret;
+    if (!secret) {
+      secret = mfa.generateSecret();
+      await cybercoreQuery(
+        'UPDATE cybercore_user SET mfa_secret = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
+        [secret, mfa.mfaKey(), userId]
+      );
+    }
 
     const otpauthUri = mfa.keyUri(r.rows[0].email, secret);
     const qr = await mfa.qrDataUrl(otpauthUri);

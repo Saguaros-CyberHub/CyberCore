@@ -19,18 +19,16 @@ const API = {
     const token = localStorage.getItem('token');
     
     const config = {
+      ...options,
+      credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
+        // Session token is the default Authorization; an explicit header in
+        // options (e.g. an mfa/enroll stage token) takes precedence.
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...options.headers
-      },
-      credentials: 'include',
-      ...options
+      }
     };
-    
-    // Add Authorization header if token exists
-    if (token) {
-      config.headers['Authorization'] = `Bearer ${token}`;
-    }
 
     if (options.body && typeof options.body === 'object') {
       config.body = JSON.stringify(options.body);
