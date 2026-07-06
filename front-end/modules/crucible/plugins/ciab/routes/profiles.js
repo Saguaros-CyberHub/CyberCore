@@ -345,6 +345,10 @@ async function callInlineGenerateProfile({
   llmModel,
   temperature,
   custom_config = {},
+  org_name,
+  company_name,
+  domain,
+  hq_city,
   progress_id          // optional — when provided, server pushes step updates under this key
 } = {}) {
   const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12', 'Library'];
@@ -364,6 +368,8 @@ async function callInlineGenerateProfile({
     user_id: userId,
     client_type, industry, difficulty, maturity, delivery, employees,
     llmModel, temperature, custom_config,
+    company_name: org_name || company_name || undefined,
+    domain, hq_city,
     onProgress: progress_id
       ? (ev) => setProgress(progress_id, { step: ev.step, percent: ev.percent, message: ev.message, run_id: ev.run_id })
       : undefined

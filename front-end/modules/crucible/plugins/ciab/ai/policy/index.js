@@ -99,9 +99,11 @@ function esc(str) {
                     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
-function buildPolicyHTML(title, companyName, bodyContent) {
-  const effectiveDate = new Date().toISOString().slice(0, 10);
-  const nextReview = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+function buildPolicyHTML(title, companyName, bodyContent, { versionMajor = 1, versionMinor = 0, effectiveDaysAgo = 0 } = {}) {
+  const now = Date.now();
+  const effectiveDate = new Date(now - effectiveDaysAgo * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const lastReviewed = effectiveDate;
+  const nextReview = new Date(now - effectiveDaysAgo * 24 * 60 * 60 * 1000 + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
   return `<!DOCTYPE html>
 <html lang="en">
@@ -138,8 +140,9 @@ function buildPolicyHTML(title, companyName, bodyContent) {
   <div class="org-name">${esc(companyName)}</div>
   <h1>${esc(title)}</h1>
   <div class="doc-meta">
-    <span>Version 1.0</span>
+    <span>Version ${versionMajor}.${versionMinor}</span>
     <span>Effective: ${effectiveDate}</span>
+    <span>Last Reviewed: ${lastReviewed}</span>
     <span>Classification: Internal Use Only</span>
     <span>Review Cycle: Annual</span>
   </div>
@@ -221,7 +224,12 @@ async function generatePolicies({ profileJson, difficulty, model, profileId } = 
       return { name, slug, html: null, error: r.error.message, generation_time_ms: 0 };
     }
     const bodyContent = cleanResponse(r.value.text);
-    const html = buildPolicyHTML(name, ctx.company_name, bodyContent);
+    // Vary version and effective date per policy so documents look like a
+    // real policy library maintained at different times, not a bulk export.
+    const versionMajor = i % 3 === 0 ? 2 : 1;
+    const versionMinor = [0, 1, 2, 0, 1][i % 5];
+    const effectiveDaysAgo = [0, 90, 180, 270, 45, 135, 365][i % 7];
+    const html = buildPolicyHTML(name, ctx.company_name, bodyContent, { versionMajor, versionMinor, effectiveDaysAgo });
     return {
       name, slug, html,
       generation_time_ms: r.value.latencyMs,

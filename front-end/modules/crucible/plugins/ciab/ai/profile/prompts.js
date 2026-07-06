@@ -1011,6 +1011,7 @@ FIREWALL:
 - 5–8 Allow rules for legitimate inter-subnet traffic.
 - ONE default-deny rule at the end.
 - ≥2 rules with INTENTIONAL WEAKNESSES.
+- Any Guest or Public-WiFi subnet that permits outbound internet access MUST also explicitly allow DNS (UDP/TCP 53) and DHCP (UDP 67/68) — guests cannot browse without these services.
 
 DELIBERATE WEAKNESSES:
 ${weaknessMin}–${weaknessMax} intentional security issues total:
