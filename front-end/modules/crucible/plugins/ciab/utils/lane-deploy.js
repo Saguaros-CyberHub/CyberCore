@@ -525,6 +525,22 @@ async function replicateGatewayTemplates({ gatewayVmid, templateNode, uniqueNode
   return tempIds;
 }
 
+// ─── Wait for an SDN bridge to appear on a specific node ──────────────────
+// After SDN apply, each node materializes bridge interfaces independently.
+// Proxmox's cluster/sdn API confirms config is written but doesn't guarantee
+// the bridge iface exists on the node yet. Poll node/network until it appears.
+async function waitForBridgeOnNode(node, bridgeName, { timeoutMs = 45000, intervalMs = 3000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/network`);
+      if ((ifaces || []).some(i => i.iface === bridgeName)) return;
+    } catch (_) {}
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  throw new Error(`Bridge '${bridgeName}' did not appear on ${node} within ${timeoutMs / 1000}s after SDN apply`);
+}
+
 // ─── Phase 1b — clone N gateway LXCs ───────────────────────────────────────
 async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, vnetByLaneId, vnetIntByLaneId, groupName, templateNode }) {
   const lanesByNode = {};
@@ -563,6 +579,11 @@ async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, 
           description: `CIAB Profile Lane\nGroup: ${groupName}\nLane: ${laneId}`
         });
         if (cloneRes) await waitForTask(sourceNode, cloneRes);
+
+        // Wait for the SDN bridge to materialize on the target node before
+        // attaching it — nodes apply SDN config asynchronously after the
+        // cluster-level PUT /cluster/sdn, so the bridge can lag by seconds.
+        await waitForBridgeOnNode(node, vnet.vnet);
 
         const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
         if (subnetScheme === 'v3') {
