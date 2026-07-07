@@ -15,6 +15,7 @@ role_id
 secret_ide
 tempCodeRunnerFile.sh
 .claude/
+.continue/
 *.bkp
 *.backup
 cyberprobe/
