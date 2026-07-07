@@ -138,6 +138,9 @@ API.interview = {
   },
   async sessions(profileId) {
     return API.request(`/interview/sessions/${profileId}`);
+  },
+  async stakeholders(profileId) {
+    return API.request(`/interview/stakeholders/${profileId}`);
   }
 };
 

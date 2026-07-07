@@ -717,114 +717,22 @@
   <script>
     let currentUser = null;
     let selectedStakeholder = null;
+    let profileStakeholders = [];
+    let currentProfileId = null;
+    let currentSessionId = null;
     let conversationHistory = [];
     let isProcessing = false;
 
-    // Stakeholder personas
-    const stakeholders = [
-      {
-        id: 'ceo',
-        name: 'Sarah Mitchell',
-        role: 'CEO / Executive Director',
-        avatar: '👩‍💼',
-        tags: ['Strategy', 'Budget', 'Risk Tolerance'],
-        expertise: ['Business strategy', 'Organizational goals', 'Budget priorities'],
-        personality: 'Results-focused, time-conscious, wants high-level summaries',
-        status: 'not-started'
-      },
-      {
-        id: 'ciso',
-        name: 'James Chen',
-        role: 'Chief Information Security Officer',
-        avatar: '👨‍💻',
-        tags: ['Security', 'Compliance', 'Technical'],
-        expertise: ['Security architecture', 'Threat landscape', 'Compliance requirements'],
-        personality: 'Technical, detail-oriented, security-focused',
-        status: 'not-started'
-      },
-      {
-        id: 'cfo',
-        name: 'Maria Rodriguez',
-        role: 'Chief Financial Officer',
-        avatar: '👩‍💼',
-        tags: ['Budget', 'ROI', 'Risk'],
-        expertise: ['Budget allocation', 'Financial risk', 'Cost-benefit analysis'],
-        personality: 'Analytical, cost-conscious, needs business justification',
-        status: 'not-started'
-      },
-      {
-        id: 'it-manager',
-        name: 'David Park',
-        role: 'IT Manager',
-        avatar: '👨‍🔧',
-        tags: ['Infrastructure', 'Operations', 'Technical'],
-        expertise: ['IT infrastructure', 'Daily operations', 'Technical challenges'],
-        personality: 'Practical, hands-on, resource-constrained',
-        status: 'not-started'
-      },
-      {
-        id: 'hr-director',
-        name: 'Lisa Thompson',
-        role: 'HR Director',
-        avatar: '👩‍💼',
-        tags: ['Training', 'Policies', 'Culture'],
-        expertise: ['Employee training', 'Security policies', 'Organizational culture'],
-        personality: 'People-focused, compliance-aware, training-oriented',
-        status: 'not-started'
-      },
-      {
-        id: 'dept-manager',
-        name: 'Robert Johnson',
-        role: 'Department Manager',
-        avatar: '👨‍💼',
-        tags: ['Operations', 'Users', 'Processes'],
-        expertise: ['Day-to-day operations', 'User workflows', 'Business processes'],
-        personality: 'Pragmatic, user-focused, productivity-concerned',
-        status: 'not-started'
-      }
-    ];
-
-    // Suggested questions by stakeholder type
+    // Suggested questions keyed by role keyword
     const suggestedQuestionsByRole = {
-      'ceo': [
-        "What are your top business priorities this year?",
-        "How do you view cybersecurity investment?",
-        "What risks keep you up at night?",
-        "How would a security incident impact the business?"
-      ],
-      'ciso': [
-        "What's your current security architecture?",
-        "What threats concern you most?",
-        "What compliance requirements apply?",
-        "What are your biggest security gaps?"
-      ],
-      'cfo': [
-        "What's the security budget allocation?",
-        "How do you measure security ROI?",
-        "What financial risks worry you?",
-        "What would a breach cost us?"
-      ],
-      'it-manager': [
-        "What systems are most critical?",
-        "What are your main technical challenges?",
-        "How do you handle patch management?",
-        "What tools do you currently use?"
-      ],
-      'hr-director': [
-        "How is security training handled?",
-        "What are the security policies?",
-        "How is policy compliance enforced?",
-        "What's the security culture like?"
-      ],
-      'dept-manager': [
-        "What systems does your team use daily?",
-        "What are your security pain points?",
-        "How do security controls affect productivity?",
-        "What access does your team need?"
-      ]
+      'ceo':        ["What are your top business priorities this year?", "How do you view cybersecurity investment?", "What risks keep you up at night?", "How would a security incident impact the business?"],
+      'ciso':       ["What's your current security architecture?", "What threats concern you most?", "What compliance requirements apply?", "What are your biggest security gaps?"],
+      'cfo':        ["What's the security budget allocation?", "How do you measure security ROI?", "What financial risks worry you?", "What would a breach cost us?"],
+      'it':         ["What systems are most critical?", "What are your main technical challenges?", "How do you handle patch management?", "What tools do you currently use?"],
+      'hr':         ["How is security training handled?", "What are the security policies?", "How is policy compliance enforced?", "What's the security culture like?"],
+      'operations': ["What systems does your team use daily?", "What are your security pain points?", "How do security controls affect productivity?", "What access does your team need?"]
     };
 
-    // Initialize
     document.addEventListener('DOMContentLoaded', async () => {
       const isLoggedIn = await Auth.requireAuth();
       if (!isLoggedIn) return;
@@ -832,11 +740,9 @@
       currentUser = Auth.getUser();
       updateUserUI();
       renderStakeholders();
-      loadProfiles();
+      await loadProfiles();
 
-      if (Auth.isInstructor()) {
-        document.getElementById('instructorLink').style.display = 'flex';
-      }
+      document.getElementById('profileSelect').addEventListener('change', changeProfile);
     });
 
     function updateUserUI() {
@@ -846,72 +752,169 @@
       document.getElementById('userAvatar').textContent = Utils.getInitials(currentUser.firstName, currentUser.lastName);
     }
 
-    function renderStakeholders() {
-      const list = document.getElementById('stakeholderList');
-      list.innerHTML = stakeholders.map(s => `
-        <div class="stakeholder-card ${s.id === selectedStakeholder?.id ? 'active' : ''} ${s.status === 'completed' ? 'completed' : ''}" 
-             data-id="${s.id}" onclick="selectStakeholder('${s.id}')">
-          <div class="stakeholder-avatar">${s.avatar}</div>
-          <div class="stakeholder-name">${s.name}</div>
-          <div class="stakeholder-role">${s.role}</div>
-          <div class="stakeholder-tags">
-            ${s.tags.map(t => `<span class="stakeholder-tag">${t}</span>`).join('')}
-          </div>
-          <div class="interview-status">
-            <span class="status-indicator ${s.status}"></span>
-            <span>${s.status === 'not-started' ? 'Not Started' : s.status === 'in-progress' ? 'In Progress' : 'Completed'}</span>
-          </div>
-        </div>
-      `).join('');
+    // ── Profile loading ────────────────────────────────────────────────────────
+
+    async function loadProfiles() {
+      try {
+        const data = await API.profiles.list();
+        const select = document.getElementById('profileSelect');
+        data.profiles.forEach(profile => {
+          const option = document.createElement('option');
+          option.value = profile.id;
+          option.textContent = profile.companyName || 'Unnamed Profile';
+          select.appendChild(option);
+        });
+        // Auto-select if only one profile
+        if (data.profiles.length === 1) {
+          select.value = data.profiles[0].id;
+          await changeProfile();
+        }
+      } catch (error) {
+        console.error('Failed to load profiles:', error);
+      }
     }
 
-    function selectStakeholder(id) {
-      selectedStakeholder = stakeholders.find(s => s.id === id);
-      if (!selectedStakeholder) return;
+    async function changeProfile() {
+      const select = document.getElementById('profileSelect');
+      const newProfileId = select.value;
 
-      // Update UI
+      // End any active session
+      if (currentSessionId) {
+        try { await API.interview.end(currentSessionId); } catch (_) {}
+        currentSessionId = null;
+      }
+
+      currentProfileId = newProfileId;
+      selectedStakeholder = null;
+      profileStakeholders = [];
+      resetChat();
+      renderStakeholders();
+
+      if (!currentProfileId) return;
+
+      try {
+        const data = await API.interview.stakeholders(currentProfileId);
+        profileStakeholders = (data.stakeholders || []).map(s => ({ ...s, status: 'not-started' }));
+        renderStakeholders();
+      } catch (err) {
+        console.error('Failed to load stakeholders:', err);
+        Toast.error('Error', 'Could not load stakeholders for this profile');
+      }
+    }
+
+    // ── Stakeholder rendering ──────────────────────────────────────────────────
+
+    function avatarForRole(role) {
+      const r = (role || '').toLowerCase();
+      if (r.includes('ceo') || r.includes('president') || r.includes('chief executive')) return '👔';
+      if (r.includes('ciso') || r.includes('information security')) return '🔐';
+      if (r.includes('cfo') || r.includes('financ') || r.includes('controller')) return '💼';
+      if (r.includes('it') || r.includes('technology') || r.includes('sysadmin') || r.includes('network')) return '💻';
+      if (r.includes('hr') || r.includes('human resources') || r.includes('people')) return '🧑‍🤝‍🧑';
+      if (r.includes('legal') || r.includes('compliance') || r.includes('privacy')) return '⚖️';
+      if (r.includes('sales') || r.includes('marketing')) return '📈';
+      if (r.includes('operation') || r.includes('coo') || r.includes('director')) return '📊';
+      return '👤';
+    }
+
+    function questionsForRole(role) {
+      const r = (role || '').toLowerCase();
+      if (r.includes('ceo') || r.includes('president') || r.includes('chief executive')) return suggestedQuestionsByRole['ceo'];
+      if (r.includes('ciso') || r.includes('information security')) return suggestedQuestionsByRole['ciso'];
+      if (r.includes('cfo') || r.includes('financ')) return suggestedQuestionsByRole['cfo'];
+      if (r.includes('it') || r.includes('technology') || r.includes('sysadmin')) return suggestedQuestionsByRole['it'];
+      if (r.includes('hr') || r.includes('human')) return suggestedQuestionsByRole['hr'];
+      return suggestedQuestionsByRole['operations'];
+    }
+
+    function renderStakeholders() {
+      const list = document.getElementById('stakeholderList');
+
+      if (!currentProfileId) {
+        list.innerHTML = '<div style="padding: 1.5rem; text-align: center; color: var(--gray-500); font-size: 0.85rem;">Select a profile above to load stakeholders</div>';
+        return;
+      }
+
+      if (profileStakeholders.length === 0) {
+        list.innerHTML = '<div style="padding: 1.5rem; text-align: center; color: var(--gray-500); font-size: 0.85rem;">Loading stakeholders…</div>';
+        return;
+      }
+
+      list.innerHTML = profileStakeholders.map(s => {
+        const avatar = avatarForRole(s.role);
+        const isActive = selectedStakeholder?.id === s.id;
+        const statusClass = s.status || 'not-started';
+        const statusLabel = statusClass === 'not-started' ? 'Not Started' : statusClass === 'in-progress' ? 'In Progress' : 'Completed';
+        const tags = [s.department, s.technical_fluency ? s.technical_fluency + ' fluency' : null].filter(Boolean).slice(0, 2);
+        return `
+          <div class="stakeholder-card ${isActive ? 'active' : ''} ${statusClass === 'completed' ? 'completed' : ''}"
+               data-id="${Utils.escapeHtml(s.id)}" onclick="selectStakeholder('${Utils.escapeHtml(s.id)}')">
+            <div class="stakeholder-avatar">${avatar}</div>
+            <div class="stakeholder-name">${Utils.escapeHtml(s.name)}</div>
+            <div class="stakeholder-role">${Utils.escapeHtml(s.role)}</div>
+            ${tags.length ? `<div class="stakeholder-tags">${tags.map(t => `<span class="stakeholder-tag">${Utils.escapeHtml(t)}</span>`).join('')}</div>` : ''}
+            <div class="interview-status">
+              <span class="status-indicator ${statusClass}"></span>
+              <span>${statusLabel}</span>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    // ── Session management ─────────────────────────────────────────────────────
+
+    async function selectStakeholder(id) {
+      if (!currentProfileId) {
+        Toast.warning('No Profile', 'Please select a profile first');
+        return;
+      }
+
+      const stakeholder = profileStakeholders.find(s => s.id === id);
+      if (!stakeholder) return;
+
+      // End previous session
+      if (currentSessionId) {
+        try { await API.interview.end(currentSessionId); } catch (_) {}
+        currentSessionId = null;
+      }
+
+      selectedStakeholder = stakeholder;
+
+      try {
+        const data = await API.interview.start(currentProfileId, stakeholder.id);
+        currentSessionId = data.session?.id;
+      } catch (err) {
+        console.error('Failed to start interview session:', err);
+        Toast.error('Error', 'Failed to start interview session');
+        selectedStakeholder = null;
+        return;
+      }
+
+      // Update chat header
+      const avatar = avatarForRole(stakeholder.role);
       document.getElementById('emptyState').style.display = 'none';
       document.getElementById('interviewHeader').style.display = 'flex';
       document.getElementById('interviewInput').style.display = 'flex';
       document.getElementById('suggestedQuestions').style.display = 'block';
+      document.getElementById('currentAvatar').textContent = avatar;
+      document.getElementById('currentName').textContent = stakeholder.name;
+      document.getElementById('currentRole').textContent = stakeholder.role;
 
-      // Update header
-      document.getElementById('currentAvatar').textContent = selectedStakeholder.avatar;
-      document.getElementById('currentName').textContent = selectedStakeholder.name;
-      document.getElementById('currentRole').textContent = selectedStakeholder.role;
-
-      // Update suggested questions
       updateSuggestedQuestions();
 
-      // Clear and start conversation
       conversationHistory = [];
-      const messagesDiv = document.getElementById('interviewMessages');
-      messagesDiv.innerHTML = '';
+      document.getElementById('interviewMessages').innerHTML = '';
 
-      // Initial greeting from stakeholder
-      const greeting = getInitialGreeting();
-      addMessage('stakeholder', greeting);
+      // Local opening line so there's no loading spinner on first render
+      addMessage('stakeholder', `Hi, I'm ${stakeholder.name}, the ${stakeholder.role}. What would you like to discuss?`, stakeholder.name, stakeholder.role);
 
-      // Update stakeholder status
-      selectedStakeholder.status = 'in-progress';
+      stakeholder.status = 'in-progress';
       renderStakeholders();
-    }
-
-    function getInitialGreeting() {
-      const greetings = {
-        'ceo': `Hello! I'm ${selectedStakeholder.name}, the CEO. I have about 20 minutes before my next meeting. What would you like to discuss about our security posture?`,
-        'ciso': `Hi there. ${selectedStakeholder.name} here, your CISO. I'm happy to discuss our security program in detail. What aspects would you like to cover?`,
-        'cfo': `Good to meet you. I'm ${selectedStakeholder.name}, the CFO. I'm always interested in discussions about security investment and ROI. How can I help?`,
-        'it-manager': `Hey! ${selectedStakeholder.name}, IT Manager. I manage the day-to-day tech operations here. What do you need to know?`,
-        'hr-director': `Hello! I'm ${selectedStakeholder.name} from HR. I handle our security training and policy programs. What would you like to discuss?`,
-        'dept-manager': `Hi, I'm ${selectedStakeholder.name}. I manage the operations department. I can tell you how security affects our daily work.`
-      };
-      return greetings[selectedStakeholder.id] || `Hello, I'm ${selectedStakeholder.name}. How can I help you?`;
     }
 
     function updateSuggestedQuestions() {
       const chips = document.getElementById('questionChips');
-      const questions = suggestedQuestionsByRole[selectedStakeholder.id] || [];
+      const questions = questionsForRole(selectedStakeholder?.role) || [];
       chips.innerHTML = questions.map(q => `
         <span class="question-chip" onclick="askSuggestedQuestion('${Utils.escapeHtml(q)}')">${q}</span>
       `).join('');
@@ -922,20 +925,22 @@
       sendMessage();
     }
 
-    function addMessage(type, content) {
+    // ── Messaging ──────────────────────────────────────────────────────────────
+
+    function addMessage(type, content, stakeholderName, stakeholderRole) {
       const messagesDiv = document.getElementById('interviewMessages');
       const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      
-      const messageHtml = `
+      const nameLabel = (type === 'stakeholder' && stakeholderName)
+        ? `<div style="font-size: 0.73rem; font-weight: 600; color: var(--gray-500); margin-bottom: 4px;">${Utils.escapeHtml(stakeholderName)} · ${Utils.escapeHtml(stakeholderRole || '')}</div>`
+        : '';
+
+      messagesDiv.innerHTML += `
         <div class="message ${type}">
+          ${nameLabel}
           <div class="message-content">${Utils.escapeHtml(content)}</div>
           <div class="message-time">${time}</div>
-        </div>
-      `;
-      
-      messagesDiv.innerHTML += messageHtml;
+        </div>`;
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
-
       conversationHistory.push({ role: type, content });
     }
 
@@ -943,55 +948,36 @@
       const messagesDiv = document.getElementById('interviewMessages');
       messagesDiv.innerHTML += `
         <div class="typing-indicator" id="typingIndicator">
-          <div class="typing-dots">
-            <span></span><span></span><span></span>
-          </div>
-          <span>${selectedStakeholder.name} is typing...</span>
-        </div>
-      `;
+          <div class="typing-dots"><span></span><span></span><span></span></div>
+          <span>${Utils.escapeHtml(selectedStakeholder?.name || 'Stakeholder')} is typing…</span>
+        </div>`;
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
     function hideTypingIndicator() {
-      const indicator = document.getElementById('typingIndicator');
-      if (indicator) indicator.remove();
+      const el = document.getElementById('typingIndicator');
+      if (el) el.remove();
     }
 
     async function sendMessage() {
-      if (isProcessing || !selectedStakeholder) return;
+      if (isProcessing || !selectedStakeholder || !currentSessionId) return;
 
       const input = document.getElementById('messageInput');
       const message = input.value.trim();
       if (!message) return;
 
-      // Add user message
       addMessage('user', message);
       input.value = '';
 
-      // Show typing indicator
       isProcessing = true;
       document.getElementById('sendBtn').disabled = true;
       showTypingIndicator();
 
       try {
-        // Build context for AI
-        const context = `You are roleplaying as ${selectedStakeholder.name}, the ${selectedStakeholder.role} of an organization being assessed for cybersecurity risks.
-
-Personality: ${selectedStakeholder.personality}
-Areas of expertise: ${selectedStakeholder.expertise.join(', ')}
-
-Respond in character as this stakeholder would. Be realistic and provide information that would be typical for someone in this role. If asked about technical details outside your expertise, deflect to the appropriate person. Keep responses conversational and realistic, 2-4 sentences typically.
-
-Previous conversation:
-${conversationHistory.map(m => `${m.role === 'user' ? 'Interviewer' : selectedStakeholder.name}: ${m.content}`).join('\n')}
-
-Respond to this question as ${selectedStakeholder.name}:`;
-
-        const data = await API.chat(`${context}\n\nInterviewer: ${message}`, currentUser?.id);
-        
+        const data = await API.interview.message(currentSessionId, message);
         hideTypingIndicator();
-        addMessage('stakeholder', data.response);
-      } catch (error) {
+        addMessage('stakeholder', data.response, data.stakeholder_name, data.stakeholder_role);
+      } catch (err) {
         hideTypingIndicator();
         addMessage('stakeholder', "I'm sorry, I got distracted for a moment. Could you repeat that?");
       } finally {
@@ -1008,14 +994,20 @@ Respond to this question as ${selectedStakeholder.name}:`;
       }
     }
 
-    function endInterview() {
+    async function endInterview() {
+      if (currentSessionId) {
+        try { await API.interview.end(currentSessionId); } catch (_) {}
+        currentSessionId = null;
+      }
       if (selectedStakeholder) {
         selectedStakeholder.status = 'completed';
-        renderStakeholders();
         Toast.success('Interview Complete', `Finished interview with ${selectedStakeholder.name}`);
       }
-      
-      // Reset UI
+      resetChat();
+      renderStakeholders();
+    }
+
+    function resetChat() {
       selectedStakeholder = null;
       conversationHistory = [];
       document.getElementById('interviewMessages').innerHTML = `
@@ -1023,12 +1015,13 @@ Respond to this question as ${selectedStakeholder.name}:`;
           <div class="empty-state-icon">🎤</div>
           <h3>Select a Stakeholder</h3>
           <p>Choose someone from the list to begin your interview simulation</p>
-        </div>
-      `;
+        </div>`;
       document.getElementById('interviewHeader').style.display = 'none';
       document.getElementById('interviewInput').style.display = 'none';
       document.getElementById('suggestedQuestions').style.display = 'none';
     }
+
+    // ── Notes ──────────────────────────────────────────────────────────────────
 
     function openNotes() {
       document.getElementById('notesOverlay').classList.add('active');
@@ -1042,28 +1035,13 @@ Respond to this question as ${selectedStakeholder.name}:`;
 
     function saveNotes() {
       const notes = document.getElementById('interviewNotes').value;
-      // Save notes to localStorage or API
-      localStorage.setItem(`interview-notes-${selectedStakeholder?.id}`, notes);
+      localStorage.setItem(`interview-notes-${currentProfileId}-${selectedStakeholder?.id}`, notes);
       Toast.success('Notes Saved', 'Your interview notes have been saved');
       closeNotes();
     }
 
-    async function loadProfiles() {
-      try {
-        const data = await API.profiles.list();
-        const select = document.getElementById('profileSelect');
-        data.profiles.forEach(profile => {
-          const option = document.createElement('option');
-          option.value = profile.id;
-          option.textContent = profile.companyName || 'Unnamed Profile';
-          select.appendChild(option);
-        });
-      } catch (error) {
-        console.error('Failed to load profiles:', error);
-      }
-    }
+    // ── Sidebar ────────────────────────────────────────────────────────────────
 
-    // Sidebar toggle
     function toggleSidebar() {
       document.getElementById('sidebar').classList.toggle('open');
       document.getElementById('sidebarOverlay').classList.toggle('active');
