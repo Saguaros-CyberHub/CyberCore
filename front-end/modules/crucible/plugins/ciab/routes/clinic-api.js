@@ -18,9 +18,10 @@ const { authenticate, optionalAuth } = require('../../../../../src/middleware/au
 const { generateProfile: aiGenerateProfile } = require('../ai/profile');
 router.post('/generate', authenticate, async (req, res) => {
   try {
-    const { userId, ...rest } = req.body || {};
+    const { userId, org_name, company_name, ...rest } = req.body || {};
     const profile = await aiGenerateProfile({
       user_id: req.user.userId,
+      company_name: org_name || company_name || undefined,
       ...rest
     });
     res.json({ success: true, profile_id: profile.id, profile });

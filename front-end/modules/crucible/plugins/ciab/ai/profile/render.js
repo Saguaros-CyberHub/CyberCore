@@ -1732,18 +1732,23 @@ const html = `<!DOCTYPE html>
             Each policy can be viewed on the student dashboard via the "View Policies" button.
           </p>
           <div style="display: grid; gap: 12px;">
-            ${data.policies_present.map((policyName) => `
+            ${data.policies_present.map((policyName, i) => {
+              const vMajor = i % 3 === 0 ? 2 : 1;
+              const vMinor = [0, 1, 2, 0, 1][i % 5];
+              const daysAgo = [0, 90, 180, 270, 45, 135, 365][i % 7];
+              const effectiveDate = new Date(Date.now() - daysAgo * 86400000).toISOString().split('T')[0];
+              return `
               <div style="border: 1px solid var(--gray-200); border-radius: 10px; overflow: hidden;">
                 <div style="padding: 14px 18px; background: var(--gray-50); display: flex; align-items: center; gap: 12px;">
                   <span style="font-size: 1.2em;">📋</span>
                   <div style="flex: 1;">
                     <div style="font-weight: 600; color: var(--primary-darker);">${esc(policyName)}</div>
-                    <div style="font-size: 0.82em; color: var(--gray-500);">Version 1.0 &middot; Effective: ${new Date().toISOString().split('T')[0]} &middot; Classification: Internal</div>
+                    <div style="font-size: 0.82em; color: var(--gray-500);">Version ${vMajor}.${vMinor} &middot; Effective: ${effectiveDate} &middot; Classification: Internal</div>
                   </div>
                   <span class="tag tag-blue">Active</span>
                 </div>
-              </div>
-            `).join('')}
+              </div>`;
+            }).join('')}
           </div>
 
           ${data.policies_missing.length > 0 ? `
