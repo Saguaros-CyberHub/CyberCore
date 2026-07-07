@@ -23,7 +23,7 @@ jobs:
         - name: Build Docker image
           uses: docker/build-push-action@v6
           with:
-                context: .
-                file: ./Dockerfile
+                context: ./front-end
+                file: ./front-end/Dockerfile
                 push: false
                 tags: cybercore:test
