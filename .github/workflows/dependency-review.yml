@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Checkout Repository
         # actions/checkout v4.2.2 pinned to SHA
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
 
       - name: Dependency Review
         # actions/dependency-review-action v5.0.0 pinned to SHA
