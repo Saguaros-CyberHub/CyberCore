@@ -1,0 +1,44 @@
+# Dependabot keeps dependencies patched and, together with GitHub's Dependabot
+# security alerts, surfaces known vulnerabilities in EXISTING dependencies.
+# The dependency-review workflow blocks NEW vulnerable/bad-license deps in PRs.
+version: 2
+updates:
+  # Node/Express app dependencies
+  - package-ecosystem: "npm"
+    directory: "/front-end"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    open-pull-requests-limit: 10
+    # Bundle low-risk updates into fewer PRs to cut noise; security updates
+    # always come as their own PRs regardless of grouping.
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    labels:
+      - "dependencies"
+
+  # Docker base image
+  - package-ecosystem: "docker"
+    directory: "/front-end"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    labels:
+      - "dependencies"
+      - "docker"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    labels:
+      - "dependencies"
+      - "ci"

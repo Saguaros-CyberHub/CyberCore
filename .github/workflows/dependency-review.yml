@@ -1,0 +1,34 @@
+name: Dependency Review
+
+# Scans dependency changes in a PR and fails if it introduces a package with a
+# known vulnerability (or a disallowed license). Complements Dependabot, which
+# handles updates and alerts on already-merged dependencies.
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: write # allow the summary comment on the PR
+
+concurrency:
+  group: dependency-review-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dependency-review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        # actions/checkout v4.2.2 pinned to SHA
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Dependency Review
+        # actions/dependency-review-action v5.0.0 pinned to SHA
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294
+        with:
+          # Fail the PR on moderate-or-higher severity vulnerabilities.
+          fail-on-severity: moderate
+          # Post a readable summary of the findings on the PR.
+          comment-summary-in-pr: on-failure
