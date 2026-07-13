@@ -198,13 +198,22 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+// Parse body early for auth routes so the key generator can read the email.
+// Without this, all users on a shared NAT IP (e.g. a university network)
+// share one bucket and one person's failed attempts locks everyone out.
+const authBodyParser = express.json({ limit: '10kb' });
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 5,
+  keyGenerator: (req) => {
+    const email = (req.body?.email || '').toLowerCase().trim();
+    return email ? `login:email:${email}` : `login:ip:${req.ip}`;
+  },
   message: { error: 'Too many login attempts, please try again later.' }
 });
-app.use('/api/auth/login', authLimiter);
-app.use('/api/auth/register', authLimiter);
+app.use('/api/auth/login', authBodyParser, authLimiter);
+app.use('/api/auth/register', authBodyParser, authLimiter);
 
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000,

@@ -400,6 +400,27 @@ function formatStatus(status) {
 // PART SWITCHING
 // ============================================================================
 async function switchPart(partNumber) {
+  // Save current part content before navigating away so data isn't lost
+  if (currentProfileId && currentPart && partNumber !== currentPart) {
+    collectDeliverableContentFromDOM(currentPart);
+    const contentToSave = collectPartContent();
+    const optionsToSave = JSON.stringify(selectedOptions[currentPart] || []);
+    const partToSave = currentPart;
+    const statusToSave = computePartStatus(currentPart);
+    API.progress.update(currentProfileId, partToSave, {
+      content: contentToSave,
+      output_option: optionsToSave,
+      status: statusToSave
+    }).then(() => {
+      const existing = currentProgress.find(p => p.part_number === partToSave);
+      if (existing) {
+        existing.content = contentToSave;
+        existing.output_option = optionsToSave;
+        existing.status = statusToSave;
+      }
+    }).catch(err => console.warn('[switchPart] Background save failed:', err));
+  }
+
   currentPart = partNumber;
   const part = PARTS.find(p => p.number === partNumber);
   if (!part) return;
@@ -1162,9 +1183,16 @@ async function saveDraft() {
 
     showAutoSaveStatus('saved');
 
-    // Reload progress
-    const progressData = await API.progress.get(currentProfileId);
-    currentProgress = progressData.progress || [];
+    // Update local state instead of re-fetching from the server
+    const status = computePartStatus(currentPart);
+    const existing = currentProgress.find(p => p.part_number === currentPart);
+    if (existing) {
+      existing.content = content;
+      existing.output_option = optionsData;
+      existing.status = status;
+    } else {
+      currentProgress.push({ part_number: currentPart, content, output_option: optionsData, status });
+    }
     renderPartsList();
     updateOverallProgress();
 
@@ -1370,6 +1398,10 @@ async function fetchIntakeFormStatus() {
       }
     });
     
+    if (response.status === 401) {
+      // Token expired — stop silently, don't overwrite status
+      return;
+    }
     if (!response.ok) {
       // Form doesn't exist yet - not started
       intakeFormStatus = { completion: 0, status: 'not_started' };

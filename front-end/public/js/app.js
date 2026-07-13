@@ -42,10 +42,13 @@ const API = {
         // Handle auth errors
         if (response.status === 401) {
           const code = data.code;
-          if (code === 'TOKEN_EXPIRED' || code === 'INVALID_TOKEN' || code === 'NO_TOKEN') {
-            // Redirect to login
+          if (code === 'TOKEN_EXPIRED' || code === 'INVALID_TOKEN') {
             if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
               window.location.href = '/login?expired=true';
+            }
+          } else if (code === 'NO_TOKEN') {
+            if (window.location.pathname !== '/login' && window.location.pathname !== '/register') {
+              window.location.href = '/login';
             }
           }
         }
