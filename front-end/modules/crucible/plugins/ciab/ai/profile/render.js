@@ -1256,8 +1256,10 @@ const html = `<!DOCTYPE html>
        NAVIGATION & TABS
        ═══════════════════════════════════════════════════════════════════════ */
     .nav-wrapper { position: sticky; top: 0; z-index: 100; background: white; box-shadow: var(--shadow); }
-    .nav-container { max-width: 1400px; margin: 0 auto; padding: 0 20px; }
-    .nav-tabs { display: flex; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; }
+    .nav-container { max-width: 1400px; margin: 0 auto; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; }
+    .nav-tabs { display: flex; overflow-x: auto; scrollbar-width: none; -ms-overflow-style: none; flex: 1; }
+    .print-btn { flex-shrink: 0; margin-left: 16px; padding: 6px 14px; background: var(--primary); color: white; border: none; border-radius: 6px; font-size: 0.85rem; font-weight: 600; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+    .print-btn:hover { background: var(--primary-dark, #1d4ed8); }
     .nav-tabs::-webkit-scrollbar { display: none; }
     .nav-tab { flex-shrink: 0; padding: 16px 24px; font-size: 0.95em; font-weight: 500; color: var(--gray-500); background: none; border: none; border-bottom: 3px solid transparent; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
     .nav-tab:hover { color: var(--primary); background: var(--gray-50); }
@@ -1434,24 +1436,23 @@ const html = `<!DOCTYPE html>
     @media print {
       * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
       body { background: white; margin: 0; }
-      .confidential-banner { position: static; }
-      .nav-wrapper { display: none !important; }
 
-      /* Cover page: exactly one page */
+      /* Hide nav, buttons, interactive elements */
+      .nav-wrapper, button, .tab-btn, select, input { display: none !important; }
+      .confidential-banner { position: static; }
+
+      /* Cover page: one page only */
       .cover-page { min-height: auto; height: auto; page-break-after: always; padding: 40px; }
 
-      /* Show all panels, no forced page breaks — let content flow naturally */
-      .tab-panel { display: block !important; }
-      .tab-panel + .tab-panel { page-break-before: always; }
+      /* Show all panels, flow naturally — no forced page breaks per panel */
+      .tab-panel { display: block !important; height: auto !important; min-height: 0 !important; overflow: visible !important; }
 
-      /* Don't break inside cards/sections */
-      .card, .section, .stakeholder-card, .policy-card { page-break-inside: avoid; }
+      /* Don't break inside cards */
+      .card, .section, .stakeholder-card { page-break-inside: avoid; }
 
-      /* Scale down the network diagram so it doesn't create blank overflow pages */
-      #tab-network svg, #tab-it svg { max-width: 100%; height: auto; }
+      /* Scale SVGs to fit page width and prevent them from blowing out the page */
+      svg { max-width: 100% !important; height: auto !important; }
 
-      /* Hide interactive elements that don't make sense in print */
-      button, .tab-btn, input[type="text"], select { display: none !important; }
       .ws-row.hidden { display: none !important; }
     }
     @media (max-width: 768px) {
@@ -1513,6 +1514,7 @@ const html = `<!DOCTYPE html>
         ${data.firewall.rules && data.firewall.rules.length > 0 ? '<button class="nav-tab" data-tab="firewall">Firewall</button>' : ''}
         <button class="nav-tab" data-tab="threats">Threats</button>
       </div>
+      <button class="print-btn" onclick="window.print()">🖨️ Print</button>
     </div>
   </div>
 

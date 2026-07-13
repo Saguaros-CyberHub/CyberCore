@@ -56,6 +56,7 @@ process.on('uncaughtException', (err) => {
 // ──────────────────────────────────────────────────────────────────────────────
 
 const crypto = require('crypto');
+const fs = require('fs');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -238,7 +239,45 @@ app.use(session({
 // ============================================================================
 
 app.use(express.static(path.join(__dirname, '../public')));
-app.use('/profiles', express.static(path.join(__dirname, '../profiles')));
+// Profile HTML files are pre-generated with CSS baked in. This middleware
+// intercepts HTML requests and injects an updated print stylesheet so print
+// fixes apply to existing profiles without regenerating them.
+const PROFILES_DIR = path.join(__dirname, '../profiles');
+const PRINT_CSS_INJECTION = `
+<style id="print-override">
+@media print {
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { background: white; margin: 0; }
+  .nav-wrapper, select, input { display: none !important; }
+  .print-btn { display: none !important; }
+  .confidential-banner { position: static; }
+  .cover-page { min-height: auto; height: auto; page-break-after: always; padding: 40px; }
+  .tab-panel {
+    display: block !important;
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    animation: none !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+  }
+  .card, .section, .stakeholder-card { page-break-inside: avoid; }
+  svg { max-width: 100% !important; height: auto !important; }
+  .ws-row.hidden { display: none !important; }
+  .footer { page-break-inside: avoid; }
+}
+</style>`;
+
+app.use('/profiles', (req, res, next) => {
+  if (!req.path.endsWith('.html')) return next();
+  const filePath = path.join(PROFILES_DIR, req.path);
+  fs.readFile(filePath, 'utf8', (err, html) => {
+    if (err) return next();
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html.replace('</head>', PRINT_CSS_INJECTION + '\n</head>'));
+  });
+});
+app.use('/profiles', express.static(PROFILES_DIR));
 // /vuln-assets is gated by short-lived HMAC-signed URLs minted by the orchestrator
 // (see src/utils/signed-url.js). Lab VMs carry ?token=…&exp=… on every request.
 const { verifySignedUrl } = require('./utils/signed-url');
