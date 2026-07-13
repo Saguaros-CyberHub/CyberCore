@@ -1432,12 +1432,27 @@ const html = `<!DOCTYPE html>
        PRINT & RESPONSIVE
        ═══════════════════════════════════════════════════════════════════════ */
     @media print {
-      .nav-wrapper { display: none; }
-      .cover-page { min-height: auto; page-break-after: always; }
-      .tab-panel { display: block !important; page-break-before: always; }
-      .tab-panel:first-of-type { page-break-before: avoid; }
-      .section { page-break-inside: avoid; }
-      body { background: white; }
+      * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      body { background: white; margin: 0; }
+      .confidential-banner { position: static; }
+      .nav-wrapper { display: none !important; }
+
+      /* Cover page: exactly one page */
+      .cover-page { min-height: auto; height: auto; page-break-after: always; padding: 40px; }
+
+      /* Show all panels, no forced page breaks — let content flow naturally */
+      .tab-panel { display: block !important; }
+      .tab-panel + .tab-panel { page-break-before: always; }
+
+      /* Don't break inside cards/sections */
+      .card, .section, .stakeholder-card, .policy-card { page-break-inside: avoid; }
+
+      /* Scale down the network diagram so it doesn't create blank overflow pages */
+      #tab-network svg, #tab-it svg { max-width: 100%; height: auto; }
+
+      /* Hide interactive elements that don't make sense in print */
+      button, .tab-btn, input[type="text"], select { display: none !important; }
+      .ws-row.hidden { display: none !important; }
     }
     @media (max-width: 768px) {
       .cover-company { font-size: 2em; }
