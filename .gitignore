@@ -1,10 +1,13 @@
 .DS_Store
 proxmox-automated-install/
+.continue/
 **/data/*
 !**/data/.gitkeep
+
 # CIAB framework catalogs (CIS IG1, NIST CSF, etc.) — version-controlled reference data.
 !**/data/frameworks/
 !**/data/frameworks/**
+
 # CIAB threat scenario library — canonical starter findings, version-controlled.
 !**/data/threat-scenario-library.json
 __pycache__/
@@ -37,6 +40,7 @@ vuln-assets/
 docker-compose.yml
 GOAD-main/
 logs/*
+
 # clinic
 config/n8n/workflows/Clinic-in-a-Box*
 
