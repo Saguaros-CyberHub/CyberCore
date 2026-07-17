@@ -315,16 +315,42 @@ router.delete('/:courseId', adminOnly, async (req, res) => {
         (e) => console.warn(`[CLE] Lane ${row.lane_id} teardown during course delete: ${e.message}`));
     }
 
-    // Remove the reserved lab network (VNets + zone) and the challenge row.
-    if (challenge_id) {
-      await teardownLabNetwork(challenge_id, { force: true, log: (m) => console.log(`[CLE] Course lab teardown: ${m}`) })
-        .catch((e) => console.warn(`[CLE] Lab network teardown for course ${courseId}: ${e.message}`));
+    // Remove every reserved-lab challenge tied to this course (VNets + zone +
+    // the crucible_challenge row). We match on the challenge's own
+    // spec.course_id — the source of truth — as well as the course's stored
+    // challenge_id, because a challenge can exist without cle_course.challenge_id
+    // ever being linked: the challenge is created by the *background* provision,
+    // and the link is written only after reserveLabNetwork returns. A course
+    // deleted mid-provision (or a retried provision) therefore leaves a
+    // challenge that challenge_id alone would miss, orphaning it in the
+    // Challenge Templates list. Matching on spec.course_id also sweeps up any
+    // duplicate challenges from repeated provisions.
+    const challengeRows = await cybercoreQuery(
+      `SELECT challenge_id FROM crucible_challenge
+        WHERE spec->>'course_id' = $1 OR challenge_id = $2`,
+      [courseId, challenge_id]   // challenge_id may be null; "= NULL" matches nothing, as intended
+    );
+
+    const challengeErrors = [];
+    for (const { challenge_id: cid } of challengeRows.rows) {
+      try {
+        await teardownLabNetwork(cid, { force: true, log: (m) => console.log(`[CLE] Course lab teardown: ${m}`) });
+      } catch (e) {
+        console.warn(`[CLE] Challenge ${cid} teardown for course ${courseId}: ${e.message}`);
+        challengeErrors.push({ challenge_id: cid, error: e.message });
+      }
     }
 
     // Delete course (cascades to cle_* child records).
     await query(`DELETE FROM cle_course WHERE course_id = $1`, [courseId]);
 
-    res.json({ success: true, message: 'Course and its reserved lab deleted', lanes_removed: lanes.rows.length });
+    res.json({
+      success: true,
+      message: 'Course and its reserved lab deleted',
+      lanes_removed: lanes.rows.length,
+      challenges_removed: challengeRows.rows.length - challengeErrors.length,
+      ...(challengeErrors.length ? { challenge_errors: challengeErrors } : {}),
+    });
   } catch (error) {
     console.error('[CLE] Delete course error:', error.message);
     res.status(500).json({ error: error.message });
