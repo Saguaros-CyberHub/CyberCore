@@ -15,6 +15,7 @@ const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { getGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
 const laneProvision = require('../utils/lane-provision');
+const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -25,16 +26,10 @@ function buildGuacLaunchUrl(connId) {
   return `${base}/#/client/${clientToken}`;
 }
 
-/** Verify the course exists and the caller may manage it. Returns the course row or null. */
-async function getManagedCourse(courseId, user) {
-  const isAdmin = user.role === 'admin';
-  const r = await query(
-    isAdmin
-      ? `SELECT course_id, challenge_id, challenge_key FROM cle_course WHERE course_id = $1`
-      : `SELECT course_id, challenge_id, challenge_key FROM cle_course WHERE course_id = $1 AND instructor_id = $2`,
-    isAdmin ? [courseId] : [courseId, user.userId]
-  );
-  return r.rows[0] || null;
+/** Verify the course exists and the caller may manage it. Returns the course row
+ *  (with its reserved-lab linkage) or null. Admin-aware via the shared helper. */
+function getManagedCourse(courseId, user) {
+  return getManagedCourseRow(courseId, user, 'course_id, challenge_id, challenge_key');
 }
 
 /**

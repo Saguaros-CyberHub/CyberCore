@@ -9,6 +9,7 @@ const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { canManageCourse } = require('../utils/course-access');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -20,13 +21,7 @@ router.get('/', instructorOnly, async (req, res) => {
     const instructorId = req.user.userId;
     const { courseId } = req.params;
 
-    // Verify instructor owns course
-    const courseOwner = await query(`
-      SELECT course_id FROM cle_course
-      WHERE course_id = $1 AND instructor_id = $2
-    `, [courseId, instructorId]);
-
-    if (courseOwner.rows.length === 0) {
+    if (!(await canManageCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
@@ -69,13 +64,7 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       return res.status(400).json({ error: 'template_id and non-empty student_ids array required' });
     }
 
-    // Verify instructor owns course
-    const courseOwner = await query(`
-      SELECT course_id FROM cle_course
-      WHERE course_id = $1 AND instructor_id = $2
-    `, [courseId, instructorId]);
-
-    if (courseOwner.rows.length === 0) {
+    if (!(await canManageCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
@@ -156,13 +145,7 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
     const instructorId = req.user.userId;
     const { courseId, labId } = req.params;
 
-    // Verify instructor owns course
-    const courseOwner = await query(`
-      SELECT course_id FROM cle_course
-      WHERE course_id = $1 AND instructor_id = $2
-    `, [courseId, instructorId]);
-
-    if (courseOwner.rows.length === 0) {
+    if (!(await canManageCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
