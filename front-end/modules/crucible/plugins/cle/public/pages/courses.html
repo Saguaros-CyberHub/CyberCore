@@ -200,7 +200,10 @@
 
           <!-- Overview Tab -->
           <div class="detail-tab-pane active" id="overview-pane">
-            <button class="btn btn-secondary" style="margin-bottom: 1rem;" onclick="editCurrentCourse()">✏️ Edit Course</button>
+            <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+              <button class="btn btn-secondary" onclick="editCurrentCourse()">✏️ Edit Course</button>
+              <button class="btn btn-danger" id="deleteCourseBtn" style="display: none;" onclick="deleteCurrentCourse()">🗑️ Delete Course</button>
+            </div>
             <div id="courseOverviewContent"></div>
           </div>
 
@@ -555,6 +558,11 @@
         document.getElementById('detailCourseStatus').textContent = data.is_active ? 'Active' : 'Archived';
         document.getElementById('detailCourseStatus').className = `badge ${data.is_active ? 'badge-active' : 'badge-archived'}`;
 
+        // Deleting a course tears down its entire lab (VMs, network) and is
+        // admin-only on the backend, so only surface the button to admins.
+        const isAdmin = Auth && Auth.user && Auth.user.role === 'admin';
+        document.getElementById('deleteCourseBtn').style.display = isAdmin ? 'inline-block' : 'none';
+
         loadCourseOverview();
         loadStudents();
         loadVMManagement();
@@ -875,6 +883,39 @@
         viewCourse(currentCourseId);
       } catch (e) {
         toast('Error updating course: ' + e.message, true);
+      }
+    }
+
+    // Permanently delete the course. The backend tears down every student
+    // workstation lane (VM + gateway + Guac connection), the course's reserved
+    // lab network (SDN zone + VNets), and cascade-removes all enrollments,
+    // deployed labs, and submissions.
+    async function deleteCurrentCourse() {
+      const name = (currentCourseData && currentCourseData.course_name) || 'this course';
+      const vmCount = (currentCourseData && currentCourseData.vm_count) || 0;
+      const warning = `Delete "${name}"?\n\n`
+        + `This permanently destroys:\n`
+        + `• every student workstation VM and its gateway${vmCount ? ` (${vmCount} currently provisioned)` : ''}\n`
+        + `• the course's reserved lab network\n`
+        + `• all enrollments, deployed labs, and submissions\n\n`
+        + `This cannot be undone.`;
+      if (!confirm(warning)) return;
+
+      const btn = document.getElementById('deleteCourseBtn');
+      const prevLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Deleting…';
+      try {
+        const result = await api('DELETE', `/courses/${currentCourseId}`);
+        const lanes = result && result.lanes_removed;
+        toast(`Course deleted${lanes ? ` — ${lanes} workstation lane${lanes === 1 ? '' : 's'} torn down` : ''}`);
+        backToList();
+        loadCourses();
+      } catch (e) {
+        toast('Error deleting course: ' + e.message, true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prevLabel;
       }
     }
 
