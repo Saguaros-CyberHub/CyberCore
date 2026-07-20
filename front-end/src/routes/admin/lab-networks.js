@@ -17,7 +17,7 @@ const { query } = require('../../utils/db');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../../utils/proxmox');
 const { getDefaultTemplateNode } = require('../../utils/site-config');
-const { sanitizeZoneAbbrev } = require('../../utils/lab-network-provision');
+const { sanitizeZoneAbbrev, ensureSdnZoneAndVnets } = require('../../utils/lab-network-provision');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
@@ -119,49 +119,33 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     let vnet = vnets.find(v => v.tag === vxlanId);
 
     if (!vnet) {
-      console.log(`[ChallengeNetwork] VNet for tag ${vxlanId} not found — creating SDN infrastructure...`);
+      console.log(`[ChallengeNetwork] VNet for tag ${vxlanId} not found — provisioning SDN infrastructure...`);
 
       // Determine zone abbreviation from spec (authoritative, already sanitized
       // at creation) or derive a valid one from challenge_key as a fallback.
-      const zoneAbbrev = spec.zone?.abbrev || sanitizeZoneAbbrev(template.challenge_key || 'chlng001');
+      const zoneAbbrev = sanitizeZoneAbbrev(spec.zone?.abbrev || template.challenge_key || 'chlng001');
 
-      // Check if the SDN zone exists
-      const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
-      const zoneExists = zones.some(z => z.zone === zoneAbbrev);
-
-      if (!zoneExists) {
-        // Get cluster node info for VXLAN zone creation
-        const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
-        const nodeNames = nodeList.map(n => n.node).join(',');
-        const nodeIps = nodeList.map(n => n.ip || `100.100.10.${10 + nodeList.indexOf(n)}`).join(',');
-
-        console.log(`[ChallengeNetwork] Creating SDN zone '${zoneAbbrev}' with nodes: ${nodeNames}`);
-        await proxmoxAPI('POST', '/api2/json/cluster/sdn/zones', {
+      // Provision the challenge's whole VXLAN block through the shared helper —
+      // the same path used at challenge-create time. It creates the zone (no
+      // ipam:'pve'), every vnet in the block under the base-20 naming scheme
+      // (v3 gets its internal vnets too), retries transient Proxmox SDN
+      // failures, and reconciles until the full set exists or throws. This
+      // replaces the old single-vnet inline logic that used ipam:'pve', a
+      // divergent name, and no retry.
+      try {
+        await ensureSdnZoneAndVnets({
           zone: zoneAbbrev,
-          type: 'vxlan',
-          peers: nodeIps,
-          ipam: 'pve'
+          vxlanStart: vxlanBlock.start,
+          vxlanEnd: vxlanBlock.end,
+          subnetScheme,
+          log: (m) => console.log(`[ChallengeNetwork] ${m}`),
         });
+      } catch (err) {
+        console.error('[ChallengeNetwork] SDN provisioning failed:', err.message);
+        return res.status(503).json({ error: `SDN provisioning failed: ${err.message}` });
       }
 
-      // Create the VNet for this VXLAN ID
-      const vnetName = `${zoneAbbrev}-${vxlanId}`;
-      console.log(`[ChallengeNetwork] Creating VNet '${vnetName}' with tag ${vxlanId} in zone '${zoneAbbrev}'`);
-      await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
-        vnet: vnetName,
-        zone: zoneAbbrev,
-        tag: vxlanId,
-        alias: `${zoneAbbrev}-vnet-${vxlanId}`
-      });
-
-      // Reload SDN so the VNet becomes active
-      console.log('[ChallengeNetwork] Reloading SDN configuration...');
-      await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
-
-      // Wait a moment for SDN to propagate
-      await new Promise(r => setTimeout(r, 5000));
-
-      // Re-fetch VNets
+      // Re-fetch VNets now that the block is provisioned.
       vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
       vnet = vnets.find(v => v.tag === vxlanId);
 
@@ -169,12 +153,13 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         return res.status(503).json({ error: `Failed to create VNet for VXLAN tag ${vxlanId}. SDN may need manual reload.` });
       }
 
-      console.log(`[ChallengeNetwork] SDN infrastructure created: zone=${zoneAbbrev}, vnet=${vnet.vnet}`);
+      console.log(`[ChallengeNetwork] SDN infrastructure provisioned: zone=${zoneAbbrev}, vnet=${vnet.vnet}`);
     }
 
-    // v3 segmented lanes need the internal VNet too (created at challenge-create
-    // time alongside the external one). Don't auto-create it here — a v3
-    // challenge must be made via /create-lab so both VNets exist.
+    // v3 segmented lanes need the internal VNet too. ensureSdnZoneAndVnets
+    // creates it alongside the external one when the block is provisioned above,
+    // but a challenge whose external vnet already existed (so we skipped the
+    // block-provision branch) may predate the internal-vnet scheme — guard for it.
     let vnetInt = null;
     if (subnetScheme === 'v3') {
       vnetInt = vnets.find(v => v.tag === vxlanId + V3_INTERNAL_TAG_OFFSET);

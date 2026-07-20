@@ -180,11 +180,29 @@ app.use(cookieParser());
 // the configured cap, keyed by user ID when logged in (so proxy-collapse
 // doesn't merge everyone's buckets) and by IP otherwise. Login brute-force
 // protection is handled separately by `authLimiter` below, which stays tight.
+// High-frequency, low-cost read endpoints that a single active user hits many
+// times per session — the per-page auth-status check and short-interval status
+// polls. Counting these toward the abuse bucket is what let normal users trip
+// the limiter within minutes of logging in, so they're skipped here. Login
+// brute-force protection stays enforced separately by `authLimiter`.
+const RATE_LIMIT_SKIP_PATHS = [
+  '/api/auth/me',
+];
+const RATE_LIMIT_SKIP_PATTERNS = [
+  /\/status$/,   // e.g. workstation/lab status polls: /api/.../:id/status
+];
+function isHighFrequencyRead(req) {
+  if (req.method !== 'GET') return false;
+  const path = req.originalUrl.split('?')[0];
+  return RATE_LIMIT_SKIP_PATHS.includes(path)
+    || RATE_LIMIT_SKIP_PATTERNS.some((re) => re.test(path));
+}
+
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
-  max:      parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 2000,
+  max:      parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 5000,
   message:  { error: 'Too many requests, please try again later.' },
-  skip: (req) => peekJwt(req)?.role === 'admin',
+  skip: (req) => peekJwt(req)?.role === 'admin' || isHighFrequencyRead(req),
   keyGenerator: (req) => {
     const payload = peekJwt(req);
     return payload?.sub ? `user:${payload.sub}` : `ip:${req.ip}`;

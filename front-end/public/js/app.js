@@ -289,25 +289,53 @@ const Confirm = {
 const Auth = {
   user: null,
 
+  /**
+   * Resolve the current session via /auth/me.
+   * Returns:
+   *   true  — authenticated (this.user populated)
+   *   false — genuinely unauthenticated (401); caller should send to /login
+   *   null  — could not determine (429 / 5xx / network). Do NOT log the user
+   *           out: a rate-limit or transient error is not an auth failure, and
+   *           bouncing to /login only drops them into the login limiter too.
+   * Transient failures are retried with backoff before giving up.
+   */
   async check() {
-    try {
-      const data = await API.auth.me();
-      this.user = data.user;
-      window.dispatchEvent(new Event('authReady'));
-      return true;
-    } catch (error) {
-      this.user = null;
-      return false;
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const data = await API.auth.me();
+        this.user = data.user;
+        window.dispatchEvent(new Event('authReady'));
+        return true;
+      } catch (error) {
+        const status = (error instanceof APIError) ? error.status : 0;
+        // Genuine auth failure — session is invalid.
+        if (status === 401) {
+          this.user = null;
+          return false;
+        }
+        // Transient (429 rate-limit, 5xx, or network error): retry, then bail
+        // without clearing an existing session.
+        if (attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, 500 * attempt));
+          continue;
+        }
+        return this.user ? true : null;
+      }
     }
+    return this.user ? true : null;
   },
 
   async requireAuth() {
-    const isLoggedIn = await this.check();
-    if (!isLoggedIn) {
+    const result = await this.check();
+    // Only redirect on a confirmed unauthenticated result. `null` means we
+    // couldn't reach /auth/me (rate-limited/transient) — leave the user where
+    // they are rather than logging them out.
+    if (result === false) {
       window.location.href = '/login';
       return false;
     }
-    return true;
+    return result === true;
   },
 
   async logout() {

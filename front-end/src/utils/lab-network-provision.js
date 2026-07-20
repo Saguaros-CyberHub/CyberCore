@@ -119,40 +119,98 @@ async function ensureSdnZoneAndVnets({ zone, vxlanStart, vxlanEnd, subnetScheme 
   }
 
   // 2. VNets
-  let vnetsCreated = 0;
+  // The full set of SDN tags this block must end up with. A lane deploy later
+  // looks its vnet up by tag (routes/admin/lanes.js) and 503s if it's absent,
+  // so every one of these must exist in the SDN config before we return.
+  const expectedTags = [];
   for (let vxlanId = vxlanStart; vxlanId <= vxlanEnd; vxlanId++) {
-    const tags = subnetScheme === 'v3' ? [vxlanId, vxlanId + V3_INTERNAL_TAG_OFFSET] : [vxlanId];
-    for (const tag of tags) {
-      const vnetName = encodeBase20(tag);
+    expectedTags.push(vxlanId);
+    if (subnetScheme === 'v3') expectedTags.push(vxlanId + V3_INTERNAL_TAG_OFFSET);
+  }
+
+  // Create one VNet, retrying transient Proxmox failures. Proxmox SDN is a
+  // single cluster-wide locked config; under load or during a concurrent apply
+  // it returns lock-timeout / 5xx on individual POSTs, and proxmoxAPI does not
+  // retry. Swallowing those (as the old code did) left silent holes in the
+  // block. "already exists" is success. Returns true iff the vnet is in place.
+  const createVnet = async (tag) => {
+    const vnetName = encodeBase20(tag);
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         await proxmoxAPI('POST', '/api2/json/cluster/sdn/vnets', {
           vnet: vnetName, zone, tag, alias: `${zone}-vnet-${tag}`
         });
-        vnetsCreated++;
+        return true;
       } catch (e) {
-        if (!e.message.includes('already exists')) log(`Warning: VNet ${vnetName} (tag ${tag}): ${e.message}`);
+        if (e.message.includes('already exists')) return true;
+        if (attempt === maxAttempts) {
+          log(`VNet ${vnetName} (tag ${tag}) failed after ${maxAttempts} attempts: ${e.message}`);
+          return false;
+        }
+        await new Promise(r => setTimeout(r, 500 * attempt));
       }
-      // Rate limit — Proxmox can get overwhelmed by rapid SDN API calls.
-      if (vnetsCreated % 10 === 0 && vnetsCreated > 0) await new Promise(r => setTimeout(r, 500));
     }
-  }
-  log(`${vnetsCreated} VNets created`);
+    return false;
+  };
 
-  // 3. Reload SDN + wait for the last bridge to come up.
+  // Re-list the SDN config and return the expected tags that aren't present.
+  // GET /cluster/sdn/vnets includes pending (un-applied) vnets, which is exactly
+  // what the deploy-time lookup keys on, so this matches the deploy's view.
+  const findMissingTags = async (tags) => {
+    const existing = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
+    const present = new Set((existing || []).map(v => v.tag));
+    return tags.filter(t => !present.has(t));
+  };
+
+  let vnetsCreated = 0;
+  for (let i = 0; i < expectedTags.length; i++) {
+    if (await createVnet(expectedTags[i])) vnetsCreated++;
+    // Rate limit on the iteration count (not successes) so pacing holds even
+    // when some creates fail — Proxmox can be overwhelmed by rapid SDN calls.
+    if ((i + 1) % 10 === 0) await new Promise(r => setTimeout(r, 500));
+  }
+  log(`${vnetsCreated}/${expectedTags.length} VNets created`);
+
+  // 3. Reload SDN, then reconcile: recreate any expected vnet still missing and
+  // reload again. A silent hole here 503s a lane deploy long after the fact, so
+  // verify the whole set rather than trusting the create loop.
   log('Reloading SDN...');
   await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
+
+  let missing = await findMissingTags(expectedTags);
+  for (let pass = 1; pass <= 3 && missing.length > 0; pass++) {
+    log(`Reconcile pass ${pass}: ${missing.length} VNet(s) missing, recreating...`);
+    for (const tag of missing) await createVnet(tag);
+    await proxmoxAPI('PUT', '/api2/json/cluster/sdn');
+    await new Promise(r => setTimeout(r, 1000 * pass));
+    missing = await findMissingTags(expectedTags);
+  }
+  if (missing.length > 0) {
+    // Fail loudly — reserveLabNetwork catches this and rolls back the block so
+    // we never report a half-provisioned lab as ready.
+    const preview = missing.slice(0, 10).map(encodeBase20).join(', ');
+    const err = new Error(
+      `SDN provisioning incomplete: ${missing.length}/${expectedTags.length} VNet(s) ` +
+      `missing after retries (${preview}${missing.length > 10 ? ', …' : ''})`
+    );
+    err.missingTags = missing;
+    throw err;
+  }
+
+  // 4. Wait for the VNet bridges to materialize on a node. Verify the whole
+  // expected set (not just the last one) so a mid-block gap can't pass.
   let bridgesUp = false;
   try {
     const checkNodes = await proxmoxAPI('GET', '/api2/json/nodes');
     const checkNode = (checkNodes || [])[0] && (checkNodes || [])[0].node;
     if (checkNode) {
-      const sampleVnets = [encodeBase20(vxlanEnd)];
-      if (subnetScheme === 'v3') sampleVnets.push(encodeBase20(vxlanEnd + V3_INTERNAL_TAG_OFFSET));
+      const expectedNames = expectedTags.map(encodeBase20);
       const deadline = Date.now() + 240000; // 4 min cap
       while (Date.now() < deadline) {
         const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${checkNode}/network`);
         const names = new Set((ifaces || []).map(i => i.iface));
-        if (sampleVnets.every(v => names.has(v))) { bridgesUp = true; break; }
+        if (expectedNames.every(v => names.has(v))) { bridgesUp = true; break; }
         await new Promise(r => setTimeout(r, 4000));
       }
     }
@@ -161,7 +219,7 @@ async function ensureSdnZoneAndVnets({ zone, vxlanStart, vxlanEnd, subnetScheme 
   }
   log(bridgesUp ? 'SDN VNet bridges are up.' : 'WARNING: SDN bridges not confirmed within 4 min.');
 
-  return { vnetsCreated, zoneCreated, bridgesUp };
+  return { vnetsCreated, zoneCreated, bridgesUp, expectedVnets: expectedTags.length };
 }
 
 /** Remove the block's VNets and (if it has no remaining VNets) its zone, then reload. */
