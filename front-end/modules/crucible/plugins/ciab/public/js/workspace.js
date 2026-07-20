@@ -406,7 +406,7 @@ async function switchPart(partNumber) {
     const contentToSave = collectPartContent();
     const optionsToSave = JSON.stringify(selectedOptions[currentPart] || []);
     const partToSave = currentPart;
-    const statusToSave = computePartStatus(currentPart);
+    const statusToSave = resolveSaveStatus(currentPart);
     API.progress.update(currentProfileId, partToSave, {
       content: contentToSave,
       output_option: optionsToSave,
@@ -702,10 +702,24 @@ function computePartStatus(partNumber) {
   return hasContent ? 'in_progress' : 'not_started';
 }
 
+// computePartStatus() can only ever return 'not_started'/'in_progress' — it has
+// no concept of 'submitted'/'reviewed'. Autosave and part-switch background
+// saves must never use it to overwrite a part that's already been submitted
+// or reviewed, or they'll silently demote it back down. Always resolve the
+// status to save through this wrapper instead of calling computePartStatus()
+// directly wherever the result gets sent to the server.
+function resolveSaveStatus(partNumber) {
+  const existing = currentProgress.find(p => p.part_number === partNumber);
+  if (existing && (existing.status === 'submitted' || existing.status === 'reviewed')) {
+    return existing.status;
+  }
+  return computePartStatus(partNumber);
+}
+
 async function saveSelectedOptions() {
   try {
     const optionsData = JSON.stringify(selectedOptions[currentPart] || []);
-    const status = computePartStatus(currentPart);
+    const status = resolveSaveStatus(currentPart);
     await API.progress.update(currentProfileId, currentPart, {
       output_option: optionsData,
       status
@@ -1174,17 +1188,17 @@ async function saveDraft() {
 
     const content = collectPartContent();
     const optionsData = JSON.stringify(selectedOptions[currentPart] || []);
+    const status = resolveSaveStatus(currentPart);
 
     await API.progress.update(currentProfileId, currentPart, {
       content: content,
       output_option: optionsData,
-      status: computePartStatus(currentPart)
+      status
     });
 
     showAutoSaveStatus('saved');
 
     // Update local state instead of re-fetching from the server
-    const status = computePartStatus(currentPart);
     const existing = currentProgress.find(p => p.part_number === currentPart);
     if (existing) {
       existing.content = content;
