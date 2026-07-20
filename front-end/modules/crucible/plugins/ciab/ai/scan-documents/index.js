@@ -21,6 +21,7 @@ const {
   getFindings,
   PORT_DEFAULTS
 } = require('./vuln-knowledge');
+const { inferServices } = require('./service-inference');
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -50,7 +51,7 @@ function scannableAssets(profileData) {
 // info ports (ICMP-equivalent + closed/filtered noise). Every entry traces
 // back to a profile.services token — never invented.
 function buildHostPorts(asset) {
-  const services = Array.isArray(asset.services) ? asset.services : [];
+  const services = inferServices(asset);
   const ports = [];
   const seen = new Set();
 

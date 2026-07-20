@@ -23,7 +23,6 @@ function sendHtmlNoCache(res, file) {
 
 const pages = {
   '/dashboard':   'dashboard.html',
-  '/my-profiles': 'profiles.html',
   '/generator':   'generator.html',
   '/workspace':   'workspace.html',
   '/progress':    'progress.html',

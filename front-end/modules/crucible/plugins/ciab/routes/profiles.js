@@ -168,6 +168,7 @@ router.get('/recent', authenticateToken, async (req, res) => {
         difficulty,
         created_at,
         html_file_path,
+        json_file_path,
         employee_count,
         hq_city
       FROM profiles

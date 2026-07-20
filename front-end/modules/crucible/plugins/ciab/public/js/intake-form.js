@@ -60,7 +60,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   if (!profileId) {
     Toast.error('Error', 'No profile specified');
-    window.location.href = '/ciab/my-profiles';
+    window.location.href = '/ciab/dashboard';
     return;
   }
 

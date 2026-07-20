@@ -29,7 +29,6 @@
         "label": "Clinic-in-a-Box",
         "items": [
             { "label": "Dashboard",          "icon": "\ud83d\udcca", "url": "/ciab/dashboard",            "page": "dashboard" },
-            { "label": "My Profiles",        "icon": "\ud83d\udcc1", "url": "/ciab/my-profiles",          "page": "profiles" },
             { "label": "Generate New",       "icon": "\u26a1",       "url": "/ciab/generator",            "page": "generator" },
             { "label": "Real-Client Intakes","icon": "\ud83d\udce8", "url": "/ciab/real-client-intakes",  "page": "real-client-intakes" },
             { "label": "Workspace",          "icon": "\ud83d\udcdd", "url": "/ciab/workspace",            "page": "workspace" },

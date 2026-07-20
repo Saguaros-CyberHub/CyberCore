@@ -458,7 +458,7 @@ async function generateProfile(args) {
 
   // Store paths with leading slash so <a href> resolves from the site root
   // (the profiles dir is served by Express at /profiles/* in server.js).
-  // Without the leading /, links from /ciab/my-profiles resolve as
+  // Without the leading /, links from /ciab/dashboard resolve as
   // /ciab/profiles/... which hits a 404.
   const jsonRelPath = '/' + path.join('profiles', jsonFilename).replace(/\\/g, '/');
   const htmlRelPath = '/' + path.join('profiles', htmlFilename).replace(/\\/g, '/');
@@ -542,6 +542,49 @@ async function generateProfile(args) {
     } catch (intakeErr) {
       console.warn(`⚠️  [ai/profile] Intake seed failed (profile still created): ${intakeErr.message}`);
     }
+  }
+
+  // Auto-generate fallback scan documents (nmap/nessus/zap) at creation time
+  // so students have something to look at even when they can't reach the
+  // deployed lane backend directly. Best-effort, same pattern as the intake
+  // seed above: a failure here logs but does NOT roll back the profile.
+  try {
+    reportStep('generating_documents', 98, 'Generating scan documents…');
+    const { generateScanDocuments } = require('../scan-documents');
+    const threatsData = combined.student_view.raw.threats || {};
+    const networkData = threatsData.network || {};
+    const orgData = threatsData.organization || {};
+    const domain = orgData.domain_public
+      || `${String(seed.template.industry || 'corp').toLowerCase().replace(/\s+/g, '')}.local`;
+    const generated = generateScanDocuments({
+      profileData: { assets: networkData.assets || [] },
+      companyName: profileRow.company_name,
+      domain,
+      types: ['nessus', 'zap', 'nmap']
+    });
+    for (const doc of generated) {
+      await pool.query(`
+        INSERT INTO generated_documents (profile_id, document_type, filename, content, metadata, generated_by)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (profile_id, document_type)
+        DO UPDATE SET
+          filename = EXCLUDED.filename,
+          content = EXCLUDED.content,
+          metadata = EXCLUDED.metadata,
+          generated_by = EXCLUDED.generated_by,
+          generated_at = NOW()
+      `, [
+        profileRow.id,
+        doc.type,
+        doc.filename,
+        doc.content || '',
+        JSON.stringify({ company: profileRow.company_name, size: doc.content?.length || 0, auto_generated: true }),
+        user_id
+      ]);
+    }
+    console.log(`📄 [ai/profile] Auto-generated ${generated.length} scan documents for profile ${profileRow.id}`);
+  } catch (docErr) {
+    console.warn(`⚠️  [ai/profile] Scan document auto-generation failed (profile still created): ${docErr.message}`);
   }
 
   reportStep('complete', 100, 'Profile generated successfully');

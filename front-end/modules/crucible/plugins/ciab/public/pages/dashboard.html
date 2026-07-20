@@ -249,10 +249,6 @@
       <header class="main-header">
         <div class="header-left">
           <button class="menu-toggle" onclick="toggleSidebar()">☰</button>
-          <div class="search-box">
-            <span class="icon">🔍</span>
-            <input type="text" placeholder="Search profiles..." id="searchInput">
-          </div>
         </div>
         <div class="header-right">
           <button class="header-btn" onclick="loadDashboard()" title="Refresh">🔄</button>
@@ -343,8 +339,7 @@
             <!-- Recent Profiles -->
             <div class="card">
               <div class="card-header">
-                <span class="card-title">Recent Profiles</span>
-                <a href="/my-profiles" class="btn btn-sm btn-outline">View All</a>
+                <span class="card-title">Your Profiles</span>
               </div>
               <div class="card-body" id="recentProfilesContainer">
                 <p class="text-muted text-center">Loading...</p>
@@ -479,6 +474,43 @@
     </div>
   </div>
 
+  <!-- Scan Reports Modal -->
+  <div class="modal-overlay" id="scanReportsModal">
+    <div class="modal" style="max-width: 700px;">
+      <div class="modal-header">
+        <div class="modal-title" id="scanReportsModalTitle">Scan Reports</div>
+        <button class="modal-close" onclick="closeModal('scanReportsModal')">&times;</button>
+      </div>
+      <div style="padding: 20px;">
+        <p class="text-muted" style="font-size: 0.9em; margin-bottom: 16px;">NMAP, Nessus, and ZAP scan reports for this client profile.</p>
+        <div id="scanReportsLoading" style="display:none; text-align:center; padding: 24px; color:#64748b;">Loading…</div>
+        <div id="scanReportsEmpty" style="display:none; text-align:center; padding: 24px;">
+          <p class="text-muted" style="font-size:0.9em; margin-bottom: 16px;">No scan reports generated yet.</p>
+          <button class="btn btn-sm btn-primary" onclick="generateScanReportsForProfile()" id="btnGenerateScanReports">Generate Reports</button>
+        </div>
+        <div id="scanReportsList" style="display:none;"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete Profile Confirmation Modal -->
+  <div class="modal-overlay" id="deleteProfileModal">
+    <div class="modal">
+      <div class="modal-header">
+        <span class="modal-title">Delete Profile</span>
+        <button class="modal-close" onclick="closeModal('deleteProfileModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p>Are you sure you want to delete <strong id="deleteProfileName"></strong>?</p>
+        <p class="text-muted">This action cannot be undone.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('deleteProfileModal')">Cancel</button>
+        <button class="btn btn-danger" id="confirmDeleteProfileBtn">Delete</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Chat is now handled by global layout.js -->
 
   <script src="/js/app.js"></script>
@@ -554,7 +586,7 @@
 		if (statHoursEl) statHoursEl.textContent = total * 8;
 
 		// Load recent profiles
-		const profilesResponse = await API.profiles.recent(5);
+		const profilesResponse = await API.profiles.recent(15);
 		renderRecentProfiles(profilesResponse.profiles || []);
 	  } catch (error) {
 		console.error('Failed to load dashboard:', error);
@@ -597,8 +629,10 @@
             <a href="/ciab/workspace?profile=${p.id}" class="btn btn-sm btn-success">📝 Start Assessment</a>
             <button class="btn btn-sm btn-primary" onclick="openProfileModal('${p.id}')">View Details</button>
             ${p.htmlFilePath ? `<a href="${p.htmlFilePath}" target="_blank" class="btn btn-sm btn-outline">Open HTML</a>` : ''}
-            <button class="btn btn-sm btn-outline" onclick="startInterview('${p.id}')">Interview</button>
+            ${p.jsonFilePath ? `<a href="${p.jsonFilePath}" target="_blank" class="btn btn-sm btn-outline">Open JSON</a>` : ''}
             <button class="btn btn-sm btn-outline" onclick="viewPolicies('${p.id}', '${(p.companyName || 'Company').replace(/'/g, "\\'")}')">View Policies</button>
+            <button class="btn btn-sm btn-outline" onclick="viewScanReports('${p.id}', '${(p.companyName || 'Company').replace(/'/g, "\\'")}')">Scan Reports</button>
+            <button class="btn btn-sm btn-ghost" onclick="confirmDeleteProfile('${p.id}', '${(p.companyName || 'this profile').replace(/'/g, "\\'")}')" title="Delete">🗑️</button>
           </div>
         </div>
       `).join('');
@@ -827,12 +861,12 @@
 
     function continueAssessment() {
       if (currentProfileId) {
-        window.location.href = `/ciab/my-profiles?view=${currentProfileId}`;
+        window.location.href = `/ciab/workspace?profile=${currentProfileId}`;
       }
     }
 
     function viewProfile(id) {
-      window.location.href = `/ciab/my-profiles?view=${id}`;
+      openProfileModal(id);
     }
 
     function showProgress() {
@@ -983,6 +1017,126 @@
       }
     }
 
+    // ── Scan Reports (NMAP / Nessus / ZAP) ──────────────────────────────────
+    let currentScanReportsProfileId = null;
+
+    const SCAN_DOC_LABELS = { nmap: 'NMAP Network Scan', nessus: 'Nessus Vulnerability Scan', zap: 'ZAP Web App Scan' };
+    const SCAN_DOC_ICONS = { nmap: '🗺️', nessus: '🔬', zap: '⚡' };
+
+    function renderScanReportsList(documents) {
+      const list = document.getElementById('scanReportsList');
+      list.innerHTML = documents.map(doc => `
+        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 0.75rem 1rem; display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.75rem;">
+          <div style="display:flex; align-items:center; gap:0.75rem;">
+            <span style="font-size:1.4rem;">${SCAN_DOC_ICONS[doc.type] || '📄'}</span>
+            <div>
+              <div style="font-weight:600; font-size:0.92rem;">${SCAN_DOC_LABELS[doc.type] || doc.filename}</div>
+              <div style="font-size:0.78rem; color:#64748b;">Generated ${new Date(doc.generated_at).toLocaleDateString()} · ${(doc.size / 1024).toFixed(1)} KB</div>
+            </div>
+          </div>
+          <a href="#" onclick="downloadScanReport(event, '${doc.download_url}', '${doc.filename}')">
+            <button class="btn btn-sm btn-outline">⬇ Download</button>
+          </a>
+        </div>
+      `).join('');
+    }
+
+    async function viewScanReports(profileId, companyName) {
+      currentScanReportsProfileId = profileId;
+      document.getElementById('scanReportsModalTitle').textContent = `Scan Reports — ${companyName}`;
+      const loading = document.getElementById('scanReportsLoading');
+      const empty = document.getElementById('scanReportsEmpty');
+      const list = document.getElementById('scanReportsList');
+      empty.style.display = 'none';
+      list.style.display = 'none';
+      loading.style.display = 'block';
+      openModal('scanReportsModal');
+
+      try {
+        const data = await API.profiles.documents(profileId);
+        loading.style.display = 'none';
+        if (!data.documents || data.documents.length === 0) {
+          empty.style.display = 'block';
+          return;
+        }
+        renderScanReportsList(data.documents);
+        list.style.display = 'block';
+      } catch (error) {
+        console.error('Error fetching scan reports:', error);
+        loading.style.display = 'none';
+        empty.style.display = 'block';
+      }
+    }
+
+    async function generateScanReportsForProfile() {
+      const profileId = currentScanReportsProfileId;
+      if (!profileId) return;
+      const btn = document.getElementById('btnGenerateScanReports');
+      const loading = document.getElementById('scanReportsLoading');
+      const empty = document.getElementById('scanReportsEmpty');
+      const list = document.getElementById('scanReportsList');
+
+      if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
+      empty.style.display = 'none';
+      list.style.display = 'none';
+      loading.style.display = 'block';
+
+      try {
+        const result = await API.profiles.generateDocuments(profileId);
+        loading.style.display = 'none';
+        if (result.documents && result.documents.length > 0) {
+          if (typeof Toast !== 'undefined') Toast.success('Reports Ready', `${result.documents.length} scan reports generated.`);
+          renderScanReportsList(result.documents);
+          list.style.display = 'block';
+        } else {
+          if (typeof Toast !== 'undefined') Toast.info('No Reports', 'No documents were generated for this profile.');
+          empty.style.display = 'block';
+        }
+      } catch (error) {
+        console.error('Error generating scan reports:', error);
+        if (typeof Toast !== 'undefined') Toast.error('Error', 'Failed to generate reports. Please try again.');
+        empty.style.display = 'block';
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Generate Reports'; }
+      }
+    }
+
+    function downloadScanReport(event, url, filename) {
+      event.preventDefault();
+      fetch(url, { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } })
+        .then(r => r.blob())
+        .then(blob => {
+          const objUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = objUrl;
+          a.download = filename || 'document';
+          a.click();
+          URL.revokeObjectURL(objUrl);
+        })
+        .catch(() => { if (typeof Toast !== 'undefined') Toast.error('Error', 'Failed to download document.'); });
+    }
+
+    // ── Delete Profile ──────────────────────────────────────────────────────
+    let deleteProfileId = null;
+
+    function confirmDeleteProfile(id, name) {
+      deleteProfileId = id;
+      document.getElementById('deleteProfileName').textContent = name;
+      openModal('deleteProfileModal');
+    }
+
+    document.getElementById('confirmDeleteProfileBtn').addEventListener('click', async () => {
+      if (!deleteProfileId) return;
+      try {
+        await API.profiles.delete(deleteProfileId);
+        if (typeof Toast !== 'undefined') Toast.success('Deleted', 'Profile deleted successfully');
+        closeModal('deleteProfileModal');
+        loadDashboard();
+      } catch (error) {
+        if (typeof Toast !== 'undefined') Toast.error('Error', 'Failed to delete profile');
+      }
+    });
+
     // Sidebar toggle
     function toggleSidebar() {
       const sidebar = document.getElementById('sidebar');
@@ -1003,15 +1157,6 @@
       if (typeof Layout !== 'undefined') Layout.toggleChat();
     }
 
-    // Search
-    const searchInput = document.getElementById('searchInput');
-    if (searchInput) {
-      searchInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter' && e.target.value.trim()) {
-          window.location.href = `/ciab/my-profiles?search=${encodeURIComponent(e.target.value.trim())}`;
-        }
-      });
-    }
   </script>
 </body>
 </html>

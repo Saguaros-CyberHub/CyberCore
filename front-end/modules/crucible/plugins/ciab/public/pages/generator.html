@@ -747,7 +747,7 @@
         const body = await res.json();
         status.textContent = `Profile created: ${body.profile.total_assets} assets (${body.profile.real_count} real + ${body.profile.filler_count} filler)`;
         Toast.success('Profile generated', body.profile.company_name);
-        setTimeout(() => { window.location.href = '/ciab/my-profiles'; }, 1500);
+        setTimeout(() => { window.location.href = '/ciab/dashboard'; }, 1500);
       } catch (err) {
         status.textContent = 'Error: ' + err.message;
         Toast.error('Generation failed', err.message);
@@ -894,7 +894,7 @@
         Toast.success('Success', 'Profile generated successfully!');
 
         setTimeout(() => {
-          window.location.href = '/ciab/my-profiles';
+          window.location.href = '/ciab/dashboard';
         }, 1500);
 
       } catch (error) {

@@ -230,7 +230,7 @@
         actions.push(`<a class="btn btn-primary btn-sm" href="/ciab/real-client-intake/${encodeURIComponent(it.id)}/synthesize">🎯 Create Challenge</a>`);
       }
       if (it.linked_profile_id) {
-        actions.push(`<a class="btn btn-outline btn-sm" href="/ciab/my-profiles">📁 View profile</a>`);
+        actions.push(`<a class="btn btn-outline btn-sm" href="/ciab/dashboard">📁 View profile</a>`);
       } else if (it.linked_challenge_id) {
         actions.push(`<a class="btn btn-primary btn-sm" href="/ciab/generator?real_intake_id=${encodeURIComponent(it.id)}&challenge_id=${encodeURIComponent(it.linked_challenge_id)}">📁 Generate Profile</a>`);
       }
