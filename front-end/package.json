@@ -9,7 +9,7 @@
     "setup-db": "node src/utils/setup-db.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.111.0",
+    "@anthropic-ai/sdk": "^0.112.3",
     "bcryptjs": "^2.4.3",
     "connect-redis": "^7.1.0",
     "cookie-parser": "^1.4.6",
