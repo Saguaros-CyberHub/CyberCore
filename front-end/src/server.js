@@ -304,6 +304,14 @@ app.use('/profiles', (req, res, next) => {
     res.send(html.replace('</head>', PRINT_CSS_INJECTION + '\n</head>'));
   });
 });
+// Profile JSON holds the full simulated-company data set and must never be
+// fetchable directly by URL. Every legitimate reader (scan-doc/policy/
+// interview/deploy generation) already reads it server-side off disk, not
+// over HTTP — nothing legitimate depends on this path being open.
+app.use('/profiles', (req, res, next) => {
+  if (req.path.endsWith('.json')) return res.status(404).send('Not found');
+  next();
+});
 app.use('/profiles', express.static(PROFILES_DIR));
 // /vuln-assets is gated by short-lived HMAC-signed URLs minted by the orchestrator
 // (see src/utils/signed-url.js). Lab VMs carry ?token=…&exp=… on every request.

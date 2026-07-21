@@ -629,7 +629,6 @@
             <a href="/ciab/workspace?profile=${p.id}" class="btn btn-sm btn-success">📝 Start Assessment</a>
             <button class="btn btn-sm btn-primary" onclick="openProfileModal('${p.id}')">View Details</button>
             ${p.htmlFilePath ? `<a href="${p.htmlFilePath}" target="_blank" class="btn btn-sm btn-outline">Open HTML</a>` : ''}
-            ${p.jsonFilePath ? `<a href="${p.jsonFilePath}" target="_blank" class="btn btn-sm btn-outline">Open JSON</a>` : ''}
             <button class="btn btn-sm btn-outline" onclick="viewPolicies('${p.id}', '${(p.companyName || 'Company').replace(/'/g, "\\'")}')">View Policies</button>
             <button class="btn btn-sm btn-outline" onclick="viewScanReports('${p.id}', '${(p.companyName || 'Company').replace(/'/g, "\\'")}')">Scan Reports</button>
             <button class="btn btn-sm btn-ghost" onclick="confirmDeleteProfile('${p.id}', '${(p.companyName || 'this profile').replace(/'/g, "\\'")}')" title="Delete">🗑️</button>

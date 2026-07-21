@@ -1555,12 +1555,34 @@ router.get('/:id', authenticateToken, async (req, res) => {
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Profile not found' });
     }
-    
+
+    const profile = toCamelCase(result.rows[0]);
+
+    // Embed the asset list from the profile JSON server-side, so callers (e.g.
+    // the admin lane-deploy console) never need to fetch the raw JSON file
+    // directly over HTTP.
+    profile.assets = [];
+    if (profile.jsonFilePath) {
+      try {
+        const resolvedPath = path.join(process.cwd(), profile.jsonFilePath.replace(/^\//, ''));
+        if (fs.existsSync(resolvedPath)) {
+          const parsed = JSON.parse(fs.readFileSync(resolvedPath, 'utf-8'));
+          const data = Array.isArray(parsed) ? parsed[0] : parsed;
+          const studentView = data?.student_view?.raw || {};
+          profile.assets = studentView?.network?.assets
+            || studentView?.threats?.network?.assets
+            || [];
+        }
+      } catch (e) {
+        console.warn('⚠️ [GET /profiles/:id] Could not load assets from profile JSON:', e.message);
+      }
+    }
+
     res.json({
       success: true,
-      profile: toCamelCase(result.rows[0])
+      profile
     });
-    
+
   } catch (error) {
     console.error('Error fetching profile:', error);
     res.status(500).json({ error: 'Failed to fetch profile', details: error.message });

@@ -256,24 +256,9 @@ async function loadProfileById(id) {
     const profile = data.profile || data;
     CURRENT_PROFILE = profile;
 
-    // Profile JSON may not be embedded in /api/profiles/:id response — try its raw file
-    // (the synthesizer reads from disk server-side, here we only need the asset list for display)
-    let assets = profile?.json?.student_view?.raw?.threats?.network?.assets
-              || profile?.studentView?.raw?.threats?.network?.assets
-              || profile?.assets;
-    if (!Array.isArray(assets)) {
-      // Fetch directly from the static file path
-      const jsonPath = profile.jsonFilePath || profile.json_file_path;
-      if (jsonPath) {
-        try {
-          const fileResp = await fetch('/' + jsonPath.replace(/^\/+/, ''));
-          if (fileResp.ok) {
-            const raw = await fileResp.json();
-            assets = raw?.student_view?.raw?.threats?.network?.assets || raw?.assets || [];
-          }
-        } catch (_) { /* ignore */ }
-      }
-    }
+    // GET /api/profiles/:id embeds the asset list server-side — no need to
+    // fetch the raw profile JSON directly.
+    const assets = profile?.assets;
     CURRENT_ASSETS = Array.isArray(assets) ? assets : [];
 
     renderAssetTable();
