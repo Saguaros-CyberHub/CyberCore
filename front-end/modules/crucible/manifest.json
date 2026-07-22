@@ -18,6 +18,10 @@
       "mountPath": "/"
     },
     {
+      "file": "routes/challenges.js",
+      "mountPath": "/"
+    },
+    {
       "file": "routes/index.js",
       "mountPath": "/api/modules/crucible"
     }

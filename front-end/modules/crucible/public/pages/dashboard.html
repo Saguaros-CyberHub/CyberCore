@@ -142,6 +142,17 @@
       leaderboard:{ label: 'Leaderboard',                icon: '🏆', desc: 'Rankings across all Crucible events. See where you stand.' },
     };
 
+    // Tabs backed by the challenge catalog (crucible_challenge). Each maps to
+    // one or more challenge_type values. Every other tab is event-backed
+    // (cybercore_event) — human-run live sessions.
+    const CHALLENGE_TABS = {
+      vuln:      ['single_vm', 'multi_vm'],
+      koth:      ['koth'],
+      redvsblue: ['red_vs_blue'],
+    };
+
+    const DIFFICULTY_LABELS = ['Trivial', 'Easy', 'Medium', 'Intermediate', 'Hard', 'Expert'];
+
     let currentType = 'weekly';
     let isAdmin = false;
 
@@ -173,6 +184,20 @@
 
       if (type === 'leaderboard') {
         renderLeaderboard(content, meta);
+        return;
+      }
+
+      if (CHALLENGE_TABS[type]) {
+        try {
+          const types = CHALLENGE_TABS[type].join(',');
+          const res = await fetch(`/api/crucible/challenges?type=${encodeURIComponent(types)}`, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          });
+          const data = await res.json();
+          renderChallenges(content, meta, data.challenges || []);
+        } catch (e) {
+          content.innerHTML = `<p style="color:#ef4444;">Error loading challenges: ${escHtml(e.message)}</p>`;
+        }
         return;
       }
 
@@ -227,6 +252,52 @@
       container.innerHTML = html;
     }
 
+    function difficultyLabel(d) {
+      if (d === null || d === undefined) return null;
+      return DIFFICULTY_LABELS[d] || `Level ${d}`;
+    }
+
+    function renderChallenges(container, meta, challenges) {
+      let html = `
+        <div class="content-header">
+          <h2>${meta.icon} ${escHtml(meta.label)}</h2>
+        </div>
+        <p class="content-desc">${escHtml(meta.desc)}</p>
+      `;
+
+      if (challenges.length === 0) {
+        html += `
+          <div class="empty-state">
+            <div class="empty-icon">${meta.icon}</div>
+            <h3>No Challenges Available</h3>
+            <p>There are no active ${escHtml(meta.label.toLowerCase())} right now. Check back soon.</p>
+          </div>`;
+      } else {
+        html += '<div class="events-grid">' + challenges.map(c => {
+          const diff = difficultyLabel(c.difficulty);
+          return `
+          <div class="event-card">
+            <div class="event-card-header">
+              <h3 class="event-card-title">${escHtml(c.name)}</h3>
+              ${statusBadge(c.status)}
+            </div>
+            ${c.description ? `<p class="event-card-desc">${escHtml(c.description)}</p>` : ''}
+            <div class="event-card-meta">
+              ${diff ? `<span>🎚️ ${escHtml(diff)}</span>` : ''}
+              <span>🧩 ${escHtml((c.challenge_type || '').replace(/_/g, ' '))}</span>
+              ${c.attachable ? `<span>🔌 Attachable</span>` : ''}
+            </div>
+            <div class="event-card-footer">
+              <button class="btn btn-primary btn-sm" onclick="startChallenge('${c.challenge_id}')">Start Challenge</button>
+              <span style="font-size:0.75rem; color:var(--text-secondary);">${escHtml(c.challenge_key)}</span>
+            </div>
+          </div>`;
+        }).join('') + '</div>';
+      }
+
+      container.innerHTML = html;
+    }
+
     async function renderLeaderboard(container, meta) {
       container.innerHTML = `
         <div class="content-header">
@@ -254,6 +325,10 @@
 
     function joinEvent(eventId) {
       Toast.info('Not Yet Active', 'Event joining will be available once your instructor activates the event lane.');
+    }
+
+    function startChallenge(challengeId) {
+      Toast.info('Not Yet Active', 'Challenge launching will be available once your instructor attaches it to a lane.');
     }
 
     document.addEventListener('DOMContentLoaded', async () => {

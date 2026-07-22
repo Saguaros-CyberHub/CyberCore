@@ -1,27 +1,28 @@
 # CyberSaguaros — SSRF Research Portal
 
-An attachable CyberCore challenge module: a custom vulnerable web application
-themed as the **CyberSaguaros Research Group**, a fictional cactus research
-group applying "cyber algorithms" to cactus research.
+A single-VM **Crucible challenge**: a custom vulnerable web application themed
+as the **CyberSaguaros Research Group**, a fictional cactus research group
+applying "cyber algorithms" to cactus research.
 
-It delivers the web-exploitation front of the multi-stage attack-path lab:
+The challenge is the web-exploitation front of a multi-stage attack path:
 **SSRF → admin access → file-upload RCE → reverse shell → Linux privilege
-escalation**. The GOAD / Active Directory pivot is a separate module — this
+escalation**. The GOAD / Active Directory pivot is its own challenge — this
 box only foreshadows it (planted notes).
 
-## Deployment
+## Deploying the challenge
 
-This is an **attachable module**. Once the template (VMID 1703) is baked and
-migration `020_seed_cybersaguaros_module.sql` is applied:
+Once the template (VMID 1703) is baked and migration
+`020_seed_cybersaguaros_module.sql` has registered the challenge, drop it into
+a lane:
 
 ```
 POST /api/admin/lanes/<laneId>/modules
   { "challenge_key": "cybersaguaros-ssrf", "module": "crucible" }
 ```
 
-The attach-module system clones template 1703 into the target lane, assigns a
-VMID in the 800000-899999 range and a lane IP in the `.100+` range, and starts
-it. Reachable from that lane's Kali at `http://<lane-base>.<octet>/`. Detach
+Deploying clones template 1703 into the target lane, assigns a VMID in the
+800000-899999 range and a lane IP in the `.100+` range, and starts it. Players
+reach it from that lane's Kali at `http://<lane-base>.<octet>/`. Tear it down
 with `DELETE /api/admin/lanes/<laneId>/modules/<moduleInstanceId>` or the admin
 UI **Modules** button.
 
