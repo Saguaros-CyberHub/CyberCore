@@ -10,8 +10,7 @@ the doc.
 
 ## Reading order
 
-Start at the top and work down. The first three are the foundation; the rest
-are subsystem deep-dives you can read on demand.
+Start at the top and work down. The first three are the foundation; the rest are subsystem deep-dives you can read on demand.
 
 | # | Doc | What it covers |
 |---|-----|----------------|
@@ -26,8 +25,7 @@ are subsystem deep-dives you can read on demand.
 | 09 | [Deployment & Ops](09-deployment-and-ops.md) | The Docker Compose stack, environment variables, and offline mode. |
 | 10 | [Plugins: CiaB & CLE](10-plugins.md) | The two shipped plugins and what they add. |
 
-Also: [offline-mode.md](11-offline-mode.md) — running CyberHub on a LAN or
-air-gapped machine without public HTTPS.
+Also: [offline-mode.md](11-offline-mode.md) — running CyberHub on a LAN or air-gapped machine without public HTTPS.
 
 ## Conventions used in these docs
 
