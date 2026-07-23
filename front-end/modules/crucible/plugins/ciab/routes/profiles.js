@@ -554,7 +554,30 @@ router.get('/:id/policies', authenticateToken, async (req, res) => {
     );
 
     if (docResult.rows.length === 0) {
-      return res.json({ success: true, policies: [], company_name: profileCheck.rows[0].company_name, total_count: 0 });
+      // No row at all — generation was never triggered for this profile
+      // (e.g. it predates auto-generation). Distinct from 'generating' so
+      // the UI knows a manual "Generate" button is actually appropriate here.
+      return res.json({ success: true, policies: [], company_name: profileCheck.rows[0].company_name, total_count: 0, status: 'not_started' });
+    }
+
+    // metadata is a JSONB column — node-postgres already parses it into a
+    // real object, not a string. Calling JSON.parse() on it (as this code
+    // used to) throws on the object, gets silently swallowed, and defaults
+    // meta to {} every time — which is why status always fell back to
+    // 'complete' regardless of what was actually stored.
+    const meta = docResult.rows[0].metadata || {};
+    const status = meta.status || 'complete'; // rows written before this field existed are already complete
+
+    if (status === 'generating' || status === 'failed' || status === 'none') {
+      return res.json({
+        success: true,
+        policies: [],
+        company_name: profileCheck.rows[0].company_name,
+        total_count: 0,
+        status,
+        error: meta.error,
+        reason: meta.reason
+      });
     }
 
     const parsed = JSON.parse(docResult.rows[0].content);
@@ -570,7 +593,8 @@ router.get('/:id/policies', authenticateToken, async (req, res) => {
       success: true,
       policies: policies,
       company_name: parsed.company_name || profileCheck.rows[0].company_name,
-      total_count: policies.length
+      total_count: policies.length,
+      status: 'complete'
     });
   } catch (error) {
     console.error('Error fetching policies:', error);
@@ -657,6 +681,26 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Profile JSON file not found — cannot generate policies' });
     }
 
+    // Mark as generating before the Claude calls start — covers the case
+    // where a student has two tabs open and clicks Generate in one while
+    // viewing the other, so the second tab doesn't also offer a Generate
+    // button and trigger a duplicate, wasteful generation run.
+    try {
+      await pool.query(`
+        INSERT INTO generated_documents (profile_id, document_type, filename, content, metadata, generated_by)
+        VALUES ($1, 'policies', 'policies_pending.json', $2, $3, $4)
+        ON CONFLICT (profile_id, document_type) DO UPDATE SET
+          content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
+      `, [
+        id,
+        JSON.stringify({ policies: [], total_count: 0 }),
+        JSON.stringify({ status: 'generating', started_at: new Date().toISOString() }),
+        userId
+      ]);
+    } catch (markErr) {
+      console.warn('⚠️ [policies/generate] Could not mark policy generation as started:', markErr.message);
+    }
+
     const result = await generatePolicies({
       profileJson,
       difficulty: profile.difficulty,
@@ -665,6 +709,17 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
     });
 
     if (!result.policies || result.policies.length === 0) {
+      try {
+        await pool.query(`
+          UPDATE generated_documents SET metadata = $2, generated_at = NOW()
+          WHERE profile_id = $1 AND document_type = 'policies'
+        `, [
+          id,
+          JSON.stringify({ status: 'none', reason: result.message || 'No policies applicable' })
+        ]);
+      } catch (markErr) {
+        console.warn('⚠️ [policies/generate] Could not mark policy generation as none:', markErr.message);
+      }
       return res.json({
         success: true,
         message: result.message || 'No policies generated (policies_present may be empty)',
@@ -684,7 +739,7 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
         id,
         `policies_${safeName}.json`,
         JSON.stringify(result),
-        JSON.stringify({ count: result.total_count, names: result.policies.map(p => p.name) }),
+        JSON.stringify({ status: 'complete', count: result.total_count, names: result.policies.map(p => p.name) }),
         userId
       ]);
       console.log(`📋 [policies/generate] Stored ${result.total_count} policies in DB`);
@@ -702,6 +757,17 @@ router.post('/:id/policies/generate', authenticateToken, async (req, res) => {
   } catch (error) {
     console.error('❌ [policies/generate] Error:', error.message);
     console.error(error.stack);
+    try {
+      await pool.query(`
+        UPDATE generated_documents SET metadata = $2, generated_at = NOW()
+        WHERE profile_id = $1 AND document_type = 'policies'
+      `, [
+        req.params.id,
+        JSON.stringify({ status: 'failed', error: error.message })
+      ]);
+    } catch (markErr) {
+      console.warn('⚠️ [policies/generate] Could not mark policy generation as failed:', markErr.message);
+    }
     res.status(500).json({ error: 'Failed to generate policies', details: error.message });
   }
 });

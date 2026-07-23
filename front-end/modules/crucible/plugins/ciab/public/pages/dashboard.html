@@ -646,6 +646,9 @@
     function closeModal(modalId) {
       const modal = document.getElementById(modalId);
       if (modal) modal.classList.remove('active');
+      // Stop the "still generating" poll in viewPolicies() from silently
+      // reopening this modal after the user has already closed it.
+      if (modalId === 'policiesModal') currentPolicyProfileId = null;
     }
 
     async function openProfileModal(profileId) {
@@ -898,7 +901,32 @@
         const sidebar = document.getElementById('policySidebar');
 
         if (!data.policies || data.policies.length === 0) {
+          if (data.status === 'generating') {
+            // Auto-generated at profile creation and still running — no
+            // Generate button here, since clicking it would kick off a
+            // second, wasteful generation on top of the one already in
+            // flight. Just poll quietly until it's done.
+            sidebar.innerHTML = `<h4>POLICY DOCUMENTS</h4>
+              <p class="text-muted" style="font-size:0.9em;">⏳ Policies are being generated automatically — usually ready within 1-2 minutes. This will refresh automatically.</p>`;
+            document.getElementById('policyContent').innerHTML = '<div class="policy-empty-state"><div class="icon">⏳</div><p>Policies are still generating in the background. Check back shortly.</p></div>';
+            document.getElementById('policyCount').textContent = 'Generating…';
+            setTimeout(() => {
+              if (currentPolicyProfileId === profileId) viewPolicies(profileId, companyName);
+            }, 10000);
+            return;
+          }
+          if (data.status === 'none') {
+            sidebar.innerHTML = `<h4>POLICY DOCUMENTS</h4>
+              <p class="text-muted" style="font-size:0.9em;">No policies are applicable for this profile.</p>`;
+            document.getElementById('policyContent').innerHTML = '<div class="policy-empty-state"><div class="icon">📋</div><p>This profile has no policies to generate.</p></div>';
+            document.getElementById('policyCount').textContent = '0 policies';
+            return;
+          }
+          const failedNote = data.status === 'failed'
+            ? '<p class="text-muted" style="font-size:0.85em; color:#e53e3e; margin-bottom: 8px;">Automatic generation failed — try again below.</p>'
+            : '';
           sidebar.innerHTML = `<h4>POLICY DOCUMENTS</h4>
+            ${failedNote}
             <p class="text-muted" style="font-size:0.9em; margin-bottom: 16px;">No policies generated yet.</p>
             <button class="btn btn-sm btn-primary" onclick="generatePoliciesForProfile('${profileId}')" id="btnGeneratePolicies">Generate Policies</button>`;
           document.getElementById('policyContent').innerHTML = '<div class="policy-empty-state"><div class="icon">📋</div><p>Click "Generate Policies" to create policy documents for this profile.</p></div>';

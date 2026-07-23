@@ -69,11 +69,15 @@ function validateIt(payload) {
   return { payload, warnings };
 }
 
-// ─── C: network — workstation autofill + firewall sanity ─────────────────
+// ─── C: network — firewall sanity ────────────────────────────────────────
+// Workstation reconciliation (matching the IT branch's endpoint counts,
+// distributing across subnets) now happens once, later in the pipeline —
+// see ai/profile/reconcile-workstations.js, called from index.js right
+// before the profile JSON is written. It completely rebuilds the
+// workstation list from the IT branch's totals, so autofilling one here
+// first would just be discarded — no point doing that work twice.
 
-const DEPT_ABBREVS = ['admin', 'ops', 'sales', 'fin', 'hr', 'it', 'eng', 'mkt', 'cs', 'qa'];
-
-function validateNetwork(payload, ctx) {
+function validateNetwork(payload) {
   const warnings = [];
   if (!payload?.network) {
     warnings.push('C: network missing');
@@ -81,50 +85,7 @@ function validateNetwork(payload, ctx) {
   }
   const net = payload.network;
 
-  // 1. Workstation autofill — the biggest delta-from-LLM. The prompt asks
-  //    for 5-10 examples; we fill the rest programmatically up to endpoint_count.
-  const targetTotal = ctx.endpointCount || 50;
-  if (Array.isArray(net.assets)) {
-    const workstations = net.assets.filter(a => String(a.role || '').toLowerCase() === 'workstation');
-    const others = net.assets.filter(a => String(a.role || '').toLowerCase() !== 'workstation');
-
-    if (workstations.length > 0 && workstations.length < targetTotal) {
-      const wsSubnet = workstations[0].subnet;
-      const baseIp = String(workstations[0].ip || '').split('.').slice(0, 3).join('.');
-      const startOctet = Math.max(...workstations.map(w => {
-        const last = parseInt(String(w.ip || '').split('.')[3], 10);
-        return Number.isFinite(last) ? last : 10;
-      })) + 1;
-
-      // Pick a department-naming pattern from existing examples (e.g. "admin", "ops")
-      const exampleHostnames = workstations.map(w => String(w.hostname || '').toLowerCase());
-      const detectedDepts = DEPT_ABBREVS.filter(d => exampleHostnames.some(h => h.startsWith(d + '-')));
-      const depts = detectedDepts.length > 0 ? detectedDepts : ['admin', 'ops'];
-
-      const needed = targetTotal - workstations.length;
-      const generated = [];
-      for (let i = 0; i < needed; i++) {
-        const dept = depts[i % depts.length];
-        const num = String(Math.floor(i / depts.length) + workstations.filter(w =>
-          String(w.hostname || '').toLowerCase().startsWith(dept + '-')).length + 1).padStart(2, '0');
-        const ipLast = startOctet + i;
-        if (ipLast > 250) break; // /24 subnet ceiling
-        generated.push({
-          hostname: `${dept}-ws-${num}`,
-          ip: `${baseIp}.${ipLast}`,
-          subnet: wsSubnet,
-          role: 'workstation',
-          os: workstations[0].os || 'Windows 10 Pro',
-          function: `${dept.toUpperCase()} workstation`,
-          critical: false
-        });
-      }
-      net.assets = [...others, ...workstations, ...generated];
-      warnings.push(`C: autofilled ${generated.length} workstations from ${workstations.length} examples → ${workstations.length + generated.length} total`);
-    }
-  }
-
-  // 2. Firewall: normalize field names; cap rules at 25
+  // Firewall: normalize field names; cap rules at 25
   if (net.firewall) {
     if (Array.isArray(net.firewall.rules)) {
       net.firewall.rules = net.firewall.rules.slice(0, 25).map(r => ({

@@ -3,6 +3,58 @@
  * Kept as a separate file so future tweaks don't touch the orchestrator.
  */
 
+const { loadIg1 } = require('../../utils/ig1-derivation');
+
+// Which CIS Controls v8 (IG1) control families each policy type should cite.
+// Lookup key matches POLICY_PROMPTS below (case-insensitive substring match
+// against the policy name). Policy types with no clean CIS Controls mapping
+// (e.g. physical security isn't one of the IG1 control families) are simply
+// omitted — no forced/inaccurate citation.
+const POLICY_CIS_CONTROLS = {
+  'data handling': [3],
+  'incident response': [17, 8],
+  'password': [5, 6],
+  'acceptable use': [9, 2],
+  'access control': [5, 6],
+  'business continuity': [11],
+  'change management': [4],
+  'information security': [1, 4, 5, 6, 7, 17],
+  'network security': [4, 12],
+  'remote work': [6],
+  'vendor': [15],
+  'third-party': [15],
+  'data retention': [3],
+  'training': [14],
+  'cybersecurity training': [14],
+  'cloud security': [3, 4, 6]
+};
+
+// Build the "here's what's actually true today" block for a policy's prompt,
+// so the model never writes a policy that contradicts the same CIS Controls
+// answers the student's risk assessment already shows them.
+function buildCisAlignment(policyName, ctx) {
+  const lower = String(policyName || '').toLowerCase();
+  const controlsKey = Object.keys(POLICY_CIS_CONTROLS).find(k => lower.includes(k));
+  if (!controlsKey || !ctx.ig1?.answers) return '';
+
+  const controls = POLICY_CIS_CONTROLS[controlsKey];
+  const ig1 = loadIg1();
+  const relevant = (ig1.safeguards || []).filter(sg => controls.includes(sg.control));
+  if (relevant.length === 0) return '';
+
+  const lines = relevant.map(sg => {
+    const answer = ctx.ig1.answers[`ig1_${sg.num}`] || 'unknown';
+    const note = ctx.ig1.notes?.[`ig1_${sg.num}_note`] || '';
+    const label = answer === 'yes' ? 'IMPLEMENTED' : answer === 'partial' ? 'PARTIALLY IMPLEMENTED' : 'NOT IMPLEMENTED';
+    return `- Safeguard ${sg.num} (${sg.name}): ${label}${note ? ' — ' + note : ''}`;
+  });
+
+  return `\nCIS CONTROLS v8 (IG1) ALIGNMENT:
+This policy must explicitly reference the CIS Controls safeguard numbers below by number (e.g. "per CIS Safeguard ${relevant[0].num}"). The current-state facts are ALREADY DETERMINED for this company — the policy text must match them, not contradict them:
+${lines.join('\n')}
+Where a safeguard is NOT IMPLEMENTED or only PARTIALLY IMPLEMENTED, write the policy so it establishes the REQUIREMENT going forward (this is what the policy is FOR) while a "Current State" or "Compliance Gap" note honestly acknowledges the company is not yet meeting it — do not describe the gap as already closed.`;
+}
+
 // Per-policy section recipe + context-injection notes. Lookup by case-insensitive
 // substring against the policy name from profile.governance.policies_present.
 const POLICY_PROMPTS = {
@@ -87,6 +139,7 @@ HARD RULES:
 - Use real HTML for structure: <h2> (major numbered sections), <h3> (subsections), <p>, <ul>/<li>, <ol>/<li>, <table>/<thead>/<tbody>/<tr>/<th>/<td>, <strong>.
 - Reference the company by its real name. Do not use placeholders like [Company Name].
 - Reference specific systems, tools, vendors, and configurations from the provided company profile — never invent generic ones if a specific one is given.
+- When a CIS CONTROLS v8 (IG1) ALIGNMENT section is provided, cite those safeguard numbers by name in the relevant section, and never describe a safeguard as already fully met if it's listed as NOT IMPLEMENTED or PARTIALLY IMPLEMENTED — this company's actual risk assessment already documents that gap, and the policy must not contradict it.
 - Tables must have <th> headers and be well-formed.
 - Include specific numbers: timeframes (hours/days/weeks), retention periods, review cycles, password lengths, etc.
 - Length: approximately 800–1200 words total.
@@ -136,6 +189,7 @@ function buildUserPrompt(policyName, ctx) {
   const cfg = findPolicyConfig(policyName);
   const sections = cfg ? cfg.sections : DEFAULT_SECTIONS;
   const extra = cfg ? cfg.extra(ctx) : '';
+  const cisAlignment = buildCisAlignment(policyName, ctx);
   const depth = ctx.difficulty === 'advanced' ? 'detailed with appendices and cross-references'
               : ctx.difficulty === 'beginner' ? 'concise and straightforward'
               : 'moderately detailed';
@@ -149,6 +203,7 @@ ${sections}
 
 ADDITIONAL CONTEXT:
 ${extra}
+${cisAlignment}
 
 STYLE REQUIREMENTS:
 - Use the company name "${ctx.company_name}" throughout

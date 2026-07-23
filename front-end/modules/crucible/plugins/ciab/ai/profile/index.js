@@ -41,6 +41,7 @@ const {
   validateThreat
 } = require('./validators');
 const { renderProfileHtml } = require('./render');
+const { reconcileWorkstations } = require('./reconcile-workstations');
 
 // ─── Client-type templates (P0/E0 template tables) ────────────────────────
 
@@ -376,7 +377,7 @@ async function generateProfile(args) {
   // Validate / autofill A, B, C
   const orgV = validateOrg(orgPayload, { employeeCount });
   const itV  = validateIt(itPayload);
-  const netV = validateNetwork(netPayload, { endpointCount: seed.endpoint_count });
+  const netV = validateNetwork(netPayload);
   for (const w of [...orgV.warnings, ...itV.warnings, ...netV.warnings]) {
     console.warn(`⚠️  [ai/profile] ${w}`);
   }
@@ -420,6 +421,30 @@ async function generateProfile(args) {
   // + IG1 derivation. Students get a populated intake AND a populated risk
   // assessment baseline instead of starting from blank.
   reportStep('intake_prefill', 88, 'Building pre-filled intake form + IG1 baseline…');
+  // Reconcile workstation OS/type + subnet distribution against the IT
+  // branch's endpoint counts BEFORE the intake form is pre-filled below.
+  // `itV.payload.it_environment` / `netV.payload.network` are the SAME object
+  // references combineProfile() put into `combined.student_view.raw.threats`
+  // (no deep clone), so mutating them here is visible to both — this must run
+  // first, or the intake form pre-fill reads the old, un-reconciled numbers
+  // while everything built from `combined` afterward (HTML, policies, JSON)
+  // reads the reconciled ones, producing exactly the kind of mismatch this
+  // whole reconciliation step exists to prevent.
+  try {
+    const threatsRef = combined.student_view.raw.threats;
+    const reconciled = reconcileWorkstations({
+      endpoints: threatsRef.it_environment?.endpoints,
+      assets: threatsRef.network?.assets,
+      subnets: threatsRef.network?.subnets,
+      industry: orgV.payload?.organization?.industry || seed.template?.industry,
+      clientType: config.clientTypeName || config.clientType
+    });
+    if (threatsRef.it_environment) threatsRef.it_environment.endpoints = reconciled.endpoints;
+    if (threatsRef.network) threatsRef.network.assets = reconciled.assets;
+  } catch (reconcileErr) {
+    console.warn(`⚠️  [ai/profile] Workstation reconciliation failed (continuing with unreconciled data): ${reconcileErr.message}`);
+  }
+
   let intakeV11 = null;
   try {
     const flavor = buildFlavorBundle(seed.run_id, seed.stakeholder_count || 5);
@@ -586,6 +611,86 @@ async function generateProfile(args) {
   } catch (docErr) {
     console.warn(`⚠️  [ai/profile] Scan document auto-generation failed (profile still created): ${docErr.message}`);
   }
+
+  // Auto-generate policies too, but in the BACKGROUND — deliberately not
+  // awaited. Unlike scan docs (deterministic, instant), policy generation is
+  // 3-6 real Claude calls that can take a minute or more; making the student
+  // wait for that would defeat the point of removing the manual "Generate
+  // Policies" click. The profile is already usable the moment this function
+  // returns below; policies typically finish shortly after and are usually
+  // ready by the time a student clicks into them.
+  (async () => {
+    // Mark generation as started BEFORE the Claude calls even begin, so a
+    // student who clicks "View Policies" while this is running sees an
+    // accurate "still generating" status instead of an empty result that
+    // looks like nothing happened — which would tempt them to click a
+    // manual "Generate" button and trigger a wasteful duplicate generation.
+    try {
+      await pool.query(`
+        INSERT INTO generated_documents (profile_id, document_type, filename, content, metadata, generated_by)
+        VALUES ($1, 'policies', 'policies_pending.json', $2, $3, $4)
+        ON CONFLICT (profile_id, document_type) DO UPDATE SET
+          content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
+      `, [
+        profileRow.id,
+        JSON.stringify({ policies: [], total_count: 0 }),
+        JSON.stringify({ status: 'generating', started_at: new Date().toISOString() }),
+        user_id
+      ]);
+    } catch (markErr) {
+      console.warn(`⚠️  [ai/profile] Could not mark policy generation as started: ${markErr.message}`);
+    }
+
+    try {
+      const { generatePolicies } = require('../policy');
+      const result = await generatePolicies({
+        profileJson: combined,
+        difficulty: seed.difficulty,
+        profileId: profileRow.id
+      });
+      if (!result.policies || result.policies.length === 0) {
+        // Nothing applicable for this profile (e.g. no policies_present) —
+        // mark as such so the UI doesn't show a stuck "still generating"
+        // message, or a Generate button that would just repeat the same no-op.
+        await pool.query(`
+          UPDATE generated_documents SET metadata = $2, generated_at = NOW()
+          WHERE profile_id = $1 AND document_type = 'policies'
+        `, [
+          profileRow.id,
+          JSON.stringify({ status: 'none', reason: result.message || 'No policies applicable' })
+        ]);
+        console.log(`📋 [ai/profile] No policies to auto-generate for profile ${profileRow.id} (${result.message || 'none present'})`);
+        return;
+      }
+      const safeName = (profileRow.company_name || 'profile').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      await pool.query(`
+        INSERT INTO generated_documents (profile_id, document_type, filename, content, metadata, generated_by)
+        VALUES ($1, 'policies', $2, $3, $4, $5)
+        ON CONFLICT (profile_id, document_type) DO UPDATE SET
+          content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
+      `, [
+        profileRow.id,
+        `policies_${safeName}.json`,
+        JSON.stringify(result),
+        JSON.stringify({ status: 'complete', count: result.total_count, names: result.policies.map(p => p.name) }),
+        user_id
+      ]);
+      console.log(`📋 [ai/profile] Auto-generated ${result.total_count} policies in the background for profile ${profileRow.id}`);
+    } catch (policyErr) {
+      console.warn(`⚠️  [ai/profile] Background policy auto-generation failed (profile unaffected): ${policyErr.message}`);
+      try {
+        await pool.query(`
+          UPDATE generated_documents SET metadata = $2, generated_at = NOW()
+          WHERE profile_id = $1 AND document_type = 'policies'
+        `, [
+          profileRow.id,
+          JSON.stringify({ status: 'failed', error: policyErr.message })
+        ]);
+      } catch (statusErr) {
+        console.warn(`⚠️  [ai/profile] Could not mark policy generation as failed: ${statusErr.message}`);
+      }
+    }
+  })();
 
   reportStep('complete', 100, 'Profile generated successfully');
   console.log(`✅ [ai/profile] Profile ${profileRow.id} created (${org.company_name}, ${seed.run_id})`);

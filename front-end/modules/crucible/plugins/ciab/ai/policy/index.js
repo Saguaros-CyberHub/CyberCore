@@ -18,6 +18,7 @@
 
 const llm = require('../../../../../../src/utils/llm-client');
 const { SYSTEM_PROMPT, buildUserPrompt } = require('./prompts');
+const { deriveIg1Baseline } = require('../../utils/ig1-derivation');
 
 // ─── Context extraction ────────────────────────────────────────────────────
 /**
@@ -38,6 +39,25 @@ function buildContext(profileJson, defaults = {}) {
   const servers = (it.servers || []).slice(0, 5);
   const saas = (it.saas || []).slice(0, 5);
   const compliance = threats.profiles?.compliance_focus || [];
+
+  // Derive the same CIS Controls v8 IG1 safeguard answers (yes/partial/no)
+  // the student's pre-filled intake form already shows — deriveIg1Baseline
+  // is a pure function of the profile's declared IT facts + run_id, so
+  // calling it again here reproduces the exact same answers, not a fresh
+  // independent guess. Policies reference these so they never contradict
+  // what the risk assessment says is actually true about the company.
+  let ig1 = null;
+  try {
+    const runId = profileJson?.student_view?.meta?.run_id || '';
+    ig1 = deriveIg1Baseline({
+      it_environment: it,
+      network: net,
+      threat_profile: threats.threat_profile,
+      profiles: threats.profiles
+    }, runId);
+  } catch (ig1Err) {
+    console.warn(`⚠️ [ai/policy] IG1 baseline derivation failed (continuing without CIS alignment): ${ig1Err.message}`);
+  }
 
   return {
     company_name: org.company_name || 'Organization',
@@ -71,6 +91,10 @@ function buildContext(profileJson, defaults = {}) {
     business_continuity: org.business_continuity || {},
 
     difficulty: defaults.difficulty || profileJson.difficulty || 'intermediate',
+
+    // CIS Controls v8 IG1 baseline — same answers as the student's pre-filled
+    // intake form (see comment above). null if derivation failed.
+    ig1,
 
     // Derived strings used by the prompt extras
     serverList: servers.map(s => `${s.hostname} (${s.os || 'N/A'}, ${s.role || 'server'})`).join(', ') || 'standard servers',
