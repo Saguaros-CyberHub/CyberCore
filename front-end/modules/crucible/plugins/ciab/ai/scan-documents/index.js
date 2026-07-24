@@ -440,6 +440,55 @@ function guessPluginFamily(normalized) {
   return 'General';
 }
 
+// ─── Shared report styling ─────────────────────────────────────────────────
+// One stylesheet reused by ZAP/Nessus/NMAP's HTML output (and by the combined
+// print views in routes/profiles.js) so all scan documents look like one
+// consistent family of reports instead of three different formats.
+
+const SCAN_DOC_CSS = `
+  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 30px; color: #1a202c; }
+  h1 { border-bottom: 3px solid #2c5282; padding-bottom: 10px; }
+  h2 { color: #2c5282; margin-top: 28px; }
+  .host-heading { margin-top: 28px; color: #2c5282; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+  .meta-line { margin: 4px 0; color: #4a5568; font-size: 0.92em; }
+  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
+  .summary div { padding: 12px; border-radius: 6px; text-align: center; font-weight: 600; }
+  .summary .critical { background: #ede9fe; color: #5b21b6; }
+  .summary .high   { background: #fee2e2; color: #991b1b; }
+  .summary .medium { background: #fef3c7; color: #92400e; }
+  .summary .low    { background: #dbeafe; color: #1e40af; }
+  .summary .info   { background: #f3f4f6; color: #374151; }
+  .host-count { color: #718096; font-size: 0.9em; }
+  .host-card { margin: 24px 0; page-break-inside: avoid; }
+  .alert { margin: 16px 0; padding: 16px; border-left: 4px solid; background: #f9fafb; border-radius: 4px; page-break-inside: avoid; }
+  .alert-critical { border-color: #7b2d8e; }
+  .alert-high   { border-color: #ef4444; }
+  .alert-medium { border-color: #f59e0b; }
+  .alert-low    { border-color: #3b82f6; }
+  .alert-informational { border-color: #9ca3af; }
+  .sev-badge { display: inline-block; font-size: 0.65em; font-weight: 700; padding: 2px 8px; border-radius: 3px; color: #fff; vertical-align: middle; }
+  .sev-critical { background: #7b2d8e; }
+  .sev-high { background: #ef4444; }
+  .sev-medium { background: #f59e0b; }
+  .sev-low { background: #3b82f6; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
+  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+  th { width: 130px; color: #4a5568; }
+  code { background: #edf2f7; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+  .terminal { background: #1a202c; color: #e2e8f0; padding: 16px; border-radius: 6px; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 0.8em; overflow-x: auto; white-space: pre; line-height: 1.5; page-break-inside: avoid; }
+  .t-crit { color: #fc8181; font-weight: 700; }
+  .t-warn { color: #f6ad55; }
+  .t-cve  { color: #63b3ed; }
+  .footer-note { color: #9ca3af; font-size: 0.85em; }
+  @media print { .host-card, .alert, .terminal { page-break-inside: avoid; } }
+`;
+
+function xmlDecode(s) {
+  return String(s == null ? '' : s)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+
 // ─── ZAP HTML generator ───────────────────────────────────────────────────
 // Only emit findings if at least one scannable asset declares HTTP/HTTPS.
 // Otherwise ZAP would have nothing to scan — emit an empty report.
@@ -552,25 +601,7 @@ function generateZap({ profileData, companyName, domain }) {
 function wrapZap({ title, target, scanDate, summary, alertsHtml }) {
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>${htmlEsc(title)}</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 0 auto; padding: 30px; color: #1a202c; }
-  h1 { border-bottom: 3px solid #2c5282; padding-bottom: 10px; }
-  .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 20px 0; }
-  .summary div { padding: 12px; border-radius: 6px; text-align: center; font-weight: 600; }
-  .summary .high   { background: #fee2e2; color: #991b1b; }
-  .summary .medium { background: #fef3c7; color: #92400e; }
-  .summary .low    { background: #dbeafe; color: #1e40af; }
-  .summary .info   { background: #f3f4f6; color: #374151; }
-  .alert { margin: 20px 0; padding: 16px; border-left: 4px solid; background: #f9fafb; border-radius: 4px; }
-  .alert-high   { border-color: #ef4444; }
-  .alert-medium { border-color: #f59e0b; }
-  .alert-low    { border-color: #3b82f6; }
-  .alert-informational { border-color: #9ca3af; }
-  table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.9em; }
-  th, td { padding: 6px 10px; text-align: left; border-bottom: 1px solid #e5e7eb; }
-  th { width: 130px; color: #4a5568; }
-  code { background: #edf2f7; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
-</style></head><body>
+<style>${SCAN_DOC_CSS}</style></head><body>
 <h1>${htmlEsc(title)}</h1>
 <p><strong>Target:</strong> <code>${htmlEsc(target)}</code></p>
 <p><strong>Scan Date:</strong> ${htmlEsc(scanDate)}</p>
@@ -583,7 +614,166 @@ function wrapZap({ title, target, scanDate, summary, alertsHtml }) {
 <h2>Findings</h2>
 ${alertsHtml}
 <hr>
-<p style="color:#9ca3af; font-size:0.85em;">Generated for cybersecurity training exercise — simulated scan output derived from profile asset inventory.</p>
+<p class="footer-note">Generated for cybersecurity training exercise — simulated scan output derived from profile asset inventory.</p>
+</body></html>`;
+}
+
+// ─── NESSUS HTML wrapper ───────────────────────────────────────────────────
+// Parses the Nessus XML this same module generates and renders it as a
+// styled HTML report (severity summary + per-host findings), reusing the
+// same ReportHost/ReportItem parsing already proven correct in the PDF
+// export's Nessus renderer — just targeting HTML tags instead of PDF draws.
+
+function wrapNessus({ title, companyName, scanDate, xml }) {
+  const hosts = [];
+  const hostRegex = /<ReportHost name="([^"]*)">([\s\S]*?)<\/ReportHost>/g;
+  let hostMatch;
+  while ((hostMatch = hostRegex.exec(xml)) !== null) {
+    const hostBlock = hostMatch[2];
+    const host = { name: xmlDecode(hostMatch[1]), properties: {}, items: [] };
+
+    const tagRegex = /<tag name="([^"]*)">([\s\S]*?)<\/tag>/g;
+    let tagMatch;
+    while ((tagMatch = tagRegex.exec(hostBlock)) !== null) {
+      host.properties[tagMatch[1]] = xmlDecode(tagMatch[2].trim());
+    }
+
+    const itemRegex = /<ReportItem\s+([^>]*)>([\s\S]*?)<\/ReportItem>/g;
+    let itemMatch;
+    while ((itemMatch = itemRegex.exec(hostBlock)) !== null) {
+      const attrs = {};
+      const attrRegex = /(\w+)="([^"]*)"/g;
+      let attrMatch;
+      while ((attrMatch = attrRegex.exec(itemMatch[1])) !== null) {
+        attrs[attrMatch[1]] = xmlDecode(attrMatch[2]);
+      }
+      const body = itemMatch[2];
+      const extractField = (tag) => {
+        const m = body.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
+        return m ? xmlDecode(m[1].trim()) : '';
+      };
+      if (attrs.severity === '0') continue; // info/service-detection noise, not a finding
+      host.items.push({
+        port: attrs.port, protocol: attrs.protocol, severity: parseInt(attrs.severity, 10) || 0,
+        pluginName: attrs.pluginName || '', pluginID: attrs.pluginID || '',
+        cvss: extractField('cvss_base_score'), cvss3: extractField('cvss3_base_score'),
+        description: extractField('description'), solution: extractField('solution'),
+        cve: (body.match(/<cve>([\s\S]*?)<\/cve>/g) || []).map(c => xmlDecode(c.replace(/<\/?cve>/g, '').trim()))
+      });
+    }
+    host.items.sort((a, b) => b.severity - a.severity);
+    hosts.push(host);
+  }
+
+  const allItems = hosts.flatMap(h => h.items);
+  const counts = { critical: 0, high: 0, medium: 0, low: 0 };
+  allItems.forEach(item => {
+    if (item.severity >= 4) counts.critical++;
+    else if (item.severity === 3) counts.high++;
+    else if (item.severity === 2) counts.medium++;
+    else if (item.severity === 1) counts.low++;
+  });
+
+  const sevClass = (s) => (s >= 4 ? 'critical' : s === 3 ? 'high' : s === 2 ? 'medium' : 'low');
+  const sevLabel = (s) => (s >= 4 ? 'CRITICAL' : s === 3 ? 'HIGH' : s === 2 ? 'MEDIUM' : 'LOW');
+
+  const hostsHtml = hosts.map(host => {
+    const fqdn = host.properties['host-fqdn'] || host.name;
+    const os = host.properties['operating-system'] || 'Unknown OS';
+    const ip = host.properties['host-ip'] || host.name;
+    const findingsHtml = host.items.map(item => `
+<div class="alert alert-${sevClass(item.severity)}">
+  <h3>${htmlEsc(item.pluginName)} <span class="sev-badge sev-${sevClass(item.severity)}">${sevLabel(item.severity)}</span></h3>
+  <table>
+    ${item.port && item.port !== '0' ? `<tr><th>Port</th><td>${htmlEsc(item.port)}/${htmlEsc(item.protocol)}</td></tr>` : ''}
+    ${item.pluginID ? `<tr><th>Plugin ID</th><td>${htmlEsc(item.pluginID)}</td></tr>` : ''}
+    ${item.cvss3 || item.cvss ? `<tr><th>CVSS</th><td>${htmlEsc(item.cvss3 || item.cvss)}</td></tr>` : ''}
+    ${item.cve.length ? `<tr><th>CVE</th><td>${item.cve.map(htmlEsc).join(', ')}</td></tr>` : ''}
+  </table>
+  ${item.description ? `<p><strong>Description:</strong> ${htmlEsc(item.description)}</p>` : ''}
+  ${item.solution ? `<p><strong>Solution:</strong> ${htmlEsc(item.solution)}</p>` : ''}
+</div>`).join('\n');
+
+    return `
+<div class="host-card">
+  <h2 class="host-heading">${htmlEsc(fqdn)}</h2>
+  <p class="meta-line">IP: <code>${htmlEsc(ip)}</code> &nbsp;|&nbsp; OS: ${htmlEsc(os)} &nbsp;|&nbsp; ${host.items.length} finding(s)</p>
+  ${findingsHtml || '<p>No findings above informational severity.</p>'}
+</div>`;
+  }).join('\n');
+
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>${htmlEsc(title)}</title>
+<style>${SCAN_DOC_CSS}</style></head><body>
+<h1>${htmlEsc(title)}</h1>
+<p><strong>Company:</strong> ${htmlEsc(companyName)}</p>
+<p><strong>Scan Date:</strong> ${htmlEsc(scanDate)}</p>
+<div class="summary">
+  <div class="critical">Critical: ${counts.critical}</div>
+  <div class="high">High: ${counts.high}</div>
+  <div class="medium">Medium: ${counts.medium}</div>
+  <div class="low">Low: ${counts.low}</div>
+</div>
+<p class="host-count">${hosts.length} host(s) scanned &nbsp;|&nbsp; ${allItems.length} total finding(s)</p>
+<h2>Findings by Host</h2>
+${hostsHtml}
+<hr>
+<p class="footer-note">Generated for cybersecurity training exercise — simulated scan output derived from profile asset inventory.</p>
+</body></html>`;
+}
+
+// ─── NMAP HTML wrapper ─────────────────────────────────────────────────────
+// Converts the Markdown/terminal-style report this module generates into a
+// styled HTML page. Keeps the authentic terminal-dump look (dark <pre> block)
+// instead of trying to force it into structured tables — it's real scan
+// output, not tabular data.
+
+function inlineMd(escaped) {
+  return escaped
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.*?)\*/g, '<em>$1</em>')
+    .replace(/_(.*?)_/g, '<em>$1</em>')
+    .replace(/`([^`]*)`/g, '<code>$1</code>');
+}
+
+function highlightTerminalLine(escLine) {
+  return escLine
+    .replace(/(VULNERABLE)/g, '<span class="t-crit">$1</span>')
+    .replace(/(WARNING:.*)$/, '<span class="t-warn">$1</span>')
+    .replace(/(CVE-\d{4}-\d+)/g, '<span class="t-cve">$1</span>');
+}
+
+function nmapMarkdownToHtml(markdown) {
+  const lines = markdown.split('\n');
+  let html = '';
+  let inCode = false;
+  for (const line of lines) {
+    if (/^```/.test(line.trim())) {
+      html += inCode ? '</pre>\n' : '<pre class="terminal">';
+      inCode = !inCode;
+      continue;
+    }
+    if (inCode) {
+      html += highlightTerminalLine(htmlEsc(line)) + '\n';
+      continue;
+    }
+    const h1 = line.match(/^#\s+(.*)/);
+    const h3 = line.match(/^###\s+(.*)/);
+    const bq = line.match(/^>\s?(.*)/);
+    if (h1) { html += `<h1>${inlineMd(htmlEsc(h1[1]))}</h1>\n`; continue; }
+    if (h3) { html += `<h2 class="host-heading">${inlineMd(htmlEsc(h3[1]))}</h2>\n`; continue; }
+    if (bq) { html += `<p class="meta-line">${inlineMd(htmlEsc(bq[1]))}</p>\n`; continue; }
+    if (!line.trim()) continue;
+    html += `<p>${inlineMd(htmlEsc(line))}</p>\n`;
+  }
+  return html;
+}
+
+function wrapNmap({ title, markdown }) {
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>${htmlEsc(title)}</title>
+<style>${SCAN_DOC_CSS}</style></head><body>
+${nmapMarkdownToHtml(markdown)}
 </body></html>`;
 }
 
@@ -605,21 +795,24 @@ function generateScanDocuments({ profileData, companyName, domain, types }) {
     ? types.map(t => String(t).toLowerCase())
     : ['nmap', 'nessus', 'zap'];
 
+  const scanDate = new Date().toUTCString();
   const docs = [];
   for (const t of wanted) {
     if (t === 'nmap') {
+      const markdown = generateNmap({ profileData, companyName, domain });
       docs.push({
         type: 'nmap',
-        filename: `${safeName}_nmap_scan.md`,
-        content: generateNmap({ profileData, companyName, domain }),
-        mime: 'text/markdown'
+        filename: `${safeName}_nmap_scan.html`,
+        content: wrapNmap({ title: `${companyName} — NMAP Network Scan`, markdown }),
+        mime: 'text/html'
       });
     } else if (t === 'nessus') {
+      const xml = generateNessus({ profileData, companyName });
       docs.push({
         type: 'nessus',
-        filename: `${safeName}_nessus_scan.nessus`,
-        content: generateNessus({ profileData, companyName }),
-        mime: 'application/xml'
+        filename: `${safeName}_nessus_scan.html`,
+        content: wrapNessus({ title: `${companyName} — Nessus Vulnerability Scan`, companyName, scanDate, xml }),
+        mime: 'text/html'
       });
     } else if (t === 'zap') {
       docs.push({
@@ -639,6 +832,10 @@ module.exports = {
   generateNmap,
   generateNessus,
   generateZap,
+  wrapNmap,
+  wrapNessus,
+  wrapZap,
+  SCAN_DOC_CSS,
   scannableAssets,
   buildHostPorts
 };

@@ -630,7 +630,7 @@ async function generateProfile(args) {
         INSERT INTO generated_documents (profile_id, document_type, filename, content, metadata, generated_by)
         VALUES ($1, 'policies', 'policies_pending.json', $2, $3, $4)
         ON CONFLICT (profile_id, document_type) DO UPDATE SET
-          content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
+          filename = EXCLUDED.filename, content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
       `, [
         profileRow.id,
         JSON.stringify({ policies: [], total_count: 0 }),
@@ -667,7 +667,7 @@ async function generateProfile(args) {
         INSERT INTO generated_documents (profile_id, document_type, filename, content, metadata, generated_by)
         VALUES ($1, 'policies', $2, $3, $4, $5)
         ON CONFLICT (profile_id, document_type) DO UPDATE SET
-          content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
+          filename = EXCLUDED.filename, content = EXCLUDED.content, metadata = EXCLUDED.metadata, generated_at = NOW()
       `, [
         profileRow.id,
         `policies_${safeName}.json`,

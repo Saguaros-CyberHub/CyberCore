@@ -719,8 +719,8 @@
                 <button id="generateDocsBtn" class="btn btn-primary" onclick="generateDocuments()" disabled>
                   ⚡ Generate All Documents
                 </button>
-                <button id="downloadPdfBtn" class="btn btn-outline" onclick="downloadProfilePdf()" disabled>
-                  📥 Download PDF
+                <button id="downloadPdfBtn" class="btn btn-outline" onclick="printScanReportsInstructor()" disabled>
+                  🖨️ Print Scan Reports / PDF
                 </button>
               </div>
             </div>
@@ -770,6 +770,9 @@
                 <span id="policyCostBadge" style="font-size: 0.8rem; font-weight: 600; color: var(--success); background: rgba(16, 185, 129, 0.12); padding: 0.25rem 0.75rem; border-radius: 1rem;"></span>
                 <button id="generatePoliciesBtn" class="btn btn-primary" onclick="generatePoliciesForProfile()" disabled>
                   📋 Generate Policies
+                </button>
+                <button id="printPoliciesBtn" class="btn btn-outline" onclick="printPoliciesInstructor()" disabled>
+                  🖨️ Print Policies / PDF
                 </button>
               </div>
             </div>
@@ -1188,6 +1191,7 @@
           document.getElementById('downloadPdfBtn').disabled = true;
           document.getElementById('generateExamplesBtn').disabled = !profileId;
           document.getElementById('generatePoliciesBtn').disabled = !profileId;
+          document.getElementById('printPoliciesBtn').disabled = !profileId;
           document.getElementById('viewExamplesBtn').style.display = 'none';
           const vcsBtn = document.getElementById('viewVulnCheatSheetBtn');
           if (vcsBtn) vcsBtn.disabled = !profileId;
@@ -1427,7 +1431,8 @@
                 <strong style="font-size: 0.85rem;">${profile.company_name || 'Unnamed'}</strong>
                 <div style="display: flex; gap: 0.4rem;">
                   <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); generateDocsForProfile('${profile.profile_id}', '${studentId}')">Generate</button>
-                  <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); window.open('/api/profiles/${profile.profile_id}/documents/pdf', '_blank')">PDF</button>
+                  <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); window.open('/api/profiles/${profile.profile_id}/documents/print', '_blank')">Scans</button>
+                  <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); window.open('/api/profiles/${profile.profile_id}/policies/print', '_blank')">Policies</button>
                 </div>
               </div>
               <div style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
@@ -2368,9 +2373,14 @@
           </div>
 
           <div style="display: flex; gap: 0.75rem; margin-top: 1rem; flex-wrap: wrap;">
-            <button class="btn btn-sm btn-outline" style="border-color: var(--primary-light, #1e5288); color: var(--primary-light, #1e5288);" onclick="downloadPdfFromModal('${profileId}')">
-              📄 Download PDF
+            <button class="btn btn-sm btn-outline" style="border-color: var(--primary-light, #1e5288); color: var(--primary-light, #1e5288);" onclick="window.open('/api/profiles/${profileId}/documents/print', '_blank')">
+              🖨️ Print Scan Reports / PDF
             </button>
+            ${hasPolicies ? `
+              <button class="btn btn-sm btn-outline" style="border-color: var(--primary, #0c234b); color: var(--primary, #0c234b);" onclick="window.open('/api/profiles/${profileId}/policies/print', '_blank')">
+                🖨️ Print Policies / PDF
+              </button>
+            ` : ''}
             ${!hasPolicies ? `
               <button class="btn btn-sm btn-outline" id="genPoliciesBtnModal" style="border-color: var(--primary, #0c234b); color: var(--primary, #0c234b);" onclick="generatePoliciesFromModal('${profileId}')">
                 📋 Generate Policies
@@ -2628,36 +2638,6 @@
         btn.disabled = false;
         Toast.error('Error', err.message);
       }
-    }
-
-    // Download PDF from View Documents modal
-    function downloadPdfFromModal(profileId) {
-      const btn = event.target;
-      btn.disabled = true;
-      btn.innerHTML = '⏳ Generating...';
-      fetch(`/api/profiles/${profileId}/documents/pdf`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      }).then(async r => {
-        if (!r.ok) {
-          const errData = await r.json().catch(() => ({}));
-          throw new Error(errData.error || `PDF generation failed (${r.status})`);
-        }
-        return r.blob();
-      }).then(blob => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'Security_Documents.pdf';
-        a.click();
-        URL.revokeObjectURL(url);
-        Toast.success('Downloaded', 'PDF has been downloaded');
-      }).catch(err => {
-        console.error('PDF download error:', err);
-        Toast.error('Download Failed', err.message);
-      }).finally(() => {
-        btn.disabled = false;
-        btn.innerHTML = '📄 Download PDF';
-      });
     }
 
     // Submit add student
@@ -3056,40 +3036,25 @@
       }
     }
 
-    // Download all documents as PDF
-    function downloadProfilePdf() {
+    // Open the combined scan-reports print view (NMAP+Nessus+ZAP) in a new tab.
+    // It's real HTML with a print button — "Print > Save as PDF" produces the PDF.
+    function printScanReportsInstructor() {
       const profileId = document.getElementById('docProfileSelect').value;
       if (!profileId) {
         Toast.warning('Select Profile', 'Please select a profile first');
         return;
       }
-      const btn = document.getElementById('downloadPdfBtn');
-      btn.disabled = true;
-      btn.innerHTML = '⏳ Generating PDF...';
+      window.open(`/api/profiles/${profileId}/documents/print`, '_blank');
+    }
 
-      fetch(`/api/profiles/${profileId}/documents/pdf`, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      }).then(async r => {
-        if (!r.ok) {
-          const errData = await r.json().catch(() => ({}));
-          throw new Error(errData.error || `PDF generation failed (${r.status})`);
-        }
-        return r.blob();
-      }).then(blob => {
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = 'Security_Documents.pdf';
-        a.click();
-        URL.revokeObjectURL(url);
-        Toast.success('Download Complete', 'PDF has been downloaded');
-      }).catch(err => {
-        console.error('PDF download error:', err);
-        Toast.error('Download Failed', err.message);
-      }).finally(() => {
-        btn.disabled = false;
-        btn.innerHTML = '📄 Download PDF';
-      });
+    // Open the combined all-policies print view in a new tab.
+    function printPoliciesInstructor() {
+      const profileId = document.getElementById('docProfileSelect').value;
+      if (!profileId) {
+        Toast.warning('Select Profile', 'Please select a profile first');
+        return;
+      }
+      window.open(`/api/profiles/${profileId}/policies/print`, '_blank');
     }
 
     // Generate documents

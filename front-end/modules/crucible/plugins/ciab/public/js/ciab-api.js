@@ -68,26 +68,10 @@ API.profiles = {
   },
 
   downloadDocumentsPdf(id) {
-    const a = document.createElement('a');
-    a.href = `/api/profiles/${id}/documents/pdf`;
-    a.download = 'Security_Documents.pdf';
-    fetch(`/api/profiles/${id}/documents/pdf`, {
-      headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-    }).then(async r => {
-      if (!r.ok) {
-        const errData = await r.json().catch(() => ({}));
-        throw new Error(errData.error || `PDF generation failed (${r.status})`);
-      }
-      return r.blob();
-    }).then(blob => {
-      const url = URL.createObjectURL(blob);
-      a.href = url;
-      a.click();
-      URL.revokeObjectURL(url);
-    }).catch(err => {
-      console.error('PDF download error:', err);
-      if (typeof Toast !== 'undefined') Toast.error('Download Failed', err.message);
-    });
+    // Opens the combined scan-reports print view — real HTML with a print
+    // button, so "Print > Save as PDF" produces the PDF (no server-side PDF
+    // generation involved).
+    window.open(`/api/profiles/${id}/documents/print`, '_blank');
   }
 };
 

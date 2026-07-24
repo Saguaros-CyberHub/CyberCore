@@ -868,9 +868,7 @@ router.get('/download/:profileId/:docType', authenticateToken, instructorOnly, a
     
     // Set appropriate content type based on document type
     let contentType = 'application/octet-stream';
-    if (docType === 'zap') contentType = 'text/html';
-    else if (docType === 'nessus') contentType = 'application/xml';
-    else if (docType === 'nmap') contentType = 'text/markdown';
+    if (docType === 'zap' || docType === 'nessus' || docType === 'nmap') contentType = 'text/html';
     else if (docType === 'policies') contentType = 'application/json';
     
     res.setHeader('Content-Type', contentType);

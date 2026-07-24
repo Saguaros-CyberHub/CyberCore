@@ -468,6 +468,7 @@
       </div>
       <div class="policy-actions">
         <button class="btn btn-sm btn-outline" onclick="openPolicyInNewTab()" id="btnOpenPolicyTab" style="display:none;">Open in New Tab</button>
+        <button class="btn btn-sm btn-primary" onclick="printAllPolicies()" id="btnPrintAllPolicies" style="display:none;">🖨️ Print All / PDF</button>
         <div style="flex:1;"></div>
         <span id="policyCount" style="font-size: 0.85em; color: #64748b; align-self: center;"></span>
       </div>
@@ -489,6 +490,9 @@
           <button class="btn btn-sm btn-primary" onclick="generateScanReportsForProfile()" id="btnGenerateScanReports">Generate Reports</button>
         </div>
         <div id="scanReportsList" style="display:none;"></div>
+        <div id="scanReportsPrintRow" style="display:none; margin-top: 12px; text-align: right;">
+          <button class="btn btn-sm btn-primary" onclick="printAllScanReports()">🖨️ Print All / PDF</button>
+        </div>
       </div>
     </div>
   </div>
@@ -893,6 +897,7 @@
       document.getElementById('policySidebar').innerHTML = '<h4>POLICY DOCUMENTS</h4><p class="text-muted" style="font-size:0.9em;">Loading...</p>';
       document.getElementById('policyContent').innerHTML = '<div class="policy-empty-state"><div class="icon">📋</div><p>Select a policy from the sidebar to view it</p></div>';
       document.getElementById('btnOpenPolicyTab').style.display = 'none';
+      document.getElementById('btnPrintAllPolicies').style.display = 'none';
       document.getElementById('policyCount').textContent = '';
       openModal('policiesModal');
 
@@ -945,6 +950,7 @@
         ).join('');
 
         document.getElementById('policyCount').textContent = `${data.policies.length} ${data.policies.length === 1 ? 'policy' : 'policies'}`;
+        document.getElementById('btnPrintAllPolicies').style.display = 'inline-flex';
 
         // Auto-select first policy
         const firstItem = sidebar.querySelector('.policy-list-item');
@@ -1044,6 +1050,11 @@
       }
     }
 
+    function printAllPolicies() {
+      if (!currentPolicyProfileId) return;
+      window.open(`/api/profiles/${currentPolicyProfileId}/policies/print`, '_blank');
+    }
+
     // ── Scan Reports (NMAP / Nessus / ZAP) ──────────────────────────────────
     let currentScanReportsProfileId = null;
 
@@ -1074,8 +1085,10 @@
       const loading = document.getElementById('scanReportsLoading');
       const empty = document.getElementById('scanReportsEmpty');
       const list = document.getElementById('scanReportsList');
+      const printRow = document.getElementById('scanReportsPrintRow');
       empty.style.display = 'none';
       list.style.display = 'none';
+      printRow.style.display = 'none';
       loading.style.display = 'block';
       openModal('scanReportsModal');
 
@@ -1088,6 +1101,7 @@
         }
         renderScanReportsList(data.documents);
         list.style.display = 'block';
+        printRow.style.display = 'block';
       } catch (error) {
         console.error('Error fetching scan reports:', error);
         loading.style.display = 'none';
@@ -1102,10 +1116,12 @@
       const loading = document.getElementById('scanReportsLoading');
       const empty = document.getElementById('scanReportsEmpty');
       const list = document.getElementById('scanReportsList');
+      const printRow = document.getElementById('scanReportsPrintRow');
 
       if (btn) { btn.disabled = true; btn.textContent = 'Generating…'; }
       empty.style.display = 'none';
       list.style.display = 'none';
+      printRow.style.display = 'none';
       loading.style.display = 'block';
 
       try {
@@ -1115,6 +1131,7 @@
           if (typeof Toast !== 'undefined') Toast.success('Reports Ready', `${result.documents.length} scan reports generated.`);
           renderScanReportsList(result.documents);
           list.style.display = 'block';
+          printRow.style.display = 'block';
         } else {
           if (typeof Toast !== 'undefined') Toast.info('No Reports', 'No documents were generated for this profile.');
           empty.style.display = 'block';
@@ -1126,6 +1143,11 @@
       } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Generate Reports'; }
       }
+    }
+
+    function printAllScanReports() {
+      if (!currentScanReportsProfileId) return;
+      window.open(`/api/profiles/${currentScanReportsProfileId}/documents/print`, '_blank');
     }
 
     function downloadScanReport(event, url, filename) {

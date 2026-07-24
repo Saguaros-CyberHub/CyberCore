@@ -134,7 +134,21 @@ test('respects types filter', () => {
 });
 test('filenames are slugified company name', () => {
   const docs = generateScanDocuments({ profileData: FIXTURE, companyName: 'Test Co. LLC!', types: ['nmap'] });
-  assert.match(docs[0].filename, /^test_co__llc__nmap_scan\.md$/);
+  assert.match(docs[0].filename, /^test_co__llc__nmap_scan\.html$/);
+});
+
+console.log('\ngenerateScanDocuments — nmap/nessus now render as HTML (matches zap format)');
+test('nmap document content is a styled HTML page, not raw markdown', () => {
+  const docs = generateScanDocuments({ profileData: FIXTURE, companyName: 'TestCo', domain: 'test.local', types: ['nmap'] });
+  assert.match(docs[0].content, /^<!DOCTYPE html>/);
+  assert.match(docs[0].content, /<pre class="terminal">/);
+  assert.match(docs[0].content, /VULNERABLE/);
+});
+test('nessus document content is a styled HTML page, not raw XML', () => {
+  const docs = generateScanDocuments({ profileData: FIXTURE, companyName: 'TestCo', types: ['nessus'] });
+  assert.match(docs[0].content, /^<!DOCTYPE html>/);
+  assert.match(docs[0].content, /MS17-010/);
+  assert.match(docs[0].content, /class="alert alert-/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
