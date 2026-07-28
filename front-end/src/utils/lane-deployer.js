@@ -702,13 +702,37 @@ async function deployWorkstation(job) {
     if (progress?.lanes[job.laneId]) progress.lanes[job.laneId].status = 'starting';
     await proxmoxAPI('POST', `${vmApiBase(targetNode, workstationVmid, providerType)}/status/start`);
 
-    // 6. Console. The target is the gateway's WAN transit IP, which DNATs to the
-    //    workstation — guacd sits on the orchestrator's Docker bridge and has no
-    //    route into the lane subnet. Only if the gateway plumbing failed do we
-    //    point straight at the lane IP (routable only where the lane subnet is
-    //    carried, e.g. a Tailscale-connected orchestrator).
-    const consoleHost = viaGateway ? gatewayWanIp : `${laneBase}.${WORKSTATION_OCTET}`;
-    const consolePort = viaGateway ? con.wanPort : con.guestPort;
+    // 6. Console. ALWAYS the gateway's WAN transit IP (e.g. 100.100.60.136) —
+    //    never the lane-local address. guacd runs on the orchestrator's Docker
+    //    bridge with no route into 10.<vxh>.<vxl>.0/24, so the gateway's wan0
+    //    DNAT is the only way in. This is how every working lane on this cluster
+    //    connects; a console pointed at the lane IP is dead on arrival.
+    //
+    //    That holds even when our own DNAT install failed: the v2 gateway
+    //    template already bakes wan0:3389 -> <base>.50, so RDP still works
+    //    provided the guest took the .50 lease. Falling back to the lane IP (as
+    //    an earlier revision did) just guaranteed a broken console instead.
+    //    Non-RDP protocols have no baked rule, so those genuinely need the
+    //    install to have succeeded — flag it loudly rather than fail silently.
+    const consoleHost = gatewayWanIp;
+    const consolePort = con.wanPort;
+    let consoleVia = viaGateway ? 'gateway' : 'gateway-baked-dnat';
+    if (!viaGateway) {
+      if (con.protocol === 'rdp') {
+        console.warn(
+          `${LOG} ${laneName}: gateway config failed — falling back to the template's ` +
+          `baked wan0:3389 DNAT. This only works if the guest lands on ` +
+          `${laneBase}.${WORKSTATION_OCTET} by itself (Kali does; most templates do not).`
+        );
+      } else {
+        consoleVia = 'unreachable';
+        console.error(
+          `${LOG} ${laneName}: gateway config failed and ${con.protocol} has no baked ` +
+          `DNAT — this console will NOT connect until a rule for port ${con.wanPort} ` +
+          `is added on gateway ${gatewayVmid}. Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
+        );
+      }
+    }
     const guacConnId = await createGuacConnection({
       connName: `${laneName}-${workstationVmid}`,
       user, template, creds, parentIdentifier: guacParent,
@@ -729,7 +753,7 @@ async function deployWorkstation(job) {
         ip: `${laneBase}.${WORKSTATION_OCTET}`,
         ip_confirmed: false,
         workstation_mac: mac,
-        console_via: viaGateway ? 'gateway' : 'direct',
+        console_via: consoleVia,
         console_host: consoleHost,
         console_port: consolePort,
         guac_connection_id: guacConnId,

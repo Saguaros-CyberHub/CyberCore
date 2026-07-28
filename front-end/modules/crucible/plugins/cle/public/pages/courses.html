@@ -787,14 +787,18 @@
               ? `<span style="font-size:0.75rem;color:var(--text-muted);">VXLAN ${escHtml(String(v.vxlan_id))}</span>`
               : '<span style="color:var(--text-muted);">—</span>';
 
-            // console_via 'direct' means the gateway DNAT could not be installed,
-            // so the console points at the lane-local IP — reachable only from
-            // inside the lab network. Worth flagging rather than hiding.
+            // The endpoint is always the lane gateway's WAN IP. console_via says
+            // which DNAT is carrying it: 'gateway' = the per-lane rule we
+            // installed; 'gateway-baked-dnat' = ours failed, relying on the
+            // template's built-in 3389 rule (works only if the guest took .50);
+            // 'unreachable' = no rule at all for this protocol.
             let connCell = '<span style="color:var(--text-muted);">—</span>';
             if (v.console_endpoint) {
               const proto = (v.console_protocol || 'rdp').toUpperCase();
-              const warn = v.console_via === 'direct'
-                ? ` <span title="Gateway DNAT unavailable — reachable only from the lab network" style="color:#d69e2e;">&#9888;</span>`
+              const warn = v.console_via === 'unreachable'
+                ? ` <span title="No gateway DNAT for this port — the console will not connect" style="color:#e53e3e;">&#10007;</span>`
+                : v.console_via === 'gateway-baked-dnat'
+                ? ` <span title="Per-lane DNAT install failed; using the template's baked 3389 rule. Works only if the guest took the .50 lease." style="color:#d69e2e;">&#9888;</span>`
                 : '';
               connCell = `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.console_endpoint)}</span>`
                        + `<br><span style="font-size:0.7rem;color:var(--text-muted);">${escHtml(proto)}${warn}</span>`;
@@ -1068,6 +1072,14 @@
         select.innerHTML = templates.length
           ? templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('')
           : '<option value="">No active workstation templates available</option>';
+
+        // Surface WHY the picker is empty (usually a template left at the admin
+        // form's default status of 'draft') instead of a dead-end message.
+        if (!templates.length && data.hint) {
+          document.getElementById('provisionVMTemplateInfo').innerHTML =
+            `<span style="color:#b7791f;">${escHtml(data.hint)}</span>`;
+          return;
+        }
 
         // Re-evaluate eligibility AND the description whenever the template changes
         select.onchange = () => { updateProvisionEligibility(); renderTemplateInfo(); };

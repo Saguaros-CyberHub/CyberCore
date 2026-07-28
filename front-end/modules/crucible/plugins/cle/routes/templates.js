@@ -61,6 +61,34 @@ router.get('/vm', instructorOnly, async (req, res) => {
       };
     });
 
+    // An empty picker is ambiguous — "none exist" and "some exist but are
+    // filtered out" look identical to the instructor. The most common cause is
+    // a template registered with the admin form's DEFAULT status of 'draft',
+    // which this endpoint (and the provision endpoint) deliberately exclude. Say
+    // so rather than leaving them to guess.
+    if (templates.length === 0) {
+      const blocked = await cybercoreQuery(`
+        SELECT os_name, status, is_active, template_vmid
+          FROM cybercore_template_catalog
+         WHERE template_type = 'workstation'
+           AND (status <> 'active' OR is_active = FALSE OR template_vmid IS NULL)
+         ORDER BY os_name ASC
+      `);
+      let hint = 'No workstation templates are registered yet. Add one in '
+               + 'Admin -> Workstation Templates.';
+      if (blocked.rows.length > 0) {
+        hint = `${blocked.rows.length} workstation template(s) exist but are not `
+             + 'usable yet: ' + blocked.rows.map(r => {
+                 const why = r.template_vmid == null ? 'no VMID (press Verify)'
+                           : !r.is_active            ? 'is_active = false'
+                           : `status = ${r.status}`;
+                 return `${r.os_name} (${why})`;
+               }).join(', ')
+             + '. Fix in Admin -> Workstation Templates.';
+      }
+      return res.json({ templates, hint });
+    }
+
     res.json({ templates });
   } catch (error) {
     console.error('[CLE] Get VM templates error:', error.message);

@@ -196,9 +196,11 @@ router.get('/', instructorOnly, async (req, res) => {
         ip_address:     cfg.ip || null,
         ip_confirmed:   cfg.ip_confirmed === true,
         has_console:    !!cfg.guac_connection_id,
-        // How the student reaches it. console_via 'direct' means the gateway
-        // DNAT could not be installed and the console points at the lane IP,
-        // which is only routable from inside the lab network.
+        // How the student reaches it. The endpoint is always the lane gateway's
+        // WAN transit IP (guacd has no route into the lane subnet); console_via
+        // says which DNAT carries it — 'gateway' (our per-lane rule),
+        // 'gateway-baked-dnat' (ours failed, using the template's built-in 3389
+        // rule), or 'unreachable' (no rule for this protocol).
         console_via:      cfg.console_via || null,
         console_protocol: cfg.console_protocol || null,
         console_endpoint: cfg.console_host ? `${cfg.console_host}:${cfg.console_port}` : null,

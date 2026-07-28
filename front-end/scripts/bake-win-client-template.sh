@@ -65,7 +65,7 @@
 # Usage:
 #   bash bake-win-client-template.sh
 #   FORCE=1 bash bake-win-client-template.sh          # replace an existing 1002
-#   OS_DISK_BUS=sata bash bake-win-client-template.sh # if virtio-scsi injection fails
+#   OS_DISK_BUS=scsi bash bake-win-client-template.sh # virtio-scsi (needs driver injection)
 #
 # Env vars (override defaults):
 #   PROXMOX_NODE      — node name                     (default: $(hostname))
@@ -80,7 +80,7 @@
 #   FINAL_VMID        — template VMID                 (default: 1002)
 #   BUILD_VMID        — scratch VMID used for install (default: 9902)
 #   ADMIN_PASSWORD    — bake-time local admin password(default: CyberCore!Bake1)
-#   OS_DISK_BUS       — scsi | sata                   (default: scsi)
+#   OS_DISK_BUS       - sata | scsi                   (default: sata, driver-free)
 #   DISK_GB           — template disk size            (default: 64)
 #   BUILD_CORES/BUILD_MEM — build VM resources        (default: 4 / 8192)
 #   KEEP_BUILD_VM=1   — don't destroy the scratch VM (for debugging a failure)
@@ -109,7 +109,23 @@ ADMIN_PASSWORD="${ADMIN_PASSWORD:-CyberCore!Bake1}"
 # fine. Secure Boot is off here only to keep one less variable in a lab image,
 # not as a workaround. Set SECURE_BOOT=1 if you want it.
 SECURE_BOOT="${SECURE_BOOT:-0}"
-OS_DISK_BUS="${OS_DISK_BUS:-scsi}"
+# SATA by default, deliberately.
+#
+# virtio-scsi is faster, but it makes the install depend on WinPE successfully
+# side-loading the vioscsi driver via Autounattend DriverPaths. In practice that
+# injection failed here even with correct paths and correct drive letters
+# (verified: D: was the virtio ISO and D:\vioscsi\w11\amd64 was listed), and the
+# failure mode is brutal — Setup shows an EMPTY disk list with no error, so an
+# unattended build just stops dead at a dialog nobody is watching.
+#
+# SATA needs no driver at all: WinPE sees the disk natively, DiskConfiguration
+# partitions it, and the install proceeds. The virtio guest tools still get
+# installed inside the guest by provision.ps1, so qemu-guest-agent works either
+# way. For an RDP desktop the disk-bus difference is not the bottleneck.
+#
+# Set OS_DISK_BUS=scsi if you want virtio-scsi and are willing to debug the
+# driver injection.
+OS_DISK_BUS="${OS_DISK_BUS:-sata}"
 DISK_GB="${DISK_GB:-64}"
 BUILD_CORES="${BUILD_CORES:-4}"
 BUILD_MEM="${BUILD_MEM:-8192}"
@@ -236,6 +252,78 @@ if [ -z "$WIN_ISO_PATH" ] || [ ! -f "$WIN_ISO_PATH" ]; then
   exit 1
 fi
 ISO_DIR=$(dirname "$WIN_ISO_PATH")
+
+# ---------- 1a2. Validate the virtio ISO ----------
+# A virtio ISO the guest cannot read is, from inside the build, indistinguishable
+# from one that isn't there: DriverPaths match nothing, no disk appears, and
+# Setup dead-ends on an empty disk list ~20 minutes in with no error.
+#
+# That is not hypothetical — it is exactly what happened here. The newest virtio
+# ISO on this cluster attached fine from Proxmox's side but presented to Windows
+# as an unlabelled drive that threw "Windows can't access this disc", i.e. a
+# truncated/corrupt upload. `pvesm list` happily reports such a file, so the only
+# way to catch it is to actually mount it.
+#
+# Validate before building, and prefer an older virtio release over a bad newer
+# one — most clusters keep several.
+validate_virtio_iso() {
+  local candidates cand path mnt good=""
+
+  if [ -n "$VIRTIO_ISO_NAME" ]; then
+    candidates="$VIRTIO_ISO"          # explicit override: test only that one
+  else
+    candidates=$(pvesm list "$ISO_STORAGE" 2>/dev/null | awk '{print $1}' \
+      | grep -iE 'iso/virtio-win.*\.iso$' | sort -Vr)
+  fi
+
+  for cand in $candidates; do
+    path=$(pvesm path "$cand" 2>/dev/null || true)
+    if [ -z "$path" ] || [ ! -f "$path" ]; then
+      echo "    $(basename "$cand"): no filesystem path — skipping"
+      continue
+    fi
+
+    mnt=$(mktemp -d)
+    if ! mount -o loop,ro "$path" "$mnt" 2>/dev/null; then
+      rmdir "$mnt"
+      echo "    $(basename "$cand"): will NOT mount (corrupt or truncated) — skipping"
+      continue
+    fi
+
+    if [ -f "$mnt/virtio-win-guest-tools.exe" ]; then
+      good="$cand"
+      echo "    $(basename "$cand"): OK (guest tools present)"
+      if [ "$OS_DISK_BUS" = "scsi" ]; then
+        if find "$mnt" -ipath '*/vioscsi/w1*/amd64/vioscsi.inf' 2>/dev/null | grep -q .; then
+          echo "      vioscsi driver present (OS_DISK_BUS=scsi viable)"
+        else
+          echo "      WARNING: no vioscsi driver on this ISO — OS_DISK_BUS=scsi will" >&2
+          echo "               leave Setup with an empty disk list. Use the default sata." >&2
+        fi
+      fi
+    else
+      echo "    $(basename "$cand"): mounts but has no virtio-win-guest-tools.exe — skipping"
+    fi
+
+    umount "$mnt"; rmdir "$mnt"
+    if [ -n "$good" ]; then break; fi
+  done
+
+  if [ -z "$good" ]; then
+    echo "    WARNING: no usable virtio-win ISO found." >&2
+    echo "             qemu-guest-agent will NOT be installed. The template still" >&2
+    echo "             works for RDP, but deploy-time IP confirmation won't report." >&2
+    return 0
+  fi
+
+  if [ "$good" != "$VIRTIO_ISO" ]; then
+    echo "==> Newer virtio ISO was unusable; falling back to $(basename "$good")"
+  fi
+  VIRTIO_ISO="$good"
+}
+echo "==> Validating virtio ISO(s)..."
+validate_virtio_iso
+echo "==> virtio ISO (validated): $VIRTIO_ISO"
 
 # ---------- 1b. Verify WIN_EDITION exists in this ISO ----------
 # A wrong edition name is the single most expensive failure mode here: Setup
@@ -786,12 +874,36 @@ Set-Service wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
 # re-arms its own service on the generalized image — use it if present so the
 # service actually runs on first boot of every clone.
 $cbUnattend = 'C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf\Unattend.xml'
-$sysprepArgs = '/generalize','/oobe','/shutdown','/mode:vm'
+
+# Copy the answer file to a SPACE-FREE path before handing it to sysprep.
+#
+# sysprep rejects "/unattend:C:\Program Files\Cloudbase Solutions\..." and pops
+# its graphical USAGE dialog -- which parks the whole unattended build at a modal
+# nobody is watching. Verified by hand at the console: quoting just the value
+# (/unattend:"C:\Program Files\...") fails the same way, so this is sysprep's own
+# argument parsing, not a PowerShell quoting problem. Rather than guess at which
+# quoting form it will accept, copy the file somewhere without spaces and the
+# question stops existing.
+#
+# /mode:vm is deliberately omitted: bake-win-server-template.sh patches that same
+# switch out of upstream's sysprep call, because some builds reject it.
+$sysprepArgs = '/generalize /oobe /shutdown'
 if (Test-Path $cbUnattend) {
-  Log "Using cloudbase-init Unattend.xml for sysprep"
-  $sysprepArgs = '/generalize','/oobe','/shutdown','/mode:vm',"/unattend:$cbUnattend"
+  $flatUnattend = 'C:\Windows\Temp\cloudbase-unattend.xml'
+  try {
+    Copy-Item $cbUnattend $flatUnattend -Force -ErrorAction Stop
+    $sysprepArgs = '/generalize /oobe /shutdown /unattend:{0}' -f $flatUnattend
+    Log "Using cloudbase-init Unattend.xml (copied to $flatUnattend)"
+  } catch {
+    # Not fatal. cloudbase-init's service is set to Automatic, so it still runs
+    # on first boot of every clone and creates the injected account -- just after
+    # boot rather than during specialize.
+    Log "WARNING: could not stage Unattend.xml ($_) - running sysprep without it"
+  }
+} else {
+  Log 'cloudbase-init Unattend.xml not present - running sysprep without /unattend'
 }
-Log ("Running sysprep: {0}" -f ($sysprepArgs -join ' '))
+Log ("Running sysprep: {0}" -f $sysprepArgs)
 Copy-Item $log 'C:\Windows\Temp\cybercore-provision-presysprep.log' -Force -ErrorAction SilentlyContinue
 Start-Process -FilePath 'C:\Windows\System32\Sysprep\sysprep.exe' -ArgumentList $sysprepArgs -Wait
 PS_EOF
@@ -852,9 +964,10 @@ qm create "$BUILD_VMID" \
   --agent enabled=1 \
   --description "Scratch VM for bake-win-client-template.sh — safe to destroy"
 
-# OS disk. virtio-scsi is the fast path and needs the vioscsi driver injected in
-# WinPE (handled by DriverPaths above). OS_DISK_BUS=sata is the escape hatch if
-# that injection ever fails on a new ISO: no driver needed, slightly slower.
+# OS disk. SATA is the default because WinPE sees it with no driver at all.
+# OS_DISK_BUS=scsi selects virtio-scsi, which is faster but depends on the
+# DriverPaths vioscsi injection above actually working — when it doesn't, Setup
+# stops on an empty disk list with no error message.
 if [ "$OS_DISK_BUS" = "sata" ]; then
   echo "==> OS disk on SATA (driver-free install path)"
   qm set "$BUILD_VMID" --sata1 "${PROXMOX_STORAGE}:${DISK_GB},cache=writeback"
@@ -896,15 +1009,32 @@ qm start "$BUILD_VMID"
 # minutes in. Pressing a key at THAT reboot would restart the install from
 # scratch in a loop — which is exactly why this stops at 90s and is not simply
 # left running for the whole build.
-(
-  sleep 3   # let the VM POST before the first keystroke
-  for _ in $(seq 1 90); do
-    qm sendkey "$BUILD_VMID" ret >/dev/null 2>&1 || true
-    sleep 1
-  done
-) &
-SENDKEY_PID=$!
-echo "==> Sending Enter for the first ~90s to clear the 'Press any key to boot' prompt..."
+#
+# Only runs as a FALLBACK. When the no-prompt repack succeeded there is no
+# prompt to answer, and every keystroke is pure downside: Enter lands on the
+# install progress screen's Cancel button (observed). Sending keys we don't need
+# is a way to break a working build, so we don't.
+#
+# Bounded by WALL CLOCK, not iteration count. `qm sendkey` is a Perl CLI
+# invocation costing a few hundred ms, so "90 iterations of sleep 1" was really
+# 2-3 minutes -- long enough to still be hammering Enter once Setup was showing
+# a Cancel button. 45s of real time comfortably covers a ~5s prompt that appears
+# within ~20s of power-on, and is over well before any clickable UI exists.
+if [ "$BOOT_ISO" != "$WIN_ISO" ]; then
+  SENDKEY_PID=""
+  echo "==> Booting the no-prompt ISO — no keystrokes needed (skipping sendkey)."
+else
+  (
+    sleep 3   # let the VM POST before the first keystroke
+    _sk_deadline=$(( $(date +%s) + 45 ))
+    while [ "$(date +%s)" -lt "$_sk_deadline" ]; do
+      qm sendkey "$BUILD_VMID" ret >/dev/null 2>&1 || true
+      sleep 1
+    done
+  ) &
+  SENDKEY_PID=$!
+  echo "==> Original ISO in use — sending Enter for 45s to clear the boot prompt..."
+fi
 
 # ---------- 4. Wait for provisioning to finish ----------
 # provision.ps1 ends with `sysprep /shutdown`, so the VM powering itself off IS
@@ -962,7 +1092,7 @@ while true; do
   sleep 20
 done
 
-wait "$SENDKEY_PID" 2>/dev/null || true
+if [ -n "$SENDKEY_PID" ]; then wait "$SENDKEY_PID" 2>/dev/null || true; fi
 
 # ---------- 5. Convert to the final template ----------
 # Detach every CD and add the cloud-init drive the orchestrator writes
