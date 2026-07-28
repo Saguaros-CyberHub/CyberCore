@@ -304,15 +304,16 @@ router.delete('/:courseId', adminOnly, async (req, res) => {
     }
     const { challenge_id } = existsResult.rows[0];
 
-    // Tear down every student lane belonging to this course (workstation +
-    // gateway + Guac connection + lane row).
-    const lanes = await cybercoreQuery(
-      `SELECT lane_id FROM cybercore_lane WHERE config->>'course_id' = $1`,
-      [courseId]
-    );
-    for (const row of lanes.rows) {
-      await laneProvision.teardownLane(row.lane_id).catch(
-        (e) => console.warn(`[CLE] Lane ${row.lane_id} teardown during course delete: ${e.message}`));
+    // Tear down every student lane belonging to this course in one hardened
+    // batch pass (parallel stop + delete, orphan retry rounds, orphan disk
+    // sweep). The old per-lane loop took minutes for a full class and left
+    // disk images behind on Ceph.
+    let laneTeardown = { lanes_deleted: 0, vms_destroyed: 0, orphan_disks_swept: 0, errors: [] };
+    try {
+      laneTeardown = await laneProvision.teardownCourseLanes(courseId);
+    } catch (e) {
+      console.error(`[CLE] Lane teardown during course ${courseId} delete: ${e.message}`);
+      laneTeardown.errors.push(e.message);
     }
 
     // Remove every reserved-lab challenge tied to this course (VNets + zone +
@@ -347,8 +348,11 @@ router.delete('/:courseId', adminOnly, async (req, res) => {
     res.json({
       success: true,
       message: 'Course and its reserved lab deleted',
-      lanes_removed: lanes.rows.length,
+      lanes_removed: laneTeardown.lanes_deleted,
+      vms_destroyed: laneTeardown.vms_destroyed,
+      orphan_disks_swept: laneTeardown.orphan_disks_swept,
       challenges_removed: challengeRows.rows.length - challengeErrors.length,
+      ...(laneTeardown.errors.length ? { lane_errors: laneTeardown.errors } : {}),
       ...(challengeErrors.length ? { challenge_errors: challengeErrors } : {}),
     });
   } catch (error) {

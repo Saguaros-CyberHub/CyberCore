@@ -355,6 +355,7 @@
             <option value="">Loading templates...</option>
           </select>
         </div>
+        <div id="provisionVMTemplateInfo" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: -0.4rem 0 0.4rem;"></div>
         <div class="form-group">
           <label>Student(s)</label>
           <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
@@ -362,9 +363,11 @@
         <p style="font-size: 0.8rem; color: var(--text-muted, #6b7280); margin: 0.25rem 0 0;">
           Each selected student gets their own isolated VXLAN lane (gateway + workstation), drawn from this course's reserved network.
         </p>
+        <div id="provisionPreview" style="display:none; margin-top: 0.75rem;"></div>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('provisionVMModal')">Cancel</button>
-          <button class="btn btn-primary" onclick="provisionVMs()">Provision VMs</button>
+          <button class="btn btn-outline" id="provisionAllBtn" onclick="provisionWholeClass()">Deploy Whole Class</button>
+          <button class="btn btn-primary" id="provisionSelectedBtn" onclick="provisionVMs()">Provision Selected</button>
         </div>
       </div>
     </div>
@@ -759,7 +762,8 @@
         const data = await api('GET', `/courses/${currentCourseId}/vms`);
         const vms = data.vms || [];
 
-        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Provision Workstation VMs</button>`;
+        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Provision Workstation VMs</button>
+          <div id="provisionProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
 
         if (vms.length === 0) {
           html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No workstation VMs provisioned yet.</p>';
@@ -769,7 +773,8 @@
               <th>Student</th>
               <th>VM Name</th>
               <th>Lane (VXLAN)</th>
-              <th>IP</th>
+              <th>Connection</th>
+              <th>Credentials</th>
               <th>State</th>
               <th>Actions</th>
             </tr></thead>
@@ -781,11 +786,33 @@
             const laneLabel = v.vxlan_id
               ? `<span style="font-size:0.75rem;color:var(--text-muted);">VXLAN ${escHtml(String(v.vxlan_id))}</span>`
               : '<span style="color:var(--text-muted);">—</span>';
-            html += `<tr>
+
+            // console_via 'direct' means the gateway DNAT could not be installed,
+            // so the console points at the lane-local IP — reachable only from
+            // inside the lab network. Worth flagging rather than hiding.
+            let connCell = '<span style="color:var(--text-muted);">—</span>';
+            if (v.console_endpoint) {
+              const proto = (v.console_protocol || 'rdp').toUpperCase();
+              const warn = v.console_via === 'direct'
+                ? ` <span title="Gateway DNAT unavailable — reachable only from the lab network" style="color:#d69e2e;">&#9888;</span>`
+                : '';
+              connCell = `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.console_endpoint)}</span>`
+                       + `<br><span style="font-size:0.7rem;color:var(--text-muted);">${escHtml(proto)}${warn}</span>`;
+            }
+
+            const credCell = v.workstation_user
+              ? `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.workstation_user)}</span>`
+                + (v.workstation_pass ? `<br><span style="font-family:monospace;font-size:0.72rem;color:var(--text-muted);">${escHtml(v.workstation_pass)}</span>` : '')
+              : '<span style="font-size:0.75rem;color:var(--text-muted);">template default</span>';
+
+            const errTitle = v.error ? ` title="${escHtml(v.error)}"` : '';
+
+            html += `<tr${errTitle}>
               <td>${studentLabel}</td>
               <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}</td>
               <td style="font-size:0.85rem;">${laneLabel}</td>
-              <td style="font-size:0.85rem;">${v.ip_address ? escHtml(v.ip_address) : '<span style="color:var(--text-muted);">—</span>'}</td>
+              <td>${connCell}</td>
+              <td>${credCell}</td>
               <td>${_powerBadge(v.power_state)}</td>
               <td style="display:flex;gap:0.4rem;align-items:center;">
                 ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" onclick="openVMConsole('${escHtml(v.lane_id)}')">Console</button>` : ''}
@@ -1011,6 +1038,7 @@
 
     async function showProvisionVMModal() {
       showModal('provisionVMModal');
+      resetProvisionAllButton();   // clear any confirm state left from a previous open
 
       // Load templates, students, and current VMs in parallel, then update eligibility once
       try {
@@ -1026,17 +1054,45 @@
       }
     }
 
+    // Templates keyed by id, so the picker can describe what's about to deploy.
+    let _provisionTemplates = {};
+
     async function loadVMTemplates() {
       try {
         const data = await api('GET', '/templates/vm');
         const templates = data.templates || [];
+        _provisionTemplates = {};
+        templates.forEach(t => { _provisionTemplates[String(t.template_id)] = t; });
+
         const select = document.getElementById('provisionVMTemplate');
-        select.innerHTML = templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
-        // Re-evaluate which students are eligible whenever the template changes
-        select.onchange = updateProvisionEligibility;
+        select.innerHTML = templates.length
+          ? templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('')
+          : '<option value="">No active workstation templates available</option>';
+
+        // Re-evaluate eligibility AND the description whenever the template changes
+        select.onchange = () => { updateProvisionEligibility(); renderTemplateInfo(); };
+        renderTemplateInfo();
       } catch (e) {
         toast('Error loading templates: ' + e.message, true);
       }
+    }
+
+    /** Show OS/type/protocol and whether the student gets credentials automatically. */
+    function renderTemplateInfo() {
+      const el = document.getElementById('provisionVMTemplateInfo');
+      if (!el) return;
+      const t = _provisionTemplates[document.getElementById('provisionVMTemplate').value];
+      if (!t) { el.textContent = ''; return; }
+      const bits = [
+        (t.provider_type || 'qemu').toUpperCase(),
+        t.os_family ? escHtml(t.os_family) : null,
+        `${escHtml((t.console_protocol || 'rdp').toUpperCase())} console`,
+        `NIC ${escHtml(t.nic_model || 'virtio')}`,
+        t.credentials === 'template'
+          ? 'credentials baked into template'
+          : 'credentials generated per student',
+      ].filter(Boolean);
+      el.innerHTML = bits.join(' &middot; ');
     }
 
     async function loadModalStudents(containerId) {
@@ -1107,16 +1163,134 @@
 
         // Each student gets their own isolated lane (gateway + workstation),
         // drawn from the course's reserved VXLAN block.
-        await api('POST', `/courses/${currentCourseId}/vms/provision`, {
+        const res = await api('POST', `/courses/${currentCourseId}/vms/provision`, {
           template_id: templateId,
           student_ids: selectedStudents,
         });
 
-        toast('VM provisioning started');
+        toast(res.message || 'VM provisioning started');
         closeModal('provisionVMModal');
         loadVMManagement();
+        pollProvisionProgress();
       } catch (e) {
         toast('Error provisioning VMs: ' + e.message, true);
+      }
+    }
+
+    /**
+     * Deploy a workstation for every enrolled student who doesn't have one.
+     * Two-step, mirroring the admin group deploy: the first call returns a
+     * cluster-capacity preview, the second (confirm) actually deploys.
+     */
+    async function provisionWholeClass() {
+      const btn = document.getElementById('provisionAllBtn');
+      const preview = document.getElementById('provisionPreview');
+      try {
+        const templateId = document.getElementById('provisionVMTemplate').value;
+        if (!templateId) { toast('Select a template first', true); return; }
+
+        btn.disabled = true;
+        btn.textContent = 'Checking capacity...';
+
+        const res = await api('POST', `/courses/${currentCourseId}/vms/provision-all`, {
+          template_id: templateId,
+        });
+
+        // Already deploying (pre-flight unavailable) — nothing more to confirm.
+        if (!res.preview) {
+          toast(res.message || 'Provisioning started');
+          closeModal('provisionVMModal');
+          loadVMManagement();
+          pollProvisionProgress();
+          return;
+        }
+
+        const s = res.summary || {};
+        const blocked = (res.errors || []).length > 0;
+        preview.style.display = 'block';
+        preview.innerHTML = `
+          <div style="border:1px solid ${blocked ? '#e53e3e' : '#f6e05e'}; background:${blocked ? 'rgba(229,62,62,0.08)' : 'rgba(245,158,11,0.10)'}; border-radius:8px; padding:0.7rem;">
+            <div style="font-weight:600; font-size:0.85rem; margin-bottom:0.35rem;">
+              Deploy ${res.student_count} workstation(s) &mdash; ${escHtml(res.template || '')}
+            </div>
+            <div style="font-size:0.78rem; color:var(--text-secondary);">
+              ${s.new_vms || 0} new VMs (${s.vms_per_lane || 0} per lane) &middot;
+              cluster currently at ${s.current_vms || 0} VMs &middot;
+              ${s.currently_deploying || 0} deploying now
+            </div>
+            ${(res.warnings || []).map(w => `<div style="font-size:0.75rem;color:#b7791f;margin-top:0.3rem;">&#9888; ${escHtml(w)}</div>`).join('')}
+            ${(res.errors || []).map(e => `<div style="font-size:0.75rem;color:#e53e3e;margin-top:0.3rem;">&#10007; ${escHtml(e)}</div>`).join('')}
+            ${(res.skipped || []).length ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.3rem;">${res.skipped.length} student(s) skipped (already deployed or ineligible)</div>` : ''}
+          </div>`;
+
+        if (blocked) {
+          btn.disabled = false;
+          btn.textContent = 'Deploy Whole Class';
+          toast('Cluster is at capacity — deployment blocked', true);
+          return;
+        }
+
+        btn.textContent = `Confirm — deploy ${res.student_count}`;
+        btn.disabled = false;
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = 'Deploying...';
+          try {
+            const done = await api('POST', `/courses/${currentCourseId}/vms/provision-all`, {
+              template_id: templateId, confirm: true,
+            });
+            toast(done.message || 'Provisioning started');
+            closeModal('provisionVMModal');
+            loadVMManagement();
+            pollProvisionProgress();
+          } catch (e) {
+            toast('Error deploying class: ' + e.message, true);
+          } finally {
+            resetProvisionAllButton();
+          }
+        };
+      } catch (e) {
+        toast('Error: ' + e.message, true);
+        resetProvisionAllButton();
+      }
+    }
+
+    function resetProvisionAllButton() {
+      const btn = document.getElementById('provisionAllBtn');
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = 'Deploy Whole Class';
+      btn.onclick = provisionWholeClass;
+      const preview = document.getElementById('provisionPreview');
+      if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
+    }
+
+    /**
+     * Poll the deploy's phase/ETA while it runs. 404 means it finished and aged
+     * out, at which point the lane table alone is enough.
+     */
+    let _provisionProgressTimer = null;
+    async function pollProvisionProgress() {
+      clearTimeout(_provisionProgressTimer);
+      const banner = document.getElementById('provisionProgressBanner');
+      try {
+        const p = await api('GET', `/courses/${currentCourseId}/vms/provision-progress`);
+        if (banner) {
+          const eta = p.eta_s != null && p.eta_s > 0 ? ` &middot; ETA ~${Math.ceil(p.eta_s / 60)} min` : '';
+          banner.style.display = 'block';
+          banner.innerHTML =
+            `<strong>${escHtml(p.phase_detail || p.phase || 'Deploying')}</strong> &mdash; ` +
+            `${p.completed}/${p.total} complete (${p.succeeded} ok, ${p.failed} failed)${eta}`;
+        }
+        if (p.phase !== 'complete') {
+          _provisionProgressTimer = setTimeout(pollProvisionProgress, 5000);
+        } else {
+          if (banner) setTimeout(() => { banner.style.display = 'none'; }, 8000);
+          loadVMManagement();
+        }
+      } catch (_) {
+        // No active deployment (finished or aged out) — stop polling quietly.
+        if (banner) banner.style.display = 'none';
       }
     }
 

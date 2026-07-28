@@ -3,8 +3,11 @@
  * Mounted at /api/cle/courses/:courseId/vms
  *
  * Workstations are provisioned as per-student cybercore_lane rows (gateway LXC +
- * workstation VM) drawn from the course's reserved VXLAN block. cybercore_lane
- * is the source of truth — no cybercore_resource / vm_instance / allocation.
+ * workstation VM) drawn from the course's reserved VXLAN block, through the
+ * shared src/utils/lane-deployer.js — the same sequence the admin group deploy
+ * uses for its attack boxes. cybercore_lane is the source of truth for the lane;
+ * lane-deployer additionally registers each workstation in cybercore_resource /
+ * vm_instance / allocation so the STUDENT sees it on their own dashboard.
  */
 
 const express = require('express');
@@ -14,10 +17,20 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { getGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
+const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const laneProvision = require('../utils/lane-provision');
 const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
 
 const instructorOnly = requireRole('instructor', 'admin');
+
+// Columns every provision path needs. os_family drives the NIC model (stock
+// Windows images have no virtio-net driver, so a virtio NIC never DHCPs) and
+// metadata carries console protocol / RDP credentials — omitting either is how
+// a Windows template ends up deployed but unreachable.
+const TEMPLATE_COLS = `
+  id, template_key, os_name, os_family, os_version,
+  template_vmid, node, provider_type, metadata
+`;
 
 /** Guacamole client launch URL (base64("<connId>\0c\0<datasource>")). */
 function buildGuacLaunchUrl(connId) {
@@ -29,7 +42,102 @@ function buildGuacLaunchUrl(connId) {
 /** Verify the course exists and the caller may manage it. Returns the course row
  *  (with its reserved-lab linkage) or null. Admin-aware via the shared helper. */
 function getManagedCourse(courseId, user) {
-  return getManagedCourseRow(courseId, user, 'course_id, challenge_id, challenge_key');
+  return getManagedCourseRow(courseId, user, 'course_id, course_name, challenge_id, challenge_key');
+}
+
+/** Load + validate the workstation template a provision request names. */
+async function loadWorkstationTemplate(templateId) {
+  const tpl = await cybercoreQuery(`
+    SELECT ${TEMPLATE_COLS}
+      FROM cybercore_template_catalog
+     WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
+  `, [templateId]);
+  if (tpl.rows.length === 0) {
+    const err = new Error('Template not found or not active');
+    err.status = 404;
+    throw err;
+  }
+  const template = tpl.rows[0];
+  if (!template.template_vmid) {
+    const err = new Error(`Template '${template.os_name}' has no Proxmox VMID configured`);
+    err.status = 409;
+    throw err;
+  }
+  return template;
+}
+
+/** Resolve the course's reserved lab (VXLAN block + challenge key). */
+async function loadCourseLab(course) {
+  if (!course.challenge_id) {
+    const err = new Error('Course has no reserved lab — recreate the course to provision its network');
+    err.status = 409;
+    throw err;
+  }
+  const lab = await laneProvision.resolveCourseLab(course.challenge_id);
+  if (!lab) {
+    const err = new Error('Reserved lab challenge missing for this course');
+    err.status = 409;
+    throw err;
+  }
+  return { challenge_key: lab.challengeKey, vxlan_block: lab.vxlanBlock };
+}
+
+/**
+ * Resolve the students to provision: actively enrolled, with an email (Guacamole
+ * accounts are email-keyed), and not already holding a lane in this course.
+ * Returns { students, skipped }.
+ */
+async function resolveTargetStudents(courseId, requestedIds) {
+  const enrolled = await query(
+    `SELECT user_id FROM cle_course_enrollment
+      WHERE course_id = $1 AND status = 'active'`,
+    [courseId]
+  );
+  const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
+
+  const ids = requestedIds ? requestedIds.filter(Boolean) : [...enrolledIds];
+  const skipped = [];
+  const candidates = [];
+  for (const id of ids) {
+    if (!enrolledIds.has(id)) { skipped.push({ student_id: id, reason: 'not enrolled' }); continue; }
+    candidates.push(id);
+  }
+  if (candidates.length === 0) return { students: [], skipped };
+
+  const users = await cybercoreQuery(
+    `SELECT user_id, email FROM cybercore_user WHERE user_id = ANY($1::uuid[])`,
+    [candidates]
+  );
+  const emailById = {};
+  for (const r of users.rows) emailById[r.user_id] = r.email;
+
+  // Students who already have a live lane in this course — re-provisioning would
+  // collide on the gateway/workstation VMIDs for their VXLAN.
+  const existing = await cybercoreQuery(
+    `SELECT user_id FROM cybercore_lane
+      WHERE user_id = ANY($1::uuid[])
+        AND config->>'course_id' = $2
+        AND status NOT IN ('deleted', 'error')`,
+    [candidates, courseId]
+  );
+  const alreadyDeployed = new Set(existing.rows.map(r => r.user_id));
+
+  const students = [];
+  for (const id of candidates) {
+    if (alreadyDeployed.has(id)) { skipped.push({ student_id: id, reason: 'already has a workstation' }); continue; }
+    if (!emailById[id]) { skipped.push({ student_id: id, reason: 'no email on account' }); continue; }
+    students.push({ id, email: emailById[id] });
+  }
+  return { students, skipped };
+}
+
+/** Kick off the background deploy. Shared by /provision and /provision-all. */
+function startProvision({ courseId, courseName, challenge, template, students }) {
+  laneProvision.provisionLanes({ courseId, courseName, challenge, template, students })
+    .then(result => console.log(`[CLE] Provision finished for course ${courseId}:`, JSON.stringify({
+      provisioned: result.provisioned.length, failed: result.failed.length,
+    })))
+    .catch(err => console.error(`[CLE] Provision failed for course ${courseId}: ${err.message}`));
 }
 
 /**
@@ -86,7 +194,17 @@ router.get('/', instructorOnly, async (req, res) => {
         template_id:    cfg.template_id || null,
         vm_name:        cfg.template_name || `cle-${row.vxlan_id}`,
         ip_address:     cfg.ip || null,
+        ip_confirmed:   cfg.ip_confirmed === true,
         has_console:    !!cfg.guac_connection_id,
+        // How the student reaches it. console_via 'direct' means the gateway
+        // DNAT could not be installed and the console points at the lane IP,
+        // which is only routable from inside the lab network.
+        console_via:      cfg.console_via || null,
+        console_protocol: cfg.console_protocol || null,
+        console_endpoint: cfg.console_host ? `${cfg.console_host}:${cfg.console_port}` : null,
+        workstation_user: cfg.workstation_user || null,
+        workstation_pass: cfg.workstation_pass || null,
+        error:            cfg.error || null,
         created_at:     row.created_at,
       };
     });
@@ -99,10 +217,10 @@ router.get('/', instructorOnly, async (req, res) => {
 });
 
 /**
- * POST /provision — Provision workstation lanes for students.
- * Each student gets a gateway LXC + workstation VM on their own VXLAN, drawn
- * from the course's reserved block. ≤3 deploy sequentially; >3 via the batch
- * deployer. Responds immediately; lanes appear as they reach 'deploying'.
+ * POST /provision — Provision workstation lanes for the named students.
+ * Each student gets their own isolated lane (gateway + workstation) on their own
+ * VXLAN, drawn from the course's reserved block. Responds immediately; lanes
+ * surface via GET / polling and GET /provision-progress.
  */
 router.post('/provision', instructorOnly, async (req, res) => {
   try {
@@ -115,65 +233,112 @@ router.post('/provision', instructorOnly, async (req, res) => {
 
     const course = await getManagedCourse(courseId, req.user);
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
-    if (!course.challenge_id) {
-      return res.status(409).json({ error: 'Course has no reserved lab — recreate the course to provision its network' });
-    }
 
-    // Validate the workstation template.
-    const tpl = await cybercoreQuery(`
-      SELECT id, template_key, os_name, template_vmid, node, provider_type, metadata
-        FROM cybercore_template_catalog
-       WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
-    `, [template_id]);
-    if (tpl.rows.length === 0) return res.status(404).json({ error: 'Template not found or not active' });
-    const template = tpl.rows[0];
-
-    // Resolve the course's reserved VXLAN block from its challenge.
-    const chal = await cybercoreQuery(
-      `SELECT challenge_key, spec FROM crucible_challenge WHERE challenge_id = $1`,
-      [course.challenge_id]
-    );
-    if (chal.rows.length === 0) return res.status(409).json({ error: 'Reserved lab challenge missing for this course' });
-    const spec = typeof chal.rows[0].spec === 'string' ? JSON.parse(chal.rows[0].spec) : (chal.rows[0].spec || {});
-    const challenge = { challenge_key: chal.rows[0].challenge_key, vxlan_block: spec.vxlan_block };
-
-    // Keep only enrolled students; pull their emails for Guac.
-    const enrolledRows = await cybercoreQuery(`
-      SELECT u.user_id, u.email
-        FROM cybercore_user u
-       WHERE u.user_id = ANY($1)
-    `, [student_ids]);
-    const emailById = {};
-    for (const r of enrolledRows.rows) emailById[r.user_id] = r.email;
-
-    const students = [];
-    const failed = [];
-    for (const sid of student_ids) {
-      const ok = await query(
-        `SELECT 1 FROM cle_course_enrollment WHERE user_id = $1 AND course_id = $2 AND status = 'active'`,
-        [sid, courseId]
-      );
-      if (!ok.rows.length) { failed.push({ student_id: sid, reason: 'not enrolled' }); continue; }
-      students.push({ id: sid, email: emailById[sid] || null });
-    }
+    const template = await loadWorkstationTemplate(template_id);
+    const challenge = await loadCourseLab(course);
+    const { students, skipped } = await resolveTargetStudents(courseId, student_ids);
 
     if (!students.length) {
-      return res.status(400).json({ error: 'No enrolled students to provision', failed });
+      return res.status(400).json({ error: 'No eligible students to provision', skipped });
     }
 
-    // Respond now; deploy in the background (lanes surface via GET / polling).
     res.json({
       success: true,
       message: `Provisioning started for ${students.length} student(s)`,
       count: students.length,
-      ...(failed.length ? { failed } : {}),
+      progress_url: `/api/cle/courses/${courseId}/vms/provision-progress`,
+      ...(skipped.length ? { skipped } : {}),
     });
 
-    laneProvision.provisionLanes({ courseId, challenge, template, students })
-      .then(result => console.log(`[CLE] Provision finished for course ${courseId}:`, JSON.stringify(result)))
-      .catch(err => console.error(`[CLE] Provision failed for course ${courseId}: ${err.message}`));
+    startProvision({ courseId, courseName: course.course_name, challenge, template, students });
   } catch (error) {
     console.error('[CLE] Provision VMs error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /provision-all — Provision a workstation for every actively-enrolled
+ * student who doesn't already have one. This is the "deploy the class" button.
+ *
+ * Runs the same cluster capacity pre-flight the admin group deploy uses: without
+ * `confirm: true` it returns a preview instead of deploying, so the instructor
+ * sees the resource impact before committing a whole cohort.
+ */
+router.post('/provision-all', instructorOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const { template_id, confirm } = req.body;
+    if (!template_id) return res.status(400).json({ error: 'template_id is required' });
+
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const template = await loadWorkstationTemplate(template_id);
+    const challenge = await loadCourseLab(course);
+    const { students, skipped } = await resolveTargetStudents(courseId, null);
+
+    if (!students.length) {
+      return res.status(400).json({
+        error: 'Every enrolled student already has a workstation, or none are eligible',
+        skipped,
+      });
+    }
+
+    if (!confirm) {
+      try {
+        // One workstation per lane; the gateway is counted by the guard itself.
+        const preview = await buildDeployPreview({
+          numLanes: students.length,
+          attackBoxes: false,
+          challengeVmCount: 1,
+          proxmoxAPI,
+          cybercoreQuery,
+        });
+        return res.json({
+          preview: true,
+          student_count: students.length,
+          template: template.os_name,
+          ...(skipped.length ? { skipped } : {}),
+          ...preview,
+        });
+      } catch (err) {
+        // A failed pre-flight must not block the deploy — the admin path treats
+        // it the same way. Fall through and provision.
+        console.error('[CLE] Pre-flight check failed:', err.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Provisioning started for ${students.length} student(s)`,
+      count: students.length,
+      progress_url: `/api/cle/courses/${courseId}/vms/provision-progress`,
+      ...(skipped.length ? { skipped } : {}),
+    });
+
+    startProvision({ courseId, courseName: course.course_name, challenge, template, students });
+  } catch (error) {
+    console.error('[CLE] Provision-all error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /provision-progress — Live phase/ETA for an in-flight class deploy.
+ * 404 once the deploy has finished and aged out; the client should fall back to
+ * polling GET / for lane status.
+ */
+router.get('/provision-progress', instructorOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const progress = laneProvision.getProvisionProgress(courseId);
+    if (!progress) return res.status(404).json({ error: 'No active deployment for this course' });
+    res.json(progress);
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -220,7 +385,7 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
 
 /**
  * DELETE /:laneId — Tear down a student's workstation lane (workstation +
- * gateway + Guac connection + lane row).
+ * gateway + Guac connection + workspace records + lane row).
  */
 router.delete('/:laneId', instructorOnly, async (req, res) => {
   try {
@@ -236,8 +401,8 @@ router.delete('/:laneId', instructorOnly, async (req, res) => {
     );
     if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
 
-    await laneProvision.teardownLane(laneId);
-    res.json({ success: true, message: 'Workstation lane removed' });
+    const result = await laneProvision.teardownLane(laneId);
+    res.json({ success: true, message: 'Workstation lane removed', ...result });
   } catch (error) {
     console.error('[CLE] Delete VM error:', error.message);
     res.status(500).json({ error: error.message });
