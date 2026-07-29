@@ -145,7 +145,19 @@ const MOCK_THREAT = {
     content: { scan_date: '2026-01-15', findings: [] } }]
 };
 
-// Branch-aware mock — picks the right canned response based on a prompt-text hint
+// Each branch has a unique "Generate the X." opening line in its user prompt.
+// Tagging the call with the branch it belongs to lets assertions target the
+// A/B/C/D pipeline specifically, instead of counting every call the mock sees.
+// generateProfile() also kicks off background policy generation that it
+// deliberately does not await, so a bare total is both wrong and racy — it
+// depends on whether those fire-and-forget calls land before the assertion.
+const BRANCH_MATCHERS = [
+  { branch: 'org',     re: /Generate the organization profile/, response: () => MOCK_ORG },
+  { branch: 'it',      re: /Generate the IT environment/,       response: () => MOCK_IT },
+  { branch: 'network', re: /Generate the network architecture/, response: () => MOCK_NETWORK },
+  { branch: 'threat',  re: /Generate the threat profile/,       response: () => MOCK_THREAT }
+];
+
 let callIndex = 0;
 const callRecord = [];
 const mockClient = {
@@ -154,15 +166,16 @@ const mockClient = {
       callIndex++;
       const userText = params.messages[0]?.content || '';
       const systemText = Array.isArray(params.system) ? params.system.map(b => b.text || '').join(' ') : (params.system || '');
-      callRecord.push({ index: callIndex, systemSnippet: systemText.slice(0, 60), userSnippet: userText.slice(0, 80) });
 
-      // Dispatch on user-prompt opening (each branch has a unique "Generate the X." line).
-      let response;
-      if (/Generate the organization profile/.test(userText)) response = MOCK_ORG;
-      else if (/Generate the IT environment/.test(userText)) response = MOCK_IT;
-      else if (/Generate the network architecture/.test(userText)) response = MOCK_NETWORK;
-      else if (/Generate the threat profile/.test(userText)) response = MOCK_THREAT;
-      else response = { ok: true };
+      const matcher = BRANCH_MATCHERS.find(m => m.re.test(userText));
+      callRecord.push({
+        index: callIndex,
+        branch: matcher ? matcher.branch : null,   // null = not a pipeline branch
+        systemSnippet: systemText.slice(0, 60),
+        userSnippet: userText.slice(0, 80)
+      });
+
+      const response = matcher ? matcher.response() : { ok: true };
 
       return {
         content: [{ type: 'text', text: JSON.stringify(response) }],
@@ -172,6 +185,11 @@ const mockClient = {
     }
   }
 };
+
+// Snapshot only the branch calls — background work cannot perturb this.
+function branchCalls() {
+  return callRecord.filter(c => c.branch !== null);
+}
 llm._setClientForTest(mockClient);
 
 // Stub fs writes (don't pollute the profiles directory). Also stub statSync
@@ -227,8 +245,26 @@ const { generateProfile, buildConfig, combineProfile } = require('../ai/profile'
     assert.ok(row.run_id);
   });
 
-  await test('fired 4 LLM calls (one per branch)', () => {
-    assert.strictEqual(callIndex, 4, `expected 4 LLM calls, got ${callIndex}`);
+  await test('fired exactly one LLM call per A/B/C/D branch', () => {
+    const branches = branchCalls().map(c => c.branch).sort();
+    assert.deepStrictEqual(
+      branches,
+      ['it', 'network', 'org', 'threat'],
+      `expected one call per branch, got [${branches.join(', ')}]`
+    );
+  });
+
+  await test('any non-branch calls are background policy generation', () => {
+    // generateProfile() fires policy generation in an un-awaited async block,
+    // so these may or may not have landed by now — assert what they are, not
+    // how many there are.
+    for (const call of callRecord.filter(c => c.branch === null)) {
+      assert.match(
+        call.systemSnippet,
+        /policy|policies/i,
+        `unexpected non-branch LLM call: ${call.systemSnippet}`
+      );
+    }
   });
 
   await test('wrote a JSON + HTML file under profiles/', () => {
