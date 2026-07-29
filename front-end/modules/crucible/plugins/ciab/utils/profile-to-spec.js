@@ -15,7 +15,7 @@
  */
 
 const { resolveTemplate } = require('../../../../../src/utils/vm-template-resolver');
-const { findScript } = require('../../../../../src/utils/vuln-script-resolver');
+const { findScript, familyToOsTarget } = require('../../../../../src/utils/vuln-script-resolver');
 
 // ─── OS string parser ───────────────────────────────────────────────────────
 // Profile assets carry `os` as a single human string (e.g. "Windows Server 2022",
@@ -212,17 +212,25 @@ function synthesizeSpecFromProfile({
     console.log(`[profile-to-spec] ${asset.hostname} → template_vmid=${match.template_vmid} (${match.os_name}, match=${match.match_type}, role=${resolverRole})`);
 
     // Resolve post-clone scripts for each declared service. Include the
-    // 'init-setup' bootstrap only if its os_target matches the VM's os_family
+    // 'init-setup' bootstrap only if its os_target covers the VM's os_family
     // (init-setup is currently Windows-only PowerShell; running it on a Linux
     // VM 596's on every agent/exec call because powershell doesn't exist).
+    //
+    // os_family and os_target are DIFFERENT namespaces: parseOs() emits
+    // 'windows_server' / 'windows_client' / 'linux', while vuln_scripts.os_target
+    // stores 'windows' / 'linux'. Comparing them raw made 'windows' !==
+    // 'windows_server' and silently excluded init-setup from every host it was
+    // meant for — so the bootstrap ran nowhere at all. familyToOsTarget() is the
+    // same normalization findScript() already applies to service scripts below.
     const postCloneScripts = [];
     const seenSlugs = new Set();
 
     const lc = s => String(s || '').trim().toLowerCase();
+    const vmOsTarget = familyToOsTarget(os_family);
     const bootstrap = vulnScriptCatalog.find(r =>
       r.slug === 'init-setup'
       && r.is_active !== false
-      && (!r.os_target || lc(r.os_target) === lc(os_family) || lc(r.os_target) === 'any')
+      && (!r.os_target || lc(r.os_target) === vmOsTarget || lc(r.os_target) === 'any')
     );
     if (bootstrap) {
       postCloneScripts.push(bootstrap.slug);
