@@ -51,7 +51,7 @@ variable "template_name" {
 
 variable "disk_size" {
   type    = string
-  default = "80G"
+  default = "64G"
 }
 
 variable "cores" {
@@ -71,7 +71,7 @@ variable "network_bridge" {
 
 variable "vlan_tag" {
   type        = string
-  default     = "40"
+  default     = "60"
   description = "Build-time VLAN. Needs outbound HTTPS unless installers are pre-staged in files/installers/."
 }
 
@@ -94,12 +94,23 @@ variable "timezone" {
   default = "UTC"
 }
 
+# This account SURVIVES into the template. Sysprep /generalize resets the SID and
+# machine identity but does not delete local accounts, and cleanup.ps1 only clears
+# the autologon registry values. So this is both the account Packer authenticates
+# with during the build and the account a clone is administered through.
+#
+# It must match `username` in files/cloudbase-init/*.conf, which is what makes the
+# Proxmox Cloud-Init password field apply to it. If you rename it here, rename it
+# there too.
 variable "winrm_username" {
   type        = string
-  default     = "packer"
-  description = "Local admin created by autounattend.xml, removed by Sysprep. Rendered into the answer file so it cannot drift."
+  default     = "cactus-user"
+  description = "Local admin created by autounattend.xml and kept in the template. Rendered into the answer file so the build account and the WinRM account cannot drift."
 }
 
+# Build-time password only. It is baked into the answer file in cleartext, so
+# treat it as disposable: Cloudbase-Init overwrites it on a clone's first boot
+# with whatever the Proxmox Cloud-Init password field holds.
 variable "winrm_password" {
   type      = string
   sensitive = true

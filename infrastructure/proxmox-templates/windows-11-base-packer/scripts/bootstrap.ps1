@@ -54,6 +54,37 @@ if ($Process.ExitCode -notin @(0, 3010)) {
     }
 }
 
+Write-Host "Staging the full virtio driver set into the driver store"
+
+# virtio-win-guest-tools installs the whole suite plus the guest agent, but PnP
+# only *binds* drivers for hardware present at build time. Adding every w11/amd64
+# INF to the driver store as well means a clone handed a device this VM never had
+# -- virtio-blk instead of virtio-scsi, a balloon device, an RNG, a serial port --
+# binds it on first boot instead of sitting in Device Manager with a yellow bang.
+$DriverInfs = Get-ChildItem `
+    -Path $VirtioRoot `
+    -Recurse `
+    -Filter *.inf `
+    -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match '\\w11\\amd64\\' }
+
+$Staged = 0
+
+foreach ($Inf in $DriverInfs) {
+    & pnputil.exe /add-driver $Inf.FullName /install 2>&1 | Out-Null
+
+    # pnputil returns 259 (ERROR_NO_MORE_ITEMS) when a driver is already staged,
+    # which is a no-op rather than a failure.
+    if ($LASTEXITCODE -in @(0, 259)) {
+        $Staged++
+    }
+    else {
+        Write-Host "  WARNING: pnputil returned $LASTEXITCODE for $($Inf.Name)"
+    }
+}
+
+Write-Host "Staged $Staged of $($DriverInfs.Count) virtio drivers"
+
 Write-Host "Waiting for the QEMU guest agent service"
 
 $Deadline = (Get-Date).AddMinutes(5)

@@ -41,8 +41,25 @@ Set-ItemProperty `
     -Type DWord `
     -Value 0
 
+# Set the firewall rules for Remote Desktop, ICMP echo requests (ping), and inbound OpenSSH connections to allow
 Enable-NetFirewallRule `
     -DisplayGroup "Remote Desktop" `
+    -ErrorAction SilentlyContinue
+
+Set-NetFirewallRule `
+    -Name "CoreNet-Diag-ICMP4-EchoRequest-In" `
+    -Enabled True `
+    -Profile Any `
+    -RemoteAddress Any `
+    -LocalAddress Any `
+    -ErrorAction SilentlyContinue
+
+# install-software.ps1 treats OpenSSH as best-effort, so the rule is absent on a
+# build VLAN that could not reach Windows Update. Do not fail the build over it.
+Set-NetFirewallRule `
+    -Name "OpenSSH-Server-In-TCP" `
+    -Enabled True `
+    -Profile Any `
     -ErrorAction SilentlyContinue
 
 Write-Host "Verifying the QEMU guest agent"

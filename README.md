@@ -5,9 +5,10 @@ run by Cyber Saguaros. It's a single Node.js/Express application that serves the
 hub UI, is the system of record for users and labs, and orchestrates a Proxmox VE
 cluster to spin up isolated, per-user lab environments called **lanes**.
 
-> **📚 Full documentation lives in [docs/](docs/).** Start with
-> [docs/01-overview.md](docs/01-overview.md). This README is just the map and the
-> quick start.
+> **📚 Full documentation lives at [docs.saguaroscyberhub.org](https://docs.saguaroscyberhub.org)**
+> (source: [Saguaros-CyberHub/CyberHub-Docs](https://github.com/Saguaros-CyberHub/CyberHub-Docs)).
+> Start with the [Overview](https://docs.saguaroscyberhub.org/Overview/01-overview/).
+> This README is just the map and the quick start.
 
 ## What it actually is
 
@@ -39,7 +40,7 @@ flowchart TB
 ```
 
 Full diagrams and the boot/request lifecycles are in
-[docs/02-architecture.md](docs/02-architecture.md).
+[Architecture](https://docs.saguaroscyberhub.org/Overview/02-architecture/).
 
 ## Repository layout
 
@@ -53,7 +54,6 @@ Full diagrams and the boot/request lifecycles are in
 | [config/](config/) | Caddy, Guacamole, n8n, and site configuration. |
 | [challenges/](challenges/) | Source for self-contained vulnerable-app challenges (e.g. CyberSaguaros). |
 | [docker-compose.yml](docker-compose.yml) | The deployment stack. |
-| [docs/](docs/) | The documentation set. |
 
 ## Quick start
 
@@ -61,7 +61,8 @@ Full diagrams and the boot/request lifecycles are in
 # 1. Configure
 cp example.env .env
 #    …then fill in every REPLACE_ME (DB creds, JWT_SECRET, SESSION_SECRET,
-#    PROXMOX_*, GUAC_*, etc. — see docs/09-deployment-and-ops.md)
+#    PROXMOX_*, GUAC_*, etc. — see the Deployment & Ops doc:
+#    https://docs.saguaroscyberhub.org/Overview/09-deployment-and-ops/)
 
 # 2. Launch the stack (app + postgres + redis + guacamole + caddy + …)
 docker compose up -d
@@ -75,7 +76,10 @@ seed `cybercore_db` (schema, first admin from `ADMIN_EMAIL`, module rows); the
 app then loads modules/plugins (creating `clinic_db` / `cle_db`) and starts
 listening. Caddy serves the hub — a domain name in `CYBERHUB_HOST` gets automatic
 HTTPS; `:80` runs HTTP-only for LAN/offline use
-([docs/offline-mode.md](docs/11-offline-mode.md)).
+([Offline Mode](https://docs.saguaroscyberhub.org/Overview/11-offline-mode/)).
+
+A step-by-step walkthrough lives in the
+[Quickstart Guide](https://docs.saguaroscyberhub.org/Setup/Quickstart%20Guide/).
 
 ## The modules
 
@@ -89,29 +93,35 @@ Discovered from [front-end/modules/](front-end/modules/) and registered in the
 
 Plugins (both under Crucible): **Clinic-in-a-Box** (AI risk-assessment training,
 `clinic_db`) and **Cyber Learning Environment** (instructor course tooling,
-`cle_db`). See [docs/10-plugins.md](docs/10-plugins.md).
+`cle_db`). See [Plugins: CiaB & CLE](https://docs.saguaroscyberhub.org/Overview/10-plugins/).
 
 ## Documentation index
 
+Hosted at **[docs.saguaroscyberhub.org](https://docs.saguaroscyberhub.org)**;
+written in [Saguaros-CyberHub/CyberHub-Docs](https://github.com/Saguaros-CyberHub/CyberHub-Docs).
+
 | # | Doc |
 |---|-----|
-| 01 | [Overview](docs/01-overview.md) — what CyberCore is, glossary, system map |
-| 02 | [Architecture](docs/02-architecture.md) — components, boot, request lifecycle |
-| 03 | [Data Model](docs/03-data-model.md) — databases, ER map, table reference |
-| 04 | [Modules & Plugins](docs/04-modules-and-plugins.md) — the loader, adding features |
-| 05 | [Lanes & Provisioning](docs/05-lanes-and-provisioning.md) — the lane lifecycle |
-| 06 | [Networking](docs/06-networking.md) — subnet schemes, Tailscale, Guacamole |
-| 07 | [Crucible & Challenges](docs/07-crucible-challenges.md) — challenges vs. events |
-| 08 | [Auth & Security](docs/08-auth-and-security.md) — JWT, roles, MFA, rate limits |
-| 09 | [Deployment & Ops](docs/09-deployment-and-ops.md) — the compose stack, env, logging |
-| 10 | [Plugins: CiaB & CLE](docs/10-plugins.md) — the two shipped plugins |
+| 01 | [Overview](https://docs.saguaroscyberhub.org/Overview/01-overview/) — what CyberCore is, glossary, system map |
+| 02 | [Architecture](https://docs.saguaroscyberhub.org/Overview/02-architecture/) — components, boot, request lifecycle |
+| 03 | [Data Model](https://docs.saguaroscyberhub.org/Overview/03-data-model/) — databases, ER map, table reference |
+| 04 | [Modules & Plugins](https://docs.saguaroscyberhub.org/Overview/04-modules-and-plugins/) — the loader, adding features |
+| 05 | [Lanes & Provisioning](https://docs.saguaroscyberhub.org/Overview/05-lanes-and-provisioning/) — the lane lifecycle |
+| 06 | [Networking](https://docs.saguaroscyberhub.org/Overview/06-networking/) — subnet schemes, Tailscale, Guacamole |
+| 07 | [Crucible & Challenges](https://docs.saguaroscyberhub.org/Overview/07-crucible-challenges/) — challenges vs. events |
+| 08 | [Auth & Security](https://docs.saguaroscyberhub.org/Overview/08-auth-and-security/) — JWT, roles, MFA, rate limits |
+| 09 | [Deployment & Ops](https://docs.saguaroscyberhub.org/Overview/09-deployment-and-ops/) — the compose stack, env, logging |
+| 10 | [Plugins: CiaB & CLE](https://docs.saguaroscyberhub.org/Overview/10-plugins/) — the two shipped plugins |
+| 11 | [Offline Mode](https://docs.saguaroscyberhub.org/Overview/11-offline-mode/) — LAN / air-gapped operation |
+| — | [Quickstart Guide](https://docs.saguaroscyberhub.org/Setup/Quickstart%20Guide/) — set up CyberHub locally |
 
 ## Contributing
 
 - Keep route handlers thin; put infrastructure logic in `src/utils/`.
 - Write idempotent migrations — the loader re-runs plugin migrations every boot.
-- **Update the matching doc in [docs/](docs/) in the same PR** when you change how
-  a subsystem works. These docs are only useful if they stay honest.
+- **When you change how a subsystem works, open a matching PR against
+  [CyberHub-Docs](https://github.com/Saguaros-CyberHub/CyberHub-Docs)** and link it
+  from your CyberCore PR. The docs are only useful if they stay honest.
 
 ## License
 

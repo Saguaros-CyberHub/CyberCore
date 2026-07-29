@@ -17,11 +17,19 @@ $TempPaths = @(
     "$env:TEMP\*"
 ) + $ProfileTemp
 
+# Packer stages its own scaffolding in C:\Windows\Temp -- the per-provisioner
+# script and the environment-variable file the elevated wrapper dot-sources. This
+# script runs from inside that scaffolding, so a blanket wipe deletes the files
+# the *next* provisioner is about to run and Packer fails with "the term
+# c:/Windows/Temp/packer-ps-env-vars-....ps1 is not recognized".
+$PackerArtifacts = @("packer-*", "script-*")
+
 foreach ($Path in $TempPaths) {
     Remove-Item `
         -Path $Path `
         -Recurse `
         -Force `
+        -Exclude $PackerArtifacts `
         -ErrorAction SilentlyContinue
 }
 

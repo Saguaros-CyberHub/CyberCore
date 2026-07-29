@@ -20,6 +20,52 @@ if (-not (Test-Path $UnattendSource)) {
 
 Copy-Item -Path $UnattendSource -Destination $UnattendTarget -Force
 
+# Windows 11 turns Device Encryption on by itself on hardware that qualifies, and
+# this VM qualifies: TPM 2.0 plus Secure Boot, both of which the template wants
+# for other reasons. Sysprep then refuses to generalize:
+#   SYSPRP BitLocker-Sysprep: BitLocker is on for the OS volume. (0x80310039)
+# The specialize pass of autounattend.xml sets PreventDeviceEncryption, so on a
+# clean build this loop finds nothing to do. It stays as a safety net for images
+# where encryption started before that key was written.
+$SystemDrive = $env:SystemDrive
+
+if (Get-Command -Name Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+    $Volume = Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction SilentlyContinue
+
+    if ($Volume -and $Volume.VolumeStatus -ne "FullyDecrypted") {
+        Write-Host "BitLocker is $($Volume.VolumeStatus) on $SystemDrive; decrypting before Sysprep"
+
+        Disable-BitLocker -MountPoint $SystemDrive -ErrorAction Stop | Out-Null
+
+        # Decryption is asynchronous and Sysprep will not wait for it.
+        $Deadline = (Get-Date).AddMinutes(90)
+
+        while ((Get-Date) -lt $Deadline) {
+            Start-Sleep -Seconds 15
+
+            $Volume = Get-BitLockerVolume -MountPoint $SystemDrive -ErrorAction SilentlyContinue
+
+            if (-not $Volume -or $Volume.VolumeStatus -eq "FullyDecrypted") {
+                break
+            }
+
+            Write-Host "  $($Volume.VolumeStatus), $($Volume.EncryptionPercentage)% encrypted"
+        }
+
+        if ($Volume -and $Volume.VolumeStatus -ne "FullyDecrypted") {
+            throw "BitLocker on $SystemDrive is still $($Volume.VolumeStatus) after 90 minutes; Sysprep cannot generalize an encrypted volume"
+        }
+
+        Write-Host "$SystemDrive is fully decrypted"
+    }
+    else {
+        Write-Host "BitLocker is not enabled on $SystemDrive"
+    }
+}
+else {
+    Write-Host "BitLocker cmdlets unavailable; skipping the decryption check"
+}
+
 # Logs from the build's own install confuse the generalize pass and are the usual
 # cause of "a fatal error occurred while trying to sysprep the machine".
 Remove-Item `
@@ -53,8 +99,31 @@ if ($Process.ExitCode -ne 0) {
     throw "Sysprep failed with exit code $($Process.ExitCode)"
 }
 
-if (-not (Test-Path (Join-Path $SysprepRoot "Sysprep_succeeded.tag"))) {
-    throw "Sysprep returned 0 but did not write Sysprep_succeeded.tag; the image is not generalized"
+# Sysprep_succeeded.tag is written on the shutdown/reboot path. A /quit run can
+# return before it exists, so its absence proves nothing and checking for it
+# fails builds that actually generalized cleanly. The authoritative signal is the
+# generalization state the generalize pass writes to the registry:
+#   4 = generalized, specialize pending on next boot  <- what we want
+#   7 = fully configured, i.e. generalize never ran
+$StatusKey = "HKLM:\SYSTEM\Setup\Status\SysprepStatus"
+
+$State = (Get-ItemProperty `
+        -Path $StatusKey `
+        -Name GeneralizationState `
+        -ErrorAction SilentlyContinue).GeneralizationState
+
+if ($State -ne 4) {
+    $Log = Join-Path $SysprepRoot "Panther\setupact.log"
+
+    if (Test-Path $Log) {
+        Write-Host "--- setupact.log ---"
+        Get-Content -Path $Log -Tail 40
+        Write-Host "--- end setupact.log ---"
+    }
+
+    throw "Sysprep exited 0 but GeneralizationState is '$State' (expected 4); the image is not generalized"
 }
+
+Write-Host "GeneralizationState is 4; the image is generalized"
 
 Write-Host "Sysprep complete. The builder will now shut the VM down and convert it to a template."
