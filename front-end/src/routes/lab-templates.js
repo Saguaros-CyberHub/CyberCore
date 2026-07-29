@@ -296,10 +296,63 @@ router.get('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) 
   }
 });
 
+// crucible_challenge.difficulty is an INTEGER (1=easy … 5=impossible) while
+// every UI that touches it speaks in labels. Both write paths must convert:
+// passing 'intermediate' straight through fails the whole request with
+// `invalid input syntax for type integer`, which is what made the challenge
+// editor unusable. Returns null for absent/unrecognized input so callers can
+// COALESCE to "leave it alone".
+const DIFFICULTY_MAP = {
+  beginner: 1, easy: 1, intermediate: 2, medium: 2, hard: 3, advanced: 3, expert: 4, impossible: 5,
+};
+
+function toDifficultyInt(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (Number.isFinite(Number(value))) return Number(value);
+  return DIFFICULTY_MAP[String(value).toLowerCase()] ?? null;
+}
+
+// Spec keys that describe a challenge's RESERVED NETWORK, not its content. They
+// are written once by reserveLabNetwork and are load-bearing afterwards:
+// vxlan_block is how a CLE course finds its lanes' VXLAN ids (lane-provision
+// resolveCourseLab) and zone.abbrev is what teardownLabNetwork deletes from the
+// SDN. An edit that dropped them would strand the SDN zone and break every
+// future provision for that course with "no reserved VXLAN block". They are
+// carried over from the stored spec unconditionally — changing a reservation
+// means tearing the lab down and re-creating it, not editing a JSON field.
+const PROTECTED_SPEC_KEYS = ['vxlan_block', 'zone', 'cle', 'course_id'];
+
 // PUT /api/admin/lab-templates/:id — update challenge spec (add VMs, phantom assets, vuln defaults)
 router.put('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { name, description, difficulty, spec } = req.body;
+    const { name, description, difficulty, spec, vm_specs, phantom_assets } = req.body;
+
+    const existing = await cybercoreQuery(
+      `SELECT spec FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]
+    );
+    if (existing.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
+
+    const currentSpec = typeof existing.rows[0].spec === 'string'
+      ? JSON.parse(existing.rows[0].spec || '{}')
+      : (existing.rows[0].spec || {});
+
+    // Merge rather than replace. `vm_specs`/`phantom_assets` are accepted as
+    // top-level aliases because that is the shape the template editor posts;
+    // before this they were silently dropped and an edit appeared to save while
+    // changing nothing.
+    let nextSpec = null;
+    if (spec || vm_specs || phantom_assets) {
+      nextSpec = { ...currentSpec, ...(spec || {}) };
+      // Length-guarded: an empty array is truthy, and a client that posts one by
+      // reflex (the editor does when it renders no VM rows) must not blank the
+      // VM list of a challenge it never showed VMs for.
+      if (Array.isArray(vm_specs) && vm_specs.length) nextSpec.vms = vm_specs;
+      if (Array.isArray(phantom_assets) && phantom_assets.length) nextSpec.phantom_assets = phantom_assets;
+      for (const key of PROTECTED_SPEC_KEYS) {
+        if (key in currentSpec) nextSpec[key] = currentSpec[key];
+        else delete nextSpec[key];
+      }
+    }
 
     const result = await cybercoreQuery(
       `UPDATE crucible_challenge SET
@@ -310,7 +363,7 @@ router.put('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) 
         updated_at = NOW()
        WHERE challenge_id = $1
        RETURNING *`,
-      [req.params.id, name, description, difficulty, spec ? JSON.stringify(spec) : null]
+      [req.params.id, name, description, toDifficultyInt(difficulty), nextSpec ? JSON.stringify(nextSpec) : null]
     );
 
     if (result.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
@@ -379,9 +432,7 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       return res.status(400).json({ error: 'max_lanes must be between 1 and 200' });
     }
 
-    // Map difficulty string to integer (1=easy … 5=impossible)
-    const difficultyMap = { beginner: 1, easy: 1, intermediate: 2, medium: 2, hard: 3, advanced: 3, expert: 4, impossible: 5 };
-    const difficultyInt = difficultyMap[(difficulty || 'intermediate').toLowerCase()] || 2;
+    const difficultyInt = toDifficultyInt(difficulty) ?? 2;
 
     const statusUpdates = [];
     const pushStatus = (msg) => { statusUpdates.push(msg); console.log(`[CreateChallenge] ${msg}`); };

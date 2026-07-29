@@ -1189,6 +1189,12 @@ msmith@arizona.edu, Mark, Smith"
         </div>
       </div>
 
+      <!-- Shown instead of the VM/GOAD builders when the challenge is a reserved
+           lab network (e.g. a CLE course) — it owns a VXLAN block and SDN zone,
+           not a VM list, so only its name/description/difficulty are editable. -->
+      <div id="tplReservationNotice" style="display: none; border: 1px solid #4299e1; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(66, 153, 225, 0.12); font-size: 0.85rem;"></div>
+
+      <div id="tplBuilderSections">
       <!-- GOAD configuration card -->
       <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12);">
         <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
@@ -1234,6 +1240,7 @@ msmith@arizona.edu, Mark, Smith"
       <h4 style="margin: 1.5rem 0 0.5rem;">Phantom Assets (appear in profile only)</h4>
       <div id="tplPhantomList"></div>
       <button class="btn btn-sm btn-outline" onclick="addTemplatePhantom()" style="margin-top: 0.5rem;">+ Add Phantom Host</button>
+      </div><!-- /tplBuilderSections -->
 
       <input type="hidden" id="tplEditId" value="">
       <button class="btn btn-primary" onclick="saveTemplate()" style="width: 100%; margin-top: 1.5rem;">Save Template</button>

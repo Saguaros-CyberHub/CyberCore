@@ -448,6 +448,19 @@ async function deleteChallenge(id, name) {
   } catch (e) { Toast.error('Error', e.message); }
 }
 
+/**
+ * crucible_challenge.difficulty is stored as an INTEGER (1=easy … 5=impossible);
+ * the badge and the editor's dropdown both speak in labels. Anything outside the
+ * three labels the dropdown offers collapses to the nearest one.
+ */
+function difficultyLabel(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return String(value || 'intermediate');
+  if (n <= 1) return 'beginner';
+  if (n === 2) return 'intermediate';
+  return 'advanced';
+}
+
 async function loadChallengeTemplates() {
   const container = document.getElementById('challengeTemplatesList');
   container.innerHTML = '<p style="color: var(--gray-500);">Loading...</p>';
@@ -469,12 +482,13 @@ async function loadChallengeTemplates() {
             <tr>
               <td><strong>${escHtml(t.name)}</strong><br><span style="font-size: 0.75rem; color: var(--gray-500);">${escHtml((t.description || '').substring(0, 60))}</span></td>
               <td><code style="font-size: 0.75rem;">${escHtml(t.challenge_key)}</code></td>
-              <td><span class="badge ${t.difficulty === 'advanced' ? 'badge-red' : t.difficulty === 'beginner' ? 'badge-green' : 'badge-yellow'}">${escHtml(t.difficulty || 'intermediate')}</span></td>
+              <td><span class="badge ${difficultyLabel(t.difficulty) === 'advanced' ? 'badge-red' : difficultyLabel(t.difficulty) === 'beginner' ? 'badge-green' : 'badge-yellow'}">${escHtml(difficultyLabel(t.difficulty))}</span></td>
               <td style="font-size: 0.8rem;">${t.vxlan_block ? `${t.vxlan_block.start}–${t.vxlan_block.end}` : '—'}</td>
               <td>${t.vm_count}</td>
               <td><span class="badge ${t.status === 'active' ? 'badge-green' : 'badge-gray'}">${escHtml(t.status)}</span></td>
               <td style="font-size: 0.8rem;">${new Date(t.created_at).toLocaleDateString()}</td>
               <td>
+                <button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid var(--primary, #4299e1); color: var(--primary, #4299e1); background: transparent; margin-right: 0.25rem;" onclick="editTemplate('${t.id}')">Edit</button>
                 <button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteChallenge('${t.id}', '${escHtml(t.name)}')">Delete</button>
               </td>
             </tr>
@@ -488,6 +502,14 @@ async function loadChallengeTemplates() {
 
 let templateVMs = [];
 let templatePhantoms = [];
+
+// The spec as loaded from the server, so saveTemplate can merge its edits onto
+// it instead of posting a spec built only from the fields the modal renders.
+let templateEditSpec = {};
+// True when the open challenge is a reserved lab network (CLE course, etc.):
+// a VXLAN block + SDN zone with no VM list of its own. Those have nothing for
+// the VM/GOAD builders to edit, and their reservation keys must survive a save.
+let templateIsReservation = false;
 
 // ---- Template editor GOAD handlers (tplGoad*) ----
 let _preTplGoadVMs = null;
@@ -599,6 +621,33 @@ async function loadTplGoadFields(goad) {
   onTplGoadVersionChange();
 }
 
+/**
+ * Show/hide the VM + GOAD + phantom builders and render the reservation banner.
+ * A reserved lab network has no VM list to edit, and its VXLAN block and SDN
+ * zone are fixed at creation — showing an empty VM builder there just invites
+ * someone to "fix" it by adding rows that would never deploy.
+ */
+function applyTemplateEditorMode(spec) {
+  const notice = document.getElementById('tplReservationNotice');
+  document.getElementById('tplBuilderSections').style.display = templateIsReservation ? 'none' : '';
+  notice.style.display = templateIsReservation ? '' : 'none';
+  if (!templateIsReservation) return;
+
+  const block = spec.vxlan_block || {};
+  notice.innerHTML = `
+    <strong>Reserved lab network${spec.cle ? ' — CLE course' : ''}</strong>
+    <p style="margin: 0.4rem 0 0.5rem; color: var(--gray-600);">
+      This challenge owns a VXLAN block and an SDN zone rather than a VM list.
+      Name, description and difficulty are editable; the reservation itself is not
+      — changing it means deleting the challenge and re-creating the lab.
+    </p>
+    <div style="font-family: monospace; font-size: 0.78rem; color: var(--gray-600);">
+      VXLAN block: ${block.start != null ? `${block.start}–${block.end}` : '—'}<br>
+      SDN zone: ${escHtml((spec.zone && spec.zone.abbrev) || '—')}
+      ${spec.course_id ? `<br>Course: ${escHtml(spec.course_id)}` : ''}
+    </div>`;
+}
+
 function showCreateTemplateModal() {
   document.getElementById('templateEditorTitle').textContent = 'New Challenge Template';
   document.getElementById('tplEditId').value = '';
@@ -607,6 +656,9 @@ function showCreateTemplateModal() {
   document.getElementById('tplDifficulty').value = 'intermediate';
   templateVMs = [{ name: '', role: '', os: 'Windows 11 25H2', template_vmid: '', type: 'qemu', vm_offset: 600000, default_scripts: [], services: [] }];
   templatePhantoms = [];
+  templateEditSpec = {};
+  templateIsReservation = false;
+  applyTemplateEditorMode({});
   resetTplGoadFields();
   renderTemplateVMs();
   renderTemplatePhantoms();
@@ -617,11 +669,14 @@ async function editTemplate(id) {
   try {
     const t = await api('GET', `/lab-templates/${id}`);
     const spec = t.spec ? (typeof t.spec === 'string' ? JSON.parse(t.spec) : t.spec) : {};
+    templateEditSpec = spec;
+    // Reservation-only: holds a VXLAN block but declares no VMs of its own.
+    templateIsReservation = !!spec.vxlan_block && !(spec.vms || []).length;
     document.getElementById('templateEditorTitle').textContent = `Edit: ${t.name}`;
     document.getElementById('tplEditId').value = id;
     document.getElementById('tplName').value = t.name;
     document.getElementById('tplDesc').value = t.description || '';
-    document.getElementById('tplDifficulty').value = t.difficulty;
+    document.getElementById('tplDifficulty').value = difficultyLabel(t.difficulty);
     document.getElementById('tplModule').value = t.module || 'crucible';
     document.getElementById('tplChallengeKey').value = t.challenge_key || '';
     templateVMs = (spec.vms && spec.vms.length)
@@ -630,6 +685,7 @@ async function editTemplate(id) {
     templatePhantoms = (spec.phantom_assets && spec.phantom_assets.length)
       ? spec.phantom_assets
       : (typeof t.phantom_assets === 'string' ? JSON.parse(t.phantom_assets) : (t.phantom_assets || []));
+    applyTemplateEditorMode(spec);
     await loadTplGoadFields(spec.goad);
     renderTemplateVMs();
     renderTemplatePhantoms();
@@ -698,15 +754,33 @@ async function saveTemplate() {
     vm_specs: templateVMs,
     phantom_assets: templatePhantoms
   };
-  // POST /create-lab reads goad at the top level. PUT /lab-templates/:id
-  // overwrites the spec atomically, so embed there too.
-  if (goad) {
-    body.goad = goad;
-    body.spec = { vms: templateVMs, phantom_assets: templatePhantoms, goad };
+  // POST /create-lab reads goad at the top level.
+  if (goad) body.goad = goad;
+
+  if (editId) {
+    // Merge onto the spec we loaded rather than rebuilding it from the modal —
+    // a challenge's spec carries keys this editor never renders (vxlan_block,
+    // zone, course_id on a CLE course). The server re-asserts the protected ones
+    // too; this just keeps the request honest about what it is changing.
+    body.spec = { ...templateEditSpec };
+    if (goad) body.spec.goad = goad;
+    if (!templateIsReservation) {
+      body.spec.vms = templateVMs;
+      body.spec.phantom_assets = templatePhantoms;
+    } else {
+      // Nothing rendered them, so don't post them back as empty arrays.
+      delete body.vm_specs;
+      delete body.phantom_assets;
+    }
   }
 
-  if (!body.name || templateVMs.length === 0) {
-    Toast.warning('Missing', 'Name and at least one VM are required');
+  if (!body.name) {
+    Toast.warning('Missing', 'Name is required');
+    return;
+  }
+  // A reserved lab network legitimately has no VMs of its own.
+  if (!templateIsReservation && templateVMs.length === 0) {
+    Toast.warning('Missing', 'At least one VM is required');
     return;
   }
 

@@ -37,6 +37,34 @@ function progressIdForCourse(courseId) {
   return `cle-course-${courseId}`;
 }
 
+// Longest sanitized course code we will put in a lane name. The binding limit is
+// the gateway LXC hostname: lane-deployer builds `${laneName}-gateway` inside a
+// 63-char budget minus 18 reserved for the `-b<16hex>` claim secret, so laneName
+// must stay ≤ 37. `cle-` + code + `-` + a 5-digit VXLAN id spends 10 of those,
+// leaving 27; 24 keeps headroom. cle_course.code is VARCHAR(50), so a code CAN
+// overrun this — truncating is better than a silently mangled gateway hostname.
+const MAX_CODE_LEN = 24;
+
+/**
+ * Lane-name prefix for a course: `cle-<course-code>`, so a lane comes out as
+ * `cle-cybv454-10003` rather than the old course-agnostic `cle-10003`. The name
+ * becomes the Proxmox VM name, both LXC hostnames, the dnsmasq reservation
+ * hostname and the Guacamole connection name — hence lowercase, and hostname
+ * characters only (spaces stripped per the naming convention, everything else
+ * unsafe folded to `-`). Falls back to a bare `cle` when the course has no code.
+ */
+function laneNamePrefix(courseCode) {
+  const slug = String(courseCode || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')          // "CYBV 454" → "cybv454"
+    .replace(/[^a-z0-9-]/g, '-')  // anything else illegal in a hostname
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .substring(0, MAX_CODE_LEN)
+    .replace(/-$/, '');           // truncation must not leave a trailing hyphen
+  return slug ? `cle-${slug}` : 'cle';
+}
+
 /**
  * Resolve a course's reserved lab: the crucible_challenge row created by
  * reserveLabNetwork at course-creation time, which owns the VXLAN block and the
@@ -64,8 +92,10 @@ async function resolveCourseLab(challengeId) {
  * @param {object} args.template    cybercore_template_catalog row (workstation)
  * @param {Array}  args.students    [{ id, email }]
  * @param {string} [args.courseName]
+ * @param {string} [args.courseCode] cle_course.code — names the lanes
+ *   `cle-<code>-<vxlanId>`; omitted/blank falls back to `cle-<vxlanId>`.
  */
-async function provisionLanes({ courseId, challenge, template, students, courseName }) {
+async function provisionLanes({ courseId, challenge, template, students, courseName, courseCode }) {
   if (!students.length) return { provisioned: [], failed: [], progressId: null };
 
   const vxlanBlock = challenge.vxlan_block || challenge.spec?.vxlan_block;
@@ -79,7 +109,7 @@ async function provisionLanes({ courseId, challenge, template, students, courseN
     vxlanBlock,
     moduleKey: MODULE_KEY,
     subnetScheme: SUBNET_SCHEME,
-    namePrefix: 'cle',
+    namePrefix: laneNamePrefix(courseCode),
     // config.course_id is how every CLE read path finds these lanes again —
     // listing, counts, teardown. It must be on every lane.
     laneConfig: {
@@ -131,6 +161,7 @@ async function teardownCourseLanes(courseId) {
 module.exports = {
   MODULE_KEY,
   SUBNET_SCHEME,
+  laneNamePrefix,
   resolveCourseLab,
   provisionLanes,
   getProvisionProgress,

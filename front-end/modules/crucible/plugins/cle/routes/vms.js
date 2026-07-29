@@ -42,7 +42,8 @@ function buildGuacLaunchUrl(connId) {
 /** Verify the course exists and the caller may manage it. Returns the course row
  *  (with its reserved-lab linkage) or null. Admin-aware via the shared helper. */
 function getManagedCourse(courseId, user) {
-  return getManagedCourseRow(courseId, user, 'course_id, course_name, challenge_id, challenge_key');
+  // `code` names the lanes (cle-<code>-<vxlanId>) — see lane-provision.laneNamePrefix.
+  return getManagedCourseRow(courseId, user, 'course_id, course_name, code, challenge_id, challenge_key');
 }
 
 /** Load + validate the workstation template a provision request names. */
@@ -132,8 +133,8 @@ async function resolveTargetStudents(courseId, requestedIds) {
 }
 
 /** Kick off the background deploy. Shared by /provision and /provision-all. */
-function startProvision({ courseId, courseName, challenge, template, students }) {
-  laneProvision.provisionLanes({ courseId, courseName, challenge, template, students })
+function startProvision({ courseId, courseName, courseCode, challenge, template, students }) {
+  laneProvision.provisionLanes({ courseId, courseName, courseCode, challenge, template, students })
     .then(result => console.log(`[CLE] Provision finished for course ${courseId}:`, JSON.stringify({
       provisioned: result.provisioned.length, failed: result.failed.length,
     })))
@@ -252,7 +253,7 @@ router.post('/provision', instructorOnly, async (req, res) => {
       ...(skipped.length ? { skipped } : {}),
     });
 
-    startProvision({ courseId, courseName: course.course_name, challenge, template, students });
+    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students });
   } catch (error) {
     console.error('[CLE] Provision VMs error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
@@ -319,7 +320,7 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
       ...(skipped.length ? { skipped } : {}),
     });
 
-    startProvision({ courseId, courseName: course.course_name, challenge, template, students });
+    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students });
   } catch (error) {
     console.error('[CLE] Provision-all error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
