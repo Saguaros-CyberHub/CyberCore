@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:26-alpine
 
 # Runtime tools the app shells out to:
 #   - curl
