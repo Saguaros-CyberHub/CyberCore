@@ -2735,12 +2735,14 @@
       }
     }
     
+    // Short labels for the part chip. These are abbreviations of the canonical
+    // names in utils/part-definitions.js — keep them recognisable against it.
     function getPartName(num) {
       const names = {
-        1: 'Orientation', 2: 'Scoping', 3: 'Threats', 4: 'Vulnerabilities',
+        1: 'Orientation', 2: 'Org Understanding', 3: 'Threats', 4: 'Vulnerabilities',
         5: 'Risk Analysis', 6: 'Controls', 7: 'Reporting', 8: 'Reflection'
       };
-      return names[num] || 'Unknown';
+      return names[num] || `Part ${num}`;
     }
     
     function getDefaultPartRubric(partNumber) {
