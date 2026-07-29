@@ -45,7 +45,9 @@ const VM_CATALOG = [
 ];
 
 const VULN_SCRIPTS = [
-  { id: 'sc-init',  slug: 'init-setup',      os_target: 'linux',
+  // os_target matches migrations/012_seed_vuln_scripts.sql — init-setup is
+  // Windows-only PowerShell (init-setup.ps1).
+  { id: 'sc-init',  slug: 'init-setup',      os_target: 'windows',
     services_exposed: [], category: 'initial setup', script_type: 'baseline', is_active: true },
   { id: 'sc-smb',   slug: 'win-smb-vuln',    os_target: 'windows',
     services_exposed: ['445/SMB'], category: 'lateral movement', script_type: 'vulnerable', is_active: true },
@@ -254,6 +256,46 @@ test('init-setup bootstrap appears exactly once even if duplicate services', () 
   assert.strictEqual(initCount, 1);
   const smbCount = result.spec.vms[0].post_clone_scripts.filter(s => s === 'win-smb-vuln').length;
   assert.strictEqual(smbCount, 1);
+});
+
+// os_family ('windows_server'/'windows_client'/'linux') and os_target
+// ('windows'/'linux') are different namespaces. Comparing them raw excluded
+// init-setup from every host, so it ran nowhere. These two lock in both
+// directions of the intended behaviour.
+test('init-setup lands on Windows hosts despite the os_family/os_target namespace gap', () => {
+  const profile = profileWith([
+    { hostname: 'DC-01', role: 'server', os: 'Windows Server 2022', services: [] },
+    { hostname: 'WS-01', role: 'server', os: 'Windows 11',          services: [] }
+  ]);
+  const result = synthesizeSpecFromProfile({
+    profile,
+    assetSelection: null,
+    vmTemplateCatalog: VM_CATALOG,
+    vulnScriptCatalog: VULN_SCRIPTS
+  });
+  // windows_server and windows_client both normalise to os_target 'windows'.
+  for (const vm of result.spec.vms) {
+    assert.ok(
+      vm.post_clone_scripts.includes('init-setup'),
+      `${vm.name} should get the Windows bootstrap`
+    );
+  }
+});
+
+test('init-setup is skipped on Linux hosts (powershell does not exist there)', () => {
+  const profile = profileWith([
+    { hostname: 'WEB-01', role: 'server', os: 'Ubuntu Server 22.04', services: ['80/HTTP'] }
+  ]);
+  const result = synthesizeSpecFromProfile({
+    profile,
+    assetSelection: null,
+    vmTemplateCatalog: VM_CATALOG,
+    vulnScriptCatalog: VULN_SCRIPTS
+  });
+  const vm = result.spec.vms[0];
+  assert.ok(!vm.post_clone_scripts.includes('init-setup'), 'Linux VM must not get the PowerShell bootstrap');
+  // The Linux service script still resolves — only the bootstrap is filtered.
+  assert.ok(vm.post_clone_scripts.includes('lin-apache-2449'));
 });
 
 // ─── Synthesizer: vuln-app placement ────────────────────────────────────────
