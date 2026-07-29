@@ -93,6 +93,7 @@ runs/
 .crash
 .terraform/
 .terraform.lock.hcl
+*.pkrvars.hcl
 
 # But keep the example/template
 !rocky-cis-vars.yml
