@@ -52,8 +52,42 @@ test('WEB-01 emits HTTP/HTTPS/SSH ports', () => {
   const portNums = ports.map(p => p.port).sort((a, b) => a - b);
   assert.deepStrictEqual(portNums, [22, 80, 443]);
 });
-test('asset with no services emits no ports', () => {
-  assert.strictEqual(buildHostPorts(FIXTURE.assets[2]).length, 0);
+// buildHostPorts() runs declared services through inferServices(), which since
+// fe82a09 fills in a plausible port list when the profile declares none —
+// AI-generated assets often carry {hostname, os, role} and nothing else, and a
+// scan report with empty hosts is useless. So "no declared services" no longer
+// means "no ports"; it means "infer from the strongest available signal".
+test('scannable asset with no declared services falls back to OS defaults', () => {
+  // No hostname keyword to key off, so this lands on "bare Windows server".
+  const ports = buildHostPorts({ hostname: 'SRV-01', role: 'server', os: 'Windows Server 2022', ip: '10.10.5.30' });
+  assert.deepStrictEqual(ports.map(p => p.port).sort((a, b) => a - b), [445, 3389]);
+});
+
+test('hostname keyword beats the bare-OS fallback', () => {
+  // \bapp\b matches the web-server rule, so this is a web host, not a file server.
+  const ports = buildHostPorts({ hostname: 'APP-01', role: 'server', os: 'Windows Server 2022', ip: '10.10.5.31' });
+  assert.deepStrictEqual(ports.map(p => p.port).sort((a, b) => a - b), [80, 443, 3389]);
+});
+
+test('declared services always win over inference', () => {
+  const ports = buildHostPorts({ hostname: 'APP-01', role: 'server', os: 'Windows Server 2022', services: ['22/SSH'] });
+  assert.deepStrictEqual(ports.map(p => p.port), [22]);
+});
+
+test('asset with no services and no inferable signal emits no ports', () => {
+  // Neither Windows nor Linux, no role or hostname keyword to key off — the
+  // inference module deliberately under-infers rather than inventing services.
+  const ports = buildHostPorts({ hostname: 'CAM-01', role: 'server', os: 'VxWorks 7', ip: '10.10.5.60' });
+  assert.strictEqual(ports.length, 0);
+});
+
+// The real guard against scanning a workstation is scannableAssets(), which
+// filters by role before buildHostPorts() is ever reached — covered above and
+// in the generateNmap tests below. This test previously asserted that
+// buildHostPorts() itself returned nothing for a workstation, which stopped
+// being true once inference landed and never reflected the production path.
+test('workstations never reach the port builder in the real flow', () => {
+  assert.ok(!scannableAssets(FIXTURE).some(a => a.role === 'workstation'));
 });
 
 console.log('\ngenerateNmap');
