@@ -75,8 +75,12 @@ function ensureFindingFields(body) {
 }
 
 // ============================================================================
-// READ
+// STATIC ROUTES
 // ============================================================================
+// Express matches in registration order, so every literal single-segment path
+// MUST be declared before `/:profileId` below. A route added underneath it is
+// swallowed: the request lands in the profile handler with profileId set to
+// the literal (e.g. "scenarios"), which then fails uuid parsing and 500s.
 
 // GET /api/clinic-risk-assessment/frameworks — return catalogs once (cached client-side).
 router.get('/frameworks', (req, res) => {
@@ -84,6 +88,20 @@ router.get('/frameworks', (req, res) => {
     cis_ig1: frameworks.getCisIg1(),
     nist_csf_2_0: frameworks.getNistCsf(),
   });
+});
+
+// GET /api/clinic-risk-assessment/scenarios — threat scenario library (Tier 1).
+router.get('/scenarios', async (req, res) => {
+  try {
+    await ensureScenariosSeeded();
+    const list = await scenarioLib.listScenarios(pool, {
+      industry: req.query.industry, size: req.query.size, category: req.query.category
+    });
+    res.json({ scenarios: list });
+  } catch (err) {
+    console.error('[CRA scenarios]', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // GET /api/clinic-risk-assessment/pickable — landing-page picker data.
@@ -662,19 +680,8 @@ router.delete('/:profileId/assets/:assetId', async (req, res) => {
 // ============================================================================
 // THREAT SCENARIO LIBRARY (Tier 1)
 // ============================================================================
-
-router.get('/scenarios', async (req, res) => {
-  try {
-    await ensureScenariosSeeded();
-    const list = await scenarioLib.listScenarios(pool, {
-      industry: req.query.industry, size: req.query.size, category: req.query.category
-    });
-    res.json({ scenarios: list });
-  } catch (err) {
-    console.error('[CRA scenarios]', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+// The list endpoint is registered further up, above `/:profileId` — see the
+// STATIC ROUTES block. Only the profile-scoped instantiate route lives here.
 
 // Instantiate a library scenario as a profile-specific finding
 router.post('/:profileId/scenarios/:key/instantiate', express.json(), async (req, res) => {

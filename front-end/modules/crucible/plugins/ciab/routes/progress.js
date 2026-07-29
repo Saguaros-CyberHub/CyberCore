@@ -9,6 +9,7 @@ const router = express.Router();
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { authenticateToken } = require('../../../../../src/middleware/auth');
+const { TOTAL_PARTS, getPartName } = require('../utils/part-definitions');
 
 // GET /api/progress/:profileId - Get all progress for a profile
 router.get('/:profileId', authenticateToken, async (req, res) => {
@@ -38,9 +39,9 @@ router.get('/:profileId', authenticateToken, async (req, res) => {
       });
     }
     
-    // Build progress map for all 8 parts
+    // Build progress map for all parts
     const progressMap = {};
-    for (let i = 1; i <= 8; i++) {
+    for (let i = 1; i <= TOTAL_PARTS; i++) {
       progressMap[i] = {
         part_number: i,
         part_name: getPartName(i),
@@ -51,18 +52,25 @@ router.get('/:profileId', authenticateToken, async (req, res) => {
         feedback: null
       };
     }
-    
-    // Overlay actual progress
+
+    // Overlay actual progress. part_name is re-derived rather than taken from
+    // the row: rows written before part-definitions.js became the single
+    // source of truth carry the old names, and a stored label shouldn't
+    // disagree with what the instructor UI shows for the same part.
     for (const row of result.rows) {
-      progressMap[row.part_number] = { ...progressMap[row.part_number], ...row };
+      progressMap[row.part_number] = {
+        ...progressMap[row.part_number],
+        ...row,
+        part_name: getPartName(row.part_number)
+      };
     }
-    
+
     res.json({
       success: true,
       profile_id: profileId,
       progress: Object.values(progressMap),
       summary: {
-        total_parts: 8,
+        total_parts: TOTAL_PARTS,
         started: result.rows.length,
         submitted: result.rows.filter(r => ['submitted', 'reviewed'].includes(r.status)).length,
         reviewed: result.rows.filter(r => r.status === 'reviewed').length,
@@ -84,7 +92,7 @@ router.put('/:profileId/:partNumber', authenticateToken, async (req, res) => {
     const { content, output_option, evidence_files, status } = req.body;
     
     const partNum = parseInt(partNumber);
-    if (partNum < 1 || partNum > 8) {
+    if (partNum < 1 || partNum > TOTAL_PARTS) {
       return res.status(400).json({ error: 'Invalid part number' });
     }
     
@@ -137,16 +145,6 @@ router.post('/:profileId/:partNumber/submit', authenticateToken, async (req, res
 });
 
 // Helper functions
-function getPartName(partNumber) {
-  const names = {
-    1: 'Introduction to Risk Assessment', 2: 'Scoping and Context',
-    3: 'Threat Identification', 4: 'Vulnerability Assessment',
-    5: 'Risk Analysis', 6: 'Control Recommendations',
-    7: 'Reporting', 8: 'Presentation'
-  };
-  return names[partNumber] || `Part ${partNumber}`;
-}
-
 function calculateAvgScore(rows) {
   const scored = rows.filter(r => r.score !== null);
   if (scored.length === 0) return null;
