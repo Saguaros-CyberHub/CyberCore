@@ -10,7 +10,12 @@
 const path = require('path');
 const fs   = require('fs');
 
-const CONFIG_PATH = path.resolve(__dirname, '../../../../config/site.json');
+// Resolves in both layouts. In the container the app lives at /app, so this
+// clamps at the filesystem root and lands on /config/site.json — where
+// docker-compose mounts ./config/site.json. In a host checkout it lands on
+// <repo>/config/site.json. (One more `../` also works in the container, for the
+// same clamping reason, but walks above the repo root on a host checkout.)
+const CONFIG_PATH = path.resolve(__dirname, '../../../config/site.json');
 
 let _cache = null;
 

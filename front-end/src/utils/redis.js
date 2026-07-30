@@ -1,28 +1,32 @@
 /**
  * Redis Connection
  * Shared Redis client for session storage and caching
- * Uses redis v3 API for compatibility
+ * Uses the redis v4+ API (node-redis), which connect-redis v9 expects.
  */
 
 const redis = require('redis');
 
-// Create Redis client with v3 API
+// Total time to keep retrying a dead Redis before giving up, matching the
+// one-hour budget the previous v3 retry_strategy enforced.
+const RETRY_BUDGET_MS = 1000 * 60 * 60;
+const connectingSince = Date.now();
+
 const redisClient = redis.createClient({
-  host: process.env.REDIS_HOST || 'redis',
-  port: parseInt(process.env.REDIS_PORT) || 6379,
-  db: parseInt(process.env.REDIS_DB) || 0,
-  retry_strategy: (options) => {
-    if (options.error && options.error.code === 'ECONNREFUSED') {
-      return Math.min(options.attempt * 100, 3000);
-    }
-    if (options.total_retry_time > 1000 * 60 * 60) {
-      return new Error('Redis retry time exhausted');
-    }
-    if (options.attempt > 10) {
-      return undefined;
-    }
-    return Math.min(options.attempt * 100, 3000);
-  }
+  socket: {
+    host: process.env.REDIS_HOST || 'redis',
+    port: parseInt(process.env.REDIS_PORT) || 6379,
+    // v4 replaces retry_strategy with reconnectStrategy: return a delay in ms,
+    // or an Error to stop reconnecting. Back off to a 3s ceiling so a Redis
+    // that comes up after the app (the usual docker-compose ordering) is picked
+    // up promptly without hammering it.
+    reconnectStrategy: (retries) => {
+      if (Date.now() - connectingSince > RETRY_BUDGET_MS) {
+        return new Error('Redis retry time exhausted');
+      }
+      return Math.min((retries + 1) * 100, 3000);
+    },
+  },
+  database: parseInt(process.env.REDIS_DB) || 0,
 });
 
 redisClient.on('ready', () => {
@@ -35,6 +39,15 @@ redisClient.on('error', (err) => {
 
 redisClient.on('reconnecting', () => {
   // Silently retry
+});
+
+// v4+ requires an explicit connect(). It is deliberately not awaited: callers
+// import this module synchronously, and the client's offline queue holds any
+// commands issued before the handshake completes. The catch is required — once
+// reconnectStrategy returns an Error this promise rejects, and an unhandled
+// rejection would take the process down.
+redisClient.connect().catch(() => {
+  // Connection errors are already surfaced via the 'error' handler above.
 });
 
 module.exports = redisClient;

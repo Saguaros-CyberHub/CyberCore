@@ -62,9 +62,11 @@ const helmet = require('helmet');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const session = require('express-session');
-const RedisStore = require('connect-redis').default;
+// connect-redis v9 exports RedisStore as a named export; the v7 default export
+// is gone, and reading `.default` would silently yield undefined.
+const { RedisStore } = require('connect-redis');
 const redisClient = require('./utils/redis');
-const rateLimit = require('express-rate-limit');
+const { rateLimit, ipKeyGenerator } = require('express-rate-limit');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
@@ -191,6 +193,14 @@ const RATE_LIMIT_SKIP_PATHS = [
 const RATE_LIMIT_SKIP_PATTERNS = [
   /\/status$/,   // e.g. workstation/lab status polls: /api/.../:id/status
 ];
+// Never key a bucket on a raw IPv6 address. A single client is typically handed
+// a whole IPv6 prefix, so one attacker could mint an unlimited number of
+// distinct buckets and walk straight past the login cap. ipKeyGenerator
+// collapses IPv6 to its subnet and passes IPv4 through untouched.
+function ipKey(req) {
+  return req.ip ? ipKeyGenerator(req.ip) : 'unknown';
+}
+
 function isHighFrequencyRead(req) {
   if (req.method !== 'GET') return false;
   const path = req.originalUrl.split('?')[0];
@@ -205,7 +215,7 @@ const limiter = rateLimit({
   skip: (req) => peekJwt(req)?.role === 'admin' || isHighFrequencyRead(req),
   keyGenerator: (req) => {
     const payload = peekJwt(req);
-    return payload?.sub ? `user:${payload.sub}` : `ip:${req.ip}`;
+    return payload?.sub ? `user:${payload.sub}` : `ip:${ipKey(req)}`;
   },
   handler: (req, res, next, opts) => {
     const payload = peekJwt(req);
@@ -226,7 +236,7 @@ const authLimiter = rateLimit({
   max: 5,
   keyGenerator: (req) => {
     const email = (req.body?.email || '').toLowerCase().trim();
-    return email ? `login:email:${email}` : `login:ip:${req.ip}`;
+    return email ? `login:email:${email}` : `login:ip:${ipKey(req)}`;
   },
   message: { error: 'Too many login attempts, please try again later.' }
 });
