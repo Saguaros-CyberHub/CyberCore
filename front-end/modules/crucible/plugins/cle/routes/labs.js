@@ -68,10 +68,18 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
-    // Get template details
+    // Get template details. The picker (GET /api/cle/templates/vulnerable)
+    // sources these ids from crucible_challenge.challenge_id, so validate
+    // against that same table under the same conditions — otherwise this accepts
+    // an id the picker would never have offered. There is no
+    // cybercore_challenge_template table; querying it is what made every deploy
+    // fail here.
     const templateResult = await cybercoreQuery(`
-      SELECT template_id, name, description FROM cybercore_challenge_template
-      WHERE template_id = $1
+      SELECT challenge_id AS template_id, name, description
+        FROM crucible_challenge
+       WHERE challenge_id = $1
+         AND status = 'active'
+         AND spec->>'cle' IS DISTINCT FROM 'true'
     `, [template_id]);
 
     if (templateResult.rows.length === 0) {

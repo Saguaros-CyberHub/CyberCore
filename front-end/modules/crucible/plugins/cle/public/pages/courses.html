@@ -1334,7 +1334,7 @@
           return;
         }
 
-        await api('POST', `/courses/${currentCourseId}/deploy-labs`, {
+        await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
           template_id: templateId,
           student_ids: selectedStudents,
           learning_objective: objective
