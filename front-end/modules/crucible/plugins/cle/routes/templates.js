@@ -7,9 +7,45 @@ const express = require('express');
 const router = express.Router();
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { resolveConsole, resolveNicModel } = require('../../../../../src/utils/lane-deployer');
+const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
+const {
+  resolveConsole, resolveNicModel, RESOURCE_LIMITS,
+} = require('../../../../../src/utils/lane-deployer');
 
 const instructorOnly = requireRole('instructor', 'admin');
+
+/**
+ * The sizing each template ships with, so the provision form can pre-fill CPU /
+ * RAM / disk with what the instructor would get if they changed nothing.
+ *
+ * One cluster-wide call rather than a per-template config read: the resource
+ * listing already carries maxcpu/maxmem/maxdisk for every VM including
+ * templates. Read-only — nothing here modifies a template; the numbers are
+ * applied to each clone at provision time.
+ *
+ * Returns {} when Proxmox is unreachable; the picker then just offers no
+ * defaults rather than failing to load.
+ */
+async function loadTemplateDefaults(vmids) {
+  if (!vmids.length) return {};
+  try {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    const wanted = new Set(vmids.map(Number));
+    const byVmid = {};
+    for (const r of (resources || [])) {
+      if (!wanted.has(Number(r.vmid))) continue;
+      byVmid[Number(r.vmid)] = {
+        cores:     r.maxcpu ? Number(r.maxcpu) : null,
+        memory_mb: r.maxmem ? Math.round(Number(r.maxmem) / 1048576) : null,
+        disk_gb:   r.maxdisk ? Math.round(Number(r.maxdisk) / 1073741824) : null,
+      };
+    }
+    return byVmid;
+  } catch (err) {
+    console.warn(`[CLE] Could not read template sizing from Proxmox: ${err.message}`);
+    return {};
+  }
+}
 
 /**
  * GET /api/cle/templates/vm — List workstation templates that can actually be
@@ -46,6 +82,8 @@ router.get('/vm', instructorOnly, async (req, res) => {
       ORDER BY os_name ASC
     `);
 
+    const defaultsByVmid = await loadTemplateDefaults(result.rows.map(r => r.template_vmid));
+
     const templates = result.rows.map(t => {
       const con = resolveConsole(t);
       return {
@@ -54,6 +92,10 @@ router.get('/vm', instructorOnly, async (req, res) => {
         console_protocol: con.protocol,
         console_port:     con.wanPort,
         nic_model:        resolveNicModel(t),
+        // What this image is sized at today. The provision form seeds its
+        // CPU/RAM/disk inputs from these, so "deploy unchanged" and "deploy
+        // adjusted" go through the same code path.
+        default_resources: defaultsByVmid[Number(t.template_vmid)] || null,
         // Whether the student gets credentials automatically. 'template' means
         // the image bakes an account; otherwise they come from cloud-init, and
         // a template with neither leaves the student at a login prompt.
@@ -86,10 +128,13 @@ router.get('/vm', instructorOnly, async (req, res) => {
                }).join(', ')
              + '. Fix in Admin -> Workstation Templates.';
       }
-      return res.json({ templates, hint });
+      return res.json({ templates, hint, resource_limits: RESOURCE_LIMITS });
     }
 
-    res.json({ templates });
+    // Shipped alongside the templates so the form's min/max come from the same
+    // constants the provision endpoint validates against, instead of a second
+    // copy that can drift out of sync.
+    res.json({ templates, resource_limits: RESOURCE_LIMITS });
   } catch (error) {
     console.error('[CLE] Get VM templates error:', error.message);
     res.status(500).json({ error: error.message });

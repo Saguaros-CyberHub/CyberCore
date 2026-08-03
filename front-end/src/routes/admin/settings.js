@@ -382,6 +382,270 @@ router.post('/users', authenticateToken, adminOnly, async (req, res) => {
 
 
 // ============================================================================
+// USER EDITING
+// ----------------------------------------------------------------------------
+// What an admin may change on an existing account, and what they may not.
+//
+// Everything a user OWNS — lanes, VM allocations, CLE courses, badges — is
+// keyed by cybercore_user.user_id, so every field below is safe to edit as far
+// as ownership goes. The one exception is `email`, which is not just a contact
+// field on this system: it IS the Guacamole account name. Lanes record it as
+// config.guac_user, guac-sessions.js joins sessions back to the user with
+// `cybercore_user.email = vm_instance.metadata->>'guac_user'`, and the deployed
+// group configs in clinic_db list members by email. Rename a user who holds any
+// of that and their consoles keep pointing at a Guacamole account that no longer
+// matches them — the machine still runs, they just can't reach it. So an email
+// change is gated on the account holding no live console-bearing resources.
+//
+// Username is safe: login accepts `email = $1 OR username = $1`, and nothing
+// else in the schema references it.
+// ============================================================================
+
+// Fields an admin may PATCH, mapped to their cybercore_user column.
+const EDITABLE_USER_FIELDS = {
+  first_name:   'first_name',
+  last_name:    'last_name',
+  organization: 'organization',
+  username:     'username',
+  email:        'email',
+  role:         'role',
+  active:       'active',
+};
+
+// Login names: the local-part character set POST /users already accepts via
+// deriveUsername, so an edited account stays typeable at the login prompt.
+const USERNAME_RE = /^[a-z0-9._-]+$/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Count the resources that would be orphaned by an email change. Lanes and VM
+ * allocations both carry the Guacamole identity; a non-zero count is what makes
+ * a rename unsafe.
+ *
+ * CLE courses are deliberately NOT counted here: they live in the plugin's own
+ * database behind a pool this route has no handle on, and they key off user_id
+ * anyway, so a rename cannot orphan them.
+ */
+async function getUserOwnership(userId) {
+  const res = await cybercoreQuery(
+    `SELECT
+       (SELECT COUNT(*) FROM cybercore_lane
+         WHERE user_id = $1 AND status <> 'deleted')                    AS lanes,
+       (SELECT COUNT(*) FROM cybercore_allocation a
+          JOIN cybercore_resource r ON r.resource_id = a.resource_id
+         WHERE a.user_id = $1 AND r.status <> 'retired')                AS allocations`,
+    [userId]
+  );
+  const row = res.rows[0] || {};
+  const lanes = Number(row.lanes) || 0;
+  const allocations = Number(row.allocations) || 0;
+  return { lanes, allocations, guac_linked: lanes + allocations };
+}
+
+/**
+ * GET /api/admin/users/:id — one user plus what they own, so the edit form can
+ * explain up front why the email field is locked instead of failing the save.
+ */
+router.get('/users/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const result = await cybercoreQuery(
+      `SELECT user_id AS id, username, email, first_name, last_name, organization,
+              role, active AS is_active, status, mfa_enabled, auth_provider,
+              created_at, updated_at, last_auth_at AS last_login
+         FROM cybercore_user WHERE user_id = $1`,
+      [req.params.id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+
+    const user = result.rows[0];
+    const ownership = await getUserOwnership(user.id);
+    res.json({
+      user,
+      ownership,
+      // Why the form should disable the email input, in the form's own words.
+      email_locked_reason: ownership.guac_linked > 0
+        ? `This account holds ${ownership.lanes} lane(s) and ${ownership.allocations} VM allocation(s) whose `
+          + 'remote consoles are tied to the current email address. Tear those down first to change it.'
+        : null,
+    });
+  } catch (error) {
+    console.error('[Users] Get user error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * PATCH /api/admin/users/:id — edit an existing account.
+ *
+ * Only the keys present in the body are touched, so the form can send a partial
+ * update without racing another admin's edit of a different field.
+ */
+router.patch('/users/:id', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const current = await cybercoreQuery(
+      `SELECT user_id, username, email, first_name, last_name, organization, role, active, status
+         FROM cybercore_user WHERE user_id = $1`,
+      [id]
+    );
+    if (current.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = current.rows[0];
+
+    // ── Collect and validate just the fields that were actually sent ────────
+    const updates = {};
+    const warnings = [];
+
+    for (const field of Object.keys(EDITABLE_USER_FIELDS)) {
+      if (!Object.prototype.hasOwnProperty.call(req.body, field)) continue;
+      const raw = req.body[field];
+
+      if (field === 'active') {
+        if (typeof raw !== 'boolean') return res.status(400).json({ error: 'active must be true or false' });
+        updates.active = raw;
+        continue;
+      }
+      if (field === 'role') {
+        if (!VALID_ROLES.includes(raw)) {
+          return res.status(400).json({ error: `role must be one of: ${VALID_ROLES.join(', ')}` });
+        }
+        updates.role = raw;
+        continue;
+      }
+
+      const value = raw === null ? null : String(raw).trim();
+
+      if (field === 'username') {
+        if (!value) return res.status(400).json({ error: 'username cannot be empty' });
+        if (!USERNAME_RE.test(value)) {
+          return res.status(400).json({ error: 'username may only contain letters, numbers, dot, underscore and hyphen' });
+        }
+        updates.username = value;
+        continue;
+      }
+      if (field === 'email') {
+        if (!value) return res.status(400).json({ error: 'email cannot be empty' });
+        if (!EMAIL_RE.test(value)) return res.status(400).json({ error: 'email is not a valid address' });
+        updates.email = value;
+        continue;
+      }
+      // Free-text profile fields. An emptied optional field becomes NULL rather
+      // than '' so it reads as "unset" everywhere, the way POST /users stores it.
+      updates[field] = value || null;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: 'No editable fields supplied' });
+    }
+
+    // ── Guards that depend on the CHANGE, not just the value ────────────────
+
+    // The last admin must not be able to lock everyone out — of either their
+    // role or their login. Checked before uniqueness so the message is the
+    // useful one when an admin edits their own account.
+    const losingAdmin = (updates.role !== undefined && user.role === 'admin' && updates.role !== 'admin')
+                     || (updates.active === false && user.role === 'admin');
+    if (losingAdmin) {
+      const admins = await cybercoreQuery(
+        `SELECT COUNT(*)::int AS n FROM cybercore_user
+          WHERE role = 'admin' AND active = TRUE AND status = 'active' AND user_id <> $1`,
+        [id]
+      );
+      if (admins.rows[0].n === 0) {
+        return res.status(409).json({
+          error: 'This is the last active admin — promote another admin before changing this one',
+        });
+      }
+    }
+
+    if (updates.username !== undefined && updates.username.toLowerCase() !== String(user.username).toLowerCase()) {
+      const dupe = await cybercoreQuery(
+        'SELECT user_id FROM cybercore_user WHERE LOWER(username) = LOWER($1) AND user_id <> $2',
+        [updates.username, id]
+      );
+      if (dupe.rows.length > 0) return res.status(409).json({ error: 'That username is already taken' });
+    }
+
+    if (updates.email !== undefined && updates.email.toLowerCase() !== String(user.email).toLowerCase()) {
+      const ownership = await getUserOwnership(id);
+      if (ownership.guac_linked > 0) {
+        return res.status(409).json({
+          error: `Cannot change the email of an account that owns ${ownership.lanes} lane(s) and `
+               + `${ownership.allocations} VM allocation(s): their remote consoles authenticate against `
+               + 'the current address. Tear those down first, then rename.',
+          ownership,
+        });
+      }
+      const dupe = await cybercoreQuery(
+        'SELECT user_id FROM cybercore_user WHERE LOWER(email) = LOWER($1) AND user_id <> $2',
+        [updates.email, id]
+      );
+      if (dupe.rows.length > 0) return res.status(409).json({ error: 'That email is already in use' });
+
+      // Their old Guacamole account keeps the old name; the next login mints a
+      // fresh one under the new address. Harmless, but it leaves a stray account
+      // an admin would otherwise have to notice on their own.
+      warnings.push(
+        `Guacamole still has an account named "${user.email}" — delete it from this page if it is no longer needed.`
+      );
+    }
+
+    if (updates.role !== undefined && updates.role !== user.role
+        && ['instructor', 'admin'].includes(user.role) && !['instructor', 'admin'].includes(updates.role)) {
+      warnings.push(
+        `${user.email} loses instructor access — any CLE courses they own stay theirs but become unreachable `
+        + 'until their role is restored or the courses are reassigned.'
+      );
+    }
+
+    // ── Apply ───────────────────────────────────────────────────────────────
+    const sets = [];
+    const values = [];
+    for (const [field, column] of Object.entries(EDITABLE_USER_FIELDS)) {
+      if (updates[field] === undefined) continue;
+      values.push(updates[field]);
+      sets.push(`${column} = $${values.length}`);
+    }
+    // Login requires active = TRUE **and** status = 'active' (see routes/auth.js),
+    // so flipping one without the other would leave a re-enabled user still
+    // locked out. Same idiom as the group enable/disable path in groups.js.
+    if (updates.active !== undefined) {
+      values.push(updates.active ? 'active' : 'inactive');
+      sets.push(`status = $${values.length}`);
+    }
+    sets.push('updated_at = NOW()');
+    values.push(id);
+
+    const result = await cybercoreQuery(
+      `UPDATE cybercore_user SET ${sets.join(', ')} WHERE user_id = $${values.length}
+       RETURNING user_id AS id, username, email, first_name, last_name, organization,
+                 role, active AS is_active, status, mfa_enabled`,
+      values
+    );
+
+    // Log the before/after of only what moved, so the activity log stays legible.
+    const changed = {};
+    for (const field of Object.keys(updates)) {
+      if (String(user[field]) !== String(updates[field])) {
+        changed[field] = { from: user[field], to: updates[field] };
+      }
+    }
+    logActivity(req, 'user_updated', 'cybercore_user', id, { email: user.email, changed });
+
+    res.json({
+      success: true,
+      user: result.rows[0],
+      ...(warnings.length ? { warnings } : {}),
+      message: `Updated ${result.rows[0].email}`,
+    });
+  } catch (error) {
+    console.error('[Users] Update error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
 // BATCH USER CREATION
 // ----------------------------------------------------------------------------
 // Create many users in one request (e.g. a roster pasted by an instructor).
@@ -524,6 +788,100 @@ router.patch('/settings/mfa', authenticateToken, adminOnly, async (req, res) => 
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============================================================================
+// ADMIN PASSWORD RESET
+// ----------------------------------------------------------------------------
+// Sets a user's CyberHub login password without knowing the old one — the
+// help-desk counterpart to PUT /api/auth/password, which requires the current
+// password and so is useless when the user has forgotten it.
+//
+// This resets the PLATFORM login only. A user's Guacamole password is a
+// separate credential (see PUT /api/admin/guac/users/:name/password); the two
+// are deliberately not chained, because rewriting the Guac password invalidates
+// the stored copy their existing lane consoles authenticate with.
+//
+// KNOWN LIMITATION: sessions are stateless JWTs (middleware/auth.js verifies the
+// signature and never re-reads the row), so a reset does NOT end sessions the
+// user — or an attacker — already holds. Those stay valid until the token
+// expires, JWT_EXPIRES_IN, default 7 days. Callers are told so explicitly rather
+// than being left to assume a reset locks anyone out.
+// ============================================================================
+
+// Same floor as the self-service change at PUT /api/auth/password. An admin
+// should not be able to set a password weaker than the user could set for
+// themselves; generatePassword()'s output always clears it.
+const PASSWORD_MIN_LEN = 8;
+const PASSWORD_COMPLEXITY_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/;
+
+router.post('/users/:id/password', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const supplied = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    const found = await cybercoreQuery(
+      'SELECT user_id, email, username, auth_provider FROM cybercore_user WHERE user_id = $1',
+      [id]
+    );
+    if (found.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    const user = found.rows[0];
+
+    // A federated account authenticates at the identity provider; a local hash
+    // would either do nothing or quietly become a second way in that bypasses
+    // SSO. Neither is what an admin clicking "reset password" means.
+    if (user.auth_provider && user.auth_provider !== 'local') {
+      return res.status(409).json({
+        error: `${user.email} signs in through ${user.auth_provider} — reset their password there instead.`,
+      });
+    }
+
+    // Blank means "generate one for me", which is how the batch-create path
+    // already hands out credentials. Returned once, in this response only.
+    const generated = supplied ? null : generatePassword();
+    const password = supplied || generated;
+
+    if (supplied) {
+      if (supplied.length < PASSWORD_MIN_LEN) {
+        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LEN} characters` });
+      }
+      if (!PASSWORD_COMPLEXITY_RE.test(supplied)) {
+        return res.status(400).json({ error: 'Password must contain an uppercase letter, a lowercase letter, and a number' });
+      }
+    }
+
+    // Cost 12, matching PUT /api/auth/password. POST /users still uses 10; this
+    // is the stronger of the two and the right default for a credential reset.
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    await cybercoreQuery(
+      `UPDATE cybercore_user
+          SET password_hash = $1, password_alg = 'bcrypt', updated_at = NOW()
+        WHERE user_id = $2`,
+      [passwordHash, id]
+    );
+
+    // Never log the password itself — only that a reset happened, and whether
+    // the admin chose it or the server generated it.
+    logActivity(req, 'user_password_reset', 'cybercore_user', id, {
+      email: user.email,
+      source: generated ? 'generated' : 'admin-supplied',
+    });
+
+    res.json({
+      success: true,
+      ...(generated ? { generated_password: generated } : {}),
+      warnings: [
+        'Sessions already signed in are not ended by this reset — their existing login stays '
+        + 'valid until it expires (7 days by default).',
+      ],
+      message: `Password reset for ${user.email}`,
+    });
+  } catch (error) {
+    console.error('[Users] Password reset error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 // POST /api/admin/users/:id/mfa/reset — clear a user's MFA, forcing
 // re-enrollment at their next login (help-desk recovery for a lost device).

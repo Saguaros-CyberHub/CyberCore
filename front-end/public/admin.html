@@ -1028,6 +1028,85 @@
     </div>
   </div>
 
+  <!-- Edit User Modal -->
+  <!-- Everything a user owns is keyed by their UUID, so these fields are safe to
+       change. Email is the exception: it doubles as the Guacamole account name,
+       so the form locks it whenever the account holds lanes or VM allocations
+       whose consoles authenticate against the current address. -->
+  <div class="modal-overlay" id="editUserModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Edit User</h3>
+        <button class="modal-close" onclick="closeModal('editUserModal')">&times;</button>
+      </div>
+      <div id="euOwnership" style="font-size: 0.8rem; color: var(--gray-500); margin-bottom: 0.75rem;"></div>
+      <div class="form-group">
+        <label>Username <span style="font-size: 0.8rem; color: var(--gray-500);">(unique login name)</span></label>
+        <input type="text" id="euUsername">
+      </div>
+      <div class="form-group">
+        <label>Email</label>
+        <input type="email" id="euEmail">
+        <div id="euEmailNote" style="font-size: 0.78rem; color: var(--gray-500); margin-top: 0.25rem;"></div>
+      </div>
+      <div class="form-group">
+        <label>First Name</label>
+        <input type="text" id="euFirstName">
+      </div>
+      <div class="form-group">
+        <label>Last Name</label>
+        <input type="text" id="euLastName">
+      </div>
+      <div class="form-group">
+        <label>Organization</label>
+        <input type="text" id="euOrganization">
+      </div>
+      <div class="form-group">
+        <label>Role</label>
+        <select id="euRole" style="padding: 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; font-size: 0.9rem;">
+          <option value="user">User</option>
+          <option value="student">Student</option>
+          <option value="instructor">Instructor</option>
+          <option value="admin">Admin</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label style="display: flex; align-items: center; gap: 0.5rem;">
+          <input type="checkbox" id="euActive" style="width: auto;">
+          Account active <span style="font-size: 0.8rem; color: var(--gray-500);">(unchecked blocks login)</span>
+        </label>
+      </div>
+      <div id="euStatus"></div>
+      <button class="btn btn-primary" id="euSaveBtn" onclick="saveUserEdits()">Save Changes</button>
+    </div>
+  </div>
+
+  <!-- Reset Login Password Modal -->
+  <!-- Resets the CyberHub login only. The "Reset Guac PW" action on the same row
+       is a separate credential — rewriting that one invalidates the stored copy
+       the user's existing lane consoles authenticate with. -->
+  <div class="modal-overlay" id="resetLoginPwModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Reset Login Password</h3>
+        <button class="modal-close" onclick="closeModal('resetLoginPwModal')">&times;</button>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--gray-500); margin: 0 0 0.75rem;">
+        Sets the CyberHub sign-in password for <code id="rpUserEmail"></code>. This does not
+        change their Guacamole password.
+      </p>
+      <div class="form-group">
+        <label>New Password <span style="font-size: 0.8rem; color: var(--gray-500);">(leave blank to generate one)</span></label>
+        <input type="text" id="rpPassword" placeholder="Leave blank for a generated password" autocomplete="off">
+        <div style="font-size: 0.78rem; color: var(--gray-500); margin-top: 0.25rem;">
+          Minimum 8 characters with an uppercase letter, a lowercase letter, and a number.
+        </div>
+      </div>
+      <div id="rpStatus"></div>
+      <button class="btn btn-primary" id="rpSaveBtn" onclick="submitLoginPasswordReset()">Reset Password</button>
+    </div>
+  </div>
+
   <!-- Batch User Creation Modal -->
   <div class="modal-overlay" id="batchUsersModal">
     <div class="modal-content" style="max-width: 680px;">
