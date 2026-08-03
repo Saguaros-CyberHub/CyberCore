@@ -21,6 +21,7 @@ const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
 const { generatePassword } = require('../../utils/password-generator');
 const { waitForGuestAgent, executeScriptsOnVM } = require('../../utils/script-executor');
+const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../../utils/batch-deployer');
 const goadDeploy = require('../../utils/goad-deploy');
@@ -866,6 +867,29 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
               }
               await query(`UPDATE deployment_vuln_selections SET status = 'complete', updated_at = NOW() WHERE id = $1`, [deploymentId]);
               console.log(`[Group ${group_name}] Vuln scripts completed for ${student.email}`);
+            }
+
+            // Plant HTB-style user/root capture flags. Runs LAST, after vuln
+            // scripts and after GOAD provisioning, so a script that recreates a
+            // user profile or a GOAD heal that reboots a DC can't clobber the
+            // files. Because deployedVMs includes the GOAD hosts, this covers
+            // DC01/DC02/SRV02 with no change to goad-deploy.js.
+            //
+            // Best-effort: flag failures are recorded per-flag as
+            // plant_status='failed' and surfaced on the instructor dashboard.
+            // They must never fail a whole class deploy.
+            try {
+              progress.lanes[laneId].status = 'planting_flags';
+              await plantFlagsForLane({
+                laneId,
+                userId: student.id,
+                vms: deployedVMs,
+                specVms: spec.vms || [],
+                api: proxmoxAPI,
+                logTag: `[Group ${group_name}][Flags]`
+              });
+            } catch (flagErr) {
+              console.error(`[Group ${group_name}] Flag planting failed for ${student.email}: ${flagErr.message}`);
             }
 
             // Register each lane VM (challenge VMs + Kali, NOT the gateway —

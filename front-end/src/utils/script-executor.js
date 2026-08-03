@@ -348,6 +348,195 @@ async function pollExecStatusWithLog(node, vmId, pid, logPath, onProgress = null
   return { exited: false, exitcode: -1, stdout: '', stderr: 'Timed out', _logSoFar: fullLog };
 }
 
+// ============================================================================
+// ARGV-STYLE + LINUX EXEC PRIMITIVES
+// ----------------------------------------------------------------------------
+// These are the "short command, no staged file" primitives. Prefer them over
+// executePowerShellViaFile whenever the payload is small AND secret: the staged
+// path writes the script to C:\Windows\Temp and tees output to a .log there,
+// neither of which is reliably cleaned up (the Remove-Item lives inside the
+// stub, so a timeout leaves it behind; the log cleanup is fire-and-forget).
+// C:\Windows\Temp is traversable by Users. Anything sensitive — capture flags
+// above all — must go through agentExecArgv/agentShellExec instead.
+// ============================================================================
+
+/**
+ * Run an argv-style command inside a QEMU VM via the guest agent.
+ *
+ * Proxmox's agent/exec wants `command` either as a single string (executable
+ * only, no args) OR multiple `command=...` form params (executable + args).
+ * The default proxmoxAPI helper encodes objects as plain k=v, which collapses
+ * the argv into one giant "executable path with embedded spaces" -> ENOENT.
+ * This wrapper builds the form body by hand with `command` repeated per argv
+ * element, then POSTs the raw string body.
+ *
+ * The `api` parameter exists so callers that already receive an injected
+ * proxmoxAPI (goad-deploy, attached-modules) can pass theirs through unchanged.
+ *
+ * @returns {Promise<{pid:number}>}
+ */
+async function agentExecArgv(node, vmId, argv, api = proxmoxAPI) {
+  const body = argv.map(a => `command=${encodeURIComponent(a)}`).join('&');
+  const result = await api(
+    'POST',
+    `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+    body
+  );
+  if (!result?.pid) {
+    throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
+  }
+  return { pid: result.pid };
+}
+
+/**
+ * POST form-urlencoded pairs to Proxmox by shelling out to curl.
+ *
+ * Node's https.request consistently gets HTTP 596 (pveproxy 3-second backend
+ * timeout) on PVE 9.1.9 for agent/exec, while curl with the same token + body
+ * + endpoint returns 200 in ~200ms. No Node-side fix was ever found (URL
+ * encoding, content-type, JSON vs form, keep-alive, Content-Length all tried).
+ * The ~50ms fork cost is irrelevant next to the work the agent does.
+ *
+ * Originally lived in the CIAB plugin; promoted here so there is exactly one
+ * Linux guest-exec implementation in the codebase.
+ */
+async function proxmoxFormPOST(path, pairs) {
+  const { spawn } = require('child_process');
+  const { PROXMOX_URL } = require('./proxmox');
+  const tokenId = process.env.PROXMOX_TOKEN_ID;
+  const tokenSecret = process.env.PROXMOX_TOKEN_SECRET;
+  const url = `${PROXMOX_URL}${path}`;
+
+  const args = [
+    '-k', '-s',
+    '-w', 'HTTP_STATUS:%{http_code}',
+    '-X', 'POST',
+    '-H', `Authorization: PVEAPIToken=${tokenId}=${tokenSecret}`
+  ];
+  for (const [k, v] of pairs) {
+    args.push('--data-urlencode', `${k}=${v}`);
+  }
+  args.push(url);
+
+  return new Promise((resolve, reject) => {
+    // Absolute path — alpine's apk installs curl to /usr/bin/curl unconditionally.
+    // Bypasses PATH search so a Node process whose env.PATH is missing /usr/bin
+    // still finds the binary. Override via CURL_BIN if curl ever moves.
+    const curlBin = process.env.CURL_BIN || '/usr/bin/curl';
+    const child = spawn(curlBin, args);
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', d => stdout += d.toString());
+    child.stderr.on('data', d => stderr += d.toString());
+    child.on('error', err => reject(new Error(`${curlBin} spawn failed: ${err.message}`)));
+    child.on('close', code => {
+      if (code !== 0) {
+        return reject(new Error(`curl exited ${code}: ${stderr.slice(0, 300)}`));
+      }
+      const m = stdout.match(/^([\s\S]*)HTTP_STATUS:(\d+)$/);
+      if (!m) return reject(new Error(`unparseable curl output: ${stdout.slice(0, 300)}`));
+      const body = m[1];
+      const status = parseInt(m[2], 10);
+      if (status >= 400) {
+        return reject(new Error(`Proxmox POST ${path} failed (${status}): ${body}`));
+      }
+      try {
+        const json = JSON.parse(body);
+        resolve(json.data !== undefined ? json.data : json);
+      } catch {
+        resolve(body);
+      }
+    });
+  });
+}
+
+/**
+ * Run a shell command inside a Linux QEMU guest — the equivalent of
+ * `qm guest exec <vmid> -- /bin/sh -c "..."`.
+ *
+ * Retries transient 596s: pveproxy -> pvedaemon -> QMP timeouts still happen
+ * when back-to-back exec calls race on the agent's serial channel, even after
+ * a verified-complete probe.
+ *
+ * @returns {Promise<{pid:number}>}
+ */
+async function agentShellExec(node, vmId, shellCmd) {
+  console.log(`[AgentShellExec] /bin/sh -c '${shellCmd.substring(0, 100).replace(/\n/g, ' ')}...' (${shellCmd.length} chars)`);
+
+  const pairs = [
+    ['command', '/bin/sh'],
+    ['command', '-c'],
+    ['command', shellCmd]
+  ];
+
+  let lastErr;
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      const result = await proxmoxFormPOST(
+        `/api2/json/nodes/${node}/qemu/${vmId}/agent/exec`,
+        pairs
+      );
+      const pid = result?.pid;
+      if (!pid) throw new Error(`agent/exec did not return a PID: ${JSON.stringify(result)}`);
+      return { pid };
+    } catch (err) {
+      lastErr = err;
+      const msg = String(err && err.message || err);
+      const transient = /\(596\)/.test(msg)
+        || /\b596\b/.test(msg)
+        || /ECONNRESET|ETIMEDOUT|socket hang up|EPIPE/.test(msg);
+      if (attempt === 1) {
+        console.warn(`[AgentShellExec] vm=${vmId} attempt 1 raw error (transient=${transient}): ${msg.substring(0, 200)}`);
+      }
+      if (!transient || attempt === 5) throw err;
+      const delayMs = 2000 * attempt;  // 2s, 4s, 6s, 8s
+      console.warn(`[AgentShellExec] vm=${vmId} attempt ${attempt} got transient error, retrying in ${delayMs / 1000}s`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+/**
+ * Wait until the guest's exec channel actually works.
+ *
+ * waitForGuestAgent only verifies guest-ping; the guest-exec RPC frequently
+ * 596's for several seconds afterward, especially on freshly-cloned VMs.
+ * Probe with a real exec until success or timeout.
+ *
+ * @returns {Promise<boolean>} true if exec succeeded at least once
+ */
+async function waitForAgentExecReady(node, vmId, logTag = '[AgentExec]', timeoutMs = 180000) {
+  const startedAt = Date.now();
+  let attempt = 0;
+  while (Date.now() - startedAt < timeoutMs) {
+    attempt++;
+    try {
+      const r = await agentShellExec(node, vmId, 'true');
+      // Actually wait for the probe to COMPLETE agent-side before declaring
+      // ready. The API returns a PID instantly but the agent may still be
+      // processing the previous command — the next call then 596s.
+      if (r && r.pid) {
+        const status = await pollExecStatus(node, vmId, r.pid, 30000);
+        if (!status || !status.exited) {
+          throw new Error(`probe pid=${r.pid} did not complete within 30s`);
+        }
+      }
+      console.log(`${logTag} Agent exec ready on vm=${vmId} (after ${attempt} attempt(s), ${Math.round((Date.now() - startedAt) / 1000)}s)`);
+      // Empirically the agent still rejects back-to-back calls with 596 even
+      // after a verified-complete probe. 2s eliminates it.
+      await new Promise(r => setTimeout(r, 2000));
+      return true;
+    } catch (err) {
+      if (Date.now() - startedAt >= timeoutMs) break;
+      const waitMs = Math.min(15000, 5000 + attempt * 2000);
+      console.warn(`${logTag} Agent exec not ready on vm=${vmId} (round ${attempt}): ${err.message.substring(0, 120)} — waiting ${waitMs / 1000}s`);
+      await new Promise(r => setTimeout(r, waitMs));
+    }
+  }
+  return false;
+}
+
 /**
  * Get IP addresses from a VM via guest agent
  */
@@ -371,6 +560,68 @@ async function getVMIPs(node, vmId) {
   } catch (e) {
     return [];
   }
+}
+
+/**
+ * Linux counterpart to executePowerShellViaFile.
+ *
+ * Writes the script to /tmp via base64 chunks over agentShellExec (the same
+ * proven path CIAB uses — Node's https.request 596s on PVE 9.1.9 for
+ * agent/exec, so proxmoxFormPOST shells out to curl), then runs it with
+ * output tee'd to a log we can tail for live progress.
+ *
+ * Returns the same shape as executePowerShellViaFile.
+ */
+async function executeShellViaFile(node, vmId, scriptContent, scriptArgs = '', onProgress = null) {
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const shPath = `/tmp/vuln_${ts}_${rand}.sh`;
+  const logPath = `/tmp/vuln_${ts}_${rand}.log`;
+
+  // Normalize to LF — a CRLF shebang line makes the kernel report ENOENT for
+  // "/bin/bash\r", which surfaces as a baffling "no such file or directory".
+  const normalized = scriptContent.replace(/\r\n/g, '\n');
+  const b64 = Buffer.from(normalized, 'utf-8').toString('base64');
+  const CHUNK = 48 * 1024;  // 48KB of base64 per agent call
+
+  console.log(`[ScriptExec] Writing ${normalized.length}-byte shell script to ${shPath} on VM ${vmId}`);
+
+  const runShell = async (cmd, timeoutMs = 120000) => {
+    const { pid } = await agentShellExec(node, vmId, cmd);
+    const status = await pollExecStatus(node, vmId, pid, timeoutMs);
+    if (!status.exited) throw new Error(`guest command timed out: ${cmd.substring(0, 80)}`);
+    return status;
+  };
+
+  if (b64.length <= CHUNK) {
+    await runShell(`printf %s '${b64}' | base64 -d > '${shPath}' && chmod +x '${shPath}'`);
+  } else {
+    const tmpPath = `${shPath}.b64`;
+    await runShell(`: > '${tmpPath}'`);
+    for (let i = 0; i < b64.length; i += CHUNK) {
+      await runShell(`printf %s '${b64.slice(i, i + CHUNK)}' >> '${tmpPath}'`);
+    }
+    await runShell(`base64 -d < '${tmpPath}' > '${shPath}' && chmod +x '${shPath}' && rm -f '${tmpPath}'`);
+  }
+
+  // Redirect rather than pipe through tee: /bin/sh is dash on Debian, which has
+  // no PIPESTATUS, so a pipeline would report tee's exit code (always 0) and
+  // silently swallow every script failure. Redirecting keeps $? honest, and
+  // pollExecStatusWithLog tails the same file for live progress either way.
+  const { pid } = await agentShellExec(node, vmId,
+    `sh '${shPath}' ${scriptArgs} > '${logPath}' 2>&1`);
+
+  const finalStatus = await pollExecStatusWithLog(node, vmId, pid, logPath, onProgress);
+
+  // Best-effort cleanup.
+  agentShellExec(node, vmId, `rm -f '${shPath}' '${logPath}'`).catch(() => {});
+
+  if (finalStatus._logSoFar) {
+    finalStatus.stdout = finalStatus._logSoFar;
+  }
+  delete finalStatus._logSoFar;
+
+  return finalStatus;
 }
 
 /**
@@ -414,7 +665,13 @@ async function executeScriptsOnVM(node, vmId, vmName, scripts, deploymentId) {
         // Stream partial log into DB output field so the UI panel sees live progress.
         await updateScriptStatus(deploymentId, vmName, script.slug, 'running', null, logSoFar);
       };
-      const result = await executePowerShellViaFile(node, vmId, script.script_content, script.script_args || '', onProgress);
+      // os_target has been stored and filtered on for a long time but was
+      // never honored here — every script went to powershell.exe regardless,
+      // so a Linux script failed obscurely with "powershell doesn't exist".
+      const isLinux = String(script.os_target || 'windows').toLowerCase() === 'linux';
+      const result = isLinux
+        ? await executeShellViaFile(node, vmId, script.script_content, script.script_args || '', onProgress)
+        : await executePowerShellViaFile(node, vmId, script.script_content, script.script_args || '', onProgress);
 
       if (result.exited) {
         const output = (result.stdout || '') + (result.stderr ? `\nSTDERR:\n${result.stderr}` : '');
@@ -475,9 +732,15 @@ async function updateScriptStatus(deploymentId, vmName, scriptSlug, status, erro
 module.exports = {
   waitForGuestAgent,
   guestFileWrite,
+  guestFileRead,
   agentExec,
+  agentExecArgv,
+  agentShellExec,
+  proxmoxFormPOST,
+  waitForAgentExecReady,
   pollExecStatus,
   executePowerShellViaFile,
+  executeShellViaFile,
   getVMIPs,
   sortByDependencies,
   executeScriptsOnVM,

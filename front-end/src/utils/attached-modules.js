@@ -39,6 +39,7 @@
 
 const { v4: uuidv4 } = require('uuid');
 const nodeSsh = require('./node-ssh');
+const { plantFlagsForLane } = require('./flag-manager');
 
 const ATTACHED_VMID_BASE   = 800000;
 const ATTACHED_VMID_STEP   = 10000;
@@ -191,8 +192,15 @@ async function reloadDnsmasq(bestNode, gatewayVmId) {
 
 /**
  * Build a net0/net1 string for an attached VM clone. Mirrors goad-deploy.buildLaneNet0
- * but always specifies a hwaddr (DHCP reservation depends on it) and defaults
- * to virtio for QEMU (these are Linux VMs — no Windows AD-join NIC concerns).
+ * but always specifies a hwaddr (DHCP reservation depends on it).
+ *
+ * The QEMU default is virtio because most attached modules are Linux. Windows
+ * guests MUST override it with `"nic_model": "e1000"` in the challenge spec's
+ * vms[] entry — stock Windows ships no virtio-net driver, so a virtio NIC never
+ * gets a DHCP lease and the box is simply unreachable, with no error anywhere
+ * to explain why. See migrations/023_seed_copperridge_module.sql for a worked
+ * example, and lane-deployer.js/goad-deploy.js which hardcode e1000 for the
+ * same reason.
  */
 function buildAttachedNet0(vmSpec, vnetName, mac) {
   const type = vmSpec.type || 'qemu';
@@ -322,6 +330,24 @@ async function attachModuleToLane({
       ? `/api2/json/nodes/${vm.node}/lxc/${vm.vm_id}/status/start`
       : `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`;
     await proxmoxAPI('POST', startPath);
+  }
+
+  // Plant HTB-style user/root capture flags on the attached targets. This is
+  // the only path CyberSaguaros (a Linux QEMU VM) takes, so without this hook
+  // it would be the one 480 box with no flags. Best-effort by design: an
+  // unreachable guest agent must not fail the attach, and per-flag failures
+  // are recorded as plant_status='failed' for the instructor dashboard.
+  try {
+    await plantFlagsForLane({
+      laneId: lane.lane_id,
+      userId: lane.user_id,
+      vms: attachedVms,
+      specVms,
+      api: proxmoxAPI,
+      logTag: `[Attach][Flags][${challenge.challenge_key}]`
+    });
+  } catch (flagErr) {
+    console.error(`[Attach] Flag planting failed for lane ${lane.lane_id}: ${flagErr.message}`);
   }
 
   return {

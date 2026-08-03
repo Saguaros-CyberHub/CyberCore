@@ -5,7 +5,7 @@
 -- in spec is enforced by the attach route. The VMID 1703 template is baked by
 -- front-end/scripts/bake-cybersaguaros-template.sh before this row can deploy.
 --
--- App source is bundled in the CyberCore repo at challenges/cybersaguaros/.
+-- App source is bundled in the CyberCore repo at challenges/cybersaguaros-ssrf/.
 --
 -- Schema notes (crucible_challenge):
 --   difficulty     — integer 0-5 (3 = intermediate: SSRF chain + filter bypass + LinPE)
@@ -19,8 +19,8 @@
 INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
 VALUES (
   'cybersaguaros-ssrf',
-  'CyberSaguaros — SSRF Research Portal',
-  'Custom vulnerable web app (CyberSaguaros cactus research group). SaguaroBot''s dataset integrity check is a readable SSRF -> reach the localhost-only provisioning API -> mint an admin session -> weak "Cloud Storage" upload filter -> PHP webshell RCE -> Linux privesc to root. Foreshadows the GOAD pivot.',
+  'CyberSaguaros Research Portal',
+  'Custom vulnerable web app (CyberSaguaros cactus research group). SaguaroBot''s dataset integrity check is a readable SSRF -> reach the localhost-only provisioning API -> mint an admin session -> weak "Cloud Storage" upload filter -> PHP webshell RCE as saguarobot -> lateral to hrivera via a world-readable passphrase-protected deploy key (ssh2john + rockyou) -> SSH -> user flag -> root via a group-gated SUID find/python3 copy or a fieldops-writable root cronjob -> root flag. Secondary surfaces: SQLi and reflected XSS on /research.php. Foreshadows the GOAD pivot.',
   'single_vm',
   3,
   'crucible',
@@ -34,6 +34,10 @@ VALUES (
         "type": "qemu",
         "role": "web"
       }
+    ],
+    "flags": [
+      { "key": "user_flag", "description": "Read /home/hrivera/user.txt after landing an SSH session as hrivera", "points": 50 },
+      { "key": "root_flag", "description": "Read /root/root.txt after escalating to root", "points": 100 }
     ]
   }'::jsonb,
   'active'

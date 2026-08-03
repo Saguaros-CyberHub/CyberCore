@@ -333,9 +333,34 @@ INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type
 VALUES (
   'cybersaguaros-ssrf',
   'CyberSaguaros — SSRF Research Portal',
-  'Custom vulnerable web app. SSRF chain → localhost admin API → session mint → upload filter bypass → PHP webshell → Linux privesc.',
+  'Custom vulnerable web app. SSRF chain → localhost admin API → session mint → upload filter bypass → PHP webshell RCE → leaked deploy key → SSH → SUID/cron privesc → root.',
   'single_vm', 3, 'crucible',
-  '{"attachable":true,"vms":[{"name":"cybersaguaros","template_vmid":1703,"type":"qemu","role":"web"}]}'::jsonb,
+  -- Keep this spec byte-identical to migrations/020_seed_cybersaguaros_module.sql.
+  -- Both statements upsert the same challenge_key, so whichever applies last
+  -- wins; they previously disagreed (this one was missing template_node).
+  '{"attachable":true,"template_node":"cyberhub-node-5","vms":[{"name":"cybersaguaros","template_vmid":1703,"type":"qemu","role":"web"}],"flags":[{"key":"user_flag","description":"Read /home/hrivera/user.txt after landing an SSH session as hrivera","points":50},{"key":"root_flag","description":"Read /root/root.txt after escalating to root","points":100}]}'::jsonb,
+  'active'
+)
+ON CONFLICT (challenge_key) DO UPDATE
+  SET spec = EXCLUDED.spec, name = EXCLUDED.name, description = EXCLUDED.description,
+      challenge_type = EXCLUDED.challenge_type, difficulty = EXCLUDED.difficulty,
+      module_key = EXCLUDED.module_key, status = EXCLUDED.status, updated_at = now();
+
+INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type, difficulty, module_key, spec, status)
+VALUES (
+  'copperridge-fieldops',
+  'Copper Ridge — FieldOps (IIS + Windows PE)',
+  'Custom vulnerable ASP.NET app on IIS 10. Directory browsing leaks web.config.bak → portal login → case-sensitive upload filter bypass (cmd.AspX) → webshell as the IIS application pool identity → SYSTEM via SeImpersonate/PrintSpoofer, a weak service DACL, a writable SYSTEM scheduled task, an unquoted service path, or recovered local-admin credentials.',
+  'single_vm', 3, 'crucible',
+  -- Keep byte-identical to migrations/023_seed_copperridge_module.sql.
+  -- Three fields here are load-bearing, see that file for the reasoning:
+  --   nic_model=e1000  Windows has no virtio-net driver; virtio never DHCPs.
+  --   os=windows       flag-manager throws if detectGuestOs() comes back empty.
+  --   flags.user.path  This box has no interactive user profile (the foothold
+  --                    is a virtual app-pool account), and the default Windows
+  --                    user-flag planter hard-fails when C:\Users has no
+  --                    non-builtin profile.
+  '{"attachable":true,"template_node":"cyberhub-node-5","vms":[{"name":"tuc-web01","template_vmid":1704,"type":"qemu","role":"web","os":"windows","nic_model":"e1000","flags":{"user":{"path":"C:\\Users\\Public\\Desktop\\user.txt"},"root":{"path":"C:\\Users\\Administrator\\Desktop\\root.txt"}}}]}'::jsonb,
   'active'
 )
 ON CONFLICT (challenge_key) DO UPDATE

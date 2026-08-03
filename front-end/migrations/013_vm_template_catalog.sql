@@ -69,7 +69,12 @@ INSERT INTO cybercore_template_catalog (os_family, os_name, os_version, template
   ('linux',          'Rocky Linux',         NULL,   1001, '{web,file,db}',                   'rocky-linux-template',         'os_template'),
   ('windows_client', 'Windows 11',          '25H2', 1002, '{}',                              'windows-25h2-template',        'os_template'),
   ('linux',          'Ubuntu',              NULL,   1003, '{web}',                           'Ubuntu-Template',              'os_template'),
-  ('linux',          'Metasploitable 2',    NULL,   1600, '{}',                              'Metasploitable-2-Template — admin-select only', 'os_template')
+  ('linux',          'Metasploitable 2',    NULL,   1600, '{}',                              'Metasploitable-2-Template — admin-select only', 'os_template'),
+  -- Challenge target, not a general-purpose OS image. Built by hand from a
+  -- clone of 1004; see challenges/copperridge-fieldops/BUILD.md. Also seeded
+  -- by migrations/023_seed_copperridge_module.sql for already-migrated DBs.
+  ('windows_server', 'Windows Server 2019 IIS Target', '2019', 1704, '{web}',                 'copperridge-fieldops-template — challenge target, built from a clone of 1004', 'challenge')
 ON CONFLICT DO NOTHING;
 
 UPDATE cybercore_template_catalog SET preferred = false WHERE template_vmid = 1600;
+UPDATE cybercore_template_catalog SET preferred = false WHERE template_vmid = 1704;

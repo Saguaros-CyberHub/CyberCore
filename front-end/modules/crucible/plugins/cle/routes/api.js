@@ -19,6 +19,12 @@ const guacamoleRoutes = require('./guacamole');
 const templatesRoutes = require('./templates');
 const studentRoutes = require('./students');
 const sessionRoutes = require('./sessions');
+const flagRoutes = require('./flags');
+const myCoursesRoutes = require('./my-courses');
+
+// Student-facing: enrolled courses + their capture-flag boards. No role gate —
+// every route inside scopes to req.user.userId and checks enrollment itself.
+router.use('/api/cle/my', authenticateToken, myCoursesRoutes);
 
 // Global routes
 router.use('/api/cle/templates', authenticateToken, templatesRoutes);
@@ -44,6 +50,11 @@ router.use('/api/cle/courses/:courseId/labs', authenticateToken, (req, res, next
   res.locals.courseId = req.params.courseId;
   next();
 }, labsRoutes);
+
+router.use('/api/cle/courses/:courseId/flags', authenticateToken, (req, res, next) => {
+  res.locals.courseId = req.params.courseId;
+  next();
+}, flagRoutes);
 
 router.use('/api/cle/courses/:courseId/students/:studentId/guac', authenticateToken, (req, res, next) => {
   res.locals.courseId = req.params.courseId;

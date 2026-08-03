@@ -263,6 +263,195 @@
       background: rgba(49,130,206,0.15);
     }
 
+    /* ===== Capture Flags — course list ===== */
+    .flag-course-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 16px;
+    }
+
+    .flag-course-card {
+      display: block;
+      width: 100%;
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+      background: var(--bg-card, white);
+      border: 1px solid var(--border-color, #e2e8f0);
+      border-radius: 12px;
+      padding: 18px 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+      transition: border-color 0.15s ease, transform 0.15s ease;
+    }
+    .flag-course-card:hover {
+      border-color: var(--primary, #4c51bf);
+      transform: translateY(-1px);
+    }
+
+    .flag-course-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .flag-course-name {
+      font-weight: 600;
+      font-size: 1rem;
+      color: var(--text-primary);
+    }
+
+    .flag-course-meta {
+      font-size: 0.78rem;
+      color: var(--text-muted, #718096);
+    }
+
+    .flag-board-head {
+      display: flex;
+      align-items: baseline;
+      gap: 12px;
+      margin: 20px 0 12px;
+      flex-wrap: wrap;
+    }
+    .flag-board-title {
+      font-size: 1.4rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      margin: 0;
+    }
+
+    .flag-assignment {
+      background: var(--bg-card, white);
+      border: 1px solid var(--border-color, #e2e8f0);
+      border-left: 3px solid var(--primary, #4c51bf);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+    }
+    .flag-assignment-title {
+      font-weight: 600;
+      font-size: 0.95rem;
+      color: var(--text-primary);
+    }
+    .flag-assignment-desc {
+      margin: 6px 0 0;
+      font-size: 0.87rem;
+      color: var(--text-secondary);
+      white-space: pre-wrap;
+    }
+
+    .flag-note, .flag-empty {
+      background: var(--bg-card, white);
+      border: 1px dashed var(--border-color, #e2e8f0);
+      border-radius: 8px;
+      padding: 14px 16px;
+      margin-bottom: 12px;
+      font-size: 0.87rem;
+      color: var(--text-secondary);
+    }
+    .flag-empty p { margin: 0 0 6px; }
+    .flag-empty p:last-child { margin-bottom: 0; }
+
+    .flag-hint {
+      margin: 8px 0 0;
+      font-size: 0.78rem;
+      color: var(--text-muted, #718096);
+    }
+
+    /* ===== Capture Flags — board ===== */
+    .flag-panel {
+      background: var(--bg-card, white);
+      border: 1px solid var(--border-color, #e2e8f0);
+      border-radius: 12px;
+      padding: 18px 20px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    }
+
+    .flag-submit-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .flag-input {
+      flex: 1 1 320px;
+      min-width: 0;
+      padding: 10px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.9rem;
+      color: var(--text-primary);
+      background: var(--bg-input, #fff);
+      border: 1px solid var(--border-color, #e2e8f0);
+      border-radius: 8px;
+    }
+    .flag-input:focus {
+      outline: none;
+      border-color: var(--primary, #4c51bf);
+    }
+
+    .flag-progress { margin-top: 18px; }
+
+    .flag-summary {
+      font-size: 0.9rem;
+      color: var(--text-secondary);
+      margin-bottom: 14px;
+    }
+
+    .flag-bar {
+      margin-top: 8px;
+      height: 6px;
+      border-radius: 999px;
+      background: var(--border-color, #e2e8f0);
+      overflow: hidden;
+    }
+    .flag-bar-fill {
+      height: 100%;
+      background: var(--success, #16a34a);
+      transition: width 0.3s ease;
+    }
+
+    .flag-rows { display: flex; flex-direction: column; gap: 8px; }
+
+    .flag-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 12px;
+      border: 1px solid var(--border-color, #e2e8f0);
+      border-radius: 8px;
+    }
+
+    .flag-vm {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.88rem;
+      color: var(--text-primary);
+      overflow-wrap: anywhere;
+    }
+
+    .flag-cells { display: flex; gap: 6px; flex-shrink: 0; }
+
+    .flag-chip {
+      font-size: 0.72rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .flag-chip-todo {
+      color: var(--text-muted, #718096);
+      border-color: var(--border-color, #e2e8f0);
+    }
+    .flag-chip-done  { color: #fff; background: var(--success, #16a34a); }
+    /* Failed to plant — the file was never written, so it cannot be found. */
+    .flag-chip-broken { color: #fff; background: var(--warning, #b45309); }
+    .flag-chip-none  { color: var(--text-muted, #718096); opacity: 0.5; }
+
     /* ===== VM List (My Workspaces) ===== */
     .vml-list {
       display: grid;
@@ -617,6 +806,7 @@
             </summary>
             <div class="dashboard-submenu">
               <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-myworkspaces')">My Workspaces</a>
+              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-assignments')">Course Assignments</a>
               <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-available')">Available</a>
             </div>
           </details>
@@ -682,6 +872,16 @@
           <!-- Workstation VMs (self-deployed) -->
           <div class="section-title" data-wks-section="my" style="margin-top:32px;">My Workstations</div>
           <div id="wksMyList"></div>
+        </div>
+
+        <div id="workspaces-assignmentsContent" style="display: none;">
+          <div class="hub-welcome" style="margin-bottom:20px">
+            <h1>Course Assignments</h1>
+            <p>Pick a course to see its assignment and capture the flags on your lab machines.</p>
+          </div>
+          <!-- NOT named *Content: switchDashboardTab hides every [id$="Content"]
+               element on each nav change, which would blank this panel. -->
+          <div id="flagCoursesPanel"></div>
         </div>
 
         <div id="workspaces-availableContent" style="display: none;">
@@ -828,6 +1028,7 @@
   <script src="/js/hub.js"></script>
   <script src="/js/vm-console.js"></script>
   <script src="/js/workstations.js"></script>
+  <script src="/js/flags.js"></script>
   <script>
     // Load site configuration and update UI
     async function loadSiteConfig() {
@@ -932,6 +1133,11 @@
           document.getElementById('vmList'),
           'vmConsoleContainer'
         );
+      }
+
+      // Lazy-load the course list for the capture-flag assignments pane
+      if (page === 'workspaces-assignments' && typeof Flags !== 'undefined') {
+        Flags.loadCourses();
       }
 
       // Lazy-load workstation sections

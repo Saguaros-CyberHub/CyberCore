@@ -196,6 +196,7 @@
             <div class="detail-tab" onclick="switchDetailTab('students', this)">👥 Students</div>
             <div class="detail-tab" onclick="switchDetailTab('vm-management', this)">🖥️ VM Management</div>
             <div class="detail-tab" onclick="switchDetailTab('vulnerable-labs', this)">⚠️ Vulnerable Labs</div>
+            <div class="detail-tab" onclick="switchDetailTab('flags', this)">🚩 Flags</div>
           </div>
 
           <!-- Overview Tab -->
@@ -227,6 +228,23 @@
               <p>Deploy vulnerable machines for specific learning objectives. Students can only access their assigned labs.</p>
             </div>
             <div id="vulnerableLabsContent"></div>
+          </div>
+
+          <!-- Flags Tab -->
+          <div class="detail-tab-pane" id="flags-pane">
+            <div class="info-box">
+              <p>Every target machine in a student's lane carries a randomly generated
+                 <code>user.txt</code> and <code>root.txt</code>. Values are unique per
+                 student — a flag from another lane is rejected as "Incorrect Flag" and
+                 counted here as a sharing attempt.</p>
+            </div>
+            <div style="margin-bottom: 1rem;">
+              <button class="btn btn-secondary" onclick="loadCourseFlags()">↻ Refresh</button>
+              <label style="margin-left: 1rem; font-size: 0.85rem; color: var(--text-secondary);">
+                <input type="checkbox" id="flagRevealToggle" onchange="loadCourseFlags()"> Show flag values
+              </label>
+            </div>
+            <div id="courseFlagsContent"></div>
           </div>
         </div>
       </div>
@@ -570,6 +588,7 @@
         loadStudents();
         loadVMManagement();
         loadVulnerableLabs();
+        loadCourseFlags();
       } catch (e) {
         toast('Error loading course: ' + e.message, true);
       }
@@ -875,6 +894,170 @@
         document.getElementById('vulnerableLabsContent').innerHTML = html;
       } catch (e) {
         document.getElementById('vulnerableLabsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    // ── Capture flags ─────────────────────────────────────────────────────────
+
+    // Kept so showStudentSubmissions can resolve a display label from a userId
+    // instead of it being interpolated into an inline onclick.
+    let _courseFlagStudents = [];
+
+    async function loadCourseFlags() {
+      const target = document.getElementById('courseFlagsContent');
+      if (!target || !currentCourseId) return;
+      target.innerHTML = '<p style="color: var(--text-secondary);">Loading…</p>';
+
+      try {
+        const { students } = await api('GET', `/courses/${currentCourseId}/flags`);
+        _courseFlagStudents = students || [];
+
+        if (!students || students.length === 0) {
+          target.innerHTML = '<p style="color: var(--text-secondary);">No flags yet — they are generated when a lane is deployed.</p>';
+          return;
+        }
+
+        const reveal = document.getElementById('flagRevealToggle')?.checked;
+
+        // Union of every machine seen, so the columns line up across students
+        // even when one lane failed to deploy a box.
+        const vmNames = [...new Set(students.flatMap(s => s.flags.map(f => f.vmName)))].sort();
+
+        let html = `<table class="students-table">
+          <thead><tr>
+            <th>Student</th>
+            <th>Captured</th>
+            ${vmNames.map(v => `<th>${escHtml(v)}</th>`).join('')}
+            <th title="Submissions of a flag belonging to another student's lane">Shared?</th>
+          </tr></thead>
+          <tbody>`;
+
+        students.forEach(s => {
+          const nameLabel = s.name
+            ? `${escHtml(s.name)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(s.email || '')}</span>`
+            : escHtml(s.email || s.userId);
+          // Pass only the userId (a UUID). escHtml escapes &<> but NOT quotes,
+          // so interpolating an email — which may legitimately contain an
+          // apostrophe — would break out of this inline handler's string.
+          // showStudentSubmissions resolves the display label itself.
+          const label = `<a href="#" onclick="showStudentSubmissions('${escHtml(s.userId)}'); return false;"
+                            style="color:inherit;text-decoration:underline dotted;"
+                            title="View this student's submission history">${nameLabel}</a>`;
+
+          const cells = vmNames.map(vm => {
+            const pair = ['user', 'root'].map(type => {
+              const f = s.flags.find(x => x.vmName === vm && x.flagType === type);
+              if (!f) return `<span style="color:var(--text-muted);opacity:0.4;">—</span>`;
+
+              // A flag that never made it into the guest is the instructor's
+              // problem, not the student's — call it out distinctly from
+              // "planted but not yet found".
+              if (f.plantStatus === 'failed') {
+                return `<span title="Failed to plant: ${escHtml(f.plantError || 'unknown')}"
+                  style="color:#b45309;font-weight:600;">!${type[0]}</span>`;
+              }
+              const color = f.captured ? '#16a34a' : 'var(--text-muted)';
+              const weight = f.captured ? '700' : '400';
+              const tip = f.captured && f.capturedAt
+                ? `Captured ${new Date(f.capturedAt).toLocaleString()}`
+                : 'Not captured';
+              const value = reveal ? `<br><code style="font-size:0.65rem;">${escHtml(f.flagValue)}</code>` : '';
+              return `<span title="${escHtml(tip)}" style="color:${color};font-weight:${weight};">
+                ${f.captured ? '✓' : '○'}${type[0]}</span>${value}`;
+            }).join(' ');
+            return `<td style="font-size:0.8rem;white-space:nowrap;">${pair}</td>`;
+          }).join('');
+
+          const shared = s.foreignAttempts > 0
+            ? `<span title="Last: ${escHtml(s.lastForeignAttempt ? new Date(s.lastForeignAttempt).toLocaleString() : '')}"
+                 style="color:#ef4444;font-weight:600;">${s.foreignAttempts}</span>`
+            : '<span style="color:var(--text-muted);">0</span>';
+
+          html += `<tr>
+            <td>${label}</td>
+            <td>${s.captured} / ${s.total}${s.plantFailures ? ` <span style="color:#b45309;font-size:0.75rem;">(${s.plantFailures} not planted)</span>` : ''}</td>
+            ${cells}
+            <td>${shared}</td>
+          </tr>`;
+        });
+
+        html += `</tbody></table>
+          <p style="margin-top:0.75rem;font-size:0.78rem;color:var(--text-muted);">
+            <strong>u</strong> = user flag, <strong>r</strong> = root flag.
+            ✓ captured · ○ not yet · <span style="color:#b45309;">!</span> failed to plant.
+            "Shared?" counts submissions of a flag belonging to a different lane.
+            Click a student to see their submission history.
+          </p>
+          <div id="studentSubmissionsPanel" style="margin-top:1.25rem;"></div>`;
+
+        target.innerHTML = html;
+      } catch (e) {
+        target.innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
+      }
+    }
+
+    /**
+     * Per-student submission audit trail. This is where a "Shared?" count gets
+     * turned into something actionable — the instructor can see exactly which
+     * value was submitted, when, and from where.
+     */
+    async function showStudentSubmissions(userId) {
+      const panel = document.getElementById('studentSubmissionsPanel');
+      if (!panel) return;
+
+      const student = _courseFlagStudents.find(s => s.userId === userId);
+      const label = student ? (student.name || student.email || userId) : userId;
+
+      panel.innerHTML = '<p style="color: var(--text-secondary);">Loading submissions…</p>';
+
+      try {
+        const res = await fetch(`/api/flags/submissions/${encodeURIComponent(userId)}?limit=200`,
+          { headers: headers() });
+        if (!res.ok) {
+          const e = await res.json().catch(() => ({}));
+          throw new Error(e.error || res.statusText);
+        }
+        const { submissions } = await res.json();
+
+        if (!submissions || submissions.length === 0) {
+          panel.innerHTML = `<h4 style="margin:0 0 0.5rem;">${escHtml(label)}</h4>
+            <p style="color: var(--text-secondary);">No submissions yet.</p>`;
+          return;
+        }
+
+        const badge = (r) => {
+          const map = {
+            correct:      ['#16a34a', 'Correct'],
+            duplicate:    ['#6b7280', 'Already had it'],
+            // Shown to the instructor only. The student saw "Incorrect Flag".
+            foreign_lane: ['#ef4444', "Another lane's flag"],
+            incorrect:    ['#b45309', 'Incorrect']
+          };
+          const [color, text] = map[r] || ['#6b7280', r];
+          return `<span style="background:${color}20;color:${color};border-radius:4px;padding:2px 8px;font-size:0.75rem;font-weight:600;">${text}</span>`;
+        };
+
+        panel.innerHTML = `
+          <h4 style="margin:0 0 0.5rem;">${escHtml(label)} — ${submissions.length} submission${submissions.length === 1 ? '' : 's'}</h4>
+          <table class="students-table">
+            <thead><tr>
+              <th>When</th><th>Result</th><th>Machine</th><th>Flag</th><th>Value</th><th>IP</th>
+            </tr></thead>
+            <tbody>
+              ${submissions.map(s => `
+                <tr>
+                  <td style="white-space:nowrap;font-size:0.8rem;">${s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
+                  <td>${badge(s.result)}</td>
+                  <td style="font-size:0.8rem;">${escHtml(s.vm_name || '—')}</td>
+                  <td style="font-size:0.8rem;">${escHtml(s.flag_type || '—')}</td>
+                  <td><code style="font-size:0.7rem;">${escHtml(s.submitted_value)}</code></td>
+                  <td style="font-size:0.75rem;color:var(--text-muted);">${escHtml(s.ip_address || '—')}</td>
+                </tr>`).join('')}
+            </tbody>
+          </table>`;
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (e) {
+        panel.innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
     }
 

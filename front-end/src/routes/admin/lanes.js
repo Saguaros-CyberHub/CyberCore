@@ -17,6 +17,7 @@ const { query } = require('../../utils/db');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
+const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
 const goadDeploy = require('../../utils/goad-deploy');
 const tailscale = require('../../utils/tailscale');
@@ -358,6 +359,22 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             [JSON.stringify(networkInfo), deploymentId]
           );
           console.log(`[Deploy] Vuln scripts completed for lane ${lane.lane_id}`);
+        }
+
+        // Plant HTB-style user/root capture flags, after any vuln scripts so a
+        // script that recreates a user profile can't clobber the files.
+        // Best-effort — per-flag failures are recorded as plant_status='failed'.
+        try {
+          await plantFlagsForLane({
+            laneId: lane.lane_id,
+            userId: lane.user_id,
+            vms: deployedVMs,
+            specVms: spec.vms || [],
+            api: proxmoxAPI,
+            logTag: '[Deploy][Flags]'
+          });
+        } catch (flagErr) {
+          console.error(`[Deploy] Flag planting failed for lane ${lane.lane_id}: ${flagErr.message}`);
         }
 
         const primaryVm = deployedVMs[0];

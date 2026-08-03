@@ -110,6 +110,7 @@ const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 const guacSessionRoutes = require('./routes/guac-sessions');
 const workstationRoutes = require('./routes/workstations');
+const flagRoutes = require('./routes/flags');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -250,6 +251,21 @@ const webhookLimiter = rateLimit({
 });
 app.use('/api/webhook', webhookLimiter);
 
+// Flag submission is the one endpoint where brute force is the actual threat
+// model, so it gets its own bucket. Deliberately NOT the global `limiter`:
+// that one skips admins entirely and allows 5000/15min. Keyed on the JWT
+// subject so one student cannot exhaust another's budget.
+const flagSubmitLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  keyGenerator: (req) => {
+    const payload = peekJwt(req);
+    return payload?.sub ? `flag:user:${payload.sub}` : `flag:ip:${ipKey(req)}`;
+  },
+  message: { error: 'Too many flag submissions, slow down.' }
+});
+app.use('/api/flags/submit', flagSubmitLimiter);
+
 // ============================================================================
 // BODY PARSING & COOKIES
 // ============================================================================
@@ -344,6 +360,7 @@ app.use('/api/admin', labTemplateRoutes);
 app.use('/api/modules', moduleRoutes);
 app.use('/api/dashboard', guacSessionRoutes);
 app.use('/api/workstations', workstationRoutes);
+app.use('/api/flags', flagRoutes);
 
 // Unauthenticated, source-IP-gated. Called by lane gateway LXCs on first boot
 // to fetch one-shot bootstrap payload (Tailscale auth key etc). See route

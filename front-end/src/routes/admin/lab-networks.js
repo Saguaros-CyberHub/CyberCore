@@ -21,6 +21,7 @@ const { sanitizeZoneAbbrev, ensureSdnZoneAndVnets } = require('../../utils/lab-n
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
 const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils/script-executor');
+const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
 const goadDeploy = require('../../utils/goad-deploy');
 const {
@@ -412,6 +413,22 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
               await executeScriptsOnVM(vm.node, vm.vm_id, vm.name, scriptResult.rows, deploymentId);
             }
           }
+        }
+
+        // Plant HTB-style user/root capture flags, after the vuln scripts so a
+        // script that recreates a user profile can't clobber the files.
+        // Best-effort — per-flag failures are recorded as plant_status='failed'.
+        try {
+          await plantFlagsForLane({
+            laneId,
+            userId,
+            vms: deployedVMs,
+            specVms: spec.vms || [],
+            api: proxmoxAPI,
+            logTag: '[ChallengeNetwork][Flags]'
+          });
+        } catch (flagErr) {
+          console.error(`[ChallengeNetwork] Flag planting failed for lane ${laneId}: ${flagErr.message}`);
         }
 
         // Collect IPs from all VMs

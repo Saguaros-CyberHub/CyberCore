@@ -197,6 +197,26 @@ const CATALOG = [
     services_exposed: [],
     depends_on: ['init-setup'],
     estimated_runtime_sec: 15
+  },
+  // --- Composite labs (admin-select only) ---
+  // 'Composite Lab' is in AUTO_PICK_BLOCKED_CATEGORIES in vuln-script-resolver.js,
+  // so findScript() will never auto-select this into a synthesised lab. That is
+  // deliberate: the script needs the FieldOps app staged at -AppSource first
+  // (see challenges/copperridge-fieldops/BUILD.md) and would fail without it.
+  // Registered here so the catalogued content matches what is on disk, and so
+  // an instructor can re-plant a box a student has wrecked.
+  {
+    slug: 'copperridge-fieldops',
+    file: 'Provision-FieldOps.ps1',
+    name: 'Copper Ridge FieldOps (IIS + Windows PE)',
+    description: 'Builds the TUC-WEB01 target: IIS 10 + ASP.NET 4.x, the deliberately vulnerable FieldOps portal (directory-browsing config leak, case-sensitive upload filter bypass), and four working privesc routes off the app pool identity — weak service DACL, writable SYSTEM task, unquoted service path with a real writable insertion point, and a recoverable local-admin credential. Ends with a verify pass that refuses to pass a box whose vulns did not survive.',
+    category: 'Composite Lab',
+    script_type: 'vulnerable',
+    os_target: 'windows',
+    difficulty: 'intermediate',
+    services_exposed: ['80/HTTP'],
+    depends_on: ['init-setup'],
+    estimated_runtime_sec: 420
   }
 ];
 
