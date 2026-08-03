@@ -42,9 +42,26 @@ Set-ItemProperty `
     -Value 0
 
 # Set the firewall rules for Remote Desktop, ICMP echo requests (ping), and inbound OpenSSH connections to allow
-Enable-NetFirewallRule `
+#
+# -Profile Any -RemoteAddress Any is the whole point of this call, not decoration.
+# Merely enabling the group leaves Windows' shipped scoping in place, and the
+# Public-profile Remote Desktop rule is restricted to LocalSubnet. A clone of this
+# template boots onto a fresh lane VNet with a new MAC, so Windows classifies it as
+# an unidentified network -- Public -- and the lane gateway DNATs RDP in from
+# guacd's address, which is never in the guest's subnet. Result: RDP that answers
+# fine from a neighbour on the same subnet and is silently dropped for Guacamole.
+# Pinning the profile also means we do not have to chase the network category on
+# every clone; the Private category set in configure-winrm.ps1 applies to the build
+# VLAN's connection and does not survive Sysprep + redeployment.
+#
+# Deliberately NOT -ErrorAction SilentlyContinue: this group always exists on
+# Windows 11, and remote access is the entire purpose of the template. Failing the
+# build beats shipping an image whose RDP is unreachable from where it is used.
+Set-NetFirewallRule `
     -DisplayGroup "Remote Desktop" `
-    -ErrorAction SilentlyContinue
+    -Enabled True `
+    -Profile Any `
+    -RemoteAddress Any
 
 Set-NetFirewallRule `
     -Name "CoreNet-Diag-ICMP4-EchoRequest-In" `

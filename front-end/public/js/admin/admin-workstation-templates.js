@@ -23,9 +23,10 @@ function showWorkstationTemplateForm(tpl = null) {
   document.getElementById('wsTplStatus').value        = tpl?.status        || 'draft';
   document.getElementById('wsTplModule').value        = tpl?.module_key    || '';
   document.getElementById('wsTplNotes').value         = tpl?.notes         || '';
+  document.getElementById('wsTplCiUser').value        = tpl?.metadata?.cloud_init_user  || '';
   document.getElementById('wsTplRdpUser').value       = tpl?.metadata?.default_rdp_user || '';
   document.getElementById('wsTplRdpPass').value       = tpl?.metadata?.default_rdp_pass || '';
-  document.getElementById('wsTplRdpSecurity').value   = tpl?.metadata?.rdp_security     || 'tls';
+  document.getElementById('wsTplRdpSecurity').value   = tpl?.metadata?.rdp_security     || '';
   document.getElementById('wsTplIsActive').checked    = tpl ? tpl.is_active !== false : true;
   document.getElementById('wsTplStatus2').textContent = '';
 
@@ -52,9 +53,10 @@ async function saveWorkstationTemplate() {
   const statusEl = document.getElementById('wsTplStatus2');
 
   const providerTypeVal = document.getElementById('wsTplProviderType').value;
+  const ciUser      = document.getElementById('wsTplCiUser').value.trim();
   const rdpUser     = document.getElementById('wsTplRdpUser').value.trim();
   const rdpPass     = document.getElementById('wsTplRdpPass').value.trim();
-  const rdpSecurity = document.getElementById('wsTplRdpSecurity').value || 'tls';
+  const rdpSecurity = document.getElementById('wsTplRdpSecurity').value;
 
   const body = {
     template_key:  document.getElementById('wsTplKey').value.trim(),
@@ -69,10 +71,15 @@ async function saveWorkstationTemplate() {
     status:        document.getElementById('wsTplStatus').value,
     notes:         document.getElementById('wsTplNotes').value.trim() || null,
     is_active:     document.getElementById('wsTplIsActive').checked,
+    // Rebuilt from the form each save, so every metadata key the deployer reads
+    // must have a field above — an omitted one is silently dropped on edit.
     metadata: {
+      ...(ciUser     ? { cloud_init_user: ciUser }      : {}),
       ...(rdpUser    ? { default_rdp_user: rdpUser }    : {}),
       ...(rdpPass    ? { default_rdp_pass: rdpPass }    : {}),
-      rdp_security: rdpSecurity,
+      // Only when explicitly chosen. Writing a mode unconditionally is what
+      // pinned 'tls' onto every template that was ever saved through this form.
+      ...(rdpSecurity ? { rdp_security: rdpSecurity }   : {}),
     },
   };
 

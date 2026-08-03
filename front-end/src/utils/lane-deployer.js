@@ -190,10 +190,192 @@ function resolveNicModel(template) {
   return String(template.os_family || '').startsWith('windows') ? 'e1000' : 'virtio';
 }
 
+// ── hardware sizing ──────────────────────────────────────────────────────────
+
+/**
+ * Bounds for caller-supplied workstation sizing. These are sanity rails, not a
+ * quota: a value outside them is almost always a mistyped form (4 MiB of RAM,
+ * 512 cores), and Proxmox would accept it and hand the student a machine that
+ * cannot boot. Cluster headroom is a separate concern — deployment-guards.js
+ * still gates the deploy on node capacity.
+ */
+const RESOURCE_LIMITS = {
+  cores:     { min: 1,    max: 32     },  // vCPUs
+  memory_mb: { min: 1024, max: 131072 },  // MiB, as Proxmox counts it
+  disk_gb:   { min: 8,    max: 2048   },  // GiB, boot disk only
+};
+
+/**
+ * Validate a { cores, memory_mb, disk_gb } override.
+ *
+ * Every field is optional, and an omitted one means "leave the template's own
+ * sizing alone" — which is why unset fields are dropped rather than defaulted.
+ * Returns { resources, errors }; a route turns a non-empty `errors` into a 400
+ * instead of discovering the bad value partway through a class-wide deploy.
+ */
+function normalizeResourceSpec(input) {
+  const errors = [];
+  if (input == null) return { resources: null, errors };
+  if (typeof input !== 'object' || Array.isArray(input)) {
+    return { resources: null, errors: ['resources must be an object'] };
+  }
+
+  const resources = {};
+  for (const [field, { min, max }] of Object.entries(RESOURCE_LIMITS)) {
+    const raw = input[field];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const n = Number(raw);
+    if (!Number.isInteger(n)) { errors.push(`${field} must be a whole number`); continue; }
+    if (n < min || n > max) { errors.push(`${field} must be between ${min} and ${max}`); continue; }
+    resources[field] = n;
+  }
+  return { resources: Object.keys(resources).length ? resources : null, errors };
+}
+
+const DISK_KEY_RE = /^(scsi|virtio|sata|ide)(\d+)$/;
+const SIZE_UNIT_GB = { K: 1 / 1048576, M: 1 / 1024, G: 1, T: 1024 };
+
+// Controller preference when a template declares no boot order — the same
+// order Proxmox itself defaults to, so scsi0 wins over sata0 rather than
+// whatever sorts first alphabetically.
+const DISK_BUS_ORDER = ['scsi', 'virtio', 'sata', 'ide'];
+
+/** Size in GiB from a Proxmox volume string's `size=` field, or null. */
+function diskSizeGb(volume) {
+  const m = /(?:^|,)size=(\d+(?:\.\d+)?)([KMGT])?/.exec(String(volume || ''));
+  if (!m) return null;
+  return Number(m[1]) * (SIZE_UNIT_GB[m[2] || 'G'] || 1);
+}
+
+/**
+ * The volume to grow: the guest's root/boot disk. QEMU templates name it
+ * whatever the image was built with (scsi0, virtio0, sata0…), so trust the
+ * config's own `bootdisk`, then its boot order, then the first disk by
+ * controller preference. Never the cloud-init drive or a CD-ROM — those are a
+ * few MiB of ISO and the resize call on them just fails. LXC has exactly one:
+ * rootfs.
+ */
+function pickBootDisk(cfg, providerType) {
+  if (providerType === 'lxc') {
+    return cfg.rootfs ? { key: 'rootfs', currentGb: diskSizeGb(cfg.rootfs) } : null;
+  }
+  const isDisk = (k) => DISK_KEY_RE.test(k) && typeof cfg[k] === 'string'
+    && !/cloudinit/i.test(cfg[k]) && !/media=cdrom/i.test(cfg[k]);
+
+  let key = null;
+  if (cfg.bootdisk && isDisk(cfg.bootdisk)) key = cfg.bootdisk;
+  if (!key && typeof cfg.boot === 'string') {
+    key = (/order=([^,]+)/.exec(cfg.boot)?.[1] || '').split(';').find(isDisk) || null;
+  }
+  if (!key) {
+    const rank = (k) => {
+      const [, bus, idx] = DISK_KEY_RE.exec(k);
+      return DISK_BUS_ORDER.indexOf(bus) * 1000 + Number(idx);
+    };
+    key = Object.keys(cfg).filter(isDisk).sort((a, b) => rank(a) - rank(b))[0] || null;
+  }
+  return key ? { key, currentGb: diskSizeGb(cfg[key]) } : null;
+}
+
+/**
+ * Apply the caller's CPU / RAM / disk sizing to a freshly cloned workstation.
+ *
+ * MUST run before the guest's first boot. cloud-init's growpart extends the root
+ * filesystem only on the boot where it first sees the larger disk; resize a
+ * running guest and the block device grows while the filesystem stays put.
+ *
+ * Returns { applied, warnings }. Never throws: an under-sized workstation is
+ * still a workstation the student can connect to, and failing a whole class
+ * deploy over one config PUT is the worse outcome. The warnings ride back on
+ * cybercore_lane.config so the instructor sees what didn't take instead of
+ * silently getting the template's defaults.
+ */
+async function applyResources({ node, vmid, providerType, resources, laneName }) {
+  const applied = {};
+  const warnings = [];
+  if (!resources) return { applied, warnings };
+
+  let cfg = {};
+  try {
+    cfg = await proxmoxAPI('GET', `${vmApiBase(node, vmid, providerType)}/config`) || {};
+  } catch (err) {
+    warnings.push(`could not read VM config for sizing: ${err.message}`);
+    return { applied, warnings };
+  }
+
+  // CPU + RAM in one PUT.
+  const patch = {};
+  if (resources.cores) patch.cores = resources.cores;
+  if (resources.memory_mb) {
+    patch.memory = resources.memory_mb;
+    // Proxmox rejects a config whose balloon floor exceeds `memory`, so a
+    // template that ships ballooning (the Windows images here do) would fail the
+    // whole PUT when RAM is sized below that floor. Pull the floor down with it
+    // rather than setting balloon=0, which would disable ballooning outright and
+    // hand the host back none of the guest's idle RAM.
+    const balloon = Number(cfg.balloon);
+    if (Number.isFinite(balloon) && balloon > 0 && balloon > resources.memory_mb) {
+      patch.balloon = resources.memory_mb;
+    }
+  }
+  if (Object.keys(patch).length) {
+    try {
+      await proxmoxAPI('PUT', `${vmApiBase(node, vmid, providerType)}/config`, patch);
+      if (patch.cores) applied.cores = patch.cores;
+      if (patch.memory) applied.memory_mb = patch.memory;
+    } catch (err) {
+      warnings.push(`CPU/RAM sizing failed (${err.message}) — using the template's defaults`);
+      console.warn(`${LOG} ${laneName}: CPU/RAM sizing failed: ${err.message}`);
+    }
+  }
+
+  // Disk is a separate resize endpoint, and grow-only: Proxmox cannot shrink a
+  // volume, so a target at or below the image's own size is a no-op rather than
+  // an error — "smaller than the template" can only mean the template's size.
+  if (resources.disk_gb) {
+    const disk = pickBootDisk(cfg, providerType);
+    if (!disk) {
+      warnings.push('could not identify a boot disk to resize');
+    } else if (disk.currentGb != null && resources.disk_gb <= disk.currentGb) {
+      applied.disk_gb = disk.currentGb;
+      if (resources.disk_gb < disk.currentGb) {
+        warnings.push(
+          `disk stays at the template's ${disk.currentGb}G — ${resources.disk_gb}G would shrink it, which Proxmox cannot do`
+        );
+      }
+    } else {
+      try {
+        const upid = await proxmoxAPI('PUT', `${vmApiBase(node, vmid, providerType)}/resize`, {
+          disk: disk.key,
+          size: `${resources.disk_gb}G`,
+        });
+        if (typeof upid === 'string' && upid.startsWith('UPID')) await waitForTask(node, upid, 300000);
+        applied.disk_gb = resources.disk_gb;
+      } catch (err) {
+        warnings.push(`disk resize to ${resources.disk_gb}G failed (${err.message}) — using the template's disk`);
+        console.warn(`${LOG} ${laneName}: disk resize failed: ${err.message}`);
+      }
+    }
+  }
+
+  if (Object.keys(applied).length) {
+    console.log(
+      `${LOG} ${laneName}: sized to ` +
+      `${applied.cores ?? 'template'} core(s), ${applied.memory_mb ?? 'template'} MiB, ` +
+      `${applied.disk_gb ?? 'template'} GiB disk`
+    );
+  }
+  return { applied, warnings };
+}
+
 /**
  * Credentials the user will present to the workstation itself.
- *   - A template that bakes its own account declares it as
- *     metadata.default_rdp_user / default_rdp_pass; we use that verbatim.
+ *   - A template that bakes its own account AND its own password declares both
+ *     as metadata.default_rdp_user / default_rdp_pass; we use them verbatim and
+ *     inject nothing.
+ *   - A template whose cloud-init agent is pinned to one account declares it as
+ *     metadata.cloud_init_user: that account's name, with a fresh password per
+ *     lane.
  *   - Otherwise mint a per-user account and hand it to the guest through
  *     cloud-init (ciuser/cipassword), exactly like groups.js does for Kali.
  */
@@ -201,6 +383,19 @@ function resolveWorkstationCredentials(template, user) {
   const meta = template.metadata || {};
   if (meta.default_rdp_user) {
     return { username: meta.default_rdp_user, password: meta.default_rdp_pass || null, source: 'template' };
+  }
+  // Some images pin their cloud-init agent to a single account at BAKE time —
+  // cloudbase-init resolves the account from CONF.username, fixed when the image
+  // was built. Such an agent can only set that account's PASSWORD on first boot;
+  // it cannot create or rename one after templating. Name anyone else in ciuser
+  // and the generated password still lands on the baked account while Guacamole
+  // authenticates as a user that does not exist — which surfaces as a plain RDP
+  // login failure, not as anything that points at cloud-init.
+  //
+  // So: keep the image's account name, vary only the password. Per-lane isolation
+  // is unaffected — one VM, one account, one secret that only its owner is given.
+  if (meta.cloud_init_user) {
+    return { username: meta.cloud_init_user, password: generatePassword(), source: 'cloudinit' };
   }
   const local = String(user.email || 'student').split('@')[0].replace(/[^a-z0-9_-]/gi, '-').toLowerCase();
   return { username: local || 'student', password: generatePassword(), source: 'cloudinit' };
@@ -511,7 +706,7 @@ function readProgress(progressId) {
 async function insertLane(job) {
   const {
     user, template, vxlanId, vnet, targetNode, net, console: con,
-    moduleKey, subnetScheme, laneName, laneConfig,
+    moduleKey, subnetScheme, laneName, laneConfig, resources,
   } = job;
   const providerType = template.provider_type || 'qemu';
   const ins = await cybercoreQuery(
@@ -534,6 +729,9 @@ async function insertLane(job) {
       workstation_ip: `${net.lan.base3}.${WORKSTATION_OCTET}`,
       console_protocol: con.protocol,
       console_port: con.wanPort,
+      // What was asked for. `resources` (what was achieved) lands at the end of
+      // deployWorkstation; keeping both makes a partial apply legible.
+      ...(resources ? { requested_resources: resources } : {}),
     })]
   );
   job.laneId = ins.rows[0].lane_id;
@@ -607,7 +805,7 @@ function serializeLxcClone(node, vmid, fn) {
 async function deployWorkstation(job) {
   const {
     user, template, vxlanId, vnet, targetNode, wsSourceNode, cloneSem,
-    net, console: con, laneName, description, progress, guacParent,
+    net, console: con, laneName, description, progress, guacParent, resources,
   } = job;
   const workstationVmid = WORKSTATION_VMID_OFFSET + vxlanId;
   const gatewayVmid = GATEWAY_VMID_OFFSET + vxlanId;
@@ -661,6 +859,12 @@ async function deployWorkstation(job) {
       ? `name=eth0,bridge=${vnet.vnet},hwaddr=${mac},firewall=0,ip=dhcp`
       : `${resolveNicModel(template)},bridge=${vnet.vnet},macaddr=${mac},firewall=0`;
     await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, providerType)}/config`, { net0: nicVal });
+
+    // 3b. Apply the caller's CPU / RAM / disk sizing, before the guest's first
+    //     boot so cloud-init's growpart sees the resized disk (see applyResources).
+    const sizing = await applyResources({
+      node: targetNode, vmid: workstationVmid, providerType, resources, laneName,
+    });
 
     // 4. Hand the user their login through cloud-init when the template carries a
     //    cloud-init drive (Linux cloud images, Windows + cloudbase-init).
@@ -759,6 +963,11 @@ async function deployWorkstation(job) {
         guac_connection_id: guacConnId,
         guac_user: user.email,
         workspace_resource_id: resourceId,
+        // What the machine was ACTUALLY sized to, plus anything the caller asked
+        // for that Proxmox refused — an instructor who requested 16 GiB needs to
+        // see that it landed at the template's 8, not find out from a student.
+        ...(Object.keys(sizing.applied).length ? { resources: sizing.applied } : {}),
+        ...(sizing.warnings.length ? { resource_warnings: sizing.warnings } : {}),
         ...(creds.username ? { workstation_user: creds.username } : {}),
         ...(creds.password ? { workstation_pass: creds.password } : {}),
         credentials_source: creds.source,
@@ -873,6 +1082,10 @@ async function cleanupTempGatewayTemplates(byNode, originVmid) {
  * @param {string}   [a.subnetScheme='v2']
  * @param {string}   [a.namePrefix='lane']  lane name = `${namePrefix}-${vxlanId}`
  * @param {object}   [a.laneConfig={}]      extra keys merged into cybercore_lane.config
+ * @param {object}   [a.resources=null]     { cores, memory_mb, disk_gb } applied to each
+ *   CLONE before its first boot — the catalog template itself is never modified.
+ *   Omitted fields keep the template's own sizing. Validate with
+ *   normalizeResourceSpec() first; out-of-range values are not re-checked here.
  * @param {string}   [a.description='']     extra lines on the Proxmox object descriptions
  * @param {string}   [a.guacParent]         Guacamole connection-group identifier
  * @param {string}   [a.progressId]         key into global._batchDeployProgress
@@ -882,7 +1095,7 @@ async function cleanupTempGatewayTemplates(byNode, originVmid) {
 async function deployLanes({
   users, template, vxlanBlock,
   moduleKey = 'crucible', subnetScheme = 'v2', namePrefix = 'lane',
-  laneConfig = {}, description = '', guacParent = null,
+  laneConfig = {}, resources = null, description = '', guacParent = null,
   progressId = null, progressLabel = '',
 }) {
   if (!Array.isArray(users) || users.length === 0) return { provisioned: [], failed: [], progressId };
@@ -911,7 +1124,8 @@ async function deployLanes({
   console.log(
     `${LOG} Deploying ${users.length} lane(s) from ${template.os_name || template.template_key} ` +
     `(${template.provider_type || 'qemu'} ${template.template_vmid} @ ${wsSourceNode}, ` +
-    `${con.protocol}, nic ${resolveNicModel(template)})`
+    `${con.protocol}, nic ${resolveNicModel(template)}` +
+    (resources ? `, sized ${JSON.stringify(resources)}` : '') + `)`
   );
 
   // Build a job per user, skipping any whose VNet is missing.
@@ -926,7 +1140,7 @@ async function deployLanes({
     }
     jobs.push({
       user: users[i], template, vxlanId, vnet, wsSourceNode, console: con,
-      moduleKey, subnetScheme, laneConfig, description, guacParent, progress,
+      moduleKey, subnetScheme, laneConfig, resources, description, guacParent, progress,
       laneName: `${namePrefix}-${vxlanId}`,
       net: resolveLaneNetworking(subnetScheme, moduleKey, vxlanId),
     });
@@ -1329,9 +1543,11 @@ module.exports = {
   WORKSTATION_VMID_OFFSET,
   WORKSTATION_OCTET,
   CONSOLE_PROTOCOLS,
+  RESOURCE_LIMITS,
   allocateVxlanIds,
   resolveConsole,
   resolveNicModel,
+  normalizeResourceSpec,
   deployLanes,
   teardownLanes,
   readProgress,

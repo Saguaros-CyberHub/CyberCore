@@ -94,8 +94,12 @@ async function resolveCourseLab(challengeId) {
  * @param {string} [args.courseName]
  * @param {string} [args.courseCode] cle_course.code — names the lanes
  *   `cle-<code>-<vxlanId>`; omitted/blank falls back to `cle-<vxlanId>`.
+ * @param {object} [args.resources] { cores, memory_mb, disk_gb } the instructor
+ *   chose for this deploy, applied to each cloned workstation before its first
+ *   boot. Pre-validated by the route with laneDeployer.normalizeResourceSpec;
+ *   omitted fields keep the catalog template's own sizing.
  */
-async function provisionLanes({ courseId, challenge, template, students, courseName, courseCode }) {
+async function provisionLanes({ courseId, challenge, template, students, courseName, courseCode, resources }) {
   if (!students.length) return { provisioned: [], failed: [], progressId: null };
 
   const vxlanBlock = challenge.vxlan_block || challenge.spec?.vxlan_block;
@@ -110,6 +114,7 @@ async function provisionLanes({ courseId, challenge, template, students, courseN
     moduleKey: MODULE_KEY,
     subnetScheme: SUBNET_SCHEME,
     namePrefix: laneNamePrefix(courseCode),
+    resources: resources || null,
     // config.course_id is how every CLE read path finds these lanes again —
     // listing, counts, teardown. It must be on every lane.
     laneConfig: {

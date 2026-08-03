@@ -71,6 +71,10 @@
     .form-group input, .form-group textarea, .form-group select { padding: 0.6rem; border: 1px solid #e5e7eb; border-radius: 6px; font: inherit; }
     .form-group input:focus, .form-group textarea:focus, .form-group select:focus { outline: none; border-color: var(--primary, #0c234b); box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.1); }
     .form-group textarea { resize: vertical; min-height: 100px; }
+    /* Per-deploy hardware sizing. Sub-labels stay light so the group's own
+       label ("Workstation Resources") still reads as the heading. */
+    .resource-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6rem; }
+    .resource-grid label { display: flex; flex-direction: column; gap: 0.25rem; font-weight: 500; font-size: 0.78rem; color: var(--text-secondary, #4b5563); margin-bottom: 0; }
     .form-buttons { display: flex; gap: 0.75rem; justify-content: flex-end; margin-top: 1rem; }
     .btn { padding: 0.6rem 1.2rem; border-radius: 6px; font-weight: 600; font-size: 0.9rem; cursor: pointer; border: none; }
     .btn-primary { background: var(--primary, #0c234b); color: white; }
@@ -374,6 +378,24 @@
           </select>
         </div>
         <div id="provisionVMTemplateInfo" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: -0.4rem 0 0.4rem;"></div>
+        <!-- Hardware sizing for THIS deploy. Applied to each student's clone
+             before it first boots; the catalog template is never modified, so
+             another course can deploy the same image at a different size. -->
+        <div class="form-group">
+          <label>Workstation Resources</label>
+          <div class="resource-grid">
+            <label>CPU cores
+              <input type="number" id="provisionCores" step="1" placeholder="template default">
+            </label>
+            <label>Memory (GB)
+              <input type="number" id="provisionMemoryGb" step="0.5" placeholder="template default">
+            </label>
+            <label>Disk (GB)
+              <input type="number" id="provisionDiskGb" step="1" placeholder="template default">
+            </label>
+          </div>
+          <div id="provisionResourceNote" style="font-size: 0.75rem; color: var(--text-muted, #6b7280); margin-top: 0.4rem;"></div>
+        </div>
         <div class="form-group">
           <label>Student(s)</label>
           <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
@@ -830,9 +852,18 @@
 
             const errTitle = v.error ? ` title="${escHtml(v.error)}"` : '';
 
+            // What the machine was actually sized to, plus a marker when Proxmox
+            // refused part of the request (most often a disk target below the
+            // template's own image, which cannot be shrunk).
+            const sizeCell = v.resources
+              ? `<br><span style="font-size:0.7rem;color:var(--text-muted);" title="${escHtml((v.resource_warnings || []).join('; '))}">`
+                + `${escHtml(describeResources(v.resources))}`
+                + `${(v.resource_warnings || []).length ? ' <span style="color:#d69e2e;">&#9888;</span>' : ''}</span>`
+              : '';
+
             html += `<tr${errTitle}>
               <td>${studentLabel}</td>
-              <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}</td>
+              <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}${sizeCell}</td>
               <td style="font-size:0.85rem;">${laneLabel}</td>
               <td>${connCell}</td>
               <td>${credCell}</td>
@@ -1243,6 +1274,14 @@
 
     // Templates keyed by id, so the picker can describe what's about to deploy.
     let _provisionTemplates = {};
+    // Sizing bounds, served by /templates/vm from the same constants the
+    // provision endpoint validates against. Fallback only matters if that
+    // request somehow returns without them.
+    let _provisionLimits = {
+      cores:     { min: 1,    max: 32 },
+      memory_mb: { min: 1024, max: 131072 },
+      disk_gb:   { min: 8,    max: 2048 },
+    };
 
     async function loadVMTemplates() {
       try {
@@ -1250,6 +1289,8 @@
         const templates = data.templates || [];
         _provisionTemplates = {};
         templates.forEach(t => { _provisionTemplates[String(t.template_id)] = t; });
+        if (data.resource_limits) _provisionLimits = data.resource_limits;
+        applyResourceLimits();
 
         const select = document.getElementById('provisionVMTemplate');
         select.innerHTML = templates.length
@@ -1264,12 +1305,93 @@
           return;
         }
 
-        // Re-evaluate eligibility AND the description whenever the template changes
-        select.onchange = () => { updateProvisionEligibility(); renderTemplateInfo(); };
+        // Re-evaluate eligibility, the description AND the sizing defaults
+        // whenever the template changes — each image ships its own sizing.
+        select.onchange = () => {
+          updateProvisionEligibility();
+          renderTemplateInfo();
+          seedResourceInputs();
+        };
         renderTemplateInfo();
+        seedResourceInputs();
       } catch (e) {
         toast('Error loading templates: ' + e.message, true);
       }
+    }
+
+    // Field metadata for the sizing inputs. `scale` converts the API's unit
+    // (cores, MiB, GiB) to the unit the input shows, so validation messages read
+    // in the same units the instructor typed in.
+    const RESOURCE_FIELDS = {
+      cores:     { input: 'provisionCores',     label: 'CPU cores', scale: 1,        unit: '' },
+      memory_mb: { input: 'provisionMemoryGb',  label: 'Memory',    scale: 1 / 1024, unit: ' GB' },
+      disk_gb:   { input: 'provisionDiskGb',    label: 'Disk',      scale: 1,        unit: ' GB' },
+    };
+
+    /** Push the server's bounds onto the number inputs so the browser enforces them too. */
+    function applyResourceLimits() {
+      for (const [field, meta] of Object.entries(RESOURCE_FIELDS)) {
+        const el = document.getElementById(meta.input);
+        const bounds = _provisionLimits[field];
+        if (!el || !bounds) continue;
+        el.min = String(bounds.min * meta.scale);
+        el.max = String(bounds.max * meta.scale);
+      }
+    }
+
+    /**
+     * Pre-fill the sizing inputs with the selected template's own CPU/RAM/disk,
+     * so the form always shows what the student would actually get. A template
+     * Proxmox couldn't be read for leaves the inputs blank, which the provision
+     * endpoint treats as "keep the template's sizing".
+     */
+    function seedResourceInputs() {
+      const t = _provisionTemplates[document.getElementById('provisionVMTemplate').value];
+      const defaults = t?.default_resources || {};
+      for (const [field, meta] of Object.entries(RESOURCE_FIELDS)) {
+        const el = document.getElementById(meta.input);
+        if (!el) continue;
+        const val = defaults[field];
+        el.value = (val == null) ? '' : String(Math.round(val * meta.scale * 100) / 100);
+      }
+      const note = document.getElementById('provisionResourceNote');
+      if (!note) return;
+      note.textContent = Object.keys(defaults).length
+        ? 'Pre-filled from the template — adjust to change what every selected student gets. '
+          + 'The template itself is not modified. Disk can only be grown; a smaller value keeps the template\'s disk.'
+        : 'Template sizing is unavailable right now. Leave blank to deploy at the template\'s own CPU, RAM and disk.';
+    }
+
+    /**
+     * The { cores, memory_mb, disk_gb } to send, or null to deploy the template
+     * unchanged. Blank fields are omitted rather than zeroed — the backend reads
+     * a missing field as "leave this one alone". Throws so the caller can show
+     * the message instead of firing a request the API will reject.
+     */
+    function readRequestedResources() {
+      const out = {};
+      for (const [field, meta] of Object.entries(RESOURCE_FIELDS)) {
+        const raw = (document.getElementById(meta.input)?.value || '').trim();
+        if (raw === '') continue;
+        const n = Math.round(Number(raw) / meta.scale);
+        const bounds = _provisionLimits[field];
+        if (!Number.isFinite(n) || (bounds && (n < bounds.min || n > bounds.max))) {
+          const lo = bounds.min * meta.scale, hi = bounds.max * meta.scale;
+          throw new Error(`${meta.label} must be between ${lo}${meta.unit} and ${hi}${meta.unit}`);
+        }
+        out[field] = n;
+      }
+      return Object.keys(out).length ? out : null;
+    }
+
+    /** "6 cores &middot; 8 GB RAM &middot; 80 GB disk" for the whole-class preview. */
+    function describeResources(r) {
+      if (!r) return 'template defaults';
+      return [
+        r.cores ? `${r.cores} core${r.cores === 1 ? '' : 's'}` : null,
+        r.memory_mb ? `${Math.round(r.memory_mb / 102.4) / 10} GB RAM` : null,
+        r.disk_gb ? `${r.disk_gb} GB disk` : null,
+      ].filter(Boolean).join(' · ');
     }
 
     /** Show OS/type/protocol and whether the student gets credentials automatically. */
@@ -1357,10 +1479,11 @@
         }
 
         // Each student gets their own isolated lane (gateway + workstation),
-        // drawn from the course's reserved VXLAN block.
+        // drawn from the course's reserved VXLAN block, sized per this form.
         const res = await api('POST', `/courses/${currentCourseId}/vms/provision`, {
           template_id: templateId,
           student_ids: selectedStudents,
+          resources: readRequestedResources(),
         });
 
         toast(res.message || 'VM provisioning started');
@@ -1383,12 +1506,17 @@
       try {
         const templateId = document.getElementById('provisionVMTemplate').value;
         if (!templateId) { toast('Select a template first', true); return; }
+        // Read before the request so a bad number surfaces immediately, and
+        // reuse the SAME object for the confirm call — re-reading the form
+        // between the preview and the confirm would let the two disagree.
+        const resources = readRequestedResources();
 
         btn.disabled = true;
         btn.textContent = 'Checking capacity...';
 
         const res = await api('POST', `/courses/${currentCourseId}/vms/provision-all`, {
           template_id: templateId,
+          resources,
         });
 
         // Already deploying (pre-flight unavailable) — nothing more to confirm.
@@ -1413,6 +1541,12 @@
               cluster currently at ${s.current_vms || 0} VMs &middot;
               ${s.currently_deploying || 0} deploying now
             </div>
+            <div style="font-size:0.78rem; color:var(--text-secondary); margin-top:0.2rem;">
+              Each workstation: ${escHtml(describeResources(res.resources))}
+              ${res.resources?.memory_mb
+                ? ` &middot; ${Math.round(res.student_count * res.resources.memory_mb / 1024)} GB RAM total`
+                : ''}
+            </div>
             ${(res.warnings || []).map(w => `<div style="font-size:0.75rem;color:#b7791f;margin-top:0.3rem;">&#9888; ${escHtml(w)}</div>`).join('')}
             ${(res.errors || []).map(e => `<div style="font-size:0.75rem;color:#e53e3e;margin-top:0.3rem;">&#10007; ${escHtml(e)}</div>`).join('')}
             ${(res.skipped || []).length ? `<div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.3rem;">${res.skipped.length} student(s) skipped (already deployed or ineligible)</div>` : ''}
@@ -1432,7 +1566,7 @@
           btn.textContent = 'Deploying...';
           try {
             const done = await api('POST', `/courses/${currentCourseId}/vms/provision-all`, {
-              template_id: templateId, confirm: true,
+              template_id: templateId, confirm: true, resources,
             });
             toast(done.message || 'Provisioning started');
             closeModal('provisionVMModal');
@@ -1517,7 +1651,7 @@
           return;
         }
 
-        await api('POST', `/courses/${currentCourseId}/deploy-labs`, {
+        await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
           template_id: templateId,
           student_ids: selectedStudents,
           learning_objective: objective

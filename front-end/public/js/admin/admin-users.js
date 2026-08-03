@@ -123,8 +123,10 @@ async function loadMergedUsers() {
               <td>${u.guac_exists ? (u.guac_disabled ? '<span class="badge badge-red">Disabled</span>' : '<span class="badge badge-green">Active</span>') : '<span style="color: var(--gray-400);">No account</span>'}</td>
               <td style="font-size: 0.8rem;">${u.last_login ? new Date(u.last_login).toLocaleString() : (u.guac_last_active ? new Date(u.guac_last_active).toLocaleString() : '<span style="color: var(--gray-400);">Never</span>')}</td>
               <td style="display: flex; gap: 0.3rem; flex-wrap: wrap;">
+                ${!u.is_guac_only ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="showEditUserModal('${u.id}')">Edit</button>` : ''}
                 ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="viewPermissions('${escHtml(u.email)}')">Perms</button>` : ''}
-                ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="resetPassword('${escHtml(u.email)}')">Reset PW</button>` : ''}
+                ${!u.is_guac_only ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="showResetLoginPwModal('${u.id}', '${escHtml(u.email)}')">Reset Login PW</button>` : ''}
+                ${u.guac_exists ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="resetPassword('${escHtml(u.email)}')">Reset Guac PW</button>` : ''}
                 ${u.guac_exists && !isProtected ? `<button class="btn btn-sm" style="font-size: 0.7rem; padding: 0.15rem 0.4rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="deleteUser('${escHtml(u.email)}')">Delete Guac</button>` : ''}
                 ${(!u.is_guac_only && u.mfa_enabled) ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="resetMfa('${u.id}', '${escHtml(u.email)}')">Reset MFA</button>` : ''}
               </td>
@@ -208,6 +210,169 @@ async function createCybercoreUser() {
     statusEl.innerHTML = `<p style="color: #e53e3e; margin-top: 0.5rem;">Error: ${e.message}</p>`;
     Toast.error('Error', e.message);
   }
+}
+
+// ============================================================================
+// USER EDITING
+// ============================================================================
+
+// The account currently open in the edit modal, so the save can send only the
+// fields that actually changed rather than rewriting every column.
+let _editingUser = null;
+
+async function showEditUserModal(userId) {
+  const statusEl = document.getElementById('euStatus');
+  const ownershipEl = document.getElementById('euOwnership');
+  const emailEl = document.getElementById('euEmail');
+  const emailNote = document.getElementById('euEmailNote');
+
+  _editingUser = null;
+  statusEl.innerHTML = '';
+  ownershipEl.textContent = 'Loading…';
+  emailNote.textContent = '';
+  document.getElementById('editUserModal').classList.add('active');
+
+  try {
+    const { user, ownership, email_locked_reason } = await api('GET', `/users/${encodeURIComponent(userId)}`);
+    _editingUser = user;
+
+    document.getElementById('euUsername').value     = user.username || '';
+    emailEl.value                                   = user.email || '';
+    document.getElementById('euFirstName').value    = user.first_name || '';
+    document.getElementById('euLastName').value     = user.last_name || '';
+    document.getElementById('euOrganization').value = user.organization || '';
+    document.getElementById('euRole').value         = user.role;
+    document.getElementById('euActive').checked     = !!user.is_active;
+
+    ownershipEl.innerHTML =
+      `<code style="font-size: 0.78rem;">${escHtml(user.email)}</code> — `
+      + `${ownership.lanes} lane(s), ${ownership.allocations} VM allocation(s). `
+      + 'Ownership follows the account, not these fields, so everything below is safe to change'
+      + (email_locked_reason ? ' except the email.' : '.');
+
+    // Locked rather than hidden: the admin needs to see the current address and
+    // why they can't edit it, not wonder where the field went.
+    emailEl.disabled = !!email_locked_reason;
+    emailEl.style.opacity = email_locked_reason ? '0.6' : '';
+    emailNote.innerHTML = email_locked_reason
+      ? `<span style="color: #b7791f;">&#9888; ${escHtml(email_locked_reason)}</span>`
+      : 'Also the Guacamole account name — changing it leaves the old Guacamole account behind.';
+  } catch (e) {
+    ownershipEl.textContent = '';
+    statusEl.innerHTML = `<p style="color: #e53e3e; margin-top: 0.5rem;">Error: ${escHtml(e.message)}</p>`;
+  }
+}
+
+async function saveUserEdits() {
+  if (!_editingUser) return;
+  const statusEl = document.getElementById('euStatus');
+  const btn = document.getElementById('euSaveBtn');
+
+  // Send only what moved. A partial PATCH keeps two admins editing different
+  // fields of the same account from overwriting each other.
+  const form = {
+    username:     document.getElementById('euUsername').value.trim(),
+    email:        document.getElementById('euEmail').value.trim(),
+    first_name:   document.getElementById('euFirstName').value.trim(),
+    last_name:    document.getElementById('euLastName').value.trim(),
+    organization: document.getElementById('euOrganization').value.trim(),
+    role:         document.getElementById('euRole').value,
+    active:       document.getElementById('euActive').checked,
+  };
+
+  const body = {};
+  for (const [field, value] of Object.entries(form)) {
+    const before = field === 'active' ? !!_editingUser.is_active : (_editingUser[field] || '');
+    if (value !== before) body[field] = value;
+  }
+
+  if (Object.keys(body).length === 0) {
+    statusEl.innerHTML = '<p style="color: var(--gray-500); margin-top: 0.5rem;">No changes to save.</p>';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const result = await api('PATCH', `/users/${encodeURIComponent(_editingUser.id)}`, body);
+    Toast.success('User Updated', result.message || 'Changes saved');
+    (result.warnings || []).forEach(w => Toast.warning('Heads up', w));
+    closeModal('editUserModal');
+    loadMergedUsers();
+  } catch (e) {
+    statusEl.innerHTML = `<p style="color: #e53e3e; margin-top: 0.5rem;">${escHtml(e.message)}</p>`;
+    Toast.error('Error', e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Changes';
+  }
+}
+
+// ============================================================================
+// LOGIN PASSWORD RESET
+// ----------------------------------------------------------------------------
+// The CyberHub sign-in password. Distinct from resetPassword() further down,
+// which resets the user's Guacamole credential.
+// ============================================================================
+
+let _resetPwUser = null;
+
+function showResetLoginPwModal(userId, email) {
+  _resetPwUser = { id: userId, email };
+  document.getElementById('rpUserEmail').textContent = email;
+  document.getElementById('rpPassword').value = '';
+  document.getElementById('rpStatus').innerHTML = '';
+  document.getElementById('rpSaveBtn').style.display = '';
+  document.getElementById('resetLoginPwModal').classList.add('active');
+}
+
+async function submitLoginPasswordReset() {
+  if (!_resetPwUser) return;
+  const statusEl = document.getElementById('rpStatus');
+  const btn = document.getElementById('rpSaveBtn');
+  const password = document.getElementById('rpPassword').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Resetting…';
+  try {
+    const result = await api('POST', `/users/${encodeURIComponent(_resetPwUser.id)}/password`,
+      password ? { password } : {});
+
+    Toast.success('Password Reset', result.message || 'Password updated');
+
+    // A generated password is returned exactly once — keep the modal open and
+    // show it, rather than closing over the only copy that will ever exist.
+    if (result.generated_password) {
+      statusEl.innerHTML = `
+        <div style="margin-top: 0.75rem; padding: 0.7rem; border: 1px solid #d69e2e; background: rgba(214,158,46,0.1); border-radius: 6px;">
+          <div style="font-size: 0.8rem; font-weight: 600; margin-bottom: 0.35rem;">Generated password — shown once</div>
+          <code id="rpGenerated" style="font-size: 0.95rem;">${escHtml(result.generated_password)}</code>
+          <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; margin-left: 0.5rem;" onclick="copyGeneratedPassword()">Copy</button>
+        </div>`;
+      btn.style.display = 'none';
+    } else {
+      statusEl.innerHTML = '<p style="color: #38a169; margin-top: 0.5rem;">Password updated.</p>';
+    }
+
+    // The reset does not end sessions the user already holds — see the note in
+    // the API. Surfaced here so an admin resetting a compromised account knows
+    // the attacker is not logged out by this alone.
+    (result.warnings || []).forEach(w => Toast.warning('Heads up', w));
+  } catch (e) {
+    statusEl.innerHTML = `<p style="color: #e53e3e; margin-top: 0.5rem;">${escHtml(e.message)}</p>`;
+    Toast.error('Error', e.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Reset Password';
+  }
+}
+
+function copyGeneratedPassword() {
+  const el = document.getElementById('rpGenerated');
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent)
+    .then(() => Toast.success('Copied', 'Password copied to clipboard'))
+    .catch(() => Toast.error('Error', 'Could not copy to clipboard'));
 }
 
 // ============================================================================
@@ -350,12 +515,14 @@ async function deleteUser(username) {
   } catch (e) { Toast.error('Error', e.message); }
 }
 
+// Resets the GUACAMOLE credential, not the CyberHub login — see
+// showResetLoginPwModal() for that one.
 async function resetPassword(username) {
-  const newPw = prompt(`Enter new password for "${username}":`);
+  const newPw = prompt(`Enter new Guacamole password for "${username}":`);
   if (!newPw) return;
   try {
     await api('PUT', `/guac/users/${encodeURIComponent(username)}/password`, { password: newPw });
-    Toast.success('Password Reset', `Password updated for "${username}"`);
+    Toast.success('Guacamole Password Reset', `Guacamole password updated for "${username}"`);
   } catch (e) { Toast.error('Error', e.message); }
 }
 

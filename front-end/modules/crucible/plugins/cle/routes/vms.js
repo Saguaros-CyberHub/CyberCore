@@ -18,6 +18,7 @@ const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { getGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
+const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
 const laneProvision = require('../utils/lane-provision');
 const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
 
@@ -132,9 +133,28 @@ async function resolveTargetStudents(courseId, requestedIds) {
   return { students, skipped };
 }
 
+/**
+ * Validate the instructor's optional hardware sizing for this deploy. Returns
+ * { cores, memory_mb, disk_gb } with only the fields they actually set — the
+ * rest keep the catalog template's own sizing. Throws a 400-shaped error so a
+ * mistyped core count is rejected up front rather than after N lanes exist.
+ *
+ * Sizing is applied to each CLONE before its first boot; the catalog template is
+ * never modified, so two courses can deploy the same image at different sizes.
+ */
+function parseRequestedResources(body) {
+  const { resources, errors } = normalizeResourceSpec(body.resources);
+  if (errors.length) {
+    const err = new Error(errors.join('; '));
+    err.status = 400;
+    throw err;
+  }
+  return resources;
+}
+
 /** Kick off the background deploy. Shared by /provision and /provision-all. */
-function startProvision({ courseId, courseName, courseCode, challenge, template, students }) {
-  laneProvision.provisionLanes({ courseId, courseName, courseCode, challenge, template, students })
+function startProvision({ courseId, courseName, courseCode, challenge, template, students, resources }) {
+  laneProvision.provisionLanes({ courseId, courseName, courseCode, challenge, template, students, resources })
     .then(result => console.log(`[CLE] Provision finished for course ${courseId}:`, JSON.stringify({
       provisioned: result.provisioned.length, failed: result.failed.length,
     })))
@@ -207,6 +227,11 @@ router.get('/', instructorOnly, async (req, res) => {
         console_endpoint: cfg.console_host ? `${cfg.console_host}:${cfg.console_port}` : null,
         workstation_user: cfg.workstation_user || null,
         workstation_pass: cfg.workstation_pass || null,
+        // How the machine was actually sized. While it's still deploying only
+        // the request exists; `resource_warnings` says what Proxmox refused
+        // (e.g. a disk target smaller than the template's image).
+        resources:          cfg.resources || cfg.requested_resources || null,
+        resource_warnings:  cfg.resource_warnings || null,
         error:            cfg.error || null,
         created_at:     row.created_at,
       };
@@ -237,6 +262,7 @@ router.post('/provision', instructorOnly, async (req, res) => {
     const course = await getManagedCourse(courseId, req.user);
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
+    const resources = parseRequestedResources(req.body);
     const template = await loadWorkstationTemplate(template_id);
     const challenge = await loadCourseLab(course);
     const { students, skipped } = await resolveTargetStudents(courseId, student_ids);
@@ -250,10 +276,11 @@ router.post('/provision', instructorOnly, async (req, res) => {
       message: `Provisioning started for ${students.length} student(s)`,
       count: students.length,
       progress_url: `/api/cle/courses/${courseId}/vms/provision-progress`,
+      ...(resources ? { resources } : {}),
       ...(skipped.length ? { skipped } : {}),
     });
 
-    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students });
+    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students, resources });
   } catch (error) {
     console.error('[CLE] Provision VMs error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
@@ -277,6 +304,7 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
     const course = await getManagedCourse(courseId, req.user);
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
+    const resources = parseRequestedResources(req.body);
     const template = await loadWorkstationTemplate(template_id);
     const challenge = await loadCourseLab(course);
     const { students, skipped } = await resolveTargetStudents(courseId, null);
@@ -302,6 +330,10 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
           preview: true,
           student_count: students.length,
           template: template.os_name,
+          // Echoed so the confirm step can show what the cohort will cost at the
+          // chosen size. buildDeployPreview gates on node headroom, not per-VM
+          // sizing, so this is informational only.
+          ...(resources ? { resources } : {}),
           ...(skipped.length ? { skipped } : {}),
           ...preview,
         });
@@ -317,10 +349,11 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
       message: `Provisioning started for ${students.length} student(s)`,
       count: students.length,
       progress_url: `/api/cle/courses/${courseId}/vms/provision-progress`,
+      ...(resources ? { resources } : {}),
       ...(skipped.length ? { skipped } : {}),
     });
 
-    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students });
+    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students, resources });
   } catch (error) {
     console.error('[CLE] Provision-all error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
