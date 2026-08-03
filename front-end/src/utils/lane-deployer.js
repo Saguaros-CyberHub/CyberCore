@@ -370,8 +370,12 @@ async function applyResources({ node, vmid, providerType, resources, laneName })
 
 /**
  * Credentials the user will present to the workstation itself.
- *   - A template that bakes its own account declares it as
- *     metadata.default_rdp_user / default_rdp_pass; we use that verbatim.
+ *   - A template that bakes its own account AND its own password declares both
+ *     as metadata.default_rdp_user / default_rdp_pass; we use them verbatim and
+ *     inject nothing.
+ *   - A template whose cloud-init agent is pinned to one account declares it as
+ *     metadata.cloud_init_user: that account's name, with a fresh password per
+ *     lane.
  *   - Otherwise mint a per-user account and hand it to the guest through
  *     cloud-init (ciuser/cipassword), exactly like groups.js does for Kali.
  */
@@ -379,6 +383,19 @@ function resolveWorkstationCredentials(template, user) {
   const meta = template.metadata || {};
   if (meta.default_rdp_user) {
     return { username: meta.default_rdp_user, password: meta.default_rdp_pass || null, source: 'template' };
+  }
+  // Some images pin their cloud-init agent to a single account at BAKE time —
+  // cloudbase-init resolves the account from CONF.username, fixed when the image
+  // was built. Such an agent can only set that account's PASSWORD on first boot;
+  // it cannot create or rename one after templating. Name anyone else in ciuser
+  // and the generated password still lands on the baked account while Guacamole
+  // authenticates as a user that does not exist — which surfaces as a plain RDP
+  // login failure, not as anything that points at cloud-init.
+  //
+  // So: keep the image's account name, vary only the password. Per-lane isolation
+  // is unaffected — one VM, one account, one secret that only its owner is given.
+  if (meta.cloud_init_user) {
+    return { username: meta.cloud_init_user, password: generatePassword(), source: 'cloudinit' };
   }
   const local = String(user.email || 'student').split('@')[0].replace(/[^a-z0-9_-]/gi, '-').toLowerCase();
   return { username: local || 'student', password: generatePassword(), source: 'cloudinit' };

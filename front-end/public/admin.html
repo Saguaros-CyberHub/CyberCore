@@ -740,6 +740,16 @@
               </div>
             </div>
 
+            <div class="form-group">
+              <label>Cloud-Init Account <span style="color:var(--gray-400);font-size:0.8rem;">(optional — for images whose cloud-init agent is pinned to one account)</span></label>
+              <input type="text" id="wsTplCiUser" placeholder="e.g., cactus-user" autocomplete="off">
+              <div style="font-size:0.78rem; color:var(--gray-500); margin-top:0.25rem;">
+                Set this when the image bakes its cloud-init account name in (cloudbase-init's <code>username=</code>).
+                Each lane still gets its own generated password; only the account name is fixed. Leave blank to
+                create a per-student account from their email.
+              </div>
+            </div>
+
             <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem;">
               <div class="form-group">
                 <label>Default RDP Username <span style="color:var(--gray-400);font-size:0.8rem;">(optional — used for Guacamole console)</span></label>
@@ -751,11 +761,17 @@
               </div>
               <div class="form-group">
                 <label>RDP Security <span style="color:var(--gray-400);font-size:0.8rem;">(Guacamole)</span></label>
+                <!-- Blank is the default and stores nothing, so lane-deployer's own
+                     'any' applies. Pinning a mode here is an override: 'tls' fails
+                     outright against xrdp and against NLA-only Windows, so it must
+                     be a deliberate choice, not what you get by leaving the form
+                     alone. -->
                 <select id="wsTplRdpSecurity">
-                  <option value="tls">TLS (recommended)</option>
-                  <option value="any">Any (auto-negotiate)</option>
+                  <option value="">Auto — let Guacamole negotiate (recommended)</option>
+                  <option value="nla">NLA (modern Windows)</option>
+                  <option value="tls">TLS</option>
                   <option value="rdp">RDP (classic, no TLS)</option>
-                  <option value="nla">NLA (Windows)</option>
+                  <option value="any">Any (explicit)</option>
                 </select>
               </div>
             </div>
