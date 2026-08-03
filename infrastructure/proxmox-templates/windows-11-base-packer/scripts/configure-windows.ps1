@@ -61,7 +61,8 @@ Set-NetFirewallRule `
     -DisplayGroup "Remote Desktop" `
     -Enabled True `
     -Profile Any `
-    -RemoteAddress Any
+    -RemoteAddress Any `
+    -LocalAddress Any
 
 Set-NetFirewallRule `
     -Name "CoreNet-Diag-ICMP4-EchoRequest-In" `
