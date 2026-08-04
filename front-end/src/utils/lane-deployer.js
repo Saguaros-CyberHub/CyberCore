@@ -467,19 +467,19 @@ async function configureGatewayAccess({ node, gatewayVmid, laneBase, mac, hostna
 // ── Guacamole ────────────────────────────────────────────────────────────────
 
 /**
- * Resolve the user's Guacamole password, creating the account on first use.
- * Prefers the stored (encrypted) credential so we don't reset a password their
- * other consoles already authenticate with, and persists a newly minted one so
- * the next deploy reuses it — and so staff can hand it back to a student who
- * loses it (utils/guac-credentials.js is the one implementation of that ladder).
+ * Make sure the user has a Guacamole account before we grant it permissions.
+ *
+ * Deliberately does NOT read or rotate the password: the caller only needs the
+ * account to exist, and rotating it here would invalidate the credential the
+ * user is already holding. Creating one when it's missing still records the
+ * password, so staff can hand it back later.
  */
-async function resolveGuacPassword(userId, email) {
-  if (!email) return null;
-  const cred = await guacCreds.getGuacCredential(userId).catch((e) => {
-    console.warn(`${LOG} Guac credential lookup failed for ${email}: ${e.message}`);
-    return null;
+async function ensureGuacUser(userId, email) {
+  if (!email) return false;
+  return guacCreds.ensureGuacUser(userId, email).catch((e) => {
+    console.warn(`${LOG} Could not ensure a Guacamole account for ${email}: ${e.message}`);
+    return false;
   });
-  return cred?.password || null;
 }
 
 /** Guacamole connection parameters for the resolved protocol. */
@@ -539,7 +539,7 @@ async function createGuacConnection({ connName, user, hostname, port, protocol, 
     });
     const connId = conn?.identifier || null;
     if (connId && user.email) {
-      await resolveGuacPassword(user.id, user.email);
+      await ensureGuacUser(user.id, user.email);
       await guacAPI('PATCH', `/users/${encodeURIComponent(user.email)}/permissions`, [
         { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' },
       ]).catch((e) => console.warn(`${LOG} Guac permission grant failed for ${user.email}: ${e.message}`));
@@ -1275,11 +1275,49 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   }
 
   const laneRows = await cybercoreQuery(
-    `SELECT lane_id, vxlan_id, config FROM cybercore_lane WHERE lane_id = ANY($1::uuid[])`,
+    `SELECT lane_id, vxlan_id, status, config FROM cybercore_lane WHERE lane_id = ANY($1::uuid[])`,
     [laneIds]
   );
   if (laneRows.rows.length === 0) {
     return { lanes_deleted: 0, vms_destroyed: 0, orphan_disks_swept: 0, errors };
+  }
+
+  // A VXLAN id is only free-for-reuse while no LIVE lane holds it — an 'error'
+  // or 'deleted' lane releases it (allocateVxlanIds and the
+  // ux_cybercore_lane_vxlan_active partial index both say so). So two rows can
+  // legitimately carry the same vxlan_id: a dead one and the healthy lane that
+  // recycled it.
+  //
+  // Every VMID in this teardown is derived from vxlan_id (gateway
+  // 100000+, attack box 700000+, GOAD controller 200000+). Deriving them for a
+  // dead lane whose id has been recycled would force-stop and purge the LIVE
+  // lane's machines. So: find the ids that another, surviving lane owns, and
+  // skip the derived VMIDs for those rows.
+  const contested = new Set();
+  {
+    const vxlans = laneRows.rows.map(r => r.vxlan_id).filter(v => v != null);
+    if (vxlans.length > 0) {
+      const others = await cybercoreQuery(
+        `SELECT DISTINCT vxlan_id FROM cybercore_lane
+          WHERE vxlan_id = ANY($1::int[])
+            AND NOT (lane_id = ANY($2::uuid[]))
+            AND status NOT IN ('error', 'deleted')`,
+        [vxlans, laneIds]
+      ).catch((e) => {
+        errors.push(`VXLAN ownership check: ${e.message}`);
+        // Fail SAFE: if we cannot tell, assume every id is contested and destroy
+        // only what a lane explicitly recorded. Leaving a VM behind is
+        // recoverable; destroying someone else's running lane is not.
+        return { rows: vxlans.map(v => ({ vxlan_id: v })) };
+      });
+      for (const r of others.rows) contested.add(r.vxlan_id);
+    }
+  }
+  if (contested.size > 0) {
+    console.warn(
+      `${LOG} VXLAN(s) ${[...contested].join(', ')} are held by a live lane that is not being torn down — ` +
+      `skipping derived VMIDs for the dead row(s) so the live lane is not destroyed.`
+    );
   }
 
   // Phase 1: enumerate targets.
@@ -1289,8 +1327,21 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
 
   for (const lane of laneRows.rows) {
     const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
-    if (lane.vxlan_id) vxlanIds.push(lane.vxlan_id);
     if (cfg.guac_connection_id) guacConnIds.add(cfg.guac_connection_id);
+
+    // A live lane has recycled this row's VXLAN. EVERY VMID here — including the
+    // ones recorded in cfg.vms and cfg.attack_box_vm_id — was computed from that
+    // id at insert time, so all of them now name the live lane's machines.
+    // Destroy nothing; the row and its DB bookkeeping still go. Same for the
+    // Tailscale devices, which the live lane re-registered under that id.
+    if (lane.vxlan_id != null && contested.has(lane.vxlan_id)) {
+      console.warn(
+        `${LOG} Lane ${lane.lane_id} (status ${lane.status}) shares VXLAN ${lane.vxlan_id} with a live lane — ` +
+        `removing the record only, destroying no VMs.`
+      );
+      continue;
+    }
+    if (lane.vxlan_id) vxlanIds.push(lane.vxlan_id);
 
     if (Array.isArray(cfg.vms) && cfg.vms.length > 0) {
       for (const vm of cfg.vms) {
@@ -1548,18 +1599,46 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     errors.push(`Disk sweep: ${e.message}`);
   }
 
-  // Finally, the lane rows themselves.
-  const del = await cybercoreQuery(
-    `DELETE FROM cybercore_lane WHERE lane_id = ANY($1::uuid[])`,
-    [laneIds]
-  );
+  // Finally, the lane rows — but ONLY when everything they own is actually gone.
+  //
+  // A lane row is the only handle on its VMs: their ids are derived from
+  // vxlan_id, and the cybercore_resource rows were removed in phase 5. Deleting
+  // the row while a VM survived orphans that VM permanently, AND frees its
+  // vxlan_id for the next deploy, whose gateway clone then collides with the
+  // container still running at 100000+<id>.
+  //
+  // So on failure the rows are marked 'error' instead: they keep pointing at the
+  // survivors, they stay out of allocateVxlanIds (which skips 'error'), and a
+  // retry of the same teardown can find them again.
+  let deleted = 0;
+  if (errors.length === 0) {
+    const del = await cybercoreQuery(
+      `DELETE FROM cybercore_lane WHERE lane_id = ANY($1::uuid[])`,
+      [laneIds]
+    );
+    deleted = del.rowCount;
+  } else {
+    await cybercoreQuery(
+      `UPDATE cybercore_lane
+          SET status = 'error',
+              config = config || $2::jsonb,
+              updated_at = NOW()
+        WHERE lane_id = ANY($1::uuid[])`,
+      [laneIds, JSON.stringify({ teardown_errors: errors.slice(0, 20) })]
+    ).catch(e => errors.push(`Could not mark lanes for retry: ${e.message}`));
+    console.warn(
+      `${LOG} Teardown left ${errors.length} error(s) — keeping ${laneIds.length} lane row(s) ` +
+      `as 'error' so the surviving VMs stay reachable for a retry.`
+    );
+  }
 
   console.log(
-    `${LOG} Teardown complete: ${del.rowCount} lanes, ${existingVms.length} VMs, ` +
+    `${LOG} Teardown complete: ${deleted} lanes deleted, ${existingVms.length} VMs, ` +
     `${orphanDisksSwept} orphan disks, ${errors.length} errors`
   );
   return {
-    lanes_deleted: del.rowCount,
+    lanes_deleted: deleted,
+    lanes_kept_for_retry: errors.length > 0 ? laneIds.length : 0,
     vms_destroyed: existingVms.length,
     orphan_disks_swept: orphanDisksSwept,
     errors,

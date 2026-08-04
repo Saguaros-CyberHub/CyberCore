@@ -326,11 +326,18 @@ router.post('/deploy', instructorOnly, async (req, res) => {
         instructorId,
       ]);
       labId = labResult.rows[0].material_id;
-    } else if (learning_objective) {
+    } else {
+      // Always force is_published on reuse, objective or not: my-courses filters
+      // the student board on it, so a row created before this endpoint set it
+      // (or unpublished by hand) would stay invisible to the students whose
+      // machines are about to appear.
       await query(
-        `UPDATE cle_course_material SET description = $2, is_published = TRUE, updated_at = NOW()
+        `UPDATE cle_course_material
+            SET description = COALESCE(NULLIF($2, ''), description),
+                is_published = TRUE,
+                updated_at = NOW()
           WHERE material_id = $1`,
-        [labId, learning_objective]
+        [labId, learning_objective || '']
       );
     }
 
@@ -355,13 +362,24 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       ...(skipped.length ? { skipped } : {}),
     });
 
-    const instructorEmails = await courseInstructorEmails(courseId);
+    // The response is already sent, so a failure here can only be reported
+    // through the lab's own state. Record it on the material row so GET /
+    // can explain why nothing appeared, instead of showing an empty lab.
+    const instructorEmails = await courseInstructorEmails(courseId).catch(() => []);
     vulnLab.deployVulnLab({ course, challenge, students, materialId: labId, mode, instructorEmails })
       .then(result => console.log(
         `[CLE] Lab '${challenge.challenge_key}' (${mode}) for course ${courseId}: ` +
         `${result.provisioned.length} deployed, ${result.failed.length} failed`
       ))
-      .catch(err => console.error(`[CLE] Lab deploy failed for course ${courseId}: ${err.message}`));
+      .catch(async (err) => {
+        console.error(`[CLE] Lab deploy failed for course ${courseId}: ${err.message}`);
+        await query(
+          `UPDATE cle_course_material
+              SET content = COALESCE(content, '{}')::jsonb || $2::jsonb, updated_at = NOW()
+            WHERE material_id = $1`,
+          [labId, JSON.stringify({ last_deploy_error: err.message, last_deploy_failed_at: new Date().toISOString() })]
+        ).catch(e => console.error(`[CLE] Could not record deploy error on lab ${labId}: ${e.message}`));
+      });
   } catch (error) {
     console.error('[CLE] Deploy labs error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
@@ -377,6 +395,16 @@ router.get('/:labId/progress', instructorOnly, async (req, res) => {
     const { courseId, labId } = req.params;
     if (!(await getCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
+    }
+    // The lab must belong to THIS course. Progress records carry per-student
+    // emails, and the id is a plain path parameter — without this an instructor
+    // could read another course's deploy by pointing their own course at its id.
+    const owned = await query(
+      `SELECT material_id FROM cle_course_material WHERE material_id = $1 AND course_id = $2`,
+      [labId, courseId]
+    );
+    if (owned.rows.length === 0) {
+      return res.status(404).json({ error: 'Lab not found in this course' });
     }
     const progress = vulnLab.getLabProgress(labId);
     if (!progress) return res.status(404).json({ error: 'No active deployment for this lab' });
@@ -410,13 +438,15 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
 
     const teardown = await vulnLab.teardownLab(labId);
 
-    // Only drop the assignment once its infrastructure is gone. If teardown hit
-    // errors the row stays, so the instructor can retry rather than lose the
-    // only handle on the orphaned VMs.
+    // Only drop the assignment once its infrastructure is gone. On failure BOTH
+    // this row and the lane rows survive (teardownLanes marks the lanes 'error'
+    // rather than deleting them), so Remove can genuinely be retried — and the
+    // surviving VMs still have something pointing at them in the meantime.
     if (teardown.errors.length > 0) {
       return res.status(207).json({
         success: false,
-        message: 'Some resources could not be destroyed — the lab assignment was kept so you can retry',
+        message: `Some machines could not be destroyed. The lab and its ${teardown.lanes_kept_for_retry} `
+               + `lane record(s) were kept so you can press Remove again once the cause is cleared.`,
         ...teardown,
       });
     }
@@ -425,7 +455,7 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
     res.json({ success: true, message: 'Lab removed', ...teardown });
   } catch (error) {
     console.error('[CLE] Delete lab error:', error.message);
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

@@ -36,6 +36,8 @@ const adminOnly = requireRole('admin');
 router.get('/guac/users/:userId/credentials', authenticateToken, adminOnly, async (req, res) => {
   try {
     const peek = req.query.peek === 'true' || req.query.peek === '1';
+    // adminOnly already, but keep the guard explicit so the rule lives in one place.
+    await guacCreds.assertCanDiscloseFor(req.params.userId, req.user);
     const cred = await guacCreds.getGuacCredential(req.params.userId, { create: !peek });
     logActivity(req, 'view_guac_credential', 'user', req.params.userId, {
       available: cred.available, source: cred.source, peek,
@@ -79,16 +81,24 @@ router.post('/guac/sync-users', authenticateToken, adminOnly, async (req, res) =
 
     const results = [];
 
-    // getGuacCredential does the whole ladder — stored → legacy VM metadata →
-    // mint — and persists whatever it lands on, so this loop is just a report of
-    // which rung each user came from.
+    // The backfill's job is "every active user HAS a Guacamole account, and we
+    // have its password on record where we can". getGuacCredential does that
+    // ladder — stored → legacy VM metadata → create-if-absent — and never
+    // rotates a live account, so re-running this is safe.
+    //
+    // 'exists_no_password' is reported rather than silently reset: the account
+    // is usable, we just cannot look its password up. Resetting it here would
+    // disconnect whoever is using it.
     for (const user of users.rows) {
       const cred = await guacCreds.getGuacCredential(user.user_id).catch(() => null);
-      const status = !cred || !cred.available ? 'failed'
-                   : cred.source === 'stored'   ? 'already_synced'
-                   : cred.source === 'migrated' ? 'migrated_from_vm'
-                   : 'created';
-      results.push({ email: user.email, status });
+      const status = !cred                         ? 'failed'
+                   : cred.source === 'stored'       ? 'already_synced'
+                   : cred.source === 'migrated'     ? 'migrated_from_vm'
+                   : cred.source === 'created'      ? 'created'
+                   : cred.source === 'unrecoverable' ? 'exists_no_password'
+                   : cred.source === 'undecryptable' ? 'undecryptable'
+                   : 'failed';
+      results.push({ email: user.email, status, ...(cred?.reason ? { reason: cred.reason } : {}) });
     }
 
     const summary = results.reduce((acc, r) => {

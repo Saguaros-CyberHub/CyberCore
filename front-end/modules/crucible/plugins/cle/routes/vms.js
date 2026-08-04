@@ -8,6 +8,12 @@
  * uses for its attack boxes. cybercore_lane is the source of truth for the lane;
  * lane-deployer additionally registers each workstation in cybercore_resource /
  * vm_instance / allocation so the STUDENT sees it on their own dashboard.
+ *
+ * Scope: WORKSTATION lanes only. Vulnerable-lab lanes (routes/labs.js) also carry
+ * config.course_id — every CLE read path keys on it — so every query here also
+ * requires config.material_id IS NULL. Without that, lab lanes would surface in
+ * the Workstations tab and could be destroyed by DELETE /:laneId, which bypasses
+ * the lab's own teardown and leaves the assignment pointing at nothing.
  */
 
 const express = require('express');
@@ -153,6 +159,7 @@ router.get('/', instructorOnly, async (req, res) => {
         JOIN cybercore_user u ON u.user_id = l.user_id
        WHERE l.user_id = ANY($1)
          AND l.config->>'course_id' = $2
+         AND l.config->>'material_id' IS NULL
          AND l.status <> 'deleted'
        ORDER BY l.created_at DESC
     `, [enrolledIds, courseId]);
@@ -361,7 +368,9 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
     const laneRes = await cybercoreQuery(
-      `SELECT config FROM cybercore_lane WHERE lane_id = $1 AND config->>'course_id' = $2 AND status <> 'deleted'`,
+      `SELECT config FROM cybercore_lane
+        WHERE lane_id = $1 AND config->>'course_id' = $2
+          AND config->>'material_id' IS NULL AND status <> 'deleted'`,
       [laneId, courseId]
     );
     if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
@@ -399,7 +408,10 @@ router.delete('/:laneId', instructorOnly, async (req, res) => {
 
     // Confirm the lane belongs to this course before destroying anything.
     const laneRes = await cybercoreQuery(
-      `SELECT lane_id FROM cybercore_lane WHERE lane_id = $1 AND config->>'course_id' = $2`,
+      // material_id IS NULL: a vulnerable-lab lane must be removed through
+      // DELETE /labs/:labId, which also clears the assignment it belongs to.
+      `SELECT lane_id FROM cybercore_lane
+        WHERE lane_id = $1 AND config->>'course_id' = $2 AND config->>'material_id' IS NULL`,
       [laneId, courseId]
     );
     if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });

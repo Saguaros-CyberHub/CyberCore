@@ -24,7 +24,7 @@
  * ============================================================================
  */
 
-const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { cybercoreQuery, cybercorePool } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI, waitForTask, forceDestroyVM } = require('../../../../../src/utils/proxmox');
 const { getDefaultTemplateNode } = require('../../../../../src/utils/site-config');
 const { resolveLaneNetworking } = require('../../../../../src/utils/lane-networking');
@@ -36,6 +36,57 @@ const laneProvision = require('./lane-provision');
 const LOG = '[CLE VulnLab]';
 
 const MODES = ['lane', 'attach'];
+
+/**
+ * Read-modify-write cybercore_lane.config under a real row lock.
+ *
+ * Must run on a PINNED connection. `cybercoreQuery` checks a connection out of
+ * the pool per call, so issuing BEGIN / SELECT … FOR UPDATE / UPDATE / COMMIT
+ * through it gives four unrelated backends: the lock is taken and released
+ * inside its own implicit transaction, the UPDATE autocommits, COMMIT lands on a
+ * connection with nothing open, and the one that ran BEGIN goes back to the pool
+ * mid-transaction to be inherited by whatever query grabs it next.
+ *
+ * Two attaches (or an attach racing a detach) on the same lane would then both
+ * read the same attached_modules array and the second write would drop the
+ * first — leaving that module's VMs running with nothing referencing them, since
+ * teardownLab finds instances only through this array.
+ *
+ * @param {string}   laneId
+ * @param {Function} mutate  (config) => config — must return the new config
+ */
+async function withLaneConfig(laneId, mutate) {
+  const client = await cybercorePool.connect();
+  try {
+    await client.query('BEGIN');
+    const cur = await client.query(
+      `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
+      [laneId]
+    );
+    if (cur.rows.length === 0) {
+      await client.query('ROLLBACK');
+      const err = new Error(`Lane ${laneId} no longer exists`);
+      err.status = 409;
+      throw err;
+    }
+    const config = typeof cur.rows[0].config === 'string'
+      ? JSON.parse(cur.rows[0].config || '{}')
+      : (cur.rows[0].config || {});
+
+    const next = mutate(config);
+    await client.query(
+      `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+      [laneId, JSON.stringify(next)]
+    );
+    await client.query('COMMIT');
+    return next;
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 /** Progress key for one lab deploy, so the UI can poll a stable id. */
 function progressIdForLab(materialId) {
@@ -136,7 +187,17 @@ async function countFreeLanes(block) {
   return free.length;
 }
 
-/** Every active lane a student holds in this course, newest first. */
+/**
+ * The active WORKSTATION lane each student holds in this course — the lane
+ * 'attach' mode grafts onto.
+ *
+ * `config.material_id IS NULL` is load-bearing. Vulnerable-lab lanes also carry
+ * config.course_id (every CLE read path keys on it), so without this filter a
+ * student who already has one lab could get the next lab attached to that lab's
+ * lane instead of their workstation — putting the target on the wrong network,
+ * consuming that lane's attached-module slots, and tying its lifetime to the
+ * wrong assignment.
+ */
 async function findCourseLanes(userIds, courseId) {
   if (!userIds.length) return {};
   const r = await cybercoreQuery(
@@ -144,6 +205,7 @@ async function findCourseLanes(userIds, courseId) {
        FROM cybercore_lane
       WHERE user_id = ANY($1::uuid[])
         AND config->>'course_id' = $2
+        AND config->>'material_id' IS NULL
         AND status = 'active'
       ORDER BY created_at DESC`,
     [userIds, courseId]
@@ -213,41 +275,49 @@ async function attachLabToLane({ lane, challenge, materialId, moduleKey }) {
   const bestNode = laneConfig.node;
   if (!bestNode) throw new Error('Lane config is missing `node` — cannot place attached VMs');
 
-  const instance = await attachedModules.attachModuleToLane({
-    lane,
-    laneConfig,
-    challenge,
-    spec: challenge.spec,
-    module: laneModule,
-    laneSubnetBase,
-    vnetName: vnet.vnet,
-    bestNode,
-    templateNode: challenge.spec.template_node || getDefaultTemplateNode(),
-    gatewayVmId: laneConfig.gateway_vm_id || laneConfig.gateway_vmid || (100000 + lane.vxlan_id),
-    proxmoxAPI,
-    waitForTask,
-  });
+  // The slots this attach will consume. attachModuleToLane computes the same set
+  // internally; recomputing here lets us clean up after a partial failure, which
+  // it cannot do itself — it throws mid-loop with VMs already cloned and no
+  // instance record ever persisted. Those VMs would then be invisible to every
+  // teardown path, AND their slots would look free to the next attach, whose
+  // clone would collide on the same VMID.
+  const specVmCount = (challenge.spec.vms || []).length;
+  const claimedSlots = attachedModules.findFreeSlots(laneConfig.attached_modules, specVmCount);
+
+  let instance;
+  try {
+    instance = await attachedModules.attachModuleToLane({
+      lane,
+      laneConfig,
+      challenge,
+      spec: challenge.spec,
+      module: laneModule,
+      laneSubnetBase,
+      vnetName: vnet.vnet,
+      bestNode,
+      templateNode: challenge.spec.template_node || getDefaultTemplateNode(),
+      gatewayVmId: laneConfig.gateway_vm_id || laneConfig.gateway_vmid || (100000 + lane.vxlan_id),
+      proxmoxAPI,
+      waitForTask,
+    });
+  } catch (attachErr) {
+    for (const slot of claimedSlots) {
+      const vmid = attachedModules.vmidForSlot(slot, lane.vxlan_id);
+      try {
+        const destroyed = await forceDestroyVM(vmid, 'qemu', bestNode);
+        if (destroyed) console.log(`${LOG} Cleaned up ${vmid} after a failed attach on lane ${lane.lane_id}`);
+      } catch (e) {
+        console.warn(`${LOG} Could not clean up ${vmid} after a failed attach: ${e.message}`);
+      }
+    }
+    throw attachErr;
+  }
   instance.material_id = materialId;
 
-  await cybercoreQuery('BEGIN');
-  try {
-    const cur = await cybercoreQuery(
-      `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
-      [lane.lane_id]
-    );
-    const curCfg = typeof cur.rows[0].config === 'string'
-      ? JSON.parse(cur.rows[0].config || '{}')
-      : (cur.rows[0].config || {});
-    curCfg.attached_modules = [...(Array.isArray(curCfg.attached_modules) ? curCfg.attached_modules : []), instance];
-    await cybercoreQuery(
-      `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-      [lane.lane_id, JSON.stringify(curCfg)]
-    );
-    await cybercoreQuery('COMMIT');
-  } catch (txErr) {
-    await cybercoreQuery('ROLLBACK').catch(() => {});
-    throw txErr;
-  }
+  await withLaneConfig(lane.lane_id, (cfg) => ({
+    ...cfg,
+    attached_modules: [...(Array.isArray(cfg.attached_modules) ? cfg.attached_modules : []), instance],
+  }));
 
   return instance;
 }
@@ -276,6 +346,13 @@ async function attachLabToStudents({ course, challenge, students, materialId }) 
         user_id: student.id, user_email: student.email,
         reason: 'Student has no active workstation lane in this course — provision one first, or deploy in "lane" mode',
       });
+      // Still count it, or the progress bar never reaches total and the UI polls
+      // forever waiting for a lane that was never going to be attached.
+      if (progress) {
+        progress.completed++;
+        progress.failed++;
+        progress.phase_detail = `Attaching: ${progress.completed}/${students.length} complete`;
+      }
       continue;
     }
     if (progress) {
@@ -374,26 +451,17 @@ async function detachInstance(lane, laneConfig, instance) {
     forceDestroyVM,
   });
 
-  await cybercoreQuery('BEGIN');
-  try {
-    const cur = await cybercoreQuery(
-      `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
-      [lane.lane_id]
-    );
-    const curCfg = typeof cur.rows[0].config === 'string'
-      ? JSON.parse(cur.rows[0].config || '{}')
-      : (cur.rows[0].config || {});
-    curCfg.attached_modules = (curCfg.attached_modules || [])
-      .filter(m => m.module_instance_id !== instance.module_instance_id);
-    await cybercoreQuery(
-      `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-      [lane.lane_id, JSON.stringify(curCfg)]
-    );
-    await cybercoreQuery('COMMIT');
-  } catch (txErr) {
-    await cybercoreQuery('ROLLBACK').catch(() => {});
-    throw txErr;
-  }
+  // Drop it from the lane's config even when some VMs survived: they are
+  // reported in `errors`, and leaving the instance behind would make a retry
+  // attempt to destroy the same ids again while the record claims they exist.
+  await withLaneConfig(lane.lane_id, (cfg) => ({
+    ...cfg,
+    attached_modules: (cfg.attached_modules || [])
+      .filter(m => m.module_instance_id !== instance.module_instance_id),
+  })).catch((e) => {
+    // The lane row may have gone in the meantime; the VMs are already destroyed.
+    errors.push(`Could not update lane ${lane.lane_id} config: ${e.message}`);
+  });
 
   return { destroyed, errors };
 }
@@ -408,9 +476,24 @@ async function detachInstance(lane, laneConfig, instance) {
  * running several labs at once tears down only the one asked for.
  */
 async function teardownLab(materialId) {
-  const result = { lanes_deleted: 0, vms_destroyed: 0, instances_detached: 0, errors: [] };
+  const result = {
+    lanes_deleted: 0, lanes_kept_for_retry: 0, vms_destroyed: 0, instances_detached: 0, errors: [],
+  };
 
-  // 1. Dedicated lab lanes.
+  // A deploy still running would keep cloning VMs after we take our snapshot,
+  // and those would be orphaned. Make the caller wait rather than half-tear-down.
+  const inFlight = getLabProgress(materialId);
+  if (inFlight && inFlight.phase !== 'complete') {
+    const err = new Error(
+      `This lab is still deploying (${inFlight.completed}/${inFlight.total} lanes, ${inFlight.phase}). ` +
+      `Wait for it to finish before removing it, or the machines it is still creating will be left behind.`
+    );
+    err.status = 409;
+    throw err;
+  }
+
+  // 1. Dedicated lab lanes. 'error' lanes are included: a previous teardown may
+  //    have kept them precisely so this retry can find their surviving VMs.
   const lanes = await cybercoreQuery(
     `SELECT lane_id FROM cybercore_lane
       WHERE config->>'material_id' = $1 AND status <> 'deleted'`,
@@ -421,6 +504,7 @@ async function teardownLab(materialId) {
     console.log(`${LOG} Tearing down ${laneIds.length} lab lane(s) for material ${materialId}`);
     const t = await laneDeployer.teardownLanes(laneIds);
     result.lanes_deleted = t.lanes_deleted || 0;
+    result.lanes_kept_for_retry = t.lanes_kept_for_retry || 0;
     result.vms_destroyed += t.vms_destroyed || 0;
     result.errors.push(...(t.errors || []));
   }

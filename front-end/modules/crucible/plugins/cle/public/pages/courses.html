@@ -478,6 +478,14 @@
 
     function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
 
+    // escHtml escapes &, < and > but NOT quotes, so it is unsafe for a value
+    // interpolated inside an HTML attribute. Use this there.
+    function escAttr(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     function toast(msg, isError = false) {
       const t = document.createElement('div');
       t.className = 'toast' + (isError ? ' error' : '');
@@ -607,7 +615,22 @@
       coursesList.innerHTML = filtered.map(courseItemHtml).join('');
     }
 
+    /**
+     * Stop every background poller. They all rebuild their URL from the live
+     * currentCourseId and paint into ids that exist on every course, so a timer
+     * left running from the previous course writes that course's progress into
+     * this one's banner (or requests a lab id this course does not own).
+     */
+    function cancelCoursePollers() {
+      clearTimeout(_vmRefreshTimer);
+      clearTimeout(_provisionProgressTimer);
+      clearTimeout(_labRefreshTimer);
+      clearTimeout(_labProgressTimer);
+      _vmRefreshTimer = _provisionProgressTimer = _labRefreshTimer = _labProgressTimer = null;
+    }
+
     async function viewCourse(courseId) {
+      cancelCoursePollers();
       currentCourseId = courseId;
       try {
         const data = await api('GET', `/courses/${courseId}`);
@@ -636,6 +659,7 @@
     }
 
     function backToList() {
+      cancelCoursePollers();
       document.getElementById('courseDetailView').classList.remove('active');
       document.getElementById('coursesGridView').style.display = 'block';
       document.querySelectorAll('.course-item').forEach(item => item.classList.remove('active'));
@@ -667,7 +691,7 @@
           const label = inst
             ? (inst.first_name && inst.last_name ? `${inst.first_name} ${inst.last_name}` : inst.email)
             : id;
-          return `<option value="${escHtml(id)}">${escHtml(label)}</option>`;
+          return `<option value="${escAttr(id)}">${escHtml(label)}</option>`;
         }).join('');
 
       document.getElementById('instructorFilterPanel').style.display = 'block';
@@ -771,6 +795,10 @@
       try {
         const data = await api('GET', `/courses/${currentCourseId}/students`);
         const students = data.students || [];
+        // The table is rebuilt below with the credential column hidden, so the
+        // toggle's state has to go back to matching it — otherwise the button
+        // says "Hide" over a hidden column and takes two clicks to reveal.
+        _credsShown = false;
 
         let html = `
           <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-bottom:0.75rem;">
@@ -795,12 +823,12 @@
             <td>${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))}</td>
             <td><span class="badge badge-active">${s.enrollment_role || 'Student'}</span></td>
             <td>${s.enrolled_at ? new Date(s.enrolled_at).toLocaleDateString() : 'N/A'}</td>
-            <td class="cred-col" style="display:none;" data-cred-for="${escHtml(s.user_id)}">
+            <td class="cred-col" style="display:none;" data-cred-for="${escAttr(s.user_id)}">
               <span style="color: var(--text-muted, #6b7280); font-size:0.8rem;">…</span>
             </td>
             <td class="student-actions">
-              <button class="btn btn-sm btn-outline" onclick="openGuacAccess('${escHtml(s.user_id)}')">🔗 RDP</button>
-              <button class="btn btn-sm btn-outline" onclick="removeStudent('${escHtml(s.user_id)}')">❌ Remove</button>
+              <button class="btn btn-sm btn-outline" onclick="openGuacAccess('${escAttr(s.user_id)}')">🔗 RDP</button>
+              <button class="btn btn-sm btn-outline" onclick="removeStudent('${escAttr(s.user_id)}')">❌ Remove</button>
             </td>
           </tr>`;
         });
@@ -875,7 +903,9 @@
     /** Mint (or recover) one student's console password on demand. */
     async function issueStudentCredential(userId) {
       try {
-        const c = await api('GET', `/courses/${currentCourseId}/students/${encodeURIComponent(userId)}/guac/credentials?issue=true`);
+        // POST, not GET: issuing creates a Guacamole account, and a state-changing
+        // GET can be triggered by a cross-site top-level navigation.
+        const c = await api('POST', `/courses/${currentCourseId}/students/${encodeURIComponent(userId)}/guac/credentials`);
         if (!c.available) {
           toast(c.reason || 'Could not issue a console password', true);
           return;
@@ -961,13 +991,13 @@
                 + (v.workstation_pass ? `<br><span style="font-family:monospace;font-size:0.72rem;color:var(--text-muted);">${escHtml(v.workstation_pass)}</span>` : '')
               : '<span style="font-size:0.75rem;color:var(--text-muted);">template default</span>';
 
-            const errTitle = v.error ? ` title="${escHtml(v.error)}"` : '';
+            const errTitle = v.error ? ` title="${escAttr(v.error)}"` : '';
 
             // What the machine was actually sized to, plus a marker when Proxmox
             // refused part of the request (most often a disk target below the
             // template's own image, which cannot be shrunk).
             const sizeCell = v.resources
-              ? `<br><span style="font-size:0.7rem;color:var(--text-muted);" title="${escHtml((v.resource_warnings || []).join('; '))}">`
+              ? `<br><span style="font-size:0.7rem;color:var(--text-muted);" title="${escAttr((v.resource_warnings || []).join('; '))}">`
                 + `${escHtml(describeResources(v.resources))}`
                 + `${(v.resource_warnings || []).length ? ' <span style="color:#d69e2e;">&#9888;</span>' : ''}</span>`
               : '';
@@ -980,8 +1010,8 @@
               <td>${credCell}</td>
               <td>${_powerBadge(v.power_state)}</td>
               <td style="display:flex;gap:0.4rem;align-items:center;">
-                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" onclick="openVMConsole('${escHtml(v.lane_id)}')">Console</button>` : ''}
-                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escHtml(v.lane_id)}')">Delete</button>
+                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" onclick="openVMConsole('${escAttr(v.lane_id)}')">Console</button>` : ''}
+                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escAttr(v.lane_id)}')">Delete</button>
               </td>
             </tr>`;
           });
@@ -1041,7 +1071,7 @@
                       created ${l.created_at ? new Date(l.created_at).toLocaleDateString() : 'N/A'}
                     </div>
                   </div>
-                  <button class="btn btn-sm btn-outline" onclick="deleteLab('${escHtml(l.lab_id)}')">Remove &amp; tear down</button>
+                  <button class="btn btn-sm btn-outline" onclick="deleteLab('${escAttr(l.lab_id)}')">Remove &amp; tear down</button>
                 </div>`;
 
             if ((l.deployments || []).length === 0) {
@@ -1063,7 +1093,7 @@
                   <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code></td>
                   <td><span class="badge badge-gray">${d.mode === 'attach' ? 'attached' : 'own lane'}</span></td>
                   <td>${d.lane_status === 'error'
-                        ? `<span style="color:#ef4444;" title="${escHtml(d.error || '')}">error</span>`
+                        ? `<span style="color:#ef4444;" title="${escAttr(d.error || '')}">error</span>`
                         : escHtml(d.lane_status)}</td>
                   <td>${vms || '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
                   <td>${d.attack_box_vm_id
@@ -1132,7 +1162,7 @@
           // so interpolating an email — which may legitimately contain an
           // apostrophe — would break out of this inline handler's string.
           // showStudentSubmissions resolves the display label itself.
-          const label = `<a href="#" onclick="showStudentSubmissions('${escHtml(s.userId)}'); return false;"
+          const label = `<a href="#" onclick="showStudentSubmissions('${escAttr(s.userId)}'); return false;"
                             style="color:inherit;text-decoration:underline dotted;"
                             title="View this student's submission history">${nameLabel}</a>`;
 
@@ -1145,7 +1175,7 @@
               // problem, not the student's — call it out distinctly from
               // "planted but not yet found".
               if (f.plantStatus === 'failed') {
-                return `<span title="Failed to plant: ${escHtml(f.plantError || 'unknown')}"
+                return `<span title="Failed to plant: ${escAttr(f.plantError || 'unknown')}"
                   style="color:#b45309;font-weight:600;">!${type[0]}</span>`;
               }
               const color = f.captured ? '#16a34a' : 'var(--text-muted)';
@@ -1154,14 +1184,14 @@
                 ? `Captured ${new Date(f.capturedAt).toLocaleString()}`
                 : 'Not captured';
               const value = reveal ? `<br><code style="font-size:0.65rem;">${escHtml(f.flagValue)}</code>` : '';
-              return `<span title="${escHtml(tip)}" style="color:${color};font-weight:${weight};">
+              return `<span title="${escAttr(tip)}" style="color:${color};font-weight:${weight};">
                 ${f.captured ? '✓' : '○'}${type[0]}</span>${value}`;
             }).join(' ');
             return `<td style="font-size:0.8rem;white-space:nowrap;">${pair}</td>`;
           }).join('');
 
           const shared = s.foreignAttempts > 0
-            ? `<span title="Last: ${escHtml(s.lastForeignAttempt ? new Date(s.lastForeignAttempt).toLocaleString() : '')}"
+            ? `<span title="Last: ${escAttr(s.lastForeignAttempt ? new Date(s.lastForeignAttempt).toLocaleString() : '')}"
                  style="color:#ef4444;font-weight:600;">${s.foreignAttempts}</span>`
             : '<span style="color:var(--text-muted);">0</span>';
 
@@ -1579,7 +1609,7 @@
         const students = data.students || [];
         const container = document.getElementById(containerId);
         container.innerHTML = students.map(s => `
-          <label data-user-id="${escHtml(s.user_id)}" style="display: flex; align-items: center; gap: 0.5rem;">
+          <label data-user-id="${escAttr(s.user_id)}" style="display: flex; align-items: center; gap: 0.5rem;">
             <input type="checkbox" class="modal-student-select" value="${s.user_id}" data-email="${s.email}">
             <span class="modal-student-label">${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})</span>
             <span class="provision-note" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); font-style: italic;"></span>
@@ -1801,7 +1831,7 @@
         _vulnTemplates = data.templates || [];
         const select = document.getElementById('deployLabTemplate');
         select.innerHTML = _vulnTemplates.length
-          ? _vulnTemplates.map(t => `<option value="${escHtml(t.template_id)}">${escHtml(t.name)}</option>`).join('')
+          ? _vulnTemplates.map(t => `<option value="${escAttr(t.template_id)}">${escHtml(t.name)}</option>`).join('')
           : '<option value="">No deployable vulnerable applications</option>';
         if (data.hint) toast(data.hint, true);
         onLabTemplateChange();
@@ -1939,14 +1969,29 @@
         btn.disabled = false;
         btn.textContent = `Confirm — deploy ${res.student_count}`;
         btn.onclick = async () => {
+          // Re-read the form: the preview stays on screen while the student list
+          // is still editable, and committing the snapshot would silently deploy
+          // to a different set than the one now ticked.
+          const now = readDeployLabForm();
+          const changed = now.templateId !== form.templateId
+            || now.mode !== form.mode
+            || now.studentIds.length !== form.studentIds.length
+            || now.studentIds.some(id => !form.studentIds.includes(id));
+          if (changed) {
+            toast('Your selection changed — review the new preview before deploying', true);
+            resetDeployLabButton();
+            deployVulnerableMachines();
+            return;
+          }
+
           btn.disabled = true;
           btn.textContent = 'Deploying...';
           try {
             const done = await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
-              template_id: form.templateId,
-              student_ids: form.studentIds,
-              learning_objective: form.objective,
-              mode: form.mode,
+              template_id: now.templateId,
+              student_ids: now.studentIds,
+              learning_objective: now.objective,
+              mode: now.mode,
               confirm: true,
             });
             finishLabDeploy(done);

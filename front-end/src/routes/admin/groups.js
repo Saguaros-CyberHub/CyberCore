@@ -100,10 +100,17 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       challengeRow = challengeResult.rows[0];
 
       const spec = parseSpec(challengeRow.spec);
-      const vxlanBlock = {
-        start: spec.vxlan_block?.start ?? 10000,
-        end: spec.vxlan_block?.end ?? 10009,
-      };
+      // No default block here. deployChallengeLanes REQUIRES spec.vxlan_block —
+      // a challenge without one has no SDN zone or VNets either, so falling back
+      // to 10000-10009 would pass this check and then fail in the background,
+      // after the HTTP 200 and after the accounts were created.
+      const vxlanBlock = spec.vxlan_block;
+      if (!vxlanBlock?.start || !vxlanBlock?.end) {
+        return res.status(409).json({
+          error: `Challenge '${challenge_key}' has no reserved VXLAN block — recreate it through `
+               + `Admin → Create Lab so its SDN zone and VNets exist.`,
+        });
+      }
       // Same allocator the deploy itself uses, so the check and the deploy can't
       // disagree about what "free" means (it excludes error AND deleted lanes,
       // matching the ux_cybercore_lane_vxlan_active partial unique index).

@@ -67,9 +67,15 @@ async function guacAPI(method, path, body = null) {
 }
 
 /**
- * Ensure a Guacamole user account exists for `username` (a CyberCore email).
- * Creates the account if it doesn't exist, or resets the password if it does,
- * so the caller always receives a known credential.
+ * Ensure a Guacamole user account exists for `username` (a CyberCore email),
+ * RESETTING its password if it already exists, so the caller always receives a
+ * known credential.
+ *
+ * This rotates a live credential. Only call it where that is the intent — an
+ * explicit "reset this user's console password" action. A deploy or a lookup
+ * that merely needs the account to exist must use ensureGuacUserExists(), or it
+ * will silently invalidate every console the user already has open.
+ *
  * Returns the plaintext password on success, or null if Guac is unreachable.
  */
 async function ensureGuacAccount(username) {
@@ -92,4 +98,34 @@ async function ensureGuacAccount(username) {
   }
 }
 
-module.exports = { guacAPI, getGuacToken, ensureGuacAccount, GUAC_URL, GUAC_DS };
+/**
+ * Ensure the account exists WITHOUT touching an existing one.
+ *
+ * Deploy paths need the account to be present before they can grant it
+ * connection permissions, but must never rotate its password — the student may
+ * already be holding that credential, and `attributes: {}` on a PUT also wipes
+ * whatever timezone/expiry the account was created with.
+ *
+ * @returns {Promise<{existed: boolean, password: string|null}>} `password` is
+ *   non-null only when this call created the account.
+ */
+async function ensureGuacUserExists(username) {
+  try {
+    await guacAPI('GET', `/users/${encodeURIComponent(username)}`);
+    return { existed: true, password: null };
+  } catch (_notFound) {
+    // Fall through and create. A Guac outage surfaces on the create attempt.
+  }
+  const password = randomBytes(24).toString('hex');
+  try {
+    await guacAPI('POST', '/users', { username, password, attributes: {} });
+    return { existed: false, password };
+  } catch (createErr) {
+    // Lost a race with a concurrent create — the account exists, which is all
+    // the caller asked for.
+    if (/already exists/i.test(createErr.message)) return { existed: true, password: null };
+    throw createErr;
+  }
+}
+
+module.exports = { guacAPI, getGuacToken, ensureGuacAccount, ensureGuacUserExists, GUAC_URL, GUAC_DS };

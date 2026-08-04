@@ -57,26 +57,58 @@ function logCredentialAccess({ actorId, studentId, courseId, action, detail }) {
  * GET /credentials — the student's Guacamole console login, so an instructor can
  * give it back when the student loses it.
  *
- * Read-only by default (`create: false`): opening a roster must not silently
- * issue Guacamole accounts. Pass ?issue=true to mint one when none exists.
+ * Strictly read-only — it never creates or rotates anything, so a GET cannot
+ * have side effects (a cross-site top-level navigation can trigger a GET, and
+ * this route is cookie-or-bearer authenticated). Issuing is POST /credentials.
+ *
+ * Course membership alone is NOT sufficient authority: an instructor can enroll
+ * any email address in their own course, so assertCanDiscloseFor also refuses
+ * non-student accounts for non-admin callers.
  */
 router.get('/credentials', instructorOnly, async (req, res) => {
   try {
     const { courseId, studentId } = req.params;
     await assertStudentInCourse(courseId, studentId, req.user);
+    await guacCreds.assertCanDiscloseFor(studentId, req.user);
 
-    const issue = req.query.issue === 'true' || req.query.issue === '1';
-    const cred = await guacCreds.getGuacCredential(studentId, { create: issue });
+    const cred = await guacCreds.getGuacCredential(studentId, { create: false });
 
     logCredentialAccess({
       actorId: req.user.userId, studentId, courseId,
-      action: issue ? 'issue_credential' : 'view_credential',
+      action: 'view_credential',
       detail: { available: cred.available, source: cred.source },
     });
 
     res.json(cred);
   } catch (error) {
     console.error('[CLE] Get student Guac credentials error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /credentials — issue a console login for a student who has no Guacamole
+ * account yet. Never rotates an existing one; if the account exists but its
+ * password isn't on record, that is reported so the instructor can choose the
+ * (disruptive) reset explicitly.
+ */
+router.post('/credentials', instructorOnly, async (req, res) => {
+  try {
+    const { courseId, studentId } = req.params;
+    await assertStudentInCourse(courseId, studentId, req.user);
+    await guacCreds.assertCanDiscloseFor(studentId, req.user);
+
+    const cred = await guacCreds.getGuacCredential(studentId, { create: true });
+
+    logCredentialAccess({
+      actorId: req.user.userId, studentId, courseId,
+      action: 'issue_credential',
+      detail: { available: cred.available, source: cred.source },
+    });
+
+    res.json(cred);
+  } catch (error) {
+    console.error('[CLE] Issue student Guac credentials error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
 });
@@ -89,6 +121,7 @@ router.post('/credentials/reset', instructorOnly, async (req, res) => {
   try {
     const { courseId, studentId } = req.params;
     await assertStudentInCourse(courseId, studentId, req.user);
+    await guacCreds.assertCanDiscloseFor(studentId, req.user);
 
     const cred = await guacCreds.resetGuacCredential(studentId);
     logCredentialAccess({

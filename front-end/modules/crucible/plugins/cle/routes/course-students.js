@@ -100,15 +100,21 @@ router.get('/credentials', instructorOnly, async (req, res) => {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
+    // Learner enrollments only. A Guacamole password is that account's whole
+    // session, and an instructor can enroll any email address in their own
+    // course — so the roster is not, by itself, authority to read a credential.
+    // getGuacCredentialsForUsers applies the same rule again by account role.
     const enrolled = await query(
       `SELECT user_id FROM cle_course_enrollment
-        WHERE course_id = $1 AND status IN ('active', 'completed')`,
+        WHERE course_id = $1
+          AND status IN ('active', 'completed')
+          AND enrollment_role IN ('student', 'guest')`,
       [courseId]
     );
     const userIds = enrolled.rows.map(r => r.user_id);
     if (userIds.length === 0) return res.json({ credentials: [] });
 
-    const byUser = await guacCreds.getGuacCredentialsForUsers(userIds);
+    const byUser = await guacCreds.getGuacCredentialsForUsers(userIds, req.user);
 
     await query(
       `INSERT INTO cle_activity_log (user_id, action_type, entity_type, entity_id, metadata)

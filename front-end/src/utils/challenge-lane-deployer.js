@@ -259,13 +259,34 @@ async function resolveTemplateNodes(specVms, spec, includeKali) {
  */
 async function replicateGatewayTemplate(targetNodes, templateNode, gatewayVmid, logTag) {
   const byNode = {};
-  let counter = 0;
+
+  // Pick ids that are actually free rather than always starting at the base.
+  // Two deploys running at once would otherwise both claim 169200, and a
+  // cleanup that failed leaves an id occupied that nothing else sweeps — either
+  // way the second clone fails with "VM already exists".
+  const taken = new Set();
+  try {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    for (const r of (resources || [])) {
+      const id = Number(r.vmid);
+      if (id >= TEMP_GW_TEMPLATE_BASE && id < TEMP_GW_TEMPLATE_BASE + 100) taken.add(id);
+    }
+  } catch (e) {
+    console.warn(`${logTag} Could not list cluster VMIDs to pick temp template ids: ${e.message}`);
+  }
+  let cursor = TEMP_GW_TEMPLATE_BASE;
+  const nextTempId = () => {
+    while (taken.has(cursor) && cursor < TEMP_GW_TEMPLATE_BASE + 100) cursor++;
+    taken.add(cursor);
+    return cursor++;
+  };
+
   for (const node of targetNodes) {
     if (node === templateNode) {
       byNode[node] = gatewayVmid;
       continue;
     }
-    const tempId = TEMP_GW_TEMPLATE_BASE + counter++;
+    const tempId = nextTempId();
     try {
       const upid = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
         newid: tempId,
@@ -627,9 +648,13 @@ async function resolveGatewayTransitIp(targetNode, gatewayVmId) {
  * accounts for the users it mints, but the CLE path deploys to a real roster
  * whose members may never have had one — and a PATCH /users/<unknown>/permissions
  * fails, leaving the student with a connection they cannot see.
+ *
+ * ensureGuacUser, not getGuacCredential: this must never ROTATE an existing
+ * account's password. The group deploy prints each student their credential
+ * seconds earlier, and a rotation here would invalidate every one of them.
  */
 async function createAttackBoxConsole({ connName, hostname, creds, user, guacParent, instructorEmails, logTag }) {
-  await guacCreds.getGuacCredential(user.id).catch((e) =>
+  await guacCreds.ensureGuacUser(user.id, user.email).catch((e) =>
     console.warn(`${logTag} Could not ensure a Guacamole account for ${user.email}: ${e.message}`));
 
   const conn = await guacAPI('POST', '/connections', {
@@ -1046,7 +1071,42 @@ async function deployLaneVms(job, ctx) {
  * @param {string}   [a.progressLabel]
  * @returns {Promise<{provisioned: Array, failed: Array, progressId: string}>}
  */
-async function deployChallengeLanes({
+async function deployChallengeLanes(args) {
+  // Everything after initProgress runs inside deployChallengeLanesInner. A throw
+  // there would otherwise leave the progress entry pinned in
+  // global._batchDeployProgress forever (only finishProgress schedules its
+  // eviction), and any lane row already inserted stuck at 'deploying' — which
+  // also holds its VXLAN out of the pool permanently, since allocateVxlanIds
+  // only skips 'error' and 'deleted'.
+  try {
+    return await deployChallengeLanesInner(args);
+  } catch (err) {
+    if (args.progressId) {
+      const p = laneDeployer.readProgress(args.progressId);
+      if (p) {
+        const live = (global._batchDeployProgress || {})[args.progressId];
+        if (live) {
+          live.phase_detail = `Deployment failed: ${err.message}`;
+          live.error = err.message;
+        }
+        laneDeployer.finishProgress(args.progressId);
+      }
+    }
+    // Any lane row we managed to insert before failing must not sit in
+    // 'deploying' — that status is invisible to teardown AND to the allocator.
+    await cybercoreQuery(
+      `UPDATE cybercore_lane
+          SET status = 'error', config = config || $2::jsonb, updated_at = NOW()
+        WHERE status = 'deploying'
+          AND config->>'challenge_key' = $1
+          AND created_at > NOW() - INTERVAL '1 hour'`,
+      [args.challenge?.challenge_key || '', JSON.stringify({ error: err.message })]
+    ).catch(() => {});
+    throw err;
+  }
+}
+
+async function deployChallengeLanesInner({
   users,
   challenge,
   moduleKey,
