@@ -32,6 +32,21 @@ function getClusterNodes() {
 }
 
 /**
+ * The management IP for a cluster node, from physical_cluster_details, or null
+ * when the node isn't declared there.
+ *
+ * Exists because Proxmox identifies nodes by NAME ('cyberhub-node-2') while the
+ * orchestrator runs in a container whose resolvers are 1.1.1.1 and the lab DNS —
+ * neither of which resolves those names. Anything opening a socket to a node
+ * (node-ssh) must translate through this map rather than trust DNS.
+ */
+function getNodeAddress(node) {
+  const details = getConfig().cluster?.physical_cluster_details || {};
+  const addr = details[node];
+  return (typeof addr === 'string' && addr.trim()) ? addr.trim() : null;
+}
+
+/**
  * Last-resort fallback node for template resolution.
  * Used only when cybercore_template_catalog.node is null AND Proxmox is unreachable.
  * Real source of truth is cybercore_template_catalog, populated by syncVmTemplateNodes().
@@ -106,6 +121,7 @@ function getV1LanSubnet() {
 module.exports = {
   getConfig,
   getClusterNodes,
+  getNodeAddress,
   getDefaultTemplateNode,
   getSchedulingConfig,
   getModuleNetworks,

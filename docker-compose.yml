@@ -131,6 +131,12 @@ services:
       PROXMOX_API_URL: ${PROXMOX_API_URL}
       PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}
       PROXMOX_TOKEN_SECRET: ${PROXMOX_TOKEN_SECRET}
+      # Proxmox SSH — the ONLY way to run a shell inside a lane gateway LXC
+      # (the API has no exec for containers). Without a readable key here, every
+      # per-lane DHCP reservation and console DNAT install fails, and lanes come
+      # up "active" with consoles that cannot connect. See example.env.
+      PROXMOX_SSH_USER: ${PROXMOX_SSH_USER:-root}
+      PROXMOX_SSH_KEY: ${PROXMOX_SSH_KEY:-/run/secrets/proxmox_ssh_key}
       # Tailscale BYOAB (used by v2 lane bootstrap to mint per-lane auth keys)
       TAILSCALE_OAUTH_CLIENT_ID: ${TAILSCALE_OAUTH_CLIENT_ID}
       TAILSCALE_OAUTH_CLIENT_SECRET: ${TAILSCALE_OAUTH_CLIENT_SECRET}
@@ -151,6 +157,10 @@ services:
       - "127.0.0.1:3000:3000"
     volumes:
       - ./config/site.json:/config/site.json:ro
+      # Private key for `ssh root@<node> pct exec ...`. Read-only, and mounted at
+      # the path PROXMOX_SSH_KEY names. ssh refuses a key it considers
+      # world-readable, so keep the host file at 0600.
+      - ${PROXMOX_SSH_KEY_HOST:-./secrets/proxmox_ed25519}:${PROXMOX_SSH_KEY:-/run/secrets/proxmox_ssh_key}:ro
       - ./front-end/plugins:/app/plugins:rw
       - ./front-end/profiles:/app/profiles:rw
       - ./front-end/vuln-assets:/app/vuln-assets:ro

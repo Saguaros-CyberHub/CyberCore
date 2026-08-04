@@ -1062,10 +1062,22 @@ async function deployOneWorkstation(job, ws) {
   let consoleVia = job._gatewayAccessOk ? 'gateway' : 'gateway-baked-dnat';
   if (!job._gatewayAccessOk) {
     if (con.protocol === 'rdp' && consolePort === CONSOLE_PROTOCOLS.rdp.wanPort) {
+      // Do NOT read this as "degraded but fine". The baked DNAT's destination is
+      // fixed at <base>.50, and the only thing that puts a guest there is the
+      // DHCP reservation we just failed to write. The gateway template also
+      // ships `dhcp-host=kali,<base>.50`, but that matches on the DHCP CLIENT
+      // HOSTNAME, and Proxmox takes the guest hostname from the VM name — which
+      // here is the lane name, never "kali" (the same trap documented in
+      // challenge-lane-deployer.writeLaneReservations). So this path works only
+      // for an image that keeps a baked hostname of exactly "kali" AND has no
+      // cloud-init drive to rename it. Anything else takes a pool lease and the
+      // console connects to nothing; confirmWorkstationIp catches that ~45s
+      // later and downgrades the lane to 'unreachable'.
       console.warn(
-        `${LOG} ${label}: gateway config failed — falling back to the template's ` +
-        `baked wan0:3389 DNAT. This only works if the guest lands on ` +
-        `${laneBase}.${WORKSTATION_OCTET_BASE} by itself (Kali does; most templates do not).`
+        `${LOG} ${label}: gateway config failed — falling back to the template's baked ` +
+        `wan0:3389 DNAT, which only reaches ${laneBase}.${WORKSTATION_OCTET_BASE}. Unless this ` +
+        `image announces itself to DHCP as "kali", it will take a pool lease and the console ` +
+        `will NOT connect. Fix PROXMOX_SSH_KEY / PROXMOX_SSH_USER and re-provision.`
       );
     } else {
       consoleVia = 'unreachable';
@@ -1237,10 +1249,34 @@ function confirmWorkstationIp(job, slot, workstationVmid, providerType, expected
         return;
       }
       const confirmed = ip === expectedIp;
-      if (!confirmed) {
+      // The console ALWAYS targets the reserved address — our own LANE-CONSOLE
+      // DNAT and the gateway's baked wan0:3389 rule both point there. So a guest
+      // sitting anywhere else in the lane subnet is not merely suspicious: it
+      // took an ordinary pool lease, and its console cannot connect at all.
+      //
+      // Restricted to the same /24 on purpose. getVmIp returns the FIRST
+      // non-loopback IPv4 the agent reports, so a guest that happens to surface
+      // some other interface first would otherwise be branded unreachable while
+      // working fine. A different host in the LANE's own subnet is unambiguous.
+      const sameSubnet = ip.split('.').slice(0, 3).join('.') === expectedIp.split('.').slice(0, 3).join('.');
+      if (!confirmed && sameSubnet) {
+        const detail =
+          `workstation is on ${ip}, not the reserved ${expectedIp} — it took a DHCP pool ` +
+          `lease, so the console DNAT points at an address nothing answers on. The lane's ` +
+          `DHCP reservation did not apply; check PROXMOX_SSH_KEY / PROXMOX_SSH_USER and ` +
+          `re-provision.`;
+        console.error(`${LOG} Lane ${job.laneId} slot ${slot}: ${detail}`);
+        // Downgrade the lane so it stops reading as healthy. An instructor
+        // handing this to a student otherwise sees 'active' with a Console
+        // button that silently fails.
+        await patchLaneConfig(job.laneId, {
+          console_via: 'unreachable',
+          console_error: `slot ${slot}: ${detail}`,
+        }).catch(() => {});
+      } else if (!confirmed) {
         console.warn(
-          `${LOG} Lane ${job.laneId} slot ${slot}: workstation is on ${ip}, not the reserved ` +
-          `${expectedIp} — console may not connect`
+          `${LOG} Lane ${job.laneId} slot ${slot}: workstation reports ${ip}, not the reserved ` +
+          `${expectedIp} — different subnet, so this is probably a second interface, not a bad lease`
         );
       }
       // Merged with `||` into the existing map rather than written through a

@@ -33,9 +33,49 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
+
+const { getNodeAddress } = require('./site-config');
 
 const SSH_USER = process.env.PROXMOX_SSH_USER || 'root';
 const SSH_KEY  = process.env.PROXMOX_SSH_KEY  || path.join(os.homedir(), '.ssh', 'id_ed25519');
+
+/**
+ * The address to actually open a socket to for a Proxmox node.
+ *
+ * Proxmox names its nodes ('cyberhub-node-2') and every caller here passes that
+ * name straight through from the API. In the container those names do not
+ * resolve — its resolvers are 1.1.1.1 and the lab DNS, and neither serves the
+ * cluster's node records, so ssh fails with "Could not resolve hostname" before
+ * it ever reaches the key. site.json already carries the name → IP map, so use
+ * it and fall back to the bare name for anything not declared there (a
+ * single-node dev box where the name IS resolvable).
+ */
+function nodeAddress(node) {
+  try {
+    return getNodeAddress(node) || node;
+  } catch (_) {
+    return node;    // site.json unreadable — let ssh try the name and report it
+  }
+}
+
+/**
+ * One-line preflight so a misconfigured SSH channel reports the actual cause.
+ * Without it the failure surfaces as ssh's own "Identity file ... not
+ * accessible" warning buried in stderr, alongside a non-zero exit that reads
+ * like a remote problem.
+ */
+function assertKeyReadable() {
+  try {
+    fs.accessSync(SSH_KEY, fs.constants.R_OK);
+  } catch (_) {
+    throw new Error(
+      `SSH key '${SSH_KEY}' is missing or unreadable — the orchestrator cannot run ` +
+      `commands on cluster nodes. Set PROXMOX_SSH_KEY to a key mounted into the ` +
+      `container, and PROXMOX_SSH_USER if it is not '${SSH_USER}'.`
+    );
+  }
+}
 
 const SSH_FLAGS = [
   '-i', SSH_KEY,
@@ -54,7 +94,8 @@ const SSH_FLAGS = [
 function nodeExec(node, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
   return new Promise((resolve, reject) => {
-    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${node}`, '--', ...args];
+    try { assertKeyReadable(); } catch (e) { return reject(e); }
+    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--', ...args];
     const child = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -94,7 +135,8 @@ function pctExec(node, vmid, args, opts = {}) {
 function pctExecWithStdin(node, vmid, args, stdinData, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
   return new Promise((resolve, reject) => {
-    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${node}`, '--',
+    try { assertKeyReadable(); } catch (e) { return reject(e); }
+    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--',
                  'pct', 'exec', String(vmid), '--', ...args];
     const child = spawn(cmd[0], cmd.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';

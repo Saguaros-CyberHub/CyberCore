@@ -38,6 +38,17 @@ const calls = {
   pctExecs: [],      // { gatewayVmid, script }
 };
 let gatewayAccessShouldFail = false;
+let agentIpOverride = null;   // force the guest-agent IP, to model a bad DHCP lease
+
+/** Poll until `fn()` is true or the budget expires — the IP confirm is detached. */
+async function waitFor(fn, ms = 2000) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (fn()) return true;
+    await new Promise(r => setTimeout(r, 10));
+  }
+  return false;
+}
 
 // ── Proxmox ──────────────────────────────────────────────────────────────────
 // Guest-agent IPs are derived from the MAC the deployer set: macForOctet encodes
@@ -74,8 +85,9 @@ stubModule('proxmox.js', {
     if (method === 'DELETE') { calls.deletes.push(vmid); macByVmid.delete(vmid); vmMeta.delete(vmid); return null; }
     if (url.includes('/agent/network-get-interfaces')) {
       const mac = macByVmid.get(vmid);
-      if (!mac) throw new Error('no agent');
-      return { result: [{ name: 'eth0', 'ip-addresses': [{ 'ip-address-type': 'ipv4', 'ip-address': ipFromMac(mac) }] }] };
+      if (!mac && !agentIpOverride) throw new Error('no agent');
+      const ip = agentIpOverride || ipFromMac(mac);
+      return { result: [{ name: 'eth0', 'ip-addresses': [{ 'ip-address-type': 'ipv4', 'ip-address': ip }] }] };
     }
     if (method === 'PUT' && url.endsWith('/config')) {
       calls.configs.push({ vmid, body });
@@ -192,6 +204,7 @@ function reset() {
   vmMeta.clear();
   laneSeq = 0;
   gatewayAccessShouldFail = false;
+  agentIpOverride = null;
 }
 
 const tests = [];
@@ -276,6 +289,37 @@ test('gateway failure fails the lane when it has more than one workstation', asy
   assert.strictEqual([...lanes.values()][0].status, 'error');
   assert.strictEqual(calls.clones.filter(c => c.sourceVmid !== 1694).length, 0,
     'no workstation is cloned once the lane is known to be unreachable');
+});
+
+// ── 4b. a guest that took a pool lease downgrades the lane ───────────────────
+// Reproduces the observed production failure: SSH to the node was unavailable,
+// so no DHCP reservation was written, and the Windows guest took .199 instead of
+// the reserved .50. The gateway's baked DNAT still targets .50, so the console
+// is dead — the lane must not keep reporting a healthy console.
+test('a workstation on a pool lease marks the console unreachable', async () => {
+  reset();
+  gatewayAccessShouldFail = true;
+  agentIpOverride = '10.39.16.199';       // pool lease, same lane subnet
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+
+  const lane = [...lanes.values()][0];
+  await waitFor(() => lane.config.console_via === 'unreachable');
+  assert.strictEqual(lane.config.console_via, 'unreachable');
+  assert.ok(/pool lease/.test(lane.config.console_error || ''), lane.config.console_error);
+  agentIpOverride = null;
+});
+
+// ── 4c. a second interface must NOT be mistaken for a bad lease ──────────────
+test('an address outside the lane subnet does not downgrade the lane', async () => {
+  reset();
+  agentIpOverride = '172.17.0.5';          // some other interface entirely
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+
+  const lane = [...lanes.values()][0];
+  await new Promise(r => setTimeout(r, 50));
+  assert.strictEqual(lane.config.console_via, 'gateway', 'a foreign subnet is not evidence of a bad lease');
+  assert.ok(!lane.config.console_error);
+  agentIpOverride = null;
 });
 
 // ── 5. port collision is caught before anything is built ─────────────────────
