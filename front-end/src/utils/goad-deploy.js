@@ -158,10 +158,13 @@ const INFRA_IP_OCTETS = {
   gateway:    1,
   controller: 5,
   // Ext-segment attack box. .50 matches the gateway RDP DNAT (KALI_OCTET=50 in
-  // bake-lane-gateway-v2/v3.sh) and the .50 DHCP-pool exclusion. Was 20 — an
-  // orphan that never worked: the reservation it produced sat on the INTERNAL
-  // segment (Kali lives on EXTERNAL) and the clone never carried the matching
-  // MAC, so nothing was reachable at .20. .50 is what every enforcing path uses.
+  // bake-lane-gateway-v2/v3.sh). Note the gateway's pool is .10–.200, so .50 is
+  // INSIDE it and is not excluded — it stays free because dnsmasq never hands a
+  // reserved address to a client that doesn't match the reservation, so a lease
+  // only lands here for the host the reservation names. Was 20 — an orphan that
+  // never worked: the reservation it produced sat on the INTERNAL segment (Kali
+  // lives on EXTERNAL) and the clone never carried the matching MAC, so nothing
+  // was reachable at .20. .50 is what every enforcing path uses.
   Kali:       50
 };
 
