@@ -540,11 +540,18 @@ LANE_DOMAIN=cybercore.lan
 # Convention: the GOAD controller VM gets <internal-base>.5 in every lane
 CONTROLLER_OCTET=5
 
-# Convention: Kali gets <external-base>.50 (pinned by admin.js via cloud-init
-# ipconfig0). Firstboot installs wan0:3389 DNAT to this IP on ext0.
+# Convention: the lane's primary console box gets <external-base>.50 — Kali on a
+# challenge lane, or workstation slot 0 on a lane-deployer lane. Firstboot
+# installs the wan0:3389 DNAT to this IP on ext0.
+#
+# Delivered by DHCP RESERVATION, not a static pin: the Kali cloud image's
+# cloud-ifupdown helper races a cloud-init ipconfig0 and wins, which left the box
+# on a random lease and the DNAT pointing at nothing.
 KALI_OCTET=50
 
-# DHCP scope for lane VMs on BOTH segments (excludes .1 gateway, .5 controller, .50 kali)
+# DHCP scope for lane VMs on BOTH segments. NOTE this range CONTAINS .5 and .50 —
+# it is a pool, not a set of exclusions. Those addresses stay free because dnsmasq
+# never hands a reserved address to a client that doesn't match the reservation.
 DHCP_START_OCTET=10
 DHCP_END_OCTET=200
 

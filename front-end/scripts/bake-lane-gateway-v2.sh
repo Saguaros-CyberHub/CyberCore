@@ -164,9 +164,18 @@ dhcp-authoritative
 # "kali", so it deterministically lands on this IP without any per-deploy
 # admin.js setup.  The gateway's CYBERCORE-KALI-RDP iptables DNAT (installed
 # below) targets exactly this IP, so RDP through wan0:3389 always reaches Kali.
+#
+# This covers Kali and ONLY Kali: any other image announces its own name and
+# takes an ordinary pool lease. Every other machine is pinned by MAC through a
+# file in the conf-dir below, which is also the only mechanism that scales past
+# one machine — do not try to grow this line into a general reservation table,
+# it cannot know a lane's contents at bake time.
 dhcp-host=kali,${KALI_IP}
 
-# Per-host reservations (admin.js or the GOAD controller drops files here):
+# Per-host reservations, keyed on MAC. The deploy path drops files here (one per
+# lane for workstations, one per instance for attached modules) and reloads
+# dnsmasq; whole files are rewritten as a unit so a re-provision cannot leave a
+# stale reservation behind.
 conf-dir=/etc/dnsmasq.d/,*.conf
 
 log-dhcp
@@ -189,9 +198,16 @@ if ! iptables -t nat -C POSTROUTING -s "${LAN_NET}" -o wan0 -j MASQUERADE 2>/dev
   iptables -t nat -A POSTROUTING -s "${LAN_NET}" -o wan0 -j MASQUERADE
 fi
 
-# 3. Kali attack-box DNAT — forward wan0:3389 to the lane's Kali (.50 by
-#    convention; admin.js pins this via cloud-init ipconfig0). Strip any
-#    stale rule first in case lan0 changed subnet between boots.
+# 3. Console DNAT — forward wan0:3389 to the lane's primary box (.50 by
+#    convention, delivered by DHCP reservation; see KALI_OCTET in
+#    /etc/cybercore-gateway.env). Strip any stale rule first in case lan0
+#    changed subnet between boots.
+#
+#    This is a FALLBACK, and covers exactly one machine on one port. The deploy
+#    path installs its own LANE-CONSOLE rules over SSH — one DNAT per workstation
+#    slot, on <base port> + slot — which is the only thing that works for a
+#    non-RDP console or for a lane with more than one workstation. Those rules
+#    carry a different comment tag, so the grep -v below leaves them alone.
 iptables-save | grep -v "CYBERCORE-KALI-RDP" | iptables-restore || true
 iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
   -m comment --comment "CYBERCORE-KALI-RDP" \
@@ -358,11 +374,21 @@ LANE_DOMAIN=cybercore.lan
 # Convention: the GOAD controller VM gets <lan-base>.5 in every lane
 CONTROLLER_OCTET=5
 
-# Convention: the Kali attack box gets <lan-base>.50 (admin.js pins this via
-# cloud-init ipconfig0). Firstboot installs wan0:3389 DNAT to this IP.
+# Convention: the lane's primary console box gets <lan-base>.50 — Kali on a
+# challenge lane, or workstation slot 0 on a lane-deployer lane. Firstboot
+# installs the wan0:3389 DNAT to this IP.
+#
+# The address is delivered by DHCP RESERVATION, not a static pin: the Kali cloud
+# image's cloud-ifupdown helper races a cloud-init ipconfig0 and wins, which left
+# the box on a random lease and the DNAT pointing at nothing. See
+# challenge-lane-deployer.writeLaneReservations and lane-deployer's
+# applyGatewayWorkstationAccess, both of which key the reservation on MAC.
 KALI_OCTET=50
 
-# DHCP scope for lane VMs (excludes .1 gateway, .5 controller, .50 kali)
+# DHCP scope for lane VMs. NOTE this range CONTAINS .5 and .50 — it is a pool,
+# not a set of exclusions. Those addresses stay free because dnsmasq never hands
+# a reserved address to a client that doesn't match the reservation, so a pool
+# lease only lands there for the host the reservation names.
 DHCP_START_OCTET=10
 DHCP_END_OCTET=200
 

@@ -2,8 +2,8 @@
  * ============================================================================
  * LANE DEPLOYER
  * ----------------------------------------------------------------------------
- * Deploys workstation lanes (gateway LXC + one VM) for users that ALREADY
- * EXIST, out of a caller-supplied VXLAN block. This is the sequence that
+ * Deploys workstation lanes (gateway LXC + one or more VMs) for users that
+ * ALREADY EXIST, out of a caller-supplied VXLAN block. This is the sequence that
  * routes/admin/groups.js runs for its Kali attack box, lifted out of that
  * route's group/challenge/user-creation coupling so any caller can reuse it.
  *
@@ -13,15 +13,17 @@
  * the non-obvious details that actually make a lane reachable. Those details
  * are the whole point of this file:
  *
- *   1. The VM is pinned to <lane-base>.50 by a deterministic MAC plus a dnsmasq
- *      reservation written into the gateway. The gateway template ships
+ *   1. Each VM is pinned to <lane-base>.<50 + slot> by a deterministic MAC plus a
+ *      dnsmasq reservation written into the gateway. The gateway template ships
  *      `dhcp-host=kali,<base>.50` — a HOSTNAME match, so Kali lands on .50 for
  *      free and nothing else does. A Windows template announces its own name
  *      and takes a random lease, which is why reserving by MAC is required for
- *      "any template" to work.
+ *      "any template" to work — and the only thing that works at all for slots
+ *      past the one the template bakes.
  *   2. The console target is the gateway's WAN transit IP, never the lane-local
  *      IP. guacd runs on the orchestrator's Docker bridge and has no route into
- *      10.<vxh>.<vxl>.0/24; the gateway's wan0 DNAT is the only way in.
+ *      10.<vxh>.<vxl>.0/24; the gateway's wan0 DNAT is the only way in. Slot N is
+ *      published on <protocol base port> + N.
  *   3. The gateway carries a per-lane bootstrap claim secret in its hostname so
  *      /api/lane-bootstrap can identify it by secret rather than source IP
  *      (which the Docker bridge rewrites). Without it Tailscale never comes up.
@@ -61,27 +63,51 @@ const nodeSsh = require('./node-ssh');
 const tailscale = require('./tailscale');
 
 const GATEWAY_VMID_OFFSET = 100000;     // gateway LXC = 100000 + vxlanId (matches groups.js)
-const WORKSTATION_VMID_OFFSET = 600000; // workstation = 600000 + vxlanId
+const WORKSTATION_VMID_OFFSET = 600000; // slot-0 workstation = 600000 + vxlanId
 const TEMP_GW_TEMPLATE_BASE = 169300;   // per-node temp gateway template copies (clear of groups.js' 169200)
 // GOAD controller = 200000 + vxlanId. Mirrors goad-deploy.js deployController();
 // teardown needs it because the controller is never recorded on the lane.
 const GOAD_CONTROLLER_VMID_OFFSET = 200000;
 
-// The lane octet the workstation lands on. Same value the gateway template bakes
-// its wan0:3389 DNAT against (KALI_OCTET=50 in bake-lane-gateway-v2.sh) and the
-// same one groups.js pins its attack box to — so a plain RDP template still
-// works even if our own DNAT install fails.
-const WORKSTATION_OCTET = INFRA_IP_OCTETS.Kali;
+// VMIDs for workstations in slots 1+. Deliberately NOT `base + slot*step + vxlanId`
+// like attached-modules.js: VXLAN blocks start at 10000 and grow without bound
+// (lab-network-provision.allocateVxlanBlock), so any slot*step encoding collides
+// as soon as ids exceed the step — slot 0/vxlan 20000 and slot 1/vxlan 10000 both
+// land on the same number. These are scanned for free ids and RECORDED on the
+// lane instead, which teardown already prefers over derived values.
+const EXTRA_WS_VMID_BASE = 300000;
+const EXTRA_WS_VMID_MAX  = 399999;
+
+// The lane octets workstations land on: slot 0 → .50, slot 1 → .51, …
+//
+// Slot 0 is INFRA_IP_OCTETS.Kali on purpose. It is the value the gateway template
+// bakes its wan0:3389 DNAT against (KALI_OCTET=50 in bake-lane-gateway-v2.sh) and
+// the one groups.js pins its attack box to, so a plain RDP template in slot 0
+// still works even if our own DNAT install fails. Slots 1+ have no baked
+// equivalent — see applyGatewayWorkstationAccess.
+//
+// The band ends before .100, where attached-modules.js starts allocating
+// (ATTACHED_IP_OCTET_MIN), and starts above GOAD's lab hosts (.10–.12) and the
+// .1 gateway / .5 controller reservations.
+const WORKSTATION_OCTET_BASE = INFRA_IP_OCTETS.Kali;
+const WORKSTATION_MAX_SLOTS  = 30;                  // .50 – .79
+const WORKSTATION_OCTET = WORKSTATION_OCTET_BASE;   // back-compat alias: slot 0
 
 // Console protocols a template may expose, and the port the gateway publishes
-// them on. SSH is remapped because the gateway's own sshd owns wan0:22 —
-// DNATing that would black-hole access to the gateway itself.
+// slot 0 on. SSH is remapped because the gateway's own sshd owns wan0:22 —
+// DNATing that would black-hole access to the gateway itself. Slot N is published
+// on wanPort + N (see consoleForSlot), which keeps each protocol's slots inside
+// its own band: rdp 3389–3418, vnc 5900–5929, ssh 2222–2251.
 const CONSOLE_PROTOCOLS = {
   rdp: { guestPort: 3389, wanPort: 3389 },
   vnc: { guestPort: 5900, wanPort: 5900 },
   ssh: { guestPort: 22,   wanPort: 2222 },
 };
 
+// One file for the whole lane, rewritten as a unit. It must NOT be split per
+// workstation: dnsmasq reads every *.conf in the directory, so partial files
+// would leave a stale reservation behind whenever a lane is re-provisioned with
+// fewer machines.
 const DNSMASQ_RESERVATION_PATH = '/etc/dnsmasq.d/lane-workstation.conf';
 const LOG = '[LaneDeployer]';
 
@@ -89,6 +115,82 @@ const LOG = '[LaneDeployer]';
 
 function vmApiBase(node, vmid, providerType) {
   return `/api2/json/nodes/${node}/${providerType === 'lxc' ? 'lxc' : 'qemu'}/${vmid}`;
+}
+
+// ── workstation slots ────────────────────────────────────────────────────────
+
+/** Lane octet for a workstation slot. Throws rather than silently overrunning
+ *  into the attached-module band at .100. */
+function octetForSlot(slot) {
+  if (!Number.isInteger(slot) || slot < 0 || slot >= WORKSTATION_MAX_SLOTS) {
+    throw new Error(
+      `workstation slot ${slot} out of range [0, ${WORKSTATION_MAX_SLOTS}) — ` +
+      `the octet band is .${WORKSTATION_OCTET_BASE}–.${WORKSTATION_OCTET_BASE + WORKSTATION_MAX_SLOTS - 1}`
+    );
+  }
+  return WORKSTATION_OCTET_BASE + slot;
+}
+
+/**
+ * Where the gateway publishes this slot's console. Slot 0 keeps the template's
+ * own wanPort so the baked wan0:3389 DNAT still describes it; every later slot
+ * shifts up by its slot number — unless the template pinned an explicit
+ * console_wan_port, which is honoured verbatim (see resolveConsole).
+ */
+function consoleForSlot(con, slot) {
+  if (con.wanPortPinned) return { ...con };
+  return { ...con, wanPort: con.wanPort + slot };
+}
+
+/**
+ * VMIDs handed out to slots 1+ but not yet visible in the cluster, so two
+ * overlapping deploys can't pick the same id in the window between the scan and
+ * the clone that claims it.
+ *
+ * Entries expire: once the clone exists the cluster scan sees it anyway, and a
+ * clone that has not appeared within the TTL has failed. Without the expiry this
+ * map would only ever grow, and a long-lived process would eventually report the
+ * band exhausted while the cluster had plenty of free ids.
+ */
+const _reservedWsVmids = new Map(); // vmid → Date.now() when handed out
+const RESERVED_VMID_TTL_MS = 15 * 60 * 1000;
+
+/**
+ * Pick `count` VMIDs that are free cluster-wide for slot-1+ workstations.
+ *
+ * Slot 0 does NOT come through here — it stays at WORKSTATION_VMID_OFFSET +
+ * vxlanId so every lane deployed before this file grew slots keeps the exact
+ * VMID it already has recorded, and operators keep the 600000+vxlan shorthand.
+ */
+async function reserveWorkstationVmids(count) {
+  if (count <= 0) return [];
+  let taken = new Set();
+  try {
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+    taken = new Set((resources || []).map(r => Number(r.vmid)));
+  } catch (e) {
+    // Fail loudly: guessing here means a clone lands on a VMID that already
+    // belongs to somebody else's machine.
+    throw new Error(`Could not list cluster VMIDs to allocate workstation slots: ${e.message}`);
+  }
+  const now = Date.now();
+  for (const [id, at] of _reservedWsVmids) {
+    if (now - at > RESERVED_VMID_TTL_MS) _reservedWsVmids.delete(id);
+  }
+
+  const ids = [];
+  for (let id = EXTRA_WS_VMID_BASE; ids.length < count && id <= EXTRA_WS_VMID_MAX; id++) {
+    if (taken.has(id) || _reservedWsVmids.has(id)) continue;
+    _reservedWsVmids.set(id, now);
+    ids.push(id);
+  }
+  if (ids.length < count) {
+    throw new Error(
+      `Out of workstation VMIDs in [${EXTRA_WS_VMID_BASE}, ${EXTRA_WS_VMID_MAX}] — ` +
+      `needed ${count}, found ${ids.length}`
+    );
+  }
+  return ids;
 }
 
 /** First non-loopback IPv4 from the guest agent (qemu) or interfaces API (lxc). */
@@ -178,8 +280,13 @@ function resolveConsole(template) {
   const protocol = CONSOLE_PROTOCOLS[requested] ? requested : 'rdp';
   const base = CONSOLE_PROTOCOLS[protocol];
   const guestPort = Number(meta.console_port) || base.guestPort;
-  const wanPort = Number(meta.console_wan_port) || (guestPort === 22 ? base.wanPort : guestPort);
-  return { protocol, guestPort, wanPort };
+  const pinnedWanPort = Number(meta.console_wan_port) || null;
+  const wanPort = pinnedWanPort || (guestPort === 22 ? base.wanPort : guestPort);
+  // A pinned port means "publish this image on exactly this gateway port", so
+  // consoleForSlot leaves it alone instead of shifting it by slot. Two slots that
+  // then want the same port are a real conflict, and deployLanes rejects them
+  // rather than letting the second DNAT shadow the first.
+  return { protocol, guestPort, wanPort, wanPortPinned: pinnedWanPort !== null };
 }
 
 /**
@@ -418,50 +525,68 @@ async function findCloudInitDrive(node, vmid) {
 // ── gateway plumbing ─────────────────────────────────────────────────────────
 
 /**
- * Pin the workstation to <lane-base>.50 and publish its console port on the
- * gateway's WAN IP. Must run BEFORE the workstation first boots so its very
- * first DHCPREQUEST already has a reservation waiting.
+ * Pin every workstation in the lane to its slot's address and publish each one's
+ * console port on the gateway's WAN IP. Must run BEFORE any workstation first
+ * boots, so their very first DHCPREQUEST already has a reservation waiting.
  *
- * Both halves need a shell inside the gateway LXC, and Proxmox has no LXC exec
- * API — so this goes over `pct` via SSH to the node, the same channel
+ * Renders the gateway's state from the FULL workstation list rather than
+ * patching it per machine, because both halves are whole-file/whole-chain
+ * operations:
+ *   - dnsmasq reservations live in one file at a fixed path, so a per-workstation
+ *     write would overwrite the previous machine's reservation;
+ *   - the iptables step strips every LANE-CONSOLE rule before re-adding, so a
+ *     per-workstation call would delete the previous machine's DNAT.
+ * Both were invisible while a lane held exactly one machine.
+ *
+ * Needs a shell inside the gateway LXC, and Proxmox has no LXC exec API — so
+ * this goes over `pct` via SSH to the node, the same channel
  * goad-deploy.writeDhcpReservations and attached-modules.writeDhcpForModule use.
- * Throws if that isn't wired up; the caller degrades to a direct-to-lane-IP
- * console rather than failing the whole deploy.
+ * Throws if that isn't wired up; the caller decides whether that is survivable
+ * (it is for slot 0 alone — see deployLaneWorkstations).
+ *
+ * @param {Array} workstations [{ slot, mac, ip, hostname, console:{guestPort,wanPort} }]
  */
-async function configureGatewayAccess({ node, gatewayVmid, laneBase, mac, hostname, console: con }) {
-  const target = `${laneBase}.${WORKSTATION_OCTET}`;
-
-  const reservation =
-    `# Lane workstation reservation — generated by lane-deployer.js\n` +
-    `# Pins the user's machine to ${target} so the gateway's console DNAT has a\n` +
-    `# fixed destination regardless of which OS the template runs.\n` +
-    `dhcp-host=${mac},${target},${hostname}\n`;
-  await nodeSsh.pctPushFromString(node, gatewayVmid, reservation, DNSMASQ_RESERVATION_PATH);
+async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }) {
+  const lines = [
+    '# Lane workstation reservations — generated by lane-deployer.js',
+    '# Pins each machine to its slot address so the gateway console DNAT has a',
+    '# fixed destination regardless of which OS the template runs.',
+  ];
+  for (const ws of workstations) {
+    lines.push(`dhcp-host=${ws.mac},${ws.ip},${ws.hostname}`);
+  }
+  await nodeSsh.pctPushFromString(node, gatewayVmid, lines.join('\n') + '\n', DNSMASQ_RESERVATION_PATH);
   await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
     'rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true',
   ]);
 
-  // wan0:<wanPort> → <base>.50:<guestPort>. The v2 gateway template already bakes
-  // this for 3389, but only for 3389 — re-adding it is harmless (same
-  // destination) and it's the only path for a non-RDP template. Strip our own tag
-  // first so a re-provision doesn't stack duplicates, then persist so the rule
-  // survives a gateway reboot (Alpine reloads /etc/iptables/rules-save at boot,
-  // before firstboot re-adds its own rules).
-  const rules = [
-    'iptables-save | grep -v "LANE-CONSOLE" | iptables-restore || true',
-    `iptables -t nat -A PREROUTING -i wan0 -p tcp --dport ${con.wanPort} ` +
-      `-m comment --comment "LANE-CONSOLE" -j DNAT --to-destination ${target}:${con.guestPort}`,
+  // wan0:<wanPort> → <slot ip>:<guestPort>, one pair per workstation. The v2
+  // gateway template already bakes this for 3389 → .50, but only for that one
+  // port and address — re-adding it is harmless (same destination) and it is the
+  // only path for a non-RDP template or any slot past 0. Strip our own tag first
+  // so a re-provision doesn't stack duplicates, then persist so the rules survive
+  // a gateway reboot (Alpine reloads /etc/iptables/rules-save at boot, before
+  // firstboot re-adds its own rules).
+  const rules = ['iptables-save | grep -v "LANE-CONSOLE" | iptables-restore || true'];
+  for (const ws of workstations) {
+    const { guestPort, wanPort } = ws.console;
+    rules.push(
+      `iptables -t nat -A PREROUTING -i wan0 -p tcp --dport ${wanPort} ` +
+        `-m comment --comment "LANE-CONSOLE" -j DNAT --to-destination ${ws.ip}:${guestPort}`
+    );
     // Position 2 keeps this above the base template's perimeter DROP block
     // (position 1 is the global RELATED,ESTABLISHED ACCEPT). Fall back to a
     // plain insert if the chain is shorter than that — iptables rejects an
     // index past the end of the chain, and `;` separators would hide it.
-    `iptables -I FORWARD 2 -i wan0 -o lan0 -p tcp -d ${target} --dport ${con.guestPort} ` +
-      `-m comment --comment "LANE-CONSOLE" -j ACCEPT ` +
-      `|| iptables -I FORWARD -i wan0 -o lan0 -p tcp -d ${target} --dport ${con.guestPort} ` +
-      `-m comment --comment "LANE-CONSOLE" -j ACCEPT`,
-    'mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules-save',
-  ].join('; ');
-  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c', rules]);
+    rules.push(
+      `iptables -I FORWARD 2 -i wan0 -o lan0 -p tcp -d ${ws.ip} --dport ${guestPort} ` +
+        `-m comment --comment "LANE-CONSOLE" -j ACCEPT ` +
+        `|| iptables -I FORWARD -i wan0 -o lan0 -p tcp -d ${ws.ip} --dport ${guestPort} ` +
+        `-m comment --comment "LANE-CONSOLE" -j ACCEPT`
+    );
+  }
+  rules.push('mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules-save');
+  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c', rules.join('; ')]);
 }
 
 // ── Guacamole ────────────────────────────────────────────────────────────────
@@ -565,13 +690,23 @@ async function createGuacConnection({ connName, user, hostname, port, protocol, 
  * lane-local IP) and so its ghost-card filter ties the row to the lane.
  * Non-fatal: the lane still goes active if this fails.
  */
-async function registerWorkspaceVm({ job, workstationVmid, providerType, guacConnId }) {
-  const { laneId, user, template, vxlanId, targetNode, moduleKey, laneConfig } = job;
+async function registerWorkspaceVm({ job, template, workstationVmid, providerType, guacConnId }) {
+  const { laneId, user, vxlanId, targetNode, moduleKey, laneConfig } = job;
   const slug = String(user.email || user.id).split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
   const displayName = template.os_name || template.template_key || 'workstation';
   // (module_key, name) is UNIQUE — suffix with the cluster-unique VMID so the
-  // same template deployed to N lanes can't collide on the base name.
-  const name = `${template.template_key || 'workstation'}-${slug}-${workstationVmid}`.substring(0, 80);
+  // same template deployed to N lanes, or to two slots of ONE lane, can't
+  // collide on the base name.
+  //
+  // The VMID is appended AFTER truncating the prefix, not truncated along with
+  // it. Trimming the whole string instead drops the discriminator once
+  // template_key + slug reaches 80 chars, and the two rows collide, hit the
+  // UNIQUE constraint, and lose their workspace registration — leaving a running
+  // machine that never appears on the owner's dashboard, with only a warning in
+  // the log to explain it.
+  const vmidSuffix = `-${workstationVmid}`;
+  const name = `${template.template_key || 'workstation'}-${slug}`
+    .substring(0, 80 - vmidSuffix.length) + vmidSuffix;
 
   try {
     const resourceRes = await cybercoreQuery(
@@ -689,35 +824,70 @@ function readProgress(progressId) {
 
 // ── per-lane steps ───────────────────────────────────────────────────────────
 
-/** Create the lane row (status 'deploying') with the seed config. Sets job.laneId. */
+/** Serializable projection of a workstation plan, for cybercore_lane.config. */
+function workstationConfigEntry(ws) {
+  return {
+    slot: ws.slot,
+    vmid: ws.vmid,
+    octet: ws.octet,
+    ip: ws.ip,
+    mac: ws.mac,
+    hostname: ws.hostname,
+    provider_type: ws.providerType,
+    template_id: ws.template.id || null,
+    template_name: ws.template.os_name || ws.template.template_key,
+    console_protocol: ws.console.protocol,
+    console_port: ws.console.wanPort,
+  };
+}
+
+/**
+ * Create the lane row (status 'deploying') with the seed config. Sets job.laneId.
+ *
+ * Writes the PLANNED workstation list — VMIDs included — before anything is
+ * cloned. Teardown reads it, so a deploy that dies partway through still leaves
+ * every id it might have created on the record; deriving them afterwards is
+ * impossible for slots 1+, whose VMIDs are allocated rather than computed.
+ *
+ * Slot 0 also lands on the flat `workstation_*` / `console_*` keys it has always
+ * used. The CLE read paths (plugins/cle/routes/vms.js, labs.js) and the group
+ * teardown still read those, and a lane with one machine should look exactly the
+ * way it did before this file grew slots.
+ */
 async function insertLane(job) {
   const {
-    user, template, vxlanId, vnet, targetNode, net, console: con,
+    user, vxlanId, vnet, targetNode, net, workstations,
     moduleKey, subnetScheme, laneName, laneConfig, resources,
   } = job;
-  const providerType = template.provider_type || 'qemu';
+  const primary = workstations[0];
   const ins = await cybercoreQuery(
     `INSERT INTO cybercore_lane (user_id, module_key, name, status, vxlan_id, config, created_at, updated_at)
      VALUES ($1, $2, $3, 'deploying', $4, $5::jsonb, NOW(), NOW())
      RETURNING lane_id`,
     [user.id, moduleKey, laneName, vxlanId, JSON.stringify({
       ...laneConfig,
-      template_id: template.id || null,
-      template_name: template.os_name || template.template_key,
-      provider_type: providerType,
+      template_id: primary.template.id || null,
+      template_name: primary.template.os_name || primary.template.template_key,
+      provider_type: primary.providerType,
       subnet_scheme: subnetScheme,
       vnet: vnet.vnet,
       gateway_vmid: GATEWAY_VMID_OFFSET + vxlanId,
-      workstation_vmid: WORKSTATION_VMID_OFFSET + vxlanId,
+      workstation_vmid: primary.vmid,
       node: targetNode,
       user_email: user.email,
       lane_subnet_base: net.lan.base3,
       gateway_wan_ip: net.wan.ip.split('/')[0],
-      workstation_ip: `${net.lan.base3}.${WORKSTATION_OCTET}`,
-      console_protocol: con.protocol,
-      console_port: con.wanPort,
+      workstation_ip: primary.ip,
+      console_protocol: primary.console.protocol,
+      console_port: primary.console.wanPort,
+      workstations: workstations.map(workstationConfigEntry),
+      // Per-slot lease confirmation, seeded so confirmWorkstationIp's jsonb_set
+      // has a parent object to write into. Kept as flat maps rather than fields
+      // on workstations[] so N concurrent confirmations can't clobber each other.
+      ws_ip: {},
+      ws_ip_confirmed: {},
       // What was asked for. `resources` (what was achieved) lands at the end of
-      // deployWorkstation; keeping both makes a partial apply legible.
+      // deployLaneWorkstations; keeping both makes a partial apply legible.
       ...(resources ? { requested_resources: resources } : {}),
     })]
   );
@@ -785,192 +955,258 @@ function serializeLxcClone(node, vmid, fn) {
 }
 
 /**
- * Clone + configure + start the workstation, wire up remote access, register it
- * for the owner, and mark the lane 'active'. Marks the lane 'error' and rethrows
- * on failure so runBatch records it.
+ * Clone + configure + start ONE workstation and wire up its console. Returns the
+ * record the lane config keeps for that slot; throws on failure, leaving the
+ * lane bookkeeping to deployLaneWorkstations.
+ *
+ * The gateway's DHCP reservation and console DNAT are NOT set up here — they are
+ * a whole-lane operation that must already have run (see
+ * applyGatewayWorkstationAccess), because they are rendered from every slot at
+ * once.
  */
-async function deployWorkstation(job) {
+async function deployOneWorkstation(job, ws) {
   const {
-    user, template, vxlanId, vnet, targetNode, wsSourceNode, cloneSem,
-    net, console: con, laneName, description, progress, guacParent, resources,
+    user, vxlanId, vnet, targetNode, cloneSem, net, laneName, description, progress, guacParent,
   } = job;
-  const workstationVmid = WORKSTATION_VMID_OFFSET + vxlanId;
+  const {
+    slot, template, providerType, vmid: workstationVmid, mac, ip: workstationIp,
+    hostname, console: con, sourceNode: wsSourceNode, resources,
+  } = ws;
   const gatewayVmid = GATEWAY_VMID_OFFSET + vxlanId;
-  const providerType = template.provider_type || 'qemu';
   const laneBase = net.lan.base3;
   const gatewayWanIp = net.wan.ip.split('/')[0];
-  const mac = macForOctet(WORKSTATION_OCTET, vxlanId);
+  const label = job.workstations.length > 1 ? `${laneName} slot ${slot}` : laneName;
+
+  // 2. Clone the template. (1 is the lane-wide gateway wiring, already done.)
+  const cloneBody = {
+    newid: workstationVmid,
+    ...(providerType === 'lxc' ? { hostname } : { name: hostname }),
+    full: 1,
+    target: targetNode,
+    description: `Lane workstation (slot ${slot})\nUser: ${user.email}\nLane: ${job.laneId}${description ? `\n${description}` : ''}`,
+  };
+  const clonePath = `${vmApiBase(wsSourceNode, template.template_vmid, providerType)}/clone`;
+  const runClone = async () => {
+    const upid = await proxmoxAPI('POST', clonePath, cloneBody);
+    if (upid) await waitForTask(wsSourceNode, upid, 600000);
+  };
+  await cloneSem.run(() => (providerType === 'lxc'
+    ? serializeLxcClone(wsSourceNode, template.template_vmid, runClone)
+    : runClone()));
+
+  // 3. Put it on the lane VNet with the reserved MAC.
+  const nicVal = providerType === 'lxc'
+    ? `name=eth0,bridge=${vnet.vnet},hwaddr=${mac},firewall=0,ip=dhcp`
+    : `${resolveNicModel(template)},bridge=${vnet.vnet},macaddr=${mac},firewall=0`;
+  await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, providerType)}/config`, { net0: nicVal });
+
+  // 3b. Apply the caller's CPU / RAM / disk sizing, before the guest's first
+  //     boot so cloud-init's growpart sees the resized disk (see applyResources).
+  const sizing = await applyResources({
+    node: targetNode, vmid: workstationVmid, providerType, resources, laneName: label,
+  });
+
+  // 4. Hand the user their login through cloud-init when the template carries a
+  //    cloud-init drive (Linux cloud images, Windows + cloudbase-init).
+  //    Addressing stays on DHCP so the reservation decides the IP — a static
+  //    ipconfig0 races the guest's own DHCP client and loses (the exact bug
+  //    groups.js hit pinning Kali statically).
+  let creds = resolveWorkstationCredentials(template, user);
+  if (providerType === 'qemu' && creds.source === 'cloudinit' && template.metadata?.cloud_init !== false) {
+    let ciDrive = null;
+    try { ciDrive = await findCloudInitDrive(targetNode, workstationVmid); }
+    catch (e) { console.warn(`${LOG} cloud-init probe failed for ${label}: ${e.message}`); }
+
+    if (ciDrive) {
+      // citype is deliberately NOT set: Proxmox derives it from the template's
+      // ostype — nocloud for Linux, configdrive2 for Windows. cloudbase-init
+      // reads configdrive2, so forcing 'nocloud' here (as the Linux-only call
+      // sites in groups.js/lanes.js do) silently breaks credential injection on
+      // every Windows template. If a Windows template lands without creds,
+      // check `qm config <vmid> | grep ostype` first — it must be win10/win11.
+      await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, 'qemu')}/config`, {
+        ciuser: creds.username,
+        cipassword: creds.password,
+        ipconfig0: 'ip=dhcp',
+        nameserver: net.lan.gatewayIp,
+      });
+      await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, 'qemu')}/cloudinit`).catch(() => {});
+    } else {
+      // No cloud-init drive: the guest keeps whatever accounts the template
+      // baked in. Publishing generated credentials Guacamole can only fail to
+      // authenticate with is worse than prompting the user.
+      console.log(`${LOG} ${label}: template has no cloud-init drive — using the template's own accounts`);
+      creds = { username: null, password: null, source: 'baked' };
+    }
+  } else if (providerType === 'lxc' && creds.source === 'cloudinit') {
+    creds = { username: null, password: null, source: 'baked' };
+  }
+
+  // 5. Boot it.
+  if (progress?.lanes[job.laneId]) progress.lanes[job.laneId].status = 'starting';
+  await proxmoxAPI('POST', `${vmApiBase(targetNode, workstationVmid, providerType)}/status/start`);
+
+  // 6. Console. ALWAYS the gateway's WAN transit IP (e.g. 100.100.60.136) —
+  //    never the lane-local address. guacd runs on the orchestrator's Docker
+  //    bridge with no route into 10.<vxh>.<vxl>.0/24, so the gateway's wan0
+  //    DNAT is the only way in. This is how every working lane on this cluster
+  //    connects; a console pointed at the lane IP is dead on arrival.
+  //
+  //    That holds even when our own DNAT install failed, but ONLY for slot 0 on
+  //    the template's own port: the v2 gateway bakes wan0:3389 -> <base>.50 and
+  //    nothing else. deployLaneWorkstations refuses to get this far with a
+  //    failed gateway and more than one slot, so the fallback below is always
+  //    describing a single-machine lane.
+  const consoleHost = gatewayWanIp;
+  const consolePort = con.wanPort;
+  let consoleVia = job._gatewayAccessOk ? 'gateway' : 'gateway-baked-dnat';
+  if (!job._gatewayAccessOk) {
+    if (con.protocol === 'rdp' && consolePort === CONSOLE_PROTOCOLS.rdp.wanPort) {
+      console.warn(
+        `${LOG} ${label}: gateway config failed — falling back to the template's ` +
+        `baked wan0:3389 DNAT. This only works if the guest lands on ` +
+        `${laneBase}.${WORKSTATION_OCTET_BASE} by itself (Kali does; most templates do not).`
+      );
+    } else {
+      consoleVia = 'unreachable';
+      console.error(
+        `${LOG} ${label}: gateway config failed and ${con.protocol}:${consolePort} has no baked ` +
+        `DNAT — this console will NOT connect until a rule for port ${consolePort} ` +
+        `is added on gateway ${gatewayVmid}. Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
+      );
+    }
+  }
+  const guacConnId = await createGuacConnection({
+    connName: `${laneName}-${workstationVmid}`,
+    user, template, creds, parentIdentifier: guacParent,
+    hostname: consoleHost, port: consolePort, protocol: con.protocol,
+  });
+
+  // 7. Surface it on the owner's own dashboard.
+  const resourceId = await registerWorkspaceVm({
+    job, template, workstationVmid, providerType, guacConnId,
+  });
+
+  // 8. Confirm the guest actually took the reserved lease, in the background.
+  //    Purely diagnostic — never blocks the deploy or the console.
+  confirmWorkstationIp(job, slot, workstationVmid, providerType, workstationIp);
+
+  console.log(
+    `${LOG} Lane ${job.laneId} slot ${slot} up (vxlan ${vxlanId}, node ${targetNode}, ` +
+    `ws ${workstationVmid} @ ${workstationIp}, ${con.protocol} via ${consoleHost}:${consolePort})`
+  );
+
+  return {
+    ...workstationConfigEntry(ws),
+    console_via: consoleVia,
+    console_host: consoleHost,
+    guac_connection_id: guacConnId,
+    workspace_resource_id: resourceId,
+    ...(Object.keys(sizing.applied).length ? { resources: sizing.applied } : {}),
+    ...(sizing.warnings.length ? { resource_warnings: sizing.warnings } : {}),
+    ...(creds.username ? { workstation_user: creds.username } : {}),
+    ...(creds.password ? { workstation_pass: creds.password } : {}),
+    credentials_source: creds.source,
+  };
+}
+
+/**
+ * Wire the gateway for every slot, deploy each workstation, then mark the lane
+ * 'active'. This is the unit runBatch schedules — one job is one LANE, so the
+ * concurrency limits and progress accounting keep meaning what they did when a
+ * lane held exactly one machine.
+ *
+ * Workstations within a lane run in sequence: they share a gateway, a node and
+ * (usually) a template, and the win from overlapping them is small next to the
+ * cross-lane parallelism that already exists. It also means one config write at
+ * the end rather than N racing merges into the same JSONB column.
+ */
+async function deployLaneWorkstations(job) {
+  const { user, vxlanId, targetNode, laneName, progress, workstations, net } = job;
+  const gatewayVmid = GATEWAY_VMID_OFFSET + vxlanId;
 
   if (progress) {
     progress.lanes[job.laneId] = {
-      user: user.email, vxlan: vxlanId, node: targetNode, status: 'cloning', _startedAt: Date.now(),
+      user: user.email, vxlan: vxlanId, node: targetNode, status: 'cloning',
+      workstations: workstations.length, _startedAt: Date.now(),
     };
   }
 
   try {
-    // 1. Reserve <base>.50 for our MAC and publish the console port on the
-    //    gateway WAN — before the workstation exists, so its first DHCP lease is
+    // 1. Reserve every slot's address and publish every slot's console port,
+    //    before any workstation exists — so each guest's first DHCP lease is
     //    already the reserved one.
-    let viaGateway = false;
+    job._gatewayAccessOk = false;
     try {
-      await configureGatewayAccess({
-        node: targetNode, gatewayVmid, laneBase, mac, hostname: laneName, console: con,
-      });
-      viaGateway = true;
+      await applyGatewayWorkstationAccess({ node: targetNode, gatewayVmid, workstations });
+      job._gatewayAccessOk = true;
     } catch (gwErr) {
+      // One machine on the template's own RDP port can still ride the gateway's
+      // baked wan0:3389 -> .50 rule. Nothing else can: slots 1+ have no baked
+      // reservation (so they would take pool leases and land nowhere the DNAT
+      // points) and no baked DNAT (so their ports are not forwarded at all).
+      // Continuing would produce a lane that reports 'active' with consoles that
+      // cannot connect, which is strictly worse than failing here.
+      if (workstations.length > 1) {
+        throw new Error(
+          `gateway access setup failed and this lane has ${workstations.length} workstations, ` +
+          `which the gateway's baked DNAT cannot cover: ${gwErr.message}. ` +
+          `Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
+        );
+      }
       console.warn(
         `${LOG} Gateway access setup failed for ${laneName} (${gwErr.message}) — ` +
-        `falling back to a direct lane-IP console. Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
+        `falling back to the gateway's baked DNAT. Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
       );
     }
 
-    // 2. Clone the template.
-    const cloneBody = {
-      newid: workstationVmid,
-      ...(providerType === 'lxc' ? { hostname: laneName } : { name: laneName }),
-      full: 1,
-      target: targetNode,
-      description: `Lane workstation\nUser: ${user.email}\nLane: ${job.laneId}${description ? `\n${description}` : ''}`,
-    };
-    const clonePath = `${vmApiBase(wsSourceNode, template.template_vmid, providerType)}/clone`;
-    const runClone = async () => {
-      const upid = await proxmoxAPI('POST', clonePath, cloneBody);
-      if (upid) await waitForTask(wsSourceNode, upid, 600000);
-    };
-    await cloneSem.run(() => (providerType === 'lxc'
-      ? serializeLxcClone(wsSourceNode, template.template_vmid, runClone)
-      : runClone()));
-
-    // 3. Put it on the lane VNet with the reserved MAC.
-    const nicVal = providerType === 'lxc'
-      ? `name=eth0,bridge=${vnet.vnet},hwaddr=${mac},firewall=0,ip=dhcp`
-      : `${resolveNicModel(template)},bridge=${vnet.vnet},macaddr=${mac},firewall=0`;
-    await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, providerType)}/config`, { net0: nicVal });
-
-    // 3b. Apply the caller's CPU / RAM / disk sizing, before the guest's first
-    //     boot so cloud-init's growpart sees the resized disk (see applyResources).
-    const sizing = await applyResources({
-      node: targetNode, vmid: workstationVmid, providerType, resources, laneName,
-    });
-
-    // 4. Hand the user their login through cloud-init when the template carries a
-    //    cloud-init drive (Linux cloud images, Windows + cloudbase-init).
-    //    Addressing stays on DHCP so the reservation decides the IP — a static
-    //    ipconfig0 races the guest's own DHCP client and loses (the exact bug
-    //    groups.js hit pinning Kali statically).
-    let creds = resolveWorkstationCredentials(template, user);
-    if (providerType === 'qemu' && creds.source === 'cloudinit' && template.metadata?.cloud_init !== false) {
-      let ciDrive = null;
-      try { ciDrive = await findCloudInitDrive(targetNode, workstationVmid); }
-      catch (e) { console.warn(`${LOG} cloud-init probe failed for ${laneName}: ${e.message}`); }
-
-      if (ciDrive) {
-        // citype is deliberately NOT set: Proxmox derives it from the template's
-        // ostype — nocloud for Linux, configdrive2 for Windows. cloudbase-init
-        // reads configdrive2, so forcing 'nocloud' here (as the Linux-only call
-        // sites in groups.js/lanes.js do) silently breaks credential injection on
-        // every Windows template. If a Windows template lands without creds,
-        // check `qm config <vmid> | grep ostype` first — it must be win10/win11.
-        await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, 'qemu')}/config`, {
-          ciuser: creds.username,
-          cipassword: creds.password,
-          ipconfig0: 'ip=dhcp',
-          nameserver: net.lan.gatewayIp,
-        });
-        await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, 'qemu')}/cloudinit`).catch(() => {});
-      } else {
-        // No cloud-init drive: the guest keeps whatever accounts the template
-        // baked in. Publishing generated credentials Guacamole can only fail to
-        // authenticate with is worse than prompting the user.
-        console.log(`${LOG} ${laneName}: template has no cloud-init drive — using the template's own accounts`);
-        creds = { username: null, password: null, source: 'baked' };
-      }
-    } else if (providerType === 'lxc' && creds.source === 'cloudinit') {
-      creds = { username: null, password: null, source: 'baked' };
+    // 2. Deploy each slot.
+    const deployed = [];
+    for (const ws of workstations) {
+      deployed.push(await deployOneWorkstation(job, ws));
     }
 
-    // 5. Boot it.
-    if (progress?.lanes[job.laneId]) progress.lanes[job.laneId].status = 'starting';
-    await proxmoxAPI('POST', `${vmApiBase(targetNode, workstationVmid, providerType)}/status/start`);
-
-    // 6. Console. ALWAYS the gateway's WAN transit IP (e.g. 100.100.60.136) —
-    //    never the lane-local address. guacd runs on the orchestrator's Docker
-    //    bridge with no route into 10.<vxh>.<vxl>.0/24, so the gateway's wan0
-    //    DNAT is the only way in. This is how every working lane on this cluster
-    //    connects; a console pointed at the lane IP is dead on arrival.
-    //
-    //    That holds even when our own DNAT install failed: the v2 gateway
-    //    template already bakes wan0:3389 -> <base>.50, so RDP still works
-    //    provided the guest took the .50 lease. Falling back to the lane IP (as
-    //    an earlier revision did) just guaranteed a broken console instead.
-    //    Non-RDP protocols have no baked rule, so those genuinely need the
-    //    install to have succeeded — flag it loudly rather than fail silently.
-    const consoleHost = gatewayWanIp;
-    const consolePort = con.wanPort;
-    let consoleVia = viaGateway ? 'gateway' : 'gateway-baked-dnat';
-    if (!viaGateway) {
-      if (con.protocol === 'rdp') {
-        console.warn(
-          `${LOG} ${laneName}: gateway config failed — falling back to the template's ` +
-          `baked wan0:3389 DNAT. This only works if the guest lands on ` +
-          `${laneBase}.${WORKSTATION_OCTET} by itself (Kali does; most templates do not).`
-        );
-      } else {
-        consoleVia = 'unreachable';
-        console.error(
-          `${LOG} ${laneName}: gateway config failed and ${con.protocol} has no baked ` +
-          `DNAT — this console will NOT connect until a rule for port ${con.wanPort} ` +
-          `is added on gateway ${gatewayVmid}. Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
-        );
-      }
-    }
-    const guacConnId = await createGuacConnection({
-      connName: `${laneName}-${workstationVmid}`,
-      user, template, creds, parentIdentifier: guacParent,
-      hostname: consoleHost, port: consolePort, protocol: con.protocol,
-    });
-
-    // 7. Surface it on the owner's own dashboard.
-    const resourceId = await registerWorkspaceVm({ job, workstationVmid, providerType, guacConnId });
-
-    // 8. Lane is live. Deliberately NOT gated on discovering the guest's IP: a
+    // 3. Lane is live. Deliberately NOT gated on discovering the guests' IPs: a
     //    stock Windows template has no qemu-guest-agent, and the console doesn't
     //    need the IP anyway.
+    //
+    //    Slot 0's record is ALSO flattened onto the keys it has always occupied.
+    //    plugins/cle/routes/vms.js and labs.js read `ip`, `console_via`,
+    //    `console_port`, `guac_connection_id`, `workstation_user/pass` directly,
+    //    and a one-machine lane must keep looking exactly as it did.
+    const primary = deployed[0];
     await cybercoreQuery(
       `UPDATE cybercore_lane
           SET status='active', config = config || $2::jsonb, updated_at=NOW()
         WHERE lane_id=$1`,
       [job.laneId, JSON.stringify({
-        ip: `${laneBase}.${WORKSTATION_OCTET}`,
+        workstations: deployed,
+        ip: primary.ip,
         ip_confirmed: false,
-        workstation_mac: mac,
-        console_via: consoleVia,
-        console_host: consoleHost,
-        console_port: consolePort,
-        guac_connection_id: guacConnId,
+        workstation_mac: primary.mac,
+        console_via: primary.console_via,
+        console_host: primary.console_host,
+        console_port: primary.console_port,
+        guac_connection_id: primary.guac_connection_id,
         guac_user: user.email,
-        workspace_resource_id: resourceId,
+        workspace_resource_id: primary.workspace_resource_id,
         // What the machine was ACTUALLY sized to, plus anything the caller asked
         // for that Proxmox refused — an instructor who requested 16 GiB needs to
         // see that it landed at the template's 8, not find out from a student.
-        ...(Object.keys(sizing.applied).length ? { resources: sizing.applied } : {}),
-        ...(sizing.warnings.length ? { resource_warnings: sizing.warnings } : {}),
-        ...(creds.username ? { workstation_user: creds.username } : {}),
-        ...(creds.password ? { workstation_pass: creds.password } : {}),
-        credentials_source: creds.source,
+        ...(primary.resources ? { resources: primary.resources } : {}),
+        ...(primary.resource_warnings ? { resource_warnings: primary.resource_warnings } : {}),
+        ...(primary.workstation_user ? { workstation_user: primary.workstation_user } : {}),
+        ...(primary.workstation_pass ? { workstation_pass: primary.workstation_pass } : {}),
+        credentials_source: primary.credentials_source,
       })]
     );
     if (progress?.lanes[job.laneId]) progress.lanes[job.laneId].status = 'active';
     console.log(
-      `${LOG} Lane ${job.laneId} active (vxlan ${vxlanId}, node ${targetNode}, ws ${workstationVmid}, ` +
-      `${con.protocol} via ${consoleHost}:${consolePort}) for ${user.email}`
+      `${LOG} Lane ${job.laneId} active (vxlan ${vxlanId}, node ${targetNode}, ` +
+      `${deployed.length} workstation(s), subnet ${net.lan.base3}.0/24) for ${user.email}`
     );
 
-    // 9. Confirm the guest actually took the reserved lease, in the background.
-    //    Purely diagnostic — never blocks the deploy or the console.
-    confirmWorkstationIp(job, workstationVmid, providerType, `${laneBase}.${WORKSTATION_OCTET}`);
-
-    return { laneId: job.laneId, user: user.email, vxlanId, status: 'active' };
+    return { laneId: job.laneId, user: user.email, vxlanId, status: 'active', workstations: deployed.length };
   } catch (err) {
     await markLaneError(job.laneId, `workstation: ${err.message}`);
     if (progress?.lanes[job.laneId]) progress.lanes[job.laneId].status = 'error';
@@ -980,23 +1216,56 @@ async function deployWorkstation(job) {
 }
 
 /**
- * Detached check that the workstation landed on the reserved address. Records
- * what it found on the lane so a mismatch (bad reservation, guest ignoring DHCP)
- * is visible in the UI instead of surfacing as a mysteriously dead console.
+ * Detached check that a workstation landed on its reserved address. Records what
+ * it found on the lane so a mismatch (bad reservation, guest ignoring DHCP) is
+ * visible in the UI instead of surfacing as a mysteriously dead console.
+ *
+ * Writes through jsonb_set into the per-slot `ws_ip` / `ws_ip_confirmed` maps
+ * rather than merging an object with `||`: these run detached, one per slot, and
+ * `config || '{"ws_ip":{...}}'` replaces the whole nested object — so two slots
+ * confirming at once would erase each other's result. jsonb_set touches one leaf,
+ * and the row lock serializes the statements.
+ *
+ * Slot 0 additionally keeps the flat `ip` / `ip_confirmed` keys it has always
+ * written, which the CLE VM list reads.
  */
-function confirmWorkstationIp(job, workstationVmid, providerType, expectedIp) {
+function confirmWorkstationIp(job, slot, workstationVmid, providerType, expectedIp) {
   getVmIp(job.targetNode, workstationVmid, providerType, 12, 10000)
     .then(async (ip) => {
       if (!ip) {
-        console.log(`${LOG} Lane ${job.laneId}: no guest-agent IP (expected for templates without the agent)`);
+        console.log(`${LOG} Lane ${job.laneId} slot ${slot}: no guest-agent IP (expected for templates without the agent)`);
         return;
       }
-      if (ip !== expectedIp) {
-        console.warn(`${LOG} Lane ${job.laneId}: workstation is on ${ip}, not the reserved ${expectedIp} — console may not connect`);
+      const confirmed = ip === expectedIp;
+      if (!confirmed) {
+        console.warn(
+          `${LOG} Lane ${job.laneId} slot ${slot}: workstation is on ${ip}, not the reserved ` +
+          `${expectedIp} — console may not connect`
+        );
       }
-      await patchLaneConfig(job.laneId, { ip, ip_confirmed: ip === expectedIp });
+      // Merged with `||` into the existing map rather than written through a
+      // two-element jsonb_set path: jsonb_set can only create the LAST element
+      // of a path, so if `ws_ip` were ever missing from config the write would
+      // silently do nothing. This form creates the parent when absent and still
+      // touches only one key, so concurrent per-slot confirmations don't clobber
+      // each other (the row lock serializes the statements).
+      await cybercoreQuery(
+        `UPDATE cybercore_lane
+            SET config = jsonb_set(
+                  jsonb_set(
+                    COALESCE(config, '{}'::jsonb), '{ws_ip}',
+                    COALESCE(config->'ws_ip', '{}'::jsonb) || jsonb_build_object($2::text, to_jsonb($3::text))
+                  ),
+                  '{ws_ip_confirmed}',
+                  COALESCE(config->'ws_ip_confirmed', '{}'::jsonb) || jsonb_build_object($2::text, to_jsonb($4::boolean))
+                ),
+                updated_at = NOW()
+          WHERE lane_id = $1`,
+        [job.laneId, String(slot), ip, confirmed]
+      );
+      if (slot === 0) await patchLaneConfig(job.laneId, { ip, ip_confirmed: confirmed });
     })
-    .catch((e) => console.warn(`${LOG} Lane ${job.laneId} IP check failed: ${e.message}`));
+    .catch((e) => console.warn(`${LOG} Lane ${job.laneId} slot ${slot} IP check failed: ${e.message}`));
 }
 
 // ── batch template replication ───────────────────────────────────────────────
@@ -1063,16 +1332,22 @@ async function cleanupTempGatewayTemplates(byNode, originVmid) {
  *
  * @param {object}   a
  * @param {Array}    a.users          [{ id, email }] — must already exist in cybercore_user
- * @param {object}   a.template       cybercore_template_catalog row (needs template_vmid)
+ * @param {object}   [a.template]     cybercore_template_catalog row (needs template_vmid).
+ *   Shorthand for a one-workstation lane; ignored when `templates` is given.
+ * @param {Array}    [a.templates]    one catalog row per workstation, in slot order.
+ *   Every lane gets the same set: templates[0] → slot 0 → <base>.50, templates[1]
+ *   → slot 1 → <base>.51, and so on, capped at WORKSTATION_MAX_SLOTS.
  * @param {object}   a.vxlanBlock     { start, end } — pre-reserved, VNets already created
  * @param {string}   [a.moduleKey='crucible']
  * @param {string}   [a.subnetScheme='v2']
  * @param {string}   [a.namePrefix='lane']  lane name = `${namePrefix}-${vxlanId}`
  * @param {object}   [a.laneConfig={}]      extra keys merged into cybercore_lane.config
- * @param {object}   [a.resources=null]     { cores, memory_mb, disk_gb } applied to each
+ * @param {object|Array} [a.resources=null] { cores, memory_mb, disk_gb } applied to each
  *   CLONE before its first boot — the catalog template itself is never modified.
- *   Omitted fields keep the template's own sizing. Validate with
- *   normalizeResourceSpec() first; out-of-range values are not re-checked here.
+ *   Omitted fields keep the template's own sizing. Pass an array to size each slot
+ *   separately (index-matched to `templates`, holes keep that template's own
+ *   sizing). Validate with normalizeResourceSpec() first; out-of-range values are
+ *   not re-checked here.
  * @param {string}   [a.description='']     extra lines on the Proxmox object descriptions
  * @param {string}   [a.guacParent]         Guacamole connection-group identifier
  * @param {string}   [a.progressId]         key into global._batchDeployProgress
@@ -1080,16 +1355,41 @@ async function cleanupTempGatewayTemplates(byNode, originVmid) {
  * @returns {Promise<{provisioned:Array, failed:Array, progressId:?string}>}
  */
 async function deployLanes({
-  users, template, vxlanBlock,
+  users, template, templates, vxlanBlock,
   moduleKey = 'crucible', subnetScheme = 'v2', namePrefix = 'lane',
   laneConfig = {}, resources = null, description = '', guacParent = null,
   progressId = null, progressLabel = '',
 }) {
   if (!Array.isArray(users) || users.length === 0) return { provisioned: [], failed: [], progressId };
   if (!vxlanBlock?.start || !vxlanBlock?.end) throw new Error('deployLanes: vxlanBlock {start,end} is required');
-  if (!template?.template_vmid) {
-    throw new Error(`deployLanes: template '${template?.template_key || '?'}' has no Proxmox VMID configured`);
+
+  // This module builds single-LAN lanes: it reads net.lan throughout (subnet
+  // base, gateway IP, the lan0 veth on the gateway). resolveLaneNetworking's v3
+  // scheme returns lanExt/lanInt and NO lan, so a v3 caller would get
+  // "Cannot read properties of undefined (reading 'base3')" partway through the
+  // deploy, after the lane rows already exist. Segmented lanes go through
+  // challenge-lane-deployer.js instead.
+  if (subnetScheme !== 'v1' && subnetScheme !== 'v2') {
+    throw new Error(
+      `deployLanes: subnetScheme '${subnetScheme}' is not supported — this path builds ` +
+      `single-LAN (v1/v2) lanes. Use challenge-lane-deployer for segmented v3 lanes.`
+    );
   }
+
+  const tmpls = (Array.isArray(templates) && templates.length) ? templates : (template ? [template] : []);
+  if (!tmpls.length) throw new Error('deployLanes: one of template / templates is required');
+  if (tmpls.length > WORKSTATION_MAX_SLOTS) {
+    throw new Error(
+      `deployLanes: ${tmpls.length} workstations per lane exceeds the ${WORKSTATION_MAX_SLOTS}-slot band ` +
+      `(.${WORKSTATION_OCTET_BASE}–.${WORKSTATION_OCTET_BASE + WORKSTATION_MAX_SLOTS - 1})`
+    );
+  }
+  for (const t of tmpls) {
+    if (!t?.template_vmid) {
+      throw new Error(`deployLanes: template '${t?.template_key || '?'}' has no Proxmox VMID configured`);
+    }
+  }
+  const resourcesFor = (slot) => (Array.isArray(resources) ? (resources[slot] || null) : resources);
 
   const progress = initProgress(progressId, progressLabel, users.length);
 
@@ -1103,21 +1403,53 @@ async function deployLanes({
   }
   const vnetsByTag = await loadVnetsByTag();
 
-  // Resolve template source nodes once.
+  // Resolve each template's source node and console once, not per lane.
   const gwOriginVmid = resolveGatewayVmid(moduleKey, subnetScheme);
   const gwOriginNode = await findTemplateNode(gwOriginVmid, getDefaultTemplateNode());
-  const wsSourceNode = await findTemplateNode(template.template_vmid, template.node || getDefaultTemplateNode());
-  const con = resolveConsole(template);
+  const slotSpecs = await Promise.all(tmpls.map(async (t, slot) => ({
+    slot,
+    template: t,
+    providerType: t.provider_type || 'qemu',
+    octet: octetForSlot(slot),
+    console: consoleForSlot(resolveConsole(t), slot),
+    resources: resourcesFor(slot),
+    sourceNode: await findTemplateNode(t.template_vmid, t.node || getDefaultTemplateNode()),
+  })));
+
+  // Two slots publishing the same WAN port would mean the second DNAT silently
+  // shadows the first. Slot-shifted defaults can't collide, but a template can
+  // pin metadata.console_wan_port, so check rather than assume.
+  {
+    const byPort = new Map();
+    for (const s of slotSpecs) {
+      const clash = byPort.get(s.console.wanPort);
+      if (clash !== undefined) {
+        throw new Error(
+          `deployLanes: slots ${clash} and ${s.slot} both publish gateway port ${s.console.wanPort} — ` +
+          `check metadata.console_wan_port on '${tmpls[clash].template_key}' / '${s.template.template_key}'`
+        );
+      }
+      byPort.set(s.console.wanPort, s.slot);
+    }
+  }
+
+  // VMIDs for slots 1+, allocated for the whole deploy in one cluster scan.
+  const extraVmids = await reserveWorkstationVmids(users.length * (slotSpecs.length - 1));
+
   console.log(
-    `${LOG} Deploying ${users.length} lane(s) from ${template.os_name || template.template_key} ` +
-    `(${template.provider_type || 'qemu'} ${template.template_vmid} @ ${wsSourceNode}, ` +
-    `${con.protocol}, nic ${resolveNicModel(template)}` +
-    (resources ? `, sized ${JSON.stringify(resources)}` : '') + `)`
+    `${LOG} Deploying ${users.length} lane(s) × ${slotSpecs.length} workstation(s): ` +
+    slotSpecs.map(s =>
+      `slot ${s.slot}=${s.template.os_name || s.template.template_key} ` +
+      `(${s.providerType} ${s.template.template_vmid} @ ${s.sourceNode}, .${s.octet}, ` +
+      `${s.console.protocol}:${s.console.wanPort}, nic ${resolveNicModel(s.template)}` +
+      (s.resources ? `, sized ${JSON.stringify(s.resources)}` : '') + ')'
+    ).join('; ')
   );
 
   // Build a job per user, skipping any whose VNet is missing.
   const jobs = [];
   const failed = [];
+  let extraCursor = 0;
   for (let i = 0; i < users.length; i++) {
     const vxlanId = vxlans[i];
     const vnet = vnetsByTag[String(vxlanId)];
@@ -1125,11 +1457,23 @@ async function deployLanes({
       failed.push({ user_id: users[i].id, reason: `No VNet for VXLAN ${vxlanId} (lab network not fully provisioned)` });
       continue;
     }
+    const laneName = `${namePrefix}-${vxlanId}`;
+    const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId);
+    const workstations = slotSpecs.map(s => ({
+      ...s,
+      // Slot 0 keeps the historic 600000+vxlanId so lanes deployed before this
+      // file grew slots are byte-identical; later slots come from the scan.
+      vmid: s.slot === 0 ? WORKSTATION_VMID_OFFSET + vxlanId : extraVmids[extraCursor++],
+      mac: macForOctet(s.octet, vxlanId),
+      ip: `${net.lan.base3}.${s.octet}`,
+      // dnsmasq keys DNS off the reservation hostname, so these must be distinct
+      // within a lane. Slot 0 keeps the bare lane name it has always used.
+      hostname: s.slot === 0 ? laneName : `${laneName}-ws${s.slot}`,
+    }));
     jobs.push({
-      user: users[i], template, vxlanId, vnet, wsSourceNode, console: con,
+      user: users[i], vxlanId, vnet, workstations,
       moduleKey, subnetScheme, laneConfig, resources, description, guacParent, progress,
-      laneName: `${namePrefix}-${vxlanId}`,
-      net: resolveLaneNetworking(subnetScheme, moduleKey, vxlanId),
+      laneName, net,
     });
   }
   if (!jobs.length) {
@@ -1160,7 +1504,7 @@ async function sequentialDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, prog
     try {
       await insertLane(job);
       await cloneGateway(job);
-      await deployWorkstation(job);
+      await deployLaneWorkstations(job);
       provisioned.push({ user_id: job.user.id, lane_id: job.laneId, vxlan_id: job.vxlanId });
       if (progress) { progress.succeeded++; progress.completed++; recordLaneDone(progress, 1); }
     } catch (err) {
@@ -1226,7 +1570,7 @@ async function batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem,
   if (wsJobs.length) {
     setPhase(progress, 'deploying', `Deploying lanes (${concurrency} at a time)`);
     console.log(`${LOG} Batch: ${wsJobs.length} workstations (lane concurrency ${concurrency}, clones ${cloneSem.max})`);
-    const { results } = await runBatch(wsJobs, deployWorkstation, {
+    const { results } = await runBatch(wsJobs, deployLaneWorkstations, {
       concurrency,
       onProgress: (completed, total, job, result) => {
         if (!progress) return;
@@ -1288,11 +1632,17 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   // legitimately carry the same vxlan_id: a dead one and the healthy lane that
   // recycled it.
   //
-  // Every VMID in this teardown is derived from vxlan_id (gateway
-  // 100000+, attack box 700000+, GOAD controller 200000+). Deriving them for a
+  // Most VMIDs in this teardown are derived from vxlan_id (gateway 100000+,
+  // slot-0 workstation 600000+, GOAD controller 200000+). Deriving them for a
   // dead lane whose id has been recycled would force-stop and purge the LIVE
   // lane's machines. So: find the ids that another, surviving lane owns, and
-  // skip the derived VMIDs for those rows.
+  // skip the VMIDs for those rows.
+  //
+  // Slot-1+ workstations are allocated from a free-id scan rather than derived,
+  // so a recycled VXLAN could not have handed the live lane the same ids — they
+  // would be safe to destroy. They are skipped anyway: leaving a VM behind is
+  // recoverable, and one rule ("contested row destroys nothing") is far easier
+  // to reason about than a per-VMID exemption.
   const contested = new Set();
   {
     const vxlans = laneRows.rows.map(r => r.vxlan_id).filter(v => v != null);
@@ -1328,12 +1678,19 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   for (const lane of laneRows.rows) {
     const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
     if (cfg.guac_connection_id) guacConnIds.add(cfg.guac_connection_id);
+    // Slots 1+ each own a connection. The workspace-row lookup below finds them
+    // too (it keys on lane_id, not slot), but only for lanes whose registration
+    // succeeded — this covers the rest.
+    for (const ws of (Array.isArray(cfg.workstations) ? cfg.workstations : [])) {
+      if (ws?.guac_connection_id) guacConnIds.add(ws.guac_connection_id);
+    }
 
-    // A live lane has recycled this row's VXLAN. EVERY VMID here — including the
-    // ones recorded in cfg.vms and cfg.attack_box_vm_id — was computed from that
-    // id at insert time, so all of them now name the live lane's machines.
-    // Destroy nothing; the row and its DB bookkeeping still go. Same for the
-    // Tailscale devices, which the live lane re-registered under that id.
+    // A live lane has recycled this row's VXLAN. Nearly every VMID here —
+    // including the ones recorded in cfg.vms and cfg.attack_box_vm_id — was
+    // computed from that id at insert time, so it now names the live lane's
+    // machines. Destroy nothing; the row and its DB bookkeeping still go. Same
+    // for the Tailscale devices, which the live lane re-registered under that id.
+    // (See the note above on why the allocated slot-1+ VMIDs go too.)
     if (lane.vxlan_id != null && contested.has(lane.vxlan_id)) {
       console.warn(
         `${LOG} Lane ${lane.lane_id} (status ${lane.status}) shares VXLAN ${lane.vxlan_id} with a live lane — ` +
@@ -1346,6 +1703,27 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     if (Array.isArray(cfg.vms) && cfg.vms.length > 0) {
       for (const vm of cfg.vms) {
         vmsToDestroy.push({ vmid: vm.vm_id, type: vm.type || 'qemu', label: vm.name || `vm-${vm.vm_id}` });
+      }
+    } else if (Array.isArray(cfg.workstations) && cfg.workstations.length > 0) {
+      // Slot list, written by insertLane BEFORE anything is cloned — so a deploy
+      // that died partway through still records every id it might have created.
+      // Slots 1+ have allocated VMIDs that cannot be re-derived from vxlan_id, so
+      // this is the ONLY way to find them.
+      for (const ws of cfg.workstations) {
+        if (!ws?.vmid) continue;
+        vmsToDestroy.push({
+          vmid: ws.vmid,
+          type: ws.provider_type || cfg.provider_type || 'qemu',
+          label: `workstation slot ${ws.slot ?? '?'}`,
+          // Slot-1+ VMIDs are ALLOCATED, not derived, so they can legitimately be
+          // reused: a deploy that recorded one and then failed before cloning
+          // leaves it free, and a later deploy will hand the same id to a
+          // different lane. Tearing down the first lane would then destroy the
+          // second lane's running machine. The recorded hostname is what the
+          // clone was named, so it identifies the owner — see the check by
+          // vmNameMap below.
+          expectName: ws.hostname || null,
+        });
       }
     } else {
       const wsVmid = cfg.workstation_vmid || (lane.vxlan_id ? WORKSTATION_VMID_OFFSET + lane.vxlan_id : null);
@@ -1423,11 +1801,36 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   if (allNodeNames.length === 0) allNodeNames.push(...getClusterNodes());
 
   const vmNodeMap = {};
+  const vmNameMap = {};
   for (const r of (clusterResources || [])) {
-    if (r.type === 'qemu' || r.type === 'lxc') vmNodeMap[r.vmid] = r.node;
+    if (r.type === 'qemu' || r.type === 'lxc') {
+      vmNodeMap[r.vmid] = r.node;
+      if (r.name) vmNameMap[r.vmid] = r.name;
+    }
   }
 
-  const existingVms = vmsToDestroy.filter(vm => vmNodeMap[vm.vmid]);
+  // VMIDs this teardown deliberately refuses to touch because they now belong to
+  // someone else. Tracked separately from "not found": the orphan sweep in phase
+  // 4 retries anything it still sees, and must not resurrect these.
+  const ownershipSkipped = new Set();
+
+  const existingVms = vmsToDestroy.filter((vm) => {
+    if (!vmNodeMap[vm.vmid]) return false;
+    // Ownership check for reusable (allocated) VMIDs. Only applied when BOTH the
+    // expected and actual names are known, so a lane recorded before hostnames
+    // were stored, or a VM the cluster reports without a name, still tears down.
+    const actual = vmNameMap[vm.vmid];
+    if (vm.expectName && actual && actual !== vm.expectName) {
+      console.warn(
+        `${LOG} Skipping ${vm.type} ${vm.vmid} (${vm.label}): it is named '${actual}', not the ` +
+        `'${vm.expectName}' this lane recorded — the id was reallocated to another lane, ` +
+        `and destroying it would take out a machine that is still in use.`
+      );
+      ownershipSkipped.add(vm.vmid);
+      return false;
+    }
+    return true;
+  });
   const missing = vmsToDestroy.length - existingVms.length;
   console.log(`${LOG} Teardown: ${vmsToDestroy.length} VMs across ${laneRows.rows.length} lanes (${missing} already gone)`);
 
@@ -1494,7 +1897,15 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   for (const err of destroyErrors) errors.push(err.error);
 
   // Phase 4: verify and retry orphans.
-  const allTargetVmIds = vmsToDestroy.map(v => v.vmid);
+  //
+  // Built from vmsToDestroy rather than existingVms on purpose — a VM that was
+  // mid-creation during the first scan is exactly what this sweep is for. But
+  // the ones skipped for failing the ownership check are excluded: they are
+  // alive, they will still be alive next round, and force-stopping them would
+  // destroy the lane that legitimately owns that id.
+  const allTargetVmIds = vmsToDestroy
+    .map(v => v.vmid)
+    .filter(id => !ownershipSkipped.has(id));
   for (let round = 1; round <= 3; round++) {
     try {
       const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
@@ -1649,9 +2060,13 @@ module.exports = {
   GATEWAY_VMID_OFFSET,
   WORKSTATION_VMID_OFFSET,
   WORKSTATION_OCTET,
+  WORKSTATION_OCTET_BASE,
+  WORKSTATION_MAX_SLOTS,
   CONSOLE_PROTOCOLS,
   RESOURCE_LIMITS,
   allocateVxlanIds,
+  octetForSlot,
+  consoleForSlot,
   resolveConsole,
   resolveNicModel,
   resolveWorkstationCredentials,

@@ -7,11 +7,11 @@
  * which is the implementation proven to produce a lane a student can actually
  * connect to.
  *
- * Everything hard lives in lane-deployer: pinning the workstation to
- * <lane-base>.50 by MAC, publishing its console port on the gateway's WAN IP,
- * the e1000 NIC for Windows guests, cloud-init credentials, the Tailscale claim
- * secret, workspace registration so the STUDENT sees the machine on their own
- * dashboard, and the hardened batch teardown.
+ * Everything hard lives in lane-deployer: pinning each workstation to
+ * <lane-base>.<50 + slot> by MAC, publishing its console port on the gateway's
+ * WAN IP, the e1000 NIC for Windows guests, cloud-init credentials, the Tailscale
+ * claim secret, workspace registration so the STUDENT sees the machine on their
+ * own dashboard, and the hardened batch teardown.
  *
  * This file's only job is course context:
  *   - resolve the course's reserved VXLAN block from its crucible_challenge
@@ -89,7 +89,13 @@ async function resolveCourseLab(challengeId) {
  * @param {object} args
  * @param {string} args.courseId
  * @param {object} args.challenge   { challenge_key, vxlan_block:{start,end} }
- * @param {object} args.template    cybercore_template_catalog row (workstation)
+ * @param {object} [args.template]  cybercore_template_catalog row (workstation).
+ *   Shorthand for a one-workstation lane.
+ * @param {Array}  [args.templates] one catalog row per workstation, in slot
+ *   order, when a course needs more than one machine per student. Slot 0 lands
+ *   on <lane-base>.50 exactly as a single template does, so a course that sends
+ *   one template is unaffected. The provision route currently only ever sends
+ *   one — this is the pass-through, not a UI feature.
  * @param {Array}  args.students    [{ id, email }]
  * @param {string} [args.courseName]
  * @param {string} [args.courseCode] cle_course.code — names the lanes
@@ -99,7 +105,7 @@ async function resolveCourseLab(challengeId) {
  *   boot. Pre-validated by the route with laneDeployer.normalizeResourceSpec;
  *   omitted fields keep the catalog template's own sizing.
  */
-async function provisionLanes({ courseId, challenge, template, students, courseName, courseCode, resources }) {
+async function provisionLanes({ courseId, challenge, template, templates, students, courseName, courseCode, resources }) {
   if (!students.length) return { provisioned: [], failed: [], progressId: null };
 
   const vxlanBlock = challenge.vxlan_block || challenge.spec?.vxlan_block;
@@ -110,6 +116,7 @@ async function provisionLanes({ courseId, challenge, template, students, courseN
   const result = await laneDeployer.deployLanes({
     users: students,
     template,
+    templates,
     vxlanBlock,
     moduleKey: MODULE_KEY,
     subnetScheme: SUBNET_SCHEME,
