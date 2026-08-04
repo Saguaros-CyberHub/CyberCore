@@ -1,7 +1,22 @@
 /**
- * CLE Plugin — Labs Management Routes
- * Handles vulnerable machine deployments for courses
+ * CLE Plugin — Vulnerable Lab Routes
  * Mounted at /api/cle/courses/:courseId/labs
+ *
+ * Deploys the vulnerable application an instructor assigns to students. Two
+ * modes, both driven by utils/vuln-lab-provision.js:
+ *
+ *   'lane'   — a dedicated lab lane per student (gateway + challenge VMs + a
+ *              Kali attack box) on the CHALLENGE'S OWN reserved VXLAN block.
+ *              Identical to the admin Group Deploy, and the only mode that
+ *              works for a v3/GOAD challenge such as CYBV 480.
+ *   'attach' — graft the challenge onto the workstation lane the student
+ *              already has in this course. No extra VXLAN, no second Kali.
+ *
+ * cle_course_material remains the assignment record students see; the lanes it
+ * produced are found again by config.material_id.
+ *
+ * This endpoint used to insert those two bookkeeping rows and nothing else,
+ * which is why "Deploy Labs" reported success while no VM ever appeared.
  */
 
 const express = require('express');
@@ -9,23 +24,60 @@ const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { canManageCourse } = require('../utils/course-access');
+const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
+const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
+const { getManagedCourse } = require('../utils/course-access');
+const { resolveTargetStudents, excludeStudentsWithLab } = require('../utils/students');
+const vulnLab = require('../utils/vuln-lab-provision');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
+/** The course row every route here needs, or null when absent/denied. */
+function getCourse(courseId, user) {
+  return getManagedCourse(courseId, user, 'course_id, course_name, code, instructor_id');
+}
+
 /**
- * GET / — List vulnerable labs in course
+ * Emails to grant read-only Guacamole access alongside the student: the course's
+ * own instructor plus anyone enrolled in a teaching role. cle_course_enrollment
+ * has no 'instructor' role — the instructor lives on cle_course.instructor_id
+ * and the enrollment roles are student / ta / guest / lab_assistant.
+ */
+async function courseInstructorEmails(courseId) {
+  const rows = await query(
+    `SELECT user_id FROM cle_course_enrollment
+      WHERE course_id = $1 AND enrollment_role IN ('ta', 'lab_assistant') AND status = 'active'`,
+    [courseId]
+  ).catch(() => ({ rows: [] }));
+
+  const course = await query(`SELECT instructor_id FROM cle_course WHERE course_id = $1`, [courseId])
+    .catch(() => ({ rows: [] }));
+
+  const ids = [
+    ...rows.rows.map(r => r.user_id),
+    ...(course.rows[0]?.instructor_id ? [course.rows[0].instructor_id] : []),
+  ];
+  if (ids.length === 0) return [];
+
+  const users = await cybercoreQuery(
+    `SELECT email FROM cybercore_user WHERE user_id = ANY($1::uuid[]) AND email IS NOT NULL`,
+    [[...new Set(ids)]]
+  ).catch(() => ({ rows: [] }));
+  return users.rows.map(r => r.email);
+}
+
+/**
+ * GET / — Vulnerable labs assigned in this course, with what each one actually
+ * deployed. Assignment rows live in cle_db; the lanes and VMs live in
+ * cybercore_db, so this is two queries stitched on material_id.
  */
 router.get('/', instructorOnly, async (req, res) => {
   try {
-    const instructorId = req.user.userId;
     const { courseId } = req.params;
-
-    if (!(await canManageCourse(courseId, req.user))) {
+    if (!(await getCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
-    // Get vulnerable labs deployed to this course
     const labsResult = await query(`
       SELECT
         m.material_id AS lab_id,
@@ -33,18 +85,130 @@ router.get('/', instructorOnly, async (req, res) => {
         m.template_id,
         m.title AS lab_name,
         m.description AS objective,
+        m.content,
+        m.is_published,
         m.created_at,
         m.created_by,
         COUNT(DISTINCT s.user_id) AS student_count,
         COUNT(DISTINCT s.submission_id) AS submission_count
       FROM cle_course_material m
       LEFT JOIN cle_student_submission s ON m.material_id = s.material_id
-      WHERE m.course_id = $1 AND m.type = 'lab'
-      GROUP BY m.material_id, m.template_id, m.title, m.description, m.created_at, m.created_by
+      WHERE m.course_id = $1 AND m.type IN ('lab', 'vulnerable_lab')
+      GROUP BY m.material_id, m.template_id, m.title, m.description, m.content,
+               m.is_published, m.created_at, m.created_by
       ORDER BY m.created_at DESC
     `, [courseId]);
 
-    res.json({ labs: labsResult.rows });
+    const labs = labsResult.rows;
+    if (labs.length === 0) return res.json({ labs: [] });
+
+    // Every lane carrying one of these labs — either as its own lane
+    // (config.material_id) or as an attached module on a workstation lane.
+    const materialIds = labs.map(l => l.lab_id);
+    const laneRows = await cybercoreQuery(`
+      SELECT l.lane_id, l.user_id, l.vxlan_id, l.name, l.status, l.config,
+             u.email AS student_email, u.first_name, u.last_name
+        FROM cybercore_lane l
+        JOIN cybercore_user u ON u.user_id = l.user_id
+       WHERE l.status <> 'deleted'
+         AND (
+           l.config->>'material_id' = ANY($1::text[])
+           OR (
+             jsonb_typeof(l.config->'attached_modules') = 'array'
+             AND EXISTS (
+               SELECT 1 FROM jsonb_array_elements(l.config->'attached_modules') AS m
+                WHERE m->>'material_id' = ANY($1::text[])
+             )
+           )
+         )
+       ORDER BY l.created_at DESC
+    `, [materialIds]);
+
+    // Live power state in one cluster call, so a stopped VM doesn't read as gone.
+    let byVmid = {};
+    try {
+      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      for (const r of (resources || [])) byVmid[String(r.vmid)] = r;
+    } catch (_) { /* fall back to lane status */ }
+
+    const powerOf = (vmid) => byVmid[String(vmid)]?.status || 'unknown';
+
+    // Flag-plant state per lane, so the instructor can see the lab is actually
+    // capturable before a student reports it isn't.
+    const laneIds = laneRows.rows.map(r => r.lane_id);
+    const flagsByLane = {};
+    if (laneIds.length > 0) {
+      const flags = await cybercoreQuery(
+        `SELECT lane_id, vm_name, flag_type, plant_status, captured_at
+           FROM cybercore_lane_flag WHERE lane_id = ANY($1::uuid[])`,
+        [laneIds]
+      ).catch(() => ({ rows: [] }));
+      for (const f of flags.rows) {
+        const bucket = (flagsByLane[f.lane_id] ||= { planted: 0, failed: 0, pending: 0, captured: 0 });
+        if (f.plant_status === 'planted') bucket.planted++;
+        else if (f.plant_status === 'failed') bucket.failed++;
+        else bucket.pending++;
+        if (f.captured_at) bucket.captured++;
+      }
+    }
+
+    const deploymentsByMaterial = {};
+    for (const row of laneRows.rows) {
+      const cfg = row.config || {};
+      const student = {
+        lane_id: row.lane_id,
+        user_id: row.user_id,
+        student_email: row.student_email,
+        first_name: row.first_name,
+        last_name: row.last_name,
+        lane_status: row.status,
+        vxlan_id: row.vxlan_id,
+        flags: flagsByLane[row.lane_id] || null,
+        error: cfg.error || null,
+      };
+
+      // Dedicated lab lane.
+      if (cfg.material_id) {
+        (deploymentsByMaterial[cfg.material_id] ||= []).push({
+          ...student,
+          mode: 'lane',
+          vms: (cfg.vms || []).map(v => ({ ...v, power_state: powerOf(v.vm_id) })),
+          attack_box_vm_id: cfg.attack_box_vm_id || null,
+          attack_box_power: cfg.attack_box_vm_id ? powerOf(cfg.attack_box_vm_id) : null,
+          workstation_user: cfg.workstation_user || null,
+          workstation_pass: cfg.workstation_pass || null,
+          has_console: !!cfg.guac_connection_id,
+        });
+      }
+
+      // Attached module(s) on a workstation lane.
+      for (const mod of (Array.isArray(cfg.attached_modules) ? cfg.attached_modules : [])) {
+        if (!mod.material_id) continue;
+        (deploymentsByMaterial[mod.material_id] ||= []).push({
+          ...student,
+          mode: 'attach',
+          module_instance_id: mod.module_instance_id,
+          vms: (mod.vms || []).map(v => ({ ...v, power_state: powerOf(v.vm_id) })),
+          attack_box_vm_id: cfg.attack_box_vm_id || cfg.workstation_vmid || null,
+          workstation_user: cfg.workstation_user || null,
+          workstation_pass: cfg.workstation_pass || null,
+          has_console: !!cfg.guac_connection_id,
+        });
+      }
+    }
+
+    res.json({
+      labs: labs.map(l => {
+        const deployments = deploymentsByMaterial[l.lab_id] || [];
+        return {
+          ...l,
+          deployments,
+          deployed_count: deployments.length,
+          // A lane in 'deploying' means the poller should keep going.
+          in_progress: deployments.some(d => d.lane_status === 'deploying'),
+        };
+      }),
+    });
   } catch (error) {
     console.error('[CLE] Get labs error:', error.message);
     res.status(500).json({ error: error.message });
@@ -52,118 +216,213 @@ router.get('/', instructorOnly, async (req, res) => {
 });
 
 /**
- * POST /deploy — Deploy vulnerable lab to students
+ * POST /deploy — Deploy a vulnerable lab to students.
+ *
+ * Responds 202 and deploys in the background, the same contract the workstation
+ * path uses. Without `confirm: true` it returns a cluster-capacity preview
+ * instead, so the resource cost is visible before a cohort is committed.
+ *
+ * Body: { template_id, student_ids[], learning_objective?, mode?, confirm? }
  */
 router.post('/deploy', instructorOnly, async (req, res) => {
   try {
     const instructorId = req.user.userId;
     const { courseId } = req.params;
-    const { template_id, student_ids, learning_objective } = req.body;
+    const { template_id, student_ids, learning_objective, confirm } = req.body;
+    const mode = req.body.mode || 'lane';
 
     if (!template_id || !Array.isArray(student_ids) || student_ids.length === 0) {
       return res.status(400).json({ error: 'template_id and non-empty student_ids array required' });
     }
-
-    if (!(await canManageCourse(courseId, req.user))) {
-      return res.status(403).json({ error: 'Course not found or access denied' });
+    if (!vulnLab.MODES.includes(mode)) {
+      return res.status(400).json({ error: `mode must be one of: ${vulnLab.MODES.join(', ')}` });
     }
 
-    // Get template details. The picker (GET /api/cle/templates/vulnerable)
-    // sources these ids from crucible_challenge.challenge_id, so validate
-    // against that same table under the same conditions — otherwise this accepts
-    // an id the picker would never have offered. There is no
-    // cybercore_challenge_template table; querying it is what made every deploy
-    // fail here.
-    const templateResult = await cybercoreQuery(`
-      SELECT challenge_id AS template_id, name, description
-        FROM crucible_challenge
-       WHERE challenge_id = $1
-         AND status = 'active'
-         AND spec->>'cle' IS DISTINCT FROM 'true'
-    `, [template_id]);
+    const course = await getCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
-    if (templateResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Challenge template not found' });
+    const challenge = await vulnLab.loadChallenge(template_id);
+    const caps = vulnLab.describeChallenge(challenge);
+
+    // Reject an impossible combination up front rather than after the material
+    // row exists — a 409 here leaves nothing behind to clean up.
+    if (mode === 'lane' && !caps.can_deploy_lane) {
+      return res.status(409).json({ error: `Cannot deploy '${challenge.name}' as a lab lane: ${caps.lane_blockers.join('; ')}`, capabilities: caps });
+    }
+    if (mode === 'attach' && !caps.can_attach) {
+      return res.status(409).json({ error: `Cannot attach '${challenge.name}' to an existing lane: ${caps.attach_blockers.join('; ')}`, capabilities: caps });
     }
 
-    const template = templateResult.rows[0];
-    const deployedLabs = [];
+    // Does this lab already exist for this course + challenge? Re-deploying to
+    // more students must extend the existing assignment, not create a duplicate
+    // one, or the student's board grows a second identical entry.
+    const existing = await query(
+      `SELECT material_id FROM cle_course_material
+        WHERE course_id = $1 AND template_id = $2 AND type IN ('lab', 'vulnerable_lab')
+        ORDER BY created_at DESC LIMIT 1`,
+      [courseId, template_id]
+    );
+    const materialId = existing.rows[0]?.material_id || null;
 
-    // Create course material record linking template to course
-    const labResult = await query(`
-      INSERT INTO cle_course_material
-        (course_id, template_id, title, type, description, created_by)
-      VALUES ($1, $2, $3, 'lab', $4, $5)
-      RETURNING material_id
-    `, [courseId, template_id, template.name, learning_objective || template.description || '', instructorId]);
+    const { students, skipped } = await resolveTargetStudents(courseId, student_ids, {
+      excludeIf: materialId ? excludeStudentsWithLab(materialId) : undefined,
+    });
+    if (!students.length) {
+      return res.status(400).json({ error: 'No eligible students to deploy to', skipped });
+    }
 
-    const labId = labResult.rows[0].material_id;
-
-    // Assign lab to each student via submission tracking
-    for (const studentId of student_ids) {
-      try {
-        // Verify student is enrolled
-        const enrollmentCheck = await query(`
-          SELECT * FROM cle_course_enrollment
-          WHERE user_id = $1 AND course_id = $2 AND status = 'active'
-        `, [studentId, courseId]);
-
-        if (enrollmentCheck.rows.length === 0) {
-          console.warn(`[CLE] Student ${studentId} not enrolled in course ${courseId}`);
-          continue;
-        }
-
-        // Record student assignment to lab (initially pending/unstarted)
-        const submissionResult = await query(`
-          INSERT INTO cle_student_submission
-            (material_id, user_id)
-          VALUES ($1, $2)
-          ON CONFLICT (material_id, user_id) DO NOTHING
-          RETURNING submission_id
-        `, [labId, studentId]);
-
-        deployedLabs.push({
-          student_id: studentId,
-          material_id: labId,
-          template: template.name,
-          status: 'assigned'
+    // Capacity pre-flight. A failed check must not block the deploy — the admin
+    // path treats it the same way — but a VXLAN shortfall in 'lane' mode is a
+    // hard stop, because the deploy would fail partway with lanes already built.
+    if (mode === 'lane') {
+      const freeLanes = await vulnLab.countFreeLanes(caps.vxlan_block);
+      if (freeLanes < students.length) {
+        return res.status(409).json({
+          error: `'${challenge.name}' has ${freeLanes} free lane(s) in its VXLAN block but ${students.length} student(s) were selected. `
+               + `Tear down finished lanes, or recreate the challenge with a larger max_lanes.`,
+          free_lanes: freeLanes,
+          required: students.length,
         });
+      }
 
-      } catch (labError) {
-        console.error(`[CLE] Error deploying lab to student ${studentId}:`, labError.message);
+      if (!confirm) {
+        try {
+          const preview = await buildDeployPreview({
+            numLanes: students.length,
+            attackBoxes: true,
+            challengeVmCount: caps.vm_count,
+            proxmoxAPI,
+            cybercoreQuery,
+          });
+          return res.json({
+            preview: true,
+            mode,
+            student_count: students.length,
+            free_lanes: freeLanes,
+            challenge: caps,
+            ...(skipped.length ? { skipped } : {}),
+            ...preview,
+          });
+        } catch (err) {
+          console.error('[CLE] Lab pre-flight check failed:', err.message);
+        }
       }
     }
 
-    res.json({
+    // Create (or reuse) the assignment record. is_published must be TRUE or the
+    // student-side board filters it out entirely — my-courses.loadAssignments
+    // selects WHERE is_published = TRUE.
+    let labId = materialId;
+    if (!labId) {
+      const labResult = await query(`
+        INSERT INTO cle_course_material
+          (course_id, template_id, title, type, description, content, is_published, created_by)
+        VALUES ($1, $2, $3, 'vulnerable_lab', $4, $5, TRUE, $6)
+        RETURNING material_id
+      `, [
+        courseId, template_id, challenge.name,
+        learning_objective || challenge.description || '',
+        JSON.stringify({ challenge_key: challenge.challenge_key, mode }),
+        instructorId,
+      ]);
+      labId = labResult.rows[0].material_id;
+    } else if (learning_objective) {
+      await query(
+        `UPDATE cle_course_material SET description = $2, is_published = TRUE, updated_at = NOW()
+          WHERE material_id = $1`,
+        [labId, learning_objective]
+      );
+    }
+
+    // Track the assignment per student. This is what the gradebook reads.
+    for (const student of students) {
+      await query(`
+        INSERT INTO cle_student_submission (material_id, user_id)
+        VALUES ($1, $2)
+        ON CONFLICT (material_id, user_id) DO NOTHING
+      `, [labId, student.id]).catch(err =>
+        console.error(`[CLE] Could not record lab assignment for ${student.id}: ${err.message}`));
+    }
+
+    res.status(202).json({
       success: true,
-      message: `Lab assignment created for ${deployedLabs.length} students`,
-      labs: deployedLabs
+      message: `Deploying '${challenge.name}' to ${students.length} student(s)`,
+      lab_id: labId,
+      mode,
+      count: students.length,
+      challenge: caps,
+      progress_url: `/api/cle/courses/${courseId}/labs/${labId}/progress`,
+      ...(skipped.length ? { skipped } : {}),
     });
+
+    const instructorEmails = await courseInstructorEmails(courseId);
+    vulnLab.deployVulnLab({ course, challenge, students, materialId: labId, mode, instructorEmails })
+      .then(result => console.log(
+        `[CLE] Lab '${challenge.challenge_key}' (${mode}) for course ${courseId}: ` +
+        `${result.provisioned.length} deployed, ${result.failed.length} failed`
+      ))
+      .catch(err => console.error(`[CLE] Lab deploy failed for course ${courseId}: ${err.message}`));
   } catch (error) {
     console.error('[CLE] Deploy labs error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /:labId/progress — Live phase/ETA for an in-flight lab deploy.
+ * 404 once it has finished and aged out; the client falls back to polling GET /.
+ */
+router.get('/:labId/progress', instructorOnly, async (req, res) => {
+  try {
+    const { courseId, labId } = req.params;
+    if (!(await getCourse(courseId, req.user))) {
+      return res.status(403).json({ error: 'Course not found or access denied' });
+    }
+    const progress = vulnLab.getLabProgress(labId);
+    if (!progress) return res.status(404).json({ error: 'No active deployment for this lab' });
+    res.json(progress);
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 /**
- * DELETE /:labId — Remove lab assignment
+ * DELETE /:labId — Remove a lab assignment AND everything it deployed.
+ *
+ * Teardown runs BEFORE the material row is deleted: the row is what ties the
+ * lanes and attached modules back to this lab, so deleting it first (as this
+ * route used to) would strand every VM with nothing left pointing at it.
  */
 router.delete('/:labId', instructorOnly, async (req, res) => {
   try {
-    const instructorId = req.user.userId;
     const { courseId, labId } = req.params;
-
-    if (!(await canManageCourse(courseId, req.user))) {
+    if (!(await getCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
-    // Delete lab material and all related submissions
-    await query(`
-      DELETE FROM cle_course_material
-      WHERE material_id = $1 AND course_id = $2
-    `, [labId, courseId]);
+    const owned = await query(
+      `SELECT material_id FROM cle_course_material WHERE material_id = $1 AND course_id = $2`,
+      [labId, courseId]
+    );
+    if (owned.rows.length === 0) {
+      return res.status(404).json({ error: 'Lab not found in this course' });
+    }
 
-    res.json({ success: true, message: 'Lab removed' });
+    const teardown = await vulnLab.teardownLab(labId);
+
+    // Only drop the assignment once its infrastructure is gone. If teardown hit
+    // errors the row stays, so the instructor can retry rather than lose the
+    // only handle on the orphaned VMs.
+    if (teardown.errors.length > 0) {
+      return res.status(207).json({
+        success: false,
+        message: 'Some resources could not be destroyed — the lab assignment was kept so you can retry',
+        ...teardown,
+      });
+    }
+
+    await query(`DELETE FROM cle_course_material WHERE material_id = $1 AND course_id = $2`, [labId, courseId]);
+    res.json({ success: true, message: 'Lab removed', ...teardown });
   } catch (error) {
     console.error('[CLE] Delete lab error:', error.message);
     res.status(500).json({ error: error.message });

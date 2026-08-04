@@ -53,7 +53,8 @@ const {
   resolveGatewayVmid, resolveLaneNetworking, formatLaneGatewayNet0, configureLaneTailscale,
 } = require('./lane-networking');
 const { getDefaultTemplateNode, getSchedulingConfig, getClusterNodes } = require('./site-config');
-const { guacAPI, ensureGuacAccount } = require('./guacamole');
+const { guacAPI } = require('./guacamole');
+const guacCreds = require('./guac-credentials');
 const { generatePassword } = require('./password-generator');
 const { macForOctet, INFRA_IP_OCTETS } = require('./goad-deploy');
 const nodeSsh = require('./node-ssh');
@@ -62,6 +63,9 @@ const tailscale = require('./tailscale');
 const GATEWAY_VMID_OFFSET = 100000;     // gateway LXC = 100000 + vxlanId (matches groups.js)
 const WORKSTATION_VMID_OFFSET = 600000; // workstation = 600000 + vxlanId
 const TEMP_GW_TEMPLATE_BASE = 169300;   // per-node temp gateway template copies (clear of groups.js' 169200)
+// GOAD controller = 200000 + vxlanId. Mirrors goad-deploy.js deployController();
+// teardown needs it because the controller is never recorded on the lane.
+const GOAD_CONTROLLER_VMID_OFFSET = 200000;
 
 // The lane octet the workstation lands on. Same value the gateway template bakes
 // its wan0:3389 DNAT against (KALI_OCTET=50 in bake-lane-gateway-v2.sh) and the
@@ -464,35 +468,18 @@ async function configureGatewayAccess({ node, gatewayVmid, laneBase, mac, hostna
 
 /**
  * Resolve the user's Guacamole password, creating the account on first use.
- * Mirrors routes/workstations.js: prefer the stored (encrypted) credential so we
- * don't reset a password their other consoles already authenticate with, and
- * persist a newly minted one so the next deploy reuses it.
+ * Prefers the stored (encrypted) credential so we don't reset a password their
+ * other consoles already authenticate with, and persists a newly minted one so
+ * the next deploy reuses it — and so staff can hand it back to a student who
+ * loses it (utils/guac-credentials.js is the one implementation of that ladder).
  */
 async function resolveGuacPassword(userId, email) {
   if (!email) return null;
-  const key = process.env.GUAC_ENCRYPT_KEY;
-  let password = null;
-
-  if (key) {
-    const r = await cybercoreQuery(
-      `SELECT CASE WHEN guac_password IS NOT NULL
-                   THEN pgp_sym_decrypt(guac_password, $2)::text END AS pw
-         FROM cybercore_user WHERE user_id = $1`,
-      [userId, key]
-    ).catch(() => ({ rows: [] }));
-    password = r.rows[0]?.pw || null;
-  }
-
-  if (!password) {
-    password = await ensureGuacAccount(email).catch(() => null);
-    if (password && key) {
-      await cybercoreQuery(
-        `UPDATE cybercore_user SET guac_password = pgp_sym_encrypt($1, $2) WHERE user_id = $3`,
-        [password, key, userId]
-      ).catch(() => {});
-    }
-  }
-  return password;
+  const cred = await guacCreds.getGuacCredential(userId).catch((e) => {
+    console.warn(`${LOG} Guac credential lookup failed for ${email}: ${e.message}`);
+    return null;
+  });
+  return cred?.password || null;
 }
 
 /** Guacamole connection parameters for the resolved protocol. */
@@ -1313,8 +1300,49 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
       const wsVmid = cfg.workstation_vmid || (lane.vxlan_id ? WORKSTATION_VMID_OFFSET + lane.vxlan_id : null);
       if (wsVmid) vmsToDestroy.push({ vmid: wsVmid, type: cfg.provider_type || 'qemu', label: 'workstation' });
     }
+
+    // Kali. Challenge lanes store the attack box OUTSIDE cfg.vms (it isn't part
+    // of the challenge spec), so enumerating cfg.vms alone leaves one running VM
+    // per lane behind on every teardown.
+    const abVmid = cfg.attack_box_vm_id || cfg.attack_box_vmid || null;
+    if (abVmid) vmsToDestroy.push({ vmid: abVmid, type: 'qemu', label: 'attack-box' });
+
+    // Attached modules (POST /lanes/:id/modules, and the CLE "attach" deploy
+    // mode). Each instance owns its own VMs at 800000 + slot*10000 + vxlan.
+    for (const mod of (Array.isArray(cfg.attached_modules) ? cfg.attached_modules : [])) {
+      for (const vm of (mod.vms || [])) {
+        vmsToDestroy.push({
+          vmid: vm.vm_id,
+          type: vm.type || 'qemu',
+          label: `attached:${mod.challenge_key || '?'}/${vm.name || vm.vm_id}`,
+        });
+      }
+    }
+
+    // GOAD controller. deployGoadLane stops it but never destroys it, so a live
+    // (non-pre-baked) bake leaves it running. Its VMID is deterministic and not
+    // recorded on the lane, so derive it — the same way the admin group teardown
+    // does. A lane that never ran GOAD simply has no VM there, and the
+    // vmNodeMap filter below drops it.
+    if (lane.vxlan_id) {
+      vmsToDestroy.push({
+        vmid: GOAD_CONTROLLER_VMID_OFFSET + lane.vxlan_id, type: 'qemu', label: 'goad-controller',
+      });
+    }
+
     const gwVmid = cfg.gateway_vmid || cfg.gateway_vm_id || (lane.vxlan_id ? GATEWAY_VMID_OFFSET + lane.vxlan_id : null);
     if (gwVmid) vmsToDestroy.push({ vmid: gwVmid, type: 'lxc', label: 'gateway' });
+  }
+
+  // A lane can list the same VMID twice (e.g. a config rewritten mid-deploy).
+  // Destroying it twice turns the second attempt into a spurious error.
+  {
+    const seen = new Set();
+    for (let i = vmsToDestroy.length - 1; i >= 0; i--) {
+      const key = String(vmsToDestroy[i].vmid);
+      if (seen.has(key)) vmsToDestroy.splice(i, 1);
+      else seen.add(key);
+    }
   }
 
   // Guac connections registered on the workspace rows, for lanes whose config
@@ -1547,8 +1575,16 @@ module.exports = {
   allocateVxlanIds,
   resolveConsole,
   resolveNicModel,
+  resolveWorkstationCredentials,
   normalizeResourceSpec,
   deployLanes,
   teardownLanes,
+  // Progress registry. Exported so challenge-lane-deployer.js drives the SAME
+  // global._batchDeployProgress shape instead of inventing a second contract —
+  // admin-lanes.js and the CLE pollers both already speak it.
+  initProgress,
+  setPhase,
+  recordLaneDone,
+  finishProgress,
   readProgress,
 };

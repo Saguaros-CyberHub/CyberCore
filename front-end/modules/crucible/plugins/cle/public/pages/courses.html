@@ -419,10 +419,28 @@
       <h2>Deploy Vulnerable Machine</h2>
       <div class="modal-form">
         <div class="form-group">
-          <label>Challenge/Lab Template</label>
-          <select id="deployLabTemplate">
+          <label>Vulnerable Application</label>
+          <select id="deployLabTemplate" onchange="onLabTemplateChange()">
             <option value="">Loading templates...</option>
           </select>
+          <div id="deployLabTemplateInfo" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin-top: 0.35rem;"></div>
+        </div>
+        <div class="form-group">
+          <label>Deployment Mode</label>
+          <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400;">
+            <input type="radio" name="deployLabMode" value="lane" id="deployLabModeLane" checked>
+            <span>
+              <strong>Full lab lane</strong> — its own network, the vulnerable machine(s) and a Kali attack box per student.
+              <span id="deployLabModeLaneNote" style="display:block; font-size:0.75rem; color:var(--text-muted, #6b7280);"></span>
+            </span>
+          </label>
+          <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400; margin-top:0.4rem;">
+            <input type="radio" name="deployLabMode" value="attach" id="deployLabModeAttach">
+            <span>
+              <strong>Attach to existing workstation</strong> — add the vulnerable machine to the lane the student already has in this course.
+              <span id="deployLabModeAttachNote" style="display:block; font-size:0.75rem; color:var(--text-muted, #6b7280);"></span>
+            </span>
+          </label>
         </div>
         <div class="form-group">
           <label>Student(s)</label>
@@ -432,9 +450,10 @@
           <label>Learning Objective</label>
           <textarea id="deployLabObjective" placeholder="Describe what students should learn..."></textarea>
         </div>
+        <div id="deployLabPreview" style="display:none; margin-top: 0.75rem;"></div>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('deployVulnerableModal')">Cancel</button>
-          <button class="btn btn-primary" onclick="deployVulnerableMachines()">Deploy Labs</button>
+          <button class="btn btn-primary" id="deployLabBtn" onclick="deployVulnerableMachines()">Deploy Labs</button>
         </div>
       </div>
     </div>
@@ -753,12 +772,19 @@
         const data = await api('GET', `/courses/${currentCourseId}/students`);
         const students = data.students || [];
 
-        let html = `<table class="students-table">
+        let html = `
+          <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-bottom:0.75rem;">
+            <button class="btn btn-sm btn-outline" id="toggleCredsBtn" onclick="toggleCohortCredentials()">
+              🔑 Show console logins
+            </button>
+          </div>
+          <table class="students-table">
           <thead><tr>
             <th>Email/Username</th>
             <th>Name</th>
             <th>Role</th>
             <th>Enrolled</th>
+            <th class="cred-col" style="display:none;">Console Login</th>
             <th>Actions</th>
           </tr></thead>
           <tbody>`;
@@ -769,6 +795,9 @@
             <td>${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))}</td>
             <td><span class="badge badge-active">${s.enrollment_role || 'Student'}</span></td>
             <td>${s.enrolled_at ? new Date(s.enrolled_at).toLocaleDateString() : 'N/A'}</td>
+            <td class="cred-col" style="display:none;" data-cred-for="${escHtml(s.user_id)}">
+              <span style="color: var(--text-muted, #6b7280); font-size:0.8rem;">…</span>
+            </td>
             <td class="student-actions">
               <button class="btn btn-sm btn-outline" onclick="openGuacAccess('${escHtml(s.user_id)}')">🔗 RDP</button>
               <button class="btn btn-sm btn-outline" onclick="removeStudent('${escHtml(s.user_id)}')">❌ Remove</button>
@@ -781,6 +810,88 @@
       } catch (e) {
         document.getElementById('studentsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
+    }
+
+    // ── Guacamole console credentials ─────────────────────────────────────────
+    // A student who loses their console password can be given it back rather
+    // than having every machine they own reprovisioned. Hidden by default and
+    // fetched on demand: the server logs each disclosure, so opening the roster
+    // should not count as looking at everyone's password.
+    //
+    // Passwords are written with textContent and carried on dataset properties,
+    // never interpolated into markup or an inline handler. escHtml() is
+    // HTML-escaping: inside onclick="fn('…')" the browser HTML-decodes first, so
+    // a password containing an apostrophe would break out of the JS string.
+
+    let _credsShown = false;
+
+    /** Render one credential cell: the password plus a Copy button, or Issue. */
+    function renderCredentialCell(cell, cred) {
+      cell.textContent = '';
+      if (!cred || !cred.available) {
+        const issue = document.createElement('button');
+        issue.className = 'btn btn-sm btn-outline';
+        issue.style.cssText = 'font-size:0.7rem; padding:0.1rem 0.35rem;';
+        issue.textContent = 'Issue';
+        issue.addEventListener('click', () => issueStudentCredential(cell.dataset.credFor));
+        cell.appendChild(issue);
+        return;
+      }
+      const code = document.createElement('code');
+      code.style.fontSize = '0.78rem';
+      code.textContent = cred.password;
+      const copy = document.createElement('button');
+      copy.className = 'btn btn-sm btn-outline';
+      copy.style.cssText = 'font-size:0.65rem; padding:0.1rem 0.35rem; margin-left:0.3rem;';
+      copy.textContent = 'Copy';
+      copy.addEventListener('click', () => copyText(cred.password));
+      cell.append(code, copy);
+    }
+
+    async function toggleCohortCredentials() {
+      const btn = document.getElementById('toggleCredsBtn');
+      _credsShown = !_credsShown;
+      document.querySelectorAll('#studentsContent .cred-col')
+        .forEach(el => { el.style.display = _credsShown ? '' : 'none'; });
+
+      if (!_credsShown) {
+        btn.textContent = '🔑 Show console logins';
+        return;
+      }
+      btn.textContent = '🙈 Hide console logins';
+
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/students/credentials`);
+        if (data.hint) toast(data.hint, true);
+        for (const c of (data.credentials || [])) {
+          const cell = document.querySelector(`#studentsContent [data-cred-for="${CSS.escape(c.user_id)}"]`);
+          if (cell) renderCredentialCell(cell, c);
+        }
+      } catch (e) {
+        toast('Error loading console logins: ' + e.message, true);
+      }
+    }
+
+    /** Mint (or recover) one student's console password on demand. */
+    async function issueStudentCredential(userId) {
+      try {
+        const c = await api('GET', `/courses/${currentCourseId}/students/${encodeURIComponent(userId)}/guac/credentials?issue=true`);
+        if (!c.available) {
+          toast(c.reason || 'Could not issue a console password', true);
+          return;
+        }
+        const cell = document.querySelector(`#studentsContent [data-cred-for="${CSS.escape(userId)}"]`);
+        if (cell) renderCredentialCell(cell, c);
+        toast('Console password issued');
+      } catch (e) {
+        toast('Error: ' + e.message, true);
+      }
+    }
+
+    function copyText(text) {
+      navigator.clipboard.writeText(text)
+        .then(() => toast('Copied to clipboard'))
+        .catch(() => toast('Could not copy', true));
     }
 
     let _vmRefreshTimer = null;
@@ -889,40 +1000,90 @@
       }
     }
 
+    let _labRefreshTimer = null;
+
+    /** Flag-plant summary for one deployment, or null when nothing is planted yet. */
+    function _flagSummary(flags) {
+      if (!flags) return '<span style="color: var(--text-muted, #6b7280);">—</span>';
+      const bits = [];
+      if (flags.planted) bits.push(`<span style="color:#16a34a;">${flags.planted} planted</span>`);
+      if (flags.failed)  bits.push(`<span style="color:#ef4444;">${flags.failed} failed</span>`);
+      if (flags.pending) bits.push(`<span style="color:#b7791f;">${flags.pending} pending</span>`);
+      if (flags.captured) bits.push(`<span style="color:#1e5288;">${flags.captured} captured</span>`);
+      return bits.length ? bits.join(' &middot; ') : '<span style="color: var(--text-muted, #6b7280);">—</span>';
+    }
+
     async function loadVulnerableLabs() {
+      clearTimeout(_labRefreshTimer);
       try {
         const data = await api('GET', `/courses/${currentCourseId}/labs`);
         const labs = data.labs || [];
 
-        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Vulnerable Lab</button>`;
+        let html = `
+          <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Vulnerable Lab</button>
+          <div id="labProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
 
         if (labs.length === 0) {
           html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No vulnerable labs deployed yet.</p>';
         } else {
-          html += `<table class="students-table">
-            <thead><tr>
-              <th>Lab Name</th>
-              <th>Students</th>
-              <th>Objective</th>
-              <th>Deployed</th>
-              <th>Actions</th>
-            </tr></thead>
-            <tbody>`;
-
           labs.forEach(l => {
-            html += `<tr>
-              <td>${escHtml(l.lab_name)}</td>
-              <td>${l.student_count || 0}</td>
-              <td style="font-size: 0.8rem;">${escHtml(l.objective ? l.objective.substring(0, 50) + '...' : 'N/A')}</td>
-              <td>${l.created_at ? new Date(l.created_at).toLocaleDateString() : 'N/A'}</td>
-              <td><button class="btn btn-sm btn-outline" onclick="deleteLab('${escHtml(l.lab_id)}')">Remove</button></td>
-            </tr>`;
-          });
+            html += `
+              <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1rem; margin-bottom: 1rem;">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:1rem;">
+                  <div>
+                    <h4 style="margin:0 0 0.25rem;">${escHtml(l.lab_name)}</h4>
+                    <div style="font-size:0.8rem; color: var(--text-secondary);">
+                      ${escHtml(l.objective || 'No objective set')}
+                    </div>
+                    <div style="font-size:0.75rem; color: var(--text-muted, #6b7280); margin-top:0.25rem;">
+                      Assigned to ${l.student_count || 0} &middot;
+                      ${l.deployed_count || 0} deployed &middot;
+                      created ${l.created_at ? new Date(l.created_at).toLocaleDateString() : 'N/A'}
+                    </div>
+                  </div>
+                  <button class="btn btn-sm btn-outline" onclick="deleteLab('${escHtml(l.lab_id)}')">Remove &amp; tear down</button>
+                </div>`;
 
-          html += `</tbody></table>`;
+            if ((l.deployments || []).length === 0) {
+              html += `<p style="font-size:0.8rem; color: var(--text-muted, #6b7280); margin:0.75rem 0 0;">
+                Assigned, but nothing is deployed for it yet.</p>`;
+            } else {
+              html += `<table class="students-table" style="margin-top:0.75rem;">
+                <thead><tr>
+                  <th>Student</th><th>Mode</th><th>Status</th><th>Machines</th><th>Attack Box</th><th>Flags</th>
+                </tr></thead><tbody>`;
+              l.deployments.forEach(d => {
+                const vms = (d.vms || []).map(v =>
+                  `<div style="font-size:0.75rem;"><code>${escHtml(v.name)}</code> ${_powerBadge(v.power_state)}</div>`).join('');
+                const creds = d.workstation_user
+                  ? `<div style="font-size:0.72rem;"><code>${escHtml(d.workstation_user)}</code>` +
+                    (d.workstation_pass ? ` / <code>${escHtml(d.workstation_pass)}</code>` : '') + `</div>`
+                  : '';
+                html += `<tr>
+                  <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code></td>
+                  <td><span class="badge badge-gray">${d.mode === 'attach' ? 'attached' : 'own lane'}</span></td>
+                  <td>${d.lane_status === 'error'
+                        ? `<span style="color:#ef4444;" title="${escHtml(d.error || '')}">error</span>`
+                        : escHtml(d.lane_status)}</td>
+                  <td>${vms || '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
+                  <td>${d.attack_box_vm_id
+                        ? `<code style="font-size:0.75rem;">${d.attack_box_vm_id}</code> ${d.attack_box_power ? _powerBadge(d.attack_box_power) : ''}${creds}`
+                        : '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
+                  <td style="font-size:0.75rem;">${_flagSummary(d.flags)}</td>
+                </tr>`;
+              });
+              html += `</tbody></table>`;
+            }
+            html += `</div>`;
+          });
         }
 
         document.getElementById('vulnerableLabsContent').innerHTML = html;
+
+        // Keep refreshing while anything is still building.
+        if (labs.some(l => l.in_progress)) {
+          _labRefreshTimer = setTimeout(loadVulnerableLabs, 8000);
+        }
       } catch (e) {
         document.getElementById('vulnerableLabsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
@@ -1623,7 +1784,12 @@
       }
     }
 
+    // ── Vulnerable lab deployment ─────────────────────────────────────────────
+
+    let _vulnTemplates = [];
+
     function showDeployVulnerableModal() {
+      resetDeployLabButton();
       loadVulnerableTemplates();
       loadModalStudents('deployLabStudents');
       showModal('deployVulnerableModal');
@@ -1632,36 +1798,205 @@
     async function loadVulnerableTemplates() {
       try {
         const data = await api('GET', '/templates/vulnerable');
-        const templates = data.templates || [];
+        _vulnTemplates = data.templates || [];
         const select = document.getElementById('deployLabTemplate');
-        select.innerHTML = templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
+        select.innerHTML = _vulnTemplates.length
+          ? _vulnTemplates.map(t => `<option value="${escHtml(t.template_id)}">${escHtml(t.name)}</option>`).join('')
+          : '<option value="">No deployable vulnerable applications</option>';
+        if (data.hint) toast(data.hint, true);
+        onLabTemplateChange();
       } catch (e) {
         toast('Error loading templates: ' + e.message, true);
       }
     }
 
-    async function deployVulnerableMachines() {
-      try {
-        const templateId = document.getElementById('deployLabTemplate').value;
-        const selectedStudents = Array.from(document.querySelectorAll('.modal-student-select:checked')).map(c => c.value);
-        const objective = document.getElementById('deployLabObjective').value.trim();
+    /** The template row currently selected in the modal, or null. */
+    function selectedVulnTemplate() {
+      const id = document.getElementById('deployLabTemplate').value;
+      return _vulnTemplates.find(t => String(t.template_id) === String(id)) || null;
+    }
 
-        if (!templateId || selectedStudents.length === 0) {
-          toast('Select template and at least one student', true);
+    /**
+     * Describe the selected challenge and disable any mode it cannot support,
+     * with the server's own reason. The same checks run again server-side — this
+     * just stops the instructor from picking a combination that will 409.
+     */
+    function onLabTemplateChange() {
+      const t = selectedVulnTemplate();
+      const info = document.getElementById('deployLabTemplateInfo');
+      const laneRadio  = document.getElementById('deployLabModeLane');
+      const attachRadio = document.getElementById('deployLabModeAttach');
+      const laneNote   = document.getElementById('deployLabModeLaneNote');
+      const attachNote = document.getElementById('deployLabModeAttachNote');
+
+      if (!t) {
+        info.textContent = '';
+        laneNote.textContent = attachNote.textContent = '';
+        return;
+      }
+
+      const bits = [
+        `${t.vm_count} machine${t.vm_count === 1 ? '' : 's'}`,
+        `subnet ${escHtml(t.subnet_scheme)}`,
+        t.goad_enabled ? (t.goad_prebaked ? 'GOAD (pre-baked)' : 'GOAD (~90 min bake per lane)') : null,
+        t.free_lanes != null ? `${t.free_lanes} lane${t.free_lanes === 1 ? '' : 's'} free` : null,
+      ].filter(Boolean);
+      // Deployable, but something in the spec will not behave as intended — a
+      // GOAD host whose name doesn't match the lab definition, for instance.
+      const warnHtml = (t.warnings || []).length
+        ? `<div style="color:#b7791f; margin-top:0.3rem;">⚠ ${t.warnings.map(escHtml).join('<br>⚠ ')}</div>`
+        : '';
+      info.innerHTML = bits.join(' &middot; ') + warnHtml;
+
+      laneRadio.disabled = !t.can_deploy_lane;
+      laneNote.textContent = t.can_deploy_lane ? '' : `Unavailable — ${t.lane_blockers.join('; ')}`;
+      attachRadio.disabled = !t.can_attach;
+      attachNote.textContent = t.can_attach
+        ? 'The student must already have a workstation in this course.'
+        : `Unavailable — ${t.attach_blockers.join('; ')}`;
+
+      // Keep the selection on something legal.
+      if (laneRadio.disabled && !attachRadio.disabled) attachRadio.checked = true;
+      else if (attachRadio.disabled && !laneRadio.disabled) laneRadio.checked = true;
+
+      resetDeployLabButton();
+    }
+
+    function selectedLabMode() {
+      return document.querySelector('input[name="deployLabMode"]:checked')?.value || 'lane';
+    }
+
+    function readDeployLabForm() {
+      const templateId = document.getElementById('deployLabTemplate').value;
+      // Scoped to this modal: the workstation modal has checkboxes with the same
+      // class, and a global query was picking those up too.
+      const studentIds = Array.from(
+        document.querySelectorAll('#deployLabStudents .modal-student-select:checked')
+      ).map(c => c.value);
+      return {
+        templateId,
+        studentIds,
+        objective: document.getElementById('deployLabObjective').value.trim(),
+        mode: selectedLabMode(),
+      };
+    }
+
+    function resetDeployLabButton() {
+      const btn = document.getElementById('deployLabBtn');
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = 'Deploy Labs';
+      btn.onclick = deployVulnerableMachines;
+      const preview = document.getElementById('deployLabPreview');
+      if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
+    }
+
+    /**
+     * Deploy in two steps for 'lane' mode: the first POST returns a cluster
+     * capacity preview, the second (confirm: true) commits. 'attach' mode has no
+     * preview — it adds one VM to an existing lane — so it commits directly.
+     */
+    async function deployVulnerableMachines() {
+      const form = readDeployLabForm();
+      const btn = document.getElementById('deployLabBtn');
+      const preview = document.getElementById('deployLabPreview');
+
+      if (!form.templateId || form.studentIds.length === 0) {
+        toast('Select a vulnerable application and at least one student', true);
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Checking resources...';
+
+      try {
+        const res = await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
+          template_id: form.templateId,
+          student_ids: form.studentIds,
+          learning_objective: form.objective,
+          mode: form.mode,
+        });
+
+        // Committed straight away (attach mode, or the pre-flight was skipped).
+        if (!res.preview) {
+          finishLabDeploy(res);
           return;
         }
 
-        await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
-          template_id: templateId,
-          student_ids: selectedStudents,
-          learning_objective: objective
-        });
+        const s = res.summary || {};
+        preview.style.display = 'block';
+        preview.innerHTML = `
+          <div style="background: rgba(245,158,11,0.10); border:1px solid #f6e05e; border-radius:8px; padding:0.7rem; font-size:0.8rem;">
+            <strong>Review before deploying</strong><br>
+            ${res.student_count} student(s) &middot; ${s.new_vms != null ? `${s.new_vms} new VMs` : ''}
+            ${res.free_lanes != null ? ` &middot; ${res.free_lanes} lane(s) free in this challenge's network` : ''}
+            ${(res.warnings || []).length ? `<div style="color:#b7791f; margin-top:0.35rem;">${res.warnings.map(escHtml).join('<br>')}</div>` : ''}
+            ${(res.errors || []).length ? `<div style="color:#ef4444; margin-top:0.35rem;">${res.errors.map(escHtml).join('<br>')}</div>` : ''}
+            ${res.challenge?.goad_enabled && !res.challenge?.goad_prebaked
+              ? '<div style="color:#b7791f; margin-top:0.35rem;">This challenge runs a live GOAD bake — expect roughly 90 minutes per lane.</div>' : ''}
+          </div>`;
 
-        toast('Lab deployment started');
-        closeModal('deployVulnerableModal');
-        loadVulnerableLabs();
+        btn.disabled = false;
+        btn.textContent = `Confirm — deploy ${res.student_count}`;
+        btn.onclick = async () => {
+          btn.disabled = true;
+          btn.textContent = 'Deploying...';
+          try {
+            const done = await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
+              template_id: form.templateId,
+              student_ids: form.studentIds,
+              learning_objective: form.objective,
+              mode: form.mode,
+              confirm: true,
+            });
+            finishLabDeploy(done);
+          } catch (e) {
+            toast('Error deploying labs: ' + e.message, true);
+            resetDeployLabButton();
+          }
+        };
       } catch (e) {
         toast('Error deploying labs: ' + e.message, true);
+        resetDeployLabButton();
+      }
+    }
+
+    function finishLabDeploy(res) {
+      toast(res.message || 'Lab deployment started');
+      if ((res.skipped || []).length) {
+        toast(`${res.skipped.length} student(s) skipped — see the lab list`, true);
+      }
+      closeModal('deployVulnerableModal');
+      resetDeployLabButton();
+      loadVulnerableLabs();
+      if (res.lab_id) pollLabProgress(res.lab_id);
+    }
+
+    /**
+     * Poll a lab deploy's phase/ETA while it runs. A 404 means it finished and
+     * aged out, at which point the lab table alone is enough.
+     */
+    let _labProgressTimer = null;
+    async function pollLabProgress(labId) {
+      clearTimeout(_labProgressTimer);
+      const banner = document.getElementById('labProgressBanner');
+      try {
+        const p = await api('GET', `/courses/${currentCourseId}/labs/${labId}/progress`);
+        if (banner) {
+          const eta = p.eta_s != null && p.eta_s > 0 ? ` &middot; ETA ~${Math.ceil(p.eta_s / 60)} min` : '';
+          banner.style.display = 'block';
+          banner.innerHTML =
+            `<strong>${escHtml(p.phase_detail || p.phase || 'Deploying')}</strong> &mdash; ` +
+            `${p.completed}/${p.total} complete (${p.succeeded} ok, ${p.failed} failed)${eta}`;
+        }
+        if (p.phase !== 'complete') {
+          _labProgressTimer = setTimeout(() => pollLabProgress(labId), 5000);
+        } else {
+          if (banner) setTimeout(() => { banner.style.display = 'none'; }, 8000);
+          loadVulnerableLabs();
+        }
+      } catch (_) {
+        if (banner) banner.style.display = 'none';
       }
     }
 
@@ -1708,10 +2043,17 @@
     }
 
     async function deleteLab(labId) {
-      if (!confirm('Remove this lab deployment?')) return;
+      if (!confirm('Remove this lab and destroy every machine it deployed? This cannot be undone.')) return;
       try {
-        await api('DELETE', `/courses/${currentCourseId}/labs/${labId}`);
-        toast('Lab removed');
+        const res = await api('DELETE', `/courses/${currentCourseId}/labs/${labId}`);
+        // 207: some VMs survived, so the assignment was deliberately kept to
+        // give the instructor something to retry against.
+        if (res.success === false) {
+          toast(res.message || 'Some resources could not be destroyed', true);
+          (res.errors || []).slice(0, 3).forEach(e => toast(e, true));
+        } else {
+          toast(`Lab removed — ${res.vms_destroyed || 0} machine(s) destroyed`);
+        }
         loadVulnerableLabs();
       } catch (e) {
         toast('Error removing lab: ' + e.message, true);

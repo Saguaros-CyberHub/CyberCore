@@ -11,6 +11,7 @@ const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const {
   resolveConsole, resolveNicModel, RESOURCE_LIMITS,
 } = require('../../../../../src/utils/lane-deployer');
+const vulnLab = require('../utils/vuln-lab-provision');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -142,27 +143,88 @@ router.get('/vm', instructorOnly, async (req, res) => {
 });
 
 /**
- * GET /api/cle/templates/vulnerable — List available challenge/lab templates.
+ * GET /api/cle/templates/vulnerable — Vulnerable applications an instructor can
+ * actually deploy, and in which mode.
  *
  * Excludes the per-course network reservations: every CLE course creates its own
  * crucible_challenge row (spec.cle = true) purely to own a VXLAN block, and
  * those were showing up here as if they were deployable labs.
+ *
+ * Each row carries the capability flags POST /labs/deploy validates against
+ * (can_deploy_lane / can_attach plus the reason when either is false) and the
+ * live free-lane count in the challenge's own VXLAN block. The picker was
+ * previously a bare name list, so an instructor could select a challenge with no
+ * VMs, no reserved network, or a v3 topology and only find out at deploy time.
  */
 router.get('/vulnerable', instructorOnly, async (req, res) => {
   try {
     const result = await cybercoreQuery(`
       SELECT
         challenge_id  AS template_id,
+        challenge_key,
         name,
         difficulty,
-        description
+        description,
+        subnet_scheme,
+        module_key,
+        spec
       FROM crucible_challenge
       WHERE status = 'active'
         AND spec->>'cle' IS DISTINCT FROM 'true'
       ORDER BY name ASC
     `);
 
-    res.json({ templates: result.rows });
+    const usable = [];
+    const blocked = [];
+
+    for (const row of result.rows) {
+      const caps = vulnLab.describeChallenge({
+        challenge_id:  row.template_id,
+        challenge_key: row.challenge_key,
+        name:          row.name,
+        subnet_scheme: row.subnet_scheme,
+        spec:          typeof row.spec === 'string' ? JSON.parse(row.spec) : (row.spec || {}),
+      });
+
+      // Neither mode possible = not a deployable lab. Report it separately with
+      // the reason instead of offering it.
+      if (!caps.can_deploy_lane && !caps.can_attach) {
+        blocked.push({ name: row.name, reason: caps.lane_blockers.join('; ') || 'not deployable' });
+        continue;
+      }
+
+      // Free-lane count is only meaningful for the lane mode, and costs a query
+      // each — skip it for attach-only challenges.
+      let freeLanes = null;
+      if (caps.can_deploy_lane) {
+        freeLanes = await vulnLab.countFreeLanes(caps.vxlan_block).catch(() => null);
+      }
+
+      usable.push({
+        template_id:   row.template_id,
+        challenge_key: row.challenge_key,
+        name:          row.name,
+        difficulty:    row.difficulty,
+        description:   row.description,
+        module_key:    row.module_key,
+        ...caps,
+        free_lanes:    freeLanes,
+      });
+    }
+
+    // An empty picker is ambiguous — "none exist" and "some exist but are all
+    // undeployable" look identical. Say which, the way GET /vm already does.
+    const payload = { templates: usable };
+    if (usable.length === 0) {
+      payload.hint = blocked.length > 0
+        ? `${blocked.length} challenge(s) exist but none can be deployed: `
+          + blocked.map(b => `${b.name} (${b.reason})`).join(', ')
+          + '. Create one in Admin -> Create Lab.'
+        : 'No vulnerable applications are registered yet. Create one in Admin -> Create Lab.';
+    } else if (blocked.length > 0) {
+      payload.excluded = blocked;
+    }
+    res.json(payload);
   } catch (error) {
     console.error('[CLE] Get vulnerable templates error:', error.message);
     res.status(500).json({ error: error.message });

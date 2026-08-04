@@ -21,6 +21,10 @@ const { buildDeployPreview } = require('../../../../../src/middleware/deployment
 const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
 const laneProvision = require('../utils/lane-provision');
 const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
+const {
+  resolveTargetStudents: resolveStudents,
+  excludeStudentsWithCourseLane,
+} = require('../utils/students');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -86,51 +90,14 @@ async function loadCourseLab(course) {
 
 /**
  * Resolve the students to provision: actively enrolled, with an email (Guacamole
- * accounts are email-keyed), and not already holding a lane in this course.
- * Returns { students, skipped }.
+ * accounts are email-keyed), and not already holding a lane in this course —
+ * re-provisioning would collide on the gateway/workstation VMIDs for their VXLAN.
+ *
+ * The filter itself lives in utils/students.js so the vulnerable-lab path applies
+ * exactly the same rules.
  */
-async function resolveTargetStudents(courseId, requestedIds) {
-  const enrolled = await query(
-    `SELECT user_id FROM cle_course_enrollment
-      WHERE course_id = $1 AND status = 'active'`,
-    [courseId]
-  );
-  const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
-
-  const ids = requestedIds ? requestedIds.filter(Boolean) : [...enrolledIds];
-  const skipped = [];
-  const candidates = [];
-  for (const id of ids) {
-    if (!enrolledIds.has(id)) { skipped.push({ student_id: id, reason: 'not enrolled' }); continue; }
-    candidates.push(id);
-  }
-  if (candidates.length === 0) return { students: [], skipped };
-
-  const users = await cybercoreQuery(
-    `SELECT user_id, email FROM cybercore_user WHERE user_id = ANY($1::uuid[])`,
-    [candidates]
-  );
-  const emailById = {};
-  for (const r of users.rows) emailById[r.user_id] = r.email;
-
-  // Students who already have a live lane in this course — re-provisioning would
-  // collide on the gateway/workstation VMIDs for their VXLAN.
-  const existing = await cybercoreQuery(
-    `SELECT user_id FROM cybercore_lane
-      WHERE user_id = ANY($1::uuid[])
-        AND config->>'course_id' = $2
-        AND status NOT IN ('deleted', 'error')`,
-    [candidates, courseId]
-  );
-  const alreadyDeployed = new Set(existing.rows.map(r => r.user_id));
-
-  const students = [];
-  for (const id of candidates) {
-    if (alreadyDeployed.has(id)) { skipped.push({ student_id: id, reason: 'already has a workstation' }); continue; }
-    if (!emailById[id]) { skipped.push({ student_id: id, reason: 'no email on account' }); continue; }
-    students.push({ id, email: emailById[id] });
-  }
-  return { students, skipped };
+function resolveTargetStudents(courseId, requestedIds) {
+  return resolveStudents(courseId, requestedIds, { excludeIf: excludeStudentsWithCourseLane(courseId) });
 }
 
 /**

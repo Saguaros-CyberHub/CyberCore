@@ -8,44 +8,34 @@
 
 const express = require('express');
 const router = express.Router();
-const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
-const { proxmoxAPI, waitForTask, findTemplateNode } = require('../../utils/proxmox');
-const { getDefaultTemplateNode, getClusterNodes, getSchedulingConfig } = require('../../utils/site-config');
+const { proxmoxAPI } = require('../../utils/proxmox');
+const { getClusterNodes } = require('../../utils/site-config');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { query } = require('../../utils/db');
 const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
 const { generatePassword } = require('../../utils/password-generator');
-const { waitForGuestAgent, executeScriptsOnVM } = require('../../utils/script-executor');
-const { plantFlagsForLane } = require('../../utils/flag-manager');
-const { selectBestNode } = require('../../utils/node-selector');
-const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('../../utils/batch-deployer');
-const goadDeploy = require('../../utils/goad-deploy');
+const { runBatch } = require('../../utils/batch-deployer');
+const { allocateVxlanIds } = require('../../utils/lane-deployer');
+const { deployChallengeLanes, parseSpec, readProgress } = require('../../utils/challenge-lane-deployer');
 const tailscale = require('../../utils/tailscale');
-const {
-  V3_INTERNAL_TAG_OFFSET,
-  ATTACK_BOX_VMID_OFFSET,
-  KALI_TEMPLATE_VMID,
-  resolveGatewayVmid,
-  resolveLaneNetworking,
-  applyFixedSubnet,
-  configureLaneTailscale,
-  formatLaneGatewayNet0,
-} = require('../../utils/lane-networking');
+const { ATTACK_BOX_VMID_OFFSET } = require('../../utils/lane-networking');
 
 const adminOnly = requireRole('admin');
 
 
-// Legacy fallback password when generatePassword() is unavailable
-const GROUP_PASSWORD_FALLBACK = 'ClinicP@ssw0rd123!!';
-
-
 // ============================================================================
 // GROUP DEPLOYMENT
+//
+// This route owns ACCOUNTS: it mints the throwaway instructor/student users,
+// their Guacamole accounts, the organizational connection group, and the
+// deployed_groups bookkeeping row. The VM side — gateway, challenge VMs, Kali,
+// GOAD, vuln scripts, flags, workspace registration — lives in
+// utils/challenge-lane-deployer.js, which the CLE plugin calls too.
 // ============================================================================
 
 router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
@@ -85,10 +75,10 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       }
     }
 
-    let spec = null;
-    let vxlanBlock = null;
-    let availableVxlans = [];
-    let subnetScheme = 'v1';
+    // Resolve the challenge and prove there is VXLAN room BEFORE any account is
+    // created. A capacity failure discovered after the users exist leaves a
+    // half-built group behind, which is exactly what this pre-check avoids.
+    let challengeRow = null;
     if (shouldDeployLanes) {
       const modResult = await cybercoreQuery(
         `SELECT EXISTS (SELECT 1 FROM cybercore_module WHERE key = $1) AS is_installed`,
@@ -99,7 +89,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       }
 
       const challengeResult = await cybercoreQuery(
-        `SELECT challenge_id, challenge_key, name, spec, subnet_scheme
+        `SELECT challenge_id, challenge_key, name, spec, subnet_scheme, module_key
          FROM ${module.replace(/[^a-z0-9_]/gi, '')}_challenge
          WHERE challenge_key = $1 AND status = 'active'`,
         [challenge_key]
@@ -107,33 +97,20 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       if (challengeResult.rows.length === 0) {
         return res.status(404).json({ error: `Challenge '${challenge_key}' not found or not active` });
       }
-      spec = typeof challengeResult.rows[0].spec === 'string'
-        ? JSON.parse(challengeResult.rows[0].spec) : challengeResult.rows[0].spec;
-      subnetScheme = challengeResult.rows[0].subnet_scheme || 'v1';
+      challengeRow = challengeResult.rows[0];
 
-      vxlanBlock = {
+      const spec = parseSpec(challengeRow.spec);
+      const vxlanBlock = {
         start: spec.vxlan_block?.start ?? 10000,
-        end: spec.vxlan_block?.end ?? 10009
+        end: spec.vxlan_block?.end ?? 10009,
       };
-      const vxlanResult = await cybercoreQuery(
-        `WITH used AS (
-          SELECT DISTINCT vxlan_id FROM cybercore_lane
-          WHERE vxlan_id IS NOT NULL
-            AND vxlan_id BETWEEN $1 AND $2
-            AND status NOT IN ('error')
-        )
-        SELECT gs AS vxlan_id
-        FROM generate_series($1::int, $2::int) AS gs
-        LEFT JOIN used u ON u.vxlan_id = gs
-        WHERE u.vxlan_id IS NULL
-        ORDER BY gs`,
-        [vxlanBlock.start, vxlanBlock.end]
-      );
-      availableVxlans = vxlanResult.rows.map(r => r.vxlan_id);
-
-      if (availableVxlans.length < numStud) {
+      // Same allocator the deploy itself uses, so the check and the deploy can't
+      // disagree about what "free" means (it excludes error AND deleted lanes,
+      // matching the ux_cybercore_lane_vxlan_active partial unique index).
+      const free = await allocateVxlanIds(vxlanBlock, numStud);
+      if (free.length < numStud) {
         return res.status(400).json({
-          error: `Not enough VXLAN capacity. Need ${numStud} lanes but only ${availableVxlans.length} available (range ${vxlanBlock.start}-${vxlanBlock.end}).`
+          error: `Not enough VXLAN capacity. Need ${numStud} lanes but only ${free.length} available (range ${vxlanBlock.start}-${vxlanBlock.end}).`,
         });
       }
     }
@@ -232,833 +209,74 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
     );
 
     if (shouldDeployLanes) {
-      const templateVmid = spec.template_vmid || 1600;
-      const gatewayVmid = resolveGatewayVmid(module, subnetScheme, spec);
-      const templateNode = await findTemplateNode(templateVmid, spec.template_node || getDefaultTemplateNode());
-      console.log(`[Group Deploy] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
-
-      let nodeAssignments;
-      try {
-        nodeAssignments = await distributeAcrossNodes(proxmoxAPI, numStud);
-      } catch (e) {
-        console.warn(`[Group Deploy] Batch node distribution failed, falling back to single node: ${e.message}`);
-        const bestNodeInfo = await selectBestNode();
-        nodeAssignments = new Array(numStud).fill(bestNodeInfo.node);
-      }
-
-      let vnets = [];
-      try {
-        vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
-      } catch (e) {
-        console.error('Could not fetch VNets for group deploy:', e.message);
-      }
-
-      const laneJobs = [];
-      for (let i = 0; i < created.students.length; i++) {
-        const student = created.students[i];
-        const vxlanId = availableVxlans[i];
-        const vnet = vnets.find(v => v.tag === vxlanId);
-
-        if (!vnet) {
-          console.warn(`No VNet for VXLAN ${vxlanId}, skipping lane for ${student.email}`);
-          continue;
-        }
-        const vnetInt = subnetScheme === 'v3'
-          ? vnets.find(v => v.tag === vxlanId + V3_INTERNAL_TAG_OFFSET)
-          : null;
-        if (subnetScheme === 'v3' && !vnetInt) {
-          console.warn(`No internal VNet for VXLAN ${vxlanId} (v3), skipping lane for ${student.email}`);
-          continue;
-        }
-
-        try {
-          const studentCred = created.credentials.find(c => c.email === student.email);
-          const studentPwHash = studentCred ? await bcrypt.hash(studentCred.password, 12) : null;
-          await cybercoreQuery(
-            `INSERT INTO cybercore_user (user_id, username, email, first_name, last_name, role, auth_provider, organization, password_hash, password_alg)
-             VALUES ($1, $2, $3, $4, $5, 'student', 'local', $6, $7, 'bcrypt')
-             ON CONFLICT (username) DO UPDATE SET user_id = $1, email = $3, organization = $6, password_hash = $7, password_alg = 'bcrypt'`,
-            [student.id, student.email, student.email, `Student`, `${i + 1}`, group_name, studentPwHash]
-          );
-
-          const laneName = `${vnet.zone}-${vxlanId}`;
-          const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: spec.template_vmid || 1600, type: 'qemu', vm_offset: 600000 }];
-          const expectedVms = vmSpecs.map(vs => ({
-            vm_id: (vs.vm_offset || 600000) + vxlanId,
-            name: vs.name || challenge_key,
-            type: vs.type || 'qemu'
-          }));
-          const laneConfig = JSON.stringify({
-            challenge_key,
-            module,
-            group_id: groupId,
-            group_name,
-            gateway_vm_id: 100000 + vxlanId,
-            attack_box_vm_id: attack_boxes ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null,
-            vms: expectedVms
-          });
-          const laneInsert = await cybercoreQuery(
-            `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
-             VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
-             RETURNING lane_id`,
-            [student.id, vxlanId, laneName, laneConfig, module]
-          );
-          const laneId = laneInsert.rows[0].lane_id;
-          created.lanes.push({ lane_id: laneId, student_email: student.email, vxlan_id: vxlanId });
-          laneJobs.push({ laneId, student, vxlanId, vnet, vnetInt, laneName, targetNode: nodeAssignments[i] });
-        } catch (err) {
-          console.error(`Failed to create lane record for ${student.email}:`, err.message);
-        }
-      }
-
+      // Deploy detached: the response returns as soon as the accounts and Guac
+      // objects exist, so a class-sized deploy doesn't hold the HTTP request open
+      // for the ten-plus minutes the clones take. Progress is polled from
+      // GET /deploy-group/:groupId/progress, keyed on the group id.
+      //
+      // Everything below this point used to be ~800 lines inline here. It now
+      // lives in utils/challenge-lane-deployer.js so the CLE plugin's "Deploy
+      // Vulnerable Machine" path runs the identical sequence instead of a third
+      // drifting copy of it.
       (async () => {
-        const concurrency = getSchedulingConfig().max_concurrent_lanes;
-        const cloneSem = createCloneSemaphore();
-        console.log(`[Group ${group_name}] Starting parallel deployment of ${laneJobs.length} lanes (lane concurrency: ${concurrency}, max concurrent clones: ${cloneSem.max})...`);
-
-        const batchId = groupId;
-        if (!global._batchDeployProgress) global._batchDeployProgress = {};
-        global._batchDeployProgress[batchId] = {
-          group_name,
-          total: laneJobs.length,
-          completed: 0,
-          succeeded: 0,
-          failed: 0,
-          started_at: new Date().toISOString(),
-          phase: 'preparing',
-          phase_detail: 'Replicating gateway templates',
-          elapsed_s: 0,
-          avg_lane_s: null,
-          eta_s: null,
-          eta_at: null,
-          lanes: {},
-          _laneTimes: []
-        };
-        const progress = global._batchDeployProgress[batchId];
-        const deployStartTime = Date.now();
-
-        function updateProgressTiming() {
-          const now = Date.now();
-          progress.elapsed_s = Math.round((now - deployStartTime) / 1000);
-          if (progress._laneTimes.length > 0) {
-            const avgMs = progress._laneTimes.reduce((a, b) => a + b, 0) / progress._laneTimes.length;
-            progress.avg_lane_s = Math.round(avgMs / 1000);
-            const remaining = progress.total - progress.completed;
-            const etaMs = (remaining / concurrency) * avgMs;
-            progress.eta_s = Math.round(etaMs / 1000);
-            progress.eta_at = new Date(now + etaMs).toISOString();
-          }
-        }
-
-        // Phase 1a: Replicate gateway template to each target node
-        const uniqueTargetNodes = [...new Set(laneJobs.map(j => j.targetNode))];
-        const tempTemplateIds = {};
-        const TEMP_GW_TEMPLATE_BASE = 169200;
-        let tempIdCounter = 0;
-
-        progress.phase = 'gateway_replication';
-        progress.phase_detail = `Replicating gateway template to ${uniqueTargetNodes.length} nodes`;
-        console.log(`[Group ${group_name}] Phase 1a: Replicating gateway template ${gatewayVmid} to ${uniqueTargetNodes.length} nodes...`);
-
-        for (const node of uniqueTargetNodes) {
-          if (node === templateNode) {
-            tempTemplateIds[node] = gatewayVmid;
-            console.log(`[Group ${group_name}] Node ${node} is template home — using original ${gatewayVmid}`);
-            continue;
-          }
-          const tempId = TEMP_GW_TEMPLATE_BASE + tempIdCounter++;
-          try {
-            console.log(`[Group ${group_name}] Replicating gateway template → ${tempId} on ${node}...`);
-            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
-              newid: tempId,
-              hostname: `gw-template-temp-${node}`,
-              full: 1,
-              target: node,
-              description: `Temp gateway template for batch deploy (group: ${group_name})`
-            });
-            if (cloneResult) await waitForTask(templateNode, cloneResult);
-            tempTemplateIds[node] = tempId;
-            console.log(`[Group ${group_name}] Gateway template replicated to ${node} as ${tempId}`);
-          } catch (err) {
-            console.error(`[Group ${group_name}] Failed to replicate template to ${node}: ${err.message}`);
-            tempTemplateIds[node] = gatewayVmid;
-          }
-        }
-
-        // Phase 1b: Clone all gateways in parallel from node-local templates
-        progress.phase = 'gateway_cloning';
-        progress.phase_detail = `Cloning ${laneJobs.length} gateways in parallel`;
-        updateProgressTiming();
-        console.log(`[Group ${group_name}] Phase 1b: Cloning ${laneJobs.length} gateways in parallel from node-local templates...`);
-        const gatewayResults = {};
-
-        const lanesByNode = {};
-        for (const job of laneJobs) {
-          if (!lanesByNode[job.targetNode]) lanesByNode[job.targetNode] = [];
-          lanesByNode[job.targetNode].push(job);
-        }
-
-        await Promise.all(Object.entries(lanesByNode).map(async ([node, jobs]) => {
-          const localTemplateId = tempTemplateIds[node];
-          const sourceNode = node === templateNode ? templateNode : node;
-
-          for (const job of jobs) {
-            const { laneId, student, vxlanId, vnet, vnetInt } = job;
-            const gatewayVmId = 100000 + vxlanId;
-            try {
-              console.log(`[Group ${group_name}] Cloning gateway LXC ${localTemplateId}@${sourceNode} → ${gatewayVmId} for ${student.email}`);
-              // Per-lane bootstrap secret embedded as `-b<16hex>` suffix on the
-              // LXC hostname. firstboot greps it back out (`hostname | grep -oE
-              // 'b[a-f0-9]{16}$'`) and includes it as ?secret=… on the bootstrap
-              // request. Replaces source-IP gating which breaks behind the
-              // orchestrator's Docker bridge. See utils/lane-networking.js
-              // configureLaneTailscale + bake-lane-gateway-v2.sh.
-              // Hostname budget: 63 chars; reserve 18 for `-b<16hex>`.
-              const claimSecret = crypto.randomBytes(8).toString('hex');
-              const baseHost = `${job.laneName}-gateway`.substring(0, 63 - 18).toLowerCase()
-                .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
-              const hostname = `${baseHost}-b${claimSecret}`;
-
-              const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${sourceNode}/lxc/${localTemplateId}/clone`, {
-                newid: gatewayVmId,
-                hostname,
-                full: 1,
-                target: node,
-                description: `Group: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
-                pool: `${module}-pool`
-              });
-              if (gwCloneResult) await waitForTask(sourceNode, gwCloneResult);
-              const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
-              // Pre-baked ("GOAD-Like") lanes pin a fixed subnet so the gateway's
-              // ext0/int0 land on the same base the golden-image AD was baked on.
-              if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
-                applyFixedSubnet(net, subnetScheme === 'v3', spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
-              }
-              if (subnetScheme === 'v3') {
-                await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                  net0: formatLaneGatewayNet0(net.wan),
-                  net1: `name=ext0,bridge=${vnet.vnet},ip=${net.lanExt.gatewayIp}/24,type=veth`,
-                  net2: `name=int0,bridge=${vnetInt.vnet},ip=${net.lanInt.gatewayIp}/24,type=veth`
-                });
-              } else {
-                await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
-                  net0: formatLaneGatewayNet0(net.wan),
-                  net1: `name=lan0,bridge=${vnet.vnet},ip=${net.lan.gatewayIp}/24,type=veth`
-                });
-              }
-              await configureLaneTailscale({
-                subnetScheme,
-                vxlanId,
-                wanIp: net.wan.ip.split('/')[0],
-                laneName: job.laneName,
-                claimSecret,
-                logTag: `[Group ${group_name}]`
-              });
-              gatewayResults[laneId] = { success: true };
-              console.log(`[Group ${group_name}] Gateway ${gatewayVmId} cloned on ${node}`);
-            } catch (err) {
-              console.error(`[Group ${group_name}] Gateway clone failed for ${student.email}: ${err.message}`);
-              gatewayResults[laneId] = { success: false, error: err.message };
-            }
-          }
-        }));
-
-        const gwSuccessCount = Object.values(gatewayResults).filter(r => r.success).length;
-        console.log(`[Group ${group_name}] Phase 1b complete: ${gwSuccessCount}/${laneJobs.length} gateways cloned`);
-
-        // Phase 1c: Delete temporary template copies
-        const tempIdsToDelete = Object.entries(tempTemplateIds)
-          .filter(([_, id]) => id !== gatewayVmid)
-          .map(([node, id]) => ({ node, id }));
-
-        if (tempIdsToDelete.length > 0) {
-          progress.phase_detail = 'Cleaning up temp gateway templates';
-          console.log(`[Group ${group_name}] Phase 1c: Cleaning up ${tempIdsToDelete.length} temp gateway templates...`);
-          await Promise.all(tempIdsToDelete.map(async ({ node, id }) => {
-            try {
-              await proxmoxAPI('DELETE', `/api2/json/nodes/${node}/lxc/${id}?purge=1&force=1`);
-              console.log(`[Group ${group_name}] Deleted temp template ${id} on ${node}`);
-            } catch (e) {
-              console.warn(`[Group ${group_name}] Could not delete temp template ${id} on ${node}: ${e.message}`);
-            }
-          }));
-        }
-
-        // Phase 2: Clone QEMU VMs + Kali in parallel
-        progress.phase = 'deploying';
-        progress.phase_detail = `Deploying lanes (${concurrency} at a time, max ${cloneSem.max} concurrent clones)`;
-        updateProgressTiming();
-        console.log(`[Group ${group_name}] Phase 2: Cloning challenge VMs and Kali in parallel (concurrency: ${concurrency})...`);
-
-        const { results, errors } = await runBatch(laneJobs, async (job) => {
-          const { laneId, student, vxlanId, vnet, vnetInt, targetNode } = job;
-          const bestNode = targetNode;
-
-          if (!gatewayResults[laneId]?.success) {
-            throw new Error(`Skipped: gateway clone failed — ${gatewayResults[laneId]?.error}`);
-          }
-
-          progress.lanes[laneId] = { student: student.email, vxlan: vxlanId, node: bestNode, status: 'cloning', _startedAt: Date.now() };
-          console.log(`[Group ${group_name}] Deploying lane ${laneId} for ${student.email} on ${bestNode} (VXLAN ${vxlanId})...`);
-
-          {
-            const gatewayVmId = 100000 + vxlanId;
-            const deployedVMs = [];
-            // Captured during Guac connection creation, persisted into the
-            // Kali vm_instance metadata so My Workspaces shows a Console button.
-            let kaliGuacConnId = null;
-            const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
-            const isV3 = subnetScheme === 'v3';
-            // Pre-baked lanes reuse the golden image's exact subnet (see Phase 1b).
-            if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
-              applyFixedSubnet(net, isV3, spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
-            }
-            const vnetExtName = vnet.vnet;
-            const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
-            const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
-            const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
-
-            const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, goadSubnetBase);
-
-            const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
-            const clonePromises = vmSpecs.map(async (vmSpec) => {
-              const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
-              const vmTemplate = vmSpec.template_vmid || templateVmid;
-              const vmName = vmSpec.name || challenge_key;
-              const vmType = vmSpec.type || 'qemu';
-              const goadMac = goadMacs[vmName]?.mac;
-              const isGoadVm = !!goadMacs[vmName];
-              const isDmz = vmSpec.role === 'dmz';
-              const vmVnet = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
-
-              await cloneSem.run(async () => {
-                console.log(`[Group ${group_name}] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${student.email}`);
-
-                if (vmType === 'lxc') {
-                  const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
-                    newid: vmId, hostname: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
-                    description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
-                    pool: `${module}-pool`
-                  });
-                  if (result) await waitForTask(templateNode, result);
-                  await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-                    net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac)
-                  });
-                } else {
-                  const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
-                    newid: vmId, name: `${vmName}-${student.email.split('@')[0]}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
-                    description: `Group: ${group_name}\nVM: ${vmName}\nStudent: ${student.email}\nLane: ${laneId}`,
-                    pool: `${module}-pool`
-                  });
-                  if (result) await waitForTask(templateNode, result);
-                  if (isV3 && isDmz) {
-                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                      net0: `virtio,bridge=${vnetExtName}`,
-                      net1: `virtio,bridge=${vnetIntName}`
-                    });
-                    // Dual-homed DMZ host sits at .240 on both segments. It used
-                    // to be pinned to .50, but the gateway firstboot reserves
-                    // ext .50 for Kali's RDP DNAT (wan0:3389 → ext.50) — so the
-                    // two collided and student RDP landed on the web host, not
-                    // Kali. .240 is above the gateway's DHCP pool (.10–.200), so
-                    // no lease can claim it and no gateway re-bake is needed.
-                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                      ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
-                      ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
-                      nameserver: net.lanExt.gatewayIp,
-                      citype:     'nocloud'
-                    });
-                    await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
-                  } else {
-                    const goadVm = goadMacs[vmName];
-                    const vmConfig = {
-                      net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model)
-                    };
-                    if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
-                    if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
-                    if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
-                    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, vmConfig);
-
-                    // Pre-baked golden images are already fully provisioned +
-                    // domain-joined. Proxmox regenerates a cloud-init ISO on every
-                    // clone, and cloudbase-init then applies the clone's VM name as
-                    // the Windows hostname — which silently breaks a member's domain
-                    // secure channel, because its baked AD account (e.g. TUC-SRV02$)
-                    // no longer matches its renamed host. Domain controllers are
-                    // immune (Windows refuses to rename a DC), which is exactly why
-                    // only members broke in testing. Strip the cloud-init drive so
-                    // the baked hostname + whole identity survive the clone untouched;
-                    // the reserved IP still arrives via the deterministic MAC on net0.
-                    if (spec.goad?.prebaked && isGoadVm) {
-                      try {
-                        const cfg = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`);
-                        const ciKey = cfg && Object.keys(cfg).find(k =>
-                          /^(ide|sata|scsi|virtio)\d+$/.test(k) &&
-                          typeof cfg[k] === 'string' && /cloudinit/i.test(cfg[k]));
-                        if (ciKey) {
-                          await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, { delete: ciKey });
-                          console.log(`[Group ${group_name}] Pre-baked ${vmName}: stripped cloud-init drive ${ciKey} (preserve baked hostname)`);
-                        } else {
-                          console.log(`[Group ${group_name}] Pre-baked ${vmName}: no cloud-init drive found to strip`);
-                        }
-                      } catch (err) {
-                        console.warn(`[Group ${group_name}] Pre-baked ${vmName}: cloud-init strip failed (member secure channel may break): ${err.message}`);
-                      }
-                    }
-                  }
-                }
-              });
-
-              return { vm_id: vmId, name: vmName, type: vmType, node: bestNode };
-            });
-
-            const shouldDeployAttackBox = !!attack_boxes;
-            let attackBoxVmId = shouldDeployAttackBox ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null;
-            const studentUsername = student.email.split('@')[0].replace(/[^a-z0-9_-]/gi, '-');
-            const studentCred = created.credentials.find(c => c.email === student.email);
-            const studentPassword = studentCred ? studentCred.password : GROUP_PASSWORD_FALLBACK;
-
-            const kaliClonePromise = shouldDeployAttackBox ? (async () => {
-              await cloneSem.run(async () => {
-                console.log(`[Group ${group_name}] Cloning Kali attack box → ${attackBoxVmId} for ${student.email}...`);
-                const kaliClone = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${KALI_TEMPLATE_VMID}/clone`, {
-                  newid: attackBoxVmId,
-                  name: `kali-${studentUsername}`,
-                  full: 1,
-                  target: bestNode,
-                  description: `Attack Box (Kali)\nGroup: ${group_name}\nStudent: ${student.email}\nLane: ${laneId}`,
-                  pool: `${module}-pool`
-                });
-                if (kaliClone) await waitForTask(templateNode, kaliClone);
-              });
-
-              console.log(`[Group ${group_name}] Configuring cloud-init for ${attackBoxVmId} (user: ${studentUsername})...`);
-              // Give Kali its lane-ext .50 via a DHCP RESERVATION, not a static
-              // cloud-init pin. The clone gets the deterministic MAC
-              // macForOctet(INFRA_IP_OCTETS.Kali) so the gateway's dnsmasq (fed by
-              // goadDeploy's prep.sh hostMap, which reserves <ext>.50 for that MAC)
-              // hands it .50 — matching the gateway RDP DNAT (wan0:3389 -> ext.50).
-              // Why DHCP and not the old `ipconfig0: ip=<ext>.50/24` static pin:
-              // the Kali cloud image's hotplug-DHCP helper (cloud-ifupdown) raced
-              // the static config and won, leaving Kali on a random lease; and the
-              // static path never populated /etc/resolv.conf (no resolvconf), so
-              // DNS broke. DHCP fixes both — the reservation makes the lease
-              // deterministic, and dnsmasq hands out itself (.1) as the resolver.
-              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/config`, {
-                net0: `virtio=${goadDeploy.macForOctet(goadDeploy.INFRA_IP_OCTETS.Kali, vxlanId)},bridge=${vnet.vnet}`,
-                ipconfig0: `ip=dhcp`,
-                ciuser: studentUsername,
-                cipassword: studentPassword,
-                nameserver: `${laneSubnetBase}.1`
-              });
-              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/cloudinit`);
-            })() : Promise.resolve();
-
-            progress.lanes[laneId].status = 'cloning';
-            const [clonedVMs] = await Promise.all([
-              Promise.all(clonePromises),
-              kaliClonePromise
-            ]);
-            deployedVMs.push(...clonedVMs);
-
-            progress.lanes[laneId].status = 'starting';
-            await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
-            await new Promise(r => setTimeout(r, 5000));
-
-            for (const dvm of deployedVMs) {
-              const startPath = dvm.type === 'lxc'
-                ? `/api2/json/nodes/${dvm.node}/lxc/${dvm.vm_id}/status/start`
-                : `/api2/json/nodes/${dvm.node}/qemu/${dvm.vm_id}/status/start`;
-              await proxmoxAPI('POST', startPath);
-            }
-
-            if (spec.goad?.enabled) {
-              progress.lanes[laneId].status = 'provisioning_goad';
-              try {
-                if (spec.goad?.prebaked) {
-                  // Golden-image lane: clones are already GOAD-provisioned, so just
-                  // write reservations + bounce onto the baked IPs. No controller,
-                  // no ansible, no ~90-min bake.
-                  await goadDeploy.deployPrebakedGoadLane({
-                    lane: { lane_id: laneId },
-                    spec, vxlanId, gatewayVmId, bestNode,
-                    laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase,
-                    deployedVMs, proxmoxAPI
-                  });
-                } else {
-                  await goadDeploy.deployGoadLane({
-                    lane: { lane_id: laneId },
-                    spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
-                    bestNode, templateNode, laneSubnetBase: goadSubnetBase,
-                    extSubnetBase: laneSubnetBase, deployedVMs,
-                    proxmoxAPI, waitForTask, query: cybercoreQuery
-                  });
-                }
-              } catch (goadErr) {
-                console.error(`[Group ${group_name}] GOAD provisioning failed for ${student.email}: ${goadErr.message}`);
-              }
-            }
-
-            if (attackBoxVmId) {
-              progress.lanes[laneId].status = 'configuring_kali';
-              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/status/start`);
-              console.log(`[Group ${group_name}] Kali attack box ${attackBoxVmId} started for ${student.email}`);
-
-              console.log(`[Group ${group_name}] Waiting for Kali guest agent...`);
-              await new Promise(r => setTimeout(r, 30000));
-
-              let kaliIp = null;
-              for (let attempt = 0; attempt < 10 && !kaliIp; attempt++) {
-                try {
-                  const agentData = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/qemu/${attackBoxVmId}/agent/network-get-interfaces`);
-                  const interfaces = agentData.result || agentData || [];
-                  for (const iface of interfaces) {
-                    if (iface.name === 'lo') continue;
-                    const ipAddrs = iface['ip-addresses'] || [];
-                    for (const addr of ipAddrs) {
-                      if (addr['ip-address-type'] === 'ipv4' && !addr['ip-address'].startsWith('127.')) {
-                        kaliIp = addr['ip-address'];
-                        console.log(`[Group ${group_name}] Kali IP via guest agent: ${kaliIp} (${iface.name})`);
-                        break;
-                      }
-                    }
-                    if (kaliIp) break;
-                  }
-                } catch (agentErr) {
-                  console.log(`[Group ${group_name}] Guest agent attempt ${attempt + 1}/10: ${agentErr.message}`);
-                }
-                if (!kaliIp && attempt < 9) {
-                  await new Promise(r => setTimeout(r, 5000));
-                }
-              }
-
-              if (!kaliIp) {
-                // Kali is pinned to .50 via ipconfig0 above, so that's the
-                // correct fallback when the guest agent is slow to answer —
-                // and it matches the gateway's wan0:3389 → .50 DNAT target.
-                console.warn(`[Group ${group_name}] Could not get Kali IP via guest agent — using pinned .50`);
-                kaliIp = `${laneSubnetBase}.50`;
-              }
-              console.log(`[Group ${group_name}] Kali IP: ${kaliIp}`);
-
-              let gatewayTransitIp = null;
-              try {
-                const gwConfig = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`);
-                const net0 = gwConfig.net0 || '';
-                const ipMatch = net0.match(/ip=([\d.]+)/);
-                if (ipMatch) gatewayTransitIp = ipMatch[1];
-              } catch (_) {}
-
-              if (!gatewayTransitIp) {
-                try {
-                  await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/exec`, {
-                    command: JSON.stringify(['sh', '-c', "ip -4 addr show wan0 | grep inet | awk '{print $2}' | cut -d/ -f1"])
-                  });
-                } catch (_) {}
-              }
-
-              if (!gatewayTransitIp) {
-                try {
-                  const gwInterfaces = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/interfaces`);
-                  for (const iface of (gwInterfaces || [])) {
-                    if (iface.name === 'wan0' && iface.inet) {
-                      gatewayTransitIp = iface.inet.split('/')[0];
-                      break;
-                    }
-                  }
-                } catch (_) {}
-              }
-
-              const guacTargetIp = gatewayTransitIp || kaliIp;
-              console.log(`[Group ${group_name}] Guac RDP target: ${guacTargetIp} (${gatewayTransitIp ? 'via gateway DNAT' : 'direct to Kali'})`);
-
-              // DNAT install is no longer a deploy-time concern — the gateway
-              // template bakes wan0:3389 → <lane-base>.50:3389 into firstboot,
-              // and Kali is pinned to .50 via cloud-init ipconfig0 above.
-
-              try {
-                const guacParent = created.guac_group?.identifier || 'ROOT';
-                const kaliConn = await guacAPI('POST', '/connections', {
-                  name: `${group_name} - ${student.email.split('@')[0]} - Kali`,
-                  protocol: 'rdp',
-                  parentIdentifier: guacParent,
-                  parameters: {
-                    hostname: guacTargetIp,
-                    port: '3389',
-                    username: studentUsername,
-                    password: studentPassword,
-                    security: 'any',
-                    'ignore-cert': 'true',
-                    // Without server-layout the Guac UI shows "Keyboard layout"
-                    // as unset and keystrokes never reach xrdp. en-us-qwerty
-                    // matches the default xrdp keymap on Kali; override per
-                    // template later if a different physical keyboard is used.
-                    'server-layout': 'en-us-qwerty',
-                    'enable-wallpaper': 'true',
-                    'enable-theming': 'true',
-                    'enable-font-smoothing': 'true',
-                    'enable-full-window-drag': 'true',
-                    'color-depth': '24',
-                    'resize-method': 'display-update'
-                  },
-                  attributes: {
-                    'max-connections': '2',
-                    'max-connections-per-user': '1'
-                  }
-                });
-
-                if (kaliConn?.identifier) {
-                  const connId = kaliConn.identifier;
-                  kaliGuacConnId = connId;
-                  created.guac_connections.push({
-                    id: connId,
-                    name: `${group_name} - ${student.email.split('@')[0]} - Kali`,
-                    student_email: student.email
-                  });
-                  try {
-                    await guacAPI('PATCH', `/users/${encodeURIComponent(student.email)}/permissions`, [
-                      { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' }
-                    ]);
-                    console.log(`[Group ${group_name}] Guac connection ${connId} → ${student.email}`);
-                  } catch (permErr) {
-                    console.warn(`[Group ${group_name}] Student perm failed for ${student.email}: ${permErr.message}`);
-                  }
-
-                  for (const inst of created.instructors) {
-                    try {
-                      await guacAPI('PATCH', `/users/${encodeURIComponent(inst.email)}/permissions`, [
-                        { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' }
-                      ]);
-                    } catch (_) {}
-                  }
-                }
-              } catch (guacErr) {
-                console.warn(`[Group ${group_name}] Could not create Guac connection for ${student.email}: ${guacErr.message}`);
-              }
-            }
-
-            if (groupVulnScripts && groupVulnScripts.length > 0) {
-              progress.lanes[laneId].status = 'running_scripts';
-              console.log(`[Group ${group_name}] Running ${groupVulnScripts.length} vuln scripts for ${student.email}...`);
-              const scriptEntries = groupVulnScripts.map(s => ({
-                script_slug: s.script_slug,
-                vm_name: s.vm_name || deployedVMs[0]?.name || 'default',
-                status: 'pending', error: null
-              }));
-
-              const dvsResult = await query(
-                `INSERT INTO deployment_vuln_selections (lane_id, selected_scripts, status)
-                 VALUES ($1, $2, 'running_scripts') RETURNING id`,
-                [laneId, JSON.stringify(scriptEntries)]
-              );
-              const deploymentId = dvsResult.rows[0].id;
-
-              for (const vm of deployedVMs) {
-                if (vm.type !== 'qemu') continue;
-                const agentReady = await waitForGuestAgent(vm.node, vm.vm_id, 180000);
-                if (!agentReady) { console.error(`[Group ${group_name}] Guest agent not responding on ${vm.name}`); continue; }
-                const vmScriptSlugs = groupVulnScripts.filter(s => (s.vm_name || deployedVMs[0]?.name) === vm.name).map(s => s.script_slug);
-                if (vmScriptSlugs.length > 0) {
-                  const scriptRows = await query(`SELECT slug, script_content, os_target, depends_on, script_args FROM vuln_scripts WHERE slug = ANY($1) AND is_active = true`, [vmScriptSlugs]);
-                  if (scriptRows.rows.length > 0) {
-                    await executeScriptsOnVM(vm.node, vm.vm_id, vm.name, scriptRows.rows, deploymentId);
-                  }
-                }
-              }
-              await query(`UPDATE deployment_vuln_selections SET status = 'complete', updated_at = NOW() WHERE id = $1`, [deploymentId]);
-              console.log(`[Group ${group_name}] Vuln scripts completed for ${student.email}`);
-            }
-
-            // Plant HTB-style user/root capture flags. Runs LAST, after vuln
-            // scripts and after GOAD provisioning, so a script that recreates a
-            // user profile or a GOAD heal that reboots a DC can't clobber the
-            // files. Because deployedVMs includes the GOAD hosts, this covers
-            // DC01/DC02/SRV02 with no change to goad-deploy.js.
-            //
-            // Best-effort: flag failures are recorded per-flag as
-            // plant_status='failed' and surfaced on the instructor dashboard.
-            // They must never fail a whole class deploy.
-            try {
-              progress.lanes[laneId].status = 'planting_flags';
-              await plantFlagsForLane({
-                laneId,
-                userId: student.id,
-                vms: deployedVMs,
-                specVms: spec.vms || [],
-                api: proxmoxAPI,
-                logTag: `[Group ${group_name}][Flags]`
-              });
-            } catch (flagErr) {
-              console.error(`[Group ${group_name}] Flag planting failed for ${student.email}: ${flagErr.message}`);
-            }
-
-            // Register each lane VM (challenge VMs + Kali, NOT the gateway —
-            // gateway is plumbing, not a workspace) in cybercore_resource +
-            // cybercore_vm_instance + cybercore_allocation so the student's
-            // "My Workspaces" page sees them. Only Kali gets a guac_connection_id
-            // since that's the only VM with a Guac connection in the group flow.
-            //
-            // Resource names are (module_key, name) UNIQUE — a single challenge
-            // deployed to N lanes would collide on the base VM name (e.g. "ws01").
-            // Suffix with the Proxmox VMID (cluster-unique) to guarantee uniqueness
-            // while keeping the name human-readable.
-            const studentSlug = student.email.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
-            try {
-              const vmInstanceRows = [
-                ...deployedVMs.map(v => ({
-                  name: `${v.name}-${studentSlug}-${v.vm_id}`.substring(0, 80),
-                  displayName: v.name,
-                  vmid: v.vm_id,
-                  node: v.node,
-                  providerType: v.type === 'lxc' ? 'lxc' : 'qemu',
-                  guacConnId: null,
-                  templateName: v.name
-                })),
-                ...(attackBoxVmId ? [{
-                  name: `kali-${studentSlug}-${attackBoxVmId}`.substring(0, 80),
-                  displayName: `kali-${studentSlug}`,
-                  vmid: attackBoxVmId,
-                  node: bestNode,
-                  providerType: 'qemu',
-                  guacConnId: kaliGuacConnId,
-                  templateName: 'Kali (Attack Box)'
-                }] : [])
-              ];
-
-              for (const v of vmInstanceRows) {
-                const resourceRes = await cybercoreQuery(`
-                  INSERT INTO cybercore_resource (type, module_key, name, status, metadata)
-                  VALUES ('vm', $1, $2, 'allocated', $3::jsonb)
-                  RETURNING resource_id
-                `, [
-                  module,
-                  v.name,
-                  JSON.stringify({
-                    vm_category:    'lane_vm',
-                    provider_type:  v.providerType,
-                    template_name:  v.templateName,
-                    lane_id:        laneId,
-                    group_id:       groupId,
-                    group_name,
-                    challenge_key,
-                    vxlan_id:       vxlanId
-                  })
-                ]);
-                const resourceId = resourceRes.rows[0].resource_id;
-
-                await cybercoreQuery(`
-                  INSERT INTO cybercore_vm_instance
-                    (resource_id, provider, provider_node, provider_vmid, power_state, metadata)
-                  VALUES ($1, 'proxmox', $2, $3, 'running', $4::jsonb)
-                `, [
-                  resourceId,
-                  v.node,
-                  String(v.vmid),
-                  JSON.stringify({
-                    provider_type: v.providerType,
-                    ...(v.guacConnId ? { guac_connection_id: v.guacConnId, guac_user: student.email } : {})
-                  })
-                ]);
-
-                await cybercoreQuery(`
-                  INSERT INTO cybercore_allocation (resource_id, user_id, purpose)
-                  VALUES ($1, $2, 'lane_vm')
-                `, [resourceId, student.id]);
-              }
-            } catch (regErr) {
-              // Non-fatal: lane still goes active, but VMs won't surface in My Workspaces.
-              console.warn(`[Group ${group_name}] Lane VM registration failed for ${student.email}: ${regErr.message}`);
-            }
-
-            const activeConfig = {
-              challenge_vm_id: deployedVMs[0]?.vm_id,
-              gateway_vm_id: gatewayVmId,
-              attack_box_vm_id: attackBoxVmId || null,
-              node: bestNode,
-              challenge_key,
-              module,
-              group_id: groupId,
-              group_name,
-              vms: deployedVMs,
-              subnet_scheme: subnetScheme,
-              lane_subnet_base: laneSubnetBase,
-              vnet: vnetExtName,
-              ...(isV3 ? {
-                vnet_internal: vnetIntName,
-                lane_subnet_internal: goadSubnetBase
-              } : {})
-            };
-            await cybercoreQuery(
-              `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-              [laneId, JSON.stringify(activeConfig)]
-            );
-          }
-
-          progress.lanes[laneId].status = 'active';
-          console.log(`[Group ${group_name}] Lane ${laneId} deployed (VXLAN ${vxlanId}, node ${bestNode}, student ${student.email}${attack_boxes ? ' + Kali' : ''})`);
-          return { laneId, student: student.email, vxlanId };
-        }, {
-          concurrency,
-          onProgress: (completed, total, job, result) => {
-            progress.completed = completed;
-            if (result.success) progress.succeeded++;
-            else progress.failed++;
-            const laneProgress = progress.lanes[job.laneId];
-            if (laneProgress && laneProgress._startedAt) {
-              progress._laneTimes.push(Date.now() - laneProgress._startedAt);
-            }
-            updateProgressTiming();
-            progress.phase_detail = `Deploying lanes: ${completed}/${total} complete`;
-            const etaStr = progress.eta_s != null ? ` — ETA ${Math.ceil(progress.eta_s / 60)}min` : '';
-            console.log(`[Group ${group_name}] Progress: ${completed}/${total} (${progress.succeeded} ok, ${progress.failed} failed)${etaStr}`);
-            if (!result.success) {
-              const errMsg = result.error?.message || result.error || 'unknown error';
-              console.error(`[Group ${group_name}] Lane ${job.laneId} (${job.student?.email || '?'}) FAILED: ${errMsg}`);
-              if (result.error?.stack) {
-                console.error(`[Group ${group_name}] Lane ${job.laneId} stack:\n${result.error.stack}`);
-              }
-            }
-          }
-        });
-
-        for (const err of errors) {
-          const job = laneJobs[err.index];
-          if (job) {
-            console.error(`[Group ${group_name}] Lane ${job.laneId} error (post-batch): ${err.error?.message || err.error}`);
-            await cybercoreQuery(
-              `UPDATE cybercore_lane SET status = 'error', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-              [job.laneId, JSON.stringify({ error: err.error?.message || String(err.error) })]
-            ).catch(() => {});
-          }
-        }
-
-        progress.phase = 'complete';
-        progress.phase_detail = `${progress.succeeded} succeeded, ${progress.failed} failed`;
-        progress.finished_at = new Date().toISOString();
-        progress.eta_s = 0;
-        progress.eta_at = null;
-        updateProgressTiming();
-        console.log(`[Group ${group_name}] All ${laneJobs.length} lane deployments complete (${progress.succeeded} succeeded, ${progress.failed} failed) in ${progress.elapsed_s}s.`);
-
         try {
+          const result = await deployChallengeLanes({
+            users: created.students.map(s => ({
+              id: s.id,
+              email: s.email,
+              // The account password minted above, so a student's portal login
+              // and their Kali login stay the same secret.
+              password: created.credentials.find(c => c.email === s.email)?.password || null,
+            })),
+            challenge: challengeRow,
+            moduleKey: module,
+            attackBoxes: !!attack_boxes,
+            vulnScripts: (groupVulnScripts && groupVulnScripts.length) ? groupVulnScripts : null,
+            laneConfig: { group_id: groupId, group_name },
+            guacParent: created.guac_group?.identifier || 'ROOT',
+            instructorEmails: created.instructors.map(i => i.email),
+            description: `Group: ${group_name}`,
+            progressId: groupId,
+            progressLabel: group_name,
+          });
+
+          const guacConnections = result.provisioned
+            .filter(p => p.guac_connection_id)
+            .map(p => ({
+              id: p.guac_connection_id,
+              name: `${group_name} - ${p.attack_box_user} - Kali`,
+              student_email: p.user_email,
+            }));
+
+          // Persist what the deploy actually produced. Written as one merge so a
+          // concurrent config update can't drop either key.
           await query(
             `UPDATE deployed_groups
-             SET config = jsonb_set(config::jsonb, '{guac_connections}', $1::jsonb, true)
-             WHERE id = $2`,
-            [JSON.stringify(created.guac_connections || []), groupId]
+                SET config = config::jsonb || jsonb_build_object(
+                      'guac_connections', $1::jsonb,
+                      'lanes',            $2::jsonb)
+              WHERE id = $3`,
+            [JSON.stringify(guacConnections), JSON.stringify(result.lanes || []), groupId]
           );
-          console.log(`[Group ${group_name}] Persisted ${created.guac_connections.length} Guac connection IDs to group config`);
-        } catch (e) {
-          console.warn(`[Group ${group_name}] Failed to persist guac_connections: ${e.message}`);
-        }
 
-        setTimeout(() => { delete global._batchDeployProgress[batchId]; }, 3600000);
+          console.log(
+            `[Group ${group_name}] Deploy finished: ${result.provisioned.length} lane(s) active, ` +
+            `${result.failed.length} failed`
+          );
+        } catch (err) {
+          console.error(`[Group ${group_name}] Lane deployment failed: ${err.message}`);
+        }
       })();
     }
 
+    // One lane per student is queued. The lane rows themselves are created by the
+    // detached deploy above, so the ids arrive via the progress endpoint (and are
+    // persisted onto deployed_groups.config when it finishes) rather than here.
+    const lanesQueued = shouldDeployLanes ? created.students.length : 0;
+
     logActivity(req, 'deploy_group', 'group', groupId, {
       group_name, instructors: created.instructors.length, students: created.students.length,
-      lanes: created.lanes.length, deploy_lanes: shouldDeployLanes
+      lanes: lanesQueued, deploy_lanes: shouldDeployLanes
     });
 
     res.json({
@@ -1069,7 +287,7 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       students_created: created.students.length,
       guac_users_created: created.guac_users.length,
       guac_group: created.guac_group ? 'created' : 'failed',
-      lanes_deploying: created.lanes.length,
+      lanes_deploying: lanesQueued,
       lanes: created.lanes,
       credentials: created.credentials
     });
@@ -1079,17 +297,11 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
 });
 
 router.get('/deploy-group/:groupId/progress', authenticateToken, adminOnly, (req, res) => {
-  const progress = (global._batchDeployProgress || {})[req.params.groupId];
+  const progress = readProgress(req.params.groupId);
   if (!progress) {
     return res.status(404).json({ error: 'No active batch deployment found for this group' });
   }
-  const { _laneTimes, ...clean } = progress;
-  const cleanLanes = {};
-  for (const [id, lane] of Object.entries(clean.lanes || {})) {
-    const { _startedAt, ...laneClean } = lane;
-    cleanLanes[id] = laneClean;
-  }
-  res.json({ ...clean, lanes: cleanLanes });
+  res.json(progress);
 });
 
 

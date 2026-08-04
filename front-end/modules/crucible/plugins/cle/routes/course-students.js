@@ -10,6 +10,7 @@ const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { canManageCourse } = require('../utils/course-access');
+const guacCreds = require('../../../../../src/utils/guac-credentials');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -75,6 +76,59 @@ router.get('/', instructorOnly, async (req, res) => {
     res.json({ students });
   } catch (error) {
     console.error('[CLE] Get students error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /credentials — Guacamole console logins for the whole roster, so an
+ * instructor can look one up whenever a student loses theirs instead of having
+ * their machines reprovisioned.
+ *
+ * Read-only: it never issues an account. A student with no password yet reports
+ * `available: false`, and the per-student endpoint
+ * (GET .../students/:id/guac/credentials?issue=true) mints one on demand.
+ *
+ * Instructor/admin gated, and the disclosure is logged — a Guacamole password
+ * reaches every console that student owns.
+ */
+router.get('/credentials', instructorOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+
+    if (!(await canManageCourse(courseId, req.user))) {
+      return res.status(403).json({ error: 'Course not found or access denied' });
+    }
+
+    const enrolled = await query(
+      `SELECT user_id FROM cle_course_enrollment
+        WHERE course_id = $1 AND status IN ('active', 'completed')`,
+      [courseId]
+    );
+    const userIds = enrolled.rows.map(r => r.user_id);
+    if (userIds.length === 0) return res.json({ credentials: [] });
+
+    const byUser = await guacCreds.getGuacCredentialsForUsers(userIds);
+
+    await query(
+      `INSERT INTO cle_activity_log (user_id, action_type, entity_type, entity_id, metadata)
+       VALUES ($1, 'guac_session', 'guac_credential', NULL, $2::jsonb)`,
+      [req.user.userId, JSON.stringify({ action: 'view_cohort_credentials', course_id: courseId, count: userIds.length })]
+    ).catch(err => console.warn(`[CLE] Could not log cohort credential access: ${err.message}`));
+
+    res.json({
+      credentials: userIds.map(id => ({
+        user_id: id,
+        ...(byUser[id] || { username: null, password: null, available: false }),
+      })),
+      // Told once, at the top level: without the key nothing can be decrypted,
+      // which is different from every student simply not having a password.
+      ...(process.env.GUAC_ENCRYPT_KEY ? {} : {
+        hint: 'GUAC_ENCRYPT_KEY is not configured on this server, so stored console passwords cannot be decrypted.',
+      }),
+    });
+  } catch (error) {
+    console.error('[CLE] Get cohort credentials error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

@@ -11,8 +11,97 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { getGuacToken, GUAC_URL } = require('../../../../../src/utils/guacamole');
 const { canManageCourse } = require('../utils/course-access');
+const guacCreds = require('../../../../../src/utils/guac-credentials');
 
 const instructorOnly = requireRole('instructor', 'admin');
+
+/**
+ * Confirm the caller manages the course AND the student is in it. Every route
+ * here has to check both — managing a course does not grant access to arbitrary
+ * user ids, and being enrolled somewhere does not make a student this
+ * instructor's to look at.
+ */
+async function assertStudentInCourse(courseId, studentId, user) {
+  if (!(await canManageCourse(courseId, user))) {
+    const err = new Error('Course not found or access denied');
+    err.status = 403;
+    throw err;
+  }
+  const enrollment = await query(
+    `SELECT user_id FROM cle_course_enrollment
+      WHERE user_id = $1 AND course_id = $2 AND status IN ('active', 'completed')`,
+    [studentId, courseId]
+  );
+  if (enrollment.rows.length === 0) {
+    const err = new Error('Student not found in course');
+    err.status = 403;
+    throw err;
+  }
+}
+
+/**
+ * Record a credential disclosure. cle_activity_log's action_type CHECK has no
+ * value for this, so it is filed under the closest permitted one ('guac_session')
+ * with the real action in metadata — a new enum value would need a migration and
+ * would break older rows written by a previous deploy.
+ */
+function logCredentialAccess({ actorId, studentId, courseId, action, detail }) {
+  return query(
+    `INSERT INTO cle_activity_log (user_id, action_type, entity_type, entity_id, metadata)
+     VALUES ($1, 'guac_session', 'guac_credential', $2, $3::jsonb)`,
+    [actorId, studentId, JSON.stringify({ action, course_id: courseId, ...detail })]
+  ).catch(err => console.warn(`[CLE] Could not log credential access: ${err.message}`));
+}
+
+/**
+ * GET /credentials — the student's Guacamole console login, so an instructor can
+ * give it back when the student loses it.
+ *
+ * Read-only by default (`create: false`): opening a roster must not silently
+ * issue Guacamole accounts. Pass ?issue=true to mint one when none exists.
+ */
+router.get('/credentials', instructorOnly, async (req, res) => {
+  try {
+    const { courseId, studentId } = req.params;
+    await assertStudentInCourse(courseId, studentId, req.user);
+
+    const issue = req.query.issue === 'true' || req.query.issue === '1';
+    const cred = await guacCreds.getGuacCredential(studentId, { create: issue });
+
+    logCredentialAccess({
+      actorId: req.user.userId, studentId, courseId,
+      action: issue ? 'issue_credential' : 'view_credential',
+      detail: { available: cred.available, source: cred.source },
+    });
+
+    res.json(cred);
+  } catch (error) {
+    console.error('[CLE] Get student Guac credentials error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /credentials/reset — rotate the student's console password when the old
+ * one has to be invalidated rather than recovered.
+ */
+router.post('/credentials/reset', instructorOnly, async (req, res) => {
+  try {
+    const { courseId, studentId } = req.params;
+    await assertStudentInCourse(courseId, studentId, req.user);
+
+    const cred = await guacCreds.resetGuacCredential(studentId);
+    logCredentialAccess({
+      actorId: req.user.userId, studentId, courseId,
+      action: 'reset_credential', detail: { username: cred.username },
+    });
+
+    res.json(cred);
+  } catch (error) {
+    console.error('[CLE] Reset student Guac credentials error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
 
 /**
  * GET /token — Get a read-only Guacamole token for monitoring student's RDP session

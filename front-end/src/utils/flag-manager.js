@@ -160,6 +160,29 @@ async function detectGuestOs(node, vmId, api = proxmoxAPI) {
 }
 
 /**
+ * Coerce a challenge spec's `vms[].os` into 'windows' | 'linux', or null when it
+ * says nothing useful and the guest should be probed instead.
+ *
+ * The raw value is NOT trustworthy as a discriminator. Admin → Create Lab writes
+ * `os: vm.os || 'Unknown'` (routes/lab-templates.js), and migration 024 only
+ * backfills specs where the key is ABSENT — so 'Unknown' survives. An admin who
+ * types a human OS name gets 'Windows Server 2019'. Both are truthy, so the old
+ * `spec.os || detectGuestOs()` short-circuited the probe, and the subsequent
+ * `os === 'windows'` test then failed, sending a /bin/sh flag planter at a
+ * Windows domain controller. Every flag on a GOAD lane failed that way.
+ *
+ * Anything unrecognized returns null so the caller falls back to the guest-agent
+ * probe, which is authoritative.
+ */
+function normalizeOs(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  if (!s) return null;
+  if (/win/.test(s)) return 'windows';
+  if (/linux|ubuntu|debian|centos|rocky|rhel|fedora|alpine|kali|suse|arch|bsd|unix/.test(s)) return 'linux';
+  return null;  // 'Unknown', or something we shouldn't guess at — probe instead.
+}
+
+/**
  * Paths come from admin-authored challenge spec JSON, but they end up inside a
  * single-quoted shell/PowerShell literal, so validate rather than trust.
  * Rejects quotes, backticks, $, ; and newlines.
@@ -359,8 +382,11 @@ async function plantFlagsForLane({ laneId, userId, vms, specVms = [], api = prox
       const agentUp = await waitForGuestAgent(vm.node, vm.vm_id, 300000);
       if (!agentUp) throw new Error('guest agent never came up (5m)');
 
-      const os = spec.os || await detectGuestOs(vm.node, vm.vm_id, api);
-      if (!os) throw new Error('could not determine guest OS (declare vms[].os in the challenge spec)');
+      // normalizeOs, not spec.os directly: a spec saying 'Unknown' or
+      // 'Windows Server 2019' must fall through to the probe / resolve to
+      // windows rather than be treated as Linux. See normalizeOs.
+      const os = normalizeOs(spec.os) || await detectGuestOs(vm.node, vm.vm_id, api);
+      if (!os) throw new Error('could not determine guest OS (declare vms[].os as "windows" or "linux" in the challenge spec)');
 
       // The exec channel 596s for a while after ping starts answering; probe it
       // for real before sending the first command. Only meaningful on Linux —
@@ -767,6 +793,7 @@ module.exports = {
   plantFlagsForLane,
   rotateLaneFlags,
   detectGuestOs,
+  normalizeOs,
   isSafePath,
   // submission
   verifySubmission,

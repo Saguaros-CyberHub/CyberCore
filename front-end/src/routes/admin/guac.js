@@ -9,10 +9,55 @@
 const express = require('express');
 const router = express.Router();
 const { authenticateToken, requireRole } = require('../../middleware/auth');
-const { guacAPI, getGuacToken, ensureGuacAccount, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
+const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
+const guacCreds = require('../../utils/guac-credentials');
+const { logActivity } = require('../../middleware/activity-logger');
 
 const adminOnly = requireRole('admin');
+
+
+// ============================================================================
+// CREDENTIAL RECOVERY
+// Staff-only lookup of the Guacamole password CyberCore holds for a user, so a
+// student who loses their console login can be given it back rather than having
+// every one of their machines reprovisioned.
+//
+// Both routes log the disclosure: a Guacamole password reaches every console
+// that user owns, so "who looked at this, and when" has to be answerable.
+// ============================================================================
+
+/**
+ * GET /guac/users/:userId/credentials — the user's Guacamole login.
+ *
+ * ?peek=true reads without side effects; the default issues (and stores) a
+ * password when none exists yet, so the answer is always usable.
+ */
+router.get('/guac/users/:userId/credentials', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const peek = req.query.peek === 'true' || req.query.peek === '1';
+    const cred = await guacCreds.getGuacCredential(req.params.userId, { create: !peek });
+    logActivity(req, 'view_guac_credential', 'user', req.params.userId, {
+      available: cred.available, source: cred.source, peek,
+    });
+    res.json(cred);
+  } catch (err) {
+    console.error('[admin/guac] credential lookup error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+/** POST /guac/users/:userId/credentials/reset — rotate the console password. */
+router.post('/guac/users/:userId/credentials/reset', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const cred = await guacCreds.resetGuacCredential(req.params.userId);
+    logActivity(req, 'reset_guac_credential', 'user', req.params.userId, { username: cred.username });
+    res.json(cred);
+  } catch (err) {
+    console.error('[admin/guac] credential reset error:', err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
 
 
 // ============================================================================
@@ -26,52 +71,23 @@ const adminOnly = requireRole('admin');
 router.post('/guac/sync-users', authenticateToken, adminOnly, async (req, res) => {
   try {
     const users = await cybercoreQuery(`
-      SELECT user_id, email,
-        CASE WHEN guac_password IS NOT NULL
-             THEN pgp_sym_decrypt(guac_password, $1)::text
-        END AS guac_password
+      SELECT user_id, email
       FROM cybercore_user
       WHERE status = 'active' AND active = true
       ORDER BY created_at
-    `, [process.env.GUAC_ENCRYPT_KEY || '']);
+    `);
 
     const results = [];
 
+    // getGuacCredential does the whole ladder — stored → legacy VM metadata →
+    // mint — and persists whatever it lands on, so this loop is just a report of
+    // which rung each user came from.
     for (const user of users.rows) {
-      if (user.guac_password) {
-        results.push({ email: user.email, status: 'already_synced' });
-        continue;
-      }
-
-      // Check if a password was stored in any of this user's VM instances (legacy path)
-      const legacyPw = await cybercoreQuery(`
-        SELECT vi.metadata->>'guac_password' AS pw
-        FROM cybercore_vm_instance vi
-        JOIN cybercore_resource r ON r.resource_id = vi.resource_id
-        JOIN cybercore_allocation a
-          ON  a.resource_id = r.resource_id AND a.user_id = $1
-        WHERE vi.metadata->>'guac_password' IS NOT NULL
-          AND vi.destroyed_at IS NULL
-        LIMIT 1
-      `, [user.user_id]);
-
-      let pw = legacyPw.rows[0]?.pw || null;
-      let status;
-
-      if (pw) {
-        status = 'migrated_from_vm';
-      } else {
-        pw = await ensureGuacAccount(user.email).catch(() => null);
-        status = pw ? 'created' : 'failed';
-      }
-
-      if (pw && process.env.GUAC_ENCRYPT_KEY) {
-        await cybercoreQuery(
-          'UPDATE cybercore_user SET guac_password = pgp_sym_encrypt($1, $2) WHERE user_id = $3',
-          [pw, process.env.GUAC_ENCRYPT_KEY, user.user_id]
-        );
-      }
-
+      const cred = await guacCreds.getGuacCredential(user.user_id).catch(() => null);
+      const status = !cred || !cred.available ? 'failed'
+                   : cred.source === 'stored'   ? 'already_synced'
+                   : cred.source === 'migrated' ? 'migrated_from_vm'
+                   : 'created';
       results.push({ email: user.email, status });
     }
 
