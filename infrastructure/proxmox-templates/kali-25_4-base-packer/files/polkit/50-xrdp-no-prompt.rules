@@ -1,0 +1,19 @@
+/* Stop xfce from demanding an admin password at every xrdp logon.
+ *
+ * color-manager, NetworkManager and packagekit all raise polkit prompts as the
+ * session starts. Over RDP those land as modal dialogs on a desktop the student
+ * has only just reached, asking for a password they do not have -- the session
+ * appears to hang. Granting these specific actions is the standard fix and does
+ * not widen anything else. */
+polkit.addRule(function(action, subject) {
+    if ((action.id == "org.freedesktop.color-manager.create-device" ||
+         action.id == "org.freedesktop.color-manager.create-profile" ||
+         action.id == "org.freedesktop.color-manager.delete-device" ||
+         action.id == "org.freedesktop.color-manager.delete-profile" ||
+         action.id == "org.freedesktop.color-manager.modify-device" ||
+         action.id == "org.freedesktop.color-manager.modify-profile" ||
+         action.id == "org.freedesktop.NetworkManager.network-control" ||
+         action.id == "org.freedesktop.packagekit.system-network-proxy-configure")) {
+        return polkit.Result.YES;
+    }
+});

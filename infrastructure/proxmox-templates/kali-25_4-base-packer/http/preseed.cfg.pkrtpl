@@ -1,0 +1,131 @@
+# =============================================================================
+# Kali 2025.4 preseed -- rendered by Packer from http/preseed.cfg.pkrtpl and
+# served over HTTP to the debian-installer running in the build VM.
+#
+# Edit THIS file, never a rendered copy. `$${...}` is a Packer template
+# interpolation, so a literal `$${` must not appear anywhere below. partman's
+# `$primary{ }` syntax is fine -- that is `$` followed by a name, not `$` `{`.
+#
+# Scope: this gets a MINIMAL Kali on disk with networking, SSH, the guest agent
+# and cloud-init. Desktop, xrdp and the tool metapackage are deliberately left
+# to the provisioner scripts, where a failure is visible in Packer's output
+# instead of being swallowed by a headless installer.
+# =============================================================================
+
+### Localization
+d-i debian-installer/locale string ${locale}
+d-i debian-installer/language string en
+d-i debian-installer/country string US
+d-i localechooser/supported-locales multiselect ${locale}
+d-i keyboard-configuration/xkb-keymap select ${keyboard_layout}
+d-i console-setup/ask_detect boolean false
+
+### Network
+# `auto` picks the first interface with a link, which is the single virtio NIC.
+d-i netcfg/choose_interface select auto
+d-i netcfg/dhcp_timeout string 60
+d-i netcfg/get_hostname string ${hostname}
+d-i netcfg/get_domain string
+d-i netcfg/hostname string ${hostname}
+d-i netcfg/wireless_wep string
+# Nothing in a virtio VM needs non-free firmware, and the prompt is modal.
+d-i hw-detect/load_firmware boolean false
+
+### Mirror
+d-i mirror/country string manual
+d-i mirror/http/hostname string ${mirror_host}
+d-i mirror/http/directory string ${mirror_directory}
+d-i mirror/http/proxy string ${apt_proxy}
+d-i mirror/suite string kali-rolling
+d-i mirror/codename string kali-rolling
+d-i apt-setup/use_mirror boolean true
+
+### Accounts
+# Root login stays disabled; the build user gets sudo. Matches how Kali has
+# shipped since 2020 and what the cloud-image lineage does.
+d-i passwd/root-login boolean false
+d-i passwd/make-user boolean true
+d-i passwd/user-fullname string ${username}
+d-i passwd/username string ${username}
+d-i passwd/user-password password ${password}
+d-i passwd/user-password-again password ${password}
+d-i user-setup/allow-password-weak boolean true
+d-i user-setup/encrypt-home boolean false
+
+### Clock
+d-i clock-setup/utc boolean true
+d-i time/zone string ${timezone}
+d-i clock-setup/ntp boolean true
+
+### Partitioning
+# One ext4 root filling the disk, no LVM and no swap partition.
+#
+# The reason is cloud-init's growpart: it can only extend the LAST partition on
+# the disk. The stock `atomic` recipe lays down root then swap, so root is
+# pinned at the template's 64G and a clone given a bigger disk silently gets no
+# extra space. Swap comes back as zram in scripts/configure-system.sh, which
+# costs no disk and sizes itself to whatever RAM the clone is given.
+d-i partman/early_command string debconf-set partman-auto/disk "$(list-devices disk | head -n1)"
+d-i partman-auto/method string regular
+d-i partman-auto/expert_recipe string                            \
+      cybercore-root ::                                          \
+              8192 8192 -1 ext4                                  \
+                      $primary{ } $bootable{ }                   \
+                      method{ format } format{ }                 \
+                      use_filesystem{ } filesystem{ ext4 }       \
+                      mountpoint{ / }                            \
+              .
+d-i partman-auto/choose_recipe select cybercore-root
+
+# SeaBIOS boots MBR, so force an msdos label rather than letting partman decide.
+d-i partman-partitioning/default_label string msdos
+d-i partman-partitioning/choose_label select msdos
+d-i partman-partitioning/confirm_write_new_label boolean true
+d-i partman/choose_partition select finish
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+d-i partman-md/confirm boolean true
+d-i partman-lvm/confirm boolean true
+d-i partman-lvm/confirm_nooverwrite boolean true
+# Suppress the modal "you have not selected any swap" warning.
+d-i partman-basicfilesystems/no_swap boolean false
+
+### Base system
+d-i base-installer/install-recommends boolean true
+d-i base-installer/kernel/override-image string linux-image-amd64
+
+### Apt setup
+d-i apt-setup/non-free boolean true
+d-i apt-setup/non-free-firmware boolean true
+d-i apt-setup/contrib boolean true
+d-i apt-setup/services-select multiselect
+d-i debian-installer/allow_unauthenticated boolean false
+
+### Package selection
+# `standard` only. The desktop, xrdp and the kali-linux-* metapackage are
+# installed by provisioners instead -- see the header.
+tasksel tasksel/first multiselect standard
+d-i pkgsel/include string qemu-guest-agent cloud-init cloud-guest-utils openssh-server sudo curl wget vim net-tools bind9-dnsutils ca-certificates gdisk parted resolvconf
+d-i pkgsel/upgrade select none
+d-i pkgsel/update-policy select none
+popularity-contest popularity-contest/participate boolean false
+
+### Bootloader
+d-i grub-installer/only_debian boolean true
+d-i grub-installer/with_other_os boolean true
+# `default` means "the disk holding /", which avoids hardcoding /dev/sda.
+d-i grub-installer/bootdev string default
+
+### Finish
+d-i finish-install/reboot_in_progress note
+d-i cdrom-detect/eject boolean true
+
+### Late commands
+# NOPASSWD sudo is what lets Packer's shell provisioners run as root over a
+# plain SSH session. cleanup.sh removes this file before the template is
+# sealed, so it does not ship to clones.
+d-i preseed/late_command string \
+    in-target sh -c 'echo "${username} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/99-packer-build'; \
+    in-target chmod 0440 /etc/sudoers.d/99-packer-build; \
+    in-target systemctl enable ssh; \
+    in-target systemctl enable qemu-guest-agent

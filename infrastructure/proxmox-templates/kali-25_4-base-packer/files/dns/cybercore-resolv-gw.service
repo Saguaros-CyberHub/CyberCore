@@ -1,0 +1,12 @@
+[Unit]
+Description=Point resolv.conf at the lane gateway (split-horizon DNS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cybercore-resolv-gw.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
