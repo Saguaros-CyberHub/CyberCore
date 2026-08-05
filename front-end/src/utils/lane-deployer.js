@@ -494,6 +494,21 @@ async function applyResources({ node, vmid, providerType, resources, laneName })
 function resolveWorkstationCredentials(template, user) {
   const meta = template.metadata || {};
   if (meta.default_rdp_user) {
+    // Loud on purpose. This branch disables cloud-init injection entirely, so
+    // every lane from this template shows the SAME static credential and the
+    // guest keeps whatever the bake left on the account. That is correct only
+    // for an image that genuinely ships a stable, intended-for-students login.
+    // It was silently wrong for the Windows 11 base template, which had the
+    // Packer WinRM build credentials entered here — see migration
+    // 025_cloud_init_user_for_pinned_templates.sql. An image whose cloud-init
+    // agent is pinned to one account wants cloud_init_user instead, so the
+    // account name stays fixed and only the password varies per lane.
+    console.warn(
+      `${LOG} Template '${template.template_key || template.os_name || template.id}' pins ` +
+      `default_rdp_user='${meta.default_rdp_user}': cloud-init credential injection is SKIPPED ` +
+      `and every lane will show the same static password. If this image's cloudbase-init is ` +
+      `pinned to that account, set metadata.cloud_init_user instead.`
+    );
     return { username: meta.default_rdp_user, password: meta.default_rdp_pass || null, source: 'template' };
   }
   // Some images pin their cloud-init agent to a single account at BAKE time —
