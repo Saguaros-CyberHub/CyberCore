@@ -48,10 +48,14 @@ KALI_OCTET_DEFAULT=${KALI_OCTET:-50}
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FIXED_HOOK="$HERE/v2_gateway/files/local.d/00-cybercore-firstboot.start"
-if [ "$SKIP_HOOK" != "1" ] && [ ! -f "$FIXED_HOOK" ]; then
-  echo "ERROR: fixed firstboot hook not found at $FIXED_HOOK" >&2
-  echo "       Run from a checkout, or pass SKIP_HOOK=1 to patch rules only." >&2
-  exit 1
+FIXED_FIREWALL="$HERE/v2_gateway/files/local.d/firewall.start"
+if [ "$SKIP_HOOK" != "1" ]; then
+  for f in "$FIXED_HOOK" "$FIXED_FIREWALL"; do
+    [ -f "$f" ] && continue
+    echo "ERROR: replacement hook not found at $f" >&2
+    echo "       Run from a checkout, or pass SKIP_HOOK=1 to patch rules only." >&2
+    exit 1
+  done
 fi
 
 if [ "$#" -eq 0 ]; then
@@ -201,6 +205,29 @@ for CTID in $TARGETS; do
         echo "        a reboot, or apply the same insert fix to bake-lane-gateway-v3.sh."
       elif pct push "$CTID" "$FIXED_HOOK" /etc/local.d/00-cybercore-firstboot.start --perms 0755 2>/dev/null; then
         echo "  Hook refreshed: /etc/local.d/00-cybercore-firstboot.start (survives reboot)."
+
+        # The other half of surviving a reboot. The v1 firewall.start runs after
+        # firstboot in glob order and does `iptables -t nat -F PREROUTING`, then
+        # backgrounds a scan that DNATs 3389 to whichever lease answers first.
+        # Leave it in place and this gateway loses its console DNAT again on the
+        # next boot, no matter how correct the rules are right now.
+        #
+        # Only replace a file that still has the harmful lines — a gateway
+        # already cloned from a fixed template has the v2 copy, and re-pushing
+        # over it would be pointless churn.
+        if pct exec "$CTID" -- /bin/sh -c \
+             "grep -qE '^[^#]*iptables .*-t nat .*-F|^[^#]*nc -zw2' /etc/local.d/firewall.start 2>/dev/null"; then
+          pct exec "$CTID" -- /bin/sh -c \
+            "cp /etc/local.d/firewall.start /etc/local.d/firewall.start.v1.bak" 2>/dev/null || true
+          if pct push "$CTID" "$FIXED_FIREWALL" /etc/local.d/firewall.start --perms 0755 2>/dev/null; then
+            echo "  firewall.start replaced (v1 preserved at firewall.start.v1.bak)."
+            echo "    → removed: nat PREROUTING flush + background DNAT auto-discovery."
+          else
+            echo "  WARN: could not replace firewall.start — it will flush nat on next boot."
+          fi
+        else
+          echo "  firewall.start already clean (no nat flush, no DNAT scan)."
+        fi
       else
         echo "  WARN: could not push the fixed hook — patch lasts until this CT reboots."
       fi

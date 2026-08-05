@@ -681,14 +681,45 @@ function buildGuacParameters({ protocol, hostname, port, creds, template }) {
 async function createGuacConnection({ connName, user, hostname, port, protocol, creds, template, parentIdentifier }) {
   if (process.env.GUAC_ENABLED !== 'true') return null;
   try {
-    const conn = await guacAPI('POST', '/connections', {
+    const connBody = {
       name: connName,
       protocol,
       parentIdentifier: parentIdentifier || 'ROOT',
       parameters: buildGuacParameters({ protocol, hostname, port, creds, template }),
       attributes: { 'max-connections': '5', 'max-connections-per-user': '2' },
-    });
-    const connId = conn?.identifier || null;
+    };
+
+    // Refresh an existing connection rather than blindly POSTing a new one.
+    // Guacamole's schema carries UNIQUE (connection_name, parent_id), so a
+    // re-provision that reuses the connection name — `<lane>-<vmid>`, which is
+    // stable whenever the VMID is reused — makes the POST fail. The catch below
+    // would swallow that as a warning and return null, leaving the OLD
+    // connection in place with the OLD password while the lane config and the
+    // guest both moved on to the new one. That presents as "the credential in
+    // Guacamole doesn't match the one on the VM management page", with no error
+    // anywhere the operator would look.
+    //
+    // Same list → find-by-name → PUT idiom the CIAB path uses; see
+    // modules/crucible/plugins/ciab/utils/lane-deploy.js. GET /connections
+    // returns an object keyed by identifier, and names are matched
+    // case-sensitively.
+    let connId = null;
+    const existing = await guacAPI('GET', '/connections').catch(() => null);
+    if (existing && typeof existing === 'object') {
+      for (const [id, c] of Object.entries(existing)) {
+        if (c && c.name === connName) { connId = id; break; }
+      }
+    }
+
+    if (connId) {
+      // PUT replaces the full body, so the refreshed hostname/port and the
+      // current password both overwrite whatever the previous deploy left.
+      await guacAPI('PUT', `/connections/${encodeURIComponent(connId)}`, connBody);
+      console.log(`${LOG} Guac connection refreshed: ${connName} → ${hostname}:${port} (id=${connId})`);
+    } else {
+      const conn = await guacAPI('POST', '/connections', connBody);
+      connId = conn?.identifier || null;
+    }
     if (connId && user.email) {
       await ensureGuacUser(user.id, user.email);
       await guacAPI('PATCH', `/users/${encodeURIComponent(user.email)}/permissions`, [

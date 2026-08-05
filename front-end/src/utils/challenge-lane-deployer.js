@@ -657,7 +657,7 @@ async function createAttackBoxConsole({ connName, hostname, creds, user, guacPar
   await guacCreds.ensureGuacUser(user.id, user.email).catch((e) =>
     console.warn(`${logTag} Could not ensure a Guacamole account for ${user.email}: ${e.message}`));
 
-  const conn = await guacAPI('POST', '/connections', {
+  const connBody = {
     name: connName,
     protocol: 'rdp',
     parentIdentifier: guacParent || 'ROOT',
@@ -683,9 +683,32 @@ async function createAttackBoxConsole({ connName, hostname, creds, user, guacPar
       'max-connections': '2',
       'max-connections-per-user': '1',
     },
-  });
+  };
 
-  const connId = conn?.identifier || null;
+  // Refresh an existing connection instead of blindly POSTing. Guacamole's
+  // schema carries UNIQUE (connection_name, parent_id), so re-provisioning a
+  // lane whose connection name is unchanged makes the POST fail — leaving the
+  // OLD connection live with the OLD password while the lane record and the
+  // guest both move on. It surfaces only as a credential that silently no
+  // longer works. Same idiom as lane-deployer.createGuacConnection and the
+  // CIAB deploy path; GET /connections returns an object keyed by identifier.
+  let connId = null;
+  const existing = await guacAPI('GET', '/connections').catch(() => null);
+  if (existing && typeof existing === 'object') {
+    for (const [id, c] of Object.entries(existing)) {
+      if (c && c.name === connName) { connId = id; break; }
+    }
+  }
+
+  if (connId) {
+    // PUT replaces the whole body, so a refreshed hostname and password both
+    // overwrite what the previous deploy left behind.
+    await guacAPI('PUT', `/connections/${encodeURIComponent(connId)}`, connBody);
+    console.log(`${logTag} Guac connection refreshed: ${connName} (id=${connId})`);
+  } else {
+    const conn = await guacAPI('POST', '/connections', connBody);
+    connId = conn?.identifier || null;
+  }
   if (!connId) return null;
 
   const grantees = [user.email, ...(instructorEmails || [])].filter(Boolean);

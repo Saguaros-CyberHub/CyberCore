@@ -576,8 +576,9 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
             if (vmIp) {
               const rdpUser = tpl.metadata?.default_rdp_user || null;
               const rdpPass = tpl.metadata?.default_rdp_pass || null;
-              const conn = await guacAPI('POST', '/connections', {
-                name: `${vmName}-${newVmid}`,
+              const connName = `${vmName}-${newVmid}`;
+              const connBody = {
+                name: connName,
                 protocol: 'rdp',
                 parentIdentifier: 'ROOT',
                 parameters: {
@@ -606,8 +607,27 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
                   'resize-method': 'display-update',
                 },
                 attributes: { 'max-connections': '5', 'max-connections-per-user': '2' },
-              });
-              const connId = conn?.identifier;
+              };
+
+              // Refresh an existing connection rather than blindly POSTing.
+              // Guacamole's schema carries UNIQUE (connection_name, parent_id),
+              // so redeploying onto a reused VMID makes the POST fail and leaves
+              // the OLD connection live with stale parameters — a credential
+              // that quietly stops matching the guest. Same idiom as
+              // utils/lane-deployer.createGuacConnection.
+              let connId = null;
+              const existingConns = await guacAPI('GET', '/connections').catch(() => null);
+              if (existingConns && typeof existingConns === 'object') {
+                for (const [id, c] of Object.entries(existingConns)) {
+                  if (c && c.name === connName) { connId = id; break; }
+                }
+              }
+              if (connId) {
+                await guacAPI('PUT', `/connections/${encodeURIComponent(connId)}`, connBody);
+              } else {
+                const conn = await guacAPI('POST', '/connections', connBody);
+                connId = conn?.identifier || null;
+              }
               if (connId) {
                 // Resolve Guacamole user credentials.
                 // Priority: user-level guac_password (set at registration or prior sync)
