@@ -120,15 +120,34 @@ for CTID in $TARGETS; do
     "iptables -L FORWARD --line-numbers -n 2>/dev/null | grep CYBERCORE-KALI-RDP | head -1 | awk '{print \$1}'" 2>/dev/null || true)"
   DROP="$(pct exec "$CTID" -- /bin/sh -c \
     "iptables -L FORWARD --line-numbers -n 2>/dev/null | grep -E '^[0-9]+ +DROP' | head -1 | awk '{print \$1}'" 2>/dev/null || true)"
+  # A live console needs BOTH halves: the nat DNAT that rewrites wan0:3389 to
+  # the lane host, and a FORWARD ACCEPT above the perimeter DROPs that lets the
+  # rewritten packet cross. Checking only the FORWARD half misses the case that
+  # actually bit us in the field — FORWARD correctly placed, nat table empty,
+  # so the connection is addressed to the gateway itself and dies in INPUT.
+  DNAT_OK=0
+  pct exec "$CTID" -- /bin/sh -c \
+    "iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination ${KALI_IP}:3389" 2>/dev/null \
+    && DNAT_OK=1
+
+  FWD_OK=0
   if [ -n "$POS" ] && [ -n "$DROP" ] && [ "$POS" -lt "$DROP" ]; then
-    echo "  Already correct: CYBERCORE-KALI-RDP at FORWARD pos $POS, first DROP at $DROP."
+    FWD_OK=1
+  fi
+
+  if [ "$DNAT_OK" = "1" ] && [ "$FWD_OK" = "1" ]; then
+    echo "  Already correct: DNAT present, FORWARD pos $POS above first DROP at $DROP."
     SKIPPED=$((SKIPPED + 1))
     continue
   fi
-  if [ -n "$POS" ]; then
-    echo "  BROKEN: CYBERCORE-KALI-RDP at FORWARD pos $POS, at/below first DROP at ${DROP:-none} — rule is dead."
-  else
-    echo "  BROKEN: no CYBERCORE-KALI-RDP rule in FORWARD at all."
+
+  [ "$DNAT_OK" = "1" ] || echo "  BROKEN: no CYBERCORE-KALI-RDP DNAT in nat PREROUTING for ${KALI_IP}:3389."
+  if [ "$FWD_OK" != "1" ]; then
+    if [ -n "$POS" ]; then
+      echo "  BROKEN: CYBERCORE-KALI-RDP at FORWARD pos $POS, at/below first DROP at ${DROP:-none} — rule is dead."
+    else
+      echo "  BROKEN: no CYBERCORE-KALI-RDP rule in FORWARD at all."
+    fi
   fi
 
   if [ "$DRY_RUN" = "1" ]; then
@@ -155,11 +174,22 @@ for CTID in $TARGETS; do
       "iptables -L FORWARD --line-numbers -n 2>/dev/null | grep CYBERCORE-KALI-RDP | head -1 | awk '{print \$1}'" 2>/dev/null || true)"
     NEWDROP="$(pct exec "$CTID" -- /bin/sh -c \
       "iptables -L FORWARD --line-numbers -n 2>/dev/null | grep -E '^[0-9]+ +DROP' | head -1 | awk '{print \$1}'" 2>/dev/null || true)"
-    if [ -n "$NEWPOS" ] && [ -n "$NEWDROP" ] && [ "$NEWPOS" -lt "$NEWDROP" ]; then
-      echo "  FIXED: CYBERCORE-KALI-RDP now at FORWARD pos $NEWPOS (first DROP at $NEWDROP), persisted."
+    NEWDNAT=0
+    pct exec "$CTID" -- /bin/sh -c \
+      "iptables -t nat -C PREROUTING -i wan0 -p tcp --dport 3389 -m comment --comment CYBERCORE-KALI-RDP -j DNAT --to-destination ${KALI_IP}:3389" 2>/dev/null \
+      && NEWDNAT=1
+
+    if [ "$NEWDNAT" = "1" ] && [ -n "$NEWPOS" ] && [ -n "$NEWDROP" ] && [ "$NEWPOS" -lt "$NEWDROP" ]; then
+      echo "  FIXED: DNAT wan0:3389 -> ${KALI_IP}:3389, FORWARD pos $NEWPOS (first DROP at $NEWDROP), persisted."
 
       # Make it survive a reboot. Without this the OLD hook strips the tag and
       # re-appends the dead rule on next boot, silently undoing the patch.
+      #
+      # CAVEAT: this does NOT protect against the nat table being flushed after
+      # firstboot runs. If a gateway comes back from a reboot with a healthy
+      # FORWARD chain but an empty nat PREROUTING, something later in the boot
+      # order is rebuilding nat — check /etc/local.d/firewall.start, which runs
+      # after 00-cybercore-firstboot.start lexically.
       #
       # v2 only: a v3 gateway (matched via ext0) runs a DIFFERENT firstboot hook
       # — two segments, kernel-mode Tailscale, ext0↔int0 isolation — and pushing
@@ -176,7 +206,7 @@ for CTID in $TARGETS; do
       fi
       PATCHED=$((PATCHED + 1))
     else
-      echo "  FAILED: rule still misplaced (pos=${NEWPOS:-none}, drop=${NEWDROP:-none})."
+      echo "  FAILED: dnat=${NEWDNAT} pos=${NEWPOS:-none} drop=${NEWDROP:-none}."
       FAILED=$((FAILED + 1))
     fi
   else

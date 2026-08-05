@@ -58,6 +58,7 @@ CT_WORK=/tmp/cybercore-bake
 for f in \
   "$FILES/local.d/00-cybercore-firstboot.start" \
   "$FILES/local.d/50-gateway.start.stub" \
+  "$FILES/local.d/firewall.start" \
   "$FILES/cybercore-gateway.env.tpl" \
   "$FILES/dnsmasq.conf.placeholder" \
   "$FILES/conf.d/tailscale" \
@@ -173,13 +174,15 @@ for s in 10-rewrite-lan0-iface 20-neutralize-v1-hooks 30-sweep-dnsmasq-dropins \
   pct push "$TMP_VMID" "$SCRIPTS/$s.sh" "$CT_WORK/$s.sh" --perms 0755
 done
 pct push "$TMP_VMID" "$FILES/local.d/50-gateway.start.stub" "$CT_WORK/50-gateway.start.stub" --perms 0644
+pct push "$TMP_VMID" "$FILES/local.d/firewall.start" "$CT_WORK/firewall.start" --perms 0644
 pct push "$TMP_VMID" "$FILES/conf.d/tailscale" "$CT_WORK/conf.d-tailscale" --perms 0644
 
 echo "==> Rewriting lan0 stanza in /etc/network/interfaces to 'inet manual'..."
 pct exec "$TMP_VMID" -- /bin/sh "$CT_WORK/10-rewrite-lan0-iface.sh"
 
 echo "==> Neutralizing /etc/local.d/50-gateway.start (firstboot now handles its job)..."
-pct exec "$TMP_VMID" -- /bin/sh "$CT_WORK/20-neutralize-v1-hooks.sh" "$CT_WORK/50-gateway.start.stub"
+pct exec "$TMP_VMID" -- /bin/sh "$CT_WORK/20-neutralize-v1-hooks.sh" \
+  "$CT_WORK/50-gateway.start.stub" "$CT_WORK/firewall.start"
 
 echo "==> Sweeping /etc/dnsmasq.d/ for v1 drop-ins (50-gateway.conf etc.)..."
 pct exec "$TMP_VMID" -- /bin/sh "$CT_WORK/30-sweep-dnsmasq-dropins.sh"

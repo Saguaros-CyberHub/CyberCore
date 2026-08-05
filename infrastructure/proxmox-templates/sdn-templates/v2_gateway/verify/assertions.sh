@@ -72,4 +72,27 @@ pct exec "$VMID" -- /bin/sh -c \
   || fail "image-pull ACCEPT rule missing (lane→${IMG_DST}:80)"
 assert_above_first_drop CYBERCORE-IMAGE-PULL
 
+# No local.d hook may flush or rewrite nat behind firstboot's back. The v1
+# firewall.start did exactly that — `iptables -t nat -F PREROUTING` plus a
+# backgrounded "DNAT to whatever answers on 3389" scan — and because it sorts
+# after 00-cybercore-firstboot.start it won every boot, leaving a healthy
+# FORWARD chain over an empty nat table. Assert on the source, not the symptom:
+# the flush is immediate but the re-add is 60s+ later, so a rules check at
+# verify time can pass while the template is still broken.
+# Captured into a variable rather than piped into `while`: a pipeline runs its
+# right-hand side in a subshell, so fail() would set OK=0 somewhere we cannot
+# read it back and every finding here would be silently discarded.
+BAD_HOOKS="$(pct exec "$VMID" -- /bin/sh -c \
+  "grep -lE '^[^#]*iptables .*-t nat .*-F|^[^#]*nc -zw2' /etc/local.d/*.start 2>/dev/null" 2>/dev/null \
+  | grep -v '\.v1\.bak' || true)"
+for hook in $BAD_HOOKS; do
+  fail "$hook still flushes nat or auto-discovers a DNAT target — it will undo firstboot on every boot"
+done
+
+# Belt and braces: the nat DNAT must still be there after everything in local.d
+# has had its turn. This is the check that would have caught the field failure.
+pct exec "$VMID" -- /bin/sh -c \
+  "iptables -t nat -S PREROUTING | grep -q CYBERCORE-KALI-RDP" 2>/dev/null \
+  || fail "CYBERCORE-KALI-RDP DNAT is absent from nat PREROUTING after boot — something flushed it"
+
 exit $(( OK == 1 ? 0 : 1 ))

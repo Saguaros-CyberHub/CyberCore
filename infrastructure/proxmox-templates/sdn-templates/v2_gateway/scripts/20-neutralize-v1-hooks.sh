@@ -2,6 +2,7 @@
 # ============================================================================
 # 20-neutralize-v1-hooks.sh — runs INSIDE the CT being patched.
 #   argv[1] — path to the 50-gateway.start stub, already pushed into the CT.
+#   argv[2] — path to the v2 firewall.start replacement, already pushed in.
 # ----------------------------------------------------------------------------
 # Neutralize /etc/local.d/50-gateway.start.
 #
@@ -19,7 +20,8 @@
 # ============================================================================
 set -e
 
-STUB_SRC="${1:?usage: 20-neutralize-v1-hooks.sh <path-to-stub>}"
+STUB_SRC="${1:?usage: 20-neutralize-v1-hooks.sh <stub> <firewall.start>}"
+FIREWALL_SRC="${2:?usage: 20-neutralize-v1-hooks.sh <stub> <firewall.start>}"
 HOOK=/etc/local.d/50-gateway.start
 
 if [ -f "$HOOK" ]; then
@@ -32,6 +34,35 @@ if [ -f "$HOOK" ]; then
   echo "Replaced $HOOK with no-op stub."
 else
   echo "No $HOOK present (fine)."
+fi
+
+# /etc/local.d/firewall.start — the other v1 hook that still executes at boot,
+# and the one that actually broke RDP. Commenting out its single 192.18.0 line
+# (which the sweep below would do) is NOT enough: the damage is in two lines
+# that name no addresses at all —
+#
+#   iptables -t nat -F PREROUTING       flushes firstboot's console DNAT, and
+#                                       the deploy path's LANE-CONSOLE DNATs
+#                                       restored from rules-save earlier in boot
+#   ( sleep 60; ... nc -zw2 $ip 3389 ... -j DNAT ) &
+#                                       port-scans the lease table and points
+#                                       wan0:3389 at whichever host answers first
+#
+# Glob order puts this after 00-cybercore-firstboot.start, so it always won.
+# Replace the whole file with the v2 version, which keeps the two base ACCEPTs
+# (idempotently — the v1 file re-added them every boot, which is where the
+# duplicate INPUT/FORWARD entries came from) and drops the rest.
+FW=/etc/local.d/firewall.start
+if [ -f "$FW" ]; then
+  cp "$FW" "${FW}.v1.bak"
+  echo "--- ORIGINAL $FW (preserved at ${FW}.v1.bak) ---"
+  cat "${FW}.v1.bak"
+  echo "----------------------------------------------------"
+  cp "$FIREWALL_SRC" "$FW"
+  chmod +x "$FW"
+  echo "Replaced $FW with the v2 version (no nat flush, no DNAT auto-discovery)."
+else
+  echo "No $FW present (fine)."
 fi
 
 echo "Defensive sweep: commenting out remaining 192.18.0.x in /etc/local.d/ and /etc/init.d/..."
