@@ -37,6 +37,15 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Capture whether the caller pinned the scratch IDs BEFORE vars.env fills in
+# defaults. A pinned ID is honoured strictly (hard fail if taken); a default is
+# free to move out of the way, because nobody cares which throwaway ID we used.
+# shellcheck disable=SC2034  # read indirectly as ${slot}_PINNED in section 0
+TMP_VMID_PINNED="${TMP_VMID:+1}"
+# shellcheck disable=SC2034  # read indirectly as ${slot}_PINNED in section 0
+VERIFY_VMID_PINNED="${VERIFY_VMID:+1}"
+
 # shellcheck source=vars.env
 . "$HERE/vars.env"
 
@@ -81,11 +90,41 @@ if pct config "$NEW_VMID" >/dev/null 2>&1; then
   echo "==> FORCE=1: existing $NEW_VMID will be destroyed before restore."
 fi
 
-for vid in "$TMP_VMID" "$VERIFY_VMID"; do
-  if pct status "$vid" >/dev/null 2>&1; then
-    echo "ERROR: scratch CTID $vid in use. Override with TMP_VMID/VERIFY_VMID env vars or destroy it." >&2
+# Proxmox VMIDs are ONE namespace shared by LXC and QEMU, cluster-wide. A
+# `pct status` check alone only sees containers on this node, so a VM parked on
+# the scratch ID slips through preflight and only surfaces later as
+# "VM 9995 already exists" — after 1694 has already been replaced. Check the
+# cluster VMID registry first, then fall back to per-type probes.
+vmid_exists() {
+  if [ -r /etc/pve/.vmlist ] && grep -qE "\"$1\"[[:space:]]*:" /etc/pve/.vmlist; then
+    return 0
+  fi
+  pct status "$1" >/dev/null 2>&1 && return 0
+  qm status  "$1" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+for slot in TMP_VMID VERIFY_VMID; do
+  cur="${!slot}"
+  eval "pinned=\${${slot}_PINNED:-}"
+  vmid_exists "$cur" || continue
+
+  if [ -n "$pinned" ]; then
+    echo "ERROR: $slot=$cur is already in use (LXC or VM, cluster-wide)." >&2
+    echo "       Pick a free ID or destroy that guest." >&2
     exit 1
   fi
+
+  next="$cur"
+  while vmid_exists "$next"; do
+    next=$((next + 1))
+    if [ "$next" -gt $((cur + 50)) ]; then
+      echo "ERROR: no free scratch VMID in ${cur}..$((cur + 50)). Set $slot explicitly." >&2
+      exit 1
+    fi
+  done
+  echo "==> scratch $slot: $cur is in use — using $next instead."
+  printf -v "$slot" '%s' "$next"
 done
 
 # ---------- 1. Clone 1692 -> temp ----------
@@ -211,45 +250,32 @@ Built from $SRC_VMID by infrastructure/proxmox-templates/sdn-templates/v2_gatewa
 pct set "$NEW_VMID" --template 1
 
 # ---------- 4. Cleanup ----------
+# The dump is NOT deleted here. It is the only way back to this build if
+# verification fails, and 1692 → 1694 has already been replaced by this point.
+# Removed after a passing verify; deliberately left behind after a failing one.
 echo "==> Cleanup..."
 pct destroy "$TMP_VMID" --purge 2>/dev/null || true
-rm -f "$DUMP_FILE"
 
 # ---------- 5. Verify: clone, set a fake lan0 IP, boot, check render ----------
-echo "==> Verifying: cloning $NEW_VMID -> $VERIFY_VMID with fake lan0=${VERIFY_LANE_BASE}.1/24..."
-pct clone "$NEW_VMID" "$VERIFY_VMID" --hostname lanegw-v2-verify --full --storage "$STORAGE" >/dev/null
-ip link delete lan0 2>/dev/null || true
-ip link delete wan0 2>/dev/null || true
-pct set "$VERIFY_VMID" --net1 "name=lan0,bridge=vmbr0,ip=${VERIFY_LANE_BASE}.1/24,type=veth"
-pct start "$VERIFY_VMID"
-
-# Give firstboot time to complete. Firstboot's wait-for-lan0-IP loop alone can
-# take up to 15s, then it renders + restarts dnsmasq (~2s). 35s because
-# Tailscale daemon startup + any failed-service retries can push openrc's
-# `local` runlevel later than 20s on cold boot.
-sleep 35
-
-echo "==> Verifying rendered config inside $VERIFY_VMID..."
-IMG_PULL_DST="$(echo "$CYBERCORE_INTERNAL_URL" | sed -E 's|^https?://||; s|[:/].*$||')"
+# Split out so it can be re-run on its own against an already-built template —
+# a bake that produces 1694 and then trips over something in verification
+# should not have to rebuild the whole image to prove itself.
 RENDERED_OK=1
-"$HERE/verify/assertions.sh" "$VERIFY_VMID" "$VERIFY_LANE_BASE" "$IMG_PULL_DST" || RENDERED_OK=0
+VERIFY_VMID="$VERIFY_VMID" "$HERE/verify/verify-template.sh" "$NEW_VMID" || RENDERED_OK=0
 
-pct stop "$VERIFY_VMID"
-pct destroy "$VERIFY_VMID" --purge
+if [ "$RENDERED_OK" = "1" ]; then
+  rm -f "$DUMP_FILE"
+fi
 
 echo ""
 if [ "$RENDERED_OK" = "1" ]; then
   echo "==================================================================="
   echo "  SUCCESS: lane gateway v2 template baked at VMID $NEW_VMID"
   echo "==================================================================="
-  echo "  Verification clone rendered correctly for lan0=${VERIFY_LANE_BASE}.1/24:"
-  echo "    - dnsmasq dhcp-range  ${VERIFY_LANE_BASE}.10 .. ${VERIFY_LANE_BASE}.200"
-  echo "    - controller ACCEPT   ${VERIFY_LANE_BASE}.5 -> lan0:22"
-  echo "    - lane MASQUERADE     ${VERIFY_LANE_BASE}.0/24 -> wan0"
-  echo "    - Kali console DNAT   wan0:3389 -> ${VERIFY_LANE_BASE}.50:3389"
-  echo "    - image-pull ACCEPT   ${VERIFY_LANE_BASE}.0/24 -> ${IMG_PULL_DST}:80 (above base DROPs)"
+  echo "  Nothing further to run — the template is ready."
   echo ""
-  echo "  Use from the deploy path:"
+  echo "  FOR REFERENCE ONLY, this is what the deploy path already does per lane"
+  echo "  (useful for reproducing a lane by hand when debugging):"
   echo "    pct clone $NEW_VMID <ctid> --full --storage $STORAGE"
   echo "    pct set <ctid> \\"
   echo "      --net0 'name=wan0,bridge=vmbr0,ip=100.100.60.<C>/24,gw=100.100.60.1,firewall=0,type=veth' \\"
@@ -259,11 +285,13 @@ if [ "$RENDERED_OK" = "1" ]; then
   echo "==================================================================="
 else
   echo "==================================================================="
-  echo "  WARNING: $NEW_VMID was created but verification clone had failures."
-  echo "  Inspect manually:"
-  echo "    pct clone $NEW_VMID 9999 --full --storage $STORAGE"
-  echo "    pct set 9999 --net1 'name=lan0,bridge=vmbr0,ip=${VERIFY_LANE_BASE}.1/24,type=veth'"
-  echo "    pct start 9999 && pct exec 9999 -- cat /etc/dnsmasq.conf"
+  echo "  WARNING: $NEW_VMID was created but verification did not pass."
+  echo "==================================================================="
+  echo "  The build dump has been KEPT so this image can be restored:"
+  echo "    $DUMP_FILE"
+  echo ""
+  echo "  Re-run verification alone once you have a fix (no rebake needed):"
+  echo "    ./verify/verify-template.sh $NEW_VMID"
   echo "==================================================================="
   exit 1
 fi
