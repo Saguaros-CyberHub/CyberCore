@@ -26,13 +26,13 @@ function getConfig() {
   return _cache;
 }
 
-/** All node names declared in physical_cluster_details, in definition order. */
+/** All node names declared in physical_cluster_ips, in definition order. */
 function getClusterNodes() {
-  return Object.keys(getConfig().cluster?.physical_cluster_details || {});
+  return Object.keys(getConfig().cluster?.physical_cluster_ips || {});
 }
 
 /**
- * The management IP for a cluster node, from physical_cluster_details, or null
+ * The management IP for a cluster node, from physical_cluster_ips, or null
  * when the node isn't declared there.
  *
  * Exists because Proxmox identifies nodes by NAME ('cyberhub-node-2') while the
@@ -41,7 +41,7 @@ function getClusterNodes() {
  * (node-ssh) must translate through this map rather than trust DNS.
  */
 function getNodeAddress(node) {
-  const details = getConfig().cluster?.physical_cluster_details || {};
+  const details = getConfig().cluster?.physical_cluster_ips || {};
   const addr = details[node];
   return (typeof addr === 'string' && addr.trim()) ? addr.trim() : null;
 }
