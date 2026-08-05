@@ -16,16 +16,26 @@ set -e
 PATTERNS="${1:?usage: 60-scrub-v1-iptables.sh <extended-regex>}"
 RULES=/etc/iptables/rules-save
 
+# The v1 blanket RDP forward: `-A FORWARD -i wan0 -o lan0 -p tcp --dport 3389
+# -j ACCEPT`, with no destination and no comment tag. It sits above the
+# perimeter DROPs and accepts inbound RDP to EVERY host on the lane, not just
+# the console box. It is also what quietly carried RDP while firstboot's own
+# CYBERCORE-KALI-RDP ACCEPT was being appended below the wan0→lan0 DROP (dead).
+# Now that the tagged rule inserts above the DROPs, this is both redundant and
+# broader than intended. Matched on exact shape so the tagged rules — which
+# carry `-d <ip>` and `--comment` — are never touched.
+BLANKET_RDP='^-A FORWARD -i wan0 -o lan0 -p tcp -m tcp --dport 3389 -j ACCEPT$'
+
 if [ -f "$RULES" ]; then
   cp "$RULES" "${RULES}.v1.bak"
-  grep -vE "$PATTERNS" "${RULES}.v1.bak" > "$RULES"
+  grep -vE "$PATTERNS" "${RULES}.v1.bak" | grep -vE "$BLANKET_RDP" > "$RULES"
   echo "  Cleaned $RULES (backup at ${RULES}.v1.bak)"
 fi
 
 # Also flush the running NAT table + any v1 FORWARD rules so the running state
 # matches the persistent state. iptables-save | grep -v | iptables-restore is
 # the standard idiom for surgical rule deletion.
-iptables-save | grep -vE "$PATTERNS" | iptables-restore || true
+iptables-save | grep -vE "$PATTERNS" | grep -vE "$BLANKET_RDP" | iptables-restore || true
 mkdir -p /etc/iptables
 iptables-save > /etc/iptables/rules-save
 echo "  Persistent + running iptables: stale v1 references purged"

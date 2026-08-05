@@ -430,7 +430,7 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
   try {
     // 1. Fetch and validate template
     const tplRes = await cybercoreQuery(`
-      SELECT id, template_key, os_name, template_vmid, node, provider_type,
+      SELECT id, template_key, os_family, os_name, template_vmid, node, provider_type,
              module_key, max_instances, metadata
       FROM cybercore_template_catalog
       WHERE id = $1 AND template_type = 'workstation' AND is_active = TRUE AND status = 'active'
@@ -585,7 +585,16 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
                   port: '3389',
                   ...(rdpUser ? { username: rdpUser } : {}),
                   ...(rdpPass ? { password: rdpPass } : {}),
-                  security: tpl.metadata?.rdp_security || 'tls',
+                  // Windows is forced to 'any' so guacd negotiates whatever the
+                  // guest offers. Pinning 'tls' fails against NLA-only Windows,
+                  // and the admin template form used to write rdp_security on
+                  // every save whether or not anyone chose it — see
+                  // migrations/023_clear_pinned_rdp_security.sql. Matches
+                  // buildGuacParameters in utils/lane-deployer.js; non-Windows
+                  // still honours an explicit override.
+                  security: String(tpl.os_family || '').startsWith('windows')
+                    ? 'any'
+                    : (tpl.metadata?.rdp_security || 'any'),
                   'ignore-cert': 'true',
                   width: '1920',
                   height: '1080',

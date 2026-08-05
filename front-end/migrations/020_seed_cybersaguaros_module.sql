@@ -3,7 +3,7 @@
 -- ============================================================================
 -- Consumed by POST /api/admin/lanes/:id/modules. The `attachable: true` flag
 -- in spec is enforced by the attach route. The VMID 1703 template is baked by
--- front-end/scripts/bake-cybersaguaros-template.sh before this row can deploy.
+-- infrastructure/proxmox-templates/vm-templates/bake-cybersaguaros-template.sh before this row can deploy.
 --
 -- App source is bundled in the CyberCore repo at challenges/cybersaguaros-ssrf/.
 --

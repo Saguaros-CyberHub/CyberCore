@@ -333,7 +333,7 @@ function synthesizeSpecFromProfile({
       // No web-server asset in this profile → give the app its own dedicated
       // VM cloned from template 1005, the canonical baked "web-01" template
       // (Debian 13 + Docker + Apache + PHP + SQLite + QEMU guest agent — see
-      // scripts/bake-web-template.sh). Docker is pre-baked, so the image
+      // infrastructure/proxmox-templates/vm-templates/bake-web-template.sh). Docker is pre-baked, so the image
       // build/run install path is identical to deploying onto a real web
       // server. 1005 is baked directly on the Proxmox node, so it's always
       // available even if the template catalog row isn't present.

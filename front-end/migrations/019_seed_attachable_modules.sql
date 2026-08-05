@@ -7,8 +7,8 @@
 -- ignores it (still works if anyone wants to deploy DVWA as its own lane).
 --
 -- The VMID 1701 / 1702 templates are baked by:
---   - front-end/scripts/bake-juice-shop-template.sh
---   - front-end/scripts/bake-dvwa-template.sh
+--   - infrastructure/proxmox-templates/vm-templates/bake-juice-shop-template.sh
+--   - infrastructure/proxmox-templates/vm-templates/bake-dvwa-template.sh
 -- on a Proxmox node before these rows can actually be deployed.
 --
 -- IP octets are LEFT UNSET so the attach handler auto-allocates from the

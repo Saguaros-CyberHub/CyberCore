@@ -10,8 +10,9 @@
 --
 -- v2 (new challenges, opt-in):
 --   - Lane gateway clone source: VMID 1694 (subnet-agnostic, baked by
---     bake-lane-gateway-v2.sh — firstboot renders dnsmasq/iptables from
---     the lane's actual lan0 IP at every boot)
+--     infrastructure/proxmox-templates/sdn-templates/v2_gateway/bake.sh —
+--     firstboot renders dnsmasq/iptables from the lane's actual lan0 IP
+--     at every boot)
 --   - Lane subnet: 10.<vxlan_high>.<vxlan_low>.0/24 (unique per lane,
 --     globally routable — required for Tailscale BYOAB and multi-subnet labs)
 --   - Gateway WAN: hangs directly off the lab network bridge (vmbr0) at

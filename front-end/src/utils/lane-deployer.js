@@ -645,7 +645,17 @@ function buildGuacParameters({ protocol, hostname, port, creds, template }) {
     // 'any' lets guacd negotiate whatever the guest offers — NLA/TLS on Windows,
     // plain RDP on xrdp. Pinning 'tls' fails outright against xrdp and against
     // NLA-only Windows, which is what the CLE copy of this code did.
-    security: meta.rdp_security || 'any',
+    //
+    // Windows is FORCED to 'any' rather than merely defaulting to it. The admin
+    // template form used to write rdp_security on every save whether or not
+    // anyone chose it (see migrations/023_clear_pinned_rdp_security.sql, which
+    // cleaned the 'tls' rows but cannot stop the form from re-pinning), so a
+    // Windows workstation can still arrive here carrying a value that makes
+    // guacd fail the handshake and the lane console never open. Non-Windows
+    // guests keep honouring the override — Kali's xrdp is happy either way.
+    security: String(template.os_family || '').startsWith('windows')
+      ? 'any'
+      : (meta.rdp_security || 'any'),
     'ignore-cert': 'true',
     // Without server-layout the Guac UI leaves "Keyboard layout" unset and
     // keystrokes never reach xrdp.

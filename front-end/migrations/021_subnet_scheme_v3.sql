@@ -6,7 +6,8 @@
 --
 -- v3 (new challenges, opt-in):
 --   - Lane gateway clone source: VMID 1695 (segmented gateway, baked by
---     bake-lane-gateway-v3.sh — 3 NICs: wan0 + ext0 + int0)
+--     infrastructure/proxmox-templates/sdn-templates/bake-lane-gateway-v3.sh
+--     — 3 NICs: wan0 + ext0 + int0)
 --   - Two SDN VNets per lane: an external subnet (Kali + Tailscale BYOD) and an
 --     internal subnet (GOAD Active Directory). The gateway NATs both to the
 --     internet but firewall-DROPs traffic between them — the attacker must
