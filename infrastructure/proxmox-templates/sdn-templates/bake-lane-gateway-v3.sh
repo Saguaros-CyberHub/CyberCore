@@ -33,7 +33,7 @@
 # unless FORCE=1.
 #
 # Companion to:
-#   - bake-lane-gateway-v2.sh    (v2 gateway 1694 — the clone source here)
+#   - v2_gateway/bake.sh         (v2 gateway 1694 — the clone source here)
 #   - bake-goad-controller-vm.sh (GOAD controller template)
 # ============================================================================
 set -euo pipefail
@@ -49,7 +49,7 @@ FORCE=${FORCE:-0}
 # ---------- 0. Sanity ----------
 if ! pct config "$SRC_VMID" >/dev/null 2>&1; then
   echo "ERROR: source template CT $SRC_VMID (v2 gateway) not found." >&2
-  echo "       Bake it first with bake-lane-gateway-v2.sh." >&2
+  echo "       Bake it first with v2_gateway/bake.sh." >&2
   exit 1
 fi
 SRC_IS_TEMPLATE="$(pct config "$SRC_VMID" | awk '/^template:/ {print $2}')"
@@ -183,7 +183,7 @@ dhcp-option=tag:extnet,option:dns-server,${EXT_BASE3}.1
 # identifies as "kali" — so it deterministically lands on .50 with no per-deploy
 # setup, matching the CYBERCORE-KALI-RDP wan0:3389 DNAT installed below. v2 had
 # this in its single scope; v3 was missing it, so the attack box DHCP'd a random
-# ext IP and the .50 DNAT pointed at nothing. Mirrors bake-lane-gateway-v2.sh:167.
+# ext IP and the .50 DNAT pointed at nothing. Mirrors v2's firstboot render (v2_gateway/files/local.d/00-cybercore-firstboot.start).
 dhcp-host=kali,${EXT_BASE3}.${KALI_OCTET}
 
 # Internal segment — GOAD Active Directory VMs + controller.
@@ -268,7 +268,7 @@ iptables -A FORWARD -i ext0 -o tailscale0 -m comment --comment "CYBERCORE-V3" -j
 #     (.KALI_OCTET, pinned by admin.js via cloud-init ipconfig0). The
 #     group-deploy path points Guacamole at the gateway's wan0 IP:3389 and
 #     RELIES on this DNAT ("via gateway DNAT" in the deploy log); without it,
-#     student RDP to Kali fails. Mirrors v2's inline rule (bake-lane-gateway-v2.sh
+#     student RDP to Kali fails. Mirrors v2's firstboot rule (v2_gateway/files/local.d/00-cybercore-firstboot.start
 #     section 3) but targets ext0 instead of lan0. Static dst (Kali is pinned to
 #     .50), so no watcher is needed. The top-of-block strip removes any stale
 #     copy, so a plain append stays idempotent across reboots.

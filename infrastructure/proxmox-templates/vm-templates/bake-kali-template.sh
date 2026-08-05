@@ -22,7 +22,7 @@
 #
 # Companion to:
 #   - bake-goad-controller-vm.sh (controller template, same pattern)
-#   - bake-lane-gateway-v2.sh (lane gateway template)
+#   - ../sdn-templates/v2_gateway/bake.sh (lane gateway template)
 # ============================================================================
 set -euo pipefail
 
@@ -418,7 +418,7 @@ qm create $VMID \
   --serial0 socket --vga serial0 \
   --agent enabled=1,fstrim_cloned_disks=1 \
   --ostype l26 \
-  --description "Kali Rolling template (xfce + xrdp). Baked from front-end/scripts/bake-kali-template.sh."
+  --description "Kali Rolling template (xfce + xrdp). Baked from infrastructure/proxmox-templates/vm-templates/bake-kali-template.sh."
 
 echo "==> Importing cloud image as VM disk..."
 qm disk import $VMID "$CLOUD_IMG_LOCAL" "$STORAGE"

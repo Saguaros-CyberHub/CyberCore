@@ -81,7 +81,8 @@ const EXTRA_WS_VMID_MAX  = 399999;
 // The lane octets workstations land on: slot 0 → .50, slot 1 → .51, …
 //
 // Slot 0 is INFRA_IP_OCTETS.Kali on purpose. It is the value the gateway template
-// bakes its wan0:3389 DNAT against (KALI_OCTET=50 in bake-lane-gateway-v2.sh) and
+// bakes its wan0:3389 DNAT against (KALI_OCTET=50 in the v2 gateway firstboot
+// hook, infrastructure/proxmox-templates/sdn-templates/v2_gateway/) and
 // the one groups.js pins its attack box to, so a plain RDP template in slot 0
 // still works even if our own DNAT install fails. Slots 1+ have no baked
 // equivalent — see applyGatewayWorkstationAccess.
@@ -548,7 +549,8 @@ async function findCloudInitDrive(node, vmid) {
  */
 async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }) {
   // The gateway's main config (rewritten fresh every boot by the firstboot
-  // script — see bake-lane-gateway-v2.sh) bakes in a hostname-matched
+  // script — see infrastructure/proxmox-templates/sdn-templates/v2_gateway/)
+  // bakes in a hostname-matched
   // reservation for this SAME address: `dhcp-host=kali,<base>.50`, so a Kali
   // guest lands on .50 with no per-deploy setup. Our own MAC-based reservations
   // below cover every workstation on this lane — Kali included, and more

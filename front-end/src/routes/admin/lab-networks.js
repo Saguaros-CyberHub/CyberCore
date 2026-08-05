@@ -313,7 +313,8 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         // Per-lane bootstrap secret embedded as `-b<16hex>` hostname suffix.
         // firstboot greps it back and passes ?secret=… to /api/lane-bootstrap,
         // replacing source-IP gating. See utils/lane-networking.js
-        // configureLaneTailscale + bake-lane-gateway-v2.sh. Hostname budget:
+        // configureLaneTailscale + the firstboot hook under
+        // infrastructure/proxmox-templates/sdn-templates/v2_gateway/. Hostname budget:
         // 63 chars; reserve 18 for `-b<16hex>`.
         const claimSecret = crypto.randomBytes(8).toString('hex');
         const baseHost = `${laneName}-gateway`.substring(0, 63 - 18).toLowerCase()

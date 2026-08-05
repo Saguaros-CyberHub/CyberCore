@@ -1186,7 +1186,8 @@ async function collectVmIp(node, vmId, attempts = 10, intervalMs = 5000) {
 //
 // Note: Proxmox has no HTTP-API equivalent of `pct exec` for LXC, so we
 // can't re-trigger firstboot from here. The bake script needs a longer retry
-// window for slow-WAN cases (see bake-lane-gateway-v2.sh).
+// window for slow-WAN cases (see the firstboot hook under
+// infrastructure/proxmox-templates/sdn-templates/v2_gateway/).
 async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logTag, maxWaitMs = 120000 }) {
   // No token row → Tailscale was never staged (env vars not set, or v1). Skip.
   const rowExists = await cybercoreQuery(
@@ -1221,7 +1222,8 @@ async function verifyTailscaleBootstrap({ vxlanId, gatewayVmId, targetNode, logT
                `    Likely causes: (a) gateway WAN took longer than the bake-script firstboot retry window (3×5s), ` +
                `(b) gateway can't reach orchestrator at ${orchUrl}, or (c) firstboot service never ran.\n` +
                `    Diagnose: pct enter ${gatewayVmId} on ${targetNode} → tail /var/log/messages | grep firstboot, then run /etc/local.d/00-cybercore-firstboot.start manually.\n` +
-               `    Permanent fix: re-bake the gateway template with a longer retry window in bake-lane-gateway-v2.sh.`);
+               `    Permanent fix: lengthen the retry window in the firstboot hook under ` +
+               `infrastructure/proxmox-templates/sdn-templates/v2_gateway/, then re-run its bake.sh.`);
 }
 
 // ─── Single-lane deploy (called by batch + retry endpoint) ─────────────────

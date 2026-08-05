@@ -1,0 +1,4 @@
+# Placeholder dnsmasq.conf — replaced at boot by
+# /etc/local.d/00-cybercore-firstboot.start once lan0 has an IP.
+interface=lo
+bind-interfaces

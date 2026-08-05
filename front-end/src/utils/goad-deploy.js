@@ -60,7 +60,7 @@ async function agentExecArgv(node, vmId, argv, proxmoxAPI) {
 }
 
 // Template VMID for the GOAD ansible controller (Debian 13 VM with
-// qemu-guest-agent, baked from scripts/bake-goad-controller-vm.sh —
+// qemu-guest-agent, baked from infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh —
 // git-clones upstream GOAD on first boot via cloud-init).
 const CONTROLLER_TEMPLATE_VMID = 1700;
 
@@ -158,7 +158,8 @@ const INFRA_IP_OCTETS = {
   gateway:    1,
   controller: 5,
   // Ext-segment attack box. .50 matches the gateway RDP DNAT (KALI_OCTET=50 in
-  // bake-lane-gateway-v2/v3.sh). Note the gateway's pool is .10–.200, so .50 is
+  // infrastructure/proxmox-templates/sdn-templates/ — v2_gateway/ and
+  // bake-lane-gateway-v3.sh). Note the gateway's pool is .10–.200, so .50 is
   // INSIDE it and is not excluded — it stays free because dnsmasq never hands a
   // reserved address to a client that doesn't match the reservation, so a lease
   // only lands here for the host the reservation names. Was 20 — an orphan that

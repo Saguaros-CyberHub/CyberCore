@@ -1,0 +1,12 @@
+#!/bin/sh
+# /etc/local.d/50-gateway.start (v2 stub)
+# ----------------------------------------------------------
+# The v1 contents (192.18.0.1 IP setup, NAT, firewall) are
+# preserved at /etc/local.d/50-gateway.start.v1.bak.
+#
+# All lane gateway responsibilities (lan IP awareness, dnsmasq
+# render, controller SSH ACCEPT, lane MASQUERADE) are now in
+# /etc/local.d/00-cybercore-firstboot.start, driven by lan0's
+# actual per-deploy IP. This stub exists so any process still
+# expecting this hook to be present finds something runnable.
+exit 0

@@ -1032,7 +1032,7 @@ echo "==> packer-built template: VMID $SRC_VMID"
 echo "==> Cloning template $SRC_VMID -> $FINAL_VMID (full clone)..."
 qm clone "$SRC_VMID" "$FINAL_VMID" --full --name "WinServer2019-GOAD" --storage "$PROXMOX_STORAGE"
 qm set "$FINAL_VMID" \
-  --description "Win Server 2019 - GOAD packer build, sysprep-generalized, cloudbase-init + DSC/PKI modules baked in. Source: front-end/scripts/bake-win-server-template.sh"
+  --description "Win Server 2019 - GOAD packer build, sysprep-generalized, cloudbase-init + DSC/PKI modules baked in. Source: infrastructure/proxmox-templates/vm-templates/bake-win-server-template.sh"
 qm template "$FINAL_VMID"
 
 echo "==> Destroying packer-side template $SRC_VMID..."

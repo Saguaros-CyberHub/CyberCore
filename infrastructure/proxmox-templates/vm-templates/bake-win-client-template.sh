@@ -1121,7 +1121,7 @@ echo "==> Cloning $BUILD_VMID -> $FINAL_VMID (full clone)..."
 qm clone "$BUILD_VMID" "$FINAL_VMID" --full --name "$TEMPLATE_NAME" --storage "$PROXMOX_STORAGE"
 qm set "$FINAL_VMID" --description "Windows 11 ${WIN_EDITION} workstation template.
 sysprep-generalized (fresh SID per clone), cloudbase-init + virtio guest tools,
-RDP enabled. Built by front-end/scripts/bake-win-client-template.sh.
+RDP enabled. Built by infrastructure/proxmox-templates/vm-templates/bake-win-client-template.sh.
 
 Register in CyberCore: Admin -> Workstation Templates
   template_type   workstation

@@ -7,7 +7,7 @@
 # DHCP reservations during a GOAD deploy without the orchestrator needing
 # SSH access to Proxmox nodes.
 #
-# Companion to scripts/bake-goad-controller-vm.sh. That script generates
+# Companion to infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh. That script generates
 # the keypair at /root/.ssh/goad-controller-deploy.key{,.pub} on this node
 # and embeds the private key into template 1700. This script reads the
 # public half and bakes it into 1692.
@@ -30,7 +30,7 @@ DUMP_DIR=${DUMP_DIR:-/var/lib/vz/dump}
 # ---------- 0. Sanity ----------
 if [ ! -f "$PUBKEY_PATH" ]; then
   echo "ERROR: Public key not found at $PUBKEY_PATH"
-  echo "       Run scripts/bake-goad-controller-vm.sh first to generate the keypair."
+  echo "       Run infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh first to generate the keypair."
   exit 1
 fi
 PUBKEY="$(cat "$PUBKEY_PATH")"

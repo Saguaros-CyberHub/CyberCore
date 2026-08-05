@@ -1,0 +1,270 @@
+#!/bin/sh
+# /etc/local.d/00-cybercore-firstboot.start
+# ---------------------------------------------------------------
+# Reads lan0's IP and renders dnsmasq + iptables config from it.
+# Idempotent — safe to re-run every boot. Installed by the v2 bake
+# (infrastructure/proxmox-templates/sdn-templates/v2_gateway/bake.sh).
+#
+# Numbered 00-* so it runs before any other /etc/local.d/*.start
+# hook (50-gateway.start, etc).
+# ---------------------------------------------------------------
+set -e
+
+ENV_FILE=/etc/cybercore-gateway.env
+[ -f "$ENV_FILE" ] && . "$ENV_FILE"
+
+# Defaults (overridable via /etc/cybercore-gateway.env, which the deploy path
+# can drop in at deploy time via `pct push`):
+DNS_FORWARDER="${DNS_FORWARDER:-100.100.60.1}"   # OPNsense lab gateway
+LANE_DOMAIN="${LANE_DOMAIN:-cybercore.lan}"
+CONTROLLER_OCTET="${CONTROLLER_OCTET:-5}"        # GOAD controller is .5 by convention
+KALI_OCTET="${KALI_OCTET:-50}"                   # Kali attack box is .50 by convention
+DHCP_START_OCTET="${DHCP_START_OCTET:-10}"
+DHCP_END_OCTET="${DHCP_END_OCTET:-200}"
+
+# Wait for lan0 to have an address (the deploy path sets it via `pct set`, but
+# there can still be a tiny race vs local.d on cold boot).
+LAN_CIDR=""
+for _ in $(seq 1 15); do
+  LAN_CIDR="$(ip -4 -o addr show lan0 2>/dev/null | awk '{print $4}' | head -1)"
+  [ -n "$LAN_CIDR" ] && break
+  sleep 1
+done
+
+if [ -z "$LAN_CIDR" ]; then
+  echo "[cybercore-firstboot] lan0 has no IPv4 after 15s — skipping render" >&2
+  exit 0
+fi
+
+LAN_IP="${LAN_CIDR%/*}"
+LAN_PREFIX="${LAN_CIDR##*/}"
+LAN_BASE3="$(echo "$LAN_IP" | awk -F. '{print $1"."$2"."$3}')"
+LAN_NET="${LAN_BASE3}.0/${LAN_PREFIX}"
+
+DHCP_START="${LAN_BASE3}.${DHCP_START_OCTET}"
+DHCP_END="${LAN_BASE3}.${DHCP_END_OCTET}"
+CONTROLLER_IP="${LAN_BASE3}.${CONTROLLER_OCTET}"
+KALI_IP="${LAN_BASE3}.${KALI_OCTET}"
+
+# Render /etc/dnsmasq.conf
+cat > /etc/dnsmasq.conf <<DNSMASQ_EOF
+# Auto-generated at boot by /etc/local.d/00-cybercore-firstboot.start.
+# Hand edits will be overwritten on next boot. To override values, set
+# variables in /etc/cybercore-gateway.env (DNS_FORWARDER, LANE_DOMAIN,
+# CONTROLLER_OCTET, DHCP_START_OCTET, DHCP_END_OCTET).
+
+interface=lan0
+bind-interfaces
+domain-needed
+bogus-priv
+no-resolv
+server=${DNS_FORWARDER}
+local=/${LANE_DOMAIN}/
+domain=${LANE_DOMAIN}
+expand-hosts
+
+dhcp-range=${DHCP_START},${DHCP_END},255.255.255.0,12h
+dhcp-option=option:router,${LAN_IP}
+dhcp-option=option:dns-server,${LAN_IP}
+dhcp-authoritative
+
+# Reserve <lane-base>.<KALI_OCTET> for the Kali attack box. Match is by the
+# hostname the client sends in its DHCPREQUEST — Kali always identifies as
+# "kali", so it deterministically lands on this IP without any per-deploy
+# setup.  The gateway's CYBERCORE-KALI-RDP iptables DNAT (installed below)
+# targets exactly this IP, so RDP through wan0:3389 always reaches Kali.
+#
+# This covers Kali and ONLY Kali: any other image announces its own name and
+# takes an ordinary pool lease. Every other machine is pinned by MAC through a
+# file in the conf-dir below, which is also the only mechanism that scales past
+# one machine — do not try to grow this line into a general reservation table,
+# it cannot know a lane's contents at bake time.
+dhcp-host=kali,${KALI_IP}
+
+# Per-host reservations, keyed on MAC. The deploy path drops files here (one per
+# lane for workstations, one per instance for attached modules) and reloads
+# dnsmasq; whole files are rewritten as a unit so a re-provision cannot leave a
+# stale reservation behind.
+conf-dir=/etc/dnsmasq.d/,*.conf
+
+log-dhcp
+log-queries
+DNSMASQ_EOF
+
+# Make sure the reservations directory exists (controller writes here)
+mkdir -p /etc/dnsmasq.d
+
+# --- iptables: dynamic rules driven by lan0's current IP ---
+
+# 1. Allow GOAD controller (LAN_BASE3.<CONTROLLER_OCTET>) to SSH the gateway
+#    over lan0. Strip any stale rule first (in case lan0 changed subnet).
+iptables-save | grep -v "GOAD-CONTROLLER-SSH" | iptables-restore || true
+iptables -I INPUT -i lan0 -s "${CONTROLLER_IP}" -p tcp --dport 22 \
+  -m comment --comment "GOAD-CONTROLLER-SSH" -j ACCEPT
+
+# 2. Masquerade lane subnet out wan0
+if ! iptables -t nat -C POSTROUTING -s "${LAN_NET}" -o wan0 -j MASQUERADE 2>/dev/null; then
+  iptables -t nat -A POSTROUTING -s "${LAN_NET}" -o wan0 -j MASQUERADE
+fi
+
+# 3. Console DNAT — forward wan0:3389 to the lane's primary box (.50 by
+#    convention, delivered by DHCP reservation; see KALI_OCTET in
+#    /etc/cybercore-gateway.env). Strip any stale rule first in case lan0
+#    changed subnet between boots.
+#
+#    This is a FALLBACK, and covers exactly one machine on one port. The deploy
+#    path installs its own LANE-CONSOLE rules over SSH — one DNAT per workstation
+#    slot, on <base port> + slot — which is the only thing that works for a
+#    non-RDP console or for a lane with more than one workstation. Those rules
+#    carry a different comment tag, so the grep -v below leaves them alone.
+#
+#    The FORWARD ACCEPT must be INSERTED, not appended: the base template's
+#    FORWARD chain ends with a catch-all `-i wan0 -o lan0 -j DROP`, so an
+#    appended ACCEPT sits below it and never matches. That is exactly what this
+#    rule did before — the fallback looked present in `iptables -S` but carried
+#    no traffic, and RDP only worked via the deploy path's LANE-CONSOLE rules
+#    (which do insert at position 2) or a blanket v1 leftover. Position 2 is the
+#    same slot CYBERCORE-IMAGE-PULL uses: above the perimeter DROPs, below the
+#    global RELATED,ESTABLISHED ACCEPT at position 1. The bare `-I FORWARD`
+#    fallback covers a chain shorter than 2, which would otherwise abort this
+#    script under `set -e`.
+iptables-save | grep -v "CYBERCORE-KALI-RDP" | iptables-restore || true
+iptables -t nat -A PREROUTING -i wan0 -p tcp --dport 3389 \
+  -m comment --comment "CYBERCORE-KALI-RDP" \
+  -j DNAT --to-destination "${KALI_IP}:3389"
+iptables -I FORWARD 2 -i wan0 -o lan0 -p tcp -d "${KALI_IP}" --dport 3389 \
+  -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT \
+  || iptables -I FORWARD -i wan0 -o lan0 -p tcp -d "${KALI_IP}" --dport 3389 \
+    -m comment --comment "CYBERCORE-KALI-RDP" -j ACCEPT
+logger -t cybercore-firstboot "iptables: CYBERCORE-KALI-RDP DNAT wan0:3389 -> ${KALI_IP}:3389, FORWARD ACCEPT inserted above the wan0->lan0 DROP"
+
+# 4. Vuln-app image pull — narrow ACCEPT for lane → orchestrator:80.
+#    The v1/v2 base template ships FORWARD DROPs for lan0 → 100.64.0.0/10
+#    (perimeter to keep lane attackers off lab infra). That also blocks the
+#    legitimate prebuilt-image pull where web VMs curl
+#    http://<INTERNAL>/api/profile-deploy/image/<token>. Punch one hole, only
+#    that destination, only NEW state. Reply traffic is covered by the global
+#    RELATED,ESTABLISHED ACCEPT at position 1 of FORWARD. Position 2 puts us
+#    right above the DROP block.
+#
+#    IMPORTANT: use CYBERCORE_INTERNAL_URL (the lab-internal IP, default
+#    100.100.20.50), not CYBERCORE_ORCHESTRATOR_URL (the public domain). The
+#    orchestrator embeds the INTERNAL URL into install_script via
+#    vuln-app-builder.js LANE_ORCH_URL — so the lane VM's TCP dst is
+#    100.100.20.50, not the public IP. A rule keyed on the public hostname
+#    resolves to the wrong dst and misses every packet.
+ORCH_INTERNAL_HOST_FOR_IPT="$(echo "${CYBERCORE_INTERNAL_URL:-http://100.100.20.50:80}" | sed -E 's|^https?://||; s|[:/].*$||')"
+iptables-save | grep -v "CYBERCORE-IMAGE-PULL" | iptables-restore || true
+iptables -I FORWARD 2 -i lan0 -o wan0 -s "${LAN_NET}" -d "${ORCH_INTERNAL_HOST_FOR_IPT}" \
+  -p tcp --dport 80 -m conntrack --ctstate NEW \
+  -m comment --comment "CYBERCORE-IMAGE-PULL" -j ACCEPT \
+  || iptables -I FORWARD -i lan0 -o wan0 -s "${LAN_NET}" -d "${ORCH_INTERNAL_HOST_FOR_IPT}" \
+    -p tcp --dport 80 -m conntrack --ctstate NEW \
+    -m comment --comment "CYBERCORE-IMAGE-PULL" -j ACCEPT
+logger -t cybercore-firstboot "iptables: CYBERCORE-IMAGE-PULL ACCEPT lan0→wan0 ${LAN_NET}→${ORCH_INTERNAL_HOST_FOR_IPT}:80 inserted at FORWARD pos 2"
+
+# Persist current rule set (Alpine iptables init reloads from here)
+mkdir -p /etc/iptables
+iptables-save > /etc/iptables/rules-save
+
+# (Re)start dnsmasq with new config. `restart` is start-or-restart on Alpine.
+rc-service dnsmasq restart >/dev/null 2>&1 \
+  || /etc/init.d/dnsmasq restart >/dev/null 2>&1 \
+  || rc-service dnsmasq start >/dev/null 2>&1 \
+  || true
+
+# --- Tailscale subnet router (BYOAB) ---
+# Pulls the per-deploy auth key from the orchestrator's HTTP bootstrap
+# endpoint. Replaces the earlier "the deploy path SSHes the key in" approach —
+# the orchestrator never connects to the Proxmox node at all. The endpoint
+# (GET /api/lane-bootstrap) identifies this lane by its WAN source IP and
+# returns a single-use payload with the key, tags, and hostname.
+#
+# tailscaled runs in userspace-networking mode (configured at bake time in
+# /etc/conf.d/tailscale), so no TUN device or LXC capability tweaks are
+# needed. Subnet routing still works.
+ORCHESTRATOR_URL="${CYBERCORE_ORCHESTRATOR_URL:-http://100.100.20.50:80}"
+BOOTSTRAP_PATH="/api/lane-bootstrap"
+
+# Per-lane claim secret. The orchestrator embeds a `b<16hex>` suffix in this
+# LXC's hostname at clone time; we grep it back out here and pass it to the
+# bootstrap endpoint as ?secret=…  The endpoint matches on the secret instead
+# of source IP, which gets rewritten by the orchestrator's Docker bridge and
+# never reaches the app as the gateway's real WAN IP.
+#
+# If no secret is present (gateway baked before this change, manual rebuild,
+# etc.), fall back to the no-querystring URL — the endpoint still honors
+# source-IP matching for backward compat.
+CLAIM_SECRET="$(hostname | grep -oE 'b[a-f0-9]{16}$' | sed 's/^b//')"
+if [ -n "$CLAIM_SECRET" ]; then
+  BOOTSTRAP_URL="${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}?secret=${CLAIM_SECRET}"
+else
+  BOOTSTRAP_URL="${ORCHESTRATOR_URL}${BOOTSTRAP_PATH}"
+fi
+
+# wget is preferred over curl on Alpine (smaller, always present). BusyBox wget
+# doesn't speak HTTPS by default, so the bake installs the GNU wget package —
+# see scripts/40-install-https-tooling.sh.
+#
+# Retry window: 60 attempts × (5s timeout + 5s sleep) = up to 10 minutes.
+# Covers slow-WAN, late dnsmasq/DHCP, and orchestrator-restart races. The
+# bootstrap token's server-side TTL is also 10 min, so this matches.
+echo "[cybercore-firstboot] Fetching bootstrap payload from ${ORCHESTRATOR_URL}${BOOTSTRAP_PATH} (claim=${CLAIM_SECRET:+secret}${CLAIM_SECRET:-ip})..." >&2
+BOOTSTRAP_RESP=""
+for _ in $(seq 1 60); do
+  BOOTSTRAP_RESP="$(wget -qO- --timeout=5 "${BOOTSTRAP_URL}" 2>/dev/null || true)"
+  # Accept payload only if it has the auth key field; an `{"error":...}` body
+  # (token missing / already consumed) is treated as a soft fail and retried.
+  if [ -n "$BOOTSTRAP_RESP" ] && echo "$BOOTSTRAP_RESP" | grep -q '"tailscale_authkey"'; then
+    break
+  fi
+  BOOTSTRAP_RESP=""
+  sleep 5
+done
+
+if [ -z "$BOOTSTRAP_RESP" ]; then
+  logger -t cybercore-firstboot "Bootstrap fetch FAILED or empty (orchestrator unreachable, no token, or network not ready) — skipping tailscale up"
+elif echo "$BOOTSTRAP_RESP" | grep -q '"error"'; then
+  logger -t cybercore-firstboot "Bootstrap returned error: $(echo "$BOOTSTRAP_RESP" | head -c 200)"
+else
+  # Parse JSON without jq (Alpine base doesn't ship it). The payload shape is
+  # {"tailscale_authkey":"...","tailscale_tags":"tag:lane,...","tailscale_hostname":"lane-..."}
+  # so a per-key sed is good enough — we control both ends.
+  json_field() {
+    echo "$BOOTSTRAP_RESP" | sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+  }
+  TS_AUTHKEY="$(json_field tailscale_authkey)"
+  TS_TAGS="$(json_field tailscale_tags)"
+  TS_HOSTNAME="$(json_field tailscale_hostname)"
+  TS_HOSTNAME="${TS_HOSTNAME:-lane-gw-${LAN_BASE3//./-}}"
+
+  if [ -n "$TS_AUTHKEY" ]; then
+    rc-service tailscale start >/dev/null 2>&1 \
+      || /etc/init.d/tailscale start >/dev/null 2>&1 \
+      || true
+    # Give the daemon a moment to come up before `up`
+    for _ in 1 2 3 4 5; do
+      tailscale status >/dev/null 2>&1 && break
+      sleep 1
+    done
+
+    TS_UP_ARGS="--authkey=${TS_AUTHKEY} --advertise-routes=${LAN_NET} --hostname=${TS_HOSTNAME} --reset --accept-dns=false"
+    if [ -n "$TS_TAGS" ]; then
+      TS_UP_ARGS="$TS_UP_ARGS --advertise-tags=${TS_TAGS}"
+    fi
+    if tailscale up $TS_UP_ARGS >/tmp/tailscale-up.log 2>&1; then
+      logger -t cybercore-firstboot "tailscale up OK: hostname=${TS_HOSTNAME} routes=${LAN_NET} tags=${TS_TAGS}"
+    else
+      logger -t cybercore-firstboot "tailscale up FAILED — see /tmp/tailscale-up.log"
+    fi
+    # Defense in depth — the key was consumed by the bootstrap endpoint
+    # (one-shot DB row), but unset the var locally anyway.
+    unset TS_AUTHKEY
+  else
+    logger -t cybercore-firstboot "Bootstrap response had no tailscale_authkey field — skipping"
+  fi
+fi
+unset BOOTSTRAP_RESP
+
+logger -t cybercore-firstboot "rendered: lan0=${LAN_IP}/${LAN_PREFIX} net=${LAN_NET} dhcp=${DHCP_START}-${DHCP_END} controller=${CONTROLLER_IP} kali=${KALI_IP} dns_fwd=${DNS_FORWARDER}"
+echo "[cybercore-firstboot] lan0=${LAN_IP}/${LAN_PREFIX} controller=${CONTROLLER_IP}" >&2

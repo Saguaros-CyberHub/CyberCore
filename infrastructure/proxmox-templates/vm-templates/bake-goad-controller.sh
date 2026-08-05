@@ -345,7 +345,7 @@ inventory and runs `main.yml`.
 ```
 
 ## Re-bake source of truth
-This template is rebuilt from `front-end/scripts/bake-goad-controller.sh`,
+This template is rebuilt from `infrastructure/proxmox-templates/vm-templates/bake-goad-controller.sh`,
 which git-clones the CyberSaguaros GOAD fork at bake time (default
 https://github.com/joshmp087/GOAD.git, branch `main`).
 Override with `GOAD_REPO=...` and/or `GOAD_REF=<branch|tag|sha>`.

@@ -215,8 +215,8 @@ write_files:
   # to per-lane — v1: 192.18.0.1 shared, v2: 10.<vxh>.<vxl>.1 unique) without
   # the orchestrator needing any SSH access. The corresponding public key
   # must be in the gateway template's /root/.ssh/authorized_keys (added by
-  # scripts/patch-goad-gateway-key.sh for 1692; bake-lane-gateway-v2.sh
-  # inherits it for 1694 via the clone-from-1692 chain).
+  # ../sdn-templates/patch-goad-gateway-key.sh for 1692; ../sdn-templates/
+  # v2_gateway/bake.sh inherits it for 1694 via the clone-from-1692 chain).
   - path: /root/.ssh/id_ed25519
     permissions: '0600'
     content: |
@@ -948,7 +948,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # GOAD Controller (VM, upstream-backed)
       Per-lane VM cloned from template $VMID. Carries upstream GOAD's
       ansible/ + ad/ at /opt/goad/. Run with /opt/goad-light/run.sh.
-      Source of truth: front-end/scripts/bake-goad-controller-vm.sh
+      Source of truth: infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh
       Re-bake to update.
 
 runcmd:
@@ -998,7 +998,7 @@ qm create $VMID \
   --serial0 socket --vga serial0 \
   --agent enabled=1,fstrim_cloned_disks=1 \
   --ostype l26 \
-  --description "GOAD controller (VM). Baked from front-end/scripts/bake-goad-controller-vm.sh."
+  --description "GOAD controller (VM). Baked from infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh."
 
 # Import the cloud image disk
 echo "==> Importing cloud image as VM disk..."

@@ -27,7 +27,7 @@ reach it from that lane's Kali at `http://<lane-base>.<octet>/`. Tear it down
 with `DELETE /api/admin/lanes/<laneId>/modules/<moduleInstanceId>` or the admin
 UI **Modules** button.
 
-Bake the template with `front-end/scripts/bake-cybersaguaros-template.sh`
+Bake the template with `infrastructure/proxmox-templates/vm-templates/bake-cybersaguaros-template.sh`
 (run on a Proxmox node — the VM git-clones the CyberCore repo at bake time and
 copies this `challenges/cybersaguaros-ssrf/` directory into
 `/var/www/cybersaguaros`). Override the source with `CHALLENGE_REPO_URL` /
