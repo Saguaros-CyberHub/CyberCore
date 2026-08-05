@@ -87,6 +87,23 @@ const SSH_FLAGS = [
 ];
 
 /**
+ * Single-quote one argument for a POSIX shell.
+ *
+ * ssh does not exec its trailing arguments remotely — it joins them with plain
+ * spaces into ONE string and hands that to the remote shell to re-split. So an
+ * argument like `mkdir -p /etc/dnsmasq.d`, passed here as a single array
+ * element (the payload of `/bin/sh -c <this>`), loses that grouping the moment
+ * ssh joins it with its neighbors — the remote shell sees `-p` and the path as
+ * separate words, no different from `pct exec ... --`, instead of part of the
+ * `-c` string. Quoting every element before the join makes ssh's rejoin
+ * produce a string that re-splits back into exactly the elements we started
+ * with, no matter how many words are inside any one of them.
+ */
+function shQuote(s) {
+  return `'${String(s).replace(/'/g, `'\\''`)}'`;
+}
+
+/**
  * Run a command via ssh on a Proxmox node. Returns { stdout, stderr, code }.
  * Throws on non-zero exit (so callers can use try/catch). Pass timeoutMs to
  * abort runaway commands; default 5 minutes.
@@ -95,7 +112,7 @@ function nodeExec(node, args, opts = {}) {
   const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
   return new Promise((resolve, reject) => {
     try { assertKeyReadable(); } catch (e) { return reject(e); }
-    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--', ...args];
+    const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--', ...args.map(shQuote)];
     const child = spawn(cmd[0], cmd.slice(1), { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -137,7 +154,7 @@ function pctExecWithStdin(node, vmid, args, stdinData, opts = {}) {
   return new Promise((resolve, reject) => {
     try { assertKeyReadable(); } catch (e) { return reject(e); }
     const cmd = ['ssh', ...SSH_FLAGS, `${SSH_USER}@${nodeAddress(node)}`, '--',
-                 'pct', 'exec', String(vmid), '--', ...args];
+                 ...['pct', 'exec', String(vmid), '--', ...args].map(shQuote)];
     const child = spawn(cmd[0], cmd.slice(1), { stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
