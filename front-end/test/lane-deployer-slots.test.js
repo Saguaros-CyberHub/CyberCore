@@ -39,6 +39,7 @@ const calls = {
 };
 let gatewayAccessShouldFail = false;
 let dnsmasqShouldBeDown = false;   // model a gateway whose dnsmasq refused to start
+let cloudInitDriveOnClone = false; // model a template that actually ships a cloud-init drive
 let agentIpOverride = null;   // force the guest-agent IP, to model a bad DHCP lease
 
 /** Poll until `fn()` is true or the budget expires — the IP confirm is detached. */
@@ -96,7 +97,11 @@ stubModule('proxmox.js', {
       if (m) macByVmid.set(vmid, m[1]);
       return null;
     }
-    if (method === 'GET' && url.endsWith('/config')) return {};   // no cloud-init drive, no disks
+    if (method === 'GET' && url.endsWith('/config')) {
+      // Default: no cloud-init drive, no disks. Templates that carry one take
+      // the credential-injection path instead, which is where citype matters.
+      return cloudInitDriveOnClone ? { ide2: 'local-lvm:vm-1-cloudinit,media=cdrom' } : {};
+    }
     if (url.includes('/tasks/')) return { status: 'stopped' };
     return null;
   },
@@ -224,7 +229,13 @@ function reset() {
   laneSeq = 0;
   gatewayAccessShouldFail = false;
   dnsmasqShouldBeDown = false;
+  cloudInitDriveOnClone = false;
   agentIpOverride = null;
+}
+
+/** The cloud-init PUT for a workstation (the one carrying ciuser/cipassword). */
+function cloudInitConfigFor(vmid) {
+  return calls.configs.find(c => c.vmid === vmid && c.body.ciuser !== undefined) || null;
 }
 
 const tests = [];
@@ -309,6 +320,33 @@ test('gateway failure fails the lane when it has more than one workstation', asy
   assert.strictEqual([...lanes.values()][0].status, 'error');
   assert.strictEqual(calls.clones.filter(c => c.sourceVmid !== 1694).length, 0,
     'no workstation is cloned once the lane is known to be unreachable');
+});
+
+// ── 3b. cloud-init drive format ──────────────────────────────────────────────
+// A Windows clone MUST be told citype=configdrive2. Proxmox does not infer it
+// from ostype (verified false on this cluster — see the Windows template's
+// README), and the nocloud default produces a drive cloudbase-init finds, fails
+// to parse, and reports success on: the account keeps its bake password while
+// the lane advertises a generated one. There is no signal anywhere except a
+// student failing to log in, so it is pinned here.
+test('a Windows clone is pinned to configdrive2; Linux keeps the default', async () => {
+  reset();
+  cloudInitDriveOnClone = true;
+  await laneDeployer.deployLanes({ users: USERS, template: WIN, vxlanBlock: BLOCK });
+
+  const win = cloudInitConfigFor(610000);
+  assert.ok(win, 'the Windows clone got a cloud-init config PUT');
+  assert.strictEqual(win.body.citype, 'configdrive2', 'cloudbase-init reads the OpenStack layout only');
+  assert.ok(win.body.cipassword, 'a password is injected alongside it');
+  assert.strictEqual([...lanes.values()][0].config.credentials_source, 'cloudinit');
+
+  reset();
+  cloudInitDriveOnClone = true;
+  await laneDeployer.deployLanes({ users: USERS, template: KALI, vxlanBlock: BLOCK });
+
+  const kali = cloudInitConfigFor(610000);
+  assert.ok(kali, 'the Linux clone got a cloud-init config PUT');
+  assert.ok(!('citype' in kali.body), 'nocloud is already the default and what cloud-init reads');
 });
 
 // ── 4a. dnsmasq down is fatal even for one workstation ───────────────────────

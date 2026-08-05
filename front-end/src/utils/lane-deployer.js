@@ -302,6 +302,26 @@ function resolveNicModel(template) {
   return String(template.os_family || '').startsWith('windows') ? 'e1000' : 'virtio';
 }
 
+/**
+ * The cloud-init drive FORMAT a QEMU workstation needs, or null to keep
+ * whatever the template already carries.
+ *
+ * Only Windows gets an answer here. Its cloudbase-init reads the OpenStack
+ * config-drive layout and nothing else, so the drive has to be configdrive2 —
+ * and Proxmox's default (nocloud) produces a drive that agent finds, fails to
+ * parse, and reports success on. Linux keeps the default, which is already what
+ * cloud-init reads; forcing it would only override a template that deliberately
+ * chose otherwise.
+ *
+ * Override per template with metadata.citype for an image whose agent disagrees
+ * with its os_family.
+ */
+function resolveCitype(template) {
+  const meta = template.metadata || {};
+  if (meta.citype) return meta.citype;
+  return String(template.os_family || '').startsWith('windows') ? 'configdrive2' : null;
+}
+
 // ── hardware sizing ──────────────────────────────────────────────────────────
 
 /**
@@ -1200,13 +1220,30 @@ async function deployOneWorkstation(job, ws) {
     catch (e) { console.warn(`${LOG} cloud-init probe failed for ${label}: ${e.message}`); }
 
     if (ciDrive) {
-      // citype is deliberately NOT set: Proxmox derives it from the template's
-      // ostype — nocloud for Linux, configdrive2 for Windows. cloudbase-init
-      // reads configdrive2, so forcing 'nocloud' here (as the Linux-only call
-      // sites in groups.js/lanes.js do) silently breaks credential injection on
-      // every Windows template. If a Windows template lands without creds,
-      // check `qm config <vmid> | grep ostype` first — it must be win10/win11.
+      // citype IS set for Windows, and this is load-bearing.
+      //
+      // Proxmox does NOT derive it from ostype — that was verified false on this
+      // cluster, and the Windows template's own build notes say so (see
+      // "Set citype to configdrive2" in
+      // infrastructure/proxmox-templates/windows-11-base-packer/README.md).
+      // An unset citype means `nocloud`, which writes `user-data` at the drive
+      // root; cloudbase-init's ConfigDriveService reads the OpenStack layout
+      // (openstack/latest/meta_data.json) and cannot parse that. It finds the
+      // drive, reads nothing useful, and REPORTS SUCCESS having changed nothing.
+      // The account keeps its bake-time password while the lane advertises the
+      // generated one, which reaches the student as a plain RDP credential
+      // failure with nothing anywhere pointing at cloud-init.
+      //
+      // It used to be a manual `qm set <template_vmid> --citype configdrive2`
+      // post-build step, so a rebuilt or newly registered Windows template
+      // silently reintroduced the bug. Setting it per clone makes the deploy
+      // correct regardless of how the template was registered. Linux is left
+      // alone: nocloud is both the Proxmox default and what cloud-init wants,
+      // and overriding it here could only break a template that deliberately
+      // chose something else.
+      const citype = resolveCitype(template);
       await proxmoxAPI('PUT', `${vmApiBase(targetNode, workstationVmid, 'qemu')}/config`, {
+        ...(citype ? { citype } : {}),
         ciuser: creds.username,
         cipassword: creds.password,
         ipconfig0: 'ip=dhcp',
