@@ -22,7 +22,7 @@ const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
-const { getGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
+const { mintGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
 const laneProvision = require('../utils/lane-provision');
@@ -378,8 +378,14 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
     const connId = laneRes.rows[0].config?.guac_connection_id;
     if (!connId) return res.status(404).json({ error: 'No remote console is configured for this workstation yet' });
 
+    // mintGuacToken, NOT getGuacToken: the cached token is the one this process
+    // uses for every Guacamole call it makes. Handing that same token to a
+    // browser means the console tab's logout (or its session ending) destroys
+    // the orchestrator's session too, and every subsequent Guac call — console
+    // provisioning, and the connection cleanup in lane teardown — fails with
+    // 403 PERMISSION_DENIED until the cache turns over ~50 minutes later.
     let guacToken = null;
-    try { guacToken = await getGuacToken(); } catch (e) {
+    try { guacToken = (await mintGuacToken()).authToken; } catch (e) {
       console.warn(`[CLE] Guac token fetch failed: ${e.message}`);
     }
 

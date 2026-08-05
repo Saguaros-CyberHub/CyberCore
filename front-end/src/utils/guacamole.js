@@ -13,12 +13,18 @@ const GUAC_DS = process.env.GUAC_DATASOURCE || 'postgresql';
 // Cache the Guac auth token (they last ~60 min)
 let guacTokenCache = { token: null, expires: 0 };
 
-async function getGuacToken() {
-  // Return cached token if still valid (with 5-min buffer)
-  if (guacTokenCache.token && Date.now() < guacTokenCache.expires - 300000) {
-    return guacTokenCache.token;
-  }
-
+/**
+ * Authenticate as the service account and return Guacamole's full token
+ * payload. Deliberately NOT cached: every call opens a NEW Guacamole session.
+ *
+ * This is what a browser handoff must use. Guacamole keeps its tokens in
+ * memory and destroys one the moment its holder logs out (the web client sends
+ * DELETE /api/tokens/<token>), so a browser handed the token THIS process is
+ * caching can end that session for the whole orchestrator — after which every
+ * server-side call fails with 403 PERMISSION_DENIED until the cache turns over.
+ * Mint a separate one for the client and let it own its own session.
+ */
+async function mintGuacToken() {
   const username = process.env.GUAC_ADMIN_USER || 'cactus-admin';
   const password = process.env.GUAC_ADMIN_PASSWORD;
   if (!password) throw new Error('GUAC_ADMIN_PASSWORD not set in .env');
@@ -33,8 +39,28 @@ async function getGuacToken() {
     const text = await resp.text();
     throw new Error(`Guacamole auth failed (${resp.status}): ${text}`);
   }
+  return resp.json(); // { authToken, username, dataSource, availableDataSources }
+}
 
-  const data = await resp.json();
+/**
+ * Drop the cached token so the next call re-authenticates.
+ *
+ * A Guacamole token can die long before the cache expires — the server was
+ * restarted (tokens live in memory), the session idled out, or somebody logged
+ * the session out. Nothing about that is visible until a call fails, so every
+ * 401/403 clears the cache; see guacAPI.
+ */
+function invalidateGuacToken() {
+  guacTokenCache = { token: null, expires: 0 };
+}
+
+async function getGuacToken() {
+  // Return cached token if still valid (with 5-min buffer)
+  if (guacTokenCache.token && Date.now() < guacTokenCache.expires - 300000) {
+    return guacTokenCache.token;
+  }
+
+  const data = await mintGuacToken();
   guacTokenCache = {
     token: data.authToken,
     expires: Date.now() + 55 * 60 * 1000 // ~55 min
@@ -42,8 +68,18 @@ async function getGuacToken() {
   return data.authToken;
 }
 
-// Generic Guac API call helper
-async function guacAPI(method, path, body = null) {
+/**
+ * Generic Guac API call helper.
+ *
+ * A dead session answers with 403 PERMISSION_DENIED — indistinguishable, at the
+ * status code, from a real authorization failure. Since the token is cached for
+ * up to ~50 minutes, believing it would leave the whole orchestrator locked out
+ * of Guacamole for that long: no console provisioning, and every lane teardown
+ * failing its Guac cleanup (which is enough to leave lanes stuck in 'error').
+ * So the first 401/403 discards the cached token and retries ONCE with a fresh
+ * one. A genuine permission error simply fails twice.
+ */
+async function guacAPI(method, path, body = null, _retried = false) {
   const token = await getGuacToken();
   const url = `${GUAC_URL}/api/session/data/${GUAC_DS}${path}?token=${token}`;
 
@@ -60,6 +96,11 @@ async function guacAPI(method, path, body = null) {
 
   const text = await resp.text();
   if (!resp.ok) {
+    if ((resp.status === 403 || resp.status === 401) && !_retried) {
+      console.warn(`[Guac] ${method} ${path} returned ${resp.status} — re-authenticating and retrying once`);
+      invalidateGuacToken();
+      return guacAPI(method, path, body, true);
+    }
     throw new Error(`Guac API ${method} ${path} failed (${resp.status}): ${text}`);
   }
 
@@ -128,4 +169,13 @@ async function ensureGuacUserExists(username) {
   }
 }
 
-module.exports = { guacAPI, getGuacToken, ensureGuacAccount, ensureGuacUserExists, GUAC_URL, GUAC_DS };
+module.exports = {
+  guacAPI,
+  getGuacToken,
+  mintGuacToken,
+  invalidateGuacToken,
+  ensureGuacAccount,
+  ensureGuacUserExists,
+  GUAC_URL,
+  GUAC_DS,
+};

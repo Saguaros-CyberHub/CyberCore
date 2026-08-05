@@ -38,6 +38,7 @@ const calls = {
   pctExecs: [],      // { gatewayVmid, script }
 };
 let gatewayAccessShouldFail = false;
+let dnsmasqShouldBeDown = false;   // model a gateway whose dnsmasq refused to start
 let agentIpOverride = null;   // force the guest-agent IP, to model a bad DHCP lease
 
 /** Poll until `fn()` is true or the budget expires — the IP confirm is detached. */
@@ -156,13 +157,31 @@ stubModule('cybercore-db.js', {
 
 // ── gateway shell, node picker, config, guac, tailscale ──────────────────────
 stubModule('node-ssh.js', {
+  // The message matters: node-ssh's own preflight reports an unusable channel as
+  // "missing or unreadable", and the deployer stops probing the gateway the
+  // moment it sees one of those rather than spending its whole budget on a
+  // channel that is never going to answer.
   pctPushFromString: async (node, gatewayVmid, content, dest) => {
-    if (gatewayAccessShouldFail) throw new Error('ssh: no key configured');
+    if (gatewayAccessShouldFail) throw new Error(`SSH key '/no/such/key' is missing or unreadable`);
     calls.dnsmasqFiles.push({ gatewayVmid, path: dest, content });
   },
+  // The real pctExec resolves { stdout, stderr, code }, and the deployer READS
+  // stdout: once to decide the gateway's firstboot has stopped rewriting the
+  // config it is about to write, and once to confirm dnsmasq actually came back
+  // up. A stub that returns undefined makes both look like failures.
   pctExec: async (node, gatewayVmid, argv) => {
-    if (gatewayAccessShouldFail) throw new Error('ssh: no key configured');
-    calls.pctExecs.push({ gatewayVmid, script: argv[argv.length - 1] });
+    if (gatewayAccessShouldFail) throw new Error(`SSH key '/no/such/key' is missing or unreadable`);
+    const script = argv[argv.length - 1];
+    calls.pctExecs.push({ gatewayVmid, script });
+    let stdout = '';
+    if (script.includes('firstboot-done')) {
+      stdout = 'firstboot-done\n';
+    } else if (script.includes('pgrep dnsmasq')) {
+      stdout = dnsmasqShouldBeDown
+        ? 'dnsmasq-down\ndnsmasq: duplicate dhcp-host IP address 10.39.16.50\n'
+        : 'dnsmasq-up\n';
+    }
+    return { stdout, stderr: '', code: 0 };
   },
 });
 stubModule('node-selector.js', { selectBestNode: async () => ({ node: 'node1' }) });
@@ -204,6 +223,7 @@ function reset() {
   vmMeta.clear();
   laneSeq = 0;
   gatewayAccessShouldFail = false;
+  dnsmasqShouldBeDown = false;
   agentIpOverride = null;
 }
 
@@ -289,6 +309,23 @@ test('gateway failure fails the lane when it has more than one workstation', asy
   assert.strictEqual([...lanes.values()][0].status, 'error');
   assert.strictEqual(calls.clones.filter(c => c.sourceVmid !== 1694).length, 0,
     'no workstation is cloned once the lane is known to be unreachable');
+});
+
+// ── 4a. dnsmasq down is fatal even for one workstation ───────────────────────
+// The gateway's baked wan0:3389 DNAT targets <base>.50, and the only thing that
+// puts a guest there is a DHCP lease. A gateway whose dnsmasq refused to start
+// (classically: its boot-time config re-added `dhcp-host=kali,<base>.50` on top
+// of our reservation for the same address) serves no lease at all, so there is
+// nothing for the fallback to reach and the lane must fail rather than report
+// 'active' with a console that connects to nothing.
+test('a gateway whose dnsmasq will not start fails the lane, fallback or not', async () => {
+  reset();
+  dnsmasqShouldBeDown = true;
+  const res = await laneDeployer.deployLanes({ users: USERS, template: KALI, vxlanBlock: BLOCK });
+  assert.strictEqual(res.provisioned.length, 0);
+  assert.strictEqual(res.failed.length, 1);
+  assert.ok(/dnsmasq is not running/.test(res.failed[0].reason), res.failed[0].reason);
+  assert.strictEqual([...lanes.values()][0].status, 'error');
 });
 
 // ── 4b. a guest that took a pool lease downgrades the lane ───────────────────

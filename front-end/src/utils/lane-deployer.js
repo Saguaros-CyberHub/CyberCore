@@ -541,6 +541,89 @@ async function findCloudInitDrive(node, vmid) {
 // ── gateway plumbing ─────────────────────────────────────────────────────────
 
 /**
+ * Block until the gateway's own firstboot hook has finished rendering its
+ * config, so applyGatewayWorkstationAccess writes on top of it instead of under
+ * it.
+ *
+ * /etc/local.d/00-cybercore-firstboot.start (see
+ * infrastructure/proxmox-templates/sdn-templates/v2_gateway/) REWRITES
+ * /etc/dnsmasq.conf from scratch on every boot and re-adds its baked
+ * `dhcp-host=kali,<base>.50` line, then rewrites the nat table. Both of those
+ * undo what applyGatewayWorkstationAccess just did, and the second one is not
+ * merely lost work: the baked kali line plus our own MAC reservation are two
+ * dhcp-host entries claiming the SAME address, and dnsmasq then refuses to
+ * start at all. No DHCP means no workstation lands on its reserved octet, and
+ * every console on the lane — including slot 0 on the baked wan0:3389 DNAT —
+ * points at an address nothing answers on.
+ *
+ * This used to be a flat 5-second sleep, which held only while the node was
+ * idle enough to boot an Alpine LXC in under 5s. Deploying a class breaks that
+ * assumption on every lane after the first: the node is busy cloning and
+ * booting the previous student's workstation, firstboot lands after our writes
+ * instead of before them, and the whole cohort comes up with dead consoles
+ * while the lanes still report 'active'. Hence a marker, not a timer.
+ *
+ * The marker is the persisted rules-save, written at the END of firstboot's
+ * config phase — after the dnsmasq render and after every iptables rule. What
+ * follows it is the Tailscale bootstrap, which retries for up to 10 minutes and
+ * touches none of this, so waiting for that too would stall every deploy.
+ *
+ * Never throws: a gateway we cannot reach over SSH is exactly what
+ * applyGatewayWorkstationAccess reports (and deployLaneWorkstations decides on)
+ * moments later, with a better message than this could give.
+ *
+ * @returns {Promise<boolean>} whether firstboot was observed to finish.
+ */
+async function waitForGatewayFirstboot(node, gatewayVmid, { timeoutMs = 180000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const probe = [
+    '/bin/sh', '-c',
+    // `|| true` on the whole chain: pctExec rejects on a non-zero exit, and
+    // "not ready yet" is the expected answer for most of this loop.
+    `grep -q '^interface=lan0' /etc/dnsmasq.conf && ` +
+    `grep -q 'CYBERCORE-KALI-RDP' /etc/iptables/rules-save && echo firstboot-done || true`,
+  ];
+
+  let lastErr = null;
+  let attempt = 0;
+  let consecutiveErrors = 0;
+  while (Date.now() < deadline) {
+    if (attempt++ > 0) await new Promise(r => setTimeout(r, 3000));
+    try {
+      const res = await nodeSsh.pctExec(node, gatewayVmid, probe, { timeoutMs: 30000 });
+      consecutiveErrors = 0;
+      if (String(res?.stdout || '').includes('firstboot-done')) return true;
+    } catch (e) {
+      // The container may not be far enough into its boot to run `pct exec` yet,
+      // so an error is not automatically the end. But the whole budget must not
+      // be spent on a channel that is never going to work: a lane deploy that
+      // cannot SSH the node is a supported (degraded) outcome, and burning the
+      // full timeout per lane before reaching it would turn one misconfigured
+      // key into a class-wide stall. Anything that names a broken channel stops
+      // immediately; everything else gets a few retries.
+      lastErr = e;
+      consecutiveErrors++;
+      const fatal = /missing or unreadable|permission denied|could not resolve|connection refused|no route to host/i
+        .test(e.message);
+      if (fatal || consecutiveErrors >= 5) {
+        console.warn(
+          `${LOG} Gateway ${gatewayVmid} on ${node}: cannot probe firstboot over SSH ` +
+          `(${e.message.split('\n')[0]}) — continuing without waiting for it`
+        );
+        return false;
+      }
+    }
+  }
+  console.warn(
+    `${LOG} Gateway ${gatewayVmid} on ${node}: firstboot did not finish within ` +
+    `${Math.round(timeoutMs / 1000)}s — continuing, but its boot-time config may overwrite ` +
+    `the lane's DHCP reservations and console DNATs` +
+    (lastErr ? ` (last probe error: ${lastErr.message.split('\n')[0]})` : '')
+  );
+  return false;
+}
+
+/**
  * Pin every workstation in the lane to its slot's address and publish each one's
  * console port on the gateway's WAN IP. Must run BEFORE any workstation first
  * boots, so their very first DHCPREQUEST already has a reservation waiting.
@@ -590,6 +673,30 @@ async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }
   await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
     'rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true',
   ]);
+
+  // The restart above swallows its own failure (`|| true`), and dnsmasq DOES
+  // refuse to start on a config it dislikes — a second dhcp-host claiming an
+  // address we just reserved is the standard way to get there. A lane with no
+  // DHCP server hands out no leases, so no workstation reaches its reserved
+  // octet and every console on the lane points at an address that answers
+  // nothing. That is worth failing the lane over: the caller marks it 'error'
+  // with this message instead of reporting 'active' with dead consoles.
+  const health = await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    'pgrep dnsmasq >/dev/null 2>&1 && echo dnsmasq-up || { echo dnsmasq-down; dnsmasq --test 2>&1 | head -5; }',
+  ]);
+  const healthOut = String(health?.stdout || '');
+  if (!healthOut.includes('dnsmasq-up')) {
+    const err = new Error(
+      `dnsmasq is not running on gateway ${gatewayVmid} after writing the lane's DHCP ` +
+      `reservations — the lane would come up with no leases and dead consoles. ` +
+      `dnsmasq --test says: ${healthOut.replace('dnsmasq-down', '').trim() || '(no output)'}`
+    );
+    // No DHCP means no guest reaches its reserved octet, so the gateway's baked
+    // wan0:3389 -> <base>.50 fallback has nothing to forward to either. Unlike a
+    // failed SSH channel, this is not survivable for a one-workstation lane.
+    err.noFallback = true;
+    throw err;
+  }
 
   // wan0:<wanPort> → <slot ip>:<guestPort>, one pair per workstation. The v2
   // gateway template already bakes this for 3389 → .50, but only for that one
@@ -1007,7 +1114,10 @@ async function cloneGateway(job) {
     subnetScheme, vxlanId, wanIp: net.wan.ip.split('/')[0], laneName, claimSecret, logTag: LOG,
   });
   await proxmoxAPI('POST', `${vmApiBase(targetNode, gatewayVmid, 'lxc')}/status/start`);
-  await new Promise(r => setTimeout(r, 5000)); // let dnsmasq come up before the workstation DHCPs
+  // Wait for the gateway's OWN boot-time config to land before the caller writes
+  // the lane's reservations and DNATs over the top of it — see
+  // waitForGatewayFirstboot for what happens when these two interleave.
+  await waitForGatewayFirstboot(targetNode, gatewayVmid);
 }
 
 /**
@@ -1238,6 +1348,11 @@ async function deployLaneWorkstations(job) {
           `Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
         );
       }
+      // Some failures take the baked fallback down with them — a gateway whose
+      // dnsmasq will not start serves no lease to reach .50 with. Those are
+      // marked at the throw site, because from here they look like any other
+      // gateway error.
+      if (gwErr.noFallback) throw gwErr;
       console.warn(
         `${LOG} Gateway access setup failed for ${laneName} (${gwErr.message}) — ` +
         `falling back to the gateway's baked DNAT. Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.`
@@ -1715,6 +1830,24 @@ async function batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem,
  * (cybercore_resource → vm_instance + allocation cascade), their Tailscale
  * devices, and finally the cybercore_lane rows.
  *
+ * Two grades of failure, and the difference decides whether the lane rows
+ * survive (see the end of this function):
+ *
+ *   errors   — something this teardown OWNS is still out there. A VM it could
+ *              not destroy, a disk it could not sweep, an ownership check it
+ *              could not run. The lane row is the only handle on those, so it
+ *              is kept as 'error' for a retry.
+ *   warnings — bookkeeping in another system that outlived the lane: a
+ *              Guacamole connection that would not delete, a workspace lookup
+ *              that failed. Nothing on the cluster is still running, and the
+ *              lane row cannot help clean any of it up. Keeping the row for
+ *              these means one Guacamole 403 leaves every torn-down machine
+ *              displayed as a permanent ERROR in the CLE VM list, long after
+ *              the VMs themselves are gone.
+ *
+ * Both are returned in `errors` so the caller still reports everything that
+ * went wrong.
+ *
  * @param {Array<string>} laneIds
  * @param {object} [opts]
  * @param {number} [opts.concurrency=15]
@@ -1722,6 +1855,7 @@ async function batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem,
  */
 async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   const errors = [];
+  const warnings = [];
   if (!Array.isArray(laneIds) || laneIds.length === 0) {
     return { lanes_deleted: 0, vms_destroyed: 0, orphan_disks_swept: 0, errors };
   }
@@ -1898,7 +2032,8 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     );
     for (const r of rows.rows) if (r.cid) guacConnIds.add(r.cid);
   } catch (e) {
-    errors.push(`Workspace console lookup: ${e.message}`);
+    // Only costs us some connection ids to delete in phase 5 — no VM depends on it.
+    warnings.push(`Workspace console lookup: ${e.message}`);
   }
 
   const [clusterResources, nodeList] = await Promise.all([
@@ -2060,10 +2195,14 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
       [laneIdStrings]
     ).catch(e => errors.push(`Workspace resource cleanup: ${e.message}`)),
 
+    // A connection that will not delete is an orphaned row in Guacamole's own
+    // database — annoying, and worth reporting, but it holds nothing on the
+    // cluster. Guacamole being unreachable (or answering 403 with a dead admin
+    // session) must not be what decides whether this lane's record survives.
     ...(process.env.GUAC_ENABLED === 'true'
       ? [...guacConnIds].map(cid =>
           guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`)
-            .catch(e => errors.push(`Guac connection ${cid}: ${e.message}`)))
+            .catch(e => warnings.push(`Guac connection ${cid}: ${e.message}`)))
       : []),
 
     ...vxlanIds.map(vxlanId => tailscale.deleteLaneDevices({ vxlanId }).catch(() => {})),
@@ -2129,6 +2268,10 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   // So on failure the rows are marked 'error' instead: they keep pointing at the
   // survivors, they stay out of allocateVxlanIds (which skips 'error'), and a
   // retry of the same teardown can find them again.
+  //
+  // `warnings` (Guacamole, workspace lookup) deliberately do NOT count here:
+  // nothing they describe is still running, and the row would only keep a
+  // destroyed machine on screen as an ERROR.
   let deleted = 0;
   if (errors.length === 0) {
     const del = await cybercoreQuery(
@@ -2136,6 +2279,12 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
       [laneIds]
     );
     deleted = del.rowCount;
+    if (warnings.length > 0) {
+      console.warn(
+        `${LOG} Teardown removed everything on the cluster but left ${warnings.length} ` +
+        `bookkeeping warning(s): ${warnings.join('; ')}`
+      );
+    }
   } else {
     await cybercoreQuery(
       `UPDATE cybercore_lane
@@ -2153,14 +2302,15 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
 
   console.log(
     `${LOG} Teardown complete: ${deleted} lanes deleted, ${existingVms.length} VMs, ` +
-    `${orphanDisksSwept} orphan disks, ${errors.length} errors`
+    `${orphanDisksSwept} orphan disks, ${errors.length} errors, ${warnings.length} warnings`
   );
   return {
     lanes_deleted: deleted,
     lanes_kept_for_retry: errors.length > 0 ? laneIds.length : 0,
     vms_destroyed: existingVms.length,
     orphan_disks_swept: orphanDisksSwept,
-    errors,
+    errors: [...errors, ...warnings],
+    warnings,
   };
 }
 

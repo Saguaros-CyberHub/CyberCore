@@ -9,7 +9,7 @@ const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { getGuacToken, GUAC_URL } = require('../../../../../src/utils/guacamole');
+const { mintGuacToken, GUAC_URL } = require('../../../../../src/utils/guacamole');
 const { canManageCourse } = require('../utils/course-access');
 const guacCreds = require('../../../../../src/utils/guac-credentials');
 
@@ -170,8 +170,12 @@ router.get('/token', instructorOnly, async (req, res) => {
 
     const studentEmail = studentResult.rows[0].email;
 
-    // Get instructor token
-    const instructorToken = await getGuacToken();
+    // A session of its own for this handoff. The response hands this token to
+    // the browser, and a browser destroys its token on logout — so it must never
+    // be the cached one this process uses for its own Guacamole calls, or that
+    // logout takes the orchestrator's session down with it (403 PERMISSION_DENIED
+    // on everything until the cache turns over). See mintGuacToken.
+    const instructorToken = (await mintGuacToken()).authToken;
 
     // Fetch student's Guacamole user to get their connections
     const guacUsersUrl = `${GUAC_URL}/api/users`;

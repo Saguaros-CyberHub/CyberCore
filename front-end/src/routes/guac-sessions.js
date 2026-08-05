@@ -18,7 +18,7 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
-const { guacAPI, getGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
+const { guacAPI, mintGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
 const { proxmoxAPI } = require('../utils/proxmox');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
@@ -405,7 +405,10 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
     let guacAuth = await getUserGuacToken(vmRow.guac_user, vmRow.guac_password);
     if (!guacAuth) {
       try {
-        const adminToken = await getGuacToken();
+        // A FRESH admin session, never the token this process caches for its own
+        // API calls — see mintGuacToken. The browser owns whatever token it is
+        // given and destroys it on logout.
+        const adminToken = (await mintGuacToken()).authToken;
         guacAuth = {
           authToken:            adminToken,
           dataSource:           GUAC_DS,
