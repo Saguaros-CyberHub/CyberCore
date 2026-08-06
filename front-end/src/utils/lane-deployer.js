@@ -560,43 +560,98 @@ async function restartDnsmasq(node, gatewayVmid) {
   return { up: out.includes('dnsmasq-up'), detail: out.replace('dnsmasq-down', '').trim() };
 }
 
+/** The IP field of a `dhcp-host=` line, or null. Comments are not lines. */
+function reservationIp(line) {
+  if (!/^dhcp-host=/.test(line)) return null;
+  const field = line.replace(/^dhcp-host=/, '').split(',')
+    .map(f => f.trim())
+    .find(f => /^\d{1,3}(\.\d{1,3}){3}$/.test(f));
+  return field || null;
+}
+
+/**
+ * Comment out every baked reservation in /etc/dnsmasq.conf that claims an
+ * address we are about to reserve ourselves, and return the line numbers touched
+ * so a rollback can restore them exactly.
+ *
+ * Matching on the ADDRESS, not on a hostname pattern, is what makes this
+ * correct across gateway versions. v2's firstboot bakes exactly one line
+ * (`dhcp-host=kali,<ext>.50`), so a kali-specific sed was sufficient there. v3
+ * bakes four — kali plus `TUC-DC01/.10`, `TUC-DC02/.11`, `TUC-SRV02/.22` for the
+ * pre-baked GOAD hosts — and a kali-only rule leaves three live collisions on
+ * every 480 lane. Any lab that adds a host to that template gets handled here
+ * without another code change.
+ */
+async function neutralizeConflictingReservations(node, gatewayVmid, ourIps, logTag) {
+  const read = await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    'cat /etc/dnsmasq.conf 2>/dev/null || true',
+  ]).catch(() => null);
+  const conf = String(read?.stdout || '');
+  if (!conf.trim()) return { lineNumbers: [], conflicts: [] };
+
+  const want = new Set(ourIps);
+  const lineNumbers = [];
+  const conflicts = [];
+  conf.split('\n').forEach((line, i) => {
+    const ip = reservationIp(line.trim());
+    if (ip && want.has(ip)) {
+      lineNumbers.push(i + 1);
+      conflicts.push(line.trim());
+    }
+  });
+  if (lineNumbers.length === 0) return { lineNumbers: [], conflicts: [] };
+
+  // By line number: precise, and idempotent because a re-run sees the line
+  // already '#'-prefixed and no longer parses it as a reservation.
+  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    `sed -i '${lineNumbers.map(n => `${n}s/^/#/`).join(';')}' /etc/dnsmasq.conf`,
+  ]);
+  console.log(
+    `${logTag} Gateway ${gatewayVmid}: superseded ${lineNumbers.length} baked reservation(s) — ` +
+    conflicts.join(' | ')
+  );
+  return { lineNumbers, conflicts };
+}
+
 /**
  * Install a lane's DHCP reservations into its gateway and prove dnsmasq survived.
  *
  * THE trap this exists to avoid: the gateway's main config — rewritten fresh on
- * every boot by the firstboot script (sdn-templates/v2_gateway, and
- * bake-lane-gateway-v3.sh:187) — bakes a hostname-matched reservation for the
- * attack box, `dhcp-host=kali,<ext>.50`. Our per-lane files reserve that same
- * address by MAC, which is strictly better (a clone is named kali-<user>, so the
- * baked hostname match never fires). But **dnsmasq refuses to start when two
- * dhcp-host lines claim the same IP**, whether matched by hostname or by MAC.
+ * every boot by the firstboot script — bakes hostname-matched reservations for
+ * the attack box and, on v3, for the pre-baked GOAD hosts. Our per-lane file
+ * reserves those same addresses by MAC, which is strictly better (a Kali clone is
+ * named kali-<user>, so the baked hostname match never fires for it). But
+ * **dnsmasq refuses to start when two dhcp-host lines claim the same IP**,
+ * whether matched by hostname or by MAC.
  *
  * The failure mode is silent and total: the restart is best-effort (`|| true`),
  * dnsmasq stays down, and NOTHING on the lane gets a lease — the GOAD hosts never
  * reach their baked .10/.11/.22, Kali gets no address at all, and every console
- * points at somewhere that answers nothing. The lane still reports 'active'.
+ * points at somewhere that answers nothing, while the lane still reports 'active'.
  *
- * So: comment the baked line out first (commented, not deleted — idempotent on
- * re-provision and legible by hand), then verify dnsmasq is actually running. If
- * it is not, put the gateway back the way we found it so the baked fallback still
- * works, and throw rather than hand back a lane with no DHCP.
+ * So: supersede the colliding baked lines first (commented, not deleted —
+ * idempotent on re-provision and legible by hand), then verify dnsmasq is
+ * actually running. If it is not, put the gateway back exactly as we found it so
+ * its baked reservations still work, and throw rather than hand back a lane with
+ * no DHCP at all.
  */
 async function installLaneReservations({ node, gatewayVmid, gatewayVmId, path, lines, logTag = LOG }) {
   gatewayVmid = gatewayVmid ?? gatewayVmId;   // both spellings are in use across callers
+
+  const ourIps = lines.map(l => reservationIp(String(l).trim())).filter(Boolean);
   await nodeSsh.pctPushFromString(node, gatewayVmid, lines.join('\n') + '\n', path);
-  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
-    `sed -i 's/^dhcp-host=kali,/#dhcp-host=kali,/' /etc/dnsmasq.conf`,
-  ]);
+  const { lineNumbers } = await neutralizeConflictingReservations(node, gatewayVmid, ourIps, logTag);
 
   const { up, detail } = await restartDnsmasq(node, gatewayVmid);
   if (up) return;
 
-  // Roll back to the gateway's own baked behaviour: better one hostname-matched
-  // reservation than a dead DHCP server.
+  // Roll back to the gateway's own baked behaviour: better the template's
+  // hostname reservations than a dead DHCP server.
   console.error(`${logTag} dnsmasq did not come up on gateway ${gatewayVmid} — reverting our reservations`);
-  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
-    `rm -f ${path}; sed -i 's/^#dhcp-host=kali,/dhcp-host=kali,/' /etc/dnsmasq.conf`,
-  ]).catch(() => {});
+  const undo = lineNumbers.length
+    ? `; sed -i '${lineNumbers.map(n => `${n}s/^#//`).join(';')}' /etc/dnsmasq.conf`
+    : '';
+  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c', `rm -f ${path}${undo}`]).catch(() => {});
   const after = await restartDnsmasq(node, gatewayVmid).catch(() => ({ up: false }));
 
   const err = new Error(
