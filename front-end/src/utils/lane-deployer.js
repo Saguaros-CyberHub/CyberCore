@@ -548,6 +548,70 @@ function resolveWorkstationCredentials(template, user) {
   return { username: local || 'student', password: generatePassword(), source: 'cloudinit' };
 }
 
+/** Restart dnsmasq in a gateway LXC and report whether it actually came up. */
+async function restartDnsmasq(node, gatewayVmid) {
+  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    'rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true',
+  ]);
+  const health = await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    'pgrep dnsmasq >/dev/null 2>&1 && echo dnsmasq-up || { echo dnsmasq-down; dnsmasq --test 2>&1 | head -5; }',
+  ]);
+  const out = String(health?.stdout || '');
+  return { up: out.includes('dnsmasq-up'), detail: out.replace('dnsmasq-down', '').trim() };
+}
+
+/**
+ * Install a lane's DHCP reservations into its gateway and prove dnsmasq survived.
+ *
+ * THE trap this exists to avoid: the gateway's main config — rewritten fresh on
+ * every boot by the firstboot script (sdn-templates/v2_gateway, and
+ * bake-lane-gateway-v3.sh:187) — bakes a hostname-matched reservation for the
+ * attack box, `dhcp-host=kali,<ext>.50`. Our per-lane files reserve that same
+ * address by MAC, which is strictly better (a clone is named kali-<user>, so the
+ * baked hostname match never fires). But **dnsmasq refuses to start when two
+ * dhcp-host lines claim the same IP**, whether matched by hostname or by MAC.
+ *
+ * The failure mode is silent and total: the restart is best-effort (`|| true`),
+ * dnsmasq stays down, and NOTHING on the lane gets a lease — the GOAD hosts never
+ * reach their baked .10/.11/.22, Kali gets no address at all, and every console
+ * points at somewhere that answers nothing. The lane still reports 'active'.
+ *
+ * So: comment the baked line out first (commented, not deleted — idempotent on
+ * re-provision and legible by hand), then verify dnsmasq is actually running. If
+ * it is not, put the gateway back the way we found it so the baked fallback still
+ * works, and throw rather than hand back a lane with no DHCP.
+ */
+async function installLaneReservations({ node, gatewayVmid, gatewayVmId, path, lines, logTag = LOG }) {
+  gatewayVmid = gatewayVmid ?? gatewayVmId;   // both spellings are in use across callers
+  await nodeSsh.pctPushFromString(node, gatewayVmid, lines.join('\n') + '\n', path);
+  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    `sed -i 's/^dhcp-host=kali,/#dhcp-host=kali,/' /etc/dnsmasq.conf`,
+  ]);
+
+  const { up, detail } = await restartDnsmasq(node, gatewayVmid);
+  if (up) return;
+
+  // Roll back to the gateway's own baked behaviour: better one hostname-matched
+  // reservation than a dead DHCP server.
+  console.error(`${logTag} dnsmasq did not come up on gateway ${gatewayVmid} — reverting our reservations`);
+  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
+    `rm -f ${path}; sed -i 's/^#dhcp-host=kali,/dhcp-host=kali,/' /etc/dnsmasq.conf`,
+  ]).catch(() => {});
+  const after = await restartDnsmasq(node, gatewayVmid).catch(() => ({ up: false }));
+
+  const err = new Error(
+    `dnsmasq is not running on gateway ${gatewayVmid} after writing the lane's DHCP ` +
+    `reservations — the lane would come up with no leases and dead consoles. ` +
+    `dnsmasq --test says: ${detail || '(no output)'}` +
+    (after.up ? ' (the gateway was reverted to its baked reservations and dnsmasq is back up)' : '')
+  );
+  // No DHCP means no guest reaches its reserved octet, so the gateway's baked
+  // wan0:3389 -> <base>.50 fallback has nothing to forward to either. Unlike a
+  // failed SSH channel, this is not survivable for a one-workstation lane.
+  err.noFallback = true;
+  throw err;
+}
+
 /** The cloud-init drive key on a QEMU clone (ide2, sata3, …), or null. */
 async function findCloudInitDrive(node, vmid) {
   const cfg = await proxmoxAPI('GET', `${vmApiBase(node, vmid, 'qemu')}/config`);
@@ -666,21 +730,6 @@ async function waitForGatewayFirstboot(node, gatewayVmid, { timeoutMs = 180000 }
  * @param {Array} workstations [{ slot, mac, ip, hostname, console:{guestPort,wanPort} }]
  */
 async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }) {
-  // The gateway's main config (rewritten fresh every boot by the firstboot
-  // script — see infrastructure/proxmox-templates/sdn-templates/v2_gateway/)
-  // bakes in a hostname-matched
-  // reservation for this SAME address: `dhcp-host=kali,<base>.50`, so a Kali
-  // guest lands on .50 with no per-deploy setup. Our own MAC-based reservations
-  // below cover every workstation on this lane — Kali included, and more
-  // precisely — but dnsmasq refuses to start at all when two dhcp-host lines
-  // claim the same IP, regardless of whether they're matched by hostname or MAC.
-  // This gateway is dedicated to this one lane and never needs the baked-in
-  // fallback, so neutralize it before writing ours. Comment rather than delete:
-  // idempotent on re-provision, and legible if anyone inspects the file by hand.
-  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
-    `sed -i 's/^dhcp-host=kali,/#dhcp-host=kali,/' /etc/dnsmasq.conf`,
-  ]);
-
   const lines = [
     '# Lane workstation reservations — generated by lane-deployer.js',
     '# Pins each machine to its slot address so the gateway console DNAT has a',
@@ -689,34 +738,9 @@ async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }
   for (const ws of workstations) {
     lines.push(`dhcp-host=${ws.mac},${ws.ip},${ws.hostname}`);
   }
-  await nodeSsh.pctPushFromString(node, gatewayVmid, lines.join('\n') + '\n', DNSMASQ_RESERVATION_PATH);
-  await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
-    'rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true',
-  ]);
-
-  // The restart above swallows its own failure (`|| true`), and dnsmasq DOES
-  // refuse to start on a config it dislikes — a second dhcp-host claiming an
-  // address we just reserved is the standard way to get there. A lane with no
-  // DHCP server hands out no leases, so no workstation reaches its reserved
-  // octet and every console on the lane points at an address that answers
-  // nothing. That is worth failing the lane over: the caller marks it 'error'
-  // with this message instead of reporting 'active' with dead consoles.
-  const health = await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c',
-    'pgrep dnsmasq >/dev/null 2>&1 && echo dnsmasq-up || { echo dnsmasq-down; dnsmasq --test 2>&1 | head -5; }',
-  ]);
-  const healthOut = String(health?.stdout || '');
-  if (!healthOut.includes('dnsmasq-up')) {
-    const err = new Error(
-      `dnsmasq is not running on gateway ${gatewayVmid} after writing the lane's DHCP ` +
-      `reservations — the lane would come up with no leases and dead consoles. ` +
-      `dnsmasq --test says: ${healthOut.replace('dnsmasq-down', '').trim() || '(no output)'}`
-    );
-    // No DHCP means no guest reaches its reserved octet, so the gateway's baked
-    // wan0:3389 -> <base>.50 fallback has nothing to forward to either. Unlike a
-    // failed SSH channel, this is not survivable for a one-workstation lane.
-    err.noFallback = true;
-    throw err;
-  }
+  await installLaneReservations({
+    node, gatewayVmid, path: DNSMASQ_RESERVATION_PATH, lines, logTag: LOG,
+  });
 
   // wan0:<wanPort> → <slot ip>:<guestPort>, one pair per workstation. The v2
   // gateway template already bakes this for 3389 → .50, but only for that one
@@ -2368,6 +2392,12 @@ module.exports = {
   normalizeResourceSpec,
   deployLanes,
   teardownLanes,
+  // Shared gateway DHCP plumbing. challenge-lane-deployer.js writes its own
+  // reservations file and MUST go through this — it neutralizes the gateway's
+  // baked `dhcp-host=kali,<ext>.50` first, without which dnsmasq refuses to
+  // start and the whole lane comes up with no leases.
+  installLaneReservations,
+  restartDnsmasq,
   // Progress registry. Exported so challenge-lane-deployer.js drives the SAME
   // global._batchDeployProgress shape instead of inventing a second contract —
   // admin-lanes.js and the CLE pollers both already speak it.

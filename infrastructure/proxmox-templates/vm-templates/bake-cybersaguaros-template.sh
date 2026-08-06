@@ -30,7 +30,7 @@
 # ============================================================================
 set -euo pipefail
 
-VMID=${VMID:-1703}
+VMID=${VMID:-1710}
 NAME=${NAME:-cybersaguaros-template}
 STORAGE=${STORAGE:-vmpool}
 SNIPPET_STORAGE="${SNIPPET_STORAGE:-}"
@@ -404,7 +404,12 @@ runcmd:
 
   # ==========================================================================
   # Identity + LinPE artifacts. All deliberate.
-  # \$ escapes = runtime guest shell; bare $VAR = bake-time substitution.
+  # Escaped \$ = runtime guest shell; unescaped = bake-time substitution.
+  # (Never write an unescaped dollar-name here unless that variable is really
+  # assigned above: the script runs under "set -u", so bash aborts the whole
+  # bake with "unbound variable" and blames the heredoc's opening line.
+  # Backticks are banned in here too -- this is an UNQUOTED heredoc, so they
+  # are command substitution and would execute at bake time.)
   # ==========================================================================
 
   # ---- Privilege group -----------------------------------------------------

@@ -578,18 +578,31 @@ async function writeLaneReservations({
 
   if (lines.length === 3) return;  // header only — nothing to reserve
 
+  // installLaneReservations, NOT a bare push+restart. Our Kali line claims the
+  // same address as the `dhcp-host=kali,<ext>.50` the gateway template bakes into
+  // /etc/dnsmasq.conf, and dnsmasq refuses to start when two dhcp-host lines
+  // claim one IP. Writing ours without commenting theirs out took dnsmasq down
+  // for the whole lane: the GOAD hosts never got .10/.11/.22 and Kali got no
+  // address at all, while the lane still reported active. The shared helper
+  // neutralizes the baked line, verifies dnsmasq actually came back, and reverts
+  // if it did not.
   try {
-    await nodeSsh.pctPushFromString(node, gatewayVmId, lines.join('\n') + '\n',
-      '/etc/dnsmasq.d/lane-reservations.conf');
-    await nodeSsh.pctExec(node, gatewayVmId, ['/bin/sh', '-c',
-      'rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true',
-    ]);
+    await laneDeployer.installLaneReservations({
+      node, gatewayVmId, gatewayVmid: gatewayVmId,
+      path: '/etc/dnsmasq.d/lane-reservations.conf',
+      lines, logTag,
+    });
     console.log(`${logTag} Lane ${laneId}: ${lines.length - 3} DHCP reservation(s) written`);
   } catch (err) {
+    // A dead DHCP server is not survivable — every guest on this lane would sit
+    // without an address. Anything else (no SSH channel, for instance) leaves the
+    // gateway's baked reservation in place, so the lane is degraded but usable.
+    if (err.noFallback) throw err;
     console.error(
       `${logTag} Lane ${laneId}: could not write DHCP reservations (${err.message}). ` +
       (attackBoxOctet != null
-        ? `Kali will take a pool lease instead of ${extSubnetBase}.${attackBoxOctet}, so its RDP console will NOT connect. `
+        ? `Kali falls back to the gateway's baked hostname reservation for ${extSubnetBase}.${attackBoxOctet}, ` +
+          `which only matches a guest announcing itself as exactly "kali". `
         : '') +
       'Check PROXMOX_SSH_KEY / PROXMOX_SSH_USER.'
     );
