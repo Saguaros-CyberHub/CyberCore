@@ -333,7 +333,7 @@ INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type
 VALUES (
   'cybersaguaros-ssrf',
   'CyberSaguaros — SSRF Research Portal',
-  'Custom vulnerable web app. SSRF chain → localhost admin API → session mint → upload filter bypass → PHP webshell RCE → leaked deploy key → SSH → SUID/cron privesc → root.',
+  'Custom vulnerable web app. SSRF chain → localhost admin API → session mint → upload filter bypass → PHP webshell RCE → leaked deploy key → SSH → sudo NOPASSWD / cron privesc → root.',
   'single_vm', 3, 'crucible',
   -- Keep this spec byte-identical to migrations/020_seed_cybersaguaros_module.sql.
   -- Both statements upsert the same challenge_key, so whichever applies last

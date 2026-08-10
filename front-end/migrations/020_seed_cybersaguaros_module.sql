@@ -20,7 +20,7 @@ INSERT INTO crucible_challenge (challenge_key, name, description, challenge_type
 VALUES (
   'cybersaguaros-ssrf',
   'CyberSaguaros Research Portal',
-  'Custom vulnerable web app (CyberSaguaros cactus research group). SaguaroBot''s dataset integrity check is a readable SSRF -> reach the localhost-only provisioning API -> mint an admin session -> weak "Cloud Storage" upload filter -> PHP webshell RCE as saguarobot -> lateral to hrivera via a world-readable passphrase-protected deploy key (ssh2john + rockyou) -> SSH -> user flag -> root via a group-gated SUID find/python3 copy or a fieldops-writable root cronjob -> root flag. Secondary surfaces: SQLi and reflected XSS on /research.php. Foreshadows the GOAD pivot.',
+  'Custom vulnerable web app (CyberSaguaros cactus research group). SaguaroBot''s dataset integrity check is a readable SSRF -> reach the localhost-only provisioning API -> mint an admin session -> weak "Cloud Storage" upload filter -> PHP webshell RCE as saguarobot -> lateral to hrivera via a world-readable passphrase-protected deploy key (ssh2john + rockyou) -> SSH -> user flag -> root via a group-scoped sudo NOPASSWD grant on find/python3 (GTFObins) or a fieldops-writable root cronjob -> root flag. Secondary surfaces: SQLi and reflected XSS on /research.php. Foreshadows the GOAD pivot.',
   'single_vm',
   3,
   'crucible',

