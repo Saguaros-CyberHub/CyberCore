@@ -11,6 +11,8 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { canManageCourse } = require('../utils/course-access');
 const guacCreds = require('../../../../../src/utils/guac-credentials');
+const prov = require('../../../../../src/utils/account-provisioning');
+const activation = require('../../../../../src/utils/activation');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -42,15 +44,24 @@ router.get('/', instructorOnly, async (req, res) => {
     const userIds = enrollmentsResult.rows.map(r => r.user_id);
     let userMap = {};
     const laneCounts = {}; // user_id → count
+    let pendingActivation = {};
     if (userIds.length > 0) {
+      // role/auth_provider/mfa/provenance are selected so the per-row
+      // credential controls can be decided SERVER-SIDE. The UI must never infer
+      // them, or it would offer buttons the API refuses.
       const usersResult = await cybercoreQuery(`
-        SELECT user_id, email, first_name, last_name
+        SELECT user_id, email, username, first_name, last_name, role,
+               auth_provider, mfa_enabled, provisioned_via, provisioned_ref, activated_at
         FROM cybercore_user
         WHERE user_id = ANY($1)
       `, [userIds]);
       usersResult.rows.forEach(u => {
         userMap[u.user_id] = u;
       });
+
+      // "Invited but hasn't set a password yet" — otherwise an instructor has
+      // no way to tell that apart from "invitation never arrived".
+      pendingActivation = await activation.pendingActivationFor(userIds).catch(() => ({}));
 
       const lc = await cybercoreQuery(`
         SELECT user_id, COUNT(*)::int AS vm_count
@@ -62,16 +73,28 @@ router.get('/', instructorOnly, async (req, res) => {
     }
 
     // Step 3: Merge user data with enrollments
-    const students = enrollmentsResult.rows.map(e => ({
-      user_id: e.user_id,
-      email: userMap[e.user_id]?.email || 'unknown',
-      first_name: userMap[e.user_id]?.first_name || '',
-      last_name: userMap[e.user_id]?.last_name || '',
-      enrollment_role: e.enrollment_role,
-      enrolled_at: e.enrolled_at,
-      status: e.status,
-      vm_count: laneCounts[e.user_id] || 0
-    }));
+    const students = enrollmentsResult.rows.map(e => {
+      const u = userMap[e.user_id];
+      return {
+        user_id: e.user_id,
+        email: u?.email || 'unknown',
+        username: u?.username || null,
+        first_name: u?.first_name || '',
+        last_name: u?.last_name || '',
+        enrollment_role: e.enrollment_role,
+        enrolled_at: e.enrolled_at,
+        status: e.status,
+        vm_count: laneCounts[e.user_id] || 0,
+        // Staff enrolled in a course are ordinary members of it, but the
+        // instructor has no account-level power over them. Both flags are
+        // computed here rather than in the browser, and can_regenerate is the
+        // exact same predicate the credential routes enforce.
+        elevated: u ? prov.isElevatedAccount(u) : false,
+        can_regenerate: u ? prov.canManageAccount(u, req.user, courseId) : false,
+        activation_pending: !!pendingActivation[e.user_id],
+        activated: !!u?.activated_at,
+      };
+    });
 
     res.json({ students });
   } catch (error) {

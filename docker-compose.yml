@@ -145,12 +145,49 @@ services:
       # Rate Limiting
       RATE_LIMIT_WINDOW_MS: 900000
       RATE_LIMIT_MAX_REQUESTS: 100
+      # Outbound email — activation links and course notifications from the CLE
+      # roster import. MAIL_HOST is the compose service name below; see the dns:
+      # note underneath, which is what makes that name resolvable at all.
+      MAIL_ENABLED: ${MAIL_ENABLED:-false}
+      MAIL_HOST: ${MAIL_HOST:-mailrelay}
+      MAIL_PORT: ${MAIL_PORT:-25}
+      MAIL_SECURE: ${MAIL_SECURE:-false}
+      MAIL_FROM: ${MAIL_FROM:-CyberHub <no-reply@localhost>}
+      MAIL_REPLY_TO: ${MAIL_REPLY_TO:-}
+      # Absolute base URL used to build activation links. Must be reachable by
+      # students from OUTSIDE the lab, or every invitation is a dead link.
+      MAIL_PUBLIC_URL: ${MAIL_PUBLIC_URL:-}
+      # pgcrypto key for message bodies at rest. Falls back to MFA_ENCRYPT_KEY /
+      # GUAC_ENCRYPT_KEY; with none of the three, every message is suppressed
+      # rather than stored in plaintext.
+      MAIL_ENCRYPT_KEY: ${MAIL_ENCRYPT_KEY:-}
+      MAIL_POLL_MS: ${MAIL_POLL_MS:-15000}
+      MAIL_MAX_ATTEMPTS: ${MAIL_MAX_ATTEMPTS:-5}
+      MAIL_RETENTION_DAYS: ${MAIL_RETENTION_DAYS:-30}
+      MAIL_RATE_PER_MIN: ${MAIL_RATE_PER_MIN:-60}
+      # Empty = send anywhere. Set this to your institution's domain(s) so a
+      # mistyped roster cannot turn the platform into a credential-phishing
+      # sender. See G12 in the roster import plan.
+      MAIL_ALLOWED_RECIPIENT_DOMAINS: ${MAIL_ALLOWED_RECIPIENT_DOMAINS:-}
+      ACTIVATION_TTL_HOURS: ${ACTIVATION_TTL_HOURS:-72}
+      # Synthetic domain for generated cohort accounts. Hard-suppressed by the
+      # mailer regardless of any other setting — these credentials are handed
+      # out on a printed sheet, never emailed. Must NOT be a domain you own.
+      CLE_COHORT_EMAIL_DOMAIN: ${CLE_COHORT_EMAIL_DOMAIN:-cohort.invalid}
     # External DNS so api.tailscale.com (and any other public hostnames the
     # orchestrator hits) resolve. Lab DNS at 100.100.0.1 doesn't recurse to
     # the public internet, so fetch() throws EAI_AGAIN on Tailscale calls
     # without an internet-capable resolver in front. Order matters: Docker
     # tries entries top-to-bottom.
+    #
+    # 127.0.0.11 MUST stay first. It is Docker's embedded resolver, and it is
+    # the only thing that resolves compose service names like `mailrelay` and
+    # `postgres`. Overriding dns: at all displaces it; listing it explicitly
+    # restores service discovery while keeping the public resolvers behind it.
+    # Verify after any change to this block:
+    #   docker compose exec app node -e "require('dns').lookup('mailrelay',console.log)"
     dns:
+      - 127.0.0.11
       - 1.1.1.1
       - 100.100.0.1
     ports:
@@ -295,5 +332,56 @@ services:
       - "21100-21110:21100-21110"
     volumes:
       - ./front-end/profiles:/home/vsftpd/${FTP_USER}:rw
+    networks:
+      - cybercore-net
+
+  # ==========================================================================
+  # MAILRELAY — outbound SMTP for activation links and course notifications.
+  #
+  # INTERNAL ONLY. There is deliberately no `ports:` stanza, so only containers
+  # on cybercore-net can submit. That is what makes unauthenticated submission
+  # safe; publishing 25 would turn this into an open relay the moment
+  # mynetworks is judged even slightly wrong, and an open relay is discovered
+  # in hours, not weeks.
+  #
+  # DELIVERABILITY IS NOT A CODE PROBLEM. Before trusting this in production:
+  #   1. Outbound port 25 must not be blocked. Most residential ISPs and many
+  #      university NAT egress paths block it outright, and nothing below
+  #      matters if it is. Check first:
+  #        docker compose exec mailrelay sh -c 'nc -zv gmail-smtp-in.l.google.com 25'
+  #   2. PTR (reverse DNS) on the egress IP must equal MAIL_RELAY_HOSTNAME.
+  #      Only the IP's owner can set this. A generic PTR is rejected outright
+  #      by Gmail and Outlook.
+  #   3. SPF:   saguaroscyberhub.org TXT "v=spf1 ip4:<egress-ip> -all"
+  #      DKIM:  2048-bit key in ./secrets/dkim, public half published at
+  #             <selector>._domainkey.saguaroscyberhub.org
+  #      DMARC: start at p=none with rua=, read the reports, then tighten.
+  #
+  # STRONGLY RECOMMENDED: set MAIL_SMARTHOST to a reputable relay — ideally the
+  # institution's own SMTP server. A brand-new IP sending 200 near-identical
+  # credential-bearing messages in one burst is the textbook spam signature,
+  # and will be spam-foldered even with 1-3 all correct. Keeping this container
+  # in front still buys queueing, retry, and one place to change the story.
+  # ==========================================================================
+  mailrelay:
+    # Pinned: :latest silently changes TLS and relay defaults.
+    image: boky/postfix:v4.3.0
+    container_name: cybercore-mailrelay
+    restart: unless-stopped
+    environment:
+      # HELO/envelope identity. MUST match the PTR record of the egress IP.
+      HOSTNAME: ${MAIL_RELAY_HOSTNAME:-mail.localhost}
+      ALLOWED_SENDER_DOMAINS: ${MAIL_RELAY_ALLOWED_SENDER_DOMAINS:-localhost}
+      # RFC1918 only — the compose bridge. Never widen this.
+      POSTFIX_mynetworks: 172.16.0.0/12,192.168.0.0/16,10.0.0.0/8
+      DKIM_SELECTOR: ${MAIL_DKIM_SELECTOR:-cyberhub}
+      # Empty = deliver direct to MX. Set to hand off to a smarthost instead.
+      RELAYHOST: ${MAIL_SMARTHOST:-}
+      RELAYHOST_USERNAME: ${MAIL_SMARTHOST_USER:-}
+      RELAYHOST_PASSWORD: ${MAIL_SMARTHOST_PASSWORD:-}
+      POSTFIX_message_size_limit: "10485760"
+    volumes:
+      # DKIM signing keys. Optional — Postfix starts without them, unsigned.
+      - ./secrets/dkim:/etc/opendkim/keys:ro
     networks:
       - cybercore-net

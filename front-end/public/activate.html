@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Activate Your Account | CyberHub</title>
+  <!-- The activation token lives in this page's URL. Referrer-Policy stops it
+       leaking to any third-party origin a linked resource might reach. -->
+  <meta name="referrer" content="no-referrer">
+  <script>if(localStorage.getItem("ciab-theme")==="dark")document.documentElement.setAttribute("data-theme","dark")</script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+  <div class="auth-container">
+    <div class="auth-card">
+      <div class="auth-header">
+        <div class="auth-logo">🏥</div>
+        <h1 id="siteName">CyberHub</h1>
+        <p id="siteDescription">Cyber Risk Assessment Training Platform</p>
+      </div>
+
+      <div class="auth-body">
+        <div id="errorAlert" class="alert alert-danger" style="display: none;"></div>
+
+        <!-- Set a password -->
+        <div id="activateStep">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Welcome! Choose a password to finish setting up your account.
+          </p>
+          <form id="activateForm">
+            <div class="form-group">
+              <label class="form-label" for="newPassword">Password</label>
+              <input type="password" class="form-input" id="newPassword" placeholder="••••••••"
+                     autocomplete="new-password" autofocus>
+              <div class="form-error" id="newPasswordError"></div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="confirmPassword">Confirm Password</label>
+              <input type="password" class="form-input" id="confirmPassword" placeholder="••••••••"
+                     autocomplete="new-password">
+              <div class="form-error" id="confirmPasswordError"></div>
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary, #777); margin-bottom: 1rem;">
+              At least 8 characters, including an uppercase letter, a lowercase letter, and a number.
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="activateSubmitBtn">
+              Set Password &amp; Continue
+            </button>
+          </form>
+        </div>
+
+        <!-- Terminal state: nothing to do here without a fresh invitation -->
+        <div id="deadEndStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;" id="deadEndMessage"></p>
+          <a href="/login" class="btn btn-primary btn-block btn-lg">Go to Sign In</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/app.js"></script>
+  <script>
+    async function loadSiteConfig() {
+      try {
+        const response = await fetch('/api/site-config');
+        if (!response.ok) return;
+        const config = await response.json();
+        if (config.site_name) {
+          document.getElementById('siteName').textContent = config.site_name;
+          document.title = `Activate Your Account | ${config.site_name}`;
+        }
+        if (config.site_description) {
+          document.getElementById('siteDescription').textContent = config.site_description;
+        }
+      } catch (e) {
+        console.warn('[Activate] Could not load site config:', e.message);
+      }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      loadSiteConfig();
+
+      const errorAlert = document.getElementById('errorAlert');
+      const token = Utils.getQueryParam('token');
+
+      function showError(msg) {
+        errorAlert.textContent = msg || 'Something went wrong';
+        errorAlert.style.display = 'block';
+      }
+      function clearError() { errorAlert.style.display = 'none'; }
+      function deadEnd(msg) {
+        document.getElementById('deadEndMessage').textContent = msg;
+        document.getElementById('activateStep').style.display = 'none';
+        document.getElementById('deadEndStep').style.display = '';
+      }
+
+      // The token is never validated up front, deliberately: checking it would
+      // mean either consuming it (so the real submit fails) or exposing an
+      // endpoint that reports whether a given token is live. Let the submit be
+      // the single point where it is spent.
+      if (!token) {
+        deadEnd('This activation link is missing its token. Use the link from your invitation email, or ask your instructor to send a new one.');
+        return;
+      }
+
+      document.getElementById('activateForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const newPassword = document.getElementById('newPassword').value;
+        const confirmPassword = document.getElementById('confirmPassword').value;
+        const btn = document.getElementById('activateSubmitBtn');
+
+        document.getElementById('newPasswordError').textContent = '';
+        document.getElementById('confirmPasswordError').textContent = '';
+
+        // Mirrors the server rules so the common mistakes don't spend the token
+        // on a round trip; the server remains the authority.
+        if (newPassword.length < 8) {
+          document.getElementById('newPasswordError').textContent = 'Password must be at least 8 characters';
+          return;
+        }
+        if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(newPassword)) {
+          document.getElementById('newPasswordError').textContent = 'Include an uppercase letter, a lowercase letter, and a number';
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          document.getElementById('confirmPasswordError').textContent = 'Passwords do not match';
+          return;
+        }
+
+        btn.disabled = true; btn.textContent = 'Setting up...';
+        try {
+          const result = await API.auth.activate(token, newPassword);
+
+          // An account whose role requires MFA is sent to enrollment rather than
+          // straight in. It has no session yet, so the login page has to redo
+          // the sign-in it now has a real password for.
+          if (result.enrollment_required) {
+            deadEnd('Your password is set. Your account also requires multi-factor authentication — sign in to finish setting it up.');
+            return;
+          }
+
+          if (result.token) localStorage.setItem('token', result.token);
+          Toast.success('Welcome!', 'Your account is ready');
+          setTimeout(() => { window.location.href = '/hub'; }, 600);
+        } catch (error) {
+          // A spent or expired token is terminal: no amount of retrying on this
+          // page will help, so say so instead of leaving the form up.
+          const msg = error.message || 'Could not activate your account';
+          if (/expired|already been used|no longer valid|not valid/i.test(msg)) {
+            deadEnd(msg);
+          } else {
+            showError(msg);
+          }
+        } finally {
+          btn.disabled = false; btn.textContent = 'Set Password & Continue';
+        }
+      });
+    });
+  </script>
+</body>
+</html>

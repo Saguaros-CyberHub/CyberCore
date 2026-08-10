@@ -8,24 +8,21 @@
 
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { query } = require('../../utils/db');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { logActivity } = require('../../middleware/activity-logger');
-const { generatePassword } = require('../../utils/password-generator');
+// The single place local accounts are minted. Replaced four divergent
+// implementations that disagreed about bcrypt cost, username derivation, and —
+// the bug that mattered — whether the stored email was lowercased.
+const accountProvisioning = require('../../utils/account-provisioning');
 
 const adminOnly = requireRole('admin');
 
 const VALID_ROLES = ['user', 'student', 'instructor', 'admin'];
 
-// Derive a login username from an email local-part: lowercase, keep only safe
-// characters. Caller is responsible for de-duplicating against existing names.
-function deriveUsername(email) {
-  const local = String(email || '').split('@')[0] || '';
-  const base = local.toLowerCase().replace(/[^a-z0-9._-]/g, '');
-  return base || 'user';
-}
+// deriveUsername moved to utils/account-provisioning.js, where it sits next to
+// the de-duplication it always required a caller to remember.
 
 
 // ============================================================================
@@ -342,6 +339,9 @@ router.post('/users', authenticateToken, adminOnly, async (req, res) => {
       return res.status(409).json({ error: 'User with this username already exists' });
     }
 
+    // provisionAccount is idempotent by email — it returns the existing account
+    // rather than creating a second one — so the explicit check stays, to keep
+    // this route's 409 contract instead of silently succeeding.
     const existingEmail = await cybercoreQuery(
       'SELECT user_id FROM cybercore_user WHERE LOWER(email) = LOWER($1)',
       [email]
@@ -351,17 +351,24 @@ router.post('/users', authenticateToken, adminOnly, async (req, res) => {
       return res.status(409).json({ error: 'User with this email already exists' });
     }
 
-    const passwordHash = bcrypt.hashSync(password, 10);
+    // Was a hand-rolled INSERT at bcrypt cost 10 that stored the email verbatim.
+    // The shared util lowercases on write (so login can find the account), uses
+    // cost 12 like every other path, and stamps provenance.
+    const outcome = await accountProvisioning.provisionAccount({
+      username, email, firstName, lastName, organization, role, password,
+      // An admin typed this password and is about to hand it over, so it should
+      // be rotated — but this route has never behaved that way, and flipping it
+      // now would change the contract for existing tooling. Left as-is
+      // deliberately; the admin can tick the box on a reset instead.
+      mustChangePassword: false,
+      provenance: { by: req.user.userId, via: 'admin_single', ref: null },
+    });
 
-    const result = await cybercoreQuery(
-      `INSERT INTO cybercore_user
-       (username, email, first_name, last_name, organization, role, password_hash, password_alg, status, active, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'bcrypt', 'active', TRUE, NOW(), NOW())
-       RETURNING user_id, username, email, first_name, last_name, role`,
-      [username, email, firstName || null, lastName || null, organization || 'Independent', role, passwordHash]
-    );
-
-    const newUser = result.rows[0];
+    const u = outcome.user;
+    const newUser = {
+      user_id: u.user_id, username: u.username, email: u.email,
+      first_name: u.first_name, last_name: u.last_name, role: u.role,
+    };
 
     logActivity(req, 'user_created', 'cybercore_user', newUser.user_id, {
       username: newUser.username,
@@ -397,8 +404,9 @@ router.post('/users', authenticateToken, adminOnly, async (req, res) => {
 // matches them — the machine still runs, they just can't reach it. So an email
 // change is gated on the account holding no live console-bearing resources.
 //
-// Username is safe: login accepts `email = $1 OR username = $1`, and nothing
-// else in the schema references it.
+// Username is safe: login accepts either an email or a username (matched
+// case-insensitively, see findUserForLogin in routes/auth.js), and nothing else
+// in the schema references it.
 // ============================================================================
 
 // Fields an admin may PATCH, mapped to their cybercore_user column.
@@ -613,6 +621,27 @@ router.patch('/users/:id', authenticateToken, adminOnly, async (req, res) => {
       values.push(updates.active ? 'active' : 'inactive');
       sets.push(`status = $${values.length}`);
     }
+
+    // Promoting an account out of student tier drops its provenance.
+    //
+    // Otherwise: an instructor imports a fresh address into their course, so the
+    // account is permanently stamped provisioned_via='cle_import', ref=<course>.
+    // That is fine while it is their own student — regenerating a password they
+    // already issued grants nothing. But if an admin later promotes that same
+    // account to instructor or admin, the original instructor would still match
+    // the provenance check and could reset a colleague's password. Clearing it
+    // here closes the only durable escalation path left.
+    //
+    // must_change_password goes too: a forced rotation inherited from a lab
+    // account has no business gating a staff sign-in.
+    if (updates.role !== undefined && ['instructor', 'admin'].includes(updates.role)
+        && !['instructor', 'admin'].includes(user.role)) {
+      sets.push('provisioned_via = NULL', 'provisioned_ref = NULL', 'must_change_password = FALSE');
+      warnings.push(
+        `${user.email} is now ${updates.role}. Any course that created this account no longer has `
+        + 'credential controls over it.'
+      );
+    }
     sets.push('updated_at = NOW()');
     values.push(id);
 
@@ -672,11 +701,9 @@ router.post('/users/batch', authenticateToken, adminOnly, async (req, res) => {
       return res.status(400).json({ error: `Invalid default role: ${defaultRole}` });
     }
 
-    // Preload existing usernames/emails so we can de-dupe in memory (and across
-    // rows within this same batch) without a query per row.
-    const existing = await cybercoreQuery('SELECT LOWER(username) AS u, LOWER(email) AS e FROM cybercore_user');
-    const usedUsernames = new Set(existing.rows.map(r => r.u));
-    const usedEmails = new Set(existing.rows.map(r => r.e));
+    // Username de-duplication across the DB and within this batch is handled by
+    // the shared util's allocateUsername; this set carries the in-batch half.
+    const takenUsernames = new Set();
 
     const created = [];
     const failed = [];
@@ -687,51 +714,38 @@ router.post('/users/batch', authenticateToken, adminOnly, async (req, res) => {
       const email = String(row.email || '').trim();
 
       try {
-        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-          throw new Error('valid email is required');
-        }
-        const emailLc = email.toLowerCase();
-        if (usedEmails.has(emailLc)) throw new Error('email already exists');
-
         const role = row.role ? String(row.role).toLowerCase() : defaultRole;
         if (!VALID_ROLES.includes(role)) throw new Error(`invalid role "${role}"`);
 
-        const organization = (row.organization && String(row.organization).trim()) || defaultOrg;
-        const firstName = row.firstName ? String(row.firstName).trim() : null;
-        const lastName = row.lastName ? String(row.lastName).trim() : null;
+        // Was a hand-rolled INSERT that stored `email` VERBATIM while login
+        // looked it up case-sensitively — so any capitalized roster row created
+        // an account nobody could ever sign into. The shared util lowercases on
+        // write, which is the whole fix.
+        const outcome = await accountProvisioning.provisionAccount({
+          email,
+          firstName: row.firstName,
+          lastName: row.lastName,
+          username: row.username,
+          organization: (row.organization && String(row.organization).trim()) || defaultOrg,
+          role,
+          password: row.password ? String(row.password) : undefined,
+          // Unchanged behaviour: this route has never forced a rotation, and
+          // callers rely on the password it hands back continuing to work.
+          mustChangePassword: false,
+          provenance: { by: req.user.userId, via: 'admin_batch', ref: null },
+          takenUsernames,
+        });
 
-        // Username: caller-supplied or derived from email, then made unique.
-        let username = (row.username && String(row.username).trim().toLowerCase()) || deriveUsername(email);
-        if (usedUsernames.has(username)) {
-          let n = 2;
-          while (usedUsernames.has(`${username}${n}`)) n++;
-          username = `${username}${n}`;
-        }
+        if (!outcome.created) throw new Error('email already exists');
 
-        const providedPassword = row.password ? String(row.password) : null;
-        const password = providedPassword || generatePassword();
-        const passwordHash = bcrypt.hashSync(password, 10);
-
-        const result = await cybercoreQuery(
-          `INSERT INTO cybercore_user
-           (username, email, first_name, last_name, organization, role, password_hash, password_alg, status, active, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, 'bcrypt', 'active', TRUE, NOW(), NOW())
-           RETURNING user_id, username, email, role`,
-          [username, email, firstName, lastName, organization, role, passwordHash]
-        );
-
-        usedUsernames.add(username);
-        usedEmails.add(emailLc);
-
-        const u = result.rows[0];
         created.push({
-          user_id: u.user_id,
-          username: u.username,
-          email: u.email,
-          role: u.role,
+          user_id: outcome.user.user_id,
+          username: outcome.user.username,
+          email: outcome.user.email,
+          role: outcome.user.role,
           // Only surface auto-generated passwords; if the admin supplied one
           // they already have it and we avoid echoing it back.
-          generated_password: providedPassword ? null : password,
+          generated_password: outcome.password,
         });
       } catch (e) {
         failed.push({ line: lineNo, email: email || '(blank)', error: e.message });
@@ -808,57 +822,36 @@ router.patch('/settings/mfa', authenticateToken, adminOnly, async (req, res) => 
 // than being left to assume a reset locks anyone out.
 // ============================================================================
 
-// Same floor as the self-service change at PUT /api/auth/password. An admin
-// should not be able to set a password weaker than the user could set for
-// themselves; generatePassword()'s output always clears it.
-const PASSWORD_MIN_LEN = 8;
-const PASSWORD_COMPLEXITY_RE = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/;
+// The password floor (8 chars, upper + lower + digit — the same rule
+// PUT /api/auth/password enforces) now lives in utils/account-provisioning.js
+// and is applied by setPassword, so an admin cannot set a password weaker than
+// the user could set for themselves and the two can no longer drift apart.
 
 router.post('/users/:id/password', authenticateToken, adminOnly, async (req, res) => {
   try {
     const { id } = req.params;
     const supplied = typeof req.body?.password === 'string' ? req.body.password : '';
 
-    const found = await cybercoreQuery(
-      'SELECT user_id, email, username, auth_provider FROM cybercore_user WHERE user_id = $1',
-      [id]
-    );
-    if (found.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    const user = found.rows[0];
+    const user = await accountProvisioning.findUserById(id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
 
-    // A federated account authenticates at the identity provider; a local hash
-    // would either do nothing or quietly become a second way in that bypasses
-    // SSO. Neither is what an admin clicking "reset password" means.
-    if (user.auth_provider && user.auth_provider !== 'local') {
-      return res.status(409).json({
-        error: `${user.email} signs in through ${user.auth_provider} — reset their password there instead.`,
-      });
-    }
+    // setPassword enforces the federated-account 409 and the length/complexity
+    // floor itself — it is the same code the CLE regenerate route runs, so the
+    // two cannot drift apart. Errors carry .status and are mapped below.
+    //
+    // must_change_password stays FALSE here: an admin resetting a password is
+    // often doing it FOR the user (help desk, shared lab machine), and forcing
+    // a rotation would break that. The CLE path opts in instead.
+    const { password } = await accountProvisioning.setPassword(id, {
+      password: supplied || null,
+      mustChange: false,
+      actorId: req.user.userId,
+    });
+    const generated = supplied ? null : password;
 
-    // Blank means "generate one for me", which is how the batch-create path
-    // already hands out credentials. Returned once, in this response only.
-    const generated = supplied ? null : generatePassword();
-    const password = supplied || generated;
-
-    if (supplied) {
-      if (supplied.length < PASSWORD_MIN_LEN) {
-        return res.status(400).json({ error: `Password must be at least ${PASSWORD_MIN_LEN} characters` });
-      }
-      if (!PASSWORD_COMPLEXITY_RE.test(supplied)) {
-        return res.status(400).json({ error: 'Password must contain an uppercase letter, a lowercase letter, and a number' });
-      }
-    }
-
-    // Cost 12, matching PUT /api/auth/password. POST /users still uses 10; this
-    // is the stronger of the two and the right default for a credential reset.
-    const passwordHash = await bcrypt.hash(password, 12);
-
-    await cybercoreQuery(
-      `UPDATE cybercore_user
-          SET password_hash = $1, password_alg = 'bcrypt', updated_at = NOW()
-        WHERE user_id = $2`,
-      [passwordHash, id]
-    );
+    // Any outstanding invitation is now a second, unrelated way in that the
+    // admin does not know about.
+    await require('../../utils/activation').revokeActivationTokens(id, 'activate').catch(() => {});
 
     // Never log the password itself — only that a reset happened, and whether
     // the admin chose it or the server generated it.
@@ -877,6 +870,9 @@ router.post('/users/:id/password', authenticateToken, adminOnly, async (req, res
       message: `Password reset for ${user.email}`,
     });
   } catch (error) {
+    // setPassword raises 409 for a federated account and 400 for a password
+    // that fails the policy floor; both are the caller's answer, not a 500.
+    if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('[Users] Password reset error:', error.message);
     res.status(500).json({ error: error.message });
   }
@@ -901,6 +897,91 @@ router.post('/users/:id/mfa/reset', authenticateToken, adminOnly, async (req, re
     res.json({ success: true, message: `MFA reset for ${result.rows[0].email}` });
   } catch (error) {
     console.error('[Users] MFA reset error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// MAIL DIAGNOSTICS
+// ----------------------------------------------------------------------------
+// Mail has more ways to be silently broken than almost anything else in this
+// stack: the relay hostname may not resolve (the app service overrides `dns:`,
+// which displaces Docker's embedded resolver), outbound port 25 is blocked on
+// many networks, and a message can be accepted by the relay and still never
+// arrive. These two endpoints separate "the app cannot reach the relay" from
+// "the relay cannot reach the world", which are different problems with
+// different owners.
+// ============================================================================
+
+// GET /api/admin/mail/status — configuration and queue health. No secrets.
+router.get('/mail/status', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const mailer = require('../../utils/mailer');
+
+    let queue = [];
+    try {
+      const result = await cybercoreQuery(
+        `SELECT status, count(*)::int AS n FROM cybercore_email_outbox GROUP BY status`
+      );
+      queue = result.rows;
+    } catch (err) {
+      queue = [{ status: 'unavailable', n: 0, error: err.message }];
+    }
+
+    res.json({
+      enabled: mailer.mailEnabled(),
+      // Booleans, never the values themselves.
+      host: process.env.MAIL_HOST || null,
+      port: Number(process.env.MAIL_PORT) || 25,
+      from: process.env.MAIL_FROM || null,
+      public_url: mailer.publicUrl() || null,
+      encryption_key_configured: !!mailer.mailKey(),
+      allowed_recipient_domains: mailer.allowedDomains(),
+      cohort_domain: process.env.CLE_COHORT_EMAIL_DOMAIN || 'cohort.invalid',
+      queue,
+      ...(mailer.mailEnabled() ? {} : {
+        hint: 'Set MAIL_ENABLED=true and MAIL_HOST to enable delivery. Until then every message is recorded as suppressed and nothing is sent.',
+      }),
+      ...(mailer.mailKey() ? {} : {
+        hint_key: 'No MAIL_ENCRYPT_KEY (or MFA_ENCRYPT_KEY / GUAC_ENCRYPT_KEY) is set, so message bodies cannot be stored securely and every message will be suppressed.',
+      }),
+    });
+  } catch (error) {
+    console.error('[Mail] Status error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/mail/test — send one message, synchronously, and report what
+// happened. Deliberately bypasses the queue: a slow or hanging relay IS the
+// answer the operator is looking for, so surfacing it directly beats returning
+// "queued" and making them go read a table.
+router.post('/mail/test', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const mailer = require('../../utils/mailer');
+    const to = String(req.body?.to || '').trim();
+    if (!to) return res.status(400).json({ error: 'to is required' });
+
+    let siteName = 'CyberHub';
+    try {
+      const s = await cybercoreQuery(`SELECT value FROM cybercore_site_settings WHERE key = 'site_name'`);
+      if (s.rows[0]?.value) siteName = s.rows[0].value;
+    } catch { /* branding is cosmetic; a missing settings table must not block a diagnostic */ }
+
+    const result = await mailer.sendTest(to, { siteName });
+
+    logActivity(req, 'mail_test', 'email', null, { to, ok: result.ok });
+
+    if (!result.ok) return res.status(502).json({ error: result.error, sent: false });
+    res.json({
+      sent: true,
+      message_id: result.messageId,
+      accepted: result.accepted,
+      note: 'The relay accepted this message. That is not proof of delivery — check the recipient mailbox, and the relay logs if it does not arrive.',
+    });
+  } catch (error) {
+    console.error('[Mail] Test send error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

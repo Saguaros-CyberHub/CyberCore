@@ -25,8 +25,11 @@
         <div id="loginStep">
           <form id="loginForm">
             <div class="form-group">
-              <label class="form-label" for="email">Email Address</label>
-              <input type="email" class="form-input" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+              <label class="form-label" for="email">Email or Username</label>
+              <!-- type="text", not "email": the browser's own validation would
+                   reject a bare cohort username like cybr-480-7w1-1-student1
+                   before our handler ever runs. -->
+              <input type="text" class="form-input" id="email" name="email" placeholder="you@example.com" required autocomplete="username" inputmode="email">
               <div class="form-error" id="emailError"></div>
             </div>
 
@@ -88,6 +91,33 @@
           </form>
         </div>
 
+        <!-- Step 3: forced password change (temporary credential must be replaced) -->
+        <div id="pwChangeStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            This account is using a temporary password. Choose a password of your own to finish signing in.
+          </p>
+          <form id="pwChangeForm">
+            <div class="form-group">
+              <label class="form-label" for="newPassword">New Password</label>
+              <input type="password" class="form-input" id="newPassword" placeholder="••••••••"
+                     autocomplete="new-password" autofocus>
+              <div class="form-error" id="newPasswordError"></div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="confirmPassword">Confirm New Password</label>
+              <input type="password" class="form-input" id="confirmPassword" placeholder="••••••••"
+                     autocomplete="new-password">
+              <div class="form-error" id="confirmPasswordError"></div>
+            </div>
+            <div style="font-size: 0.8rem; color: var(--text-secondary, #777); margin-bottom: 1rem;">
+              At least 8 characters, including an uppercase letter, a lowercase letter, and a number.
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="pwChangeSubmitBtn">
+              Set Password &amp; Continue
+            </button>
+          </form>
+        </div>
+
         <!-- Recovery codes shown once after enrollment -->
         <div id="recoveryStep" style="display: none;">
           <div class="alert alert-success" style="margin-bottom: 1rem;">
@@ -139,6 +169,10 @@
       // Short-lived stage tokens held in memory only (never localStorage).
       let mfaToken = null;
       let enrollToken = null;
+      let pwChangeToken = null;
+      // Set when forced MFA enrollment ALSO returns a password gate: the
+      // recovery codes must be read before we move the user on.
+      let pendingPasswordChange = null;
 
       // Check if redirected due to expired session
       if (Utils.getQueryParam('expired')) {
@@ -152,9 +186,27 @@
       }
       function clearError() { errorAlert.style.display = 'none'; }
       function showStep(id) {
-        ['loginStep', 'mfaStep', 'enrollStep', 'recoveryStep'].forEach(s => {
+        ['loginStep', 'mfaStep', 'enrollStep', 'pwChangeStep', 'recoveryStep'].forEach(s => {
           document.getElementById(s).style.display = s === id ? '' : 'none';
         });
+      }
+
+      /**
+       * Every sign-in path can now end in "you must replace this password", so
+       * each one routes through here rather than calling finishLogin directly.
+       * Returns true when the caller should stop and let the user set a password.
+       */
+      function handlePasswordChange(result) {
+        if (!result.password_change_required) return false;
+        if (result.password_change_expired || !result.password_change_token) {
+          showError(result.error || 'This temporary password has expired. Ask your instructor for a new invitation.');
+          showStep('loginStep');
+          return true;
+        }
+        pwChangeToken = result.password_change_token;
+        showStep('pwChangeStep');
+        document.getElementById('newPassword').focus();
+        return true;
       }
       function finishLogin(token) {
         if (token) localStorage.setItem('token', token);
@@ -177,8 +229,12 @@
         document.getElementById('passwordError').textContent = '';
 
         let hasError = false;
-        if (!Validator.email(email)) {
-          document.getElementById('emailError').textContent = 'Please enter a valid email address';
+        // Accept an email OR a bare username: cohort accounts are handed out as
+        // `cybr-480-7w1-1-student1`, and requiring the synthetic @-domain here
+        // would reject exactly the credential the instructor printed out.
+        const looksLikeUsername = !email.includes('@') && /^[a-z0-9._-]+$/i.test(email);
+        if (!Validator.email(email) && !looksLikeUsername) {
+          document.getElementById('emailError').textContent = 'Enter your email address or username';
           hasError = true;
         }
         if (!Validator.required(password)) {
@@ -204,6 +260,7 @@
             await beginEnrollment();
             return;
           }
+          if (handlePasswordChange(result)) return;
           finishLogin(result.token);
         } catch (error) {
           showError(error.message || 'Invalid email or password');
@@ -224,6 +281,7 @@
         btn.disabled = true; btn.textContent = 'Verifying...';
         try {
           const result = await API.auth.loginMfa(mfaToken, code);
+          if (handlePasswordChange(result)) return;
           finishLogin(result.token);
         } catch (error) {
           showError(error.message || 'Invalid code');
@@ -265,6 +323,12 @@
           const result = await API.auth.mfaVerify(code, enrollToken);
           if (result.token) localStorage.setItem('token', result.token);
           document.getElementById('recoveryCodes').textContent = (result.recovery_codes || []).join('\n');
+          // Recovery codes are shown exactly once and are unrecoverable, so they
+          // take priority over the password step. Stash the gate and apply it
+          // when the user clicks through.
+          pendingPasswordChange = result.password_change_required ? result : null;
+          document.getElementById('recoveryContinueBtn').textContent =
+            pendingPasswordChange ? 'Continue' : 'Continue to Dashboard';
           showStep('recoveryStep');
         } catch (error) {
           showError(error.message || 'Invalid code');
@@ -273,7 +337,52 @@
         }
       });
 
-      document.getElementById('recoveryContinueBtn').addEventListener('click', () => finishLogin(null));
+      document.getElementById('recoveryContinueBtn').addEventListener('click', () => {
+        if (pendingPasswordChange) {
+          const gate = pendingPasswordChange;
+          pendingPasswordChange = null;
+          if (handlePasswordChange(gate)) return;
+        }
+        finishLogin(null);
+      });
+
+      // ── Step 3: replace the temporary password ────────────────────────────
+      document.getElementById('pwChangeForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const newPassword = document.getElementById('newPassword').value;
+        const confirmPassword = document.getElementById('confirmPassword').value;
+        const btn = document.getElementById('pwChangeSubmitBtn');
+
+        document.getElementById('newPasswordError').textContent = '';
+        document.getElementById('confirmPasswordError').textContent = '';
+
+        // Mirrors the server rules so the common mistakes don't cost a round
+        // trip; the server remains the authority.
+        if (newPassword.length < 8) {
+          document.getElementById('newPasswordError').textContent = 'Password must be at least 8 characters';
+          return;
+        }
+        if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(newPassword)) {
+          document.getElementById('newPasswordError').textContent = 'Include an uppercase letter, a lowercase letter, and a number';
+          return;
+        }
+        if (newPassword !== confirmPassword) {
+          document.getElementById('confirmPasswordError').textContent = 'Passwords do not match';
+          return;
+        }
+
+        btn.disabled = true; btn.textContent = 'Saving...';
+        try {
+          const result = await API.auth.setInitialPassword(pwChangeToken, newPassword);
+          pwChangeToken = null;
+          finishLogin(result.token);
+        } catch (error) {
+          showError(error.message || 'Could not set your password');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Set Password & Continue';
+        }
+      });
     });
   </script>
 </body>

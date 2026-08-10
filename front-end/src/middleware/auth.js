@@ -35,6 +35,21 @@ function authenticate(req, res, next) {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // A stage token proves ONE step of a multi-step sign-in, not a completed
+    // one. It is signed with the same secret as a session, so without this
+    // check it authenticates every protected route in the app — which would
+    // mean an 'mfa' token, issued after the password but BEFORE the second
+    // factor, bypasses MFA entirely for its lifetime. Likewise a 'pwchange'
+    // token would let an account skip the very password change it was issued
+    // to compel. The stage claim only ever appears on these tokens; a real
+    // session never carries one.
+    if (decoded.stage) {
+      return res.status(401).json({
+        error: 'Finish signing in before using this endpoint.',
+        code: 'STAGE_TOKEN'
+      });
+    }
+
     // Attach user info to request
     req.user = {
       userId: decoded.sub,
@@ -101,11 +116,15 @@ function optionalAuth(req, res, next) {
 
     if (token) {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = {
-        userId: decoded.sub,
-        email: decoded.email,
-        role: decoded.role
-      };
+      // Same rule as authenticate(): a half-finished sign-in is not a user.
+      // Here it merely means the request proceeds anonymously.
+      if (!decoded.stage) {
+        req.user = {
+          userId: decoded.sub,
+          email: decoded.email,
+          role: decoded.role
+        };
+      }
     }
 
     next();
@@ -117,9 +136,14 @@ function optionalAuth(req, res, next) {
 
 /**
  * Strictly authenticate a short-lived stage token (Authorization: Bearer only).
- * Stage tokens carry a `stage` claim ('mfa' or 'enroll') and must NEVER be
- * accepted as a full session — used for the second step of login.
- * Exposes req.user and req.mfaStage. Does not read the session cookie.
+ *
+ * Stage tokens carry a `stage` claim ('mfa' | 'enroll' | 'pwchange') and are
+ * refused as a full session by authenticate() and optionalAuth(), which is what
+ * keeps a half-finished sign-in from reaching the rest of the app.
+ *
+ * Bearer-only by design: these are held in memory by the login page and must
+ * never be written to the session cookie, so there is nothing to read there.
+ * Exposes req.user and req.mfaStage.
  */
 function authenticateStage(stage) {
   return (req, res, next) => {

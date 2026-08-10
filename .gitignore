@@ -111,3 +111,36 @@ cybersaguaros-ad-rename.md
 # CIAB vuln-app image build output (built on the orchestrator, served to lanes)
 front-end/vuln-builds/
 **/vuln-builds/
+
+# ---------------------------------------------------------------------------
+# Roster-import test suite — kept local, not pushed.
+#
+# Listed file by file rather than as front-end/test/*.test.js on purpose: a
+# blanket pattern would silently swallow any test somebody adds later, and
+# front-end/test/lane-deployer-slots.test.js is already tracked and should stay
+# that way.
+#
+# These still run — the files are on disk, `npm test` finds them, and dropping
+# a line from this list is all it takes to start committing one.
+#
+# Worth knowing before deleting any of them outright: three carry the only
+# regression protection for security fixes made alongside this feature —
+#   auth-stage-tokens        stage tokens must not authenticate normal routes
+#                            (they did; that was an MFA bypass)
+#   roster-credential-guards an instructor must not be able to touch an
+#                            admin's or another course's credentials
+#   account-consolidation    exactly one place may INSERT a cybercore_user row
+# ---------------------------------------------------------------------------
+front-end/test/account-consolidation.test.js
+front-end/test/account-provisioning.test.js
+front-end/test/activation.test.js
+front-end/test/auth-login-lookup.test.js
+front-end/test/auth-password-gate.test.js
+front-end/test/auth-stage-tokens.test.js
+front-end/test/csv-parser.test.js
+front-end/test/email-normalize.test.js
+front-end/test/email-outbox.test.js
+front-end/test/email-templates.test.js
+front-end/test/roster-classify.test.js
+front-end/test/roster-cohort.test.js
+front-end/test/roster-credential-guards.test.js

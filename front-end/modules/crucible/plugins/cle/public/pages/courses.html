@@ -214,7 +214,11 @@
 
           <!-- Students Tab -->
           <div class="detail-tab-pane" id="students-pane">
-            <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showAddStudentModal()">+ Add Student</button>
+            <div style="margin-bottom: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+              <button class="btn btn-primary" onclick="showAddStudentModal()">+ Add Student</button>
+              <button class="btn btn-secondary" onclick="showRosterImportModal()">📄 Import Roster (CSV)</button>
+              <button class="btn btn-secondary" onclick="showCohortModal()">👥 Generate Cohort Accounts</button>
+            </div>
             <div id="studentsContent"></div>
           </div>
 
@@ -361,6 +365,139 @@
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('addStudentModal')">Cancel</button>
           <button class="btn btn-primary" onclick="saveAddedStudent()">Add Student</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import Roster Modal -->
+  <div class="modal-overlay" id="rosterImportModal">
+    <div class="modal" style="max-width: 820px;">
+      <h2>Import Roster</h2>
+
+      <!-- Stage 1: choose or paste a roster -->
+      <div class="modal-form" id="rosterStage-input">
+        <div class="info-box" style="margin-bottom: 1rem;">
+          <p style="margin:0;">
+            Upload a CSV with <strong>email</strong>, <strong>first name</strong> and <strong>last name</strong> columns
+            (an export from Canvas works as-is). Students without an account get one, and are emailed a link to
+            choose their own password. Students who already have an account are just added to this course.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label>CSV file</label>
+          <input type="file" id="rosterFileInput" accept=".csv,.tsv,.txt,text/csv,text/plain"
+                 onchange="onRosterFileChosen(this)">
+        </div>
+
+        <div class="form-group">
+          <label>…or paste the roster</label>
+          <textarea id="rosterPasteInput" rows="7" placeholder="email,first name,last name&#10;ada@arizona.edu,Ada,Lovelace"
+                    onblur="parseRosterInput()" style="font-family: ui-monospace, monospace; font-size: 0.85rem;"></textarea>
+        </div>
+
+        <div id="rosterParseSummary" style="margin-bottom: 0.75rem;"></div>
+
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:0.5rem; font-weight:normal;">
+            <input type="checkbox" id="rosterNotifyExisting" checked style="width:auto;">
+            Email students who already have an account to tell them they've been added
+          </label>
+        </div>
+
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeRosterImportModal()">Cancel</button>
+          <button class="btn btn-primary" id="rosterPreviewBtn" onclick="previewRosterImport()">Check Roster</button>
+        </div>
+      </div>
+
+      <!-- Stage 2: preview — nothing has changed yet -->
+      <div class="modal-form" id="rosterStage-preview" style="display: none;">
+        <div id="rosterPreviewArea"></div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="backToRosterInput()">← Back</button>
+          <button class="btn btn-primary" id="rosterConfirmBtn" onclick="confirmRosterImport()">Import</button>
+        </div>
+      </div>
+
+      <!-- Stage 3: what actually happened -->
+      <div class="modal-form" id="rosterStage-result" style="display: none;">
+        <div id="rosterResultArea"></div>
+        <div class="form-buttons">
+          <button class="btn btn-primary" onclick="closeRosterImportModal()">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generate Cohort Accounts Modal -->
+  <div class="modal-overlay" id="cohortModal">
+    <div class="modal" style="max-width: 720px;">
+      <h2>Generate Cohort Accounts</h2>
+
+      <!-- Stage 1: how many -->
+      <div class="modal-form" id="cohortStage-input">
+        <div class="info-box" style="margin-bottom: 1rem;">
+          <p style="margin:0;">
+            Creates numbered lab accounts named after this course's code, with random passwords —
+            for exercises where students shouldn't need a real email address.
+            <strong>No email is sent</strong>; you'll get the credentials once, here, to print or hand out.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label>How many accounts *</label>
+          <input type="number" id="cohortCount" min="1" max="500" value="25" required>
+        </div>
+
+        <div class="form-group">
+          <label>Start numbering at</label>
+          <input type="number" id="cohortStartIndex" min="1" value="1">
+          <small style="color: var(--text-secondary, #777);">
+            Names already in use are skipped, so you can add more to an existing cohort later.
+          </small>
+        </div>
+
+        <div class="form-group">
+          <label>Enrollment Role</label>
+          <select id="cohortRole">
+            <option value="student">Student</option>
+            <option value="lab_assistant">Lab Assistant</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:0.5rem; font-weight:normal;">
+            <input type="checkbox" id="cohortRequireChange" style="width:auto;">
+            Make students choose their own password at first sign-in
+          </label>
+          <small style="color: var(--text-secondary, #777);">
+            Leave this off if you're handing out a printed sheet — turning it on means the
+            passwords below stop working once each student signs in.
+          </small>
+        </div>
+
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="closeCohortModal()">Cancel</button>
+          <button class="btn btn-primary" id="cohortPreviewBtn" onclick="previewCohort()">Preview</button>
+        </div>
+      </div>
+
+      <!-- Stage 2: preview — nothing has been created yet -->
+      <div class="modal-form" id="cohortStage-preview" style="display: none;">
+        <div id="cohortPreviewArea"></div>
+        <div class="form-buttons">
+          <button class="btn btn-secondary" onclick="backToCohortInput()">← Back</button>
+          <button class="btn btn-primary" id="cohortConfirmBtn" onclick="confirmCohort()">Generate</button>
+        </div>
+      </div>
+
+      <!-- Stage 3: credentials, shown once -->
+      <div class="modal-form" id="cohortStage-result" style="display: none;">
+        <div id="cohortResultArea"></div>
+        <div class="form-buttons">
+          <button class="btn btn-primary" onclick="closeCohortModal()">Done</button>
         </div>
       </div>
     </div>
@@ -818,8 +955,26 @@
           <tbody>`;
 
         students.forEach(s => {
+          // `elevated` and `can_regenerate` are computed SERVER-SIDE from the
+          // account's role and provenance. Never decide them here: the API
+          // enforces the same predicate, and a button the server refuses is
+          // worse than no button at all.
+          //
+          // Course-scoped actions (RDP, Remove) stay available for everyone,
+          // including staff — those only touch the enrollment, not the account.
+          const accountActions = s.can_regenerate
+            ? `<button class="btn btn-sm btn-outline" onclick="regenerateStudentPassword('${escAttr(s.user_id)}')">🔑 New password</button>
+               ${s.activation_pending ? `<button class="btn btn-sm btn-outline" onclick="resendStudentActivation('${escAttr(s.user_id)}')">✉️ Resend invite</button>` : ''}`
+            : (s.elevated
+                ? `<span class="badge" title="This is a staff account. It's enrolled in your course, but you have no password or credential controls over it." style="font-size:0.7rem;">staff — no credential controls</span>`
+                : '');
+
+          const statusBadge = s.activation_pending
+            ? `<span class="badge" title="Invited, but they haven't set a password yet" style="font-size:0.7rem; margin-left:0.35rem;">invited</span>`
+            : '';
+
           html += `<tr>
-            <td><code style="font-size: 0.8rem;">${escHtml(s.email)}</code></td>
+            <td><code style="font-size: 0.8rem;">${escHtml(s.email)}</code>${statusBadge}</td>
             <td>${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))}</td>
             <td><span class="badge badge-active">${s.enrollment_role || 'Student'}</span></td>
             <td>${s.enrolled_at ? new Date(s.enrolled_at).toLocaleDateString() : 'N/A'}</td>
@@ -828,6 +983,7 @@
             </td>
             <td class="student-actions">
               <button class="btn btn-sm btn-outline" onclick="openGuacAccess('${escAttr(s.user_id)}')">🔗 RDP</button>
+              ${accountActions}
               <button class="btn btn-sm btn-outline" onclick="removeStudent('${escAttr(s.user_id)}')">❌ Remove</button>
             </td>
           </tr>`;
@@ -2238,5 +2394,13 @@
       loadCourses();
     });
   </script>
+
+  <!-- Roster import. These MUST load after the inline block above: they use the
+       globals it defines (api, escHtml, toast, showModal, currentCourseId,
+       loadStudents), and a tag placed before it throws on first reference.
+       Served from the plugin's staticDir, mounted at /cle by the manifest — no
+       loader change needed. -->
+  <script src="/cle/js/csv.js"></script>
+  <script src="/cle/js/roster-import.js"></script>
 </body>
 </html>

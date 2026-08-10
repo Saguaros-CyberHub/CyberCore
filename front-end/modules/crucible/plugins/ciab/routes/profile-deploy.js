@@ -30,12 +30,11 @@ const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
 const { getOrGenerateVulnApp } = require('../utils/vuln-app-generator');
 const { resolveImageFile } = require('../utils/vuln-app-builder');
 const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator');
-const { generatePassword } = require('../../../../../src/utils/password-generator');
+// The single place local accounts are minted, shared with the core admin
+// routes and the CLE roster import. provisionOrRotateAccount preserves this
+// path's create-or-rotate semantics (see the call sites below).
+const accountProvisioning = require('../../../../../src/utils/account-provisioning');
 const { guacAPI } = require('../../../../../src/utils/guacamole');
-// bcryptjs (pure JS) is what package.json ships — matches src/routes/admin/groups.js's
-// student-creation pattern. The native `bcrypt` package isn't a dependency.
-const bcrypt = require('bcryptjs');
-const { v4: uuidv4 } = require('uuid');
 const {
   deployProfileLanesBatch,
   deployOneLaneFromSpec,
@@ -330,25 +329,29 @@ async function runProfileDeploy(opts) {
   const credentials = [];
   const students = [];
   for (let i = 1; i <= numLanes; i++) {
-    const studentId = uuidv4();
     const email = `${groupSlug}-student${i}@clinic.local`;
-    const password = generatePassword();
-    const passwordHash = await bcrypt.hash(password, 12);
 
-    // Upsert the user — re-deploys of the same group rotate the password but
-    // keep the same user_id so prior workspaces/permissions stay associated.
-    const userRow = await cybercoreQuery(
-      `INSERT INTO cybercore_user
-         (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
-       VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, 'student', true, NOW())
-       ON CONFLICT (username) DO UPDATE SET
-         password_hash = EXCLUDED.password_hash,
-         password_alg  = 'bcrypt',
-         organization  = EXCLUDED.organization
-       RETURNING user_id`,
-      [studentId, email, email, passwordHash, 'Student', String(i), finalGroupName]
-    );
-    const effectiveId = userRow.rows[0].user_id;
+    // Create-or-rotate, via the shared minting path (see
+    // src/utils/account-provisioning.js). Re-deploys of the same group rotate
+    // the password but keep the same user_id, so prior workspaces and Guacamole
+    // permissions stay associated — the same semantics the ON CONFLICT upsert
+    // this replaced provided.
+    const outcome = await accountProvisioning.provisionOrRotateAccount({
+      email,
+      username: email,
+      firstName: 'Student',
+      lastName: String(i),
+      organization: finalGroupName,
+      role: 'student',
+      emailVerified: true,
+      mustChangePassword: false,
+      // `userId` is the acting admin, passed in by the route (runProfileDeploy
+      // has no req of its own).
+      provenance: { by: userId || null, via: 'group_deploy', ref: String(groupId) },
+    });
+    const password = outcome.password;
+
+    const effectiveId = outcome.user.user_id;
     students.push({ id: effectiveId, email, name: `Student ${i}`, index: i });
     credentials.push({ email, password, role: 'student' });
 
@@ -698,22 +701,26 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       const vxlanId = vxlanIds[i];
       const laneIndex = startIndex + i + 1;
 
-      const studentId = uuidv4();
       const email = `${groupSlug}-student${laneIndex}@clinic.local`;
-      const password = generatePassword();
-      const passwordHash = await bcrypt.hash(password, 12);
-      const userRow = await cybercoreQuery(
-        `INSERT INTO cybercore_user
-           (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
-         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, 'student', true, NOW())
-         ON CONFLICT (username) DO UPDATE SET
-           password_hash = EXCLUDED.password_hash,
-           password_alg  = 'bcrypt',
-           organization  = EXCLUDED.organization
-         RETURNING user_id`,
-        [studentId, email, email, passwordHash, 'Student', String(laneIndex), baseGroupName]
-      );
-      const effectiveId = userRow.rows[0].user_id;
+
+      // Create-or-rotate through the shared minting path, same as the initial
+      // deploy above: adding lanes to an existing group must keep each
+      // student's user_id (their prior workspaces hang off it) while handing
+      // the admin a credential sheet that actually works.
+      const outcome = await accountProvisioning.provisionOrRotateAccount({
+        email,
+        username: email,
+        firstName: 'Student',
+        lastName: String(laneIndex),
+        organization: baseGroupName,
+        role: 'student',
+        emailVerified: true,
+        mustChangePassword: false,
+        provenance: { by: req.user?.userId || null, via: 'group_deploy', ref: String(groupId) },
+      });
+      const password = outcome.password;
+
+      const effectiveId = outcome.user.user_id;
       credentials.push({ email, password, role: 'student' });
       try {
         await guacAPI('POST', '/users', { username: email, password, attributes: { disabled: null, timezone: 'America/Phoenix' } });

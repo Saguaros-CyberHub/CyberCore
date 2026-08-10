@@ -8,7 +8,6 @@
 
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { proxmoxAPI } = require('../../utils/proxmox');
@@ -18,7 +17,7 @@ const { query } = require('../../utils/db');
 const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
-const { generatePassword } = require('../../utils/password-generator');
+const accountProvisioning = require('../../utils/account-provisioning');
 const { runBatch } = require('../../utils/batch-deployer');
 const { allocateVxlanIds } = require('../../utils/lane-deployer');
 const { deployChallengeLanes, parseSpec, readProgress } = require('../../utils/challenge-lane-deployer');
@@ -137,55 +136,57 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       created.guac_group_error = e.message;
     }
 
-    for (let i = 1; i <= numInst; i++) {
-      const userId = uuidv4();
-      const email = `${group_name.toLowerCase().replace(/[^a-z0-9]/g, '')}-instructor${i}@clinic.local`;
-      const password = generatePassword();
-      const passwordHash = await bcrypt.hash(password, 12);
+    // Account minting goes through the shared util (utils/account-provisioning),
+    // which is now the only place in the platform that writes a cybercore_user
+    // row. It lowercases the address on write, uses one bcrypt cost everywhere,
+    // and stamps provenance — so a group-deployed account is distinguishable
+    // from one an instructor's course created, which is what the CLE credential
+    // guards key on.
+    //
+    // The generated addresses are unchanged (`<slug>-student1@clinic.local`) so
+    // existing groups, their Guacamole accounts, and the credential CSVs that
+    // were handed out all keep working. .local is a reserved domain, so the
+    // mailer refuses to send to these — deliberately: nobody ever reads them.
+    const slug = group_name.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const takenUsernames = new Set();
 
-      await cybercoreQuery(
-        `INSERT INTO cybercore_user (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
-         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, $8, true, NOW())
-         RETURNING user_id, email, first_name, last_name, role`,
-        [userId, email, email, passwordHash, 'Instructor', `${i}`, group_name, 'instructor']
-      );
-      created.instructors.push({ id: userId, email, name: `Instructor ${i}` });
-      created.credentials.push({ email, password, role: 'instructor' });
+    const mintAccount = async (role, i) => {
+      const email = `${slug}-${role}${i}@clinic.local`;
+      const outcome = await accountProvisioning.provisionAccount({
+        email,
+        username: email,          // username has always equalled the address here
+        firstName: role === 'instructor' ? 'Instructor' : 'Student',
+        lastName: String(i),
+        organization: group_name,
+        role,
+        emailVerified: true,      // synthetic address; nothing to verify
+        // Unchanged behaviour: these credentials are handed out on a CSV, and
+        // forcing a rotation would strand the copy the instructor printed.
+        mustChangePassword: false,
+        provenance: { by: req.user.userId, via: 'group_deploy', ref: String(groupId) },
+        takenUsernames,
+      });
+
+      if (!outcome.created) {
+        throw new Error(`An account already exists for ${email}. Choose a different group name.`);
+      }
+
+      const bucket = role === 'instructor' ? created.instructors : created.students;
+      bucket.push({ id: outcome.user.user_id, email, name: `${role === 'instructor' ? 'Instructor' : 'Student'} ${i}` });
+      created.credentials.push({ email, password: outcome.password, role });
 
       try {
         await guacAPI('POST', '/users', {
           username: email,
-          password,
+          password: outcome.password,
           attributes: { disabled: null, timezone: 'America/Phoenix' }
         });
         created.guac_users.push(email);
       } catch (e) { /* skip if Guac unreachable */ }
-    }
+    };
 
-    for (let i = 1; i <= numStud; i++) {
-      const userId = uuidv4();
-      const email = `${group_name.toLowerCase().replace(/[^a-z0-9]/g, '')}-student${i}@clinic.local`;
-      const password = generatePassword();
-      const passwordHash = await bcrypt.hash(password, 12);
-
-      await cybercoreQuery(
-        `INSERT INTO cybercore_user (user_id, username, email, password_hash, password_alg, first_name, last_name, organization, role, email_verified, created_at)
-         VALUES ($1, $2, $3, $4, 'bcrypt', $5, $6, $7, $8, true, NOW())
-         RETURNING user_id, email, first_name, last_name, role`,
-        [userId, email, email, passwordHash, 'Student', `${i}`, group_name, 'student']
-      );
-      created.students.push({ id: userId, email, name: `Student ${i}` });
-      created.credentials.push({ email, password, role: 'student' });
-
-      try {
-        await guacAPI('POST', '/users', {
-          username: email,
-          password,
-          attributes: { disabled: null, timezone: 'America/Phoenix' }
-        });
-        created.guac_users.push(email);
-      } catch (e) { /* skip if Guac unreachable */ }
-    }
+    for (let i = 1; i <= numInst; i++) await mintAccount('instructor', i);
+    for (let i = 1; i <= numStud; i++) await mintAccount('student', i);
 
     if (created.guac_group?.identifier) {
       const groupId_guac = created.guac_group.identifier;

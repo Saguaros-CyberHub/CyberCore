@@ -547,8 +547,11 @@ router.post('/assign', authenticateToken, instructorOnly, async (req, res) => {
     
     // If student_email provided, look up the student (from cybercore_user)
     if (student_email && !student_id) {
+      // Case-insensitive: accounts are minted by several paths that disagreed
+      // about casing, so an exact match here would fail to find a student whose
+      // roster row happened to be capitalized. Uses ux_cybercore_user_email_lower.
       const userResult = await cybercoreQuery(
-        'SELECT user_id AS id FROM cybercore_user WHERE email = $1',
+        'SELECT user_id AS id FROM cybercore_user WHERE LOWER(email) = LOWER($1)',
         [student_email]
       );
       

@@ -213,7 +213,15 @@ const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
   max:      parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 5000,
   message:  { error: 'Too many requests, please try again later.' },
-  skip: (req) => peekJwt(req)?.role === 'admin' || isHighFrequencyRead(req),
+  // A stage token carries the account's real role but represents a sign-in that
+  // is only half finished, so it must not buy the admin exemption — otherwise
+  // knowing an admin's password (without their second factor) is enough to
+  // shed rate limiting. Bucketing by its `sub` below is still correct; that
+  // identifies the account rather than granting it anything.
+  skip: (req) => {
+    const payload = peekJwt(req);
+    return (!payload?.stage && payload?.role === 'admin') || isHighFrequencyRead(req);
+  },
   keyGenerator: (req) => {
     const payload = peekJwt(req);
     return payload?.sub ? `user:${payload.sub}` : `ip:${ipKey(req)}`;
@@ -243,6 +251,53 @@ const authLimiter = rateLimit({
 });
 app.use('/api/auth/login', authBodyParser, authLimiter);
 app.use('/api/auth/register', authBodyParser, authLimiter);
+
+// Setting a first password gets its own buckets. Both endpoints write a
+// password, so without a limit either one is an unthrottled oracle for anyone
+// holding a stage token or guessing at activation links.
+//
+// Keyed on the token subject rather than the IP: a whole class arriving from
+// one campus NAT address would otherwise share a bucket, and one student
+// fumbling their new password would lock out everyone else.
+const initialPasswordLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  keyGenerator: (req) => {
+    const payload = peekJwt(req);
+    return payload?.sub ? `pwinit:user:${payload.sub}` : `pwinit:ip:${ipKey(req)}`;
+  },
+  message: { error: 'Too many attempts. Please wait a few minutes and try again.' }
+});
+app.use('/api/auth/password/initial', initialPasswordLimiter);
+
+// Activation carries no identity until the token is redeemed, so this one can
+// only be keyed on the client. It is the brute-force surface for a 32-byte
+// random token — practically unguessable, but an open write endpoint should
+// never be unbounded.
+const activationLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => `activate:ip:${ipKey(req)}`,
+  message: { error: 'Too many activation attempts. Please wait a few minutes and try again.' }
+});
+app.use('/api/auth/activate', activationLimiter);
+
+// Roster imports create accounts and send mail on an instructor's behalf, which
+// makes them the one instructor-facing surface that can be turned outward. The
+// cap is generous for real teaching (a class is one or two runs) and tight
+// enough that the platform cannot be driven as a bulk sender. Preview and
+// confirm share the bucket deliberately — preview is an account-existence
+// oracle, so it should not be cheaper than the thing it previews.
+const rosterImportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  keyGenerator: (req) => {
+    const payload = peekJwt(req);
+    return payload?.sub ? `roster:user:${payload.sub}` : `roster:ip:${ipKey(req)}`;
+  },
+  message: { error: 'Too many roster operations. Please wait a few minutes and try again.' }
+});
+app.use(/^\/api\/cle\/courses\/[^/]+\/roster\//, rosterImportLimiter);
 
 const webhookLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -385,6 +440,14 @@ app.get('/login', (req, res) => {
 
 app.get('/register', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/register.html'));
+});
+
+// Landing page for the activation links the CLE roster import emails. The token
+// stays in the query string and is only ever POSTed to /api/auth/activate — the
+// page itself is static and unauthenticated, because its recipient has no
+// account credential yet by definition.
+app.get('/activate', (req, res) => {
+  res.sendFile(path.join(__dirname, '../public/activate.html'));
 });
 
 // Placeholder pages for modules without content
@@ -554,6 +617,18 @@ async function start() {
 
     // Ensure MFA columns exist on cybercore_user (idempotent)
     await ensureMfaColumns();
+
+    // Same story as the MFA columns: the config/postgres scripts only run on a
+    // fresh volume, so the password-policy and provenance columns — and the
+    // activation-token table the roster import issues invitations from — have
+    // to be added idempotently here for existing deployments.
+    await require('./utils/account-provisioning').ensureProvisioningColumns();
+    await require('./utils/activation').ensureActivationTokens();
+    await require('./utils/mailer').ensureEmailOutbox();
+
+    // Drains queued mail in the background. No-ops when mail isn't configured,
+    // so an offline deployment doesn't spin a pointless timer.
+    require('./utils/email-worker').startEmailWorker();
 
     // Nothing can be deploying yet — anything that says it is was abandoned by
     // a previous process and is holding a VXLAN it will never use.

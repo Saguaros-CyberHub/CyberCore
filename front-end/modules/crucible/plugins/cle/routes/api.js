@@ -21,6 +21,7 @@ const studentRoutes = require('./students');
 const sessionRoutes = require('./sessions');
 const flagRoutes = require('./flags');
 const myCoursesRoutes = require('./my-courses');
+const courseRosterRoutes = require('./course-roster');
 
 // Student-facing: enrolled courses + their capture-flag boards. No role gate —
 // every route inside scopes to req.user.userId and checks enrollment itself.
@@ -35,6 +36,14 @@ router.use('/api/cle/sessions', authenticateToken, instructorOnly, sessionRoutes
 router.use('/api/cle/courses', authenticateToken, coursesRoutes);
 
 // Nested course resources - use a middleware to pass courseId to nested routers
+// Bulk roster operations (CSV import, cohort generation, per-student credential
+// actions). Mounted BEFORE /students so it cannot collide with that router's
+// /:studentId routes.
+router.use('/api/cle/courses/:courseId/roster', authenticateToken, (req, res, next) => {
+  res.locals.courseId = req.params.courseId;
+  next();
+}, courseRosterRoutes);
+
 router.use('/api/cle/courses/:courseId/students', authenticateToken, (req, res, next) => {
   // Store courseId from params for nested router access
   res.locals.courseId = req.params.courseId;

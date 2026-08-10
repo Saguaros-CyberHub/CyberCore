@@ -1,0 +1,63 @@
+# ============================================================================
+# docker-compose.dev.yml — development overrides
+# ----------------------------------------------------------------------------
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# Replaces the Postfix relay with Mailpit, which accepts every message on port
+# 25 and delivers NONE of them, exposing what it captured on a local web UI.
+#
+# The substitution is by service NAME, so the app's MAIL_HOST=mailrelay is
+# unchanged and no application config differs between dev and production. That
+# matters: a mail path that is only exercised under a different configuration
+# is a mail path you have not actually tested.
+#
+# Read captured messages at http://127.0.0.1:8025 — real rendered HTML and
+# text, real activation links you can click, and nothing reaching a real inbox.
+#
+# WHAT THIS DOES NOT TEST
+# Mailpit stands in for the relay, so it tells you nothing about Postfix's
+# mynetworks, the HELO hostname, DKIM signing, or whether outbound 25 is even
+# open. Validate those against the real `mailrelay` service before trusting
+# delivery in production — see the deliverability notes in docker-compose.yml.
+# ============================================================================
+
+services:
+  mailrelay:
+    image: axllent/mailpit:latest
+    container_name: cybercore-mailpit
+    restart: unless-stopped
+    environment:
+      # This is a capture server on an internal network; it must accept
+      # whatever the app sends without argument.
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+      MP_MAX_MESSAGES: "5000"
+    ports:
+      # Web UI, bound to loopback only — never expose a mailbox viewer.
+      # SMTP (1025 in mailpit's default config) is NOT published; the app
+      # reaches it over cybercore-net like it does the real relay.
+      - "127.0.0.1:8025:8025"
+    # Mailpit listens on 1025 by default; the app is configured for 25.
+    command: ["--smtp", "0.0.0.0:25", "--listen", "0.0.0.0:8025"]
+    networks:
+      - cybercore-net
+
+  app:
+    environment:
+      # Turn mail on for development regardless of .env, so the capture loop
+      # actually exercises the queue and the worker.
+      MAIL_ENABLED: "true"
+      MAIL_HOST: mailrelay
+      MAIL_PORT: "25"
+      MAIL_FROM: CyberHub (dev) <no-reply@localhost>
+      # Local dev serves on 127.0.0.1:3000, and an activation link built from
+      # the production URL would be unclickable from a dev browser.
+      MAIL_PUBLIC_URL: ${MAIL_PUBLIC_URL:-http://localhost:3000}
+      # Nothing leaves the machine, so no allowlist — this is how you exercise
+      # the "sends to any domain" path that production deliberately blocks.
+      MAIL_ALLOWED_RECIPIENT_DOMAINS: ""
+      # Bodies still get encrypted at rest in dev; falls back to the MFA key.
+      MAIL_ENCRYPT_KEY: ${MAIL_ENCRYPT_KEY:-${MFA_ENCRYPT_KEY}}
+      # Tighter loop so a manual test doesn't sit waiting on the sweeper.
+      MAIL_POLL_MS: "5000"

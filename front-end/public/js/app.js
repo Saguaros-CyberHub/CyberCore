@@ -135,6 +135,26 @@ const API = {
 
     async mfaDisable(code) {
       return API.request('/auth/mfa/disable', { method: 'POST', body: { code } });
+    },
+
+    // Replace a temporary password using the short-lived pwchange-stage token
+    // login() returned instead of a session. Returns the full session on success.
+    async setInitialPassword(stageToken, newPassword) {
+      return API.request('/auth/password/initial', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${stageToken}` },
+        body: { newPassword }
+      });
+    },
+
+    // Redeem a single-use activation link and set a first password. No auth
+    // header — the token in the body IS the authentication, because the
+    // recipient has no credential yet.
+    async activate(token, newPassword) {
+      return API.request('/auth/activate', {
+        method: 'POST',
+        body: { token, newPassword }
+      });
     }
   },
 

@@ -27,11 +27,31 @@ CREATE TABLE IF NOT EXISTS cybercore_user (
   role           TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user','student','admin','instructor')),
   group_key      TEXT REFERENCES cybercore_group(key) ON DELETE SET NULL,
   guac_password  BYTEA,
+  -- Password policy. must_change_password gates session issuance at login;
+  -- temp_password_expires_at bounds a credential that was handed out rather
+  -- than chosen. Also applied at runtime by ensureProvisioningColumns() in
+  -- src/utils/account-provisioning.js, since this script does not re-run on
+  -- an existing database. See front-end/migrations/027.
+  must_change_password     BOOLEAN NOT NULL DEFAULT FALSE,
+  password_changed_at      TIMESTAMPTZ,
+  temp_password_expires_at TIMESTAMPTZ,
+  activated_at             TIMESTAMPTZ,
+  -- Provenance: who minted this account and for which course/group. This is
+  -- the authorization key for instructor-scoped credential actions — an
+  -- instructor may only touch accounts their own course created.
+  provisioned_by   UUID,
+  provisioned_via  TEXT,   -- no CHECK: the boot-time DDL re-runs every start
+  provisioned_ref  TEXT,   -- course_id or group_id
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
   last_auth_at   TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_user_email_lower ON cybercore_user (lower(email));
+-- The login lookup matches lower(email) OR lower(username); without this the
+-- OR degrades to a sequential scan on every sign-in.
+CREATE INDEX IF NOT EXISTS idx_cybercore_user_username_lower ON cybercore_user (lower(username));
+CREATE INDEX IF NOT EXISTS idx_cybercore_user_provisioned
+  ON cybercore_user (provisioned_via, provisioned_ref) WHERE provisioned_via IS NOT NULL;
 
 -- === User↔Group bridge ===
 CREATE TABLE IF NOT EXISTS cybercore_user_group (
