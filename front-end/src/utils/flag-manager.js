@@ -126,6 +126,110 @@ async function ensureLaneFlags({ laneId, userId, vms }) {
   return out;
 }
 
+/**
+ * Read a lane's flags back in a form seedLaneFlags can replay onto a NEW lane.
+ *
+ * Exists because cybercore_lane_flag CASCADEs off cybercore_lane, so any teardown
+ * that deletes the row also deletes the student's capture state. A redeploy that
+ * is meant to rebuild a broken box — not to reset the exercise — has to carry
+ * that state across itself.
+ *
+ * @param {string[]} laneIds
+ * @returns {Promise<Array<{lane_id, user_id, vm_name, flag_type, flag_value, captured_at, points}>>}
+ */
+async function snapshotLaneFlags(laneIds) {
+  const ids = (Array.isArray(laneIds) ? laneIds : [laneIds]).filter(Boolean);
+  if (ids.length === 0) return [];
+  const result = await cybercoreQuery(
+    `SELECT lane_id, user_id, vm_name, flag_type, flag_value, captured_at, points
+       FROM cybercore_lane_flag
+      WHERE lane_id = ANY($1::uuid[])`,
+    [ids]
+  );
+  return result.rows;
+}
+
+/**
+ * Pre-create a lane's flag rows from a snapshot taken off a previous lane, so a
+ * redeploy re-plants the SAME values and the student keeps every capture.
+ *
+ * ORDERING IS LOAD-BEARING: this must run after the lane row exists and BEFORE
+ * plantFlagsForLane. ensureLaneFlags only preserves a value it finds already
+ * there (its ON CONFLICT re-assigns the column to itself), so seeding first is
+ * the whole mechanism by which the new lane inherits the old values instead of
+ * minting fresh ones. Seed afterwards and the guest has already been written
+ * with a different value than the row now claims.
+ *
+ * plant_status is deliberately NOT carried over. The VALUE survives, but the new
+ * guest does not have the file until planting writes it — claiming 'planted'
+ * before that would tell a student to go looking for a file that isn't there.
+ * captured_at IS carried over: the student already found it, and rebuilding
+ * their box is not a reason to take that back.
+ *
+ * ON CONFLICT DO NOTHING covers ux_cybercore_lane_flag_value, the GLOBAL unique
+ * index on flag_value. If the old row somehow still exists — a teardown reported
+ * clean that left the row behind — the seed is skipped and ensureLaneFlags mints
+ * a fresh value for that flag. Losing the carry-over is recoverable; failing the
+ * redeploy and leaving the student with no machines is not. The shortfall is
+ * returned so the caller can say so out loud.
+ *
+ * @param {object} a
+ * @param {string} a.laneId  the NEW lane
+ * @param {string} a.userId
+ * @param {Array}  a.seeds   rows from snapshotLaneFlags
+ * @returns {Promise<{seeded:number, skipped:number}>}
+ */
+async function seedLaneFlags({ laneId, userId, seeds }) {
+  const rows = (seeds || []).filter(s => s && s.vm_name && s.flag_type && s.flag_value);
+  if (rows.length === 0) return { seeded: 0, skipped: 0 };
+
+  let seeded = 0;
+  for (const s of rows) {
+    const r = await cybercoreQuery(
+      `INSERT INTO cybercore_lane_flag
+         (lane_id, user_id, vm_name, flag_type, flag_value, plant_status, captured_at, points)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
+       ON CONFLICT DO NOTHING
+       RETURNING flag_id`,
+      [laneId, userId, s.vm_name, s.flag_type, s.flag_value, s.captured_at || null, s.points || 0]
+    ).catch((e) => {
+      console.warn(`[Flags] Could not seed ${s.vm_name}/${s.flag_type} onto lane ${laneId}: ${e.message}`);
+      return { rowCount: 0 };
+    });
+    if (r.rowCount > 0) seeded++;
+  }
+
+  const skipped = rows.length - seeded;
+  if (skipped > 0) {
+    console.warn(
+      `[Flags] Lane ${laneId}: ${skipped}/${rows.length} flag(s) could not be carried over — ` +
+      `fresh values will be minted for those and the student's capture of them is lost.`
+    );
+  }
+  return { seeded, skipped };
+}
+
+/**
+ * Drop the flag rows for specific VMs on a lane, so the next plant mints fresh
+ * values and clears capture state.
+ *
+ * The attach-mode counterpart to "delete the lane row and let CASCADE do it":
+ * an attached module's host lane SURVIVES a detach, so its flag rows survive too
+ * and ensureLaneFlags would faithfully re-plant the same values. That is the
+ * right default, and this is the opt-out.
+ *
+ * @returns {Promise<number>} rows deleted
+ */
+async function deleteLaneFlagsForVms({ laneId, vmNames }) {
+  const names = (vmNames || []).filter(Boolean);
+  if (!laneId || names.length === 0) return 0;
+  const r = await cybercoreQuery(
+    `DELETE FROM cybercore_lane_flag WHERE lane_id = $1 AND vm_name = ANY($2::text[])`,
+    [laneId, names]
+  );
+  return r.rowCount || 0;
+}
+
 async function setPlantStatus(flagId, status, error = null) {
   await cybercoreQuery(
     `UPDATE cybercore_lane_flag
@@ -789,6 +893,11 @@ module.exports = {
   normalizeSubmission,
   timingSafeEqualStr,
   ensureLaneFlags,
+  // carry-over across a redeploy (cybercore_lane_flag CASCADEs off the lane row,
+  // so rebuilding a lane destroys capture state unless it is replayed)
+  snapshotLaneFlags,
+  seedLaneFlags,
+  deleteLaneFlagsForVms,
   // planting
   plantFlagsForLane,
   rotateLaneFlags,

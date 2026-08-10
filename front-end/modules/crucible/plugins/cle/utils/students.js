@@ -118,8 +118,31 @@ function excludeStudentsWithLab(materialId) {
   };
 }
 
+/**
+ * Run several exclusions and merge their results into one, so a caller can pass
+ * more than one to resolveTargetStudents' single `excludeIf` slot. The first
+ * reason recorded for a student wins — order the arguments most-specific first.
+ *
+ * Exclusions are independent predicates over the same candidate list, so running
+ * them all and merging is equivalent to chaining, without needing a pipeline.
+ */
+function combineExclusions(...fns) {
+  const active = fns.filter(Boolean);
+  if (active.length <= 1) return active[0];
+  return async (candidates) => {
+    const merged = new Map();
+    for (const fn of active) {
+      for (const [id, reason] of await fn(candidates)) {
+        if (!merged.has(id)) merged.set(id, reason);
+      }
+    }
+    return merged;
+  };
+}
+
 module.exports = {
   resolveTargetStudents,
   excludeStudentsWithCourseLane,
   excludeStudentsWithLab,
+  combineExclusions,
 };

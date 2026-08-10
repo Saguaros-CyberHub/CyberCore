@@ -338,7 +338,7 @@ VALUES (
   -- Keep this spec byte-identical to migrations/020_seed_cybersaguaros_module.sql.
   -- Both statements upsert the same challenge_key, so whichever applies last
   -- wins; they previously disagreed (this one was missing template_node).
-  '{"attachable":true,"template_node":"cyberhub-node-5","vms":[{"name":"cybersaguaros","template_vmid":1703,"type":"qemu","role":"web"}],"flags":[{"key":"user_flag","description":"Read /home/hrivera/user.txt after landing an SSH session as hrivera","points":50},{"key":"root_flag","description":"Read /root/root.txt after escalating to root","points":100}]}'::jsonb,
+  '{"attachable":true,"template_node":"cyberhub-node-5","vms":[{"name":"cybersaguaros","template_vmid":1703,"type":"qemu","role":"web","os":"linux","flags":{"user":{"path":"/home/hrivera/user.txt"},"root":{"path":"/root/root.txt"}}}]}'::jsonb,
   'active'
 )
 ON CONFLICT (challenge_key) DO UPDATE

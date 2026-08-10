@@ -7,6 +7,16 @@
 --
 -- App source is bundled in the CyberCore repo at challenges/cybersaguaros-ssrf/.
 --
+-- Flags are NOT baked into template 1703. src/utils/flag-manager.js plants a
+-- per-lane unique value at attach time via plantFlagsForLane(). Two spec fields
+-- drive that and both matter:
+--   vms[].os              — skips guest-OS probing; plantFlagsForLane throws if
+--                           it can neither read this nor detect the OS.
+--   vms[].flags.user.path — WITHOUT this override, plantLinuxUserFlag() writes
+--                           user.txt into EVERY /home/* directory, including
+--                           saguarobot's. That would hand the webshell foothold
+--                           the user flag and skip the whole SSH stage.
+--
 -- Schema notes (crucible_challenge):
 --   difficulty     — integer 0-5 (3 = intermediate: SSRF chain + filter bypass + LinPE)
 --   challenge_type — crucible_challenge_type enum: single_vm | multi_vm | koth | ...
@@ -32,12 +42,13 @@ VALUES (
         "name": "cybersaguaros",
         "template_vmid": 1703,
         "type": "qemu",
-        "role": "web"
+        "role": "web",
+        "os": "linux",
+        "flags": {
+          "user": { "path": "/home/hrivera/user.txt" },
+          "root": { "path": "/root/root.txt" }
+        }
       }
-    ],
-    "flags": [
-      { "key": "user_flag", "description": "Read /home/hrivera/user.txt after landing an SSH session as hrivera", "points": 50 },
-      { "key": "root_flag", "description": "Read /root/root.txt after escalating to root", "points": 100 }
     ]
   }'::jsonb,
   'active'

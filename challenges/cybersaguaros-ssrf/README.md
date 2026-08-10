@@ -165,10 +165,25 @@ Bake-script artifacts:
   maintenance grant for nightly sweeps and telemetry reindexing. The bake runs
   `visudo -c` against it and refuses to seal if it does not parse, because a
   syntax error here breaks `sudo` for every user on the box.
-- `/home/hrivera/user.txt` (`0640 hrivera:hrivera`), `/root/root.txt` (`0600`).
-  Static values; override at bake time with `USER_FLAG_VALUE` /
-  `ROOT_FLAG_VALUE`. Nothing in CyberCore validates flags today, so they are
-  proof-of-ownership only.
+- **Flags are not baked into the template.** `src/utils/flag-manager.js` plants
+  them at *deploy* time through `plantFlagsForLane()`, which `attached-modules.js`
+  calls on every lane attach, so each lane gets its own unique 32-hex value that
+  is wired into the submission/verification and instructor-dashboard tables.
+  Two `spec` fields drive this and both are load-bearing:
+  - `vms[].os: "linux"` — skips guest-OS probing; planting fails outright if the
+    OS can be neither read nor detected.
+  - `vms[].flags.user.path: "/home/hrivera/user.txt"` — **without this override**
+    `plantLinuxUserFlag()` writes `user.txt` into *every* `/home/*` directory,
+    including `saguarobot`'s, handing the webshell foothold the user flag and
+    skipping the entire SSH stage.
+
+  The planter writes `user.txt` mode `0644` and does not `chown` it when given
+  an explicit path, so containment rests entirely on `/home/hrivera` being
+  `0750 hrivera:hrivera` — `saguarobot` cannot traverse in, so it cannot read a
+  world-readable file inside. The bake asserts exactly that with `HOME_PERMS`
+  (it drops a decoy at the planter's own mode and confirms `saguarobot` is
+  refused), and asserts `ROOT_DIR_CLOSED` so `hrivera` cannot list `/root`
+  before escalating. `/root/root.txt` is planted `0600 root:root`.
 - `/opt/saguaro/research-notes.txt` — DB app creds + AD-pivot hint. Ambient
   flavour; it deliberately does **not** point at the deploy key.
 - `/etc/cloud/cloud.cfg.d/99-cybercore-default-user.cfg` and

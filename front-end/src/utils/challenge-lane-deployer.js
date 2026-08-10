@@ -55,7 +55,7 @@ const { selectBestNode } = require('./node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('./batch-deployer');
 const { generatePassword } = require('./password-generator');
 const { waitForGuestAgent, executeScriptsOnVM } = require('./script-executor');
-const { plantFlagsForLane } = require('./flag-manager');
+const { plantFlagsForLane, seedLaneFlags } = require('./flag-manager');
 const goadDeploy = require('./goad-deploy');
 const laneDeployer = require('./lane-deployer');
 const nodeSsh = require('./node-ssh');
@@ -1105,6 +1105,10 @@ async function deployLaneVms(job, ctx) {
  * @param {string}   [a.description]     appended to every Proxmox description
  * @param {string}   [a.progressId]      key for readProgress()
  * @param {string}   [a.progressLabel]
+ * @param {object}   [a.flagSeeds]       { [userId]: [rows from flagManager.snapshotLaneFlags] }.
+ *   Replays a previous lane's flag values (and captures) onto the new lane before
+ *   planting, so rebuilding a student's lane doesn't reset their progress. See
+ *   flag-manager.seedLaneFlags for why it has to happen at insert time.
  * @returns {Promise<{provisioned: Array, failed: Array, progressId: string}>}
  */
 async function deployChallengeLanes(args) {
@@ -1114,8 +1118,12 @@ async function deployChallengeLanes(args) {
   // eviction), and any lane row already inserted stuck at 'deploying' — which
   // also holds its VXLAN out of the pool permanently, since allocateVxlanIds
   // only skips 'error' and 'deleted'.
+  //
+  // insertedLaneIds is filled by the inner function as it creates rows, so the
+  // recovery sweep below can name exactly the lanes THIS call made.
+  const insertedLaneIds = [];
   try {
-    return await deployChallengeLanesInner(args);
+    return await deployChallengeLanesInner({ ...args, _insertedLaneIds: insertedLaneIds });
   } catch (err) {
     if (args.progressId) {
       const p = laneDeployer.readProgress(args.progressId);
@@ -1130,14 +1138,23 @@ async function deployChallengeLanes(args) {
     }
     // Any lane row we managed to insert before failing must not sit in
     // 'deploying' — that status is invisible to teardown AND to the allocator.
-    await cybercoreQuery(
-      `UPDATE cybercore_lane
-          SET status = 'error', config = config || $2::jsonb, updated_at = NOW()
-        WHERE status = 'deploying'
-          AND config->>'challenge_key' = $1
-          AND created_at > NOW() - INTERVAL '1 hour'`,
-      [args.challenge?.challenge_key || '', JSON.stringify({ error: err.message })]
-    ).catch(() => {});
+    //
+    // Scoped to the ids this call inserted. It used to sweep by challenge_key +
+    // "created in the last hour", which is not scoped to the call, the course, or
+    // even the caller: one failed single-student redeploy would mark every
+    // in-flight lane of the same challenge across every course as 'error',
+    // releasing their VXLANs into the allocator while their VMs were still being
+    // built. Concurrent deploys of one challenge are routine now that a single
+    // student can be redeployed on their own, so that blast radius had to go.
+    if (insertedLaneIds.length > 0) {
+      await cybercoreQuery(
+        `UPDATE cybercore_lane
+            SET status = 'error', config = config || $2::jsonb, updated_at = NOW()
+          WHERE lane_id = ANY($1::uuid[])
+            AND status = 'deploying'`,
+        [insertedLaneIds, JSON.stringify({ error: err.message })]
+      ).catch(() => {});
+    }
     throw err;
   }
 }
@@ -1155,6 +1172,8 @@ async function deployChallengeLanesInner({
   description = '',
   progressId = null,
   progressLabel = '',
+  flagSeeds = null,
+  _insertedLaneIds = [],
 }) {
   if (!Array.isArray(users) || users.length === 0) {
     return { provisioned: [], failed: [], progressId };
@@ -1268,6 +1287,27 @@ async function deployChallengeLanesInner({
         }), resolvedModule]
       );
       const laneId = ins.rows[0].lane_id;
+      _insertedLaneIds.push(laneId);
+
+      // Carry a previous lane's flag values and captures onto this one, when the
+      // caller is rebuilding a lane rather than creating a fresh one. MUST happen
+      // here — after the row exists, long before step 6 plants — because
+      // ensureLaneFlags only preserves a value that is already in the table.
+      // Best-effort: a student re-earning a flag is a far better outcome than a
+      // redeploy that dies and leaves them with no machines at all.
+      const seeds = flagSeeds ? (flagSeeds[user.id] || flagSeeds[String(user.id)]) : null;
+      if (seeds && seeds.length > 0) {
+        const { seeded, skipped } = await seedLaneFlags({ laneId, userId: user.id, seeds })
+          .catch((e) => {
+            console.warn(`${logTag} Flag carry-over failed for ${user.email}: ${e.message}`);
+            return { seeded: 0, skipped: seeds.length };
+          });
+        console.log(
+          `${logTag} Carried ${seeded}/${seeds.length} flag(s) onto lane ${laneId} for ${user.email}` +
+          (skipped > 0 ? ` (${skipped} will be re-minted)` : '')
+        );
+      }
+
       created.push({ lane_id: laneId, user_id: user.id, user_email: user.email, vxlan_id: vxlanId });
       jobs.push({
         laneId, user, vxlanId,

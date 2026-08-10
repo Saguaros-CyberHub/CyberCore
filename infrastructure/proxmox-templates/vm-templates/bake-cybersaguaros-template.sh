@@ -104,13 +104,20 @@ DEPLOY_DIR="${DEPLOY_DIR:-/opt/saguaro/deploy}"
 # wrapper to keep saguarobot out.
 PRIV_GROUP="${PRIV_GROUP:-fieldops}"
 
-# Proof-of-ownership text files. Nothing in CyberCore validates these today
-# (crucible_score has no submission route), so they are read-and-show only.
-# NOTE: do NOT write these as ${VAR:-FLAG{...}} — the braces confuse bash.
-USER_FLAG_VALUE="${USER_FLAG_VALUE:-}"
-ROOT_FLAG_VALUE="${ROOT_FLAG_VALUE:-}"
-[ -n "$USER_FLAG_VALUE" ] || USER_FLAG_VALUE='FLAG{cybersaguaros-user-7f2c9ab41de60358}'
-[ -n "$ROOT_FLAG_VALUE" ] || ROOT_FLAG_VALUE='FLAG{cybersaguaros-root-c04e18d7b9a2f563}'
+# NOTE: flags are deliberately NOT baked into this template.
+# src/utils/flag-manager.js plants them at DEPLOY time via plantFlagsForLane(),
+# which attached-modules.js calls on every lane attach. That gives each lane its
+# own unique 32-hex value, wired into the submission/verification and instructor
+# dashboard tables — a baked static flag would be identical on every lane and
+# unverifiable. The template only has to provide the right *permissions* for
+# those files to land safely; see the /home/$SSH_USER 0750 step in runcmd.
+#
+# Paths are pinned per-VM in the challenge spec:
+#   vms[].flags.user.path = /home/$SSH_USER/user.txt
+#   vms[].flags.root.path = /root/root.txt
+# The user path override matters — without it plantLinuxUserFlag() writes
+# user.txt into EVERY /home/* directory, including saguarobot's, which would
+# hand the foothold account the user flag and skip the SSH stage entirely.
 
 # Must match DB_PASS in ${CHALLENGE_DIR}/app/includes/config.php.
 DB_APP_PASSWORD="Pr1ckly-Pear-Access-2026"
@@ -479,12 +486,18 @@ runcmd:
   - [ sh, -c, 'chown root:root /opt/saguaro; chmod 755 /opt/saguaro' ]
   - [ sh, -c, 'chown root:$PRIV_GROUP /opt/saguaro/field-sync.sh; chmod 775 /opt/saguaro/field-sync.sh' ]
 
-  # ---- Artifact 4: flags ---------------------------------------------------
-  # /home/$SSH_USER is 0750 $SSH_USER:$SSH_USER, so saguarobot cannot read
-  # user.txt — the SSH stage cannot be skipped.
+  # ---- Artifact 4: home directory permissions (flag containment) -----------
+  # No flag files are written here — flag-manager.js plants them at deploy time
+  # with a per-lane unique value. What the TEMPLATE must guarantee is that the
+  # planted user.txt is unreachable from the webshell.
+  #
+  # plantLinuxUserFlag() writes the file 0644 and does NOT chown it when an
+  # explicit path is given, so the file itself is world-readable. Containment
+  # therefore rests entirely on this directory mode: 0750 $SSH_USER:$SSH_USER
+  # means saguarobot (other: ---) cannot traverse into /home/$SSH_USER and so
+  # cannot read a 0644 file inside it. If this ever regresses to 0755 the SSH
+  # stage becomes skippable. The HOME_PERMS marker asserts it.
   - [ sh, -c, 'chmod 750 /home/$SSH_USER' ]
-  - [ sh, -c, 'printf "%s\n" "$USER_FLAG_VALUE" > /home/$SSH_USER/user.txt; chown $SSH_USER:$SSH_USER /home/$SSH_USER/user.txt; chmod 640 /home/$SSH_USER/user.txt' ]
-  - [ sh, -c, 'printf "%s\n" "$ROOT_FLAG_VALUE" > /root/root.txt; chown root:root /root/root.txt; chmod 600 /root/root.txt' ]
 
   # ---- Enable + start services ----
   - [ systemctl, enable, qemu-guest-agent ]
@@ -562,9 +575,16 @@ runcmd:
   # Cron artifact: present, writable by $SSH_USER, NOT writable by saguarobot.
   - [ sh, -c, 'if [ -f /etc/cron.d/saguaro-fieldsync ] && su -s /bin/sh $SSH_USER -c "test -w /opt/saguaro/field-sync.sh" && ! su -s /bin/sh saguarobot -c "test -w /opt/saguaro/field-sync.sh"; then echo "CRON_ARTIFACT=yes" >> /etc/cybercore-bake.env; else echo "CRON_ARTIFACT=no" >> /etc/cybercore-bake.env; fi' ]
 
-  # Flags: content, exact perms, and NOT readable one rung down the chain.
-  - [ sh, -c, 'm=\$(stat -c "%a %U %G" /home/$SSH_USER/user.txt 2>/dev/null); if grep -Fq "FLAG{" /home/$SSH_USER/user.txt 2>/dev/null && [ "\$m" = "640 $SSH_USER $SSH_USER" ] && ! su -s /bin/sh saguarobot -c "cat /home/$SSH_USER/user.txt" >/dev/null 2>&1; then echo "USER_FLAG=yes" >> /etc/cybercore-bake.env; else echo "USER_FLAG=no (\$m)" >> /etc/cybercore-bake.env; fi' ]
-  - [ sh, -c, 'm=\$(stat -c "%a %U" /root/root.txt 2>/dev/null); if grep -Fq "FLAG{" /root/root.txt 2>/dev/null && [ "\$m" = "600 root" ] && ! su -s /bin/sh $SSH_USER -c "cat /root/root.txt" >/dev/null 2>&1; then echo "ROOT_FLAG=yes" >> /etc/cybercore-bake.env; else echo "ROOT_FLAG=no (\$m)" >> /etc/cybercore-bake.env; fi' ]
+  # Flag CONTAINMENT, not flag content — the files themselves are planted at
+  # deploy time by flag-manager.js, so there is nothing to check here yet.
+  # What must hold is that a 0644 user.txt dropped into /home/$SSH_USER stays
+  # unreadable from the webshell account. Tested for real: write a decoy at the
+  # exact mode the planter uses, confirm saguarobot cannot read it, remove it.
+  - [ sh, -c, 'printf "%s" "bake-decoy" > /home/$SSH_USER/user.txt; chmod 644 /home/$SSH_USER/user.txt; m=\$(stat -c "%a %U" /home/$SSH_USER); if [ "\$m" = "750 $SSH_USER" ] && ! su -s /bin/sh saguarobot -c "cat /home/$SSH_USER/user.txt" >/dev/null 2>&1; then echo "HOME_PERMS=yes" >> /etc/cybercore-bake.env; else echo "HOME_PERMS=no (\$m)" >> /etc/cybercore-bake.env; fi; rm -f /home/$SSH_USER/user.txt' ]
+
+  # And /root must stay closed to $SSH_USER before escalation, or the root flag
+  # is readable straight after the SSH pivot.
+  - [ sh, -c, 'if su -s /bin/sh $SSH_USER -c "ls /root" >/dev/null 2>&1; then echo "ROOT_DIR_CLOSED=no" >> /etc/cybercore-bake.env; else echo "ROOT_DIR_CLOSED=yes" >> /etc/cybercore-bake.env; fi' ]
 
   # Both layers of the cloud-init sudo guard are in place, and saguarobot holds
   # neither the blanket sudoers file nor 'sudo' group membership.
@@ -690,8 +710,8 @@ else
       M_SUDO_GATED=$(get SUDO_GATED)
       M_NO_STRAY_SUID=$(get NO_STRAY_SUID)
       M_CRON=$(get CRON_ARTIFACT)
-      M_USER_FLAG=$(get USER_FLAG)
-      M_ROOT_FLAG=$(get ROOT_FLAG)
+      M_HOME_PERMS=$(get HOME_PERMS)
+      M_ROOT_DIR=$(get ROOT_DIR_CLOSED)
       SUDO_GUARD=$(get SUDO_GUARD)
       SUDOERS_CLEAN=$(get SUDOERS_CLEAN)
       M_TMP_OPTS=$(get TMP_OPTS)
@@ -714,8 +734,8 @@ else
       echo "    gate holds vs bot:    ${M_SUDO_GATED:-unknown}"
       echo "    no stray setuid:      ${M_NO_STRAY_SUID:-unknown}"
       echo "    root cron artifact:   ${M_CRON:-unknown}"
-      echo "    user flag:            ${M_USER_FLAG:-unknown}"
-      echo "    root flag:            ${M_ROOT_FLAG:-unknown}"
+      echo "    home 0750 (flag safe): ${M_HOME_PERMS:-unknown}"
+      echo "    /root closed to user: ${M_ROOT_DIR:-unknown}"
       echo "    sudo guard armed:     ${SUDO_GUARD:-unknown}"
       echo "    saguarobot sudo-free: ${SUDOERS_CLEAN:-unknown}"
       echo "    /tmp mount options:   ${M_TMP_OPTS:-unknown}   (nosuid breaks /tmp/rootbash payloads)"
@@ -738,8 +758,8 @@ else
       [ "$M_SUDO_GATED" != "yes" ] && { echo "ERROR: saguarobot CAN sudo — the webshell short-circuits straight to root"; FAIL=1; }
       [ "$M_NO_STRAY_SUID" != "yes" ] && { echo "ERROR: stray setuid binaries under /opt, /home or /usr/local (leftover from an older bake?)"; FAIL=1; }
       [ "$M_CRON" != "yes" ]       && { echo "ERROR: root cron artifact missing, or writable by the wrong account"; FAIL=1; }
-      [ "$M_USER_FLAG" != "yes" ]  && { echo "ERROR: user.txt missing, wrong perms, or readable by saguarobot"; FAIL=1; }
-      [ "$M_ROOT_FLAG" != "yes" ]  && { echo "ERROR: /root/root.txt missing, wrong perms, or readable by $SSH_USER"; FAIL=1; }
+      [ "$M_HOME_PERMS" != "yes" ] && { echo "ERROR: /home/$SSH_USER is not 0750 $SSH_USER, or saguarobot can read a 0644 file inside it — the deploy-planted user flag would be readable from the webshell"; FAIL=1; }
+      [ "$M_ROOT_DIR" != "yes" ]   && { echo "ERROR: $SSH_USER can list /root — the deploy-planted root flag is readable without escalation"; FAIL=1; }
       [ "$SUDO_GUARD" != "yes" ]   && { echo "ERROR: cloud-init sudo guard not armed — lane clones will re-grant saguarobot NOPASSWD:ALL"; FAIL=1; }
       [ "$SUDOERS_CLEAN" != "yes" ] && { echo "ERROR: saguarobot still holds a sudo grant — the lateral-movement stage is bypassable"; FAIL=1; }
     else
@@ -801,16 +821,15 @@ echo "                    named by /opt/saguaro/field-sync.sh"
 echo "                    ssh2john id_rsa > k.hash"
 echo "                    john --wordlist=rockyou.txt k.hash  -> $DEPLOY_KEY_PASSPHRASE"
 echo "                    chmod 600 id_rsa && ssh -i id_rsa $SSH_USER@<ip>"
-echo "  User flag:      /home/$SSH_USER/user.txt"
-echo "                    $USER_FLAG_VALUE"
+echo "  User flag:      /home/$SSH_USER/user.txt  (planted at DEPLOY time by"
+echo "                    flag-manager.js -- unique per lane, not baked here)"
 echo "  Root privesc:   any of these (all gated to group $PRIV_GROUP)"
 echo "                    sudo -l          # lists the grant, no password"
 echo "                    sudo find . -exec /bin/sh \\; -quit"
 echo "                    sudo python3 -c 'import os; os.system(\"/bin/bash\")'"
 echo "                    /opt/saguaro/field-sync.sh  (0775 root:$PRIV_GROUP,"
 echo "                      run by /etc/cron.d/saguaro-fieldsync every minute)"
-echo "  Root flag:      /root/root.txt"
-echo "                    $ROOT_FLAG_VALUE"
+echo "  Root flag:      /root/root.txt  (also planted at deploy time)"
 echo "  Red herring:    dvalmont / $DVALMONT_PASSWORD  (SSH works, leads nowhere)"
 echo "  Off-path:       reflected XSS + SQLi on /research.php?q="
 echo "  Instructor:     $SSH_USER / $SSH_PASSWORD (not crackable, console use)"

@@ -242,7 +242,16 @@ const Toast = {
  * Reuses the shared .modal-overlay/.modal styles so dark mode just works.
  */
 const Confirm = {
-  show({ title = 'Are you sure?', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false } = {}) {
+  /**
+   * `checkbox: { label, checked }` adds one opt-in toggle to the dialog, for a
+   * destructive action with a meaningful variant (e.g. "also reset flags").
+   *
+   * Resolving stays backward compatible with the 26 existing
+   * `if (!await Confirm.show(…))` call sites: cancel is still false, and confirm
+   * is still `true` UNLESS a checkbox was requested, in which case it is
+   * `{ checked }` — an object, so it is truthy either way.
+   */
+  show({ title = 'Are you sure?', message = '', confirmText = 'Confirm', cancelText = 'Cancel', danger = false, checkbox = null } = {}) {
     return new Promise(resolve => {
       const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
       const overlay = document.createElement('div');
@@ -252,13 +261,21 @@ const Confirm = {
           <div class="modal-header">
             <h3 class="modal-title" id="confirmModalTitle">${esc(title)}</h3>
           </div>
-          <div class="modal-body">${esc(message)}</div>
+          <div class="modal-body">${esc(message)}${checkbox ? `
+            <label style="display:flex; align-items:center; gap:0.5rem; margin-top:0.9rem; font-size:0.85rem; cursor:pointer;">
+              <input type="checkbox" data-role="confirm-checkbox"${checkbox.checked ? ' checked' : ''}>
+              <span>${esc(checkbox.label || '')}</span>
+            </label>` : ''}</div>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-action="cancel">${esc(cancelText)}</button>
             <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-action="confirm">${esc(confirmText)}</button>
           </div>
         </div>
       `;
+      const box = overlay.querySelector('[data-role="confirm-checkbox"]');
+      // Read the box at close time, not at build time — Enter can confirm the
+      // dialog after the user has toggled it.
+      const accept = () => (checkbox ? { checked: !!(box && box.checked) } : true);
       const prevFocus = document.activeElement;
       const close = result => {
         overlay.remove();
@@ -268,12 +285,14 @@ const Confirm = {
       };
       const onKey = e => {
         if (e.key === 'Escape') close(false);
-        if (e.key === 'Enter') close(true);
+        // Space toggles the checkbox; Enter while it is focused must not also
+        // submit the dialog out from under the user.
+        if (e.key === 'Enter' && e.target !== box) close(accept());
       };
       overlay.addEventListener('click', e => {
         if (e.target === overlay) close(false);
         const action = e.target.closest('[data-action]')?.dataset.action;
-        if (action === 'confirm') close(true);
+        if (action === 'confirm') close(accept());
         if (action === 'cancel') close(false);
       });
       document.addEventListener('keydown', onKey);

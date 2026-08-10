@@ -1087,6 +1087,19 @@ function finishProgress(progressId) {
   setTimeout(() => { delete global._batchDeployProgress[progressId]; }, 3600000);
 }
 
+/**
+ * Progress ids currently registered, optionally filtered by prefix.
+ *
+ * Lets a caller that owns a FAMILY of keys enumerate its own in-flight work
+ * without reaching into global._batchDeployProgress itself. The CLE lab paths
+ * use `cle-lab-<materialId>` for a whole-lab operation and
+ * `cle-lab-<materialId>-<userId>` for a single student's, and need to ask "is
+ * anything at all running against this lab?" before tearing it down.
+ */
+function listProgressIds(prefix = '') {
+  return Object.keys(global._batchDeployProgress || {}).filter(id => id.startsWith(prefix));
+}
+
 /** Strip internal bookkeeping so a route can return progress verbatim. */
 function readProgress(progressId) {
   const progress = (global._batchDeployProgress || {})[progressId];
@@ -2461,4 +2474,5 @@ module.exports = {
   recordLaneDone,
   finishProgress,
   readProgress,
+  listProgressIds,
 };

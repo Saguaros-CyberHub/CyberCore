@@ -471,6 +471,49 @@ async function ensureMfaColumns() {
   }
 }
 
+/**
+ * Release lanes left stranded in 'deploying' by a previous process.
+ *
+ * Deploys are fire-and-forget async work inside THIS process, with their
+ * progress held in an in-memory global — a restart kills them mid-clone and
+ * there is no resume. So any lane still marked 'deploying' when the server boots
+ * is, by definition, abandoned: nothing is working on it and nothing ever will.
+ *
+ * Left alone it holds its VXLAN out of the pool forever, because allocateVxlanIds
+ * skips only 'error' and 'deleted'. Marking it 'error' releases the id and makes
+ * the row visible to teardown, so the operator can clean up whatever was built.
+ *
+ * "Not running at startup" is the whole test, and it is exact — which is why
+ * this lives here rather than in the deploy path. The failure handler in
+ * challenge-lane-deployer.js used to approximate it with "same challenge_key,
+ * created in the last hour", which was both too wide (it condemned other
+ * courses' in-flight lanes) and too narrow (a GOAD bake runs ~90 minutes, so a
+ * perfectly healthy lane could outlive the window and be marked 'error' while
+ * still building).
+ */
+async function recoverStrandedLanes() {
+  try {
+    const { cybercoreQuery } = require('./utils/cybercore-db');
+    const result = await cybercoreQuery(`
+      UPDATE cybercore_lane
+         SET status = 'error',
+             config = config || '{"error":"Deployment was interrupted by a server restart"}'::jsonb,
+             updated_at = NOW()
+       WHERE status = 'deploying'
+       RETURNING lane_id, vxlan_id
+    `);
+    if (result.rowCount > 0) {
+      console.warn(
+        `⚠️  Released ${result.rowCount} lane(s) stranded mid-deploy by a previous run ` +
+        `(vxlan ${result.rows.map(r => r.vxlan_id).join(', ')}). They are marked 'error' — ` +
+        `tear them down to remove whatever was already built.`
+      );
+    }
+  } catch (err) {
+    console.warn('⚠️  Could not recover stranded lanes:', err.message);
+  }
+}
+
 async function syncVmTemplateNodes() {
   try {
     const { cybercoreQuery } = require('./utils/cybercore-db');
@@ -511,6 +554,10 @@ async function start() {
 
     // Ensure MFA columns exist on cybercore_user (idempotent)
     await ensureMfaColumns();
+
+    // Nothing can be deploying yet — anything that says it is was abandoned by
+    // a previous process and is holding a VXLAN it will never use.
+    await recoverStrandedLanes();
 
     // Sync template node locations from live Proxmox cluster
     await syncVmTemplateNodes();

@@ -31,6 +31,7 @@ const { resolveLaneNetworking } = require('../../../../../src/utils/lane-network
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const challengeLaneDeployer = require('../../../../../src/utils/challenge-lane-deployer');
 const attachedModules = require('../../../../../src/utils/attached-modules');
+const flagManager = require('../../../../../src/utils/flag-manager');
 const laneProvision = require('./lane-provision');
 
 const LOG = '[CLE VulnLab]';
@@ -93,9 +94,134 @@ function progressIdForLab(materialId) {
   return `cle-lab-${materialId}`;
 }
 
-/** Live progress for a lab deploy, or null once it has aged out. */
-function getLabProgress(materialId) {
-  return laneDeployer.readProgress(progressIdForLab(materialId));
+/**
+ * Progress key for an operation on ONE student's copy of a lab.
+ *
+ * Separate from the lab-wide key so two students can be redeployed at once
+ * without clobbering each other's progress — initProgress replaces the entry
+ * wholesale, so a shared key means the second start erases the first's state and
+ * the first poller reports the second's numbers.
+ *
+ * materialId is a UUID, so `cle-lab-<materialId>` is an unambiguous prefix of
+ * every key belonging to this lab: the next character is either '-' or the end
+ * of the string. That is what makes listProgressIds() below safe.
+ */
+function progressIdForLabStudent(materialId, userId) {
+  return `cle-lab-${materialId}-${userId}`;
+}
+
+/** Live progress for a lab deploy (or one student's), or null once it aged out. */
+function getLabProgress(materialId, userId = null) {
+  return laneDeployer.readProgress(
+    userId ? progressIdForLabStudent(materialId, userId) : progressIdForLab(materialId)
+  );
+}
+
+/**
+ * Every operation currently in flight against this lab — the lab-wide one and
+ * any per-student ones.
+ *
+ * The owning user is derived by SLICING THE KEY, not read off the entry: the
+ * deploy paths call initProgress themselves and replace the object, so any field
+ * we stashed on it would not survive the handover from teardown to deploy.
+ *
+ * @returns {Array<{progressId, userId:string|null, phase, phase_detail, completed, total}>}
+ */
+function labOperationsInFlight(materialId) {
+  const groupKey = progressIdForLab(materialId);
+  const out = [];
+  for (const progressId of laneDeployer.listProgressIds(`${groupKey}`)) {
+    const p = laneDeployer.readProgress(progressId);
+    // 'complete' entries linger for an hour so a late poller can still read the
+    // outcome; they are finished work, not a conflict.
+    if (!p || p.phase === 'complete') continue;
+    const suffix = progressId.slice(groupKey.length);
+    out.push({
+      progressId,
+      userId: suffix.startsWith('-') ? suffix.slice(1) : null,
+      phase: p.phase,
+      phase_detail: p.phase_detail,
+      completed: p.completed,
+      total: p.total,
+    });
+  }
+  return out;
+}
+
+/**
+ * Refuse to start an operation that would collide with one already running.
+ *
+ * The registry is the only mutex available — this app has no job queue, and
+ * progress lives in an in-process global. It works because there is exactly one
+ * Node process.
+ *
+ * Scoping rules:
+ *   group scope (userId null) — conflicts with ANYTHING under this lab. Tearing
+ *     down the whole lab while one student is being rebuilt would snapshot the
+ *     lane rows mid-flight and leave the machines the deploy is still cloning
+ *     with nothing pointing at them.
+ *   student scope — conflicts with the lab-wide entry, or this student's own.
+ *     Another student's redeploy is independent and must not block.
+ *
+ * @param {string}  a.ignoreProgressId  the claim the caller just took for itself
+ * @throws {Error & {status:409}}
+ */
+function assertNoConflictingLabOperation({ materialId, userId = null, ignoreProgressId = null }) {
+  const conflicts = labOperationsInFlight(materialId).filter((op) => {
+    if (op.progressId === ignoreProgressId) return false;
+    if (userId === null) return true;          // group scope: everything conflicts
+    return op.userId === null || op.userId === userId;
+  });
+  if (conflicts.length === 0) return;
+
+  const c = conflicts[0];
+  const who = c.userId ? 'one student of this lab' : 'this lab';
+  const err = new Error(
+    `Another operation on ${who} is still running (${c.completed}/${c.total}, ${c.phase_detail || c.phase}). ` +
+    `Wait for it to finish — running both at once would leave machines behind with nothing pointing at them.`
+  );
+  err.status = 409;
+  throw err;
+}
+
+/**
+ * Poll the cluster until these VMIDs are gone.
+ *
+ * Needed because Proxmox DELETE is asynchronous — it returns a UPID and destroys
+ * in the background — and detachModuleFromLane never waits on the task. An
+ * attach-mode redeploy re-attaches into the slots it just freed, which
+ * findFreeSlots hands back immediately, so vmidForSlot yields exactly the ids
+ * still being destroyed and the clone fails with "VM already exists".
+ *
+ * Doubles as the survivor check: detachModuleFromLane reports "not destroyed"
+ * for a VM that merely moved node, and drops the instance record even when VMs
+ * survive, so its `errors` are unreliable in both directions. The cluster is the
+ * only authority.
+ *
+ * @returns {Promise<{surviving:number[]}>}
+ */
+async function waitForVmidsGone(vmids, { timeoutMs = 120000, intervalMs = 5000 } = {}) {
+  const want = new Set((vmids || []).filter(v => v != null).map(v => String(v)));
+  if (want.size === 0) return { surviving: [] };
+
+  const deadline = Date.now() + timeoutMs;
+  let surviving = [...want];
+
+  while (Date.now() < deadline) {
+    try {
+      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      const live = new Set((resources || []).map(r => String(r.vmid)));
+      surviving = [...want].filter(v => live.has(v));
+      if (surviving.length === 0) return { surviving: [] };
+    } catch (e) {
+      // A cluster read failure must not be reported as "they're gone" — keep the
+      // last known survivor list and try again until the deadline.
+      console.warn(`${LOG} Could not read cluster resources while waiting for destroy: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  return { surviving: surviving.map(v => Number(v)) };
 }
 
 /**
@@ -223,7 +349,7 @@ async function findCourseLanes(userIds, courseId) {
  * Deploy a dedicated lab lane per student on the challenge's own VXLAN block.
  * Returns whatever deployChallengeLanes returns.
  */
-async function deployLabLanes({ course, challenge, students, materialId, instructorEmails }) {
+async function deployLabLanes({ course, challenge, students, materialId, instructorEmails, progressId, flagSeeds }) {
   return challengeLaneDeployer.deployChallengeLanes({
     users: students.map(s => ({ id: s.id, email: s.email })),
     challenge,
@@ -244,8 +370,11 @@ async function deployLabLanes({ course, challenge, students, materialId, instruc
     guacParent: 'ROOT',
     instructorEmails,
     description: `CLE course: ${course.course_name || course.course_id}`,
-    progressId: progressIdForLab(materialId),
+    progressId: progressId || progressIdForLab(materialId),
     progressLabel: `${challenge.name} — ${course.course_name || course.code || 'course'}`,
+    // Replays the previous lane's flag values and captures, when this is a
+    // rebuild rather than a first deploy. Null on the normal path.
+    flagSeeds,
   });
 }
 
@@ -326,8 +455,8 @@ async function attachLabToLane({ lane, challenge, materialId, moduleKey }) {
  * Attach the challenge to every named student's existing lane, one at a time so
  * two attaches never race for the same slot on the same lane.
  */
-async function attachLabToStudents({ course, challenge, students, materialId }) {
-  const progressId = progressIdForLab(materialId);
+async function attachLabToStudents({ course, challenge, students, materialId, progressId: progressIdOverride }) {
+  const progressId = progressIdOverride || progressIdForLab(materialId);
   const progress = laneDeployer.initProgress(
     progressId,
     `${challenge.name} — ${course.course_name || course.code || 'course'}`,
@@ -409,8 +538,15 @@ async function attachLabToStudents({ course, challenge, students, materialId }) 
  * @param {string} a.materialId cle_course_material.material_id for this lab
  * @param {string} a.mode       'lane' | 'attach'
  * @param {Array}  [a.instructorEmails] extra Guacamole READ grants
+ * @param {string} [a.progressId]  override the lab-wide key (per-student redeploy)
+ * @param {object} [a.flagSeeds]   { [userId]: snapshot rows } — 'lane' mode only;
+ *   in 'attach' mode the host lane survives, so its flag rows do too and there is
+ *   nothing to replay.
  */
-async function deployVulnLab({ course, challenge, students, materialId, mode, instructorEmails = [] }) {
+async function deployVulnLab({
+  course, challenge, students, materialId, mode, instructorEmails = [],
+  progressId = null, flagSeeds = null,
+}) {
   if (!MODES.includes(mode)) throw new Error(`Unknown deploy mode '${mode}'`);
   if (!students.length) return { provisioned: [], failed: [], progressId: null };
 
@@ -432,8 +568,8 @@ async function deployVulnLab({ course, challenge, students, materialId, mode, in
   );
 
   return mode === 'attach'
-    ? attachLabToStudents({ course, challenge, students, materialId })
-    : deployLabLanes({ course, challenge, students, materialId, instructorEmails });
+    ? attachLabToStudents({ course, challenge, students, materialId, progressId })
+    : deployLabLanes({ course, challenge, students, materialId, instructorEmails, progressId, flagSeeds });
 }
 
 // ── teardown ─────────────────────────────────────────────────────────────────
@@ -467,88 +603,244 @@ async function detachInstance(lane, laneConfig, instance) {
 }
 
 /**
- * Tear down everything a lab assignment deployed: whole lanes for 'lane' mode,
+ * Tear down what a lab assignment deployed: whole lanes for 'lane' mode,
  * attached-module instances for 'attach' mode. Safe to call for a lab that
  * deployed nothing.
  *
  * Both are matched on material_id, which both modes stamp — lanes on
  * config.material_id, attached instances on the instance record — so a course
  * running several labs at once tears down only the one asked for.
+ *
+ * SCOPE. With `userId` set this touches only that student's copy. Note what that
+ * CANNOT hit, because it is the whole safety argument for the per-student button:
+ * branch 1 selects on `config->>'material_id' = $1`, and a student's workstation
+ * lane has material_id NULL, so the host lane can never be selected there no
+ * matter what user_id says. Branch 2 finds the host lane but only ever calls
+ * detachInstance on it — the lane, its gateway, its console and its workstation
+ * are left running.
+ *
+ * FAILURE GRADES. laneDeployer.teardownLanes returns `errors` with its
+ * `warnings` already folded in (Guacamole, workspace bookkeeping). Those are
+ * things that outlived the lane in ANOTHER system — nothing is still running on
+ * the cluster and the lane row cannot help clean them up. They must not count as
+ * a failure, or a Guacamole 403 both blocks a redeploy and tells the instructor
+ * to retry a teardown that already succeeded. They are subtracted back out here
+ * and reported separately.
+ *
+ * @param {string}  a.materialId
+ * @param {string}  [a.userId]            null = the whole lab
+ * @param {string}  [a.ignoreProgressId]  the caller's own progress claim
+ * @param {boolean} [a.waitForVms]        confirm on the cluster that detached VMs are gone
  */
-async function teardownLab(materialId) {
+async function teardownLabScoped({ materialId, userId = null, ignoreProgressId = null, waitForVms = false }) {
   const result = {
-    lanes_deleted: 0, lanes_kept_for_retry: 0, vms_destroyed: 0, instances_detached: 0, errors: [],
+    scope: userId ? 'student' : 'lab',
+    mode_seen: [],
+    detached_instances: [],
+    flag_snapshot: {},
+    lanes_deleted: 0, lanes_kept_for_retry: 0, vms_destroyed: 0, instances_detached: 0,
+    surviving_vmids: [],
+    errors: [], warnings: [],
+    safe_to_redeploy: false,
   };
 
   // A deploy still running would keep cloning VMs after we take our snapshot,
   // and those would be orphaned. Make the caller wait rather than half-tear-down.
-  const inFlight = getLabProgress(materialId);
-  if (inFlight && inFlight.phase !== 'complete') {
-    const err = new Error(
-      `This lab is still deploying (${inFlight.completed}/${inFlight.total} lanes, ${inFlight.phase}). ` +
-      `Wait for it to finish before removing it, or the machines it is still creating will be left behind.`
-    );
-    err.status = 409;
-    throw err;
-  }
+  assertNoConflictingLabOperation({ materialId, userId, ignoreProgressId });
 
   // 1. Dedicated lab lanes. 'error' lanes are included: a previous teardown may
   //    have kept them precisely so this retry can find their surviving VMs.
   const lanes = await cybercoreQuery(
     `SELECT lane_id FROM cybercore_lane
-      WHERE config->>'material_id' = $1 AND status <> 'deleted'`,
-    [materialId]
+      WHERE config->>'material_id' = $1 AND status <> 'deleted'
+        AND ($2::uuid IS NULL OR user_id = $2::uuid)`,
+    [materialId, userId]
   );
   const laneIds = lanes.rows.map(r => r.lane_id);
   if (laneIds.length > 0) {
-    console.log(`${LOG} Tearing down ${laneIds.length} lab lane(s) for material ${materialId}`);
+    result.mode_seen.push('lane');
+
+    // Snapshot the flags BEFORE anything is destroyed. cybercore_lane_flag
+    // CASCADEs off cybercore_lane and teardownLanes hard-deletes the row, so
+    // this is the last moment the student's captures exist. The caller decides
+    // whether to replay them; taking the snapshot is cheap and unconditional so
+    // the decision can be made after the fact.
+    try {
+      const snap = await flagManager.snapshotLaneFlags(laneIds);
+      for (const row of snap) {
+        (result.flag_snapshot[row.user_id] ||= []).push(row);
+      }
+    } catch (e) {
+      // Not fatal, but the caller must not silently believe progress was kept.
+      result.warnings.push(`Could not snapshot capture flags before teardown: ${e.message}`);
+    }
+
+    console.log(
+      `${LOG} Tearing down ${laneIds.length} lab lane(s) for material ${materialId}` +
+      (userId ? ` (student ${userId})` : '')
+    );
     const t = await laneDeployer.teardownLanes(laneIds);
     result.lanes_deleted = t.lanes_deleted || 0;
     result.lanes_kept_for_retry = t.lanes_kept_for_retry || 0;
     result.vms_destroyed += t.vms_destroyed || 0;
-    result.errors.push(...(t.errors || []));
+
+    const warnSet = new Set(t.warnings || []);
+    result.warnings.push(...(t.warnings || []));
+    result.errors.push(...(t.errors || []).filter(e => !warnSet.has(e)));
   }
 
   // 2. Attached instances on lanes this lab did NOT own.
-  //    jsonb_path_exists rather than a JS scan: a course can have dozens of
+  //    jsonb_array_elements rather than a JS scan: a course can have dozens of
   //    lanes and only a couple carrying this lab.
   const attachedLanes = await cybercoreQuery(
-    `SELECT lane_id, vxlan_id, config FROM cybercore_lane
+    `SELECT lane_id, vxlan_id, user_id, config FROM cybercore_lane
       WHERE status <> 'deleted'
+        AND ($2::uuid IS NULL OR user_id = $2::uuid)
         AND jsonb_typeof(config->'attached_modules') = 'array'
         AND EXISTS (
           SELECT 1 FROM jsonb_array_elements(config->'attached_modules') AS m
            WHERE m->>'material_id' = $1
         )`,
-    [materialId]
+    [materialId, userId]
   );
 
+  const detachedVmids = [];
   for (const lane of attachedLanes.rows) {
     const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
     const instances = (cfg.attached_modules || []).filter(m => m.material_id === materialId);
+    if (instances.length > 0 && !result.mode_seen.includes('attach')) result.mode_seen.push('attach');
     for (const instance of instances) {
       try {
         const r = await detachInstance(lane, cfg, instance);
         result.instances_detached++;
         result.vms_destroyed += (r.destroyed || []).length;
         result.errors.push(...(r.errors || []));
+        // Recorded so the caller can rotate exactly these VMs' flags on request.
+        // The host lane survives, so its flag rows survive with it — which is
+        // what preserves the student's captures by default.
+        result.detached_instances.push({
+          lane_id: lane.lane_id,
+          user_id: lane.user_id,
+          module_instance_id: instance.module_instance_id,
+          vm_names: (instance.vms || []).map(v => v.name).filter(Boolean),
+        });
+        for (const vm of (instance.vms || [])) {
+          if (vm?.vm_id != null) detachedVmids.push(vm.vm_id);
+        }
       } catch (err) {
         result.errors.push(`Detach ${instance.module_instance_id} from lane ${lane.lane_id}: ${err.message}`);
       }
     }
   }
 
+  // 3. For attach mode only, confirm on the cluster that the VMs really went.
+  //    Lane mode does not need this: teardownLanes already polls for up to three
+  //    rounds and refuses to delete the lane row while anything survives, so a
+  //    clean return there IS the proof. Nothing enforces that for a detach —
+  //    detachInstance drops the instance record even when VMs survive — and the
+  //    re-attach would otherwise clone straight into the ids still being purged.
+  if (waitForVms && detachedVmids.length > 0) {
+    const { surviving } = await waitForVmidsGone(detachedVmids);
+    result.surviving_vmids = surviving;
+    if (surviving.length > 0) {
+      result.errors.push(
+        `Machine(s) ${surviving.join(', ')} were still present on the cluster two minutes after being destroyed.`
+      );
+    }
+  }
+
+  result.safe_to_redeploy =
+    result.lanes_kept_for_retry === 0 &&
+    result.surviving_vmids.length === 0 &&
+    result.errors.length === 0;
+
   return result;
+}
+
+/** Tear down everything a lab assignment deployed, for every student. */
+async function teardownLab(materialId) {
+  return teardownLabScoped({ materialId });
+}
+
+/**
+ * Tear down ONE student's copy of a lab, leaving the rest of the class alone.
+ * In attach mode the student's workstation lane is kept — only the lab's own
+ * machines go.
+ */
+async function teardownLabForStudent({ materialId, userId, ignoreProgressId = null }) {
+  if (!userId) throw new Error('teardownLabForStudent: userId is required');
+  return teardownLabScoped({ materialId, userId, ignoreProgressId, waitForVms: true });
+}
+
+/**
+ * Discard the capture flags a teardown left behind, so the rebuild mints fresh
+ * values and clears capture state. The instructor's opt-in when a lab is being
+ * redeployed because the answers leaked rather than because the box broke.
+ *
+ * Only meaningful for 'attach' mode. A dedicated lab lane is DELETED by teardown
+ * and cybercore_lane_flag CASCADEs with it, so rotation there is the default and
+ * preservation is the thing that takes work (flagSeeds). An attached module's
+ * host lane survives, so its flag rows survive too and ensureLaneFlags would
+ * faithfully re-plant the same values — correct by default, and this is the
+ * escape hatch.
+ *
+ * @param {Array} detachedInstances  teardown result's `detached_instances`
+ * @returns {Promise<number>} flag rows deleted
+ */
+async function resetFlagsForDetached(detachedInstances) {
+  let deleted = 0;
+  for (const inst of (detachedInstances || [])) {
+    try {
+      deleted += await flagManager.deleteLaneFlagsForVms({
+        laneId: inst.lane_id,
+        vmNames: inst.vm_names,
+      });
+    } catch (e) {
+      console.warn(`${LOG} Could not reset flags on lane ${inst.lane_id}: ${e.message}`);
+    }
+  }
+  return deleted;
+}
+
+/**
+ * Exclusion for the group deploy: students with a per-student operation already
+ * in flight against this lab.
+ *
+ * excludeStudentsWithLab cannot see them. Between teardownLanes deleting the row
+ * and the deploy inserting the new one, a redeploying student holds NO lane at
+ * all — so a group deploy landing in that window would build them a second lane
+ * on a second VXLAN, and the redeploy's own insert would then collide.
+ *
+ * Lives here rather than in students.js because this module owns the key format.
+ */
+function excludeStudentsInFlight(materialId) {
+  return async (candidates) => {
+    const busy = new Map();
+    const ops = labOperationsInFlight(materialId);
+    const ids = new Set(candidates);
+    for (const op of ops) {
+      if (op.userId && ids.has(op.userId)) {
+        busy.set(op.userId, 'a redeploy of this lab is already running for them');
+      }
+    }
+    return busy;
+  };
 }
 
 module.exports = {
   MODES,
   progressIdForLab,
+  progressIdForLabStudent,
   getLabProgress,
+  labOperationsInFlight,
+  assertNoConflictingLabOperation,
   loadChallenge,
   describeChallenge,
   countFreeLanes,
   findCourseLanes,
   deployVulnLab,
   teardownLab,
+  teardownLabForStudent,
+  resetFlagsForDetached,
+  excludeStudentsInFlight,
 };

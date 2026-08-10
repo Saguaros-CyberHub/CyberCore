@@ -26,11 +26,61 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
+const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const { getManagedCourse } = require('../utils/course-access');
-const { resolveTargetStudents, excludeStudentsWithLab } = require('../utils/students');
+const { resolveTargetStudents, excludeStudentsWithLab, combineExclusions } = require('../utils/students');
 const vulnLab = require('../utils/vuln-lab-provision');
 
 const instructorOnly = requireRole('instructor', 'admin');
+
+/**
+ * Parse cle_course_material.content, which is a TEXT column holding JSON.
+ * Legacy type='lab' rows predate that convention and can hold anything, so a
+ * parse failure is normal and must not break the route reading it.
+ */
+function parseMaterialContent(content) {
+  if (!content) return {};
+  if (typeof content === 'object') return content;
+  try {
+    const parsed = JSON.parse(content);
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+/**
+ * Record (or clear) why a student's redeploy failed, on the lab row.
+ *
+ * The 202 contract means the failure happens long after the response. In 'lane'
+ * mode the lane goes 'error' and shows in the table, but in 'attach' mode there
+ * is NO row to carry the error — the student's line would simply vanish and
+ * never return. Persisting it here also survives a restart, which the in-memory
+ * progress registry does not.
+ */
+async function setRedeployError(labId, userId, message) {
+  // The ::text on the outside is not decorative — `content` is a TEXT column
+  // holding JSON, so the jsonb result has to be rendered back to text on the way
+  // in. NULLIF(content,'') guards the empty-string rows, which '' ::jsonb would
+  // choke on. A legacy type='lab' row holding non-JSON still throws on the cast;
+  // that is caught below, because failing to annotate an error must never be
+  // louder than the error itself.
+  const sql = message
+    ? `UPDATE cle_course_material
+          SET content = (COALESCE(NULLIF(content,''), '{}')::jsonb
+                      || jsonb_build_object('redeploy_errors',
+                           COALESCE(COALESCE(NULLIF(content,''), '{}')::jsonb->'redeploy_errors', '{}'::jsonb)
+                           || jsonb_build_object($2::text, jsonb_build_object('message', $3::text, 'at', NOW()::text))))::text,
+              updated_at = NOW()
+        WHERE material_id = $1`
+    : `UPDATE cle_course_material
+          SET content = (COALESCE(NULLIF(content,''), '{}')::jsonb #- ARRAY['redeploy_errors', $2::text])::text,
+              updated_at = NOW()
+        WHERE material_id = $1`;
+  const params = message ? [labId, userId, String(message).substring(0, 500)] : [labId, userId];
+  await query(sql, params).catch(e =>
+    console.error(`[CLE] Could not record redeploy state on lab ${labId}: ${e.message}`));
+}
 
 /** The course row every route here needs, or null when absent/denied. */
 function getCourse(courseId, user) {
@@ -197,15 +247,46 @@ router.get('/', instructorOnly, async (req, res) => {
       }
     }
 
+    // Per-student operations currently running. Needed for two reasons the lane
+    // rows cannot cover: an 'attach' deploy never creates a lane in 'deploying'
+    // at all, and a redeploy between teardown and re-create has no lane row of
+    // any kind — so without this the poller stops, and the student's row silently
+    // disappears from the table mid-rebuild.
+    const inFlightByMaterial = {};
+    const inFlightUserIds = new Set();
+    for (const l of labs) {
+      const ops = vulnLab.labOperationsInFlight(l.lab_id).filter(o => o.userId);
+      inFlightByMaterial[l.lab_id] = ops;
+      for (const o of ops) inFlightUserIds.add(o.userId);
+    }
+    const inFlightEmails = {};
+    if (inFlightUserIds.size > 0) {
+      const u = await cybercoreQuery(
+        `SELECT user_id, email FROM cybercore_user WHERE user_id = ANY($1::uuid[])`,
+        [[...inFlightUserIds]]
+      ).catch(() => ({ rows: [] }));
+      for (const r of u.rows) inFlightEmails[r.user_id] = r.email;
+    }
+
     res.json({
       labs: labs.map(l => {
         const deployments = deploymentsByMaterial[l.lab_id] || [];
+        const inFlight = inFlightByMaterial[l.lab_id] || [];
         return {
           ...l,
           deployments,
           deployed_count: deployments.length,
-          // A lane in 'deploying' means the poller should keep going.
-          in_progress: deployments.some(d => d.lane_status === 'deploying'),
+          in_flight: inFlight.map(o => ({
+            user_id: o.userId,
+            student_email: inFlightEmails[o.userId] || null,
+            phase: o.phase,
+            phase_detail: o.phase_detail,
+          })),
+          // Why a redeploy that failed after tearing down is still visible.
+          redeploy_errors: parseMaterialContent(l.content).redeploy_errors || {},
+          // A lane in 'deploying', or anything claimed in the progress registry,
+          // means the poller should keep going.
+          in_progress: deployments.some(d => d.lane_status === 'deploying') || inFlight.length > 0,
         };
       }),
     });
@@ -264,8 +345,15 @@ router.post('/deploy', instructorOnly, async (req, res) => {
     );
     const materialId = existing.rows[0]?.material_id || null;
 
+    // excludeStudentsWithLab keys on the student's lane row, which a redeploy
+    // deletes and then re-creates — so for those few seconds it cannot see them,
+    // and a group deploy landing in that window would build a SECOND lane on a
+    // second VXLAN while the redeploy is still working. excludeStudentsInFlight
+    // covers exactly that gap.
     const { students, skipped } = await resolveTargetStudents(courseId, student_ids, {
-      excludeIf: materialId ? excludeStudentsWithLab(materialId) : undefined,
+      excludeIf: materialId
+        ? combineExclusions(excludeStudentsWithLab(materialId), vulnLab.excludeStudentsInFlight(materialId))
+        : undefined,
     });
     if (!students.length) {
       return res.status(400).json({ error: 'No eligible students to deploy to', skipped });
@@ -406,7 +494,10 @@ router.get('/:labId/progress', instructorOnly, async (req, res) => {
     if (owned.rows.length === 0) {
       return res.status(404).json({ error: 'Lab not found in this course' });
     }
-    const progress = vulnLab.getLabProgress(labId);
+    // ?user_id= reads one student's redeploy instead of the lab-wide deploy. No
+    // extra authorization needed: a per-student key can only exist under a
+    // material this course was just confirmed to own.
+    const progress = vulnLab.getLabProgress(labId, req.query.user_id || null);
     if (!progress) return res.status(404).json({ error: 'No active deployment for this lab' });
     res.json(progress);
   } catch (error) {
@@ -457,6 +548,290 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
     console.error('[CLE] Delete lab error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
   }
+});
+
+// ── per-student operations ───────────────────────────────────────────────────
+//
+// The class-wide DELETE above is all-or-nothing, which is too blunt for the
+// common cases: one student's lane failed partway, one student broke their box.
+// excludeStudentsWithLab deliberately refuses to redeploy on top of an existing
+// lane (the VMIDs would collide), so without these two routes a single broken
+// lane has no recovery short of tearing down the whole class.
+
+/**
+ * The lab row, if it belongs to this course. Every per-student route needs it,
+ * and it is what proves the caller may touch the lanes underneath.
+ */
+async function getOwnedLab(labId, courseId) {
+  const r = await query(
+    `SELECT material_id, template_id, content FROM cle_course_material
+      WHERE material_id = $1 AND course_id = $2`,
+    [labId, courseId]
+  );
+  return r.rows[0] || null;
+}
+
+/** Which mode this student actually holds this lab in, or null if they hold none. */
+async function probeStudentLabMode(materialId, userId) {
+  const own = await cybercoreQuery(
+    `SELECT 1 FROM cybercore_lane
+      WHERE config->>'material_id' = $1 AND user_id = $2::uuid AND status <> 'deleted' LIMIT 1`,
+    [materialId, userId]
+  );
+  if (own.rows.length > 0) return 'lane';
+
+  const attached = await cybercoreQuery(
+    `SELECT 1 FROM cybercore_lane
+      WHERE user_id = $2::uuid AND status <> 'deleted'
+        AND jsonb_typeof(config->'attached_modules') = 'array'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(config->'attached_modules') AS m
+           WHERE m->>'material_id' = $1
+        ) LIMIT 1`,
+    [materialId, userId]
+  );
+  return attached.rows.length > 0 ? 'attach' : null;
+}
+
+/**
+ * DELETE /:labId/students/:userId — tear down ONE student's machines for this
+ * lab, leaving the rest of the class and the assignment itself alone.
+ *
+ * Deliberately does NOT touch cle_student_submission. That row carries the
+ * grade, the feedback and graded_at; destroying a student's machines is not a
+ * reason to destroy their marks. The lab stays on their board, and Redeploy
+ * below rebuilds it.
+ *
+ * Synchronous, like the class-wide DELETE — one student's teardown is short.
+ */
+router.delete('/:labId/students/:userId', instructorOnly, async (req, res) => {
+  const { courseId, labId, userId } = req.params;
+  let claimed = null;
+  try {
+    if (!(await getCourse(courseId, req.user))) {
+      return res.status(403).json({ error: 'Course not found or access denied' });
+    }
+    if (!(await getOwnedLab(labId, courseId))) {
+      return res.status(404).json({ error: 'Lab not found in this course' });
+    }
+    const { students, skipped } = await resolveTargetStudents(courseId, [userId]);
+    if (!students.length) {
+      return res.status(404).json({
+        error: skipped[0]?.reason
+          ? `Cannot act on this student: ${skipped[0].reason}`
+          : 'Student is not actively enrolled in this course',
+      });
+    }
+
+    // Check and claim in ONE synchronous block, with every await already done.
+    // Node cannot interleave two synchronous statements, so this is the only
+    // arrangement that actually closes the double-click window — a check, an
+    // await, then a claim would let two requests both pass the check.
+    vulnLab.assertNoConflictingLabOperation({ materialId: labId, userId });
+    claimed = vulnLab.progressIdForLabStudent(labId, userId);
+    laneDeployer.initProgress(claimed, `Removing lab — ${students[0].email}`, 1);
+
+    const teardown = await vulnLab.teardownLabForStudent({
+      materialId: labId, userId, ignoreProgressId: claimed,
+    });
+
+    // Same two-grade contract as the class-wide route: on failure the lane rows
+    // survive as 'error', still pointing at whatever is still running, so this
+    // can genuinely be pressed again.
+    if (teardown.errors.length > 0) {
+      return res.status(207).json({
+        success: false,
+        message: `Some of ${students[0].email}'s machines could not be destroyed. `
+               + `Their lane record was kept so you can press Tear down again once the cause is cleared.`,
+        ...teardown,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Tore down ${students[0].email}'s machines for this lab`,
+      ...teardown,
+    });
+  } catch (error) {
+    console.error('[CLE] Per-student lab teardown error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  } finally {
+    // A leaked claim would 409 every future operation on this lab for an hour.
+    if (claimed) laneDeployer.finishProgress(claimed);
+  }
+});
+
+/**
+ * POST /:labId/students/:userId/redeploy — rebuild one student's machines.
+ *
+ * Teardown then deploy, in that order and never overlapped. Blue/green would
+ * avoid the window where the student has nothing, and is technically possible
+ * for a dedicated lane (the rebuild draws a different VXLAN), but is impossible
+ * in 'attach' mode: two instances of one challenge on one lane collide on
+ * hostnames, on the dnsmasq reservation, and on the lane_flag uniqueness of
+ * (lane_id, vm_name, flag_type). One uniform sequence beats two.
+ *
+ * FLAGS ARE PRESERVED BY DEFAULT — the point of this route is to rescue a broken
+ * box, not to reset the exercise. See the flag handling below for how, and
+ * `reset_flags: true` to opt out.
+ *
+ * Body: { reset_flags?: boolean }
+ * Responds 202 and works in the background, matching POST /deploy.
+ */
+router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res) => {
+  const { courseId, labId, userId } = req.params;
+  const resetFlags = req.body?.reset_flags === true;
+
+  // Resolved during pre-flight and reused by the background block. Re-deriving
+  // any of it afterwards would be wrong as well as wasteful: `mode` in
+  // particular is probed from what the student currently holds, and after
+  // teardown they hold nothing, so a second probe would always say 'lane'.
+  let claimed = null;
+  let ctx = null;
+  try {
+    const course = await getCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const lab = await getOwnedLab(labId, courseId);
+    if (!lab) return res.status(404).json({ error: 'Lab not found in this course' });
+
+    const { students, skipped } = await resolveTargetStudents(courseId, [userId]);
+    if (!students.length) {
+      return res.status(404).json({
+        error: skipped[0]?.reason
+          ? `Cannot redeploy for this student: ${skipped[0].reason}`
+          : 'Student is not actively enrolled in this course',
+      });
+    }
+    const student = students[0];
+
+    // Resolve the challenge BEFORE destroying anything. A template deactivated
+    // since the original deploy must fail here, while the student still has
+    // working machines — not after teardown, which would leave them with none.
+    const challenge = await vulnLab.loadChallenge(lab.template_id);
+    const caps = vulnLab.describeChallenge(challenge);
+
+    // What the student ACTUALLY holds, not what content.mode claims. That field
+    // is written once at material creation and never updated when the same lab
+    // is later deployed in the other mode, so it can disagree with reality.
+    const held = await probeStudentLabMode(labId, userId);
+    const declared = parseMaterialContent(lab.content).mode;
+    const mode = held || (vulnLab.MODES.includes(declared) ? declared : 'lane');
+
+    if (mode === 'lane' && !caps.can_deploy_lane) {
+      return res.status(409).json({ error: `Cannot rebuild '${challenge.name}' as a lab lane: ${caps.lane_blockers.join('; ')}`, capabilities: caps });
+    }
+    if (mode === 'attach' && !caps.can_attach) {
+      return res.status(409).json({ error: `Cannot re-attach '${challenge.name}': ${caps.attach_blockers.join('; ')}`, capabilities: caps });
+    }
+
+    // Capacity, checked BEFORE teardown. Afterwards is too late: an exhausted
+    // block would leave the student with their machines destroyed and no way to
+    // rebuild them. The lane they currently hold releases its id on teardown, so
+    // it counts toward what will be available.
+    if (mode === 'lane') {
+      const freeLanes = await vulnLab.countFreeLanes(caps.vxlan_block);
+      const willBeReleased = held === 'lane' ? 1 : 0;
+      if (freeLanes + willBeReleased < 1) {
+        return res.status(409).json({
+          error: `'${challenge.name}' has no free lanes in its VXLAN block, so this student's lane could not be `
+               + `rebuilt after being torn down. Remove a finished lane first.`,
+          free_lanes: freeLanes,
+        });
+      }
+    }
+
+    // Check and claim synchronously — see the note on the DELETE above.
+    vulnLab.assertNoConflictingLabOperation({ materialId: labId, userId });
+    claimed = vulnLab.progressIdForLabStudent(labId, userId);
+    const progress = laneDeployer.initProgress(claimed, `Redeploy ${challenge.name} — ${student.email}`, 1);
+    laneDeployer.setPhase(progress, 'preparing', 'Tearing down the current deployment');
+    ctx = { course, challenge, student, mode };
+
+    res.status(202).json({
+      success: true,
+      message: `Rebuilding ${student.email}'s machines for '${challenge.name}'`,
+      lab_id: labId,
+      user_id: userId,
+      mode,
+      reset_flags: resetFlags,
+      progress_url: `/api/cle/courses/${courseId}/labs/${labId}/progress?user_id=${encodeURIComponent(userId)}`,
+    });
+  } catch (error) {
+    console.error('[CLE] Redeploy pre-flight error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    // Only the 202 itself can throw with headers already sent. Replying again
+    // would throw a second time, out of an async handler Express 4 does not
+    // catch — and the claim is already released, so there is nothing else to do.
+    if (res.headersSent) return;
+    return res.status(error.status || 500).json({ error: error.message });
+  }
+
+  // ── background ─────────────────────────────────────────────────────────────
+  // The response is already sent; from here failures can only be reported
+  // through the progress entry and the persisted redeploy_errors.
+  const claimedId = claimed;
+  const { course, challenge, student, mode } = ctx;
+  (async () => {
+    const fail = async (message) => {
+      const live = (global._batchDeployProgress || {})[claimedId];
+      if (live) { live.error = message; live.phase_detail = `Redeploy failed: ${message}`; }
+      await setRedeployError(labId, userId, message);
+      console.error(`[CLE] Redeploy failed for ${userId} on lab ${labId}: ${message}`);
+    };
+
+    try {
+      const teardown = await vulnLab.teardownLabForStudent({
+        materialId: labId, userId, ignoreProgressId: claimedId,
+      });
+
+      // Refuse to build on top of survivors. Their VMIDs are derived from the
+      // VXLAN, so the rebuild would clone straight into machines that are still
+      // running and fail at the first clone with "VM already exists".
+      if (!teardown.safe_to_redeploy) {
+        await fail(
+          `Could not fully tear down the current deployment, so it was not rebuilt: `
+          + `${teardown.errors.slice(0, 3).join('; ')}`
+        );
+        return;
+      }
+
+      // Capture flags. Default is to CARRY THEM OVER, so rebuilding a broken box
+      // never costs a student work they already did:
+      //   lane mode   — the lane row was deleted and cybercore_lane_flag CASCADEs
+      //                 with it, so the values only still exist in the snapshot
+      //                 teardown took. Replaying it is what preserves them.
+      //   attach mode — the host lane survived, so its flag rows did too and
+      //                 ensureLaneFlags will re-plant the same values on its own.
+      // reset_flags inverts each: drop the snapshot, or delete the surviving rows.
+      let flagSeeds = teardown.flag_snapshot || null;
+      if (resetFlags) {
+        flagSeeds = null;
+        const deleted = await vulnLab.resetFlagsForDetached(teardown.detached_instances);
+        if (deleted > 0) console.log(`[CLE] Reset ${deleted} flag(s) for ${student.email} on lab ${labId}`);
+      }
+
+      const instructorEmails = await courseInstructorEmails(courseId).catch(() => []);
+      const result = await vulnLab.deployVulnLab({
+        course, challenge, students: [student], materialId: labId, mode,
+        instructorEmails, progressId: claimedId,
+        // 'attach' ignores this — its host lane kept the rows already.
+        flagSeeds: mode === 'lane' ? flagSeeds : null,
+      });
+
+      if ((result.failed || []).length > 0) {
+        await fail(result.failed[0].reason || 'the rebuild did not complete');
+        return;
+      }
+
+      await setRedeployError(labId, userId, null);
+      console.log(`[CLE] Redeployed ${student.email}'s '${challenge.challenge_key}' (${mode}) on lab ${labId}`);
+    } catch (err) {
+      await fail(err.message);
+    } finally {
+      laneDeployer.finishProgress(claimedId);
+    }
+  })();
 });
 
 module.exports = router;
