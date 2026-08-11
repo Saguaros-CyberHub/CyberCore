@@ -153,6 +153,80 @@ async function getUserGuacToken(guacUser, guacPassword) {
 }
 
 // ============================================================================
+// Display naming + OS tagging for the workspace list
+// ============================================================================
+
+/**
+ * cybercore_resource.name is a uniqueness key, not a label — the deployers
+ * suffix it with the owner slug and the Proxmox VMID so the same template can
+ * land in N lanes without tripping the (module_key, name) UNIQUE constraint
+ * (see lane-deployer.js registerWorkspaceVm). That produces strings like
+ * "windows-11-base-template-echum-610446", which is not what anyone sees in
+ * Proxmox.
+ *
+ * The Proxmox guest name, in order of trustworthiness:
+ *   1. vm_instance.metadata.proxmox_name — written at clone time by the
+ *      deployers. Exact, but only present on VMs deployed after that landed.
+ *   2. the lane's recorded workstation hostname for this VMID — lane-deployer
+ *      writes config.workstations[].hostname alongside the VMID it cloned.
+ *   3. the lane name — correct for slot 0, which clones under the bare lane name.
+ *   4. the resource name — already the Proxmox name for standalone workstations
+ *      (routes/workstations.js clones under exactly the name it stores).
+ */
+function resolveDisplayName(row) {
+  if (row.proxmox_name) return row.proxmox_name;
+
+  const laneWorkstations = row.lane_config?.workstations;
+  if (row.provider_vmid && Array.isArray(laneWorkstations)) {
+    const match = laneWorkstations.find(w => String(w?.vmid) === String(row.provider_vmid));
+    if (match?.hostname) return match.hostname;
+  }
+  return row.lane_name || row.name;
+}
+
+// Matched in order against the template's OS name / key / the resource name, so
+// the first entry that fits wins. Distro-specific patterns must come before the
+// generic family ones — os_family only distinguishes windows/linux/macos, which
+// is not enough to tell Kali from Ubuntu.
+const OS_PATTERNS = [
+  [/kali/i,                          'kali',    'Kali'],
+  [/parrot/i,                        'parrot',  'Parrot'],
+  [/win(dows)?[-_ ]?server|wsrv/i,   'windows', 'Windows Server'],
+  [/windows|win(10|11)|\bwin\b/i,    'windows', 'Windows'],
+  [/ubuntu/i,                        'ubuntu',  'Ubuntu'],
+  [/rocky|rhel|red[-_ ]?hat|centos|alma/i, 'rhel', 'RHEL'],
+  [/debian/i,                        'debian',  'Debian'],
+  [/metasploitable/i,                'linux',   'Metasploitable'],
+  [/macos|darwin/i,                  'macos',   'macOS'],
+];
+
+const OS_FAMILY_FALLBACK = {
+  windows_client: ['windows', 'Windows'],
+  windows_server: ['windows', 'Windows Server'],
+  linux:          ['linux',   'Linux'],
+  macos:          ['macos',   'macOS'],
+};
+
+/**
+ * Best-effort OS identification for the workspace card's tag. Returns null when
+ * nothing recognizable is available rather than guessing — an absent tag reads
+ * better than a wrong one.
+ */
+function resolveOs(row) {
+  // Sources are tried in order and never concatenated: the resource name ends
+  // in the owner's email slug, so a student named "kalib" would otherwise tag
+  // their Windows box as Kali. A template field, when present, always wins.
+  for (const source of [row.os_name, row.template_name, row.template_key, row.name]) {
+    if (!source) continue;
+    for (const [re, key, label] of OS_PATTERNS) {
+      if (re.test(source)) return { key, label };
+    }
+  }
+  const fallback = OS_FAMILY_FALLBACK[row.os_family];
+  return fallback ? { key: fallback[0], label: fallback[1] } : null;
+}
+
+// ============================================================================
 // Defense-in-depth for the workspace list: a lane VM (metadata.vm_category =
 // 'lane_vm') should only appear while its lane still exists and is not torn
 // down. Even if a teardown path forgets to delete the cybercore_resource row,
@@ -167,6 +241,27 @@ const LIVE_LANE_FILTER = `(
       AND l.status NOT IN ('deleted', 'error')
   )
 )`;
+
+// Everything resolveDisplayName/resolveOs need, shared by both scope variants so
+// the two branches can't drift. The lane join is aliased `dl` because
+// LIVE_LANE_FILTER already uses `l` for its own correlated subquery.
+const DISPLAY_JOINS = `
+  LEFT JOIN cybercore_lane dl
+    ON dl.lane_id::text = r.metadata->>'lane_id'
+  LEFT JOIN cybercore_template_catalog tc
+    ON tc.id::text = r.metadata->>'catalog_template_id'
+`;
+
+const DISPLAY_COLUMNS = `
+  vi.provider_vmid,
+  vi.metadata->>'proxmox_name' AS proxmox_name,
+  dl.name                      AS lane_name,
+  dl.config                    AS lane_config,
+  tc.os_family,
+  tc.os_name,
+  r.metadata->>'template_name' AS template_name,
+  r.metadata->>'template_key'  AS template_key
+`;
 
 // GET /api/dashboard/vms
 // Returns VMs that the requesting user is authorized to access.
@@ -197,10 +292,12 @@ router.get('/vms', authenticateToken, async (req, res) => {
           r.status                 AS resource_status,
           vi.power_state,
           vi.metadata->>'guac_connection_id' AS guac_connection_id,
+          ${DISPLAY_COLUMNS},
           owner.email              AS owner_email,
           owner.user_id            AS owner_id
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        ${DISPLAY_JOINS}
         LEFT JOIN LATERAL (
           SELECT u.user_id, u.email
           FROM cybercore_allocation a
@@ -227,9 +324,11 @@ router.get('/vms', authenticateToken, async (req, res) => {
           COALESCE(
             vi.metadata->>'guac_connection_id',
             a.metadata->>'guac_connection_id'
-          )                        AS guac_connection_id
+          )                        AS guac_connection_id,
+          ${DISPLAY_COLUMNS}
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        ${DISPLAY_JOINS}
         JOIN cybercore_allocation a
           ON  a.resource_id = r.resource_id
           AND a.user_id     = $1
@@ -242,15 +341,24 @@ router.get('/vms', authenticateToken, async (req, res) => {
       `, [userId]);
     }
 
-    const vms = result.rows.map(row => ({
-      id:             row.id,
-      name:           row.name,
-      moduleKey:      row.module_key,
-      powerState:     row.power_state,
-      resourceStatus: row.resource_status,
-      hasConsole:     !!row.guac_connection_id,
-      ...(showAll ? { ownerEmail: row.owner_email || null, ownerId: row.owner_id || null } : {}),
-    }));
+    const vms = result.rows.map(row => {
+      const os = resolveOs(row);
+      return {
+        id:             row.id,
+        // `name` stays the unique resource name — callers that match on it keep
+        // working. `displayName` is what the UI shows.
+        name:           row.name,
+        displayName:    resolveDisplayName(row),
+        vmid:           row.provider_vmid || null,
+        osKey:          os?.key || null,
+        osLabel:        os?.label || null,
+        moduleKey:      row.module_key,
+        powerState:     row.power_state,
+        resourceStatus: row.resource_status,
+        hasConsole:     !!row.guac_connection_id,
+        ...(showAll ? { ownerEmail: row.owner_email || null, ownerId: row.owner_id || null } : {}),
+      };
+    });
 
     res.json({ vms, scope: showAll ? 'all' : 'mine' });
   } catch (err) {

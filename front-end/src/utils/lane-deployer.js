@@ -968,7 +968,7 @@ async function createGuacConnection({ connName, user, hostname, port, protocol, 
  * lane-local IP) and so its ghost-card filter ties the row to the lane.
  * Non-fatal: the lane still goes active if this fails.
  */
-async function registerWorkspaceVm({ job, template, workstationVmid, providerType, guacConnId }) {
+async function registerWorkspaceVm({ job, template, workstationVmid, providerType, guacConnId, proxmoxName }) {
   const { laneId, user, vxlanId, targetNode, moduleKey, laneConfig } = job;
   const slug = String(user.email || user.id).split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
   const displayName = template.os_name || template.template_key || 'workstation';
@@ -1009,6 +1009,9 @@ async function registerWorkspaceVm({ job, template, workstationVmid, providerTyp
        VALUES ($1, 'proxmox', $2, $3, 'running', $4::jsonb)`,
       [resourceId, targetNode, String(workstationVmid), JSON.stringify({
         provider_type: providerType,
+        // The guest name as Proxmox shows it. `name` above is a uniqueness key
+        // (template + owner slug + VMID); dashboards label the card with this.
+        ...(proxmoxName ? { proxmox_name: proxmoxName } : {}),
         ...(guacConnId ? { guac_connection_id: guacConnId, guac_user: user.email } : {}),
       })]
     );
@@ -1407,7 +1410,7 @@ async function deployOneWorkstation(job, ws) {
 
   // 7. Surface it on the owner's own dashboard.
   const resourceId = await registerWorkspaceVm({
-    job, template, workstationVmid, providerType, guacConnId,
+    job, template, workstationVmid, providerType, guacConnId, proxmoxName: hostname,
   });
 
   // 8. Confirm the guest actually took the reserved lease, in the background.

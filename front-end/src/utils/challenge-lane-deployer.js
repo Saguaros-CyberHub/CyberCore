@@ -480,7 +480,9 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
     }
   });
 
-  return { vm_id: vmId, name: vmName, type: vmType, node: targetNode };
+  // proxmox_name is the clone name; `name` stays the spec name every other
+  // caller (vuln scripts, flags, lane config) already matches on.
+  return { vm_id: vmId, name: vmName, proxmox_name: cloneName, type: vmType, node: targetNode };
 }
 
 /**
@@ -819,6 +821,9 @@ async function registerWorkspaceVms({ laneId, user, vxlanId, moduleKey, challeng
          VALUES ($1, 'proxmox', $2, $3, 'running', $4::jsonb)`,
         [resourceId, v.node, String(v.vmid), JSON.stringify({
           provider_type: v.providerType,
+          // The guest name as Proxmox shows it. The resource `name` above is a
+          // uniqueness key (spec name + owner slug + VMID), not a label.
+          ...(v.proxmoxName ? { proxmox_name: v.proxmoxName } : {}),
           ...(v.guacConnId ? { guac_connection_id: v.guacConnId, guac_user: user.email } : {}),
         })]
       );
@@ -1016,6 +1021,7 @@ async function deployLaneVms(job, ctx) {
     rows: [
       ...deployedVMs.map(v => ({
         name: v.name,
+        proxmoxName: v.proxmox_name || null,
         vmid: v.vm_id,
         node: v.node,
         providerType: v.type === 'lxc' ? 'lxc' : 'qemu',
@@ -1024,6 +1030,8 @@ async function deployLaneVms(job, ctx) {
       })),
       ...(attackBoxVmId ? [{
         name: 'kali',
+        // Mirrors cloneAttackBox's clone name — keep the two in step.
+        proxmoxName: hostnameFor(`kali-${attackBoxCreds.username}`),
         vmid: attackBoxVmId,
         node: targetNode,
         providerType: 'qemu',

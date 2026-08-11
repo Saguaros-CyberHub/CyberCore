@@ -481,12 +481,15 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
     ]);
     const resourceId = resourceRes.rows[0].resource_id;
 
+    // proxmox_name matches the resource name here (the clone below uses vmName
+    // verbatim), but recording it keeps dashboards on one field regardless of
+    // which deployer created the row.
     const vmRes = await cybercoreQuery(`
       INSERT INTO cybercore_vm_instance
-        (resource_id, provider, power_state)
-      VALUES ($1, 'proxmox', 'deploying')
+        (resource_id, provider, power_state, metadata)
+      VALUES ($1, 'proxmox', 'deploying', $2::jsonb)
       RETURNING vm_instance_id
-    `, [resourceId]);
+    `, [resourceId, JSON.stringify({ proxmox_name: vmName })]);
     const vmId = vmRes.rows[0].vm_instance_id;
 
     await cybercoreQuery(`

@@ -237,6 +237,15 @@ const VmWorkspaces = (() => {
     return `<span class="vml-module-tag">${Utils.escapeHtml(label)}</span>`;
   }
 
+  // Known keys get their own colour (see hub.html .vml-os-*); anything the
+  // backend couldn't classify returns no label and gets no tag at all, which
+  // reads better than a wrong one.
+  function _osTag(vm) {
+    if (!vm.osLabel) return '';
+    const key = String(vm.osKey || 'other').replace(/[^a-z0-9]/gi, '');
+    return `<span class="vml-os-tag vml-os-${key}">${Utils.escapeHtml(vm.osLabel)}</span>`;
+  }
+
   function _vmCard(vm, consoleContainerId) {
     const canLaunch = vm.hasConsole && vm.powerState === 'running';
     const launchBtn = vm.hasConsole
@@ -253,13 +262,21 @@ const VmWorkspaces = (() => {
       ? `<span class="wks-vm-owner" title="Owner">👤 ${Utils.escapeHtml(vm.ownerEmail)}</span>`
       : '';
 
+    // displayName is the Proxmox guest name (e.g. "cle-cybv454-10446"), which is
+    // what an instructor sees in the Proxmox UI. vm.name is the internal unique
+    // resource name — kept in the tooltip so a card can still be traced back.
+    const label = vm.displayName || vm.name;
+    const tooltip = [vm.name, vm.vmid ? `VMID ${vm.vmid}` : null]
+      .filter(Boolean).join(' · ');
+
     return `
       <div class="vml-card">
         <div class="vml-card-header">
           <span class="vml-vm-icon">🖥</span>
           <div class="vml-card-info">
-            <div class="vml-vm-name">${Utils.escapeHtml(vm.name)}</div>
+            <div class="vml-vm-name" title="${Utils.escapeHtml(tooltip)}">${Utils.escapeHtml(label)}</div>
             <div class="vml-vm-meta">
+              ${_osTag(vm)}
               ${_moduleTag(vm.moduleKey)}
               ${_powerBadge(vm.powerState || 'unknown')}
               ${ownerBadge}

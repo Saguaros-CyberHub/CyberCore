@@ -537,6 +537,35 @@
     }
     [data-theme="dark"] .vml-module-tag { background: rgba(255,255,255,0.07); }
 
+    /* OS tag — one colour per distro so a lane's machines are scannable at a
+       glance. .vml-os-other is the fallback for anything unclassified. */
+    .vml-os-tag {
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: var(--gray-100, #f7fafc);
+      color: var(--text-muted);
+    }
+    .vml-os-windows { background: #dbeafe; color: #1e40af; }
+    .vml-os-kali    { background: #ede9fe; color: #5b21b6; }
+    .vml-os-parrot  { background: #d1fae5; color: #065f46; }
+    .vml-os-ubuntu  { background: #ffedd5; color: #9a3412; }
+    .vml-os-rhel    { background: #fee2e2; color: #991b1b; }
+    .vml-os-debian  { background: #fce7f3; color: #9d174d; }
+    .vml-os-linux   { background: #f1f5f9; color: #334155; }
+    .vml-os-macos   { background: #e2e8f0; color: #1f2937; }
+
+    [data-theme="dark"] .vml-os-tag     { background: rgba(255,255,255,0.07); }
+    [data-theme="dark"] .vml-os-windows { background: rgba(96,165,250,0.15);  color: #93c5fd; }
+    [data-theme="dark"] .vml-os-kali    { background: rgba(167,139,250,0.15); color: #c4b5fd; }
+    [data-theme="dark"] .vml-os-parrot  { background: rgba(52,211,153,0.15);  color: #6ee7b7; }
+    [data-theme="dark"] .vml-os-ubuntu  { background: rgba(251,146,60,0.15);  color: #fdba74; }
+    [data-theme="dark"] .vml-os-rhel    { background: rgba(248,113,113,0.15); color: #fca5a5; }
+    [data-theme="dark"] .vml-os-debian  { background: rgba(244,114,182,0.15); color: #f9a8d4; }
+    [data-theme="dark"] .vml-os-linux   { background: rgba(255,255,255,0.07); color: #cbd5e1; }
+    [data-theme="dark"] .vml-os-macos   { background: rgba(255,255,255,0.10); color: #e2e8f0; }
+
     .vml-card-actions {
       display: flex;
       align-items: center;
