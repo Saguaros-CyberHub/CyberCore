@@ -1,0 +1,206 @@
+/* ==========================================================================
+   topology.css — the topology canvas, its palette, and the property panel.
+
+   Follows main.css conventions: semantic custom properties only, no hard-coded
+   colours, so both themes work without a second stylesheet. The canvas itself
+   is drawn by Cytoscape and resolves its own colours from these same tokens
+   (see topology-render.js readTheme) — keep the two in step.
+   ========================================================================== */
+
+/* ── layout ─────────────────────────────────────────────────────────────── */
+
+.topo-wrap {
+  display: grid;
+  grid-template-columns: 190px 1fr 240px;
+  gap: 0;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  overflow: hidden;
+  background: var(--bg-card);
+  min-height: 460px;
+}
+
+/* One column under ~900px: palette on top, canvas, then panel. */
+@media (max-width: 900px) {
+  .topo-wrap { grid-template-columns: 1fr; }
+  .topo-palette, .topo-panel { max-height: 200px; }
+  .topo-canvas { min-height: 320px; }
+}
+
+.topo-palette,
+.topo-panel {
+  background: var(--bg-card-hover);
+  overflow-y: auto;
+  max-height: 520px;
+}
+.topo-palette { border-right: 1px solid var(--border-color); }
+.topo-panel   { border-left:  1px solid var(--border-color); }
+
+.topo-canvas {
+  position: relative;
+  min-height: 460px;
+  background:
+    radial-gradient(circle at 1px 1px, var(--border-color) 1px, transparent 0)
+    0 0 / 22px 22px;
+}
+
+/* Cytoscape sizes itself to this element, so it must have real dimensions
+   before create() runs — a zero-height container renders an empty graph. */
+.topo-canvas > .topo-cy { position: absolute; inset: 0; }
+
+/* ── section headers ────────────────────────────────────────────────────── */
+
+.topo-section-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 0.6rem 0.7rem 0.35rem;
+  position: sticky;
+  top: 0;
+  background: var(--bg-card-hover);
+  z-index: 1;
+}
+
+/* ── palette ────────────────────────────────────────────────────────────── */
+
+.topo-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem 0.7rem;
+  cursor: grab;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  border-left: 3px solid transparent;
+  transition: var(--transition);
+}
+.topo-palette-item:hover {
+  background: var(--bg-card);
+  border-left-color: var(--primary);
+}
+.topo-palette-item:active { cursor: grabbing; }
+.topo-palette-item img { width: 20px; height: 20px; flex: 0 0 20px; opacity: 0.85; }
+.topo-palette-item .topo-pi-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topo-palette-item .topo-pi-vmid {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.topo-palette-empty {
+  padding: 0.7rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* ── property panel ─────────────────────────────────────────────────────── */
+
+.topo-field { padding: 0 0.7rem 0.5rem; }
+.topo-field label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.15rem;
+}
+.topo-field input,
+.topo-field select {
+  width: 100%;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.topo-field input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.topo-field-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+  line-height: 1.35;
+}
+
+.topo-panel-empty {
+  padding: 0.9rem 0.7rem;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* ── toolbar ────────────────────────────────────────────────────────────── */
+
+.topo-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-card-hover);
+}
+.topo-toolbar .topo-spacer { margin-left: auto; }
+.topo-toolbar .topo-hint {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+
+/* ── validation report ──────────────────────────────────────────────────── */
+
+.topo-findings { padding: 0.5rem 0.6rem; display: grid; gap: 0.3rem; }
+.topo-finding {
+  display: flex;
+  gap: 0.45rem;
+  align-items: flex-start;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  padding: 0.35rem 0.5rem;
+  border-radius: 4px;
+  border-left: 3px solid var(--border-color);
+  background: var(--bg-card-hover);
+  color: var(--text-secondary);
+}
+.topo-finding.is-error   { border-left-color: var(--danger);  }
+.topo-finding.is-warning { border-left-color: var(--warning); }
+.topo-finding .topo-finding-vm {
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.topo-findings-ok {
+  padding: 0.5rem 0.6rem;
+  font-size: 0.75rem;
+  color: var(--success);
+}
+
+/* ── legend ─────────────────────────────────────────────────────────────── */
+
+.topo-legend {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.4rem 0.6rem;
+  border-top: 1px solid var(--border-color);
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  background: var(--bg-card-hover);
+}
+.topo-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+.topo-legend i {
+  width: 18px;
+  height: 0;
+  border-top: 2px dashed currentColor;
+  display: inline-block;
+}
+.topo-legend .topo-lg-ext { color: #f59e0b; }
+.topo-legend .topo-lg-int { color: #378dbd; }

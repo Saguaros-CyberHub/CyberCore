@@ -6,6 +6,10 @@
  */
 
 const tailscale = require('./tailscale');
+// buildLaneNet0 is the one net-string formatter; resolveVmNics wraps it rather
+// than growing a second. goad-deploy does not require this module back, so the
+// top-level require is cycle-free.
+const goadDeploy = require('./goad-deploy');
 const { cybercoreQuery } = require('./cybercore-db');
 const { getModuleNetwork, getModuleNetworks, getV2LabNetwork, getV1LanSubnet } = require('./site-config');
 
@@ -19,6 +23,10 @@ const V3_INTERNAL_TAG_OFFSET = 4000000;
 
 const ATTACK_BOX_VMID_OFFSET = 700000;
 const KALI_TEMPLATE_VMID = 1699;
+// Challenge VM id = (spec vm_offset || this) + vxlanId. Lives here rather than
+// in a deployer so topology-validate can check offset collisions without
+// pulling in a deploy path.
+const DEFAULT_VM_OFFSET = 600000;
 
 // ── v1 transit gateway map and v2 lab network ─────────────────────────────────
 // Topology is declared in config/site.json under cluster.networking.
@@ -268,12 +276,136 @@ function applyFixedSubnet(net, isV3, fixedInt, fixedExt) {
   return net;
 }
 
+// ── Segment model + VM NIC resolution ────────────────────────────────────────
+//
+// Until now, "which VNet does this VM attach to" was derived at deploy time
+// from a VM's NAME (matching a GOAD lab host) and its `role` string, and that
+// derivation was copy-pasted across five deploy paths. Nothing in the challenge
+// spec ever recorded the answer, so nothing could show it to an author before
+// the lane was built.
+//
+// resolveVmNics is now the single owner of that decision. A spec VM may declare
+// its attachments explicitly via `nics: [{ segment }]` (what the topology canvas
+// emits); when it does not, the historical derivation runs unchanged, so every
+// pre-existing challenge deploys byte-for-byte as before.
+
+/**
+ * The network segments a lane has, given its subnet scheme. v1/v2 lane gateways
+ * (1692/1694) carry one LAN NIC; the v3 gateway (1695) carries two — ext0/int0.
+ *
+ * Returned as a LIST rather than fixed keys so an N-segment gateway later is an
+ * extra array entry, not a schema change. Ids are the stable identifiers that
+ * `spec.vms[].nics[].segment` and `spec.network.segments[].id` reference.
+ */
+function resolveSegments(subnetScheme) {
+  if (subnetScheme === 'v3') {
+    return [
+      { id: 'ext', role: 'external', label: 'External / Attacker' },
+      { id: 'int', role: 'internal', label: 'Internal / Corp' },
+    ];
+  }
+  return [{ id: 'lan', role: 'lan', label: 'Lane Network' }];
+}
+
+/**
+ * Map segment id → Proxmox bridge (SDN VNet) name.
+ *
+ * v1/v2 lanes have exactly one VNet, so every id resolves to it — that keeps a
+ * spec authored as v3 from exploding if its challenge is later switched to v2,
+ * and matches the existing callers, which already pass the same vnet as both
+ * ext and int on non-v3 lanes.
+ */
+function resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName) {
+  if (subnetScheme === 'v3') {
+    return { ext: vnetExtName, int: vnetIntName };
+  }
+  return { lan: vnetExtName, ext: vnetExtName, int: vnetExtName };
+}
+
+/**
+ * Which segments a VM attaches to, in NIC order.
+ *
+ * Explicit wins: `vmSpec.nics` is honoured as authored. Otherwise reproduce the
+ * pre-canvas derivation exactly —
+ *   v3 + role 'dmz' + qemu → ext then int  (the dual-homed pivot host)
+ *   v3 + GOAD-matched name → int
+ *   everything else         → ext (v3) / lan (v1,v2)
+ *
+ * The qemu guard on the dmz rule is not cosmetic: the old code returned from the
+ * LXC branch before ever reaching the dual-homing block, so an LXC marked 'dmz'
+ * got a single external NIC. Dropping the guard would silently change that.
+ */
+function resolveVmSegments(vmSpec, { subnetScheme, isGoadVm = false } = {}) {
+  const explicit = Array.isArray(vmSpec?.nics) ? vmSpec.nics.filter(n => n && n.segment) : [];
+  if (explicit.length) return explicit.map(n => String(n.segment));
+
+  const isV3 = subnetScheme === 'v3';
+  const type = vmSpec?.type || 'qemu';
+  if (isV3 && vmSpec?.role === 'dmz' && type !== 'lxc') return ['ext', 'int'];
+  if (isV3 && isGoadVm) return ['int'];
+  return [isV3 ? 'ext' : 'lan'];
+}
+
+/**
+ * The Proxmox config keys and values for a lane VM's NICs.
+ *
+ * Returns { nets, segments, dualHomed }:
+ *   nets      — merge straight into a qemu/lxc config POST/PUT
+ *   segments  — ordered segment ids, for the topology canvas and live lane view
+ *   dualHomed — caller uses this to decide whether the .240 ipconfig pass runs
+ *
+ * ctx: { subnetScheme, bridges, goadMac, goadVm, isGoadVm }
+ *
+ * Three renderings, matching the three shapes the deploy paths used inline:
+ *   lxc          → net1 only (net0 belongs to the template), name=lan0 form
+ *   multi-NIC    → plain `virtio,bridge=…` on each, no MAC, no model override
+ *   single qemu  → buildLaneNet0, carrying the GOAD MAC and NIC model
+ */
+function resolveVmNics(vmSpec, ctx = {}) {
+  const { bridges = {}, goadMac, goadVm, isGoadVm = !!goadVm } = ctx;
+  const segments = resolveVmSegments(vmSpec, { ...ctx, isGoadVm });
+  const type = vmSpec?.type || 'qemu';
+
+  const bridgeFor = (segId) => {
+    const bridge = bridges[segId];
+    if (!bridge) {
+      throw new Error(
+        `VM '${vmSpec?.name || '(unnamed)'}' attaches to segment '${segId}', which this lane does not have. ` +
+        `Available: ${Object.keys(bridges).join(', ') || '(none)'}.`
+      );
+    }
+    return bridge;
+  };
+
+  // LXC challenge VMs take net1 — the template already owns net0.
+  if (type === 'lxc') {
+    return {
+      nets: { net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, bridgeFor(segments[0]), goadMac) },
+      segments: segments.slice(0, 1),
+      dualHomed: false,
+    };
+  }
+
+  if (segments.length > 1) {
+    const nets = {};
+    segments.forEach((segId, i) => { nets[`net${i}`] = `virtio,bridge=${bridgeFor(segId)}`; });
+    return { nets, segments, dualHomed: true };
+  }
+
+  return {
+    nets: { net0: goadDeploy.buildLaneNet0(vmSpec, bridgeFor(segments[0]), goadMac, goadVm?.nic_model) },
+    segments,
+    dualHomed: false,
+  };
+}
+
 module.exports = {
   V2_LANE_GATEWAY_VMID,
   V3_LANE_GATEWAY_VMID,
   V3_INTERNAL_TAG_OFFSET,
   ATTACK_BOX_VMID_OFFSET,
   KALI_TEMPLATE_VMID,
+  DEFAULT_VM_OFFSET,
   get TRANSIT_BY_MODULE() { return _transitByModule(); },
   get V2_LAB_NETWORK()    { return _v2LabNetwork(); },
   laneUplinkConfig,
@@ -286,4 +418,8 @@ module.exports = {
   resolveLaneNetworking,
   applyFixedSubnet,
   configureLaneTailscale,
+  resolveSegments,
+  resolveSegmentBridges,
+  resolveVmSegments,
+  resolveVmNics,
 };

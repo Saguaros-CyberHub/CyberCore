@@ -30,6 +30,9 @@ const {
   resolveLaneNetworking,
   configureLaneTailscale,
   formatLaneGatewayNet0,
+  resolveVmNics,
+  resolveSegmentBridges,
+  resolveSegments,
 } = require('../../utils/lane-networking');
 
 const adminOnly = requireRole('admin');
@@ -190,10 +193,17 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           const vmType = vmSpec.type || 'qemu';
           const vmTemplate = vmSpec.template_vmid || templateVmid;
           const vmName = vmSpec.name || challenge_key;
-          const goadMac = goadMacs[vmName]?.mac;
           const isGoadVm = !!goadMacs[vmName];
-          const isDmz = vmSpec.role === 'dmz';
-          const vmVnet = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
+          // Single owner for VM→VNet attachment: explicit spec.vms[].nics when
+          // the topology canvas authored them, the historical name/role
+          // derivation otherwise. See utils/lane-networking.resolveVmNics.
+          const { nets, dualHomed } = resolveVmNics(vmSpec, {
+            subnetScheme,
+            bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
+            goadMac: goadMacs[vmName]?.mac,
+            goadVm: goadMacs[vmName],
+            isGoadVm,
+          });
 
           console.log(`[Deploy] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
 
@@ -204,9 +214,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
               pool: `${module}-pool`
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
-            await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac)
-            });
+            await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, nets);
           } else {
             const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
               newid: vmId, name: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
@@ -215,23 +223,24 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             });
             if (cloneResult) await waitForTask(templateNode, cloneResult);
 
-            if (isV3 && isDmz) {
-              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                net0: `virtio,bridge=${vnetExtName}`,
-                net1: `virtio,bridge=${vnetIntName}`
-              });
-              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                ipconfig0:  `ip=${net.lanExt.base3}.50/24,gw=${net.lanExt.gatewayIp}`,
-                ipconfig1:  `ip=${net.lanInt.base3}.50/24`,
-                nameserver: net.lanExt.gatewayIp,
-                citype:     'nocloud'
-              });
-              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+            if (dualHomed) {
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, nets);
+              // .240, not .50 — the gateway firstboot reserves ext .50 for Kali's
+              // RDP DNAT (wan0:3389 → ext.50), so a DMZ host pinned there stole
+              // student RDP sessions. Matches challenge-lane-deployer.js, which
+              // fixed this; this path and lab-networks.js still had the collision.
+              if (isV3) {
+                await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                  ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
+                  ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
+                  nameserver: net.lanExt.gatewayIp,
+                  citype:     'nocloud'
+                });
+                await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+              }
             } else {
               const goadVm = goadMacs[vmName];
-              const vmConfig = {
-                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model)
-              };
+              const vmConfig = { ...nets };
               if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
               if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
               if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;
@@ -874,6 +883,122 @@ router.get('/challenges/:module', authenticateToken, adminOnly, async (req, res)
     res.json(rows);
   } catch (error) {
     res.json([]);
+  }
+});
+
+/**
+ * GET /api/admin/lanes/:laneId/topology
+ *
+ * The live shape of a deployed lane, in the same { segments, nodes } payload the
+ * authoring canvas consumes — so one renderer draws both.
+ *
+ * Placement comes from PROXMOX, not from the challenge spec: each VM's config is
+ * read and its netN `bridge=` matched against the lane's VNets. That is the
+ * point of a live view — it shows what is actually wired, so drift between the
+ * spec and reality is visible rather than assumed away.
+ *
+ * IPs are taken from the stored deployment record rather than the guest agent.
+ * A guest-agent sweep would be per-VM, slow, and hangs on stopped machines; this
+ * endpoint has to answer fast enough to sit behind a button.
+ */
+router.get('/lanes/:laneId/topology', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const laneRow = await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, name, status, config, module_key FROM cybercore_lane WHERE lane_id = $1`,
+      [req.params.laneId]
+    );
+    if (laneRow.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+
+    const lane = laneRow.rows[0];
+    const config = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+
+    // subnet_scheme is recorded on the lane; older rows predate it, so fall back
+    // to the presence of an internal VNet rather than assuming v1.
+    const subnetScheme = config.subnet_scheme || (config.vnet_internal ? 'v3' : 'v1');
+    const isV3 = subnetScheme === 'v3';
+
+    const cidr = (base) => (base ? `${base}.0/24` : null);
+    const segments = resolveSegments(subnetScheme).map(seg => ({
+      ...seg,
+      cidr: seg.id === 'int' ? cidr(config.lane_subnet_internal) : cidr(config.lane_subnet_base),
+      vnet: seg.id === 'int' ? config.vnet_internal : config.vnet,
+    }));
+
+    // bridge name → segment id, for reading a VM's real attachments back.
+    const segForBridge = {};
+    segments.forEach(s => { if (s.vnet) segForBridge[s.vnet] = s.id; });
+
+    // Stored per-VM IPs, when a vuln-script deployment recorded them.
+    const ipByName = {};
+    try {
+      const dep = await query(
+        `SELECT deployed_network FROM deployment_vuln_selections
+          WHERE lane_id = $1 ORDER BY created_at DESC LIMIT 1`, [req.params.laneId]
+      );
+      const net = dep.rows[0]?.deployed_network;
+      const parsed = typeof net === 'string' ? JSON.parse(net || '{}') : (net || {});
+      (parsed.vms || []).forEach(v => { if (v.name && v.ip) ipByName[v.name] = v.ip; });
+    } catch (e) {
+      // clinic_db is a separate database and may be unavailable; IPs are a
+      // nicety here, not the point of the view.
+      console.warn(`[Lanes] No stored IPs for lane ${req.params.laneId}: ${e.message}`);
+    }
+
+    const nodes = [];
+    for (const vm of (config.vms || [])) {
+      const type = vm.type === 'lxc' ? 'lxc' : 'qemu';
+      let attached = [];
+      let powerState = null;
+
+      try {
+        const cfg = await proxmoxAPI('GET', `/api2/json/nodes/${vm.node}/${type}/${vm.vm_id}/config`);
+        // netN order IS nic order, so sort numerically before mapping.
+        Object.keys(cfg || {})
+          .filter(k => /^net\d+$/.test(k))
+          .sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)))
+          .forEach(k => {
+            const m = String(cfg[k]).match(/bridge=([^,]+)/);
+            const segId = m && segForBridge[m[1]];
+            if (segId && attached.indexOf(segId) === -1) attached.push(segId);
+          });
+        const status = await proxmoxAPI('GET', `/api2/json/nodes/${vm.node}/${type}/${vm.vm_id}/status/current`);
+        powerState = status?.status || null;
+      } catch (e) {
+        // A destroyed or migrated VM must not blank the whole diagram.
+        console.warn(`[Lanes] Could not read ${type}/${vm.vm_id} on ${vm.node}: ${e.message}`);
+      }
+
+      nodes.push({
+        id: String(vm.vm_id),
+        name: vm.name,
+        role: vm.role || '',
+        os: vm.os || vm.templateName || '',
+        type,
+        vmid: vm.vm_id,
+        node: vm.node,
+        ip: ipByName[vm.name] || null,
+        power_state: powerState,
+        // Empty means Proxmox reported a bridge that is not one of this lane's
+        // VNets (or the read failed) — worth seeing as an unattached machine
+        // rather than silently pinning it to a segment it may not be on.
+        segments: attached,
+      });
+    }
+
+    res.json({
+      lane: {
+        lane_id: lane.lane_id, name: lane.name, status: lane.status,
+        vxlan_id: lane.vxlan_id, module: lane.module_key,
+        challenge_key: config.challenge_key || null, subnet_scheme: subnetScheme,
+      },
+      segments,
+      gateway: config.gateway_vm_id
+        ? { label: `Lane gateway\n${config.gateway_vm_id}` }
+        : { label: 'Lane gateway' },
+      nodes,
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

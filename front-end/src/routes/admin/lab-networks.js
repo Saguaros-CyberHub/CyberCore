@@ -29,7 +29,9 @@ const {
   resolveGatewayVmid,
   resolveLaneNetworking,
   formatLaneGatewayNet0,
-  configureLaneTailscale
+  configureLaneTailscale,
+  resolveVmNics,
+  resolveSegmentBridges
 } = require('../../utils/lane-networking');
 
 const adminOnly = requireRole('admin');
@@ -246,11 +248,17 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
           const vmType = vmSpec.type || 'qemu';
           const vmTemplate = vmSpec.template_vmid;
           const vmName = vmSpec.name || `vm-${vmId}`;
-          const goadMac = goadMacs[vmName]?.mac;
           const isGoadVm = !!goadMacs[vmName];
-          const isDmz = vmSpec.role === 'dmz';
-          // v3: GOAD VMs → internal VNet; dmz host → both; else → external.
-          const vmVnet = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
+          // Single owner for VM→VNet attachment: explicit spec.vms[].nics when
+          // the topology canvas authored them, the historical name/role
+          // derivation otherwise. See utils/lane-networking.resolveVmNics.
+          const { nets, dualHomed } = resolveVmNics(vmSpec, {
+            subnetScheme,
+            bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
+            goadMac: goadMacs[vmName]?.mac,
+            goadVm: goadMacs[vmName],
+            isGoadVm,
+          });
 
           if (!vmTemplate) {
             console.error(`[ChallengeNetwork] VM ${vmName} has no template_vmid, skipping`);
@@ -265,35 +273,34 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
               description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
             });
             if (result) await waitForTask(templateNode, result);
-            await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, {
-              net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac)
-            });
+            await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, nets);
           } else {
             const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
               newid: vmId, name: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
               description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
             });
             if (result) await waitForTask(templateNode, result);
-            if (isV3 && isDmz) {
+            if (dualHomed) {
               // v3 DMZ pivot: dual-homed (both NICs first, then cloud-init
-              // static .50 on each subnet — default route via external).
-              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                net0: `virtio,bridge=${vnetExtName}`,
-                net1: `virtio,bridge=${vnetIntName}`
-              });
-              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
-                ipconfig0:  `ip=${net.lanExt.base3}.50/24,gw=${net.lanExt.gatewayIp}`,
-                ipconfig1:  `ip=${net.lanInt.base3}.50/24`,
-                nameserver: net.lanExt.gatewayIp,
-                citype:     'nocloud'
-              });
-              await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+              // static .240 on each subnet — default route via external).
+              await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, nets);
+              // .240, not .50 — the gateway firstboot reserves ext .50 for Kali's
+              // RDP DNAT (wan0:3389 → ext.50), so a DMZ host pinned there stole
+              // student RDP sessions. Matches challenge-lane-deployer.js, which
+              // fixed this; this path and admin/lanes.js still had the collision.
+              if (isV3) {
+                await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, {
+                  ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
+                  ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
+                  nameserver: net.lanExt.gatewayIp,
+                  citype:     'nocloud'
+                });
+                await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+              }
             } else {
               // Apply per-role resources (mirrors single + group deploy paths).
               const goadVm = goadMacs[vmName];
-              const vmConfig = {
-                net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model)
-              };
+              const vmConfig = { ...nets };
               if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
               if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
               if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;

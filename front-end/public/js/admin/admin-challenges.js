@@ -554,12 +554,16 @@ async function onTplGoadToggle() {
     const labKey = document.getElementById('tplGoadVersion').value;
     const includeKali = document.getElementById('tplGoadKali').checked;
     templateVMs = buildTplGoadVMs(labKey, includeKali);
-    renderTemplateVMs();
+    // templateVMs was REPLACED, not mutated — the canvas holds the old array,
+    // so remount rather than refresh.
+    tplTopoMount();
+    renderTemplateVMs(true);
     if (typeof Toast !== 'undefined') Toast.info('GOAD enabled', `VM list set to ${labKey} topology`);
   } else {
     if (_preTplGoadVMs !== null) { templateVMs = _preTplGoadVMs; _preTplGoadVMs = null; }
     else templateVMs = [];
-    renderTemplateVMs();
+    tplTopoMount();
+    renderTemplateVMs(true);
   }
 }
 function onTplGoadVersionChange() {
@@ -570,7 +574,8 @@ function onTplGoadVersionChange() {
   if (document.getElementById('tplGoadEnabled').checked) {
     const includeKali = document.getElementById('tplGoadKali').checked;
     templateVMs = buildTplGoadVMs(labKey, includeKali);
-    renderTemplateVMs();
+    tplTopoMount();          // new array + different locked host set
+    renderTemplateVMs(true);
   }
 }
 function onTplGoadKaliToggle() {
@@ -658,11 +663,15 @@ function showCreateTemplateModal() {
   templatePhantoms = [];
   templateEditSpec = {};
   templateIsReservation = false;
+  templateNetwork = null;
+  tplSubnetScheme = 'v1';
   applyTemplateEditorMode({});
   resetTplGoadFields();
-  renderTemplateVMs();
+  renderTemplateVMs(true);
   renderTemplatePhantoms();
   document.getElementById('templateEditorModal').classList.add('active');
+  // After .active — Cytoscape sizes itself to a container that must be visible.
+  tplTopoMount();
 }
 
 async function editTemplate(id) {
@@ -685,11 +694,17 @@ async function editTemplate(id) {
     templatePhantoms = (spec.phantom_assets && spec.phantom_assets.length)
       ? spec.phantom_assets
       : (typeof t.phantom_assets === 'string' ? JSON.parse(t.phantom_assets) : (t.phantom_assets || []));
+    // GET /lab-templates/:id is SELECT *, so the row carries subnet_scheme —
+    // which decides whether the canvas draws one segment or two.
+    tplSubnetScheme = t.subnet_scheme || 'v1';
+    templateNetwork = spec.network || null;
     applyTemplateEditorMode(spec);
     await loadTplGoadFields(spec.goad);
-    renderTemplateVMs();
+    renderTemplateVMs(true);
     renderTemplatePhantoms();
     document.getElementById('templateEditorModal').classList.add('active');
+    // After .active — Cytoscape sizes itself to a container that must be visible.
+    tplTopoMount();
   } catch (e) { Toast.error('Error', e.message); }
 }
 
@@ -701,7 +716,12 @@ function addTemplateVM() {
 
 function removeTemplateVM(idx) { templateVMs.splice(idx, 1); renderTemplateVMs(); }
 
-function renderTemplateVMs() {
+/**
+ * Render the VM table. `fromCanvas` avoids a render loop: a canvas edit calls
+ * this to refresh the table, and must not push that back into the canvas.
+ */
+function renderTemplateVMs(fromCanvas) {
+  if (!fromCanvas && tplTopo) tplTopo.refresh(templateVMs);
   document.getElementById('tplVmList').innerHTML = templateVMs.map((vm, i) => `
     <div style="background: #f7fafc; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem; border: 1px solid #e2e8f0;">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
@@ -742,6 +762,135 @@ function renderTemplatePhantoms() {
   `).join('') || '<p style="color: var(--gray-400); font-size: 0.8rem;">No phantom assets. Click "+ Add Phantom Host" to add fake hosts for profile realism.</p>';
 }
 
+// ============================================================================
+// TOPOLOGY CANVAS
+// ============================================================================
+// The canvas and the VM table are two views over the SAME templateVMs array —
+// the canvas writes `nics` (network attachment) and `layout` (position) back
+// onto the same row objects. So saveTemplate() posts what it always did, plus
+// spec.network for the segment layout.
+
+let templateNetwork = null;   // spec.network — segments + canvas positions
+let tplTopo = null;           // live editor controller
+let tplVmView = 'canvas';
+let tplSubnetScheme = 'v1';   // from the challenge row; v1/v2 = 1 segment, v3 = 2
+
+/** GOAD lab host names, whose placement is fixed by the lab definition. */
+function tplGoadHostNames() {
+  if (!document.getElementById('tplGoadEnabled')?.checked) return null;
+  const lab = findGoadLab(document.getElementById('tplGoadVersion')?.value);
+  return lab ? lab.vms.map(v => v.name) : null;
+}
+
+/**
+ * Mount (or remount) the canvas. Always tears the previous instance down first:
+ * Cytoscape measures its container at init, so an instance created while the
+ * modal was hidden would render into a 0x0 box.
+ */
+function tplTopoMount() {
+  if (tplTopo) { try { tplTopo.destroy(); } catch (e) { /* already gone */ } tplTopo = null; }
+  const canvas = document.getElementById('tplTopoCanvas');
+  if (!canvas || typeof CyberCoreTopologyEditor === 'undefined') return;
+  // A reserved lab network has no VM list, so applyTemplateEditorMode hides the
+  // whole builder — mounting into that 0x0 container would build a graph that
+  // can never be laid out correctly.
+  if (templateIsReservation) return;
+
+  tplTopo = CyberCoreTopologyEditor.mount({
+    canvasEl:  canvas,
+    paletteEl: document.getElementById('tplTopoPalette'),
+    panelEl:   document.getElementById('tplTopoPanel'),
+    findingsEl: document.getElementById('tplTopoFindings'),
+    vms: templateVMs,
+    subnetScheme: tplSubnetScheme,
+    network: templateNetwork,
+    goadHosts: tplGoadHostNames(),
+    onChange: () => { renderTemplateVMs(true); }
+  });
+  setTplVmView(tplVmView);
+}
+
+function setTplVmView(view) {
+  tplVmView = view === 'table' ? 'table' : 'canvas';
+  const canvasOn = tplVmView === 'canvas';
+  document.getElementById('tplVmCanvasView').style.display = canvasOn ? '' : 'none';
+  document.getElementById('tplVmTableView').style.display = canvasOn ? 'none' : '';
+  document.getElementById('tplViewCanvasBtn')?.classList.toggle('btn-primary', canvasOn);
+  document.getElementById('tplViewTableBtn')?.classList.toggle('btn-primary', !canvasOn);
+  // The canvas was hidden when it mounted if the modal opened on the table view.
+  if (canvasOn && tplTopo) tplTopo.resize();
+}
+
+function tplTopoRelayout() { if (tplTopo) tplTopo.relayout(); }
+
+/** Run the server-side validators over the current spec and paint the results. */
+async function tplTopoValidate() {
+  if (!tplTopo) return;
+  try {
+    const result = await api('POST', '/lab-templates/validate', {
+      subnet_scheme: tplSubnetScheme,
+      goad: readTplGoadFields(),
+      vms: CyberCoreTopologyEditor.stripInternal(templateVMs)
+    });
+    tplTopo.setFindings(result);
+    const e = (result.errors || []).length, w = (result.warnings || []).length;
+    if (!e && !w) Toast.success('Validated', 'No problems found');
+    else Toast.warning('Validated', `${e} error${e === 1 ? '' : 's'}, ${w} warning${w === 1 ? '' : 's'}`);
+  } catch (err) { Toast.error('Validation failed', err.message); }
+}
+
+/** Export the topology as a reusable file. Pure client-side — no endpoint. */
+function tplTopoExport() {
+  const payload = {
+    format: 'cybercore.topology',
+    version: 1,
+    challenge_key: document.getElementById('tplChallengeKey')?.value || null,
+    name: document.getElementById('tplName')?.value || null,
+    subnet_scheme: tplSubnetScheme,
+    goad: readTplGoadFields(),
+    network: tplTopo ? tplTopo.getNetwork() : templateNetwork,
+    vms: CyberCoreTopologyEditor.stripInternal(templateVMs)
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(payload.challenge_key || payload.name || 'topology')}.cctopo.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}
+
+/**
+ * Load a topology file into the canvas. Deliberately does NOT save — the author
+ * reviews what landed and presses Save Template themselves.
+ */
+async function tplTopoImport(input) {
+  const file = input.files && input.files[0];
+  input.value = '';                       // so re-picking the same file re-fires
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    if (payload.format !== 'cybercore.topology') {
+      throw new Error('Not a CyberCore topology file (missing format marker)');
+    }
+    if (!Array.isArray(payload.vms) || !payload.vms.length) {
+      throw new Error('File declares no machines');
+    }
+    if (payload.subnet_scheme && payload.subnet_scheme !== tplSubnetScheme) {
+      // Segment ids differ between schemes, so attachments would dangle.
+      Toast.warning('Scheme differs',
+        `File is ${payload.subnet_scheme}, this challenge is ${tplSubnetScheme} — attachments to missing segments were dropped`);
+    }
+    templateVMs.length = 0;
+    payload.vms.forEach(v => templateVMs.push(v));
+    templateNetwork = payload.network || null;
+    tplTopoMount();
+    renderTemplateVMs(true);
+    Toast.success('Imported', `${payload.vms.length} machines loaded — review, then Save Template`);
+  } catch (e) { Toast.error('Import failed', e.message); }
+}
+
 async function saveTemplate() {
   const editId = document.getElementById('tplEditId').value;
   const goad = readTplGoadFields();
@@ -751,7 +900,8 @@ async function saveTemplate() {
     difficulty: document.getElementById('tplDifficulty').value,
     module: document.getElementById('tplModule').value,
     challenge_key: document.getElementById('tplChallengeKey').value.trim() || null,
-    vm_specs: templateVMs,
+    // __topoId is a per-session canvas handle and must never reach the database.
+    vm_specs: CyberCoreTopologyEditor.stripInternal(templateVMs),
     phantom_assets: templatePhantoms
   };
   // POST /create-lab reads goad at the top level.
@@ -765,8 +915,13 @@ async function saveTemplate() {
     body.spec = { ...templateEditSpec };
     if (goad) body.spec.goad = goad;
     if (!templateIsReservation) {
-      body.spec.vms = templateVMs;
+      body.spec.vms = body.vm_specs;
       body.spec.phantom_assets = templatePhantoms;
+      // Segment list + canvas positions. Only written once the canvas has been
+      // opened, so a challenge edited purely through the table keeps its spec
+      // free of topology keys.
+      const network = tplTopo ? tplTopo.getNetwork() : templateNetwork;
+      if (network) body.spec.network = network;
     } else {
       // Nothing rendered them, so don't post them back as empty arrays.
       delete body.vm_specs;

@@ -68,11 +68,16 @@ const {
   applyFixedSubnet,
   configureLaneTailscale,
   formatLaneGatewayNet0,
+  resolveVmNics,
+  resolveSegmentBridges,
+  DEFAULT_VM_OFFSET,
 } = require('./lane-networking');
+const { findGoadHostMismatch, findVmOffsetCollision } = require('./topology-validate');
 
 const GATEWAY_VMID_OFFSET = 100000;   // gateway LXC = 100000 + vxlanId
-const DEFAULT_VM_OFFSET   = 600000;   // challenge VM = spec vm_offset + vxlanId
 const TEMP_GW_TEMPLATE_BASE = 169200; // per-node temp gateway template copies
+// DEFAULT_VM_OFFSET moved to lane-networking so topology-validate can use it
+// without importing a deployer. Re-exported below; still 600000.
 
 const LOG = '[ChallengeLane]';
 
@@ -100,67 +105,10 @@ function resolveSpecVms(spec, challengeKey) {
   }];
 }
 
-/**
- * On a GOAD lane, a spec VM only becomes an AD host if its NAME matches one in
- * the chosen GOAD lab definition (goad-deploy.GOAD_LABS). prepareGoadMacs keys
- * on that name, and everything downstream follows from it:
- *
- *   matched   → internal VNet, deterministic MAC, reserved IP, healed by the
- *               pre-baked GOAD pass
- *   unmatched → EXTERNAL VNet, random MAC, a pool lease, and skipped by the heal
- *
- * So a spec that says `SRV01` when the lab defines `SRV02` deploys a Windows box
- * that is on the wrong network segment, at an unpredictable address, never
- * joined to the domain — and nothing anywhere says so. This returns a
- * description of that mismatch so the deploy can log it and the CLE picker can
- * show it before an instructor commits a cohort.
- *
- * `role: 'dmz'` VMs are deliberately external (the dual-homed vuln website), so
- * they are expected not to match and are never reported.
- */
-function findGoadHostMismatch(spec, specVms) {
-  if (!spec?.goad?.enabled) return null;
-  const labName = spec.goad.version || goadDeploy.DEFAULT_LAB;
-  const labDef = goadDeploy.GOAD_LABS[labName] || goadDeploy.GOAD_LABS[goadDeploy.DEFAULT_LAB];
-  if (!labDef) return null;
-
-  const known = new Set(labDef.vms.map(v => v.name.toLowerCase()));
-  const unmatched = specVms
-    .filter(v => v.name && v.role !== 'dmz' && !known.has(String(v.name).toLowerCase()))
-    .map(v => v.name);
-  if (unmatched.length === 0) return null;
-
-  return `${unmatched.join(', ')} ${unmatched.length === 1 ? 'is' : 'are'} not part of the `
-       + `'${labName in goadDeploy.GOAD_LABS ? labName : goadDeploy.DEFAULT_LAB}' GOAD lab, which defines `
-       + `${labDef.vms.map(v => v.name).join(', ')}. Unmatched hosts deploy to the EXTERNAL segment with `
-       + `no reserved IP and are not domain-healed. Rename them to match the lab, or mark them "role": "dmz" `
-       + `if they are meant to sit outside the AD network.`;
-}
-
-/**
- * Every challenge VM's id is `vm_offset + vxlanId`, so two VMs in one spec that
- * share an offset land on the SAME VMID. Proxmox then rejects the second clone
- * with "VM <id> already exists" partway through the lane, after the first VM and
- * the gateway already exist.
- *
- * Returns a human-readable problem string, or null when the spec is sound. This
- * is checked before anything is created, and surfaced by the CLE picker so an
- * instructor never selects a challenge that cannot deploy.
- */
-function findVmOffsetCollision(specVms) {
-  const byOffset = new Map();
-  for (const vm of specVms) {
-    const offset = vm.vm_offset || DEFAULT_VM_OFFSET;
-    const name = vm.name || '(unnamed)';
-    if (byOffset.has(offset)) {
-      return `VMs '${byOffset.get(offset)}' and '${name}' share vm_offset ${offset}, so both would `
-           + `clone to the same VMID. Give each VM in the spec a distinct vm_offset `
-           + `(e.g. 600000, 610000, 620000).`;
-    }
-    byOffset.set(offset, name);
-  }
-  return null;
-}
+// findGoadHostMismatch and findVmOffsetCollision now live in topology-validate.js
+// alongside the rest of the spec checks, so the topology canvas can run them
+// without importing a deploy path. They are still re-exported from this module
+// (see module.exports) because cle/utils/vuln-lab-provision.js calls them here.
 
 /** The Kali login for a user: their email local-part, plus a password. */
 function resolveAttackBoxCredentials(user) {
@@ -398,11 +346,19 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
   const templateNode = templateNodeByVmid[vmTemplate] || getDefaultTemplateNode();
 
   const goadVm    = goadMacs[vmName];
-  const goadMac   = goadVm?.mac;
   const isGoadVm  = !!goadVm;
-  const isDmz     = vmSpec.role === 'dmz';
-  const vmVnet    = (isV3 && isGoadVm) ? vnetIntName : vnetExtName;
   const cloneName = hostnameFor(`${vmName}-${String(user.email).split('@')[0]}`);
+
+  // Single owner for "which VNet does this VM attach to": the spec's explicit
+  // nics[] when the topology canvas authored them, the historical name/role
+  // derivation otherwise. See lane-networking.resolveVmNics.
+  const { nets, dualHomed } = resolveVmNics(vmSpec, {
+    subnetScheme,
+    bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
+    goadMac: goadVm?.mac,
+    goadVm,
+    isGoadVm,
+  });
 
   await cloneSem.run(async () => {
     console.log(`${logTag} Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${user.email}`);
@@ -414,9 +370,7 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
         pool: `${moduleKey}-pool`,
       });
       if (upid) await waitForTask(templateNode, upid, 600000);
-      await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/lxc/${vmId}/config`, {
-        net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, vmVnet, goadMac),
-      });
+      await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/lxc/${vmId}/config`, nets);
       return;
     }
 
@@ -427,27 +381,29 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
     });
     if (upid) await waitForTask(templateNode, upid, 600000);
 
-    if (isV3 && isDmz) {
-      await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, {
-        net0: `virtio,bridge=${vnetExtName}`,
-        net1: `virtio,bridge=${vnetIntName}`,
-      });
+    if (dualHomed) {
+      await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, nets);
       // Dual-homed DMZ host sits at .240 on both segments. It used to be pinned
       // to .50, but the gateway firstboot reserves ext .50 for Kali's RDP DNAT
       // (wan0:3389 → ext.50) — so the two collided and student RDP landed on the
       // web host, not Kali. .240 is above the gateway's DHCP pool (.10–.200), so
       // no lease can claim it and no gateway re-bake is needed.
-      await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, {
-        ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
-        ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
-        nameserver: net.lanExt.gatewayIp,
-        citype:     'nocloud',
-      });
-      await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+      //
+      // Only v3 carries the two subnets this pins into. A multi-NIC spec on a
+      // v1/v2 lane still gets both NICs above, just no static pinning.
+      if (isV3) {
+        await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, {
+          ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
+          ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
+          nameserver: net.lanExt.gatewayIp,
+          citype:     'nocloud',
+        });
+        await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/qemu/${vmId}/cloudinit`).catch(() => {});
+      }
       return;
     }
 
-    const vmConfig = { net0: goadDeploy.buildLaneNet0(vmSpec, vmVnet, goadMac, goadVm?.nic_model) };
+    const vmConfig = { ...nets };
     if (goadVm?.memory)  vmConfig.memory  = goadVm.memory;
     if (goadVm?.balloon) vmConfig.balloon = goadVm.balloon;
     if (goadVm?.cores)   vmConfig.cores   = goadVm.cores;

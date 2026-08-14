@@ -17,6 +17,7 @@ const { getDefaultTemplateNode } = require('../utils/site-config');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const goadDeploy = require('../utils/goad-deploy');
 const { reserveLabNetwork, teardownLabNetwork, sanitizeZoneAbbrev } = require('../utils/lab-network-provision');
+const { validateTopology } = require('../utils/topology-validate');
 
 const adminOnly = requireRole('admin');
 
@@ -291,6 +292,44 @@ router.get('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) 
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
     res.json(result.rows[0]);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/admin/lab-templates/validate — check a spec before it is saved or
+// deployed. Stateless: the caller posts the machines it currently has on the
+// canvas, including unsaved edits, and gets findings keyed to machine names.
+//
+// The same validators run at deploy time (challenge-lane-deployer re-exports
+// them), so this cannot drift into telling an author something different from
+// what the deploy will do.
+router.post('/lab-templates/validate', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { vms, spec, subnet_scheme, goad } = req.body || {};
+    const specVms = Array.isArray(vms) ? vms : [];
+    const merged = { ...(spec || {}) };
+    if (goad) merged.goad = goad;
+
+    // Warn about templates the catalog does not know. Best-effort: a catalog
+    // read failure must not turn into a validation failure, because the catalog
+    // is advisory here — Proxmox is the real authority on what exists.
+    let catalogVmids = null;
+    try {
+      const rows = await cybercoreQuery(
+        `SELECT template_vmid FROM cybercore_template_catalog WHERE is_active = true`
+      );
+      catalogVmids = new Set(rows.rows.map(r => Number(r.template_vmid)));
+    } catch (e) {
+      console.warn(`[LabTemplates] Catalog unavailable for validation (${e.message}) — skipping that check`);
+    }
+
+    res.json(validateTopology({
+      spec: merged,
+      subnetScheme: ['v1', 'v2', 'v3'].includes(subnet_scheme) ? subnet_scheme : 'v1',
+      specVms,
+      catalogVmids,
+    }));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

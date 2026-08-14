@@ -9,6 +9,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
+  <link rel="stylesheet" href="/css/topology.css">
   <style>
     /* Admin Dashboard Styles */
     .admin-grid {
@@ -1329,8 +1330,41 @@ msmith@arizona.edu, Mark, Smith"
       </div>
 
       <h4 style="margin: 1rem 0 0.5rem;">Virtual Machines</h4>
-      <div id="tplVmList"></div>
-      <button class="btn btn-sm btn-outline" onclick="addTemplateVM()" style="margin-top: 0.5rem;">+ Add VM</button>
+
+      <!-- Two views over the SAME templateVMs array. The canvas is the default;
+           the table is kept because it is the only place some fields are
+           editable in bulk, and because a canvas that misbehaves must never be
+           the only way to author a challenge. -->
+      <div class="topo-toolbar">
+        <button class="btn btn-sm btn-outline" id="tplViewCanvasBtn" onclick="setTplVmView('canvas')">Canvas</button>
+        <button class="btn btn-sm btn-outline" id="tplViewTableBtn" onclick="setTplVmView('table')">Table</button>
+        <span class="topo-spacer"></span>
+        <span class="topo-hint" id="tplTopoHint">Drag a template in · drag from a machine to a network to attach · click a link to detach</span>
+        <button class="btn btn-sm btn-outline" onclick="tplTopoRelayout()" title="Re-arrange automatically">Auto-arrange</button>
+        <button class="btn btn-sm btn-outline" onclick="tplTopoValidate()">Validate</button>
+        <button class="btn btn-sm btn-outline" onclick="tplTopoExport()">Export</button>
+        <button class="btn btn-sm btn-outline" onclick="document.getElementById('tplTopoImportFile').click()">Import</button>
+        <input type="file" id="tplTopoImportFile" accept=".json,.cctopo.json,application/json" style="display:none" onchange="tplTopoImport(this)">
+      </div>
+
+      <div id="tplVmCanvasView">
+        <div class="topo-wrap">
+          <div class="topo-palette" id="tplTopoPalette"></div>
+          <div class="topo-canvas" id="tplTopoCanvas"></div>
+          <div class="topo-panel" id="tplTopoPanel"></div>
+        </div>
+        <div class="topo-legend">
+          <span><i class="topo-lg-ext"></i> External / Attacker</span>
+          <span><i class="topo-lg-int"></i> Internal / Corp</span>
+          <span>Double border = placement fixed by the GOAD lab</span>
+        </div>
+        <div id="tplTopoFindings"></div>
+      </div>
+
+      <div id="tplVmTableView" style="display:none;">
+        <div id="tplVmList"></div>
+        <button class="btn btn-sm btn-outline" onclick="addTemplateVM()" style="margin-top: 0.5rem;">+ Add VM</button>
+      </div>
 
       <h4 style="margin: 1.5rem 0 0.5rem;">Phantom Assets (appear in profile only)</h4>
       <div id="tplPhantomList"></div>
@@ -1339,6 +1373,24 @@ msmith@arizona.edu, Mark, Smith"
 
       <input type="hidden" id="tplEditId" value="">
       <button class="btn btn-primary" onclick="saveTemplate()" style="width: 100%; margin-top: 1.5rem;">Save Template</button>
+    </div>
+  </div>
+
+  <!-- Live Lane Topology (read-only) -->
+  <div class="modal-overlay" id="laneTopologyModal">
+    <div class="modal-content" style="width:92%; max-width:1000px;">
+      <div class="modal-header">
+        <h3 id="laneTopologyTitle">Topology</h3>
+        <button class="modal-close" onclick="closeLaneTopology()">&times;</button>
+      </div>
+      <p id="laneTopologyMeta" style="font-size:0.78rem; color:var(--text-muted); margin:0 0 0.6rem;"></p>
+      <div class="topo-canvas" id="laneTopologyCanvas" style="min-height:440px; border:1px solid var(--border-color); border-radius:var(--border-radius);"></div>
+      <div class="topo-legend" style="border:1px solid var(--border-color); border-top:none; border-radius:0 0 var(--border-radius) var(--border-radius);">
+        <span><i class="topo-lg-ext"></i> External / Attacker</span>
+        <span><i class="topo-lg-int"></i> Internal / Corp</span>
+        <span>Amber border = not running</span>
+        <span>Attachments read live from Proxmox, not from the challenge spec</span>
+      </div>
     </div>
   </div>
 
@@ -1419,6 +1471,15 @@ msmith@arizona.edu, Mark, Smith"
 
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
+  <!-- Topology canvas. Vendored, not CDN: CSP is scriptSrc 'self' and offline
+       mode is a supported deployment. lodash and cytoscape must both precede
+       edgehandles — see public/vendor/README.md. -->
+  <script src="/vendor/lodash.min.js"></script>
+  <script src="/vendor/cytoscape.min.js"></script>
+  <script src="/vendor/cytoscape-edgehandles.js"></script>
+  <script src="/js/topology/topology-icons.js"></script>
+  <script src="/js/topology/topology-render.js"></script>
+  <script src="/js/topology/topology-editor.js"></script>
   <script src="/js/admin/admin-core.js"></script>
   <script src="/js/admin/admin-connections.js"></script>
   <script src="/js/admin/admin-users.js"></script>

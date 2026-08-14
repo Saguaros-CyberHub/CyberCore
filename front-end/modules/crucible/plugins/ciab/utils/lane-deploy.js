@@ -1302,6 +1302,14 @@ async function deployOneLaneFromSpec({
 
   try {
     // ── Clone challenge VMs in parallel via the shared semaphore ────────
+    // NOTE: deliberately NOT routed through lane-networking.resolveVmNics, which
+    // owns VM→VNet attachment for the three challenge deploy paths. CIAB profile
+    // lanes are flat — no GOAD, no dmz host, every VM on the external segment —
+    // and this LXC branch renders `name=eth0,…,type=veth` where the shared
+    // formatter (goad-deploy.buildLaneNet0) renders `name=lan0,…`. Converting
+    // would change the NIC name on every CIAB LXC for no gain, because these
+    // specs come from profile-to-spec.js and are never canvas-authored.
+    // Revisit if CIAB ever needs segment-aware placement.
     const clonePromises = (spec.vms || []).map(async (vmSpec) => {
       const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
       allVmIds.push(vmId);

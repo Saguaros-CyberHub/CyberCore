@@ -53,6 +53,7 @@ async function loadLanes() {
                 <td>${new Date(l.created_at).toLocaleDateString()}</td>
                 <td>
                   ${l.status === 'active' ? `
+                    <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: var(--primary); border-color: var(--primary);" onclick="showLaneTopology('${l.lane_id}', '${escHtml(l.name || '')}')">Topology</button>
                     <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem;" onclick="showRunScriptModal('${l.lane_id}', '${escHtml(l.name || '')}')">Run Script</button>
                     <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: var(--accent-red, #ab0520); border-color: var(--accent-red, #ab0520);" onclick="showGenerateChallengeProfileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Generate Profile</button>
                     <button class="btn btn-sm btn-outline" style="font-size: 0.75rem; padding: 0.2rem 0.5rem; color: #d69e2e; border-color: #d69e2e;" onclick="showPushFileModal('${l.lane_id}', '${escHtml(l.name || '')}')">Push File</button>
@@ -708,6 +709,65 @@ async function onGroupChallengeSelected() {
 // ============================================================================
 // PUSH FILE TO VM
 // ============================================================================
+
+// ============================================================================
+// LIVE LANE TOPOLOGY
+// ============================================================================
+// Read-only view of what a deployed lane actually looks like in Proxmox, drawn
+// with the same renderer as the authoring canvas. Positions are not stored for a
+// live lane, which is why the renderer runs a layout rather than expecting them.
+
+let _laneTopo = null;
+
+async function showLaneTopology(laneId, laneName) {
+  const modal = document.getElementById('laneTopologyModal');
+  const body = document.getElementById('laneTopologyCanvas');
+  const meta = document.getElementById('laneTopologyMeta');
+
+  document.getElementById('laneTopologyTitle').textContent = `Topology: ${laneName || laneId}`;
+  meta.textContent = 'Reading lane configuration from Proxmox…';
+  if (_laneTopo) { try { _laneTopo.destroy(); } catch (e) { /* already gone */ } _laneTopo = null; }
+  body.innerHTML = '';
+  modal.classList.add('active');
+
+  try {
+    const data = await api('GET', `/lanes/${laneId}/topology`);
+
+    const unattached = data.nodes.filter(n => !n.segments.length).length;
+    meta.innerHTML =
+      `<strong>${escHtml(data.lane.challenge_key || '—')}</strong> · ` +
+      `${escHtml(data.lane.subnet_scheme)} · VXLAN ${escHtml(String(data.lane.vxlan_id))} · ` +
+      `${data.nodes.length} machine${data.nodes.length === 1 ? '' : 's'}` +
+      (unattached
+        ? ` · <span style="color: var(--danger);">${unattached} on no known segment</span>`
+        : '');
+
+    // Mount after .active — Cytoscape measures its container on init.
+    const el = document.createElement('div');
+    el.style.cssText = 'position:absolute; inset:0;';
+    body.appendChild(el);
+
+    _laneTopo = CyberCoreTopology.create(el, { mode: 'view' });
+    _laneTopo.setData({
+      segments: data.segments,
+      gateway: data.gateway,
+      nodes: data.nodes.map(n => ({
+        id: n.id, name: n.name, role: n.role, os: n.os,
+        ip: n.ip, segments: n.segments,
+        // A stopped machine reads as a problem worth seeing at a glance.
+        severity: n.power_state && n.power_state !== 'running' ? 'warning' : '',
+      })),
+    }, true);
+  } catch (e) {
+    meta.textContent = '';
+    body.innerHTML = `<p style="padding:1rem; color: var(--danger);">${escHtml(e.message)}</p>`;
+  }
+}
+
+function closeLaneTopology() {
+  if (_laneTopo) { try { _laneTopo.destroy(); } catch (e) { /* already gone */ } _laneTopo = null; }
+  closeModal('laneTopologyModal');
+}
 
 async function showPushFileModal(laneId, laneName) {
   const body = document.getElementById('permissionsBody');
