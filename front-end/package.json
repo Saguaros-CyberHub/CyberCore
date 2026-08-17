@@ -10,14 +10,14 @@
     "test": "node --test \"test/*.test.js\""
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.115.0",
+    "@anthropic-ai/sdk": "^0.117.1",
     "bcryptjs": "^3.0.3",
     "connect-redis": "^9.0.0",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
     "dotenv": "^16.3.1",
     "express": "^4.22.2",
-    "express-rate-limit": "^8.6.0",
+    "express-rate-limit": "^8.6.2",
     "express-session": "^1.19.0",
     "express-validator": "^7.3.2",
     "helmet": "^7.1.0",
@@ -25,11 +25,11 @@
     "nodemailer": "^9.0.5",
     "otplib": "^13.4.1",
     "pdfkit": "^0.19.1",
-    "pg": "^8.22.0",
+    "pg": "^8.23.0",
     "qrcode": "^1.5.4",
-    "redis": "^6.1.0",
+    "redis": "^6.2.1",
     "uuid": "^14.0.1",
-    "validator": "^13.15.26"
+    "validator": "^13.15.35"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"
