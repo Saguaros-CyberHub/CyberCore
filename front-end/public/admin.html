@@ -334,6 +334,10 @@
           <button class="tab-btn" onclick="switchTab('workstation-templates', this)">Workstation Templates</button>
           <button class="tab-btn" onclick="switchTab('crucible-events', this); loadCrucibleEvents()">Crucible Events</button>
           <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Scripts</button>
+          <!-- Cytoscape measures its container at init, and .tab-content is
+               display:none until this button runs switchTab. So the canvas is
+               built by topoTabActivate() on first activation, never at page load. -->
+          <button class="tab-btn" onclick="switchTab('topology', this); topoTabActivate()">Topology</button>
           <button class="tab-btn" onclick="switchTab('settings', this)">Settings</button>
         </div>
 
@@ -659,6 +663,239 @@
 
           <!-- Challenge List -->
           <div id="challengeTemplatesList"></div>
+        </div>
+
+        <!-- ================================================================
+             TAB: Topology
+             ----------------------------------------------------------------
+             Two things in one tab, because they are two views of the same
+             graph: a DESIGNER that authors a new challenge on a canvas and
+             creates it for real, and a VIEWER that draws either a running
+             lane (live, from Proxmox) or a saved challenge's spec.
+
+             Every id here is prefixed topoDesign*/topoView* on purpose. The
+             challenge-editor modal further down this file resolves its own
+             canvas by getElementById('tplTopoCanvas'); a duplicated id would
+             be found HERE first (document order) and that modal would mount
+             into a hidden container.
+             ================================================================ -->
+        <div class="tab-content topo-page" id="tab-topology">
+
+          <div class="topo-modebar">
+            <button class="btn btn-sm btn-primary" id="topoModeDesignBtn" onclick="setTopoMode('design')">Designer</button>
+            <button class="btn btn-sm btn-outline"  id="topoModeViewBtn"   onclick="setTopoMode('view')">Viewer</button>
+          </div>
+
+          <!-- ── DESIGNER ─────────────────────────────────────────────── -->
+          <div id="topoDesignPane">
+
+            <div class="topo-seedbar">
+              <label for="topoSeedSource">Start from</label>
+              <select id="topoSeedSource" onchange="onTopoSeedSourceChange()">
+                <option value="blank">Blank canvas</option>
+                <option value="challenge">An existing challenge</option>
+                <option value="goad">A GOAD lab preset</option>
+                <option value="file">A topology file (.cctopo.json)</option>
+              </select>
+              <select id="topoSeedChoice" style="display:none;"></select>
+              <button class="btn btn-sm btn-outline" id="topoSeedLoadBtn" onclick="applyTopoSeed()">Load</button>
+              <input type="file" id="topoSeedFile" accept=".json,.cctopo.json,application/json"
+                     style="display:none" onchange="onTopoSeedFilePicked(this)">
+              <span class="topo-settings-hint" id="topoSeedHint" style="margin:0;"></span>
+            </div>
+
+            <details class="topo-settings" id="topoSettings" open>
+              <summary>Challenge settings</summary>
+              <div class="topo-settings-grid">
+                <div>
+                  <label for="topoName">Name</label>
+                  <input type="text" id="topoName" placeholder="e.g., DunderCorp Network">
+                  <div class="topo-field-error" id="topoErrName" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoKey">Challenge key</label>
+                  <input type="text" id="topoKey" placeholder="e.g., dundercorp-v1" oninput="onTopoKeyInput()">
+                  <div class="topo-field-error" id="topoErrKey" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoZone">SDN zone</label>
+                  <input type="text" id="topoZone" placeholder="auto from key" maxlength="8">
+                  <div class="topo-field-error" id="topoErrZone" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoMaxLanes">Max lanes</label>
+                  <input type="number" id="topoMaxLanes" value="10" min="1" max="200">
+                  <div class="topo-field-error" id="topoErrMaxLanes" style="display:none;"></div>
+                </div>
+                <div>
+                  <label for="topoDifficulty">Difficulty</label>
+                  <select id="topoDifficulty">
+                    <option value="beginner">Beginner</option>
+                    <option value="intermediate" selected>Intermediate</option>
+                    <option value="advanced">Advanced</option>
+                  </select>
+                </div>
+                <div>
+                  <label for="topoModule">Module</label>
+                  <select id="topoModule">
+                    <option value="crucible">Crucible</option>
+                    <option value="cyberlabs">CyberLabs</option>
+                    <option value="forge">Forge</option>
+                  </select>
+                  <p class="topo-settings-hint">Recorded for the UI — every challenge row is created in <code>crucible_challenge</code>.</p>
+                </div>
+                <div>
+                  <label for="topoSubnetScheme">Network topology</label>
+                  <select id="topoSubnetScheme" onchange="onTopoSchemeChange()">
+                    <option value="v1">v1 — flat shared subnet</option>
+                    <option value="v2">v2 — one /24 per lane</option>
+                    <option value="v3">v3 — segmented (ext + int)</option>
+                  </select>
+                </div>
+                <div>
+                  <label>&nbsp;</label>
+                  <p class="topo-settings-hint" id="topoSchemeDesc"></p>
+                </div>
+                <div class="topo-settings-wide">
+                  <label for="topoDesc">Description</label>
+                  <textarea id="topoDesc" rows="2" placeholder="What this challenge network simulates..."></textarea>
+                </div>
+              </div>
+            </details>
+
+            <!-- GOAD card. Same fields as the challenge-editor modal's, with
+                 topoGoad* ids; the read-only ones reflect the GOAD fork and the
+                 baked Windows template, not per-challenge values. -->
+            <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-bottom: 0.75rem; background: rgba(245, 158, 11, 0.12);">
+              <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
+                <input type="checkbox" id="topoGoadEnabled" onchange="onTopoGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
+                <span style="font-weight: 600; font-size: 0.95rem;">Use GOAD (Game of Active Directory)</span>
+                <span style="font-size: 0.72rem; color: var(--text-muted); font-weight: 400;">— upstream Orange Cyberdefense playbooks</span>
+              </label>
+              <div id="topoGoadConfig" style="display: none; margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px dashed #f6ad55;">
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem;">
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">GOAD Version</label>
+                    <select id="topoGoadVersion" onchange="onTopoGoadVersionChange()" style="width:100%; padding:0.35rem; font-size:0.8rem; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                      <option value="GOAD-Light">Loading...</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">Forest Domain (read-only)</label>
+                    <input type="text" id="topoGoadDomain" value="cybersaguaros.local" readonly
+                           title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)"
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-card-hover); color:var(--text-muted); cursor:not-allowed;">
+                  </div>
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">Child Subdomain (read-only)</label>
+                    <input type="text" id="topoGoadChild" value="tumamoc" readonly
+                           title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)"
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-card-hover); color:var(--text-muted); cursor:not-allowed;">
+                  </div>
+                </div>
+                <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; align-items: end;">
+                  <div>
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">Local Administrator Password (read-only — baked into the template)</label>
+                    <input type="text" id="topoGoadPassword" value="vagrant" readonly
+                           title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here"
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-card-hover); color:var(--text-muted); cursor:not-allowed;">
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <input type="checkbox" id="topoGoadKali" checked onchange="onTopoGoadKaliToggle()" style="width:16px; height:16px; cursor:pointer;">
+                    <label for="topoGoadKali" style="font-size:0.8rem; cursor:pointer; margin:0;">Include Kali (.50)</label>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <input type="checkbox" id="topoGoadPrebaked" onchange="onTopoGoadPrebakedToggle()" style="width:16px; height:16px; cursor:pointer;">
+                    <label for="topoGoadPrebaked" style="font-size:0.8rem; cursor:pointer; margin:0;">Pre-baked golden images</label>
+                  </div>
+                </div>
+                <div id="topoGoadPrebakedConfig" style="display:none; margin-top:0.6rem; padding-top:0.6rem; border-top:1px dashed #f6ad55;">
+                  <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem;">
+                    <div>
+                      <label style="font-size:0.7rem; font-weight:600; color:var(--text-secondary);">Fixed internal subnet (first 3 octets)</label>
+                      <input type="text" id="topoGoadFixedInt" placeholder="10.167.161"
+                             style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                    </div>
+                    <div>
+                      <label style="font-size:0.7rem; font-weight:600; color:var(--text-secondary);">Fixed external subnet (first 3 octets)</label>
+                      <input type="text" id="topoGoadFixedExt" placeholder="10.39.161"
+                             style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
+                    </div>
+                  </div>
+                  <p class="topo-settings-hint">
+                    Clones provisioned golden images instead of running the ~90-min ansible bake. Every pre-baked lane
+                    reuses these exact subnets (safe — v3 lanes are VXLAN-isolated), and they <strong>must</strong> match
+                    the base the image's AD/DNS was provisioned on. Forces <strong>v3</strong>.
+                  </p>
+                </div>
+                <p class="topo-settings-hint" id="topoGoadVersionDesc"></p>
+                <div class="topo-field-error" id="topoErrGoad" style="display:none;"></div>
+              </div>
+            </div>
+
+            <div class="topo-toolbar">
+              <button class="btn btn-sm btn-outline" id="topoViewCanvasBtn" onclick="setTopoVmView('canvas')">Canvas</button>
+              <button class="btn btn-sm btn-outline" id="topoViewTableBtn"  onclick="setTopoVmView('table')">Table</button>
+              <span class="topo-spacer"></span>
+              <span class="topo-hint">Drag a template in · drag from a machine to a network to attach · click a link to detach</span>
+              <button class="btn btn-sm btn-outline" onclick="topoDesignRelayout()" title="Re-arrange automatically">Auto-arrange</button>
+              <button class="btn btn-sm btn-outline" onclick="topoDesignValidate()">Validate</button>
+              <button class="btn btn-sm btn-outline" onclick="topoDesignExport()">Export</button>
+            </div>
+
+            <div id="topoDesignCanvasView">
+              <div class="topo-wrap">
+                <div class="topo-palette" id="topoDesignPalette"></div>
+                <div class="topo-canvas"  id="topoDesignCanvas"></div>
+                <div class="topo-panel"   id="topoDesignPanel"></div>
+              </div>
+              <div class="topo-legend">
+                <span><i class="topo-lg-ext"></i> External / Attacker</span>
+                <span><i class="topo-lg-int"></i> Internal / Corp</span>
+                <span>Double border = placement fixed by the GOAD lab</span>
+              </div>
+              <div id="topoDesignFindings"></div>
+            </div>
+
+            <div id="topoDesignTableView" style="display:none;">
+              <div id="topoDesignVmList"></div>
+              <button class="btn btn-sm btn-outline" onclick="topoAddVM()" style="margin-top: 0.5rem;">+ Add VM</button>
+            </div>
+
+            <h4 style="margin: 1.25rem 0 0.5rem;">Phantom Assets (appear in profile only)</h4>
+            <div id="topoPhantomList"></div>
+            <button class="btn btn-sm btn-outline" onclick="topoAddPhantom()" style="margin-top: 0.5rem;">+ Add Phantom Host</button>
+
+            <div class="topo-createbar">
+              <button class="btn btn-primary" onclick="topoCreateChallenge()">Create Challenge (DB + SDN Zone + VNets)</button>
+              <div class="topo-createstatus" id="topoCreateStatus"></div>
+            </div>
+          </div>
+
+          <!-- ── VIEWER ───────────────────────────────────────────────── -->
+          <div id="topoViewPane" style="display:none;">
+            <div class="topo-viewbar">
+              <label class="topo-radio">
+                <input type="radio" name="topoViewKind" value="lane" checked onchange="onTopoViewKindChange()"> Live lane
+              </label>
+              <label class="topo-radio">
+                <input type="radio" name="topoViewKind" value="spec" onchange="onTopoViewKindChange()"> Challenge spec
+              </label>
+              <select id="topoViewChoice" onchange="renderTopoView()"></select>
+              <button class="btn btn-sm btn-outline" onclick="loadTopoViewChoices(true)" title="Reload the list">Refresh</button>
+            </div>
+            <p class="topo-viewmeta" id="topoViewMeta"></p>
+            <div class="topo-wrap topo-wrap--view">
+              <div class="topo-canvas" id="topoViewCanvas"></div>
+            </div>
+            <div class="topo-legend" id="topoViewLegend">
+              <span><i class="topo-lg-ext"></i> External / Attacker</span>
+              <span><i class="topo-lg-int"></i> Internal / Corp</span>
+              <span>Amber border = not running</span>
+              <span>Attachments read live from Proxmox, not from the challenge spec</span>
+            </div>
+            <div id="topoViewFindings"></div>
+          </div>
         </div>
 
         <!-- TAB: Workstation Templates -->
@@ -1480,6 +1717,7 @@ msmith@arizona.edu, Mark, Smith"
   <script src="/js/topology/topology-icons.js"></script>
   <script src="/js/topology/topology-render.js"></script>
   <script src="/js/topology/topology-editor.js"></script>
+  <script src="/js/topology/topology-seed.js"></script>
   <script src="/js/admin/admin-core.js"></script>
   <script src="/js/admin/admin-connections.js"></script>
   <script src="/js/admin/admin-users.js"></script>
@@ -1491,6 +1729,9 @@ msmith@arizona.edu, Mark, Smith"
   <script src="/js/admin/admin-workstation-templates.js"></script>
   <script src="/js/admin/admin-crucible-events.js"></script>
   <script src="/js/admin/admin-settings.js"></script>
+  <!-- After admin-challenges.js: the Topology tab reuses its GOAD catalog
+       helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml. -->
+  <script src="/js/admin/admin-topology.js"></script>
   <script src="/js/admin/admin-init.js"></script>
 </body>
 </html>

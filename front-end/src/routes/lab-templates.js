@@ -18,6 +18,7 @@ const { authenticateToken, requireRole } = require('../middleware/auth');
 const goadDeploy = require('../utils/goad-deploy');
 const { reserveLabNetwork, teardownLabNetwork, sanitizeZoneAbbrev } = require('../utils/lab-network-provision');
 const { validateTopology } = require('../utils/topology-validate');
+const { buildSpecVm, buildSpecNetwork } = require('../utils/challenge-spec');
 
 const adminOnly = requireRole('admin');
 
@@ -438,7 +439,7 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
     const {
       name, challenge_key, description, difficulty, zone_abbrev,
       template_vmid, vms: vmsList, max_lanes, module, challenge_type,
-      goad, subnet_scheme
+      goad, subnet_scheme, network, phantom_assets
     } = req.body;
 
     if (!name || !challenge_key || !max_lanes) {
@@ -476,19 +477,12 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
     const statusUpdates = [];
     const pushStatus = (msg) => { statusUpdates.push(msg); console.log(`[CreateChallenge] ${msg}`); };
 
-    // Build VMs array from input (multi-VM support).
+    // Build VMs array from input (multi-VM support). buildSpecVm emits the same
+    // nine keys this route always emitted, plus `nics`/`layout` when the caller
+    // authored them on the canvas — omitted otherwise, so a caller that does not
+    // send them gets byte-identical output (test/challenge-spec-create.test.js).
     const specVMs = (vmsList && vmsList.length > 0)
-      ? vmsList.map((vm, idx) => ({
-          name: vm.name || `vm${idx + 1}`,
-          role: vm.role || 'Server',
-          os: vm.os || 'Unknown',
-          template_vmid: parseInt(vm.template_vmid),
-          type: vm.type || 'qemu',
-          vm_offset: parseInt(vm.vm_offset) || 600000,
-          services: vm.services || [],
-          default_scripts: vm.default_scripts || [],
-          hostname: `${vm.name || challenge_key}.local`
-        }))
+      ? vmsList.map((vm, idx) => buildSpecVm(vm, idx, challenge_key))
       : [{
           name: challenge_key,
           role: 'primary',
@@ -505,6 +499,20 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       vms: specVMs,
       limits: { max_concurrent_lanes: numLanes }
     };
+
+    // Segment list + canvas positions, when the challenge was authored on a
+    // canvas. Written only if the caller sent a network, so a challenge created
+    // through the flat form keeps its spec free of topology keys — the same rule
+    // the editor follows for per-VM `nics`. The segment list itself is rebuilt
+    // from subnet_scheme rather than trusted, see challenge-spec.js.
+    const specNetwork = buildSpecNetwork(network, subnetScheme);
+    if (specNetwork) spec.network = specNetwork;
+
+    // Length-guarded for the same reason PUT /lab-templates/:id guards it: a
+    // client that posts an empty array by reflex must not look like intent.
+    if (Array.isArray(phantom_assets) && phantom_assets.length) {
+      spec.phantom_assets = phantom_assets;
+    }
 
     // GOAD: when goad.enabled=true, embed the GOAD config so deploy paths can
     // detect it and run the post-clone provisioning (controller LXC + ansible

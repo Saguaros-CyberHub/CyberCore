@@ -9,6 +9,9 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/layout.css">
+  <!-- Lane topology modal. Served from the core public/ dir by the unauthenticated
+       express.static in server.js, so a plugin page can reference it directly. -->
+  <link rel="stylesheet" href="/css/topology.css">
   <style>
     /* Two-column layout: courses list + filters */
     .courses-container { display: flex; gap: 2rem; height: calc(100vh - 200px); }
@@ -366,6 +369,32 @@
           <button class="btn btn-secondary" onclick="closeModal('addStudentModal')">Cancel</button>
           <button class="btn btn-primary" onclick="saveAddedStudent()">Add Student</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================================
+       Lane Topology Modal (read-only)
+       ----------------------------------------------------------------
+       The same diagram admins get, scoped to lanes in a course this
+       instructor manages. Drawn by the shared renderer in view mode; the
+       payload comes from GET /api/cle/courses/:courseId/vms/:laneId/topology,
+       which reads each VM's real bridge out of Proxmox.
+       ================================================================ -->
+  <div class="modal-overlay" id="laneTopologyModal">
+    <div class="modal" style="max-width: 1000px;">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:1rem;">
+        <h2 id="laneTopologyTitle" style="margin:0;">Topology</h2>
+        <button class="btn btn-sm btn-outline" onclick="closeLaneTopology()">Close</button>
+      </div>
+      <p id="laneTopologyMeta" style="font-size:0.78rem; color:var(--text-muted, #6b7280); margin:0.5rem 0 0.6rem;"></p>
+      <div class="topo-canvas" id="laneTopologyCanvas"
+           style="min-height:440px; border:1px solid var(--border-color, #e5e7eb); border-radius:8px;"></div>
+      <div class="topo-legend" style="border:1px solid var(--border-color, #e5e7eb); border-top:none; border-radius:0 0 8px 8px;">
+        <span><i class="topo-lg-ext"></i> External / Attacker</span>
+        <span><i class="topo-lg-int"></i> Internal / Corp</span>
+        <span>Amber border = not running</span>
+        <span>Attachments read live from Proxmox, not from the challenge spec</span>
       </div>
     </div>
   </div>
@@ -1167,6 +1196,7 @@
               <td>${_powerBadge(v.power_state)}</td>
               <td style="display:flex;gap:0.4rem;align-items:center;">
                 ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" onclick="openVMConsole('${escAttr(v.lane_id)}')">Console</button>` : ''}
+                <button class="btn btn-sm btn-outline" onclick="showLaneTopology('${escAttr(v.lane_id)}', '${escAttr(v.vm_name || v.lane_id)}')">Topology</button>
                 <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escAttr(v.lane_id)}')">Delete</button>
               </td>
             </tr>`;
@@ -1207,12 +1237,19 @@
      * escHtml escapes & < > but NOT quotes, and an email may legitimately contain
      * an apostrophe, which would break out of the handler's string literal.
      */
-    function _labActionCell(labId, userId, email, mode, busy) {
+    function _labActionCell(labId, userId, email, mode, busy, laneId) {
       const d = `data-lab-id="${escAttr(labId)}" data-user-id="${escAttr(userId)}" `
               + `data-email="${escAttr(email || userId)}" data-mode="${escAttr(mode || '')}"`;
       const dis = busy ? ' disabled' : '';
+      // Only rows that actually have a lane get a diagram — a ghost row mid-rebuild
+      // and a torn-down row have nothing to draw.
+      const topo = laneId
+        ? `<button class="btn btn-sm btn-outline" data-lane-id="${escAttr(laneId)}" `
+          + `data-email="${escAttr(email || userId)}" onclick="showLaneTopology(this.dataset.laneId, this.dataset.email)">Topology</button>`
+        : '';
       return `<div style="display:flex; gap:0.3rem; white-space:nowrap;">
         <button class="btn btn-sm btn-outline" ${d} onclick="redeployStudentLab(this)"${dis}>Redeploy</button>
+        ${topo}
         <button class="btn btn-sm btn-outline" ${d} onclick="removeStudentLab(this)"${dis}>Tear down</button>
       </div>`;
     }
@@ -1290,7 +1327,7 @@
                         ? `<code style="font-size:0.75rem;">${d.attack_box_vm_id}</code> ${d.attack_box_power ? _powerBadge(d.attack_box_power) : ''}${creds}`
                         : '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
                   <td style="font-size:0.75rem;">${_flagSummary(d.flags)}</td>
-                  <td>${_labActionCell(l.lab_id, d.user_id, d.student_email, d.mode, !!busy || d.lane_status === 'deploying')}</td>
+                  <td>${_labActionCell(l.lab_id, d.user_id, d.student_email, d.mode, !!busy || d.lane_status === 'deploying', d.lane_id)}</td>
                 </tr>`;
               });
 
@@ -2295,6 +2332,78 @@
       }
     }
 
+    // ========================================================================
+    // LANE TOPOLOGY (read-only)
+    // ========================================================================
+    // What a student's lane actually looks like, drawn with the same renderer
+    // the admin console uses. Placement is read live from Proxmox rather than
+    // from the challenge spec, so spec-vs-reality drift is visible.
+    //
+    // Only the view-mode assets are loaded on this page: edgehandles (and its
+    // lodash dependency) is guarded behind mode === 'edit' in the renderer, and
+    // an instructor has nothing to author here.
+
+    let _laneTopo = null;
+
+    async function showLaneTopology(laneId, label) {
+      const modal = document.getElementById('laneTopologyModal');
+      const body = document.getElementById('laneTopologyCanvas');
+      const meta = document.getElementById('laneTopologyMeta');
+
+      document.getElementById('laneTopologyTitle').textContent = `Topology: ${label || laneId}`;
+      meta.textContent = 'Reading lane configuration from Proxmox…';
+      if (_laneTopo) { try { _laneTopo.destroy(); } catch (e) { /* already gone */ } _laneTopo = null; }
+      body.innerHTML = '';
+      showModal('laneTopologyModal');
+
+      if (typeof CyberCoreTopology === 'undefined') {
+        meta.textContent = '';
+        body.innerHTML = '<p style="padding:1rem; color:#ef4444;">The topology renderer failed to load.</p>';
+        return;
+      }
+
+      try {
+        const data = await api('GET', `/courses/${currentCourseId}/vms/${laneId}/topology`);
+
+        const unattached = data.nodes.filter(n => !n.segments.length).length;
+        meta.innerHTML =
+          `<strong>${escHtml(data.lane.challenge_key || data.lane.name || '—')}</strong> · ` +
+          `${escHtml(data.lane.subnet_scheme)} · VXLAN ${escHtml(String(data.lane.vxlan_id))} · ` +
+          `${data.nodes.length} machine${data.nodes.length === 1 ? '' : 's'}` +
+          (unattached
+            ? ` · <span style="color:#ef4444;">${unattached} on no known segment</span>`
+            : '');
+
+        // Mount only after the modal is visible — Cytoscape measures its
+        // container at init, and a hidden one yields a 0x0 graph.
+        const el = document.createElement('div');
+        el.style.cssText = 'position:absolute; inset:0;';
+        body.appendChild(el);
+
+        _laneTopo = CyberCoreTopology.create(el, { mode: 'view' });
+        _laneTopo.setData({
+          segments: data.segments,
+          gateway: data.gateway,
+          nodes: data.nodes.map(n => ({
+            id: n.id, name: n.name, role: n.role, os: n.os, ip: n.ip, segments: n.segments,
+            // A stopped machine reads as a problem worth seeing at a glance.
+            severity: n.power_state && n.power_state !== 'running' ? 'warning' : '',
+          })),
+          // A live lane stores no positions, so let the renderer lay it out.
+        }, true);
+      } catch (e) {
+        meta.textContent = '';
+        body.innerHTML = `<p style="padding:1rem; color:#ef4444;">${escHtml(e.message)}</p>`;
+      }
+    }
+
+    function closeLaneTopology() {
+      // destroy() is what disconnects the renderer's theme MutationObserver;
+      // skipping it leaks one observer per lane viewed.
+      if (_laneTopo) { try { _laneTopo.destroy(); } catch (e) { /* already gone */ } _laneTopo = null; }
+      closeModal('laneTopologyModal');
+    }
+
     async function deleteVM(laneId) {
       if (!confirm('Delete this workstation lane (workstation + gateway)?')) return;
       try {
@@ -2402,5 +2511,14 @@
        loader change needed. -->
   <script src="/cle/js/csv.js"></script>
   <script src="/cle/js/roster-import.js"></script>
+
+  <!-- Lane topology renderer, VIEW MODE ONLY. cytoscape-edgehandles (and the
+       lodash it needs) is guarded behind mode === 'edit' in topology-render.js,
+       and an instructor authors nothing here — so those two are deliberately not
+       loaded. Served from the core public/ dir, which server.js exposes with a
+       plain express.static, so a plugin page can reference them directly. -->
+  <script src="/vendor/cytoscape.min.js"></script>
+  <script src="/js/topology/topology-icons.js"></script>
+  <script src="/js/topology/topology-render.js"></script>
 </body>
 </html>

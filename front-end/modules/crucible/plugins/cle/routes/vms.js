@@ -25,6 +25,7 @@ const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { mintGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
+const { buildLaneTopology } = require('../../../../../src/utils/lane-topology');
 const laneProvision = require('../utils/lane-provision');
 const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
 const {
@@ -398,6 +399,42 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
   } catch (error) {
     console.error('[CLE] Console error:', error.message);
     res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * GET /:laneId/topology — the live network diagram for one of this course's lanes.
+ *
+ * The instructor-scoped door onto the same builder the admin route uses, so an
+ * instructor sees the identical picture without needing admin. It cannot simply
+ * be the admin route with a relaxed role: that handler does NO course scoping and
+ * will describe any laneId it is handed, so widening it to `instructor` would let
+ * every instructor read every lane in the range.
+ *
+ * Unlike the rest of this file, the material_id guard is deliberately DROPPED.
+ * The scope note at the top of this file exists because DELETE would destroy a
+ * lab lane through the wrong teardown path; a read-only diagram has no such
+ * hazard, and an instructor wants to see a vulnerable-lab lane's topology at
+ * least as much as a workstation's.
+ */
+router.get('/:laneId/topology', instructorOnly, async (req, res) => {
+  try {
+    const { courseId, laneId } = req.params;
+
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const laneRes = await cybercoreQuery(
+      `SELECT lane_id FROM cybercore_lane
+        WHERE lane_id = $1 AND config->>'course_id' = $2 AND status <> 'deleted'`,
+      [laneId, courseId]
+    );
+    if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
+
+    res.json(await buildLaneTopology(laneId));
+  } catch (error) {
+    console.error('[CLE] Topology error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

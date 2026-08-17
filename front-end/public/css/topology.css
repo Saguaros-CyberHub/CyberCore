@@ -204,3 +204,179 @@
 }
 .topo-legend .topo-lg-ext { color: #f59e0b; }
 .topo-legend .topo-lg-int { color: #378dbd; }
+
+/* ==========================================================================
+   Topology TAB (admin.html #tab-topology)
+   --------------------------------------------------------------------------
+   Everything above is shared with the challenge-editor modal and the live-lane
+   modal — nothing above this line may change, or those two break. These rules
+   only ADD: a taller canvas for a full page, a single-column read-only variant,
+   and the chrome the tab needs that a modal does not (seed bar, settings form,
+   mode switch).
+   ========================================================================== */
+
+/* A full page can afford more canvas than a modal can. Scoped to .topo-page so
+   the modal keeps the 460px it was designed around. */
+.topo-page .topo-wrap,
+.topo-page .topo-canvas { min-height: 560px; }
+.topo-page .topo-palette,
+.topo-page .topo-panel  { max-height: 620px; }
+
+/* Read-only viewer: no palette to drag from, no properties to edit. */
+.topo-wrap--view { grid-template-columns: 1fr; }
+
+/* ── mode switch (Designer | Viewer) ────────────────────────────────────── */
+
+.topo-modebar {
+  display: flex;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+/* ── seed bar — "start from …" ──────────────────────────────────────────── */
+
+.topo-seedbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-card-hover);
+}
+.topo-seedbar label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.topo-seedbar select {
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  max-width: 320px;
+}
+
+/* ── challenge settings ─────────────────────────────────────────────────── */
+
+.topo-settings {
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.75rem;
+  background: var(--bg-card);
+}
+.topo-settings > summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+.topo-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+.topo-settings-grid .topo-settings-wide { grid-column: 1 / -1; }
+@media (max-width: 900px) {
+  .topo-settings-grid { grid-template-columns: 1fr 1fr; }
+}
+.topo-settings-grid label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.15rem;
+}
+.topo-settings-grid input,
+.topo-settings-grid select,
+.topo-settings-grid textarea {
+  width: 100%;
+  padding: 0.35rem 0.45rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: inherit;
+}
+.topo-settings-hint {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin: 0.15rem 0 0;
+  line-height: 1.35;
+}
+/* A field-level problem from validateCreateState, rendered next to its input. */
+.topo-field-error {
+  font-size: 0.7rem;
+  color: var(--danger);
+  margin-top: 0.15rem;
+  line-height: 1.35;
+}
+.topo-settings-grid input.is-invalid,
+.topo-settings-grid select.is-invalid { border-color: var(--danger); }
+
+/* ── viewer header ──────────────────────────────────────────────────────── */
+
+.topo-viewbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.75rem;
+  margin-bottom: 0.5rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  background: var(--bg-card-hover);
+}
+.topo-viewbar .topo-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.topo-viewbar select {
+  flex: 1 1 260px;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.78rem;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.topo-viewmeta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 0 0 0.5rem;
+  min-height: 1.1em;
+}
+
+/* ── create action ──────────────────────────────────────────────────────── */
+
+.topo-createbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 1rem;
+}
+.topo-createstatus {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.45;
+  flex: 1 1 320px;
+}
+.topo-createstatus code {
+  font-size: 0.75rem;
+  background: var(--bg-card-hover);
+  padding: 0.05rem 0.25rem;
+  border-radius: 3px;
+}

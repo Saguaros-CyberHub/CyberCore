@@ -14,8 +14,13 @@ const { authenticateToken, requireRole } = require('../../middleware/auth');
 
 const adminOnly = requireRole('admin');
 
+// `os_name` is returned BOTH aliased as `name` (what this tab's own UI reads) and
+// under its real column name, because the topology palette reads `t.os_name` and
+// `t.preferred` — without them every palette entry rendered as a bare VMID with no
+// label, and the preferred-first sort was a no-op.
 const TEMPLATE_COLS = `
-  id AS template_id, template_key, os_name AS name, description, template_vmid,
+  id AS template_id, template_key, os_name AS name, os_name, preferred,
+  description, template_vmid,
   os_family, os_version, provider_type, node, module_key, max_instances, status,
   notes, metadata, is_active, created_at, updated_at
 `;
