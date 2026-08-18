@@ -202,6 +202,15 @@ router.get('/', instructorOnly, async (req, res) => {
       }
     }
 
+    // Who is actually on the roster. Lanes are found by material_id, which says
+    // nothing about enrollment, so this is what separates a student's copy of
+    // the lab from an instructor's own — and from a dropped student's leftovers.
+    const enrolled = await query(
+      `SELECT user_id FROM cle_course_enrollment WHERE course_id = $1 AND status = 'active'`,
+      [courseId]
+    ).catch(() => ({ rows: [] }));
+    const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
+
     const deploymentsByMaterial = {};
     for (const row of laneRows.rows) {
       const cfg = row.config || {};
@@ -211,6 +220,8 @@ router.get('/', instructorOnly, async (req, res) => {
         student_email: row.student_email,
         first_name: row.first_name,
         last_name: row.last_name,
+        enrolled: enrolledIds.has(row.user_id),
+        is_self: row.user_id === req.user.userId,
         lane_status: row.status,
         vxlan_id: row.vxlan_id,
         flags: flagsByLane[row.lane_id] || null,
@@ -354,6 +365,12 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       excludeIf: materialId
         ? combineExclusions(excludeStudentsWithLab(materialId), vulnLab.excludeStudentsInFlight(materialId))
         : undefined,
+      // An instructor may tick themselves in the picker and get their own copy
+      // of the lab — to walk it before assigning it, or to demo it. getCourse
+      // above has already proved they may manage this course; the exemption is
+      // from the ENROLLMENT check only, and every collision exclusion still
+      // applies to them.
+      extraUserIds: [instructorId],
     });
     if (!students.length) {
       return res.status(400).json({ error: 'No eligible students to deploy to', skipped });
@@ -429,8 +446,11 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       );
     }
 
-    // Track the assignment per student. This is what the gradebook reads.
-    for (const student of students) {
+    // Track the assignment per student. This is what the gradebook reads — so a
+    // self-deploying instructor is skipped: they are not on the roster, and a
+    // submission row for them would put the instructor in their own gradebook
+    // and inflate the lab's "Assigned to N".
+    for (const student of students.filter(s => s.enrolled)) {
       await query(`
         INSERT INTO cle_student_submission (material_id, user_id)
         VALUES ($1, $2)
@@ -614,7 +634,11 @@ router.delete('/:labId/students/:userId', instructorOnly, async (req, res) => {
     if (!(await getOwnedLab(labId, courseId))) {
       return res.status(404).json({ error: 'Lab not found in this course' });
     }
-    const { students, skipped } = await resolveTargetStudents(courseId, [userId]);
+    // extraUserIds: an instructor's own copy of the lab has no enrollment row,
+    // so without this they could deploy one and never tear it down from here.
+    const { students, skipped } = await resolveTargetStudents(courseId, [userId], {
+      extraUserIds: [req.user.userId],
+    });
     if (!students.length) {
       return res.status(404).json({
         error: skipped[0]?.reason
@@ -695,7 +719,11 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
     const lab = await getOwnedLab(labId, courseId);
     if (!lab) return res.status(404).json({ error: 'Lab not found in this course' });
 
-    const { students, skipped } = await resolveTargetStudents(courseId, [userId]);
+    // extraUserIds: see the teardown route — the instructor's own copy is not
+    // an enrollment, and must still be rebuildable.
+    const { students, skipped } = await resolveTargetStudents(courseId, [userId], {
+      extraUserIds: [req.user.userId],
+    });
     if (!students.length) {
       return res.status(404).json({
         error: skipped[0]?.reason

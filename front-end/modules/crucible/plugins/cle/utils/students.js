@@ -6,6 +6,17 @@
  * (Guacamole accounts are email-keyed), and isn't already holding whatever is
  * about to be deployed. Keeping one copy means a deploy can't silently disagree
  * with the list the UI showed the instructor.
+ *
+ * SELF-DEPLOY. An instructor also needs their OWN copy of a workstation or a
+ * vulnerable lab — to walk the exercise before assigning it, and to demo it in
+ * class. They are not enrolled in their own course (cle_course.instructor_id is
+ * the relationship, and enrollment_role has no 'instructor' value), so the
+ * enrolment filter above would reject them. `opts.extraUserIds` is the narrow
+ * exemption: ids the route has already authorised — in practice only
+ * req.user.userId, once getManagedCourse has confirmed they may manage the
+ * course — may be targeted without an enrollment row. Everything downstream
+ * (the email requirement, the collision exclusions) still applies to them
+ * exactly as it does to a student, so a self-deploy cannot double-book VMIDs.
  */
 
 const { query } = require('./db');
@@ -15,11 +26,17 @@ const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
  * Resolve the students to act on.
  *
  * @param {string}   courseId
- * @param {string[]} [requestedIds]  null/undefined = every actively enrolled student
+ * @param {string[]} [requestedIds]  null/undefined = every actively enrolled
+ *   student. A null list NEVER picks up `extraUserIds`: "the whole class" means
+ *   the roster, and quietly building the instructor a machine every time they
+ *   press Deploy Whole Class would be a surprise.
  * @param {object}   [opts]
  * @param {Function} [opts.excludeIf] async (studentIds) => Map<userId, reason>.
  *   Students the caller already covers (e.g. they hold a lane for this lab).
- * @returns {Promise<{students: Array<{id, email}>, skipped: Array<{student_id, reason}>}>}
+ * @param {string[]} [opts.extraUserIds] ids that may be targeted WITHOUT an
+ *   active enrollment — the caller themselves, for a self-deploy. Only honoured
+ *   for ids the request actually named.
+ * @returns {Promise<{students: Array<{id, email, enrolled}>, skipped: Array<{student_id, reason}>}>}
  */
 async function resolveTargetStudents(courseId, requestedIds, opts = {}) {
   const enrolled = await query(
@@ -28,12 +45,13 @@ async function resolveTargetStudents(courseId, requestedIds, opts = {}) {
     [courseId]
   );
   const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
+  const exempt = new Set((opts.extraUserIds || []).filter(Boolean));
 
   const ids = requestedIds ? requestedIds.filter(Boolean) : [...enrolledIds];
   const skipped = [];
   const candidates = [];
   for (const id of ids) {
-    if (!enrolledIds.has(id)) { skipped.push({ student_id: id, reason: 'not enrolled' }); continue; }
+    if (!enrolledIds.has(id) && !exempt.has(id)) { skipped.push({ student_id: id, reason: 'not enrolled' }); continue; }
     candidates.push(id);
   }
   if (candidates.length === 0) return { students: [], skipped };
@@ -51,9 +69,54 @@ async function resolveTargetStudents(courseId, requestedIds, opts = {}) {
   for (const id of candidates) {
     if (excluded.has(id)) { skipped.push({ student_id: id, reason: excluded.get(id) }); continue; }
     if (!emailById[id]) { skipped.push({ student_id: id, reason: 'no email on account' }); continue; }
-    students.push({ id, email: emailById[id] });
+    // `enrolled` lets a caller tell a student apart from a self-deploying
+    // instructor without re-querying — the gradebook, for one, must not grow a
+    // submission row for someone who is not on the roster.
+    students.push({ id, email: emailById[id], enrolled: enrolledIds.has(id) });
   }
   return { students, skipped };
+}
+
+/**
+ * The caller as a deploy target: the row the deploy modals list alongside the
+ * roster so an instructor can tick themselves.
+ *
+ * Returns null when the account has no email. Guacamole accounts are
+ * email-keyed, so a machine deployed to such a user would come up with no
+ * console — offering the option would only produce a deploy that half-works.
+ *
+ * Callers MUST have already proved the user may manage this course
+ * (getManagedCourse / canManageCourse); this helper does no authorisation of its
+ * own. `enrolled` is reported rather than filtered on, because an instructor who
+ * IS also enrolled (a TA teaching their own section) is already in the roster
+ * list and must not be offered twice.
+ *
+ * @param {string} courseId
+ * @param {{ userId: string }} user  req.user
+ */
+async function resolveSelfTarget(courseId, user) {
+  const found = await cybercoreQuery(
+    `SELECT user_id, email, first_name, last_name
+       FROM cybercore_user WHERE user_id = $1::uuid`,
+    [user.userId]
+  );
+  const row = found.rows[0];
+  if (!row || !row.email) return null;
+
+  const enrolled = await query(
+    `SELECT 1 FROM cle_course_enrollment
+      WHERE course_id = $1 AND user_id = $2 AND status = 'active'`,
+    [courseId, user.userId]
+  );
+
+  return {
+    user_id: row.user_id,
+    email: row.email,
+    first_name: row.first_name || '',
+    last_name: row.last_name || '',
+    enrolled: enrolled.rows.length > 0,
+    is_self: true,
+  };
 }
 
 /**
@@ -142,6 +205,7 @@ function combineExclusions(...fns) {
 
 module.exports = {
   resolveTargetStudents,
+  resolveSelfTarget,
   excludeStudentsWithCourseLane,
   excludeStudentsWithLab,
   combineExclusions,

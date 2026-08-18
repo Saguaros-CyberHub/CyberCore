@@ -102,9 +102,19 @@ async function loadCourseLab(course) {
  *
  * The filter itself lives in utils/students.js so the vulnerable-lab path applies
  * exactly the same rules.
+ *
+ * `selfId` is the caller, passed only by the routes that let an instructor build
+ * a workstation for THEMSELVES. It exempts that one id from the enrollment
+ * requirement and nothing else: they still need an email, and the
+ * already-has-a-lane exclusion applies to them exactly as it does to a student.
+ * Every route that passes it has already run getManagedCourse, so the id is one
+ * the caller is authorised to act on.
  */
-function resolveTargetStudents(courseId, requestedIds) {
-  return resolveStudents(courseId, requestedIds, { excludeIf: excludeStudentsWithCourseLane(courseId) });
+function resolveTargetStudents(courseId, requestedIds, selfId = null) {
+  return resolveStudents(courseId, requestedIds, {
+    excludeIf: excludeStudentsWithCourseLane(courseId),
+    extraUserIds: selfId ? [selfId] : [],
+  });
 }
 
 /**
@@ -145,25 +155,28 @@ router.get('/', instructorOnly, async (req, res) => {
     const course = await getManagedCourse(courseId, req.user);
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
-    // Enrolled students (CLE plugin DB) → look up their lanes (cybercore_db).
+    // Scoped by config.course_id, NOT by the roster. A lane's owner need not be
+    // an enrolled student: an instructor can provision a workstation for
+    // themselves, and a student who is dropped after their lane is built stops
+    // being enrolled while their VMs keep running. Listing by enrollment hid
+    // both — and a hidden lane cannot be deleted from this tab either, since
+    // Delete is reached from the row.
     const enrolled = await query(
       `SELECT user_id FROM cle_course_enrollment WHERE course_id = $1 AND status = 'active'`,
       [courseId]
     );
-    const enrolledIds = enrolled.rows.map(r => r.user_id);
-    if (enrolledIds.length === 0) return res.json({ vms: [] });
+    const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
 
     const lanesResult = await cybercoreQuery(`
       SELECT l.lane_id, l.status, l.vxlan_id, l.config, l.created_at, l.user_id,
              u.email AS student_email, u.first_name, u.last_name
         FROM cybercore_lane l
         JOIN cybercore_user u ON u.user_id = l.user_id
-       WHERE l.user_id = ANY($1)
-         AND l.config->>'course_id' = $2
+       WHERE l.config->>'course_id' = $1
          AND l.config->>'material_id' IS NULL
          AND l.status <> 'deleted'
        ORDER BY l.created_at DESC
-    `, [enrolledIds, courseId]);
+    `, [courseId]);
 
     // Live power-state for the workstation VMs via a single cluster call.
     let byVmid = {};
@@ -187,6 +200,11 @@ router.get('/', instructorOnly, async (req, res) => {
         student_email:  row.student_email,
         first_name:     row.first_name,
         last_name:      row.last_name,
+        // False for an instructor's own machine and for a dropped student's
+        // leftovers — the UI labels those rather than passing them off as class
+        // members.
+        enrolled:       enrolledIds.has(row.user_id),
+        is_self:        row.user_id === req.user.userId,
         template_id:    cfg.template_id || null,
         vm_name:        cfg.template_name || `cle-${row.vxlan_id}`,
         ip_address:     cfg.ip || null,
@@ -240,7 +258,10 @@ router.post('/provision', instructorOnly, async (req, res) => {
     const resources = parseRequestedResources(req.body);
     const template = await loadWorkstationTemplate(template_id);
     const challenge = await loadCourseLab(course);
-    const { students, skipped } = await resolveTargetStudents(courseId, student_ids);
+    // req.user.userId: an instructor may tick themselves in the picker and get
+    // their own workstation on this course's network. provision-all below
+    // deliberately does NOT pass it — "the whole class" is the roster.
+    const { students, skipped } = await resolveTargetStudents(courseId, student_ids, req.user.userId);
 
     if (!students.length) {
       return res.status(400).json({ error: 'No eligible students to provision', skipped });

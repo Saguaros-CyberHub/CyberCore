@@ -10,6 +10,7 @@ const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { canManageCourse } = require('../utils/course-access');
+const { resolveSelfTarget } = require('../utils/students');
 const guacCreds = require('../../../../../src/utils/guac-credentials');
 const prov = require('../../../../../src/utils/account-provisioning');
 const activation = require('../../../../../src/utils/activation');
@@ -18,14 +19,30 @@ const instructorOnly = requireRole('instructor', 'admin');
 
 /**
  * GET / — List students in a course
+ *
+ * ?include_self=1 appends the CALLER as an extra, clearly-marked row
+ * (`is_self`, enrollment_role 'instructor'), so the deploy modals can offer an
+ * instructor a machine of their own without them having to enrol in their own
+ * course. The Students tab does not pass it, so the roster — and every count
+ * derived from it — is unchanged.
+ *
+ * Appended only when they are NOT already actively enrolled: a TA teaching
+ * their own section is in the roster already, and would otherwise be listed
+ * twice with two checkboxes for one person.
  */
 router.get('/', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
+    const includeSelf = req.query.include_self === '1' || req.query.include_self === 'true';
 
     if (!(await canManageCourse(courseId, req.user))) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
+
+    // Resolved before the roster queries so its id can ride along in the same
+    // user / lane-count / activation lookups rather than costing three more.
+    const self = includeSelf ? await resolveSelfTarget(courseId, req.user).catch(() => null) : null;
+    const selfRow = (self && !self.enrolled) ? self : null;
 
     // Get enrolled students
     // Step 1: Get enrollments from cle_db
@@ -42,6 +59,7 @@ router.get('/', instructorOnly, async (req, res) => {
 
     // Step 2: Get user details + workstation-lane counts from cybercore_db
     const userIds = enrollmentsResult.rows.map(r => r.user_id);
+    if (selfRow) userIds.push(selfRow.user_id);
     let userMap = {};
     const laneCounts = {}; // user_id → count
     let pendingActivation = {};
@@ -95,6 +113,32 @@ router.get('/', instructorOnly, async (req, res) => {
         activated: !!u?.activated_at,
       };
     });
+
+    // The caller's own row, marked so the UI can label it "you" and keep it out
+    // of anything that means "the class" (counts, Deploy Whole Class). It is
+    // deliberately FIRST: it is the row the instructor is looking for when they
+    // opened the modal to build themselves a machine.
+    if (selfRow) {
+      const u = userMap[selfRow.user_id];
+      students.unshift({
+        user_id: selfRow.user_id,
+        email: selfRow.email,
+        username: u?.username || null,
+        first_name: selfRow.first_name,
+        last_name: selfRow.last_name,
+        enrollment_role: 'instructor',
+        enrolled_at: null,
+        status: 'active',
+        vm_count: laneCounts[selfRow.user_id] || 0,
+        elevated: u ? prov.isElevatedAccount(u) : true,
+        // No account-management controls on your own row — the credential
+        // routes refuse a self-target, so offering the buttons would only 403.
+        can_regenerate: false,
+        activation_pending: false,
+        activated: true,
+        is_self: true,
+      });
+    }
 
     res.json({ students });
   } catch (error) {

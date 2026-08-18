@@ -61,6 +61,16 @@
     .badge-archived { background: #e5e7eb; color: #4b5563; }
     .badge-provisioning { background: #fef3c7; color: #92400e; }
     .badge-failed { background: #fee2e2; color: #991b1b; }
+    /* An instructor's own machine, in lists otherwise made of students.
+       Deliberately quiet: it marks a row, it must not compete with the status
+       badges sitting next to it. */
+    .badge-staff { background: rgba(30,82,136,0.12); color: var(--primary-light, #1e5288); }
+    .self-target-badge {
+      display: inline-block; margin-left: 0.35rem; padding: 0.05rem 0.45rem;
+      border-radius: 10px; font-size: 0.65rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.02em;
+      background: rgba(30,82,136,0.12); color: var(--primary-light, #1e5288);
+    }
     .badge-provisioning .spinner { display: inline-block; width: 0.6rem; height: 0.6rem; margin-right: 0.3rem; border: 2px solid #92400e; border-top-color: transparent; border-radius: 50%; vertical-align: -1px; animation: badge-spin 0.7s linear infinite; }
     @keyframes badge-spin { to { transform: rotate(360deg); } }
 
@@ -563,11 +573,12 @@
           <div id="provisionResourceNote" style="font-size: 0.75rem; color: var(--text-muted, #6b7280); margin-top: 0.4rem;"></div>
         </div>
         <div class="form-group">
-          <label>Student(s)</label>
+          <label>Deploy to</label>
           <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
         </div>
         <p style="font-size: 0.8rem; color: var(--text-muted, #6b7280); margin: 0.25rem 0 0;">
-          Each selected student gets their own isolated VXLAN lane (gateway + workstation), drawn from this course's reserved network.
+          Everyone selected gets their own isolated VXLAN lane (gateway + workstation), drawn from this course's reserved network.
+          Tick yourself at the top of the list to build one on your own account &mdash; <strong>Deploy Whole Class</strong> covers the roster only.
         </p>
         <div id="provisionPreview" style="display:none; margin-top: 0.75rem;"></div>
         <div class="form-buttons">
@@ -609,8 +620,12 @@
           </label>
         </div>
         <div class="form-group">
-          <label>Student(s)</label>
+          <label>Deploy to</label>
           <div id="deployLabStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
+          <p style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: 0.4rem 0 0;">
+            Tick yourself at the top of the list to get your own copy of the lab &mdash; it lands on your account,
+            appears in your workspaces, and is not added to the gradebook.
+          </p>
         </div>
         <div class="form-group">
           <label>Learning Objective</label>
@@ -1149,7 +1164,8 @@
 
           vms.forEach(v => {
             const studentName = [v.first_name, v.last_name].filter(Boolean).join(' ');
-            const studentLabel = studentName ? `${escHtml(studentName)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(v.student_email)}</span>` : escHtml(v.student_email);
+            const studentLabel = (studentName ? `${escHtml(studentName)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(v.student_email)}</span>` : escHtml(v.student_email))
+              + _ownerBadge(v);
             const laneLabel = v.vxlan_id
               ? `<span style="font-size:0.75rem;color:var(--text-muted);">VXLAN ${escHtml(String(v.vxlan_id))}</span>`
               : '<span style="color:var(--text-muted);">—</span>';
@@ -1217,6 +1233,20 @@
     }
 
     let _labRefreshTimer = null;
+
+    /**
+     * Marks a row whose owner is not on the roster. Two ways that happens: the
+     * instructor deployed the machine to themselves, or a student was dropped
+     * after theirs was built. Both need saying — the first so a demo box isn't
+     * mistaken for a student's, the second because those VMs are still running
+     * and still cost cluster capacity.
+     */
+    function _ownerBadge(row) {
+      if (row.enrolled !== false) return '';
+      return row.is_self
+        ? ' <span class="badge badge-staff">you</span>'
+        : ' <span class="badge badge-staff" title="No longer actively enrolled in this course">not enrolled</span>';
+    }
 
     /** Flag-plant summary for one deployment, or null when nothing is planted yet. */
     function _flagSummary(flags) {
@@ -1314,7 +1344,7 @@
                 const busy = inFlightById[d.user_id];
                 const failed = (l.redeploy_errors || {})[d.user_id];
                 html += `<tr>
-                  <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code></td>
+                  <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code>${_ownerBadge(d)}</td>
                   <td><span class="badge badge-gray">${d.mode === 'attach' ? 'attached' : 'own lane'}</span></td>
                   <td>${busy
                         ? `<span style="color:#1e5288;">${escHtml(busy.phase_detail || busy.phase || 'working…')}</span>`
@@ -1407,9 +1437,10 @@
           <tbody>`;
 
         students.forEach(s => {
-          const nameLabel = s.name
+          const nameLabel = (s.name
             ? `${escHtml(s.name)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(s.email || '')}</span>`
-            : escHtml(s.email || s.userId);
+            : escHtml(s.email || s.userId))
+            + (s.staff ? ' <span class="badge badge-staff">staff</span>' : '');
           // Pass only the userId (a UUID). escHtml escapes &<> but NOT quotes,
           // so interpolating an email — which may legitimately contain an
           // apostrophe — would break out of this inline handler's string.
@@ -1855,18 +1886,37 @@
       el.innerHTML = bits.join(' &middot; ');
     }
 
+    /**
+     * The checkbox list both deploy modals target.
+     *
+     * include_self=1 asks the API to prepend the instructor themselves, so they
+     * can build a copy of a workstation or a lab on their own account — walking
+     * an exercise before assigning it, or demoing it in class — without having
+     * to enrol in their own course. That row comes back flagged `is_self`; it is
+     * styled apart from the roster, and the whole-class buttons (which resolve
+     * the roster server-side) never include it.
+     */
     async function loadModalStudents(containerId) {
       try {
-        const data = await api('GET', `/courses/${currentCourseId}/students`);
+        const data = await api('GET', `/courses/${currentCourseId}/students?include_self=1`);
         const students = data.students || [];
         const container = document.getElementById(containerId);
-        container.innerHTML = students.map(s => `
-          <label data-user-id="${escAttr(s.user_id)}" style="display: flex; align-items: center; gap: 0.5rem;">
-            <input type="checkbox" class="modal-student-select" value="${s.user_id}" data-email="${s.email}">
-            <span class="modal-student-label">${escHtml(s.email)} (${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))})</span>
+        container.innerHTML = students.map(s => {
+          const name = ((s.first_name || '') + ' ' + (s.last_name || '')).trim();
+          const label = s.is_self
+            ? `${escHtml(s.email)} <span class="self-target-badge">you &middot; instructor</span>`
+            : `${escHtml(s.email)} (${escHtml(name)})`;
+          const selfStyle = s.is_self
+            ? ' padding-bottom:0.5rem; margin-bottom:0.25rem; border-bottom:1px dashed var(--border-color, #e5e7eb);'
+            : '';
+          return `
+          <label data-user-id="${escAttr(s.user_id)}"${s.is_self ? ' data-self="1"' : ''}
+                 style="display: flex; align-items: center; gap: 0.5rem;${selfStyle}">
+            <input type="checkbox" class="modal-student-select" value="${escAttr(s.user_id)}" data-email="${escAttr(s.email)}">
+            <span class="modal-student-label">${label}</span>
             <span class="provision-note" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); font-style: italic;"></span>
-          </label>
-        `).join('');
+          </label>`;
+        }).join('');
       } catch (e) {
         toast('Error loading students: ' + e.message, true);
       }
