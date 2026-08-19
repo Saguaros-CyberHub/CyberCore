@@ -162,9 +162,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_event_group
 
 -- Makes scripts/backfill-audit-log.js re-runnable: the copy inserts with
 -- ON CONFLICT DO NOTHING against this index.
+--
+-- The predicate is deliberately NOT the jsonb existence operator
+-- (metadata ? 'legacy_id'). Adminer and several other clients treat a bare ?
+-- as a bind placeholder and rewrite it to $1 before the server ever sees it,
+-- which turns this statement into a syntax error on import. The arrow form
+-- means the same thing here — the backfill only ever writes a non-null string
+-- — and it matches the indexed expression exactly, which is what lets
+-- ON CONFLICT infer this index. Keep the two in sync.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_legacy_id
   ON cybercore_audit_log ((metadata->>'legacy_id'))
-  WHERE metadata ? 'legacy_id';
+  WHERE (metadata->>'legacy_id') IS NOT NULL;
 
 -- Free-text search across the fields a human actually types into the box.
 -- Best effort: nothing else in the repo uses pg_trgm, so do not assume the app

@@ -99,7 +99,7 @@ async function insertRows(rows) {
   ).join(', ');
   const res = await cybercoreQuery(
     `INSERT INTO cybercore_audit_log (${COLUMNS.join(', ')}) VALUES ${groups}
-     ON CONFLICT ((metadata->>'legacy_id')) WHERE metadata ? 'legacy_id' DO NOTHING`,
+     ON CONFLICT ((metadata->>'legacy_id')) WHERE (metadata->>'legacy_id') IS NOT NULL DO NOTHING`,
     rows.flat()
   );
   return res.rowCount;
@@ -167,13 +167,15 @@ async function backfillCleStaffRows() {
   for (;;) {
     // This predicate matches exactly the three deliberate enum workarounds and
     // nothing else: student telemetry never carries metadata.action.
+    // Arrow form rather than `metadata ? 'action'` for the reason given in
+    // migrations/032_audit_log.sql — a bare ? gets eaten by some clients.
     const page = await clePool.query(
       `SELECT activity_id, user_id, action_type, entity_type, entity_id,
               metadata, ip_address, created_at
          FROM cle_activity_log
         WHERE created_at > $1
           AND action_type IN ('guac_session','enrollment_change')
-          AND metadata ? 'action'
+          AND metadata->>'action' IS NOT NULL
         ORDER BY created_at ASC
         LIMIT $2`,
       [after, PAGE]

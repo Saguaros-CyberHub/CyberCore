@@ -2,7 +2,7 @@
  * audit-hygiene.test.js — properties of the audit trail that hold across the
  * whole tree, not inside any one function.
  *
- * Two invariants, both of the kind that only ever break by accident:
+ * The invariants here are all of the kind that only ever break by accident:
  *
  *   1. APPEND-ONLY. Nothing updates or deletes a row in cybercore_audit_log.
  *      This is enforced by construction — src/utils/audit.js exposes only
@@ -15,6 +15,10 @@
  *      is plaintext and adminer is published on 0.0.0.0:8181, which is the
  *      same reasoning that made 029_email_outbox.sql encrypt mail bodies:
  *      activation links are working credentials until redeemed.
+ *
+ *   3. NO BARE jsonb ? OPERATOR, and a legacy-id predicate that is identical
+ *      in all three places it appears. Both learned the hard way — see the
+ *      individual tests.
  *
  * Run: node front-end/test/audit-hygiene.test.js   (or npm test)
  */
@@ -41,6 +45,14 @@ function walk(dir, out = []) {
 
 const JS_FILES = ROOTS.flatMap(r => walk(r));
 
+/** Source with comments stripped, for checks that must not match prose. */
+function codeOnly(file) {
+  return fs.readFileSync(file, 'utf8')
+    .replace(/--.*$/gm, '')
+    .replace(/\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+}
+
 test('the source tree contains no UPDATE or DELETE against the audit table', () => {
   const offenders = [];
   for (const file of JS_FILES) {
@@ -52,12 +64,64 @@ test('the source tree contains no UPDATE or DELETE against the audit table', () 
   assert.deepStrictEqual(offenders, [], 'the audit log must stay append-only');
 });
 
-test('the migration declares no ON UPDATE or purge machinery', () => {
+test('the migration declares no trigger or purge machinery', () => {
   const sql = fs.readFileSync(path.join(ROOT, 'migrations', '032_audit_log.sql'), 'utf8');
   assert.ok(!/CREATE\s+TRIGGER/i.test(sql), 'no triggers on the audit table');
   // Retention is "keep everything", by decision. If that ever changes it
   // should be a deliberate migration, not something that drifts in.
   assert.ok(!/DELETE\s+FROM\s+cybercore_audit_log/i.test(sql));
+});
+
+const SQL_BEARING_FILES = [
+  path.join(ROOT, 'migrations', '032_audit_log.sql'),
+  path.join(ROOT, 'src', 'utils', 'audit.js'),
+  path.join(ROOT, 'scripts', 'backfill-audit-log.js'),
+  path.join(ROOT, 'src', 'routes', 'admin', 'audit.js'),
+];
+
+test('no SQL uses the bare jsonb ? operator', () => {
+  // Adminer — and several other clients — treat a bare ? as a bind placeholder
+  // and rewrite it to $1 before the server ever sees it, so
+  // `WHERE metadata ? 'legacy_id'` arrives as `WHERE metadata $1 'legacy_id'`
+  // and the import dies with a syntax error. The arrow form means the same
+  // thing for every value this code writes.
+  for (const file of SQL_BEARING_FILES) {
+    assert.ok(
+      !/\b(metadata|context|config|changes)\s+\?\s+'/.test(codeOnly(file)),
+      `${path.relative(ROOT, file)} uses the jsonb ? operator, which some clients eat`
+    );
+  }
+});
+
+test('the legacy-id index predicate is identical everywhere it appears', () => {
+  // A partial unique index can only be inferred by ON CONFLICT when the
+  // predicate matches the index exactly. If these three drift apart the
+  // backfill stops being re-runnable — it starts erroring on a duplicate key
+  // instead of skipping, which is the failure this index exists to prevent.
+  const PREDICATE = "WHERE (metadata->>'legacy_id') IS NOT NULL";
+
+  const sites = {
+    'migrations/032_audit_log.sql':   path.join(ROOT, 'migrations', '032_audit_log.sql'),
+    'src/utils/audit.js':             path.join(ROOT, 'src', 'utils', 'audit.js'),
+    'scripts/backfill-audit-log.js':  path.join(ROOT, 'scripts', 'backfill-audit-log.js'),
+  };
+  for (const [label, file] of Object.entries(sites)) {
+    assert.ok(fs.readFileSync(file, 'utf8').includes(PREDICATE), `${label} must use the shared predicate`);
+  }
+});
+
+test('ensureAuditLog mirrors every index the migration declares', () => {
+  // The migration is applied by hand; ensureAuditLog() is what an existing
+  // deployment actually gets on restart. An index in one and not the other is
+  // a query that is fast in testing and slow in production.
+  const sql = fs.readFileSync(path.join(ROOT, 'migrations', '032_audit_log.sql'), 'utf8');
+  const ensure = fs.readFileSync(path.join(ROOT, 'src', 'utils', 'audit.js'), 'utf8');
+
+  const names = [...sql.matchAll(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)/gi)].map(m => m[1]);
+  assert.ok(names.length >= 8, 'the migration declares its index set');
+  for (const name of names) {
+    assert.ok(ensure.includes(name), `ensureAuditLog() is missing index ${name}`);
+  }
 });
 
 // Keys that must never appear in an audit call's metadata literal. `password`
@@ -70,10 +134,9 @@ const FORBIDDEN = [
 ];
 
 /**
- * Pull the argument text of every audit.log / audit.batch / logActivity call,
- * by brace-matching from the opening paren. Crude on purpose: it needs to be
- * cheap and to have no dependencies, and a false positive here is a prompt to
- * look, not a broken build.
+ * Pull the argument text of every audit call, by paren-matching from the
+ * opening paren. Crude on purpose: it needs to be cheap and dependency-free,
+ * and a false positive here is a prompt to look, not a broken build.
  */
 function auditCallArgs(src) {
   const out = [];
@@ -95,17 +158,14 @@ function auditCallArgs(src) {
 test('no audit call site passes a credential in its metadata', () => {
   const offenders = [];
   for (const file of JS_FILES) {
-    // The writer itself names these keys in its redaction regex, and the
-    // hygiene test names them in this list.
+    // The writer itself names these keys in its redaction regex.
     if (/utils[\\/]audit\.js$/.test(file)) continue;
     const src = fs.readFileSync(file, 'utf8');
     for (const call of auditCallArgs(src)) {
       for (const key of FORBIDDEN) {
         // `password_supplied: !!x` is a boolean about a password, not one.
         const re = new RegExp(`\\b${key}\\b(?!_supplied)\\s*:`, 'i');
-        if (re.test(call)) {
-          offenders.push(`${path.relative(ROOT, file)} → ${key}`);
-        }
+        if (re.test(call)) offenders.push(`${path.relative(ROOT, file)} → ${key}`);
       }
     }
   }

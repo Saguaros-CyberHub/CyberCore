@@ -425,7 +425,10 @@ async function ensureAuditLog() {
       `CREATE INDEX IF NOT EXISTS idx_audit_target ON cybercore_audit_log (target_type, target_id) WHERE target_id IS NOT NULL`,
       `CREATE INDEX IF NOT EXISTS idx_audit_not_success ON cybercore_audit_log (occurred_at DESC) WHERE status <> 'success'`,
       `CREATE INDEX IF NOT EXISTS idx_audit_event_group ON cybercore_audit_log (event_group_id) WHERE event_group_id IS NOT NULL`,
-      `CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_legacy_id ON cybercore_audit_log ((metadata->>'legacy_id')) WHERE metadata ? 'legacy_id'`,
+      // Arrow form, not `metadata ? 'legacy_id'` — see the note in
+      // migrations/032_audit_log.sql. Must stay identical to the migration's
+      // predicate or ON CONFLICT cannot infer this index.
+      `CREATE UNIQUE INDEX IF NOT EXISTS ux_audit_legacy_id ON cybercore_audit_log ((metadata->>'legacy_id')) WHERE (metadata->>'legacy_id') IS NOT NULL`,
     ];
     for (const sql of indexes) await cybercoreQuery(sql);
 
