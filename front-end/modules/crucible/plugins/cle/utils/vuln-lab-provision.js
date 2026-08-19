@@ -330,7 +330,7 @@ async function findCourseLanes(userIds, courseId) {
     // gateway_wan_ip is read back, never re-derived — attachLabToLane resolves
     // this lane's networking from it, and the old derivation was not unique.
     `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key,
-            gateway_wan_ip::text AS gateway_wan_ip
+            host(gateway_wan_ip) AS gateway_wan_ip
        FROM cybercore_lane
       WHERE user_id = ANY($1::uuid[])
         AND config->>'course_id' = $2

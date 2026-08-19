@@ -629,7 +629,7 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
       // gateway_wan_ip is read back, never re-derived: the derivation was not
       // unique, so recomputing it for an existing lane can name a DIFFERENT
       // lane's gateway.
-      `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key, gateway_wan_ip::text AS gateway_wan_ip
+      `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key, host(gateway_wan_ip) AS gateway_wan_ip
        FROM cybercore_lane WHERE lane_id = $1`,
       [req.params.laneId]
     );

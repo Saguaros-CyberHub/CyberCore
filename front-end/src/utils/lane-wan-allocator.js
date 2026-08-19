@@ -400,7 +400,10 @@ async function recordLaneWanLease({ address, laneId, vxlanId }) {
  */
 async function findWanIpConflicts() {
   const res = await cybercoreQuery(`
-    SELECT l.gateway_wan_ip::text            AS wan_ip,
+    -- host(), not ::text. An INET with no mask defaults to /32, so ::text
+    -- renders '100.100.60.31/32' — accurate but noise in a warning an operator
+    -- reads at 2am.
+    SELECT host(l.gateway_wan_ip)            AS wan_ip,
            COUNT(*)::int                     AS lane_count,
            BOOL_OR(l.wan_ip_grandfathered)   AS grandfathered,
            MIN(l.created_at)                 AS first_deployed,

@@ -551,7 +551,7 @@ async function waitForBridgeOnNode(node, bridgeName, { timeoutMs = 45000, interv
  */
 async function laneWanIpFor(laneId) {
   const r = await cybercoreQuery(
-    `SELECT gateway_wan_ip::text AS ip, config->>'gateway_wan_ip' AS cfg_ip
+    `SELECT host(gateway_wan_ip) AS ip, config->>'gateway_wan_ip' AS cfg_ip
        FROM cybercore_lane WHERE lane_id = $1`,
     [laneId]
   );

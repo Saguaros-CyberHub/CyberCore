@@ -25,14 +25,17 @@
 -- or every insertLane fails with 'column "gateway_wan_ip" does not exist'.
 -- (server.js also carries an idempotent ensureLaneWanColumns() belt-and-braces
 -- for the two ADD COLUMNs, but not for the backfill or the index -- those are
--- one-time and need operator eyes on the WARNING output.)
+-- one-time and need operator eyes on the collision report at the end.)
+--
+-- PLAIN SQL ONLY -- no psql meta-commands (\set, \echo), so this runs unchanged
+-- in Adminer, DBeaver, pgAdmin or psql. In psql, pass -v ON_ERROR_STOP=1 on the
+-- command line if you want it to halt on the first error; everything is inside
+-- one transaction either way, so a failure rolls the whole thing back.
+--
+-- IDEMPOTENT: safe to re-run. Columns and indexes use IF NOT EXISTS, both
+-- backfills only touch rows that are still NULL, and the lease seed is skipped
+-- once the table has any rows.
 -- ============================================================================
-
-\set ON_ERROR_STOP on
-
--- The pre-allocator base. Change ONLY if this site's v2_lab_network.subnet_base
--- was ever something other than the code default in src/utils/site-config.js.
-\set legacy_base '100.100.60.0'
 
 BEGIN;
 
@@ -57,7 +60,10 @@ UPDATE cybercore_lane
 --    configured with, so the backfill matches what is on the wire. v1 lanes are
 --    excluded: they use the per-module transit /16, not this pool.
 UPDATE cybercore_lane
-   SET gateway_wan_ip = (:'legacy_base')::inet + 10 + (vxlan_id % 240)
+   -- '100.100.60.0' is the pre-allocator base. Change it here ONLY if this
+   -- site's cluster.networking.v2_lab_network.subnet_base was ever something
+   -- other than the code default in src/utils/site-config.js.
+   SET gateway_wan_ip = '100.100.60.0'::inet + 10 + (vxlan_id % 240)
  WHERE gateway_wan_ip IS NULL
    AND vxlan_id IS NOT NULL
    AND status NOT IN ('error', 'deleted')
@@ -78,31 +84,7 @@ UPDATE cybercore_lane l
  WHERE l.gateway_wan_ip = d.gateway_wan_ip
    AND l.status NOT IN ('error', 'deleted');
 
--- 5. Report what was flagged -----------------------------------------------
-DO $$
-DECLARE r RECORD; n INT := 0;
-BEGIN
-  FOR r IN
-    SELECT gateway_wan_ip,
-           COUNT(*) AS lanes,
-           STRING_AGG(vxlan_id::text, ', ' ORDER BY created_at) AS vxlans
-      FROM cybercore_lane
-     WHERE wan_ip_grandfathered
-     GROUP BY gateway_wan_ip
-     ORDER BY gateway_wan_ip
-  LOOP
-    n := n + 1;
-    RAISE WARNING 'WAN COLLISION % -- % live lanes share it (vxlan %). Both owners'' consoles point at the same host:port.',
-      r.gateway_wan_ip, r.lanes, r.vxlans;
-  END LOOP;
-  IF n = 0 THEN
-    RAISE NOTICE 'No pre-existing WAN address collisions. Nothing grandfathered.';
-  ELSE
-    RAISE WARNING '% colliding address(es) grandfathered out of ux_cybercore_lane_wan_ip_active. Redeploy or tear down those lanes; the exemption clears itself when they go.', n;
-  END IF;
-END $$;
-
--- 6. The constraint --------------------------------------------------------
+-- 5. The constraint --------------------------------------------------------
 --    Mirrors ux_cybercore_lane_vxlan_active (migration 016): error and deleted
 --    lanes release their address for retry.
 CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_wan_ip_active
@@ -111,7 +93,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_wan_ip_active
     AND status NOT IN ('error', 'deleted')
     AND wan_ip_grandfathered = FALSE;
 
--- 7. Lease history ----------------------------------------------------------
+-- 6. Lease history ----------------------------------------------------------
 --    cybercore_lane rows are HARD-deleted on teardown, so the lane table cannot
 --    say when an address was last in use. The allocator orders candidates by
 --    longest-since-handed-out, which needs this.
@@ -144,6 +126,36 @@ SELECT gateway_wan_ip, lane_id, vxlan_id, created_at
    AND NOT EXISTS (SELECT 1 FROM cybercore_lane_wan_lease);
 
 COMMIT;
+
+-- ============================================================================
+-- 7. THE REPORT -- read this. Returned as a RESULT SET rather than RAISE
+--    WARNING, because Adminer, pgAdmin and DBeaver all swallow server notices
+--    and this is the one part of the migration an operator has to actually see.
+--
+--    Every row is an address two or more LIVE lanes are sharing today: both
+--    owners' Guacamole consoles resolve to the same host:port, and both
+--    gateways answer ARP for it on the lab VLAN. They are exempt from the new
+--    unique index so this migration could complete; nothing is repaired
+--    automatically.
+--
+--    To fix one: redeploy the NEWER lane of the pair (it picks up a freshly
+--    allocated address); the older lane keeps its working setup. The exemption
+--    clears itself as they go.
+--
+--    NO ROWS = no pre-existing collisions. Nothing was grandfathered.
+-- ============================================================================
+SELECT host(l.gateway_wan_ip)                              AS wan_ip,
+       COUNT(*)                                            AS live_lanes,
+       STRING_AGG(l.vxlan_id::text, ', ' ORDER BY l.created_at) AS vxlan_ids,
+       STRING_AGG(COALESCE(u.email, '(no owner)'), ', ' ORDER BY l.created_at) AS owners,
+       STRING_AGG(COALESCE(l.name, '?'), ', ' ORDER BY l.created_at)           AS lane_names,
+       MAX(l.created_at)                                   AS newest_lane
+  FROM cybercore_lane l
+  LEFT JOIN cybercore_user u ON u.user_id = l.user_id
+ WHERE l.wan_ip_grandfathered
+   AND l.status NOT IN ('error', 'deleted')
+ GROUP BY l.gateway_wan_ip
+ ORDER BY COUNT(*) DESC, l.gateway_wan_ip;
 
 -- To clear a stale grandfather flag once a lane is no longer colliding:
 --   UPDATE cybercore_lane l SET wan_ip_grandfathered = FALSE
