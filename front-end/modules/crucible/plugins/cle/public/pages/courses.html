@@ -214,6 +214,7 @@
             <div class="detail-tab" onclick="switchDetailTab('vm-management', this)">🖥️ VM Management</div>
             <div class="detail-tab" onclick="switchDetailTab('vulnerable-labs', this)">⚠️ Vulnerable Labs</div>
             <div class="detail-tab" onclick="switchDetailTab('flags', this)">🚩 Flags</div>
+            <div class="detail-tab" onclick="switchDetailTab('attack-console', this)">🎯 Attack Console</div>
           </div>
 
           <!-- Overview Tab -->
@@ -266,6 +267,16 @@
               </label>
             </div>
             <div id="courseFlagsContent"></div>
+          </div>
+
+          <!-- CYBR 400 Attack Console. Populated by /cle/js/attack-console.js on
+               first show, NOT eagerly from viewCourse() like the other tabs —
+               resolving targets reads the Proxmox cluster, which is too costly
+               to pay every time any course is opened. -->
+          <div class="detail-tab-pane" id="attack-console-pane">
+            <div id="attackConsoleContent">
+              <p style="color: var(--text-secondary);">Loading…</p>
+            </div>
           </div>
         </div>
       </div>
@@ -803,6 +814,7 @@
      * this one's banner (or requests a lab id this course does not own).
      */
     function cancelCoursePollers() {
+      if (window.CleAttack) CleAttack.cancelPolling();
       clearTimeout(_vmRefreshTimer);
       clearTimeout(_provisionProgressTimer);
       clearTimeout(_labRefreshTimer);
@@ -834,6 +846,9 @@
         loadVMManagement();
         loadVulnerableLabs();
         loadCourseFlags();
+        // Not loaded here on purpose — see switchDetailTab. Only told which
+        // course it now belongs to, so a stale panel cannot paint into it.
+        if (window.CleAttack) CleAttack.reset(courseId);
       } catch (e) {
         toast('Error loading course: ' + e.message, true);
       }
@@ -859,6 +874,12 @@
       document.querySelectorAll('.detail-tab-pane').forEach(p => p.classList.remove('active'));
       tabEl.classList.add('active');
       document.getElementById(tabName + '-pane').classList.add('active');
+
+      // Lazy tabs. Every other pane is filled eagerly by viewCourse(), which is
+      // fine because they only read cle_db. The attack console resolves every
+      // lane's sensor VM against the Proxmox cluster, so it loads on first show
+      // instead of on every course open.
+      if (tabName === 'attack-console' && window.CleAttack) CleAttack.onShow();
     }
 
     function buildInstructorFilter() {
@@ -2561,6 +2582,7 @@
        loader change needed. -->
   <script src="/cle/js/csv.js"></script>
   <script src="/cle/js/roster-import.js"></script>
+  <script src="/cle/js/attack-console.js"></script>
 
   <!-- Lane topology renderer, VIEW MODE ONLY. cytoscape-edgehandles (and the
        lodash it needs) is guarded behind mode === 'edit' in topology-render.js,

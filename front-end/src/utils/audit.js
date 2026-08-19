@@ -45,6 +45,7 @@ const CATEGORY_BY_PREFIX = {
   lane:          'infra',
   vm:            'infra',
   lab:           'infra',
+  attack:        'infra',
   workstation:   'infra',
   group:         'infra',
   storage:       'infra',

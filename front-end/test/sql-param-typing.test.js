@@ -33,11 +33,20 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 
-const SRC = path.join(__dirname, '..', 'src');
+const ROOT = path.join(__dirname, '..');
+const SRC = path.join(ROOT, 'src');
+// Plugins write raw SQL too -- the CLE attack console and CIAB both do -- and
+// scanning only src/ let every one of them opt out of this check by accident.
+// Same roots audit-hygiene.test.js walks, for the same reason.
+const ROOTS = [SRC, path.join(ROOT, 'modules')];
 
 function jsFiles(dir) {
   const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries) {
+    // vendor bundles are minified third-party code, and node_modules is not ours
+    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'vendor') continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) out.push(...jsFiles(full));
     else if (entry.name.endsWith('.js')) out.push(full);
@@ -54,13 +63,13 @@ const UNCAST_NULLTEST = /\$\d+\s+IS\s+(?:NOT\s+)?NULL/gi;
 test('no query puts an uncast parameter in a NULL test', () => {
   const offenders = [];
 
-  for (const file of jsFiles(SRC)) {
+  for (const file of ROOTS.flatMap((r) => jsFiles(r))) {
     const source = fs.readFileSync(file, 'utf8');
     source.split('\n').forEach((line, i) => {
       // The explanatory comment in mailer.js quotes the broken form on purpose.
       const code = line.replace(/--.*$/, '').replace(/\/\/.*$/, '');
       for (const match of code.match(UNCAST_NULLTEST) || []) {
-        offenders.push(`${path.relative(SRC, file)}:${i + 1}  ${match.trim()}`);
+        offenders.push(`${path.relative(ROOT, file)}:${i + 1}  ${match.trim()}`);
       }
     });
   }

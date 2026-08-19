@@ -15,6 +15,7 @@ const coursesRoutes = require('./courses');
 const courseStudentsRoutes = require('./course-students');
 const vmsRoutes = require('./vms');
 const labsRoutes = require('./labs');
+const attacksRoutes = require('./attacks');
 const guacamoleRoutes = require('./guacamole');
 const templatesRoutes = require('./templates');
 const studentRoutes = require('./students');
@@ -59,6 +60,13 @@ router.use('/api/cle/courses/:courseId/labs', authenticateToken, (req, res, next
   res.locals.courseId = req.params.courseId;
   next();
 }, labsRoutes);
+
+// CYBR 400 attack console. Mounted after /labs so the two never contend for a
+// path; both use the same res.locals shim for the nested router.
+router.use('/api/cle/courses/:courseId/attacks', authenticateToken, (req, res, next) => {
+  res.locals.courseId = req.params.courseId;
+  next();
+}, attacksRoutes);
 
 router.use('/api/cle/courses/:courseId/flags', authenticateToken, (req, res, next) => {
   res.locals.courseId = req.params.courseId;

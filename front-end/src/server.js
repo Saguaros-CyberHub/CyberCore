@@ -644,6 +644,18 @@ async function start() {
     // a previous process and is holding a VXLAN it will never use.
     await recoverStrandedLanes();
 
+    // CYBR 400 attack console. The INVERSE of recoverStrandedLanes above: an
+    // attack runs detached on the guest, so a restart here is invisible to it
+    // and 'running' targets must be left alone. Only lanes caught mid-dispatch
+    // are ambiguous. See the header of cle/utils/attack-worker.js.
+    //
+    // Required from src/ because the plugin owns cle_db and its pool is only
+    // injected during moduleLoader.loadAll() above — so this must stay after
+    // it. Precedent for reaching into a plugin from src/: admin/lab-networks.js.
+    const attackWorker = require('../modules/crucible/plugins/cle/utils/attack-worker');
+    await attackWorker.recoverAttackRuns();
+    attackWorker.startAttackWorker();
+
     // Sync template node locations from live Proxmox cluster
     await syncVmTemplateNodes();
   } catch (err) {
