@@ -110,12 +110,17 @@ stubModule('cybercore-db.js', {
     }
     if (/WITH pool AS/.test(sql)) {
       const limit = params[4];
+      // params[5] is the already-probed exclusion list. Modelling it matters:
+      // without it the query re-serves the same rows every round and the
+      // allocator's round-based search can never walk past a run of squatters.
+      const exclude = new Set(params[5] || []);
       const out = [];
       for (let n = toInt(world.hostFirst); n <= toInt(world.hostLast); n++) {
         const ip = toIp(n);
         if (world.reserved.includes(ip)) continue;
         if (world.liveLaneIps.has(ip)) continue;
         if (world.inFlightTokenIps.has(ip)) continue;
+        if (exclude.has(ip)) continue;
         out.push(ip);
       }
       out.sort((a, b) => {
@@ -228,7 +233,7 @@ test('a candidate with no arping verdict is treated as in use, not as free', asy
     return { stdout: '' };   // a truncated or crashed probe reports on nothing
   };
   try {
-    await assert.rejects(() => alloc.allocateLaneWanIps(1), /pool exhausted/);
+    await assert.rejects(() => alloc.allocateLaneWanIps(1), /allocation failed/);
   } finally {
     ssh.nodeExec = realExec;
   }
@@ -308,14 +313,52 @@ test('cooldown: a previously-used address comes after every never-used one', asy
   assert.deepStrictEqual(await addrs(3), ['100.100.60.12', '100.100.60.11', '100.100.60.10']);
 });
 
-test('exhaustion throws with the numbers rather than reissuing', async () => {
+test('a genuinely full pool says so, and points at the subnet prefix', async () => {
   reset({ probeEnabled: false, hostFirst: '100.100.60.10', hostLast: '100.100.60.12' });
   await assert.rejects(
     () => alloc.allocateLaneWanIps(5),
-    (e) => /pool exhausted: needed 5 address\(es\), found 3/.test(e.message)
+    (e) => /allocation failed: needed 5 address\(es\), found 3/.test(e.message)
         && /100\.100\.60\.0\/22/.test(e.message)
+        && /pool is genuinely full/.test(e.message)
         && /Widen cluster\.networking\.v2_lab_network\.subnet/.test(e.message)
         && /OPNsense VLAN-60 interface FIRST/.test(e.message)
+  );
+});
+
+test('squatters do NOT stop the search — it walks past them into the free set', async () => {
+  // THE REGRESSION THIS FILE EXISTS FOR. The first version fetched one batch of
+  // n*2+8 candidates; when a run of orphaned gateway LXCs occupied all of them
+  // it reported "pool exhausted" with ~150 addresses free behind it and told the
+  // operator to widen the subnet. Observed live: 90 lanes on a 242-address pool,
+  // 10 candidates fetched, 10 squatted, deploy refused.
+  reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254' });
+  for (let i = 10; i <= 80; i++) world.arpAnswers.add('100.100.60.' + i);
+  assert.deepStrictEqual(await addrs(2), ['100.100.60.81', '100.100.60.82']);
+});
+
+test('a wall of squatters is reported as ONE line, not one per address', async () => {
+  reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254' });
+  for (let i = 10; i <= 60; i++) world.arpAnswers.add('100.100.60.' + i);
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => warns.push(a.join(' '));
+  try { await addrs(1); } finally { console.warn = realWarn; }
+  const squatterLines = warns.filter(w => /answered ARP/.test(w));
+  assert.strictEqual(squatterLines.length, 1, 'exactly one summary line');
+  assert.match(squatterLines[0], /51 address\(es\) answered ARP/);
+  assert.match(squatterLines[0], /\+39 more/, 'the list is truncated, not dumped');
+});
+
+test('too many squatters blames the orphans, NOT the subnet prefix', async () => {
+  // Wrong diagnosis is worse than no diagnosis: the operator widens a /24 that
+  // was never the problem and the orphaned gateways keep eating the pool.
+  reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254' });
+  for (let i = 10; i <= 254; i++) world.arpAnswers.add('100.100.60.' + i);
+  await assert.rejects(
+    () => alloc.allocateLaneWanIps(1),
+    (e) => /allocation failed/.test(e.message)
+        && /orphaned gateway LXCs/.test(e.message)
+        && !/pool is genuinely full/.test(e.message)
   );
 });
 

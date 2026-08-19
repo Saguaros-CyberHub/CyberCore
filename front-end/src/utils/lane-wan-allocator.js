@@ -52,6 +52,15 @@ const RESERVED_WAN_TTL_MS = 15 * 60 * 1000;
 const _probeReady = new Map();       // node -> { ok, at, detail }
 const PROBE_PREFLIGHT_TTL_MS = 10 * 60 * 1000;
 
+// Search bounds. The allocator walks the free set in rounds because squatters
+// (orphaned gateway LXCs still answering ARP for a lane whose row is gone) can
+// occupy a long contiguous run of it. PROBE_BATCH_MIN keeps each round's ssh
+// round trip worthwhile; the budget and round cap stop a pathological cluster
+// from ARPing an entire /22 on every deploy.
+const PROBE_BATCH_MIN   = 32;
+const PROBE_ROUNDS_MAX  = 8;
+const PROBE_BUDGET      = 512;   // addresses probed in one allocate() call
+
 /**
  * Serialize the whole allocate body - candidate query, reservation, probe,
  * claim - so one batch cannot race itself or a concurrent batch.
@@ -222,13 +231,13 @@ async function probeTakenAddresses(node, candidates) {
  * keeps a torn-down lane's address from being reissued while a stale Guacamole
  * connection or an OPNsense ARP entry still points at the previous holder.
  */
-async function candidateAddresses(limit) {
+async function candidateAddresses(limit, exclude = []) {
   const net = getV2LabNetwork();
   const firstOffset = ipToInt(net.host_range.first) - ipToInt(net.network);
   const lastOffset  = ipToInt(net.host_range.last)  - ipToInt(net.network);
 
   try {
-    return await candidateQuery(net, firstOffset, lastOffset, limit, true);
+    return await candidateQuery(net, firstOffset, lastOffset, limit, true, exclude);
   } catch (e) {
     // 42P01 undefined_table. cybercore_lane_wan_lease comes from migration 033
     // (and the boot hook), lane_bootstrap_tokens from 017 — both are hand-run
@@ -243,11 +252,11 @@ async function candidateAddresses(limit) {
       `Run migrations/033_lane_wan_ip.sql (and 017_lane_bootstrap_tokens.sql). Addresses are ` +
       `still checked against live lanes, the reserved list and ARP.`
     );
-    return candidateQuery(net, firstOffset, lastOffset, limit, false);
+    return candidateQuery(net, firstOffset, lastOffset, limit, false, exclude);
   }
 }
 
-async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional) {
+async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional, exclude = []) {
   const res = await cybercoreQuery(`
     WITH pool AS (
       SELECT (host($1::cidr)::inet + gs) AS ip
@@ -270,6 +279,7 @@ async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional)
       FROM pool p
       LEFT JOIN last_use lu ON lu.ip = p.ip
      WHERE NOT (p.ip = ANY($4::inet[]))
+       AND NOT (p.ip = ANY($6::inet[]))
        AND NOT EXISTS (SELECT 1 FROM live l WHERE l.ip = p.ip)
        ${withOptional ? `AND NOT EXISTS (
              SELECT 1 FROM lane_bootstrap_tokens b
@@ -278,7 +288,7 @@ async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional)
                 AND b.expires_at > NOW())` : ''}
      ORDER BY lu.last_allocated_at NULLS FIRST, p.ip
      LIMIT $5
-  `, [net.network + '/' + net.prefix_len, firstOffset, lastOffset, net.reserved, limit]);
+  `, [net.network + '/' + net.prefix_len, firstOffset, lastOffset, net.reserved, limit, exclude]);
 
   return res.rows.map(r => r.ip);
 }
@@ -315,51 +325,116 @@ async function allocateLaneWanIps(count, { probeNode = null, logTag = LOG } = {}
     const net = getV2LabNetwork();
     sweepReservations();
 
-    // Over-fetch so the probe has somewhere to go when it finds squatters.
-    const pool = (await candidateAddresses(n * 2 + 8))
-      .filter(ip => !_reservedWanIps.has(ip));
-
-    let usable = pool;
+    let node = null;
     if (net.probe.enabled) {
-      const node = resolveProbeNode(probeNode);
+      node = resolveProbeNode(probeNode);
       await assertProbeUsable(node);
-      const taken = await probeTakenAddresses(node, pool);
-      for (const ip of taken) {
-        // Expected, and worth saying out loud: markLaneError sets status='error',
-        // which releases the address from the partial unique index, while the
-        // gateway LXC cloned by cloneGateway may still be running on it. The
-        // arping is the only thing that catches that.
-        console.warn(
-          logTag + ' ' + ip + ' answered ARP on ' + net.probe.interface +
-          ' but no live lane claims it - skipping. Either a lane whose row was deleted while ' +
-          'its gateway LXC is still running, or a device outside CyberCore. Add it to ' +
-          'cluster.networking.v2_lab_network.reserved in config/site.json once you know which.'
-        );
-      }
-      usable = pool.filter(ip => !taken.has(ip));
     }
 
-    if (usable.length < n) {
+    // Search in ROUNDS rather than one over-fetched batch.
+    //
+    // A single batch is only correct if squatters are rare. They are not: a lane
+    // marked 'error' releases its address in the database while its gateway LXC
+    // keeps running and answering ARP, and a hard-deleted lane whose teardown
+    // half-failed does the same. On a cluster carrying a dozen of those, a
+    // one-shot fetch could come back 100% squatted and report "pool exhausted"
+    // with 150 genuinely free addresses sitting right behind it. So: keep
+    // pulling the next slice of the free set until enough survive the probe,
+    // the database runs out, or the probe budget is spent.
+    const chosen = [];
+    const tried = new Set();     // candidates already offered to the probe
+    const squatters = [];
+    let dbExhausted = false;
+
+    for (let round = 0; chosen.length < n && round < PROBE_ROUNDS_MAX; round++) {
+      const need = n - chosen.length;
+      const limit = Math.max(PROBE_BATCH_MIN, need * 3);
+      const rows = await candidateAddresses(limit, [...tried]);
+
+      // Short of the LIMIT means the query has nothing more to give: the
+      // database-free set really is used up, which is a different diagnosis
+      // from "plenty free but squatted" and gets a different remedy below.
+      if (rows.length < limit) dbExhausted = true;
+      // Everything we SAW advances the cursor, not just what survived
+      // filtering, or a round that is entirely in-flight reservations would ask
+      // the same question forever.
+      for (const ip of rows) tried.add(ip);
+
+      const batch = rows.filter(ip => !_reservedWanIps.has(ip));
+      if (!batch.length) { if (dbExhausted) break; continue; }
+
+      if (!node) {                       // probe disabled: the database decides
+        chosen.push(...batch.slice(0, need));
+        break;
+      }
+      if (tried.size > PROBE_BUDGET) break;
+
+      const taken = await probeTakenAddresses(node, batch);
+      for (const ip of batch) {
+        if (taken.has(ip)) squatters.push(ip);
+        else if (chosen.length < n) chosen.push(ip);
+      }
+    }
+
+    // ONE summary line, not one per address. A cluster with a dozen orphaned
+    // gateways would otherwise bury the actual outcome under warnings.
+    if (squatters.length) {
+      const shown = squatters.slice(0, 12).join(', ') +
+        (squatters.length > 12 ? ', +' + (squatters.length - 12) + ' more' : '');
+      console.warn(
+        logTag + ' ' + squatters.length + ' address(es) answered ARP on ' + net.probe.interface +
+        ' with no live lane claiming them - skipped: ' + shown + '. Each is either a lane whose ' +
+        'row is gone or marked error while its gateway LXC is still running, or a device outside ' +
+        'CyberCore. Destroy the orphaned gateways, or add fixed devices to ' +
+        'cluster.networking.v2_lab_network.reserved in config/site.json.'
+      );
+    }
+
+    if (chosen.length < n) {
       const census = await poolCensus();
-      throw new Error(
-        'Lane WAN pool exhausted: needed ' + n + ' address(es), found ' + usable.length + '.\n' +
+      const header =
+        'Lane WAN allocation failed: needed ' + n + ' address(es), found ' + chosen.length + '.\n' +
         '  Pool       ' + net.subnet + ', host range ' + net.host_range.first + '-' +
           net.host_range.last + ' (' + census.usable + ' usable)\n' +
         '  Held       ' + (census.live_lanes ?? '?') + ' by live lanes (status not in error/deleted)\n' +
         '  Reserved   ' + net.reserved.length + ' in config/site.json\n' +
         '  In flight  ' + (census.in_flight ?? '?') + ' held by unconsumed lane_bootstrap_tokens\n' +
-        '  Skipped    ' + (pool.length - usable.length) + ' answered ARP with no lane row\n\n' +
-        'Widen cluster.networking.v2_lab_network.subnet in config/site.json - and the matching\n' +
+        '  Probed     ' + tried.size + ', of which ' + squatters.length +
+          ' answered ARP with no lane row\n\n';
+
+      // Two genuinely different problems with two different fixes, and getting
+      // the attribution wrong is worse than saying nothing: an operator told to
+      // widen a subnet that was never the constraint widens it, and the
+      // orphaned gateways carry on eating the new space too.
+      //
+      // The discriminator is SQUATTERS, not whether the query ran dry. Walking
+      // the entire free set and finding every address answering ARP exhausts
+      // the database AND is entirely an orphan problem — an earlier version
+      // keyed on dbExhausted alone and blamed the prefix for exactly that case.
+      const orphanAdvice =
+        'The database has free addresses, but they are occupied on the wire by machines with\n' +
+        'no lane row - orphaned gateway LXCs from failed or half-torn-down lanes. Destroy\n' +
+        'those, or list any legitimate fixed devices under\n' +
+        'cluster.networking.v2_lab_network.reserved so they stop being probed every time.';
+      const widenAdvice =
+        'The pool is genuinely full - every address is held by a live lane or reserved.\n' +
+        'Widen cluster.networking.v2_lab_network.subnet in config/site.json, and the matching\n' +
         'prefix on the OPNsense VLAN-' + net.vlan_tag + ' interface FIRST, or the new addresses\n' +
-        'will have no route. Or tear down stale lanes: GET /api/admin/wan-conflicts.'
-      );
+        'will have no route. Or tear down stale lanes: GET /api/admin/wan-conflicts.';
+
+      throw new Error(header + (squatters.length
+        ? orphanAdvice + (dbExhausted
+            ? '\n\nEvery free address was walked, so once the orphans are cleared the subnet may\n' +
+              'still need widening — but clear them first, or you will widen into the same problem.'
+            : '')
+        : widenAdvice));
     }
 
-    const chosen = usable.slice(0, n);
     const now = Date.now();
     for (const ip of chosen) _reservedWanIps.set(ip, now);
     console.log(logTag + ' Allocated ' + chosen.length + ' WAN address(es) from ' + net.subnet +
-                ': ' + chosen.join(', '));
+                ': ' + chosen.join(', ') +
+                (squatters.length ? ' (skipped ' + squatters.length + ' ARP-occupied)' : ''));
     return chosen.map(wanConfigFromAddress);
   });
 }
