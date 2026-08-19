@@ -1028,11 +1028,20 @@ router.get('/mail/status', authenticateToken, adminOnly, async (req, res) => {
       queue = [{ status: 'unavailable', n: 0, error: err.message }];
     }
 
+    // isInternalHost() is the same test the TLS policy uses: a single-label
+    // Docker service name or an RFC 1918 literal cannot leave the bridge, so
+    // anything else is a public relay reached over the internet.
+    const host = process.env.MAIL_HOST || null;
+    const port = Number(process.env.MAIL_PORT) || 587;
+    const external = !!host && !mailer.isInternalHost(host);
+
     res.json({
       enabled: mailer.mailEnabled(),
+      external_relay: external,
+      auth_configured: !!process.env.MAIL_USER,
       // Booleans, never the values themselves.
-      host: process.env.MAIL_HOST || null,
-      port: Number(process.env.MAIL_PORT) || 25,
+      host,
+      port,
       from: process.env.MAIL_FROM || null,
       public_url: mailer.publicUrl() || null,
       encryption_key_configured: !!mailer.mailKey(),
@@ -1049,8 +1058,16 @@ router.get('/mail/status', authenticateToken, adminOnly, async (req, res) => {
       // refused — it gets dropped, and the send hangs for the full connection
       // timeout before reporting a bare "timeout". Naming it here turns a
       // 20-minute network hunt into a one-line env change.
-      ...(String(process.env.MAIL_HOST || '') === 'mailrelay' && (Number(process.env.MAIL_PORT) || 587) === 25 ? {
-        hint_port: 'MAIL_HOST is the bundled relay but MAIL_PORT is 25, and that relay listens on 587 (submission) only. Sends will hang until they time out. Set MAIL_PORT=587.',
+      ...(port === 25 ? {
+        hint_port: external
+          ? `MAIL_PORT is 25. Outbound 25 is blocked on most networks, and every relay documented in example.env — Resend, SES, Gmail — uses 587. A blocked port does not fail fast: the send hangs until it times out. Set MAIL_PORT=587.`
+          : 'MAIL_HOST is the bundled relay but MAIL_PORT is 25, and that relay listens on 587 (submission) only. Sends will hang until they time out. Set MAIL_PORT=587.',
+      } : {}),
+      // An external relay authenticates; the bundled one does not. Sending with
+      // no credentials to a public submission host is a guaranteed 535, and the
+      // absence of a setting is much harder to notice than a wrong one.
+      ...(external && !process.env.MAIL_USER ? {
+        hint_auth: `MAIL_HOST is external (${host}) but MAIL_USER is empty. Public submission relays require authentication and will refuse every message. For Resend the username is literally "resend" and the password is the API key.`,
       } : {}),
     });
   } catch (error) {

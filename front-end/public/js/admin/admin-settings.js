@@ -240,6 +240,12 @@ async function loadMailStatus() {
     html += mailRow('Encryption key', s.encryption_key_configured ? 'configured' : 'missing',
       s.encryption_key_configured ? 'good' : 'bad');
     html += mailRow('Relay', s.host ? `${s.host}:${s.port}` : '—');
+    // An external relay reached over the internet has different failure modes
+    // than the bundled one on the bridge, so name which is in play.
+    html += mailRow('Relay type', s.external_relay ? 'external (authenticates, verifies TLS)' : 'bundled / internal');
+    if (s.external_relay) {
+      html += mailRow('Credentials', s.auth_configured ? 'configured' : 'missing', s.auth_configured ? 'good' : 'bad');
+    }
     html += mailRow('From', s.from || '—');
     html += mailRow('Public URL', s.public_url || '— (activation links will be broken)',
       s.public_url ? null : 'bad');
@@ -255,7 +261,7 @@ async function loadMailStatus() {
       ? queue.map(q => mailRow(q.status, String(q.n), q.status === 'failed' ? 'bad' : null)).join('')
       : `<div style="color: var(--gray-500); padding: 0.3rem 0;">empty</div>`;
 
-    for (const hint of [s.hint, s.hint_key, s.hint_port].filter(Boolean)) {
+    for (const hint of [s.hint, s.hint_key, s.hint_port, s.hint_auth].filter(Boolean)) {
       html += `<div style="margin-top: 0.5rem; font-size: 0.78rem; color: #b7791f;">${escHtml(hint)}</div>`;
     }
 

@@ -88,7 +88,7 @@ function paintBroadcastMailBanner() {
     }
     // Config that parses fine and still cannot deliver - worth saying before a
     // send hangs rather than after.
-    if (s.hint_port) notes.push(escHtml(s.hint_port));
+    for (const hint of [s.hint_port, s.hint_auth].filter(Boolean)) notes.push(escHtml(hint));
 
     box.innerHTML = notes.length
       ? `<div style="padding: 0.6rem 0.85rem; border-radius: 8px; background: #fffbeb; color: #b7791f;">
