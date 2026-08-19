@@ -208,6 +208,44 @@
       border-color: rgba(99,130,255,0.12);
       color: #f0f2fa;
     }
+    /* .form-group styles input and select only, so a bare textarea - which the
+       broadcast composer is built around - is unreadable in dark mode without
+       this. */
+    [data-theme="dark"] #tab-broadcast input,
+    [data-theme="dark"] #tab-broadcast select,
+    [data-theme="dark"] #tab-broadcast textarea {
+      background: #0a0d1a;
+      border-color: rgba(99,130,255,0.12);
+      color: #f0f2fa;
+    }
+    #tab-broadcast textarea,
+    #tab-broadcast input[type="text"],
+    #tab-broadcast input[type="url"] {
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-family: inherit;
+    }
+    #tab-broadcast textarea { min-height: 190px; resize: vertical; }
+    .bc-chip {
+      display: inline-block; cursor: pointer; user-select: none;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.72rem; padding: 0.15rem 0.45rem; margin: 0.15rem 0.25rem 0 0;
+      border: 1px solid var(--border-color); border-radius: 5px;
+      background: var(--bg-card-hover); color: var(--gray-500);
+    }
+    .bc-chip:hover { color: var(--primary); border-color: var(--primary); }
+    .bc-pick {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.3rem 0.4rem; border-radius: 6px; font-size: 0.82rem;
+    }
+    .bc-pick:hover { background: var(--bg-card-hover); }
+    #broadcastPreviewFrame {
+      width: 100%; height: 420px; border: 1px solid var(--border-color);
+      border-radius: 8px; background: #f5f6f8;
+    }
     [data-theme="dark"] #laneCapacityInfo {
       background: rgba(91,140,255,0.1) !important;
       color: #7ba6ff !important;
@@ -338,6 +376,9 @@
                display:none until this button runs switchTab. So the canvas is
                built by topoTabActivate() on first activation, never at page load. -->
           <button class="tab-btn" onclick="switchTab('topology', this); topoTabActivate()">Topology</button>
+          <!-- Lazy, like Topology: nothing on this tab is worth fetching until
+               somebody opens it. -->
+          <button class="tab-btn" onclick="switchTab('broadcast', this); broadcastTabActivate()">Broadcast</button>
           <button class="tab-btn" onclick="switchTab('settings', this)">Settings</button>
         </div>
 
@@ -1188,6 +1229,155 @@
           </div>
         </div>
 
+        <!-- TAB: Broadcast -->
+        <div class="tab-content" id="tab-broadcast">
+
+          <!-- Painted from GET /mail/status. An admin should learn that nothing
+               will send BEFORE they write four paragraphs, not after. -->
+          <div id="broadcastMailBanner" style="margin-bottom: 1rem;"></div>
+
+          <div style="display: grid; grid-template-columns: 1fr 1.15fr; gap: 1.5rem; align-items: start;">
+
+            <!-- ---------------------------------------------------------- -->
+            <!-- Audience                                                    -->
+            <!-- ---------------------------------------------------------- -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Audience</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+                Filter by role, pick people by hand, or paste addresses. Accounts the
+                platform creates for itself (<code>@clinic.local</code>, <code>@cohort.invalid</code>)
+                can never receive mail and are always reported as suppressed.
+              </p>
+
+              <div class="form-group">
+                <label>Roles</label>
+                <div id="broadcastRoles" style="display: flex; flex-wrap: wrap; gap: 0.75rem; font-size: 0.85rem;">
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="student"> Students</label>
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="instructor"> Instructors</label>
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="admin"> Admins</label>
+                  <label style="display: flex; align-items: center; gap: 0.3rem;"><input type="checkbox" class="bc-role" value="user"> Users</label>
+                </div>
+              </div>
+
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+                <div class="form-group">
+                  <label>Account status</label>
+                  <select id="broadcastActivity">
+                    <option value="active">Active accounts only</option>
+                    <option value="">Any status</option>
+                    <option value="inactive">Inactive / suspended only</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>Organization</label>
+                  <select id="broadcastOrg">
+                    <option value="">Any organization</option>
+                  </select>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Add specific people <span id="broadcastPickedCount" style="font-size: 0.8rem; color: var(--gray-500);"></span></label>
+                <input type="text" id="broadcastUserFilter" placeholder="Filter by name or email...">
+                <div id="broadcastUserList" style="max-height: 190px; overflow-y: auto; margin-top: 0.4rem; border: 1px solid var(--border-color); border-radius: 8px; padding: 0.4rem;">
+                  <p style="color: var(--gray-500); font-size: 0.82rem; padding: 0.75rem; margin: 0;">Loading users...</p>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label>Additional addresses</label>
+                <textarea id="broadcastAddresses" style="min-height: 70px;" placeholder="one per line, or comma separated"></textarea>
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">
+                  Addresses that already belong to an account are matched to it, so nobody gets two copies.
+                </p>
+              </div>
+
+              <button class="btn btn-primary" id="broadcastResolveBtn" onclick="resolveBroadcastAudience()" style="width: 100%; margin-top: 0.5rem;">Resolve audience</button>
+              <div id="broadcastAudienceResult" style="margin-top: 0.9rem; font-size: 0.85rem;"></div>
+            </div>
+
+            <!-- ---------------------------------------------------------- -->
+            <!-- Message                                                     -->
+            <!-- ---------------------------------------------------------- -->
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08);">
+              <h3 style="margin: 0 0 0.5rem;">Message</h3>
+              <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+                Plain text. It is wrapped in the same branded layout as invitations and
+                password notices, so links belong in the button below rather than the body.
+              </p>
+
+              <div class="form-group">
+                <label>Subject *</label>
+                <input type="text" id="broadcastSubject" maxlength="200" placeholder="e.g. Lab 3 opens Monday" oninput="queueBroadcastRender()">
+                <p style="font-size: 0.75rem; color: var(--gray-500); margin: 0.3rem 0 0;">
+                  Stored in plain text in the mail queue and visible in relay logs &mdash; keep secrets out of it.
+                  Merge fields are not substituted here.
+                </p>
+              </div>
+
+              <div class="form-group">
+                <label>Message *</label>
+                <textarea id="broadcastBody" maxlength="20000" placeholder="Write your announcement here.
+
+Leave a blank line between paragraphs." oninput="queueBroadcastRender()"></textarea>
+                <div style="margin-top: 0.35rem;">
+                  <span style="font-size: 0.75rem; color: var(--gray-500);">Insert:</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('first_name')">{{first_name}}</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('last_name')">{{last_name}}</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('email')">{{email}}</span>
+                  <span class="bc-chip" onclick="insertBroadcastMerge('site_name')">{{site_name}}</span>
+                </div>
+              </div>
+
+              <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; margin-bottom: 0.75rem;">
+                <input type="checkbox" id="broadcastGreeting" checked onchange="queueBroadcastRender()">
+                Start with a greeting (&ldquo;Hi Ada,&rdquo;, or &ldquo;Hi,&rdquo; when we have no name)
+              </label>
+
+              <div style="display: grid; grid-template-columns: 1fr 1.4fr; gap: 0.75rem;">
+                <div class="form-group">
+                  <label>Button label</label>
+                  <input type="text" id="broadcastButtonLabel" maxlength="60" placeholder="Open CyberHub" oninput="queueBroadcastRender()">
+                </div>
+                <div class="form-group">
+                  <label>Button link</label>
+                  <input type="url" id="broadcastButtonUrl" placeholder="https://..." oninput="queueBroadcastRender()">
+                </div>
+              </div>
+
+              <div style="display: flex; align-items: baseline; justify-content: space-between; margin: 0.5rem 0 0.4rem;">
+                <strong style="font-size: 0.85rem;">Preview</strong>
+                <span id="broadcastPreviewNote" style="font-size: 0.75rem; color: var(--gray-500);"></span>
+              </div>
+              <!-- srcdoc, set as a property rather than an attribute: the shell
+                   is a full document saturated with quotes. sandbox makes it an
+                   opaque origin, hence the fixed height. -->
+              <iframe id="broadcastPreviewFrame" sandbox title="Message preview"></iframe>
+
+              <div id="broadcastMessageErrors" style="margin-top: 0.6rem; font-size: 0.82rem;"></div>
+
+              <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                <button class="btn btn-outline" id="broadcastTestBtn" onclick="sendBroadcastTest()" style="flex: 1;">Send test to me</button>
+                <button class="btn btn-primary" id="broadcastSendBtn" onclick="previewAndSendBroadcast()" style="flex: 1;">Preview &amp; Send</button>
+              </div>
+              <div id="broadcastStatus" style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--gray-500);"></div>
+            </div>
+          </div>
+
+          <!-- Recent broadcasts -->
+          <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-top: 1.5rem;">
+            <div style="display: flex; align-items: baseline; justify-content: space-between;">
+              <h3 style="margin: 0 0 0.5rem;">Recent broadcasts</h3>
+              <button class="btn btn-outline btn-sm" onclick="loadBroadcastCampaigns()">Refresh</button>
+            </div>
+            <p style="color: var(--gray-500); font-size: 0.85rem; margin-bottom: 1rem;">
+              Read from the mail queue, which is pruned on a retention schedule &mdash; older
+              broadcasts stay in the Activity Log.
+            </p>
+            <div id="broadcastCampaigns"></div>
+          </div>
+        </div>
+
         <!-- (User Management merged into Users tab above) -->
 
       </div>
@@ -1673,6 +1863,23 @@ msmith@arizona.edu, Mark, Smith"
     </div>
   </div>
 
+  <!-- Broadcast Confirmation Modal -->
+  <!-- Not showDeployConfirmation(): that helper hard-codes VM counts and its
+       modal says "Confirm Deploy". Same shape, different content. -->
+  <div class="modal-overlay" id="broadcastConfirmModal">
+    <div class="modal-content" style="max-width: 640px;">
+      <div class="modal-header">
+        <h3 id="broadcastConfirmTitle">Send this broadcast?</h3>
+        <button class="modal-close" onclick="closeModal('broadcastConfirmModal')">&times;</button>
+      </div>
+      <div id="broadcastConfirmBody" style="font-size: 0.9rem;"></div>
+      <div style="display: flex; gap: 0.75rem; margin-top: 1.25rem;">
+        <button class="btn btn-outline" onclick="closeModal('broadcastConfirmModal')" style="flex: 1;">Cancel</button>
+        <button class="btn btn-primary" id="broadcastConfirmBtn" style="flex: 1;">Send</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Crucible Event Modal -->
   <div class="modal-overlay" id="crucibleEventModal">
     <div class="modal-content" style="width:90%; max-width:560px;">
@@ -1759,6 +1966,7 @@ msmith@arizona.edu, Mark, Smith"
   <!-- After admin-challenges.js: the Topology tab reuses its GOAD catalog
        helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml. -->
   <script src="/js/admin/admin-topology.js"></script>
+  <script src="/js/admin/admin-broadcast.js"></script>
   <script src="/js/admin/admin-init.js"></script>
 </body>
 </html>

@@ -240,6 +240,119 @@ function testMessage(opts = {}) {
   };
 }
 
-const TEMPLATES = { activation, courseAdded, credentialsIssued, testMessage };
+// ============================================================================
+// BROADCAST
+// ============================================================================
+// The one template whose body is written by a human at send time rather than
+// fixed here. Everything above knows exactly what it is saying; this one does
+// not, which is why the escaping rules matter more, not less.
 
-module.exports = { ...TEMPLATES, TEMPLATE_KEYS: Object.keys(TEMPLATES), esc, courseLabel };
+/** Fields an admin may interpolate into a broadcast body. */
+const MERGE_KEYS = ['first_name', 'last_name', 'email', 'site_name'];
+
+const MERGE_RE = /\{\{\s*(first_name|last_name|email|site_name)\s*\}\}/g;
+
+/**
+ * Substitute {{merge_fields}} into raw, pre-escape text.
+ *
+ * One pass, callback form, and both details are load-bearing. A string
+ * replacement would interpret `$&` and `$1` inside a recipient's own name —
+ * "O'$&Brien" would come out mangled. And sequential replaceAll() calls would
+ * re-scan what they just injected, so a first name of "{{email}}" would leak
+ * the address of whoever the message was being rendered for.
+ *
+ * Unknown tokens are left verbatim: a visible {{typo}} in a preview beats a
+ * silent blank that nobody notices until it has been sent to 400 people.
+ */
+function applyMergeFields(raw, values = {}) {
+  return String(raw ?? '').replace(MERGE_RE, (_, key) => String(values[key] ?? ''));
+}
+
+/** True when the text renders differently per recipient. */
+function hasMergeFields(raw) {
+  MERGE_RE.lastIndex = 0;   // /g regexes are stateful across .test() calls
+  return MERGE_RE.test(String(raw ?? ''));
+}
+
+/**
+ * Plain text -> escaped paragraphs. A blank line starts a new <p>; a single
+ * newline becomes <br>.
+ *
+ * This is the ONLY path admin-authored text takes into the html part, which is
+ * what makes "no raw HTML from the browser" a property of the code rather than
+ * a convention someone has to remember.
+ */
+function paragraphize(text) {
+  return String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .split(/\n{2,}/)
+    .map(block => block.trim())
+    .filter(Boolean)
+    .map(block => `<p style="margin:0 0 16px;">${esc(block).replace(/\n/g, '<br>')}</p>`)
+    .join('\n');
+}
+
+/**
+ * An announcement written by an admin in the Broadcast tab.
+ *
+ * The subject is deliberately literal — no merge fields. The outbox stores it
+ * in plaintext by design (see 029_email_outbox.sql), it surfaces on lock
+ * screens and in relay logs, and a per-recipient subject would make the
+ * campaign report show an arbitrary sample rather than what was actually sent.
+ *
+ * The greeting is a real line rather than a {{first_name}} the admin has to
+ * remember: first_name is nullable, and is empty on every cohort- and
+ * group-deploy-provisioned account, so a hand-written "Hi {{first_name}}," is
+ * "Hi ," for a large slice of any student audience. greeting() already
+ * degrades to "Hi,".
+ */
+function broadcast(opts = {}) {
+  const {
+    siteName = 'CyberHub', firstName, lastName, email,
+    subject, bodyText, buttonLabel, buttonUrl, includeGreeting = true,
+  } = opts;
+
+  const values = {
+    first_name: String(firstName || '').trim(),
+    last_name: String(lastName || '').trim(),
+    email: String(email || '').trim(),
+    site_name: siteName,
+  };
+
+  const body = applyMergeFields(bodyText, values);
+  // Both halves or neither — a labelled button with no destination is a dead
+  // control, and a bare URL with no label renders as an empty blue box.
+  const hasButton = !!(String(buttonLabel || '').trim() && String(buttonUrl || '').trim());
+  const hello = includeGreeting ? greeting(values.first_name) : null;
+
+  const textLines = [];
+  if (hello) textLines.push(hello, '');
+  if (body) textLines.push(body);
+  if (hasButton) textLines.push('', `${buttonLabel}: ${buttonUrl}`);
+  textLines.push('', `— ${siteName}`);
+
+  const html = shell(siteName, [
+    hello ? `<p style="margin:0 0 16px;">${esc(hello)}</p>` : '',
+    paragraphize(body),
+    hasButton ? button(buttonUrl, buttonLabel) : '',
+  ].filter(Boolean).join('\n'));
+
+  return {
+    subject: String(subject || '').trim() || `A message from ${siteName}`,
+    text: textLines.join('\n'),
+    html,
+  };
+}
+
+const TEMPLATES = { activation, courseAdded, credentialsIssued, testMessage, broadcast };
+
+module.exports = {
+  ...TEMPLATES,
+  TEMPLATE_KEYS: Object.keys(TEMPLATES),
+  esc, courseLabel, greeting,
+  // Exported for the broadcast route, which renders a preview through the same
+  // code path the send uses — a preview built from a second copy of this markup
+  // would drift from what recipients actually get.
+  shell, button,
+  applyMergeFields, hasMergeFields, paragraphize, MERGE_KEYS,
+};

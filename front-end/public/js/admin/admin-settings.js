@@ -222,6 +222,10 @@ async function loadMailStatus() {
 
   try {
     const s = await api('GET', '/mail/status');
+    // Shared with the Broadcast tab, which needs to warn about an unconfigured
+    // relay the instant it opens rather than after a second round trip.
+    window.__mailStatus = s;
+    if (typeof paintBroadcastMailBanner === 'function') paintBroadcastMailBanner();
 
     // Both of these must be true for anything to send, and each fails in its
     // own quiet way — enabled-without-a-key still records every message as

@@ -9,7 +9,16 @@ async function api(method, path, body = null) {
   if (body) opts.body = JSON.stringify(body);
   const resp = await fetch(`/api/admin${path}`, opts);
   const data = await resp.json();
-  if (!resp.ok) throw new Error(data.error || `Request failed (${resp.status})`);
+  if (!resp.ok) {
+    // Callers have always read e.message and still can. The status and body ride
+    // along for the ones that need to tell responses apart - a broadcast whose
+    // audience shifted comes back 409 with fresh counts, which is a prompt to
+    // re-check rather than an error to show and forget.
+    const err = new Error(data.error || `Request failed (${resp.status})`);
+    err.status = resp.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 

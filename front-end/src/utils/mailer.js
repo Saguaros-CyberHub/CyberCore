@@ -54,6 +54,25 @@ function publicUrl() {
 }
 
 /**
+ * Branding for the message being composed. Third caller of this lookup and the
+ * last one that should write it out by hand — settings.js and the CLE roster
+ * import both grew their own copy.
+ *
+ * Never throws: branding is cosmetic, and a missing settings table must not
+ * stop a message going out.
+ */
+async function siteName() {
+  try {
+    const result = await cybercoreQuery(
+      `SELECT value FROM cybercore_site_settings WHERE key = 'site_name'`
+    );
+    return result.rows[0]?.value || 'CyberHub';
+  } catch {
+    return 'CyberHub';
+  }
+}
+
+/**
  * Is MAIL_HOST somewhere the connection cannot leave the host or its bridge
  * network? Single-label names are Docker service names (`mailrelay`), which do
  * not resolve publicly; the rest are loopback and RFC 1918 literals.
@@ -161,6 +180,25 @@ function checkRecipient(address) {
   return { ok: true };
 }
 
+/**
+ * Why NOTHING can be queued right now, or null when the server is able to send.
+ *
+ * Exists so a caller can ask the question ahead of time and get back the exact
+ * string enqueue() would have written to last_error. The broadcast preview
+ * depends on that: an admin composing a message to 400 people needs to be told
+ * "email is not configured on this server" before they write it, not afterwards
+ * via 400 suppressed rows.
+ *
+ * Note what this is NOT: it is not a recipient check. checkRecipient() answers
+ * "may this address be written to"; this answers "can this server write to
+ * anyone at all". Both have to pass.
+ */
+function globalSuppression() {
+  if (!mailEnabled()) return 'email is not configured on this server';
+  if (!mailKey()) return 'MAIL_ENCRYPT_KEY is not configured, so message bodies cannot be stored securely';
+  return null;
+}
+
 // ============================================================================
 // QUEUE
 // ============================================================================
@@ -183,19 +221,18 @@ async function enqueue(msg = {}) {
   let reason = null;
 
   const recipient = checkRecipient(to);
+  // A suppressed row is deliberately still written in both cases. An offline or
+  // LAN-only deployment is a real way to run this platform, and the import (or
+  // broadcast) report should say "email is not configured here" rather than
+  // implying the mail was sent. And refusing to store a body we cannot encrypt
+  // is the whole point of the key check.
+  const blocked = globalSuppression();
   if (!recipient.ok) {
     status = 'suppressed';
     reason = recipient.reason;
-  } else if (!mailEnabled()) {
-    // Deliberately still recorded. An offline or LAN-only deployment is a real
-    // way to run this platform, and the import results should say "email is not
-    // configured here" rather than implying the mail was sent.
+  } else if (blocked) {
     status = 'suppressed';
-    reason = 'email is not configured on this server';
-  } else if (!key) {
-    // Refusing to store a body we cannot encrypt is the whole point.
-    status = 'suppressed';
-    reason = 'MAIL_ENCRYPT_KEY is not configured, so message bodies cannot be stored securely';
+    reason = blocked;
   }
 
   const storeBody = status === 'queued';
@@ -228,10 +265,26 @@ async function enqueue(msg = {}) {
   }
 }
 
-/** Queue several, reporting the split. Order is preserved in `results`. */
-async function enqueueMany(messages = []) {
-  const results = [];
-  for (const msg of messages) results.push(await enqueue(msg));
+/**
+ * Queue several, reporting the split. Order is preserved in `results`.
+ *
+ * Sequential by default, which is what every pre-existing caller wants and got.
+ * `concurrency` exists for the admin broadcast, where the audience can run to
+ * several hundred: one INSERT round trip per recipient against an off-box
+ * database turns a 500-person send into seconds of a held-open request. Kept
+ * well under the pool's max of 10 (cybercore-db.js), which drainOutbox is also
+ * drawing from at the same time.
+ */
+async function enqueueMany(messages = [], opts = {}) {
+  const concurrency = Math.min(Math.max(1, Number(opts.concurrency) || 1), 5);
+  const results = new Array(messages.length);
+  for (let i = 0; i < messages.length; i += concurrency) {
+    const chunk = messages.slice(i, i + concurrency);
+    // enqueue() never rejects for a policy reason and swallows its own write
+    // errors, so Promise.all cannot lose a result here.
+    const settled = await Promise.all(chunk.map(msg => enqueue(msg)));
+    for (let j = 0; j < settled.length; j++) results[i + j] = settled[j];
+  }
   return {
     queued: results.filter(r => r.status === 'queued').length,
     suppressed: results.filter(r => r.status === 'suppressed').length,
@@ -360,30 +413,48 @@ async function pruneOutbox(retentionDays = Number(process.env.MAIL_RETENTION_DAY
 }
 
 /**
- * Send immediately, bypassing the queue. ONLY for the admin diagnostic
- * endpoint, where a synchronous answer is the entire point — if this is slow or
- * hangs, that IS the result the operator needs to see.
+ * Send one already-rendered message immediately, bypassing the queue.
+ *
+ * ONLY for the admin diagnostics — the relay test and the broadcast's
+ * send-to-yourself — where a synchronous answer is the entire point: if this is
+ * slow or hangs, that IS the result the operator needs to see. Everything that
+ * goes to somebody else goes through enqueue().
+ *
+ * Note that this does not consult globalSuppression(): a missing
+ * MAIL_ENCRYPT_KEY only blocks STORING a body, and nothing is stored here. That
+ * asymmetry is deliberate but sharp — a test message can arrive on a server
+ * where every queued message would be suppressed, so any UI offering both must
+ * check globalSuppression() separately rather than reading a successful test as
+ * proof that a real send would work.
  */
-async function sendTest(to, opts = {}) {
+async function sendNow(to, message = {}) {
   if (!mailEnabled()) {
     return { ok: false, error: 'MAIL_ENABLED is not "true" or MAIL_HOST is unset.' };
   }
   const recipient = checkRecipient(to);
   if (!recipient.ok) return { ok: false, error: `Refusing to send: ${recipient.reason}` };
 
-  const body = templates.testMessage({ siteName: opts.siteName || 'CyberHub', publicUrl: publicUrl() });
   try {
     const info = await transport().sendMail({
       from: process.env.MAIL_FROM || 'no-reply@localhost',
+      ...(process.env.MAIL_REPLY_TO ? { replyTo: process.env.MAIL_REPLY_TO } : {}),
       to,
-      subject: body.subject,
-      text: body.text,
-      html: body.html,
+      subject: message.subject,
+      text: message.text,
+      ...(message.html ? { html: message.html } : {}),
     });
     return { ok: true, messageId: info?.messageId || null, accepted: info?.accepted || [] };
   } catch (err) {
     return { ok: false, error: err.message };
   }
+}
+
+/** Proves the relay works end to end, for POST /api/admin/mail/test. */
+async function sendTest(to, opts = {}) {
+  return sendNow(to, templates.testMessage({
+    siteName: opts.siteName || 'CyberHub',
+    publicUrl: publicUrl(),
+  }));
 }
 
 // ============================================================================
@@ -403,6 +474,67 @@ async function statusForImport(importId) {
     [String(importId)]
   );
   return result.rows;
+}
+
+/**
+ * The same thing for one admin broadcast: same shape, same guarantee that no
+ * body is ever returned.
+ *
+ * campaign_id lives in `context` rather than a column of its own, for the same
+ * reason import_id does — this table is a queue, not a campaign archive. The
+ * durable record of a broadcast is the activity_log row the route writes; this
+ * report only lives as long as the rows do, which is MAIL_RETENTION_DAYS.
+ */
+async function statusForCampaign(campaignId) {
+  const result = await cybercoreQuery(
+    `SELECT email_id, to_address, template_key, status, attempts, last_error, sent_at, created_at
+       FROM cybercore_email_outbox
+      WHERE context->>'campaign_id' = $1
+      ORDER BY to_address`,
+    [String(campaignId)]
+  );
+  return result.rows;
+}
+
+/**
+ * Recent broadcasts, derived from the outbox itself rather than from a campaign
+ * table. Everything a delivery summary needs is already on these rows.
+ */
+async function recentCampaigns(limit = 25) {
+  const result = await cybercoreQuery(
+    `SELECT context->>'campaign_id'                            AS campaign_id,
+            min(created_at)                                    AS started_at,
+            min(subject)                                       AS subject,
+            count(*)::int                                      AS total,
+            count(*) FILTER (WHERE status = 'sent')::int       AS sent,
+            count(*) FILTER (WHERE status = 'queued')::int     AS queued,
+            count(*) FILTER (WHERE status = 'sending')::int    AS sending,
+            count(*) FILTER (WHERE status = 'failed')::int     AS failed,
+            count(*) FILTER (WHERE status = 'suppressed')::int AS suppressed
+       FROM cybercore_email_outbox
+      WHERE template_key = 'broadcast' AND context ? 'campaign_id'
+      GROUP BY 1
+      ORDER BY started_at DESC
+      LIMIT $1`,
+    [Math.min(Math.max(1, Number(limit) || 25), 100)]
+  );
+  return result.rows;
+}
+
+/**
+ * How much mail is already ahead of a new send. Used to tell an admin how long
+ * a broadcast will take to drain, since the worker sends a fixed batch per tick
+ * and a large broadcast delays everything queued behind it.
+ */
+async function queueBacklog() {
+  try {
+    const result = await cybercoreQuery(
+      `SELECT count(*)::int AS n FROM cybercore_email_outbox WHERE status IN ('queued','sending')`
+    );
+    return result.rows[0]?.n || 0;
+  } catch {
+    return 0;
+  }
 }
 
 // ============================================================================
@@ -452,6 +584,12 @@ async function ensureEmailOutbox() {
       CREATE INDEX IF NOT EXISTS idx_email_outbox_import
         ON cybercore_email_outbox ((context->>'import_id'))
     `);
+    // Backs the per-campaign delivery report and the recent-broadcasts list.
+    // Keep in sync with front-end/migrations/032_email_outbox_campaign_index.sql.
+    await cybercoreQuery(`
+      CREATE INDEX IF NOT EXISTS idx_email_outbox_campaign
+        ON cybercore_email_outbox ((context->>'campaign_id'))
+    `);
     console.log('✅ Email outbox ensured');
   } catch (err) {
     console.warn('⚠️  Could not ensure email outbox:', err.message);
@@ -459,13 +597,14 @@ async function ensureEmailOutbox() {
 }
 
 module.exports = {
-  mailEnabled, mailKey, publicUrl,
+  mailEnabled, mailKey, publicUrl, siteName,
   transport, resetTransport,
   isInternalHost, tlsRejectUnauthorized,
-  checkRecipient, allowedDomains,
+  checkRecipient, allowedDomains, globalSuppression,
   enqueue, enqueueMany,
   drainOutbox, requeueStalledSends, pruneOutbox,
-  sendTest, statusForImport,
+  sendNow, sendTest,
+  statusForImport, statusForCampaign, recentCampaigns, queueBacklog,
   ensureEmailOutbox,
   UNDELIVERABLE_TLDS,
 };
