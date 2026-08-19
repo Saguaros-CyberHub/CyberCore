@@ -141,7 +141,22 @@ router.put('/workstation-templates/:id', authenticateToken, adminOnly, async (re
            max_instances = COALESCE($8, max_instances),
            status        = COALESCE($9, status),
            notes         = COALESCE($10, notes),
-           metadata      = COALESCE($11::jsonb, metadata),
+           -- MERGE, not replace. The admin form rebuilds metadata from its own
+           -- fields on every save, and it has fields for four of the ~ten keys
+           -- the deployer reads. A wholesale replace therefore DELETED
+           -- cloud_init_user, console_protocol, console_port, console_wan_port,
+           -- nic_model, citype, cloud_init, rdp_domain and rdp_keyboard from any
+           -- template anyone edited — silently, and the only symptom was a
+           -- console that stopped authenticating on the next deploy.
+           --
+           -- To clear a key, send it as JSON null: || overwrites it with null
+           -- and the deployer's truthiness checks treat that as absent. To clear
+           -- the whole object, send {} plus reset_metadata.
+           metadata      = CASE
+                             WHEN $11::jsonb IS NULL       THEN metadata
+                             WHEN $14::boolean IS TRUE     THEN $11::jsonb
+                             ELSE metadata || $11::jsonb
+                           END,
            is_active     = COALESCE($12, is_active),
            updated_at    = now()
        WHERE id = $13 AND template_type = 'workstation'
@@ -160,6 +175,8 @@ router.put('/workstation-templates/:id', authenticateToken, adminOnly, async (re
         metadata ? JSON.stringify(metadata) : null,
         is_active !== undefined ? Boolean(is_active) : null,
         req.params.id,
+        // Explicit opt-in for the old replace-everything behaviour.
+        Boolean(req.body.reset_metadata),
       ]
     );
     if (result.rows.length === 0) return res.status(404).json({ error: 'Template not found' });

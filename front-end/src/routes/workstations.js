@@ -598,7 +598,19 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
           try {
             const vmIp = await getVmIp(bestNode, newVmid, providerType);
             if (vmIp) {
-              const rdpUser = tpl.metadata?.default_rdp_user || null;
+              // cloud_init_user is read as well as default_rdp_user. Migrations
+              // 025/026 moved bake-pinned Windows accounts from the latter to
+              // the former, and this path never learned about the move — so for
+              // every migrated template it published a connection with NO
+              // username and NO password at all (buildGuacParameters-style
+              // spreads drop falsy values), which reaches the user as a bare RDP
+              // prompt rather than as any kind of error.
+              //
+              // No password is generated here: unlike the lane path this route
+              // does not inject cloud-init credentials, so it can only report
+              // the account name and let the user supply the password they were
+              // given.
+              const rdpUser = tpl.metadata?.default_rdp_user || tpl.metadata?.cloud_init_user || null;
               const rdpPass = tpl.metadata?.default_rdp_pass || null;
               const connName = `${vmName}-${newVmid}`;
               const connBody = {

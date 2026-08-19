@@ -542,6 +542,29 @@ async function waitForBridgeOnNode(node, bridgeName, { timeoutMs = 45000, interv
 }
 
 // ─── Phase 1b — clone N gateway LXCs ───────────────────────────────────────
+/**
+ * The lane's ALLOCATED gateway WAN transit address, read back from the row.
+ *
+ * Not re-derived. profile-deploy allocates it at INSERT time; reading it here
+ * rather than passing it down also makes the single-lane RETRY path correct,
+ * which runs long after the batch and rebuilds its arguments from the database.
+ */
+async function laneWanIpFor(laneId) {
+  const r = await cybercoreQuery(
+    `SELECT gateway_wan_ip::text AS ip, config->>'gateway_wan_ip' AS cfg_ip
+       FROM cybercore_lane WHERE lane_id = $1`,
+    [laneId]
+  );
+  const ip = r.rows[0]?.ip || r.rows[0]?.cfg_ip || null;
+  if (!ip) {
+    throw new Error(
+      `Lane ${laneId} has no recorded gateway WAN address. Run migration ` +
+      `033_lane_wan_ip.sql to backfill it — re-deriving it would name a different lane's gateway.`
+    );
+  }
+  return ip;
+}
+
 async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, vnetByLaneId, vnetIntByLaneId, groupName, templateNode }) {
   const lanesByNode = {};
   for (const job of laneJobs) {
@@ -585,7 +608,8 @@ async function cloneGateways({ laneJobs, tempTemplateIds, subnetScheme, module, 
         // cluster-level PUT /cluster/sdn, so the bridge can lag by seconds.
         await waitForBridgeOnNode(node, vnet.vnet);
 
-        const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+        const net = resolveLaneNetworking(subnetScheme, module, vxlanId,
+                                          { wanIp: await laneWanIpFor(laneId) });
         if (subnetScheme === 'v3') {
           await proxmoxAPI('PUT', `/api2/json/nodes/${node}/lxc/${gatewayVmId}/config`, {
             net0: formatLaneGatewayNet0(net.wan),
@@ -1250,7 +1274,8 @@ async function deployOneLaneFromSpec({
   }
 
   const isV3 = subnetScheme === 'v3';
-  const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+  const net = resolveLaneNetworking(subnetScheme, module, vxlanId,
+                                    { wanIp: await laneWanIpFor(laneId) });
   const vnetExtName = vnet.vnet;
   const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
   const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;

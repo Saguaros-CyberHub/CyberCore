@@ -203,6 +203,11 @@ CREATE TABLE IF NOT EXISTS cybercore_lane (
   name       TEXT,
   status     cybercore_lane_status NOT NULL DEFAULT 'pending',
   vxlan_id   INTEGER,
+  -- Lane gateway wan0 transit address on the shared lab VLAN. Allocated by
+  -- src/utils/lane-wan-allocator.js; also the Guacamole console host for every
+  -- machine in the lane, which is why two lanes must never share one.
+  gateway_wan_ip       INET,
+  wan_ip_grandfathered BOOLEAN NOT NULL DEFAULT FALSE,
   config     JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -215,6 +220,36 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_event_user ON cybercore_lane
 CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_vxlan_active
   ON cybercore_lane(vxlan_id)
   WHERE vxlan_id IS NOT NULL AND status NOT IN ('error', 'deleted');
+
+-- Same rule for the gateway WAN transit address. It is ALLOCATED, not derived
+-- (src/utils/lane-wan-allocator.js) — the old derivation had 240 buckets against
+-- monotonically climbing vxlan ids, so two live lanes could share one address on
+-- the lab VLAN and one Guacamole console host:port.
+--
+-- wan_ip_grandfathered exists only for migration 033, which had to bring an
+-- existing table that ALREADY contained duplicates under this constraint. A
+-- fresh database has none, so nothing here is ever flagged; the column and the
+-- predicate clause are kept so both schemas are identical.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_cybercore_lane_wan_ip_active
+  ON cybercore_lane(gateway_wan_ip)
+  WHERE gateway_wan_ip IS NOT NULL
+    AND status NOT IN ('error', 'deleted')
+    AND wan_ip_grandfathered = FALSE;
+
+-- Address history. cybercore_lane rows are hard-deleted on teardown, so this is
+-- the only record of when an address was last in use — which is what lets the
+-- allocator prefer the longest-idle address instead of handing a torn-down
+-- lane's address straight to the next student. No FK on purpose: cascade would
+-- erase exactly the history this exists to keep.
+CREATE TABLE IF NOT EXISTS cybercore_lane_wan_lease (
+  lease_id     BIGSERIAL PRIMARY KEY,
+  wan_ip       INET NOT NULL,
+  lane_id      UUID,
+  vxlan_id     INTEGER,
+  allocated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lane_wan_lease_ip
+  ON cybercore_lane_wan_lease(wan_ip, allocated_at DESC);
 
 -- === Core seeds (modules, groups, global badges) ===
 BEGIN;

@@ -20,6 +20,8 @@ const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
 const { guacAPI, mintGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
 const { proxmoxAPI } = require('../utils/proxmox');
+const { getV2LabNetwork } = require('../utils/site-config');
+const { ipInCidr } = require('../utils/ipv4');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -87,10 +89,26 @@ async function fetchCurrentVmIps(node, vmid, providerType) {
   return ips;
 }
 
-// Lane-gateway WAN transit allocations live in 100.100.60.0/24. A VM with a
-// transit leg reports that NIC alongside its real address; the transit IP is
-// never the right RDP/VNC target for a workstation, so deprioritize it.
-const TRANSIT_RANGE = /^100\.100\.60\./;
+/**
+ * Is this address a lane-gateway WAN transit allocation?
+ *
+ * A VM with a transit leg reports that NIC alongside its real address, and the
+ * transit IP is never the right RDP/VNC target for a workstation, so it is
+ * deprioritized below.
+ *
+ * Read from config rather than the hardcoded /^100\.100\.60\./ this used to be.
+ * That regex was correct only while the pool was exactly one /24: widen it to a
+ * /22 and every lane at 100.100.61.x stops being recognised as transit, so this
+ * function can "helpfully" rewrite a working console hostname to an address
+ * guacd has no route to. Failure is delayed and looks like a Guacamole bug.
+ */
+function isTransitIp(ip) {
+  try {
+    return ipInCidr(ip, getV2LabNetwork().subnet);
+  } catch (_) {
+    return /^100\.100\.60\./.test(ip);   // config unreadable: the historical pool
+  }
+}
 
 /**
  * Lazy IP refresh. Only rewrites the stored Guacamole hostname when the
@@ -117,8 +135,8 @@ async function refreshGuacHostname(connId, currentIps) {
     // Stored IP is stale. Pick the best replacement: same /16 as the old IP
     // first, then any non-transit address, then whatever is left.
     const sameNet = storedIp.split('.').slice(0, 2).join('.') + '.';
-    const newIp = currentIps.find(ip => ip.startsWith(sameNet) && !TRANSIT_RANGE.test(ip))
-      || currentIps.find(ip => !TRANSIT_RANGE.test(ip))
+    const newIp = currentIps.find(ip => ip.startsWith(sameNet) && !isTransitIp(ip))
+      || currentIps.find(ip => !isTransitIp(ip))
       || currentIps[0];
     if (!newIp || newIp === storedIp) return;
 

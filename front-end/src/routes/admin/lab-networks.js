@@ -44,6 +44,7 @@ const {
   resolveVmNics,
   resolveSegmentBridges
 } = require('../../utils/lane-networking');
+const laneWan = require('../../utils/lane-wan-allocator');
 
 const adminOnly = requireRole('admin');
 
@@ -192,15 +193,29 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     const user = userResult.rows[0];
 
+    // WAN transit address, allocated and ARP-verified before the row exists.
+    let laneWanIp = null;
+    if (subnetScheme === 'v2' || subnetScheme === 'v3') {
+      try {
+        laneWanIp = (await laneWan.allocateLaneWanIps(1))[0].address;
+      } catch (e) {
+        return res.status(503).json({ error: e.message });
+      }
+    }
+
     // Create lane record
     const laneName = `challenge-${vnet.zone}-${vxlanId}`;
     const laneInsert = await cybercoreQuery(
-      `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
-       VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
+      `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, gateway_wan_ip, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, $6::inet, NOW(), NOW())
        RETURNING lane_id`,
-      [userId, vxlanId, laneName, JSON.stringify({ template_id: template.id, template_name: template.name, module: challengeModule }), challengeModule]
+      [userId, vxlanId, laneName, JSON.stringify({
+        template_id: template.id, template_name: template.name, module: challengeModule,
+        gateway_wan_ip: laneWanIp,
+      }), challengeModule, laneWanIp]
     );
     const laneId = laneInsert.rows[0].lane_id;
+    if (laneWanIp) await laneWan.recordLaneWanLease({ address: laneWanIp, laneId, vxlanId });
 
     // Build selected_scripts list for tracking
     const scriptsToRun = selected_scripts || [];
@@ -243,7 +258,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         const deployedVMs = [];
 
         // Per-lane networking. v1/v2: one subnet. v3: external + internal.
-        const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId);
+        const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId, { wanIp: laneWanIp });
         const isV3 = subnetScheme === 'v3';
         const vnetExtName = vnet.vnet;
         const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;

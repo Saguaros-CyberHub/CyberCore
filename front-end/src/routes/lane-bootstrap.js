@@ -13,8 +13,10 @@
  *
  * Why no bearer token?
  *   - Lane gateway has no credentials before bootstrap (chicken/egg).
- *   - Source IP is enforced at insert time (admin.js writes the expected
- *     WAN IP based on its own deterministic v2WanConfig() math).
+ *   - Source IP is enforced at insert time (the deploy path writes the lane's
+ *     ALLOCATED WAN address — see utils/lane-wan-allocator.js. It used to be
+ *     derived, which is why the IP-gated branch below needs a uniqueness guard
+ *     for gateways deployed before that changed).
  *   - Token is single-use: even if a lab-network adversary spoofs source IP
  *     and races to consume, the gateway's subsequent fetch fails noisily —
  *     and the consumed key is one-shot Tailscale-side anyway.
@@ -85,19 +87,51 @@ router.get('/', async (req, res) => {
         [secret, sourceIp || '0.0.0.0']
       );
     } else {
+      // The ambiguity guard is load-bearing. Before lane WAN addresses were
+      // allocated, two live lanes could share one — and then this UPDATE matched
+      // two unconsumed rows with different vxlan_ids and claimed an ARBITRARY
+      // one, so gateway A could consume gateway B's Tailscale auth key. Refuse
+      // when the match is not unique rather than picking.
+      //
+      // `wan_ip = $1::inet` rather than `host(wan_ip) = $1`: the text form cannot
+      // use idx_lane_bootstrap_tokens_wan_ip, the inet form can.
       result = await cybercoreQuery(
-        `UPDATE lane_bootstrap_tokens
+        `UPDATE lane_bootstrap_tokens t
             SET consumed_at = NOW(),
                 consumed_by = $1::inet
-          WHERE host(wan_ip) = $1
-            AND consumed_at IS NULL
-            AND expires_at > NOW()
+          WHERE t.wan_ip = $1::inet
+            AND t.consumed_at IS NULL
+            AND t.expires_at > NOW()
+            AND (SELECT COUNT(*) FROM lane_bootstrap_tokens u
+                  WHERE u.wan_ip = t.wan_ip
+                    AND u.consumed_at IS NULL
+                    AND u.expires_at > NOW()) = 1
           RETURNING vxlan_id, payload`,
         [sourceIp]
       );
     }
 
     if (result.rows.length === 0) {
+      if (!secret) {
+        // Distinguish "nothing to claim" from "more than one lane claims this
+        // address" — the second is a WAN collision and needs an operator, not a
+        // retry.
+        const ambiguous = await cybercoreQuery(
+          `SELECT COUNT(*)::int AS n, STRING_AGG(vxlan_id::text, ', ') AS vxlans
+             FROM lane_bootstrap_tokens
+            WHERE wan_ip = $1::inet AND consumed_at IS NULL AND expires_at > NOW()`,
+          [sourceIp]
+        ).catch(() => null);
+        if (ambiguous && ambiguous.rows[0]?.n > 1) {
+          console.error(
+            `[LaneBootstrap] REFUSED: ${ambiguous.rows[0].n} unconsumed tokens claim ${sourceIp} ` +
+            `(vxlan ${ambiguous.rows[0].vxlans}). Two lanes share this WAN transit address, so ` +
+            `handing one of them the other's Tailscale key is a coin flip. ` +
+            `GET /api/admin/wan-conflicts, then redeploy the newer lane.`
+          );
+          return res.status(409).json({ error: 'ambiguous bootstrap claim: this WAN address is shared by more than one lane' });
+        }
+      }
       console.warn(`[LaneBootstrap] No claimable token (mode=${secret ? 'secret' : 'ip'}, src=${sourceIp})`);
       return res.status(404).json({ error: 'no bootstrap token for this request' });
     }

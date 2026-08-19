@@ -97,10 +97,20 @@ router.get('/vm', instructorOnly, async (req, res) => {
         // CPU/RAM/disk inputs from these, so "deploy unchanged" and "deploy
         // adjusted" go through the same code path.
         default_resources: defaultsByVmid[Number(t.template_vmid)] || null,
-        // Whether the student gets credentials automatically. 'template' means
-        // the image bakes an account; otherwise they come from cloud-init, and
-        // a template with neither leaves the student at a login prompt.
-        credentials:      t.metadata?.default_rdp_user ? 'template' : 'cloud-init',
+        // Where the student's login comes from. Three states, not two: keying
+        // only on default_rdp_user made a template with EMPTY metadata look
+        // identical to a correctly-configured one, so the misconfiguration that
+        // produces an unauthenticatable console was invisible in the picker.
+        //   'template'         — the image bakes both account and password
+        //   'cloud-init'       — account name pinned by the image, fresh password per lane
+        //   'cloud-init-guess' — nothing declared. On Windows the deploy falls back
+        //                        to the standard baked account and warns; the UI
+        //                        should say so, because a wrong guess reaches the
+        //                        student as an RDP login failure.
+        credentials:      t.metadata?.default_rdp_user ? 'template'
+                          : t.metadata?.cloud_init_user ? 'cloud-init'
+                          : 'cloud-init-guess',
+        cloud_init_user:  t.metadata?.cloud_init_user || null,
       };
     });
 

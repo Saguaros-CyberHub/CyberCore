@@ -81,18 +81,31 @@ function laneUplinkConfig(module, vxlanId) {
 }
 
 /**
- * Compute v2 lane gateway WAN config from vxlan_id.
- * Allocates from 100.100.60.10..249 (240 simultaneous lanes).
+ * The PRE-ALLOCATOR address derivation: base + 10 + (vxlanId % 240).
+ *
+ * NOT UNIQUE, and never was. 240 buckets against VXLAN ids that climb
+ * monotonically forever (lab-network-provision.allocateVxlanBlock never reuses a
+ * freed block) means any two live lanes 240 apart got the identical address on
+ * the shared lab VLAN — and, because that address is also the Guacamole console
+ * host, the identical console endpoint. That is the bug this was replaced for;
+ * see utils/lane-wan-allocator.js.
+ *
+ * Retained for exactly two callers:
+ *   - migration 033's backfill, which must reproduce what the already-running
+ *     gateways were actually configured with
+ *   - the conflict audit's drift check
+ * Never call it to assign an address to a new lane.
  */
-function v2WanConfig(vxlanId) {
+function legacyV2WanIp(vxlanId) {
   const net = _v2LabNetwork();
-  const offset = 10 + (vxlanId % 240);
-  return {
-    bridge:  net.bridge,
-    vlanTag: net.vlanTag,
-    ip:      `${net.subnetBase}.${offset}${net.cidr}`,
-    gw:      net.gateway
-  };
+  return `${net.subnetBase}.${10 + (vxlanId % 240)}`;
+}
+
+/** legacyV2WanIp in the shape resolveLaneNetworking returns. Same warning. */
+function legacyV2WanConfig(vxlanId) {
+  const net = _v2LabNetwork();
+  const address = legacyV2WanIp(vxlanId);
+  return { bridge: net.bridge, vlanTag: net.vlanTag, ip: `${address}${net.cidr}`, gw: net.gateway, address };
 }
 
 /**
@@ -184,20 +197,42 @@ function resolveGatewayVmid(module, subnetScheme, spec) {
  * Resolve the per-lane networking config based on subnet scheme.
  *   v1/v2: { wan, lan }            — single LAN subnet
  *   v3:    { wan, lanExt, lanInt } — segmented; `lan` deliberately omitted
+ *
+ * v2/v3 REQUIRE the lane's allocated WAN transit address to be passed in. It is
+ * no longer derivable: the derivation had 240 buckets and handed two live lanes
+ * the same address (see legacyV2WanIp). Re-deriving it for a lane that already
+ * exists is the exact failure this signature change eliminates, so there is no
+ * silent default — a caller that supplies nothing throws rather than guessing.
+ *
+ * @param {object}  [opts]
+ * @param {string}  [opts.wanIp] the lane's allocated wan0 address, with or
+ *   without a prefix. DEPLOY paths get it from
+ *   laneWanAllocator.allocateLaneWanIps(); READ-BACK paths read
+ *   cybercore_lane.gateway_wan_ip.
+ * @param {boolean} [opts.allowLegacyDerivation=false] opt-in escape hatch for
+ *   migration 033's backfill and the conflict audit's drift check only.
  */
-function resolveLaneNetworking(subnetScheme, module, vxlanId) {
-  if (subnetScheme === 'v3') {
-    return {
-      wan:    v2WanConfig(vxlanId),
-      lanExt: v2LaneSubnet(vxlanId),
-      lanInt: v3InternalSubnet(vxlanId)
-    };
-  }
-  if (subnetScheme === 'v2') {
-    return {
-      wan: v2WanConfig(vxlanId),
-      lan: v2LaneSubnet(vxlanId)
-    };
+function resolveLaneNetworking(subnetScheme, module, vxlanId, opts = {}) {
+  if (subnetScheme === 'v3' || subnetScheme === 'v2') {
+    let wan;
+    if (opts.wanIp) {
+      const net = _v2LabNetwork();
+      const address = String(opts.wanIp).split('/')[0];
+      wan = { bridge: net.bridge, vlanTag: net.vlanTag, ip: `${address}${net.cidr}`, gw: net.gateway, address };
+    } else if (opts.allowLegacyDerivation) {
+      wan = legacyV2WanConfig(vxlanId);
+    } else {
+      throw new Error(
+        `resolveLaneNetworking: lane ${vxlanId} (${subnetScheme}) needs its allocated WAN ` +
+        `address passed as opts.wanIp. Deploy paths get it from ` +
+        `laneWanAllocator.allocateLaneWanIps(); read-back paths read ` +
+        `cybercore_lane.gateway_wan_ip. Re-deriving it from the vxlan id hands two lanes ` +
+        `the same address and the same Guacamole console host.`
+      );
+    }
+    return subnetScheme === 'v3'
+      ? { wan, lanExt: v2LaneSubnet(vxlanId), lanInt: v3InternalSubnet(vxlanId) }
+      : { wan, lan: v2LaneSubnet(vxlanId) };
   }
   const v1Lan = getV1LanSubnet();
   return {
@@ -409,7 +444,11 @@ module.exports = {
   get TRANSIT_BY_MODULE() { return _transitByModule(); },
   get V2_LAB_NETWORK()    { return _v2LabNetwork(); },
   laneUplinkConfig,
-  v2WanConfig,
+  // v2WanConfig is gone: it derived a non-unique address. Assign through
+  // utils/lane-wan-allocator.js; these two exist only for the 033 backfill and
+  // the conflict audit's drift check.
+  legacyV2WanIp,
+  legacyV2WanConfig,
   formatLaneHostname,
   formatLaneGatewayNet0,
   v2LaneSubnet,

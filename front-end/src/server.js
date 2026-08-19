@@ -541,6 +541,88 @@ async function ensureMfaColumns() {
 }
 
 /**
+ * Ensure the lane WAN address columns exist.
+ *
+ * Belt and braces for migrations/033_lane_wan_ip.sql, which is a HAND-RUN psql
+ * file (front-end/migrations/ has no runner — module-loader only walks
+ * manifest.database.migrations inside modules and plugins). Without the columns
+ * every insertLane fails, so the column must never be able to lag the code.
+ *
+ * Deliberately ONLY the two ADD COLUMNs. The backfill, the partial unique index
+ * and the lease-table seed stay in 033: they are one-time, they need operator
+ * eyes on the collision WARNINGs, and quietly creating a uniqueness constraint
+ * at boot on a table that currently violates it is not something a startup hook
+ * should be doing.
+ */
+async function ensureLaneWanColumns() {
+  try {
+    const { cybercoreQuery } = require('./utils/cybercore-db');
+    await cybercoreQuery(`
+      ALTER TABLE cybercore_lane
+        ADD COLUMN IF NOT EXISTS gateway_wan_ip       INET,
+        ADD COLUMN IF NOT EXISTS wan_ip_grandfathered BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+    await cybercoreQuery(`
+      CREATE TABLE IF NOT EXISTS cybercore_lane_wan_lease (
+        lease_id     BIGSERIAL PRIMARY KEY,
+        wan_ip       INET NOT NULL,
+        lane_id      UUID,
+        vxlan_id     INTEGER,
+        allocated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await cybercoreQuery(`
+      CREATE INDEX IF NOT EXISTS idx_lane_wan_lease_ip
+        ON cybercore_lane_wan_lease(wan_ip, allocated_at DESC)
+    `);
+    console.log('✅ Lane WAN address columns ensured on cybercore_lane');
+  } catch (err) {
+    console.warn('⚠️  Could not ensure lane WAN columns:', err.message);
+  }
+}
+
+/**
+ * Report — never repair — live lanes sharing a gateway WAN transit address.
+ *
+ * Both lanes in a colliding pair have running VMs and a student attached to
+ * each, so which one moves is an operator decision, not a boot-time one. The
+ * address is also the Guacamole console host, so a collision means two students'
+ * consoles resolve to the same host:port and whichever gateway answers ARP first
+ * wins.
+ *
+ * Expected to print something the first time it runs on an existing cluster:
+ * the pre-allocator derivation (base + 10 + vxlan % 240) had 240 buckets against
+ * VXLAN ids that only ever climb.
+ */
+async function warnWanIpConflicts() {
+  try {
+    const { findWanIpConflicts } = require('./utils/lane-wan-allocator');
+    const conflicts = await findWanIpConflicts();
+    if (conflicts.length === 0) return;
+
+    const lanes = conflicts.reduce((n, c) => n + c.lane_count, 0);
+    console.warn(
+      `⚠️  ${conflicts.length} lane WAN transit address(es) are shared by more than one live lane ` +
+      `(${lanes} lanes affected):`
+    );
+    for (const c of conflicts) {
+      console.warn(`    ${c.wan_ip}  ×${c.lane_count}`);
+      for (const l of (c.lanes || [])) {
+        console.warn(`        vxlan ${l.vxlan_id}  ${l.owner || '(no owner)'}  ${l.node || '(no node)'}  ${l.name || ''}`);
+      }
+    }
+    console.warn(
+      '    Both owners\' Guacamole consoles resolve to the same host:port, and both gateways\n' +
+      '    answer ARP for the same address on the lab VLAN.\n' +
+      '    GET /api/admin/wan-conflicts for detail. Redeploy or tear down the newer lane of\n' +
+      '    each pair; nothing is repaired automatically.'
+    );
+  } catch (err) {
+    console.warn('⚠️  Could not audit lane WAN addresses:', err.message);
+  }
+}
+
+/**
  * Release lanes left stranded in 'deploying' by a previous process.
  *
  * Deploys are fire-and-forget async work inside THIS process, with their
@@ -624,6 +706,10 @@ async function start() {
     // Ensure MFA columns exist on cybercore_user (idempotent)
     await ensureMfaColumns();
 
+    // Lane WAN address columns. Must be before anything can deploy a lane, and
+    // idempotent, because migrations/033 is hand-run and could lag the code.
+    await ensureLaneWanColumns();
+
     // Same story as the MFA columns: the config/postgres scripts only run on a
     // fresh volume, so the password-policy and provenance columns — and the
     // activation-token table the roster import issues invitations from — have
@@ -643,6 +729,11 @@ async function start() {
     // Nothing can be deploying yet — anything that says it is was abandoned by
     // a previous process and is holding a VXLAN it will never use.
     await recoverStrandedLanes();
+
+    // Read-only: says which lanes are double-booked on one gateway address.
+    // Runs after recoverStrandedLanes so lanes it just released to 'error' are
+    // already excluded rather than reported as conflicts.
+    await warnWanIpConflicts();
 
     // CYBR 400 attack console. The INVERSE of recoverStrandedLanes above: an
     // attack runs detached on the guest, so a restart here is invisible to it

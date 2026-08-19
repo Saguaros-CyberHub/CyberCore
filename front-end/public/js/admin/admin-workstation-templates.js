@@ -23,7 +23,17 @@ function showWorkstationTemplateForm(tpl = null) {
   document.getElementById('wsTplStatus').value        = tpl?.status        || 'draft';
   document.getElementById('wsTplModule').value        = tpl?.module_key    || '';
   document.getElementById('wsTplNotes').value         = tpl?.notes         || '';
-  document.getElementById('wsTplCiUser').value        = tpl?.metadata?.cloud_init_user  || '';
+  // Windows images cannot have a cloud-init account invented for them:
+  // cloudbase-init is pinned at bake time to one account and can only set THAT
+  // account's password. Leaving this blank on a Windows template used to fall
+  // through to a per-student username that does not exist on the guest, which
+  // reaches the student as a plain RDP login failure. Pre-fill the account every
+  // image from windows-11-base-packer bakes, so the common case is right by
+  // default and the uncommon case is at least visible.
+  document.getElementById('wsTplCiUser').value = tpl
+    ? (tpl.metadata?.cloud_init_user || '')
+    : '';
+  wsTplSuggestCiUser();
   document.getElementById('wsTplRdpUser').value       = tpl?.metadata?.default_rdp_user || '';
   document.getElementById('wsTplRdpPass').value       = tpl?.metadata?.default_rdp_pass || '';
   document.getElementById('wsTplRdpSecurity').value   = tpl?.metadata?.rdp_security     || '';
@@ -37,6 +47,25 @@ function showWorkstationTemplateForm(tpl = null) {
 function closeWorkstationTemplateForm() {
   document.getElementById('workstationTemplateForm').style.display = 'none';
   document.getElementById('wsTplEditId').value = '';
+}
+
+/**
+ * Pre-fill the Cloud-Init Account for a Windows template that has none.
+ *
+ * Advisory only — it never overwrites a value that is already there, and it is
+ * re-run when the OS family changes so switching a draft to Windows fills it in.
+ * The deployer applies the same default with a loud warning if this is left
+ * blank; putting it in the form makes the choice visible and editable, which
+ * matters because an image baked with a different account (bake-win-client
+ * -template.sh uses 'Admin') needs it corrected here.
+ */
+const WS_TPL_DEFAULT_WINDOWS_CI_USER = 'cactus-user';
+
+function wsTplSuggestCiUser() {
+  const ci = document.getElementById('wsTplCiUser');
+  const family = document.getElementById('wsTplOsFamily')?.value || '';
+  if (!ci || ci.value.trim()) return;
+  if (family.startsWith('windows')) ci.value = WS_TPL_DEFAULT_WINDOWS_CI_USER;
 }
 
 function wsTplAutoKey() {

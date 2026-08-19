@@ -55,6 +55,7 @@ const {
   resolveGatewayVmid, resolveLaneNetworking, formatLaneGatewayNet0, configureLaneTailscale,
 } = require('./lane-networking');
 const { getDefaultTemplateNode, getSchedulingConfig, getClusterNodes } = require('./site-config');
+const laneWan = require('./lane-wan-allocator');
 const { guacAPI } = require('./guacamole');
 const guacCreds = require('./guac-credentials');
 const { generatePassword } = require('./password-generator');
@@ -501,6 +502,19 @@ async function applyResources({ node, vmid, providerType, resources, laneName })
 }
 
 /**
+ * The account a Windows workstation template falls back to when it declares no
+ * cloud-init account of its own.
+ *
+ * Windows images cannot have one invented for them: cloudbase-init is pinned at
+ * BAKE time to a single account (CONF.username) and can only set that account's
+ * password on first boot. `cactus-user` is what every image built from
+ * infrastructure/proxmox-templates/windows-11-base-packer bakes. Override per
+ * site if your images bake something else; override PER TEMPLATE with
+ * metadata.cloud_init_user, which is always more specific than this.
+ */
+const DEFAULT_WINDOWS_CI_USER = process.env.LANE_DEFAULT_WINDOWS_CI_USER || 'cactus-user';
+
+/**
  * Credentials the user will present to the workstation itself.
  *   - A template that bakes its own account AND its own password declares both
  *     as metadata.default_rdp_user / default_rdp_pass; we use them verbatim and
@@ -544,6 +558,37 @@ function resolveWorkstationCredentials(template, user) {
   if (meta.cloud_init_user) {
     return { username: meta.cloud_init_user, password: generatePassword(), source: 'cloudinit' };
   }
+
+  // A Windows template that declares NOTHING must not fall through to the
+  // per-user account below. cloudbase-init resolves the account from its own
+  // baked CONF.username and can only set THAT account's password — so a
+  // generated ciuser lands the password on the baked account while Guacamole
+  // authenticates as a user that does not exist. The student sees a plain RDP
+  // login failure with nothing anywhere pointing at cloud-init. (This is the
+  // same failure migrations 025 and 026 were written for; neither could reach a
+  // template that never had default_rdp_user set in the first place, which is
+  // how a newly registered image lands here.)
+  //
+  // So: default to the account the repo's Windows images actually bake, and say
+  // so loudly. It is right for anything built from windows-11-base-packer
+  // (files/cloudbase-init/cloudbase-init.conf pins username=cactus-user) and
+  // WRONG for an image baked with a different account — bake-win-client-template
+  // .sh writes username=Admin — which is why the warning names how to check.
+  if (String(template.os_family || '').startsWith('windows')) {
+    console.warn(
+      `${LOG} Template '${template.template_key || template.os_name || template.id}' is a Windows ` +
+      `workstation but declares no cloud-init account, so it falls back to ` +
+      `'${DEFAULT_WINDOWS_CI_USER}'. That is correct only if this image's cloudbase-init is ` +
+      `pinned to that account. Check the template's ` +
+      `C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf\cloudbase-init.conf and set ` +
+      `metadata.cloud_init_user (Admin -> Workstation Templates -> Cloud-Init Account) to the ` +
+      `username= it names. A mismatch presents as an RDP login failure, not as a deploy error.`
+    );
+    return { username: DEFAULT_WINDOWS_CI_USER, password: generatePassword(), source: 'cloudinit' };
+  }
+
+  // Linux cloud images genuinely create whatever account ciuser names, so a
+  // per-student username is both correct and friendlier here.
   const local = String(user.email || 'student').split('@')[0].replace(/[^a-z0-9_-]/gi, '-').toLowerCase();
   return { username: local || 'student', password: generatePassword(), source: 'cloudinit' };
 }
@@ -1154,38 +1199,65 @@ async function insertLane(job) {
     moduleKey, subnetScheme, laneName, laneConfig, resources,
   } = job;
   const primary = workstations[0];
-  const ins = await cybercoreQuery(
-    `INSERT INTO cybercore_lane (user_id, module_key, name, status, vxlan_id, config, created_at, updated_at)
-     VALUES ($1, $2, $3, 'deploying', $4, $5::jsonb, NOW(), NOW())
-     RETURNING lane_id`,
-    [user.id, moduleKey, laneName, vxlanId, JSON.stringify({
-      ...laneConfig,
-      template_id: primary.template.id || null,
-      template_name: primary.template.os_name || primary.template.template_key,
-      provider_type: primary.providerType,
-      subnet_scheme: subnetScheme,
-      vnet: vnet.vnet,
-      gateway_vmid: GATEWAY_VMID_OFFSET + vxlanId,
-      workstation_vmid: primary.vmid,
-      node: targetNode,
-      user_email: user.email,
-      lane_subnet_base: net.lan.base3,
-      gateway_wan_ip: net.wan.ip.split('/')[0],
-      workstation_ip: primary.ip,
-      console_protocol: primary.console.protocol,
-      console_port: primary.console.wanPort,
-      workstations: workstations.map(workstationConfigEntry),
-      // Per-slot lease confirmation, seeded so confirmWorkstationIp's jsonb_set
-      // has a parent object to write into. Kept as flat maps rather than fields
-      // on workstations[] so N concurrent confirmations can't clobber each other.
-      ws_ip: {},
-      ws_ip_confirmed: {},
-      // What was asked for. `resources` (what was achieved) lands at the end of
-      // deployLaneWorkstations; keeping both makes a partial apply legible.
-      ...(resources ? { requested_resources: resources } : {}),
-    })]
-  );
+  // Only addresses that came from the shared-pool allocator are recorded here,
+  // which is what `net.wan.address` marks. A v1 lane's wan0 sits in its module's
+  // own transit /16 (laneUplinkConfig), is unique by construction, and is not
+  // drawn from — or checked against — this pool; recording it would make the
+  // column mean two different things and would disagree with migration 033,
+  // which deliberately skips v1 rows in its backfill.
+  const wanIp = net.wan.address || null;
+  let ins;
+  try {
+    ins = await cybercoreQuery(
+      `INSERT INTO cybercore_lane (user_id, module_key, name, status, vxlan_id, gateway_wan_ip, config, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4, $6::inet, $5::jsonb, NOW(), NOW())
+       RETURNING lane_id`,
+      [user.id, moduleKey, laneName, vxlanId, JSON.stringify({
+        ...laneConfig,
+        template_id: primary.template.id || null,
+        template_name: primary.template.os_name || primary.template.template_key,
+        provider_type: primary.providerType,
+        subnet_scheme: subnetScheme,
+        vnet: vnet.vnet,
+        gateway_vmid: GATEWAY_VMID_OFFSET + vxlanId,
+        workstation_vmid: primary.vmid,
+        node: targetNode,
+        user_email: user.email,
+        lane_subnet_base: net.lan.base3,
+        // Legacy mirror of the gateway_wan_ip COLUMN, which is authoritative.
+        // Kept because external readers still expect the key.
+        gateway_wan_ip: wanIp,
+        workstation_ip: primary.ip,
+        console_protocol: primary.console.protocol,
+        console_port: primary.console.wanPort,
+        workstations: workstations.map(workstationConfigEntry),
+        // Per-slot lease confirmation, seeded so confirmWorkstationIp's jsonb_set
+        // has a parent object to write into. Kept as flat maps rather than fields
+        // on workstations[] so N concurrent confirmations can't clobber each other.
+        ws_ip: {},
+        ws_ip_confirmed: {},
+        // What was asked for. `resources` (what was achieved) lands at the end of
+        // deployLaneWorkstations; keeping both makes a partial apply legible.
+        ...(resources ? { requested_resources: resources } : {}),
+      }), wanIp]
+    );
+  } catch (e) {
+    // ux_cybercore_lane_wan_ip_active. The allocator mutex is supposed to make
+    // this unreachable, so it is worth naming the one condition that can still
+    // produce it rather than retrying and papering over it.
+    if (e.code === '23505' && String(e.constraint || e.message).includes('wan_ip')) {
+      throw new Error(
+        `Lane WAN address ${wanIp} was taken between allocation and insert. This should be ` +
+        `impossible within one process — a second orchestrator is probably running against ` +
+        `this database. Lane not created.`
+      );
+    }
+    throw e;
+  }
   job.laneId = ins.rows[0].lane_id;
+  // Cooldown history. cybercore_lane is hard-deleted on teardown, so this is the
+  // only record that this address was ever in use. Never fatal.
+  if (wanIp) await laneWan.recordLaneWanLease({ address: wanIp, laneId: job.laneId, vxlanId });
   return job.laneId;
 }
 
@@ -1751,10 +1823,15 @@ async function deployLanes({
   // Allocate VXLAN ids from the reserved block; map each to its pre-created VNet.
   const vxlans = await allocateVxlanIds(vxlanBlock, users.length);
   if (vxlans.length < users.length) {
-    throw new Error(
-      `VXLAN block exhausted: ${vxlans.length} free ids for ${users.length} users ` +
-      `(range ${vxlanBlock.start}-${vxlanBlock.end}).`
-    );
+    // Same reasoning as the WAN-pool failure below: this caller is
+    // fire-and-forget, so an unfinished progress entry leaves the poller
+    // watching a deploy that never starts.
+    progress.error = `VXLAN block exhausted: ${vxlans.length} free ids for ${users.length} users ` +
+                     `(range ${vxlanBlock.start}-${vxlanBlock.end}).`;
+    progress.failed = users.length;
+    progress.completed = users.length;
+    finishProgress(progressId);
+    throw new Error(progress.error);
   }
   const vnetsByTag = await loadVnetsByTag();
 
@@ -1791,6 +1868,31 @@ async function deployLanes({
   // VMIDs for slots 1+, allocated for the whole deploy in one cluster scan.
   const extraVmids = await reserveWorkstationVmids(users.length * (slotSpecs.length - 1));
 
+  // WAN transit addresses for the whole batch, in one serialized pass: free in
+  // the database, not reserved in site.json, and silent to ARP on the lab VLAN.
+  // Allocated here rather than per-lane so the batch cannot race itself, and
+  // BEFORE any Proxmox work so an exhausted pool fails the request instead of
+  // half a classroom. v1 lanes are not in this pool — they use the per-module
+  // transit /16, which laneUplinkConfig still derives.
+  let wanIps = null;
+  if (subnetScheme === 'v2' || subnetScheme === 'v3') {
+    try {
+      wanIps = await laneWan.allocateLaneWanIps(users.length, { logTag: LOG });
+    } catch (e) {
+      // The caller is fire-and-forget (CLE responds "provisioning started" and
+      // polls), so an unfinished progress entry would leave the UI spinning on a
+      // deploy that never begins. Close it before rethrowing, and put the reason
+      // where the poller will actually see it.
+      if (progress) {
+        progress.error = e.message;
+        progress.failed = users.length;
+        progress.completed = users.length;
+      }
+      finishProgress(progressId);
+      throw e;
+    }
+  }
+
   console.log(
     `${LOG} Deploying ${users.length} lane(s) × ${slotSpecs.length} workstation(s): ` +
     slotSpecs.map(s =>
@@ -1804,16 +1906,19 @@ async function deployLanes({
   // Build a job per user, skipping any whose VNet is missing.
   const jobs = [];
   const failed = [];
+  const unusedWan = [];
   let extraCursor = 0;
   for (let i = 0; i < users.length; i++) {
     const vxlanId = vxlans[i];
     const vnet = vnetsByTag[String(vxlanId)];
     if (!vnet) {
       failed.push({ user_id: users[i].id, reason: `No VNet for VXLAN ${vxlanId} (lab network not fully provisioned)` });
+      if (wanIps) unusedWan.push(wanIps[i].address);
       continue;
     }
     const laneName = `${namePrefix}-${vxlanId}`;
-    const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId);
+    const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId,
+                                      wanIps ? { wanIp: wanIps[i].address } : {});
     const workstations = slotSpecs.map(s => ({
       ...s,
       // Slot 0 keeps the historic 600000+vxlanId so lanes deployed before this
@@ -1831,6 +1936,10 @@ async function deployLanes({
       laneName, net,
     });
   }
+  // Addresses the skipped users would have taken. The in-process reservation TTL
+  // would expire them anyway; releasing now keeps a big partially-failed batch
+  // from holding a chunk of the pool for 15 minutes.
+  if (unusedWan.length) await laneWan.releaseLaneWanIps(unusedWan);
   if (!jobs.length) {
     if (progress) { progress.failed = failed.length; progress.completed = failed.length; }
     finishProgress(progressId);

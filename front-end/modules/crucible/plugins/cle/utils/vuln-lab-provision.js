@@ -327,7 +327,10 @@ async function countFreeLanes(block) {
 async function findCourseLanes(userIds, courseId) {
   if (!userIds.length) return {};
   const r = await cybercoreQuery(
-    `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key
+    // gateway_wan_ip is read back, never re-derived — attachLabToLane resolves
+    // this lane's networking from it, and the old derivation was not unique.
+    `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key,
+            gateway_wan_ip::text AS gateway_wan_ip
        FROM cybercore_lane
       WHERE user_id = ANY($1::uuid[])
         AND config->>'course_id' = $2
@@ -392,7 +395,15 @@ async function attachLabToLane({ lane, challenge, materialId, moduleKey }) {
     || (laneConfig.lane_subnet_base?.startsWith('10.') ? 'v2' : 'v1');
   const laneModule = lane.module_key || laneConfig.module || moduleKey;
 
-  const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id);
+  const wanIp = lane.gateway_wan_ip || laneConfig.gateway_wan_ip;
+  if (!wanIp && laneSubnetScheme !== 'v1') {
+    throw new Error(
+      `Lane ${lane.lane_id} has no recorded gateway WAN address. Run migration ` +
+      `033_lane_wan_ip.sql to backfill it — re-deriving it here would name a different ` +
+      `lane's gateway.`
+    );
+  }
+  const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id, { wanIp });
   const laneSubnetBase = (net.lanExt || net.lan).base3;
 
   const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');

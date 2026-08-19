@@ -9,6 +9,7 @@
 
 const path = require('path');
 const fs   = require('fs');
+const { ipToInt, intToIp, parseCidr, ipInCidr } = require('./ipv4');
 
 // Resolves in both layouts. In the container the app lives at /app, so this
 // clamps at the filesystem root and lands on /config/site.json — where
@@ -91,16 +92,83 @@ function getModuleNetwork(moduleName) {
 }
 
 /**
- * v2 lab network config (bridge, vlan_tag, subnet_base, gateway, cidr).
+ * v2 lab (transit) network — the shared VLAN every v2/v3 lane gateway's wan0
+ * lands on. One address per LIVE lane, so the prefix is the hard ceiling on
+ * concurrent lanes.
+ *
+ * The block is declared under `subnet` as a real CIDR. `cidr` is NOT that key:
+ * it has always meant the prefix SUFFIX that gets string-concatenated onto an
+ * address (`${subnet_base}.${octet}${cidr}` — lane-networking.js), and putting a
+ * block in it renders `ip=100.100.60.32100.100.60.0/22` on a gateway's net0.
+ * It stays, derived, with its old meaning.
+ *
+ * The legacy shape { subnet_base, cidr } is still accepted and synthesizes
+ * `subnet`, so a config/site.json that predates this function needs no edit.
  */
 function getV2LabNetwork() {
   const n = getConfig().cluster?.networking?.v2_lab_network || {};
+
+  const legacyBase   = n.subnet_base || '100.100.60';
+  const legacySuffix = n.cidr        || '/24';
+  const subnet       = n.subnet      || `${legacyBase}.0${legacySuffix}`;
+
+  const { network, prefixLen, broadcast, lastHost } = parseCidr(subnet);
+  if (prefixLen > 30) {
+    throw new Error(
+      `cluster.networking.v2_lab_network.subnet '${subnet}' is a /${prefixLen} — ` +
+      `too small to hold any lane. Use /30 or wider.`
+    );
+  }
+
+  const gateway = n.gateway || intToIp(ipToInt(network) + 1);
+  if (!ipInCidr(gateway, subnet)) {
+    throw new Error(
+      `cluster.networking.v2_lab_network.gateway ${gateway} is outside subnet ${subnet}. ` +
+      `Every lane gateway is configured with gw=${gateway}; a gateway off-subnet makes ` +
+      `every lane unreachable.`
+    );
+  }
+
+  // Historical floor: the pre-allocator derivation started at <base>.10 and every
+  // lane deployed to date sits at or above it. Defaulting here means widening the
+  // prefix never moves an address that is already on the wire.
+  const first = n.host_range?.first || intToIp(ipToInt(network) + 10);
+  const last  = n.host_range?.last  || lastHost;
+  if (ipToInt(first) > ipToInt(last) || !ipInCidr(first, subnet) || !ipInCidr(last, subnet)) {
+    throw new Error(
+      `cluster.networking.v2_lab_network.host_range ${first}–${last} is empty or falls ` +
+      `outside ${subnet}.`
+    );
+  }
+
+  const vlanTag = n.vlan_tag ?? 60;
+
   return {
-    bridge:      n.bridge      || 'vmbr0',
-    vlan_tag:    n.vlan_tag    ?? 60,
-    subnet_base: n.subnet_base || '100.100.60',
-    gateway:     n.gateway     || '100.100.60.1',
-    cidr:        n.cidr        || '/24'
+    bridge:   n.bridge || 'vmbr0',
+    vlan_tag: vlanTag,
+
+    subnet,                                                // '100.100.60.0/22'
+    network,                                               // '100.100.60.0'
+    broadcast,                                             // '100.100.63.255'
+    prefix_len: prefixLen,                                 // 22
+    cidr:       `/${prefixLen}`,                           // '/22' — net0 suffix, legacy meaning
+    subnet_base: network.split('.').slice(0, 3).join('.'), // legacy, derived; allocation no longer uses it
+    gateway,
+
+    host_range: { first, last },
+    // Never handed out. Network and broadcast are ordinary host addresses inside
+    // a /22, but plenty of gear dislikes them, so they are excluded by default.
+    reserved: [...new Set([
+      gateway, network, broadcast,
+      ...(Array.isArray(n.reserved) ? n.reserved : []),
+    ])],
+
+    probe: {
+      enabled:    n.probe?.enabled !== false,
+      node:       n.probe?.node      || null,   // null = auto-pick from getClusterNodes()
+      interface:  n.probe?.interface || `vmbr0.${vlanTag}`,
+      timeout_ms: n.probe?.timeout_ms ?? 2000,
+    },
   };
 }
 

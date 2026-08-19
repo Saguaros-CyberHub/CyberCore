@@ -197,7 +197,17 @@ stubModule('site-config.js', {
   // permit — the deploy hangs with no error at all.
   getSchedulingConfig: () => ({ max_concurrent_lanes: 4, max_concurrent_clones: 4 }),
   getClusterNodes: () => ['node1'],
-  getV2LabNetwork: () => ({ bridge: 'vmbr0', vlan_tag: 60, subnet_base: '100.100.60', gateway: '100.100.60.1', cidr: '/24' }),
+  // Full shape, matching src/utils/site-config.getV2LabNetwork: the allocator
+  // and wanConfigFromAddress read host_range/reserved/probe, and a stub that
+  // stops at the legacy five keys fails on `host_range.first`.
+  getV2LabNetwork: () => ({
+    bridge: 'vmbr0', vlan_tag: 60,
+    subnet: '100.100.60.0/24', network: '100.100.60.0', broadcast: '100.100.60.255',
+    prefix_len: 24, cidr: '/24', subnet_base: '100.100.60', gateway: '100.100.60.1',
+    host_range: { first: '100.100.60.10', last: '100.100.60.254' },
+    reserved: ['100.100.60.1', '100.100.60.0', '100.100.60.255'],
+    probe: { enabled: false, node: null, interface: 'vmbr0.60', timeout_ms: 2000 },
+  }),
   getV1LanSubnet: () => ({ base3: '192.18.0', cidr: '192.18.0.0/24', gateway_ip: '192.18.0.1', netmask24: '255.255.255.0' }),
   getModuleNetwork: () => ({}),
   getModuleNetworks: () => ({}),
@@ -210,6 +220,30 @@ stubModule('tailscale.js', { deleteLaneDevices: async () => 0, isEnabled: () => 
 // Tailscale call reaches the network.
 const laneNetworking = require(path.join(UTILS, 'lane-networking.js'));
 laneNetworking.configureLaneTailscale = async () => null;
+
+// The WAN allocator reaches Postgres and ssh, so it is stubbed — but it hands
+// out 100.100.60.10, .11, … in order, which is what the pre-allocator
+// derivation produced for vxlan 10000/10001/… That keeps every assertion below
+// (console endpoints, gateway net0) asserting the same addresses it always did,
+// so a change in those numbers means a real regression rather than a stub
+// artefact. Addresses are NOT reused across calls: the whole point of the
+// allocator is that two lanes never share one.
+let _stubWanCursor = 10;
+let _stubWanFail = null;      // set to a message to model an exhausted pool
+stubModule('lane-wan-allocator.js', {
+  allocateLaneWanIps: async (count) => (_stubWanFail
+    ? Promise.reject(new Error(_stubWanFail))
+    : Array.from({ length: count }, () => {
+      const address = `100.100.60.${_stubWanCursor++}`;
+      return { address, ip: `${address}/24`, cidr: '/24', bridge: 'vmbr0', vlanTag: 60, gw: '100.100.60.1' };
+    })),
+  releaseLaneWanIps: async () => {},
+  recordLaneWanLease: async () => true,
+  wanConfigFromAddress: (a) => ({
+    bridge: 'vmbr0', vlanTag: 60, ip: `${a}/24`, gw: '100.100.60.1', address: a,
+  }),
+  findWanIpConflicts: async () => [],
+});
 
 process.env.GUAC_ENABLED = 'true';
 
@@ -469,6 +503,62 @@ test('more workstations than the octet band is rejected', async () => {
     () => laneDeployer.deployLanes({ users: USERS, templates: many, vxlanBlock: BLOCK }),
     /exceeds the 30-slot band/
   );
+});
+
+// ── 8. WAN address pool ──────────────────────────────────────────────────────
+test('every lane in a batch gets its own WAN transit address', async () => {
+  reset();
+  await laneDeployer.deployLanes({
+    users: [{ id: 'u1', email: 'a@x.edu' }, { id: 'u2', email: 'b@x.edu' }, { id: 'u3', email: 'c@x.edu' }],
+    template: KALI, vxlanBlock: { start: 10000, end: 10005 },
+  });
+  // The gateway net0 carries it, and the Guac console host is the same address.
+  const gwNet0 = calls.configs
+    .filter(c => c.body && typeof c.body.net0 === 'string' && c.body.net0.includes('name=wan0'))
+    .map(c => c.body.net0.match(/ip=([\d.]+)/)[1]);
+  assert.strictEqual(gwNet0.length, 3, 'one gateway per lane');
+  assert.strictEqual(new Set(gwNet0).size, 3,
+    `two lanes shared a WAN address — the exact bug this replaced: ${gwNet0.join(', ')}`);
+});
+
+test('an exhausted WAN pool fails the deploy and closes out its progress', async () => {
+  // The CLE route is fire-and-forget: it answers "provisioning started" and the
+  // UI polls. A progress entry left open would spin forever on a deploy that
+  // never began, so the failure has to land somewhere the poller reads.
+  reset();
+  _stubWanFail = 'Lane WAN pool exhausted: needed 2 address(es), found 0.';
+  try {
+    await assert.rejects(
+      () => laneDeployer.deployLanes({
+        users: [{ id: 'u1', email: 'a@x.edu' }, { id: 'u2', email: 'b@x.edu' }],
+        template: KALI, vxlanBlock: BLOCK,
+        progressId: 'cle-course-test', progressLabel: 'Test course',
+      }),
+      /pool exhausted/
+    );
+    const p = laneDeployer.readProgress('cle-course-test');
+    assert.ok(p, 'progress entry should still be readable');
+    assert.match(p.error || '', /pool exhausted/, 'the reason must reach the poller');
+    assert.strictEqual(p.phase, 'complete', 'and it must not read as still running');
+  } finally {
+    _stubWanFail = null;
+  }
+});
+
+test('no Proxmox work happens when the pool is exhausted', async () => {
+  // Allocation is deliberately before the first clone, so an exhausted pool
+  // fails the request rather than half a classroom.
+  reset();
+  _stubWanFail = 'Lane WAN pool exhausted: needed 2 address(es), found 0.';
+  try {
+    await laneDeployer.deployLanes({
+      users: [{ id: 'u1', email: 'a@x.edu' }, { id: 'u2', email: 'b@x.edu' }],
+      template: KALI, vxlanBlock: BLOCK, progressId: 'cle-course-test2',
+    }).catch(() => {});
+    assert.strictEqual(calls.clones.length, 0, 'nothing should have been cloned');
+  } finally {
+    _stubWanFail = null;
+  }
 });
 
 (async () => {

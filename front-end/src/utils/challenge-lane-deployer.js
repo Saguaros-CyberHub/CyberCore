@@ -58,6 +58,7 @@ const { waitForGuestAgent, executeScriptsOnVM } = require('./script-executor');
 const { plantFlagsForLane, seedLaneFlags } = require('./flag-manager');
 const goadDeploy = require('./goad-deploy');
 const laneDeployer = require('./lane-deployer');
+const laneWan = require('./lane-wan-allocator');
 const nodeSsh = require('./node-ssh');
 const {
   V3_INTERNAL_TAG_OFFSET,
@@ -274,7 +275,7 @@ async function cleanupTempGatewayTemplates(byNode, gatewayVmid, logTag) {
  * concurrent clones of the same container template fail with "CT is locked".
  */
 async function cloneGateway(job, sourceNode, sourceVmid, ctx) {
-  const { laneId, user, vxlanId, vnet, vnetInt, laneName, targetNode } = job;
+  const { laneId, user, vxlanId, vnet, vnetInt, laneName, targetNode, wanIp } = job;
   const { subnetScheme, moduleKey, spec, description, logTag } = ctx;
   const gatewayVmId = GATEWAY_VMID_OFFSET + vxlanId;
 
@@ -297,7 +298,7 @@ async function cloneGateway(job, sourceNode, sourceVmid, ctx) {
   });
   if (upid) await waitForTask(sourceNode, upid, 600000);
 
-  const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId);
+  const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId, { wanIp });
   // Pre-baked ("GOAD-Like") lanes pin a fixed subnet so the gateway's ext0/int0
   // land on the same base the golden-image AD was baked on.
   if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
@@ -804,7 +805,7 @@ async function registerWorkspaceVms({ laneId, user, vxlanId, moduleKey, challeng
  */
 async function deployLaneVms(job, ctx) {
   const {
-    laneId, user, vxlanId, vnet, vnetInt, targetNode, attackBoxCreds,
+    laneId, user, vxlanId, vnet, vnetInt, targetNode, attackBoxCreds, wanIp,
   } = job;
   const {
     spec, subnetScheme, moduleKey, challengeKey, attackBoxes, vulnScripts,
@@ -814,7 +815,7 @@ async function deployLaneVms(job, ctx) {
   const isV3 = subnetScheme === 'v3';
   const gatewayVmId = GATEWAY_VMID_OFFSET + vxlanId;
 
-  const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId);
+  const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId, { wanIp });
   if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
     applyFixedSubnet(net, isV3, spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
   }
@@ -1191,6 +1192,15 @@ async function deployChallengeLanesInner({
   }
   const { resolved: vnetsByVxlan, missing } = await resolveVnets(vxlans, subnetScheme);
 
+  // WAN transit addresses for the batch, before any Proxmox work. Same pool the
+  // workstation lanes draw from — one shared VLAN, one allocator — so an
+  // exhausted pool fails here rather than producing lanes that silently share a
+  // gateway address and a Guacamole console host.
+  const wanIps = (subnetScheme === 'v2' || subnetScheme === 'v3')
+    ? await laneWan.allocateLaneWanIps(users.length, { logTag })
+    : null;
+  const unusedWan = [];
+
   // 2. Spread the lanes across the cluster.
   let nodeAssignments;
   try {
@@ -1220,8 +1230,10 @@ async function deployChallengeLanesInner({
     if (!nets) {
       const reason = missing.find(m => m.vxlanId === vxlanId)?.reason || `No VNet for VXLAN ${vxlanId}`;
       failed.push({ user_id: user.id, user_email: user.email, reason });
+      if (wanIps) unusedWan.push(wanIps[i].address);
       continue;
     }
+    const wanIp = wanIps ? wanIps[i].address : null;
 
     // Falling back to the VNet's SDN zone keeps the admin group deploy's
     // historical lane names (`<zone>-<vxlan>`) byte-identical.
@@ -1234,8 +1246,8 @@ async function deployChallengeLanesInner({
 
     try {
       const ins = await cybercoreQuery(
-        `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
-         VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
+        `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, gateway_wan_ip, created_at, updated_at)
+         VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, $6::inet, NOW(), NOW())
          RETURNING lane_id`,
         [user.id, vxlanId, laneName, JSON.stringify({
           ...laneConfig,
@@ -1247,11 +1259,15 @@ async function deployChallengeLanesInner({
           attack_box_vm_id: attackBoxes ? (ATTACK_BOX_VMID_OFFSET + vxlanId) : null,
           node:          nodeAssignments[i],
           user_email:    user.email,
+          // This path never used to record the address at all, which is why the
+          // 033 backfill has to re-derive it for most existing lanes.
+          gateway_wan_ip: wanIp,
           vms:           expectedVms,
-        }), resolvedModule]
+        }), resolvedModule, wanIp]
       );
       const laneId = ins.rows[0].lane_id;
       _insertedLaneIds.push(laneId);
+      if (wanIp) await laneWan.recordLaneWanLease({ address: wanIp, laneId, vxlanId });
 
       // Carry a previous lane's flag values and captures onto this one, when the
       // caller is rebuilding a lane rather than creating a fresh one. MUST happen
@@ -1274,7 +1290,7 @@ async function deployChallengeLanesInner({
 
       created.push({ lane_id: laneId, user_id: user.id, user_email: user.email, vxlan_id: vxlanId });
       jobs.push({
-        laneId, user, vxlanId,
+        laneId, user, vxlanId, wanIp,
         vnet: nets.vnet, vnetInt: nets.vnetInt,
         laneName, targetNode: nodeAssignments[i],
         attackBoxCreds: resolveAttackBoxCredentials(user),
@@ -1282,8 +1298,10 @@ async function deployChallengeLanesInner({
     } catch (err) {
       console.error(`${logTag} Failed to create lane record for ${user.email}: ${err.message}`);
       failed.push({ user_id: user.id, user_email: user.email, reason: err.message });
+      if (wanIp) unusedWan.push(wanIp);
     }
   }
+  if (unusedWan.length) await laneWan.releaseLaneWanIps(unusedWan);
 
   if (jobs.length === 0) {
     if (progress) { progress.failed = failed.length; progress.completed = failed.length; }

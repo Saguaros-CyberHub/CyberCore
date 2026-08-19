@@ -34,8 +34,39 @@ const {
   resolveSegmentBridges,
 } = require('../../utils/lane-networking');
 const { buildLaneTopology } = require('../../utils/lane-topology');
+const laneWan = require('../../utils/lane-wan-allocator');
 
 const adminOnly = requireRole('admin');
+
+
+// ============================================================================
+// WAN TRANSIT ADDRESS CONFLICTS
+// ============================================================================
+
+/**
+ * GET /wan-conflicts — live lanes sharing a gateway WAN transit address.
+ *
+ * Read-only. Repairs nothing, on purpose: both lanes in a pair have running VMs
+ * and a student attached to each, so which one moves is an operator decision.
+ *
+ * Deliberately NOT nested under /lanes. Express matches in registration order
+ * and `router.get('/lanes/:id')` is registered further down this file, so
+ * `/lanes/wan-conflicts` would be swallowed by it and 'wan-conflicts' passed to
+ * Postgres as a UUID — a 500 with a 22P02, not a 404.
+ */
+router.get('/wan-conflicts', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const conflicts = await laneWan.findWanIpConflicts();
+    res.json({
+      conflicts,
+      count: conflicts.length,
+      lanes_affected: conflicts.reduce((n, c) => n + c.lane_count, 0),
+    });
+  } catch (error) {
+    console.error('[Admin] WAN conflict audit error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 
 // ============================================================================
@@ -154,13 +185,26 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
       challenge_name: challenge.name,
       module
     });
+    // WAN transit address, allocated and ARP-verified before the row exists.
+    // Failing here is better than a lane that deploys onto an address another
+    // lane is already answering for.
+    let laneWanIp = null;
+    if (subnetScheme === 'v2' || subnetScheme === 'v3') {
+      try {
+        laneWanIp = (await laneWan.allocateLaneWanIps(1, { probeNode: bestNode }))[0].address;
+      } catch (e) {
+        return res.status(503).json({ error: e.message });
+      }
+    }
+
     const laneInsert = await cybercoreQuery(
-      `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, created_at, updated_at)
-       VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, NOW(), NOW())
+      `INSERT INTO cybercore_lane (user_id, vxlan_id, name, status, config, module_key, gateway_wan_ip, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4::jsonb, $5, $6::inet, NOW(), NOW())
        RETURNING lane_id, user_id, vxlan_id, name, status, created_at`,
-      [user_id, vxlanId, laneName, laneConfig, module]
+      [user_id, vxlanId, laneName, laneConfig, module, laneWanIp]
     );
     const lane = laneInsert.rows[0];
+    if (laneWanIp) await laneWan.recordLaneWanLease({ address: laneWanIp, laneId: lane.lane_id, vxlanId });
 
     res.json({
       success: true,
@@ -176,7 +220,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
     (async () => {
       try {
-        const net = resolveLaneNetworking(subnetScheme, module, vxlanId);
+        const net = resolveLaneNetworking(subnetScheme, module, vxlanId, { wanIp: laneWanIp });
         const isV3 = subnetScheme === 'v3';
         const vnetExtName = vnet.vnet;
         const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
@@ -582,7 +626,10 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
 
   try {
     const laneResult = await cybercoreQuery(
-      `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key
+      // gateway_wan_ip is read back, never re-derived: the derivation was not
+      // unique, so recomputing it for an existing lane can name a DIFFERENT
+      // lane's gateway.
+      `SELECT lane_id, user_id, vxlan_id, name, status, config, module_key, gateway_wan_ip::text AS gateway_wan_ip
        FROM cybercore_lane WHERE lane_id = $1`,
       [req.params.laneId]
     );
@@ -619,7 +666,9 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
     const laneSubnetScheme = laneConfig.subnet_scheme
       || (laneConfig.lane_subnet_base?.startsWith('10.') ? 'v2' : 'v1');
     const laneModule = lane.module_key || laneConfig.module || module;
-    const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id);
+    const net = resolveLaneNetworking(laneSubnetScheme, laneModule, lane.vxlan_id, {
+      wanIp: lane.gateway_wan_ip || laneConfig.gateway_wan_ip,
+    });
     const laneSubnetBase = (net.lanExt || net.lan).base3;
     const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
     const vnet = vnets.find(v => v.tag === lane.vxlan_id);

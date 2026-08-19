@@ -1053,7 +1053,7 @@
               </div>
               <div class="form-group">
                 <label>OS Family</label>
-                <select id="wsTplOsFamily">
+                <select id="wsTplOsFamily" onchange="wsTplSuggestCiUser()">
                   <option value="windows_client">Windows Client</option>
                   <option value="windows_server">Windows Server</option>
                   <option value="linux">Linux</option>
@@ -1093,8 +1093,18 @@
               <input type="text" id="wsTplCiUser" placeholder="e.g., cactus-user" autocomplete="off">
               <div style="font-size:0.78rem; color:var(--gray-500); margin-top:0.25rem;">
                 Set this when the image bakes its cloud-init account name in (cloudbase-init's <code>username=</code>).
-                Each lane still gets its own generated password; only the account name is fixed. Leave blank to
-                create a per-student account from their email.
+                Each lane still gets its own generated password; only the account name is fixed.
+                <br>
+                <strong>Windows images need this.</strong> cloudbase-init is pinned at bake time and can only set
+                <em>that</em> account's password — name anything else and the password lands on the baked account
+                while Guacamole signs in as a user that does not exist, which reaches the student as a plain RDP
+                login failure. Images built from <code>windows-11-base-packer</code> use <code>cactus-user</code>;
+                <code>bake-win-client-template.sh</code> uses <code>Admin</code>. Check the template's
+                <code>cloudbase-init.conf</code> if you are unsure. Left blank on Windows, deploys fall back to
+                <code>cactus-user</code> and log a warning.
+                <br>
+                On Linux, leave blank to create a per-student account from their email — cloud-init genuinely
+                creates whatever account it is given there.
               </div>
             </div>
 

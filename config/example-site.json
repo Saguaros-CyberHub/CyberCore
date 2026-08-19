@@ -17,6 +17,57 @@
     "physical_hardware_allocation_per_node": {
       "ram_gb": 256,
       "cpu_cores": 64
+    },
+    "networking": {
+      "_comment": "Lane network topology. Absent here until now, which meant the hardcoded defaults in front-end/src/utils/site-config.js were the only record of the live contract.",
+      "v2_lab_network": {
+        "_comment": "Shared transit VLAN every v2/v3 lane gateway wan0 lands on. ONE ADDRESS PER LIVE LANE, so this prefix is the hard ceiling on concurrent lanes. Declare the block in `subnet`; `cidr` is DERIVED and means the suffix concatenated onto a gateway net0 address, so putting a block there renders ip=100.100.60.32100.100.60.0/22. Widening requires the matching prefix on the OPNsense VLAN-60 interface FIRST, or new lanes come up with no route and the deploy still reports success.",
+        "bridge": "vmbr0",
+        "vlan_tag": 60,
+        "subnet": "100.100.60.0/22",
+        "gateway": "100.100.60.1",
+        "host_range": {
+          "first": "100.100.60.10",
+          "last": "100.100.63.254"
+        },
+        "reserved_comment": "Addresses the allocator must never hand out. The subnet gateway, network and broadcast are excluded automatically; list anything else on this VLAN that CyberCore does not manage.",
+        "reserved": [],
+        "probe": {
+          "_comment": "Before committing an address the allocator arpings it from a cluster node. `interface` MUST be the tagged VLAN device (vmbr0.60), not the bare bridge: vmbr0 carries VLAN 60 only as tagged frames for guests, so an untagged probe never sees a lane gateway and reports every address free. If arping or the interface is missing the allocator REFUSES rather than guessing; set enabled=false to allocate from the database alone.",
+          "enabled": true,
+          "node": null,
+          "interface": "vmbr0.60",
+          "timeout_ms": 2000
+        }
+      },
+      "v1_lane_subnet": {
+        "_comment": "Legacy v1 lanes share one LAN subnet, isolated by the per-lane gateway LXC.",
+        "base3": "192.18.0",
+        "cidr": "192.18.0.0/24",
+        "gateway_ip": "192.18.0.1",
+        "netmask24": "255.255.255.0"
+      },
+      "module_networks": {
+        "_comment": "v1 per-module transit gateways. A module with a null gateway is declared but not wired.",
+        "crucible": {
+          "bridge": "crucible",
+          "gateway": "100.102.0.1",
+          "subnet_base": "100.102",
+          "cidr": "/16"
+        },
+        "cyberlabs": {
+          "bridge": "cyberlabs",
+          "gateway": null,
+          "subnet_base": "100.101",
+          "cidr": "/16"
+        },
+        "forge": {
+          "bridge": "forge",
+          "gateway": null,
+          "subnet_base": "100.103",
+          "cidr": "/16"
+        }
+      }
     }
   },
   "cyberhub": {

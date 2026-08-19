@@ -23,6 +23,7 @@ const fs = require('fs');
 const { pool, query } = require('../utils/db');
 const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const laneWan = require('../../../../../src/utils/lane-wan-allocator');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const audit = require('../../../../../src/utils/audit');
@@ -393,10 +394,16 @@ async function runProfileDeploy(opts) {
     // that student's My Workspaces (the page filters by user_id). Previously
     // we set this to the admin's userId, which is why Cochise lanes never
     // appeared in any student's workspaces.
+    // Gateway WAN transit address: allocated and ARP-verified, never derived.
+    // CIAB draws from the same shared VLAN as every other lane, so it must go
+    // through the same allocator or it will hand out addresses another module's
+    // lanes are already answering for.
+    const laneWanIp = (await laneWan.allocateLaneWanIps(1))[0].address;
+
     const laneInsert = await cybercoreQuery(
       `INSERT INTO cybercore_lane
-         (user_id, vxlan_id, name, status, config, module_key, challenge_id, created_at, updated_at)
-       VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, NOW(), NOW())
+         (user_id, vxlan_id, name, status, config, module_key, challenge_id, gateway_wan_ip, created_at, updated_at)
+       VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, $6::inet, NOW(), NOW())
        RETURNING lane_id`,
       [
         student.id, vxlanId, laneName,
@@ -406,12 +413,15 @@ async function runProfileDeploy(opts) {
           profile_lane_group: true,
           group_id: groupId,
           student_email: student.email,
-          student_index: student.index
+          student_index: student.index,
+          gateway_wan_ip: laneWanIp
         }),
-        challengeId
+        challengeId,
+        laneWanIp
       ]
     );
     const laneId = laneInsert.rows[0].lane_id;
+    await laneWan.recordLaneWanLease({ address: laneWanIp, laneId, vxlanId });
 
     const jobInsert = await query(
       `INSERT INTO ciab_profile_lane_jobs
@@ -747,22 +757,27 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       const laneName = `kali-${groupSlug}-student${laneIndex}-${kaliVmid}`;
       // See note in runProfileDeploy — lane_group_id FKs to crucible_lane_group,
       // which CIAB does not populate. Group linkage lives in config.group_id.
+      // Same shared VLAN, same allocator — see the note on the first INSERT.
+      const laneWanIp = (await laneWan.allocateLaneWanIps(1))[0].address;
       const laneInsert = await cybercoreQuery(
         `INSERT INTO cybercore_lane
-           (user_id, vxlan_id, name, status, config, module_key, challenge_id, created_at, updated_at)
-         VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, NOW(), NOW())
+           (user_id, vxlan_id, name, status, config, module_key, challenge_id, gateway_wan_ip, created_at, updated_at)
+         VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, $6::inet, NOW(), NOW())
          RETURNING lane_id`,
         [
           effectiveId, vxlanId, laneName,
           JSON.stringify({
             challenge_id: reservation.challenge_id, challenge_key: challengeKey,
             profile_lane_group: true, group_id: groupId,
-            student_email: email, student_index: laneIndex
+            student_email: email, student_index: laneIndex,
+            gateway_wan_ip: laneWanIp
           }),
-          reservation.challenge_id
+          reservation.challenge_id,
+          laneWanIp
         ]
       );
       const laneId = laneInsert.rows[0].lane_id;
+      await laneWan.recordLaneWanLease({ address: laneWanIp, laneId, vxlanId });
       const jobInsert = await query(
         `INSERT INTO ciab_profile_lane_jobs (group_id, lane_id, vxlan_id, lane_index, status)
          VALUES ($1, $2, $3, $4, 'pending') RETURNING id`,

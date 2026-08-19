@@ -1902,9 +1902,24 @@
         `NIC ${escHtml(t.nic_model || 'virtio')}`,
         t.credentials === 'template'
           ? 'credentials baked into template'
-          : 'credentials generated per student',
+          : t.credentials === 'cloud-init'
+            ? `login <code>${escHtml(t.cloud_init_user)}</code>, password per student`
+            : 'credentials generated per student',
       ].filter(Boolean);
-      el.innerHTML = bits.join(' &middot; ');
+
+      // A Windows template with no declared cloud-init account is the shape that
+      // deploys "successfully" and then refuses every login: cloudbase-init can
+      // only set the password on the account it was baked with, so a guessed
+      // username authenticates as nobody. Say it here, before the deploy.
+      const guessing = t.credentials === 'cloud-init-guess'
+        && String(t.os_family || '').startsWith('windows');
+      el.innerHTML = bits.join(' &middot; ') + (guessing
+        ? `<div style="margin-top:0.4rem;color:var(--accent-red,#ab0520);font-size:0.78rem;">`
+          + `This Windows template declares no cloud-init account, so the deploy will guess `
+          + `<code>cactus-user</code>. If its image was baked with a different account the console `
+          + `will not log in. Set it under Admin &rarr; Workstation Templates &rarr; Cloud-Init Account.`
+          + `</div>`
+        : '');
     }
 
     /**
