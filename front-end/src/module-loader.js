@@ -274,6 +274,24 @@ async function registerModule(manifest) {
           manifest.display_order || 0
         ]
       );
+
+      // A manifest may VETO a module, and that veto is reapplied on every boot.
+      //
+      // The split of authority is: a manifest saying "active": false always
+      // wins (these are unbuilt or withdrawn features — hiding them should not
+      // depend on someone remembering to run a migration on each deployment),
+      // while everything else is the database's call, so an admin's toggle in
+      // Admin -> Settings -> Modules survives a restart.
+      //
+      // To bring a vetoed module back: flip its manifest to "active": true,
+      // restart, then enable it in the admin UI — the restart only stops the
+      // veto, it does not re-enable on your behalf.
+      if (manifest.active === false) {
+        await client.query(
+          'UPDATE cybercore_module SET active = FALSE WHERE key = $1',
+          [manifest.key]
+        );
+      }
     } finally {
       client.release();
     }

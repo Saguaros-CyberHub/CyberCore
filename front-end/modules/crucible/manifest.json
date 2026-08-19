@@ -6,7 +6,7 @@
   "entry_url": "/crucible/dashboard",
   "category": "module",
   "color": "#f56565",
-  "active": true,
+  "active": false,
   "display_order": 2,
   "routes": [
     {
