@@ -41,9 +41,28 @@ const instructorOnly = requireRole('instructor', 'admin');
 
 const COURSE_COLUMNS = 'course_id, course_name, code, max_students, provision_status, instructor_id';
 
+// Bounds a credential that was handed to a human instead of emailed. Mirrors
+// ACTIVATION_TTL_HOURS, which bounds the link that would otherwise have gone
+// out — the same exposure, delivered a different way.
+const TEMP_PASSWORD_TTL_HOURS = Number(process.env.TEMP_PASSWORD_TTL_HOURS) > 0
+  ? Number(process.env.TEMP_PASSWORD_TTL_HOURS) : 72;
+
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+/**
+ * Can an invitation actually reach this address?
+ *
+ * Every policy reason enqueue() suppresses for is knowable before the account
+ * exists: mail disabled, no key to encrypt the body with, or a recipient the
+ * policy blocks. Deciding up front is what lets a fallback account be
+ * provisioned *correctly* — rotate on first use, bounded lifetime — instead of
+ * discovering after the INSERT that nobody could be told.
+ */
+function canInvite(email) {
+  return mailer.mailEnabled() && !!mailer.mailKey() && mailer.checkRecipient(email).ok;
+}
 
 /** courseId comes from the parent mount via res.locals (see routes/api.js). */
 function courseIdOf(req, res) {
@@ -155,6 +174,43 @@ async function notifyExisting(user, { course, ctx, actorId, importId }) {
   }
 }
 
+/**
+ * Queue the "a temporary password has been set for you" notice after staff
+ * regenerated a credential.
+ *
+ * Unlike an invitation this really does put a working password in a mailbox,
+ * which is why setPassword() pairs it with mustChange and an expiry: the window
+ * in which the copy in the mailbox is worth anything closes on first sign-in.
+ */
+async function notifyCredentials(user, { password, expiresAt, course, ctx, actorId }) {
+  try {
+    const body = templates.credentialsIssued({
+      siteName: ctx.siteName,
+      publicUrl: ctx.publicUrl,
+      firstName: user.first_name,
+      username: user.username,
+      password,
+      expiresAt,
+      courseName: course && course.course_name,
+      courseCode: course && course.code,
+    });
+    const queued = await mailer.enqueue({
+      to: user.email,
+      toUserId: user.user_id,
+      templateKey: 'credentialsIssued',
+      subject: body.subject,
+      text: body.text,
+      html: body.html,
+      context: { course_id: course ? course.course_id : null },
+      requestedBy: actorId,
+    });
+    return { status: queued.status, reason: queued.reason || null };
+  } catch (err) {
+    console.warn(`[CLE] Could not send credentials to ${user.email}:`, err.message);
+    return { status: 'suppressed', reason: err.message };
+  }
+}
+
 // ============================================================================
 // POST /import — CSV roster
 // ============================================================================
@@ -207,16 +263,23 @@ router.post('/import', instructorOnly, async (req, res) => {
 
     // ── Dry run ───────────────────────────────────────────────────────────
     if (!confirm) {
+      // Two different misconfigurations produce the same outcome for the
+      // instructor — no invitation arrives — so both have to say so here. Mail
+      // switched on without MAIL_ENCRYPT_KEY is the more dangerous one, because
+      // the settings look configured.
+      const mailWarning = !mailer.mailEnabled()
+        ? 'Email is not configured on this server. Accounts will still be created, and you will be shown temporary passwords to distribute yourself.'
+        : !mailer.mailKey()
+          ? 'Email is switched on but MAIL_ENCRYPT_KEY is not set, so no invitation can be stored or sent. Accounts will still be created, and you will be shown temporary passwords to distribute yourself.'
+          : null;
+
       return res.json({
         preview: true,
         canProceed: errors.length === 0,
         summary,
         rows: classified,
         errors,
-        warnings: mailer.mailEnabled() ? warnings : [
-          ...warnings,
-          'Email is not configured on this server. Accounts will still be created, and you will be shown temporary passwords to distribute yourself.',
-        ],
+        warnings: mailWarning ? [...warnings, mailWarning] : warnings,
       });
     }
 
@@ -249,22 +312,30 @@ router.post('/import', instructorOnly, async (req, res) => {
       try {
         let user;
         let wasCreated = false;
+        let generatedPassword = null;
 
         if (row.action === roster.ACTIONS.CREATE) {
+          // An invited account discloses nothing: the activation link is the
+          // credential, single-use and expiring, and no password ever leaves
+          // the server. When the invitation cannot be delivered the instructor
+          // has to hand the credential over in person instead — so it becomes a
+          // temporary password, and must therefore rotate on first use and
+          // expire on its own rather than living forever.
+          const invitable = canInvite(row.email);
           const outcome = await prov.provisionAccount({
             email: row.email,
             firstName: row.first_name,
             lastName: row.last_name,
             role: 'student',
             organization: course.code || course.course_name,
-            // No password is disclosed for an invited account. The activation
-            // link is the credential, and it is single-use and expiring.
-            mustChangePassword: false,
+            mustChangePassword: !invitable,
+            ...(invitable ? {} : { tempPasswordTtlHours: TEMP_PASSWORD_TTL_HOURS }),
             provenance: { by: req.user.userId, via: 'cle_import', ref: course.course_id },
             takenUsernames,
           });
           user = outcome.user;
           wasCreated = outcome.created;
+          generatedPassword = outcome.password;
         } else {
           user = await prov.findUserByEmail(row.email);
           if (!user) throw new Error('account disappeared between preview and confirm');
@@ -286,6 +357,13 @@ router.post('/import', instructorOnly, async (req, res) => {
             email: user.email,
             username: user.username,
             activation_sent: mail.status === 'queued',
+            // Disclosed only when the invitation did not go out, which is what
+            // the preview promises the instructor. A credential that reached a
+            // mailbox must not also be echoed to the screen — two copies of one
+            // secret is strictly worse than one.
+            ...(mail.status !== 'queued' && generatedPassword
+              ? { temp_password: generatedPassword }
+              : {}),
             ...(mail.status !== 'queued' ? { email_note: mail.reason } : {}),
           });
         } else if (row.action !== roster.ACTIONS.ALREADY_ENROLLED && notifyExistingFlag !== false) {
@@ -634,8 +712,13 @@ router.post('/students/:studentId/password', instructorOnly, async (req, res) =>
     // Always server-generated. Letting a caller choose the password would make
     // this a way to set a known credential on someone else's account, which is
     // a materially different (and worse) capability than "issue a new random one".
+    //
+    // Bounded as well as rotate-on-first-use: this credential gets read aloud,
+    // written down, or left sitting in a mailbox, and an unbounded one stays
+    // valid for the rest of the term if the student simply never signs in.
     const { password, expires_at: expiresAt } = await prov.setPassword(target.user_id, {
       mustChange: true,
+      ttlHours: TEMP_PASSWORD_TTL_HOURS,
       actorId: req.user.userId,
     });
 
@@ -643,11 +726,28 @@ router.post('/students/:studentId/password', instructorOnly, async (req, res) =>
     // instructor does not know about.
     await activation.revokeActivationTokens(target.user_id, 'activate').catch(() => {});
 
+    // Mail the student their own copy unless the caller opts out. The password
+    // is still returned either way: the instructor asked for a credential to
+    // hand over, and a student whose mail bounces still needs one. Which of the
+    // two actually happened is reported rather than assumed.
+    let mail = null;
+    if (req.body?.notify !== false && canInvite(target.email)) {
+      const ctx = await mailContext(req.user.userId);
+      mail = await notifyCredentials(target, {
+        password, expiresAt, course, ctx, actorId: req.user.userId,
+      });
+    }
+
     roster.logRosterActivity({
       actorId: req.user.userId,
       courseId: course.course_id,
       action: 'password_regenerate',
-      detail: { target_user_id: target.user_id, target_email: target.email, target_role: target.role },
+      detail: {
+        target_user_id: target.user_id,
+        target_email: target.email,
+        target_role: target.role,
+        emailed: mail ? mail.status === 'queued' : false,
+      },
     });
 
     res.json({
@@ -657,6 +757,8 @@ router.post('/students/:studentId/password', instructorOnly, async (req, res) =>
       // Returned once, in this response only. Nothing stores the plaintext.
       password,
       expires_at: expiresAt,
+      emailed: mail ? mail.status === 'queued' : false,
+      ...(mail && mail.status !== 'queued' ? { email_note: mail.reason } : {}),
       warnings: [SESSION_SURVIVAL_WARNING],
     });
   } catch (error) {

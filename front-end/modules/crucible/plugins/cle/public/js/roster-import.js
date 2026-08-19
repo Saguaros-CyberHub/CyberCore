@@ -611,10 +611,15 @@
     h2.textContent = 'New password';
     modal.appendChild(h2);
 
+    // Whether the student already has their own copy changes what the
+    // instructor has to do next, so it leads rather than sitting in a footnote.
     const warn = document.createElement('div');
-    warn.className = 'alert alert-warning';
+    warn.className = result.emailed ? 'alert alert-success' : 'alert alert-warning';
     warn.style.marginBottom = '1rem';
-    warn.textContent = 'This is shown once and cannot be retrieved later. Give it to the student now.';
+    warn.textContent = result.emailed
+      ? `Emailed to ${result.email}. It is also shown below, once — it cannot be retrieved later.`
+      : 'This is shown once and cannot be retrieved later. Give it to the student now.'
+        + (result.email_note ? ` Not emailed: ${result.email_note}.` : '');
     modal.appendChild(warn);
 
     const box = document.createElement('div');
@@ -636,7 +641,13 @@
 
     const note = document.createElement('div');
     note.style.cssText = 'font-size:0.8rem; color:var(--text-secondary,#777); margin-bottom:1rem;';
+    // An expiry the instructor cannot see is an expiry they will be surprised
+    // by when the student calls a week later saying the password stopped working.
+    const expiry = result.expires_at
+      ? ` It stops working on ${new Date(result.expires_at).toLocaleString()}.`
+      : '';
     note.textContent = 'They will be asked to choose their own password at their next sign-in.'
+      + expiry
       + (result.warnings && result.warnings.length ? ' ' + result.warnings.join(' ') : '');
     modal.appendChild(note);
 

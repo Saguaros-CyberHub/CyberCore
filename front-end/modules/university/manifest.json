@@ -6,7 +6,7 @@
   "entry_url": "/university",
   "category": "module",
   "color": "#8b5cf6",
-  "active": true,
+  "active": false,
   "display_order": 4,
   "routes": [
     {

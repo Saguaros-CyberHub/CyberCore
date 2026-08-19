@@ -45,20 +45,29 @@ async function initHub() {
     // Determine which modules are active (have loaded plugin routes/subnav)
     loadedPluginKeys = Object.keys(data.subnavs || {});
 
-    // Render module cards
+    // Hide an entry when every one of its sub-items is gated to a role this
+    // user doesn't hold — the same rule the sidebar uses, so a student never
+    // sees a Cyber Learning Environment card they'd only get 403s from.
+    // Fails closed while Auth.user is still resolving.
+    const user = Auth.getUser();
+    const isVisible = (mod) => {
+      const sn = (data.subnavs || {})[mod.key];
+      if (!sn || !Array.isArray(sn.items) || sn.items.length === 0) return true;
+      return sn.items.some(item => !item.roles || item.roles.includes(user?.role));
+    };
+
+    // One grid, ordered by display_order. Modules and plugins were split into
+    // two headed sections, which meant nothing to students and — with the
+    // scaffolding modules now hidden — left a heading over a single card.
+    const entries = [...(data.modules || []), ...(data.plugins || [])]
+      .filter(isVisible)
+      .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0));
+
     const moduleGrid = document.getElementById('moduleGrid');
-    if (data.modules && data.modules.length > 0) {
-      moduleGrid.innerHTML = data.modules.map(renderModuleCard).join('');
+    if (entries.length > 0) {
+      moduleGrid.innerHTML = entries.map(renderModuleCard).join('');
     } else {
       moduleGrid.innerHTML = '<p style="color:var(--text-muted)">No modules available.</p>';
-    }
-
-    // Render plugin cards
-    const pluginGrid = document.getElementById('pluginGrid');
-    const pluginsTitle = document.getElementById('pluginsTitle');
-    if (data.plugins && data.plugins.length > 0) {
-      pluginsTitle.style.display = '';
-      pluginGrid.innerHTML = data.plugins.map(renderModuleCard).join('');
     }
   } catch (error) {
     console.error('Failed to load modules:', error);

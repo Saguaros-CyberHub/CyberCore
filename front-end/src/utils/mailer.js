@@ -53,6 +53,40 @@ function publicUrl() {
   return String(process.env.MAIL_PUBLIC_URL || '').replace(/\/+$/, '');
 }
 
+/**
+ * Is MAIL_HOST somewhere the connection cannot leave the host or its bridge
+ * network? Single-label names are Docker service names (`mailrelay`), which do
+ * not resolve publicly; the rest are loopback and RFC 1918 literals.
+ */
+function isInternalHost(host) {
+  const h = String(host || '').trim().toLowerCase();
+  if (!h) return false;
+  if (h === 'localhost' || h.endsWith('.localhost')) return true;
+  if (!h.includes('.')) return true;
+  if (h === '::1' || /^127\./.test(h)) return true;
+  if (/^10\./.test(h) || /^192\.168\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  return false;
+}
+
+/**
+ * Whether the relay must present a verifiable certificate.
+ *
+ * The bundled Postfix relay sits on cybercore-net with no published port and
+ * presents a self-signed certificate if it offers STARTTLS at all, so refusing
+ * it would mean never delivering — and that hop never leaves the bridge.
+ *
+ * That reasoning does not survive contact with a public relay. An external
+ * submission host (Resend, SES, an institutional smarthost) is reached over the
+ * internet and is handed MAIL_PASSWORD during AUTH, so skipping verification
+ * there is credential interception waiting to happen, not a convenience.
+ * MAIL_TLS_INSECURE exists for the rare self-signed relay reached by FQDN.
+ */
+function tlsRejectUnauthorized() {
+  if (process.env.MAIL_TLS_INSECURE === 'true') return false;
+  return !isInternalHost(process.env.MAIL_HOST);
+}
+
 /** Lazily built and cached; nodemailer pools connections internally. */
 function transport() {
   if (_transport) return _transport;
@@ -71,10 +105,7 @@ function transport() {
     connectionTimeout: 10_000,
     greetingTimeout: 10_000,
     socketTimeout: 20_000,
-    // Postfix on the same bridge network presents a self-signed certificate if
-    // it offers STARTTLS at all. Refusing it would mean never delivering; the
-    // hop never leaves the Docker network.
-    tls: { rejectUnauthorized: false },
+    tls: { rejectUnauthorized: tlsRejectUnauthorized() },
   });
   return _transport;
 }
@@ -430,6 +461,7 @@ async function ensureEmailOutbox() {
 module.exports = {
   mailEnabled, mailKey, publicUrl,
   transport, resetTransport,
+  isInternalHost, tlsRejectUnauthorized,
   checkRecipient, allowedDomains,
   enqueue, enqueueMany,
   drainOutbox, requeueStalledSends, pruneOutbox,

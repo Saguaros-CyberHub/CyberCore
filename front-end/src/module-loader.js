@@ -244,6 +244,11 @@ async function registerModule(manifest) {
     try {
       const category = manifest.category || 'module';
       
+      // NOTE: `active` is deliberately absent from the DO UPDATE list. It is
+      // seeded from the manifest on first INSERT, after which the database is
+      // authoritative — so a module disabled (or re-enabled) from
+      // Admin -> Settings -> Modules survives a restart. Putting it back here
+      // would silently revert every admin toggle on every boot.
       await client.query(
         `INSERT INTO cybercore_module (key, name, icon, description, entry_url, category, color, active, parent_module, display_order)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
@@ -254,7 +259,6 @@ async function registerModule(manifest) {
          entry_url = EXCLUDED.entry_url,
          category = EXCLUDED.category,
          color = EXCLUDED.color,
-         active = EXCLUDED.active,
          parent_module = EXCLUDED.parent_module,
          display_order = EXCLUDED.display_order`,
         [

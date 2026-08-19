@@ -6,7 +6,7 @@
   "entry_url": "/library",
   "category": "module",
   "color": "#10b981",
-  "active": true,
+  "active": false,
   "display_order": 5,
   "routes": [
     {

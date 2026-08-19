@@ -47,4 +47,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Load modules on page initialization
   loadModules();
+
+  // Mail status shares the Settings tab with modules and is equally cheap.
+  loadMailStatus();
 });

@@ -111,6 +111,7 @@ const laneBootstrapRoutes = require('./routes/lane-bootstrap');
 const guacSessionRoutes = require('./routes/guac-sessions');
 const workstationRoutes = require('./routes/workstations');
 const flagRoutes = require('./routes/flags');
+const chatStatusRoutes = require('./routes/chat-status');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -416,6 +417,11 @@ app.use('/api/modules', moduleRoutes);
 app.use('/api/dashboard', guacSessionRoutes);
 app.use('/api/workstations', workstationRoutes);
 app.use('/api/flags', flagRoutes);
+
+// Reports whether an LLM is configured, so the global chat widget can hide its
+// launcher instead of offering a button that always fails. Must stay in core:
+// POST /api/chat itself is implemented by the CIAB plugin, which mounts later.
+app.use('/api/chat', chatStatusRoutes);
 
 // Unauthenticated, source-IP-gated. Called by lane gateway LXCs on first boot
 // to fetch one-shot bootstrap payload (Tailscale auth key etc). See route

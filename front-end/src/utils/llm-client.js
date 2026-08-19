@@ -67,6 +67,13 @@ function getClient() {
 // For tests: lets a test swap in a mock client.
 function _setClientForTest(client) { _client = client; }
 
+// Can this deployment talk to an LLM at all? getClient() throws without a key,
+// so callers that would rather degrade than fail (the global chat widget hides
+// its launcher) can ask first.
+function isConfigured() {
+  return !!process.env.ANTHROPIC_API_KEY;
+}
+
 // ─── Concurrency semaphore ─────────────────────────────────────────────────
 
 function createSemaphore(max) {
@@ -351,6 +358,7 @@ module.exports = {
   generateJson,
   generateParallel,
   cachedSystem,
+  isConfigured,
   repairAndParseJson,
   resolveModel,
   createSemaphore,

@@ -6,7 +6,7 @@
   "entry_url": "/cyberlabs",
   "category": "module",
   "color": "#1e5288",
-  "active": true,
+  "active": false,
   "display_order": 2,
   "routes": [
     {

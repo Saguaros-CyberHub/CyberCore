@@ -154,6 +154,14 @@ services:
       MAIL_SECURE: ${MAIL_SECURE:-false}
       MAIL_FROM: ${MAIL_FROM:-CyberHub <no-reply@localhost>}
       MAIL_REPLY_TO: ${MAIL_REPLY_TO:-}
+      # Set only when MAIL_HOST points at an external relay instead of the
+      # mailrelay service below (Resend, SES, Gmail, a campus smarthost).
+      MAIL_USER: ${MAIL_USER:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      # Escape hatch for a self-signed relay reached by FQDN. Certificates are
+      # verified for every non-internal host by default, which is what keeps
+      # MAIL_PASSWORD from crossing an unauthenticated connection.
+      MAIL_TLS_INSECURE: ${MAIL_TLS_INSECURE:-}
       # Absolute base URL used to build activation links. Must be reachable by
       # students from OUTSIDE the lab, or every invitation is a dead link.
       MAIL_PUBLIC_URL: ${MAIL_PUBLIC_URL:-}
@@ -170,6 +178,10 @@ services:
       # sender. See G12 in the roster import plan.
       MAIL_ALLOWED_RECIPIENT_DOMAINS: ${MAIL_ALLOWED_RECIPIENT_DOMAINS:-}
       ACTIVATION_TTL_HOURS: ${ACTIVATION_TTL_HOURS:-72}
+      # Bounds the fallback credential — the temp password shown to an instructor
+      # when an invitation could not be emailed, and the one a staff regenerate
+      # hands out. Expired ones are refused at login.
+      TEMP_PASSWORD_TTL_HOURS: ${TEMP_PASSWORD_TTL_HOURS:-72}
       # Synthetic domain for generated cohort accounts. Hard-suppressed by the
       # mailer regardless of any other setting — these credentials are handed
       # out on a printed sheet, never emailed. Must NOT be a domain you own.

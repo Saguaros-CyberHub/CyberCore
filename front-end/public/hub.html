@@ -829,41 +829,17 @@
             <span>📊</span> Dashboard
           </a>
 
+          <a href="#" class="dashboard-menu-item" data-page="courses" onclick="switchDashboardTab(event, 'courses')">
+            <span>📚</span> Courses
+          </a>
+
           <details class="dashboard-menu-dropdown">
             <summary class="dashboard-menu-item">
               <span>💻</span> Remote Workspaces
             </summary>
             <div class="dashboard-submenu">
               <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-myworkspaces')">My Workspaces</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-assignments')">Course Assignments</a>
               <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'workspaces-available')">Available</a>
-            </div>
-          </details>
-
-          <details class="dashboard-menu-dropdown">
-            <summary class="dashboard-menu-item">
-              <span>📚</span> Courses
-            </summary>
-            <div class="dashboard-submenu">
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'courses-enrolled')">Enrolled</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'courses-available')">Available</a>
-            </div>
-          </details>
-
-          <details class="dashboard-menu-dropdown">
-            <summary class="dashboard-menu-item">
-              <span>🎯</span> Challenges
-            </summary>
-            <div class="dashboard-submenu">
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-weekly')">Weekly Challenges</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-vuln')">Vulnerable Boxes</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-groupctf')">Group CTF</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-koth')">King of the Hill</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-redvsblue')">Red vs Blue</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-ir')">Incident Response / SOC Sim</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-events')">CTF Events</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-byoctf')">BYO CTF</a>
-              <a href="#" class="dashboard-submenu-item" onclick="switchDashboardTab(event, 'challenges-leaderboard')">Leaderboard</a>
             </div>
           </details>
 
@@ -878,13 +854,9 @@
             <p>Select a module to get started, or explore what's available below.</p>
           </div>
 
-          <div class="section-title">Modules</div>
           <div class="module-grid" id="moduleGrid">
             <div class="module-grid-loading">Loading modules...</div>
           </div>
-
-          <div class="section-title" id="pluginsTitle" style="display:none">Plugins</div>
-          <div class="module-grid" id="pluginGrid"></div>
         </div>
 
         <div id="workspaces-myworkspacesContent" style="display: none;">
@@ -903,10 +875,10 @@
           <div id="wksMyList"></div>
         </div>
 
-        <div id="workspaces-assignmentsContent" style="display: none;">
+        <div id="coursesContent" style="display: none;">
           <div class="hub-welcome" style="margin-bottom:20px">
-            <h1>Course Assignments</h1>
-            <p>Pick a course to see its assignment and capture the flags on your lab machines.</p>
+            <h1>My Courses</h1>
+            <p>The classes you're enrolled in. Open one to see its assignments and capture the flags on your lab machines.</p>
           </div>
           <!-- NOT named *Content: switchDashboardTab hides every [id$="Content"]
                element on each nav change, which would blank this panel. -->
@@ -919,61 +891,6 @@
             <p>Choose a template to deploy your own workstation VM. Each VM runs in your lane and is yours to control.</p>
           </div>
           <div id="wksTemplateGrid"></div>
-        </div>
-
-        <div id="courses-enrolledContent" style="display: none;">
-          <h2>Enrolled Courses</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="courses-availableContent" style="display: none;">
-          <h2>Available Courses</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-weeklyContent" style="display: none;">
-          <h2>Weekly Challenges</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-vulnContent" style="display: none;">
-          <h2>Vulnerable Boxes</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-groupctfContent" style="display: none;">
-          <h2>Group CTF</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-kothContent" style="display: none;">
-          <h2>King of the Hill</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-redvsblueContent" style="display: none;">
-          <h2>Red vs Blue</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-irContent" style="display: none;">
-          <h2>Incident Response / SOC Sim</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-eventsContent" style="display: none;">
-          <h2>CTF Events</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-byoctfContent" style="display: none;">
-          <h2>BYO CTF</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
-        </div>
-
-        <div id="challenges-leaderboardContent" style="display: none;">
-          <h2>Leaderboard</h2>
-          <p style="color: var(--text-secondary);">Coming Soon...</p>
         </div>
 
         <div id="settingsContent" style="display: none;">
@@ -1164,8 +1081,8 @@
         );
       }
 
-      // Lazy-load the course list for the capture-flag assignments pane
-      if (page === 'workspaces-assignments' && typeof Flags !== 'undefined') {
+      // Lazy-load the enrolled-course list (course cards + flag progress)
+      if (page === 'courses' && typeof Flags !== 'undefined') {
         Flags.loadCourses();
       }
 

@@ -7,7 +7,7 @@
   "category": "module",
   "color": "#f56565",
   "active": true,
-  "display_order": 1,
+  "display_order": 2,
   "routes": [
     {
       "file": "routes/pages.js",

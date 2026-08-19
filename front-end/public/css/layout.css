@@ -89,24 +89,58 @@
   transition: color 0.3s ease;
 }
 
-/* Triangle arrow — only on items that actually have a submenu (dropdown) */
-.nav-item.has-subnav::before {
-  content: '';
+/* A nav entry that owns a submenu: the label link plus its own toggle button.
+   The arrow used to be a ::before on the link itself, which meant it had no
+   independent hit target — "collapsing" a section just navigated to it. The
+   button sits inside the link's left padding, so the row still navigates
+   everywhere except on the arrow. */
+.nav-row {
+  position: relative;
+}
+
+.nav-toggle {
   position: absolute;
-  left: 10px;
-  top: 50%;
-  transform: translateY(-50%);
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 1.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  z-index: 3;
+}
+
+.nav-toggle::before {
+  content: '';
   width: 0;
   height: 0;
   border-top: 5px solid transparent;
   border-bottom: 5px solid transparent;
-  border-left: 7px solid rgba(255, 255, 255, 0.2);
-  z-index: 2;
+  border-left: 7px solid rgba(255, 255, 255, 0.45);
   transition: border-left-color 0.3s ease, transform 0.25s ease;
 }
-/* Rotate the arrow down when its module is expanded (active) */
-.nav-item.has-subnav.active::before {
-  transform: translateY(-50%) rotate(90deg);
+
+.nav-toggle:hover::before {
+  border-left-color: white;
+}
+
+/* Point the arrow down while the section is open */
+.nav-toggle[aria-expanded="true"]::before {
+  transform: rotate(90deg);
+}
+
+.nav-toggle:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.8);
+  outline-offset: -3px;
+  border-radius: 3px;
+}
+
+.module-subnav[hidden] {
+  display: none;
 }
 
 /* Red carpet fill */
@@ -127,9 +161,6 @@
 .nav-item:hover::after {
   width: 1.75rem;
 }
-.nav-item:hover::before {
-  border-left-color: white;
-}
 
 .nav-item.active {
   color: white;
@@ -138,9 +169,7 @@
   width: 100%;
   opacity: 1;
 }
-.nav-item.active::before {
-  border-left-color: white;
-}
+
 
 /* Keep text above the red fill */
 .nav-item > span {
@@ -158,31 +187,26 @@
   font-size: 1rem;
 }
 
-/* Subnav items — bold text + smaller triangle, no red fill */
+/* Subnav items — bold text, no red fill, no arrow of their own. Indented so the
+   nesting is legible now that they carry no marker of their own. */
+.subnav-item {
+  padding-left: 2.9rem;
+  font-size: 0.92rem;
+}
 .subnav-item::after {
   display: none;
-}
-.subnav-item::before {
-  border-left-width: 5px;
-  border-top-width: 3px;
-  border-bottom-width: 3px;
-  border-left-color: rgba(255, 255, 255, 0.18);
 }
 .subnav-item:hover > span,
 .subnav-item.active > span {
   transform: none;
   font-weight: 600;
 }
-.subnav-item:hover::before {
-  border-left-color: rgba(255, 255, 255, 0.55);
-}
+
 .subnav-item.active > span {
   font-weight: 700;
   color: white;
 }
-.subnav-item.active::before {
-  border-left-color: white;
-}
+
 
 .nav-item .nav-badge {
   position: relative;

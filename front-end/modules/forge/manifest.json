@@ -6,7 +6,7 @@
   "entry_url": "/forge",
   "category": "module",
   "color": "#ed8936",
-  "active": true,
+  "active": false,
   "display_order": 3,
   "routes": [
     {

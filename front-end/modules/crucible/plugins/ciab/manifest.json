@@ -7,7 +7,7 @@
     "category": "plugin",
     "color": "#48bb78",
     "active": true,
-    "display_order": 10,
+    "display_order": 3,
     "parent_module": "crucible",
     "routes": [
         {

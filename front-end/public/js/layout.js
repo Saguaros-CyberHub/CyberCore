@@ -147,7 +147,48 @@ const Layout = {
     `;
   },
 
-  // Build the dynamic nav sections from module data
+  // ── Sidebar accordion state ────────────────────────────────────────────────
+  // The sidebar is re-injected on every page load (and again on `authReady`),
+  // so which sections are open cannot live in the DOM — persist it instead.
+  NAV_OPEN_KEY: 'cyberhub-nav-open',
+
+  getOpenNavKeys() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(this.NAV_OPEN_KEY));
+      return Array.isArray(raw) ? raw : null;
+    } catch (_) {
+      return null;
+    }
+  },
+
+  setOpenNavKeys(keys) {
+    try {
+      localStorage.setItem(this.NAV_OPEN_KEY, JSON.stringify(keys));
+    } catch (_) {}
+  },
+
+  // Open/close one nav section and remember the choice across page loads.
+  toggleNavSection(btn) {
+    const key = btn.dataset.navToggle;
+    const panel = document.getElementById(`subnav-${key}`);
+    if (!panel) return;
+
+    const open = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', String(open));
+    panel.hidden = !open;
+
+    const keys = new Set(this.getOpenNavKeys() || [this.getActiveModule()]);
+    if (open) keys.add(key); else keys.delete(key);
+    this.setOpenNavKeys([...keys]);
+  },
+
+  // Build the dynamic nav from module data.
+  //
+  // Modules and plugins are merged into ONE flat list ordered by display_order.
+  // The old "Modules" / "Plugins" split meant a plugin could never sort above a
+  // module (so the Cyber Learning Environment could not be promoted to the top),
+  // and the headings meant nothing to students. `category` itself is left alone
+  // so the admin settings UI and the hub card grid keep working.
   buildNavHTML(modules, plugins) {
     const user = Auth.getUser();
     const activeModule = this.getActiveModule();
@@ -158,27 +199,51 @@ const Layout = {
     const isLegacyCiab = legacyCiabPages.includes(activeModule);
     const effectiveModule = isLegacyCiab ? 'ciab' : activeModule;
 
-    const isModuleActive = (mod) => {
-      const entryKey = (mod.entry_url || '').split('/').filter(Boolean)[0];
-      return mod.key === effectiveModule || entryKey === effectiveModule;
+    const entryKeyOf = (mod) => (mod.entry_url || '').split('/').filter(Boolean)[0];
+    const isModuleActive = (mod) => mod.key === effectiveModule || entryKeyOf(mod) === effectiveModule;
+    const subnavOf = (mod) => this._subnavs[mod.key] || this._subnavs[entryKeyOf(mod)];
+
+    // The sub-items this user is actually allowed to see.
+    // Known false on this tab only once /api/chat/status has answered; treat
+    // anything else as "show it" so the entry never flickers out for a working
+    // deployment.
+    let chatDisabled = false;
+    try { chatDisabled = sessionStorage.getItem('cyberhub-chat-enabled') === 'false'; } catch (_) {}
+
+    const visibleItems = (mod) => {
+      const sn = subnavOf(mod);
+      if (!sn || !Array.isArray(sn.items)) return [];
+      return sn.items.filter(item => {
+        if (item.roles && !item.roles.includes(user?.role)) return false;
+        // A menu entry that opens the chat is dead weight with no LLM configured.
+        if (chatDisabled && item.onclick && item.onclick.includes('openChat')) return false;
+        return true;
+      });
     };
 
-    const subnavData = this._subnavs[effectiveModule];
-    const subnav = subnavData?.items;
-
-    // A module/plugin only gets the dropdown arrow if it actually has a submenu.
-    const hasSubnav = (mod) => {
-      const entryKey = (mod.entry_url || '').split('/').filter(Boolean)[0];
-      const sn = this._subnavs[mod.key] || this._subnavs[entryKey];
-      return !!(sn && sn.items && sn.items.length);
+    // Hide a whole entry when every one of its children is gated to a role the
+    // user doesn't hold. That is what makes the Cyber Learning Environment
+    // instructor/admin-only without a schema change.
+    //
+    // This deliberately fails CLOSED: on the first paint `Auth.user` has not
+    // resolved yet (it is populated by the async /auth/me that fires
+    // `authReady`), so a role-gated entry stays hidden until the authReady
+    // re-render rather than flashing at every student on every page load.
+    const isEntryVisible = (mod) => {
+      const sn = subnavOf(mod);
+      if (!sn || !Array.isArray(sn.items) || sn.items.length === 0) return true;
+      return visibleItems(mod).length > 0;
     };
 
-    const buildSubnav = () => {
-      if (!subnav) return '';
-      let s = `<div class="nav-section module-subnav">`;
-      subnav.forEach(item => {
-        if (item.roles && !item.roles.includes(user?.role)) return;
-        const active = activeSubPage === item.page ? 'active' : '';
+    const buildSubnav = (mod, expanded) => {
+      const items = visibleItems(mod);
+      if (!items.length) return '';
+      let s = `<div class="module-subnav" id="subnav-${mod.key}"${expanded ? '' : ' hidden'}>`;
+      items.forEach(item => {
+        // Sub-page matching is substring-based and shared across plugins
+        // ('dashboard' matches CIAB and CLE alike), so only ever mark a child
+        // active inside the module you're actually in.
+        const active = isModuleActive(mod) && activeSubPage === item.page ? 'active' : '';
         const onclick = item.onclick ? ` onclick="${item.onclick}"` : '';
         s += `<a href="${item.url}" class="nav-item subnav-item ${active}"${onclick}>
           <span>${item.label}</span>
@@ -189,38 +254,38 @@ const Layout = {
       return s;
     };
 
-    let html = '';
+    // First visit: only the module you're currently in is open.
+    const openKeys = this.getOpenNavKeys() || [effectiveModule];
 
-    // Modules section
-    if (modules.length > 0) {
-      html += `<div class="nav-section">
-        <div class="nav-section-title">Modules</div>`;
-      modules.forEach(mod => {
-        const active = isModuleActive(mod) ? 'active' : '';
-        const subnavClass = hasSubnav(mod) ? 'has-subnav' : '';
-        html += `<a href="${mod.entry_url}" class="nav-item ${active} ${subnavClass}">
-          <span>${mod.name}</span>
-        </a>`;
-        if (active) html += buildSubnav();
+    // Home first. Previously only the logo went home, which students didn't find.
+    let html = `<div class="nav-section">
+      <a href="/hub" class="nav-item ${activeModule === 'hub' ? 'active' : ''}">
+        <span class="icon">🏠</span>
+        <span>Home</span>
+      </a>`;
+
+    [...(modules || []), ...(plugins || [])]
+      .filter(isEntryVisible)
+      .sort((a, b) => (a.display_order ?? 0) - (b.display_order ?? 0))
+      .forEach(mod => {
+        const active = isModuleActive(mod);
+        const items = visibleItems(mod);
+        const expanded = items.length > 0 && (active || openKeys.includes(mod.key));
+
+        html += `<div class="nav-row">
+          <a href="${mod.entry_url}" class="nav-item ${active ? 'active' : ''}">
+            <span>${mod.name}</span>
+          </a>`;
+        // The arrow is a real button so it has its own hit target, keyboard
+        // handling and focus ring — clicking it must NOT follow the link.
+        if (items.length) {
+          html += `<button type="button" class="nav-toggle" data-nav-toggle="${mod.key}" aria-expanded="${expanded}" aria-controls="subnav-${mod.key}" aria-label="Toggle ${mod.name} menu"></button>`;
+        }
+        html += `</div>`;
+        html += buildSubnav(mod, expanded);
       });
-      html += `</div>`;
-    }
 
-    // Plugins section
-    if (plugins.length > 0) {
-      html += `<div class="nav-section">
-        <div class="nav-section-title">Plugins</div>`;
-      plugins.forEach(mod => {
-        const active = isModuleActive(mod) ? 'active' : '';
-        const subnavClass = hasSubnav(mod) ? 'has-subnav' : '';
-        html += `<a href="${mod.entry_url}" class="nav-item ${active} ${subnavClass}">
-          <span>${mod.name}</span>
-        </a>`;
-        if (active) html += buildSubnav();
-      });
-      html += `</div>`;
-    }
-
+    html += `</div>`;
     return html;
   },
 
@@ -297,6 +362,10 @@ const Layout = {
     try {
       const countEl = document.getElementById('profileCount');
       if (!countEl) return;
+      // API.profiles only exists on CIAB pages (ciab-api.js). The CIAB subnav is
+      // now rendered from every page, so the badge can be present when the
+      // client isn't loaded.
+      if (!API.profiles) return;
       const data = await API.profiles.list();
       if (data.profiles) {
         countEl.textContent = data.profiles.length;
@@ -322,12 +391,12 @@ const Layout = {
         </div>
         <div class="global-chat-messages" id="globalChatMessages">
           <div class="chat-message assistant">
-            👋 Hi! I'm your AI assistant for the Clinic-in-a-Box toolkit. I can help you with:
+            👋 Hi! I'm your CyberHub assistant. I can help you with:
             <ul style="margin: 10px 0; padding-left: 20px;">
-              <li>Understanding risk assessment concepts</li>
-              <li>Analyzing your generated profiles</li>
-              <li>Completing your assessment deliverables</li>
-              <li>Interview preparation tips</li>
+              <li>Finding your way around the platform</li>
+              <li>Understanding your course labs and assignments</li>
+              <li>Cybersecurity concepts you're stuck on</li>
+              <li>Working through your assessment deliverables</li>
             </ul>
             How can I help you today?
           </div>
@@ -344,10 +413,34 @@ const Layout = {
     `;
   },
 
+  // Does this deployment have an LLM configured? Cached per tab so it costs one
+  // request per session rather than one per page load.
+  async isChatEnabled() {
+    const CACHE_KEY = 'cyberhub-chat-enabled';
+    try {
+      const cached = sessionStorage.getItem(CACHE_KEY);
+      if (cached !== null) return cached === 'true';
+    } catch (_) {}
+
+    try {
+      const { enabled } = await API.chatStatus();
+      try { sessionStorage.setItem(CACHE_KEY, String(!!enabled)); } catch (_) {}
+      return !!enabled;
+    } catch (_) {
+      // Not signed in yet, or the endpoint is unreachable. Assume no assistant
+      // rather than render a launcher that is guaranteed to fail.
+      return false;
+    }
+  },
+
   // Inject global chat
-  injectGlobalChat() {
+  async injectGlobalChat() {
     // Check if chat already exists (avoid duplicates)
     if (document.getElementById('globalChatContainer')) return;
+
+    // No API key on this deployment means every send would fail with a generic
+    // "having trouble connecting". Show nothing at all instead.
+    if (!(await this.isChatEnabled())) return;
 
     // Create container
     const chatContainer = document.createElement('div');
@@ -362,6 +455,10 @@ const Layout = {
       styles.textContent = this.getChatStyles();
       document.head.appendChild(styles);
     }
+
+    // init() calls loadChatHistory() synchronously, which is now before this
+    // await resolves — replay it here, once the markup exists.
+    this.loadChatHistory();
   },
 
   // Chat styles
@@ -559,7 +656,9 @@ const Layout = {
   toggleChat() {
     const chatWindow = document.getElementById('globalChatWindow');
     const chatToggle = document.getElementById('globalChatToggle');
-    
+    // The widget isn't injected when no LLM is configured.
+    if (!chatWindow || !chatToggle) return;
+
     chatWindow.classList.toggle('open');
     chatToggle.classList.toggle('active');
     chatToggle.textContent = chatWindow.classList.contains('open') ? '✕' : '💬';
@@ -572,6 +671,7 @@ const Layout = {
   // Open chat (used by sidebar link)
   openChat() {
     const chatWindow = document.getElementById('globalChatWindow');
+    if (!chatWindow) return;
     if (!chatWindow.classList.contains('open')) {
       this.toggleChat();
     }
@@ -621,8 +721,9 @@ const Layout = {
       // Remove thinking indicator
       document.getElementById('globalThinkingIndicator')?.remove();
       
-      // Add response
-      messagesDiv.innerHTML += `<div class="chat-message assistant">${data.response}</div>`;
+      // Add response. Escape it — this is model output echoing user-influenced
+      // text, and it was the one string here going in as raw HTML.
+      messagesDiv.innerHTML += `<div class="chat-message assistant">${this.formatChatText(data.response)}</div>`;
       
       // Save to history
       this.saveChatMessage('assistant', data.response);
@@ -667,7 +768,7 @@ const Layout = {
         messagesDiv.innerHTML = '';
         
         history.forEach(msg => {
-          messagesDiv.innerHTML += `<div class="chat-message ${msg.role}">${msg.content}</div>`;
+          messagesDiv.innerHTML += `<div class="chat-message ${msg.role === 'user' ? 'user' : 'assistant'}">${this.formatChatText(msg.content)}</div>`;
         });
         
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -690,6 +791,12 @@ const Layout = {
     }
   },
 
+  // Escape chat text, then restore paragraph breaks. Chat replies are plain
+  // text, so this is all the formatting they need.
+  formatChatText(text) {
+    return this.escapeHtml(text == null ? '' : String(text)).replace(/\n/g, '<br>');
+  },
+
   // HTML escape utility
   escapeHtml(text) {
     const div = document.createElement('div');
@@ -697,8 +804,35 @@ const Layout = {
     return div.innerHTML;
   },
 
-  // Setup additional event listeners
+  // Show/hide the sidebar on narrow screens. The markup has called this since
+  // the mobile header was added (hub.html, module-placeholder.html and the CIAB
+  // risk-assessment page all have onclick="Layout.toggleSidebar()") but it was
+  // never defined, so the hamburger threw on every phone and tablet. The CSS
+  // (.sidebar.open / .sidebar-overlay.active) was already in place.
+  toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    if (!sidebar) return;
+    const open = sidebar.classList.toggle('open');
+
+    let overlay = document.querySelector('.sidebar-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'sidebar-overlay';
+      overlay.addEventListener('click', () => this.toggleSidebar());
+      document.body.appendChild(overlay);
+    }
+    overlay.classList.toggle('active', open);
+  },
+
+  // Setup additional event listeners.
+  //
+  // init() runs more than once per page (DOMContentLoaded, the `authReady`
+  // re-render, and several pages call it themselves), so guard registration —
+  // otherwise every listener fires N times per event.
   setupEventListeners() {
+    if (this._listenersBound) return;
+    this._listenersBound = true;
+
     // Close chat on escape key
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
@@ -707,6 +841,16 @@ const Layout = {
           this.toggleChat();
         }
       }
+    });
+
+    // Sidebar accordion. Delegated on `document` because the sidebar's innerHTML
+    // is replaced several times per page load, which would discard a listener
+    // bound to the nav itself.
+    document.addEventListener('click', (e) => {
+      const btn = e.target.closest?.('.nav-toggle');
+      if (!btn) return;
+      e.preventDefault();
+      this.toggleNavSection(btn);
     });
   },
 

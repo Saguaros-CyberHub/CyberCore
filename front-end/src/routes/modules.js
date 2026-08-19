@@ -8,7 +8,9 @@ const moduleLoader = require('../module-loader');
 router.get('/', async (req, res) => {
   try {
     const result = await cybercoreQuery(
-      `SELECT key, name, icon, description, entry_url, category, color
+      // display_order is selected as well as sorted on: the sidebar merges
+      // modules and plugins into one list client-side and re-sorts by it.
+      `SELECT key, name, icon, description, entry_url, category, color, display_order
        FROM cybercore_module
        WHERE active = TRUE
        ORDER BY display_order, name`

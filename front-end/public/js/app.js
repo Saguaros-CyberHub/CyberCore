@@ -176,6 +176,21 @@ const API = {
         method: 'POST'
       });
     }
+  },
+
+  // Global AI assistant. Layout.sendChat() calls this from the chat widget,
+  // which is injected on EVERY page — so it has to live in the core client.
+  // It used to be defined only in the CIAB plugin's ciab-api.js, which the hub
+  // never loads, so the widget threw "API.chat is not a function" everywhere
+  // outside /ciab/* and showed "having trouble connecting" instead.
+  async chat(message, sessionId) {
+    return API.request('/chat', { method: 'POST', body: { message, sessionId } });
+  },
+
+  // Is an LLM actually configured on this deployment? Used to hide the chat
+  // launcher entirely rather than offer a button that always fails.
+  async chatStatus() {
+    return API.request('/chat/status');
   }
 };
 

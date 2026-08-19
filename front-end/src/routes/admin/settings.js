@@ -842,7 +842,7 @@ router.post('/users/:id/password', authenticateToken, adminOnly, async (req, res
     // must_change_password stays FALSE here: an admin resetting a password is
     // often doing it FOR the user (help desk, shared lab machine), and forcing
     // a rotation would break that. The CLE path opts in instead.
-    const { password } = await accountProvisioning.setPassword(id, {
+    const { password, expires_at: expiresAt } = await accountProvisioning.setPassword(id, {
       password: supplied || null,
       mustChange: false,
       actorId: req.user.userId,
@@ -853,16 +853,63 @@ router.post('/users/:id/password', authenticateToken, adminOnly, async (req, res
     // admin does not know about.
     await require('../../utils/activation').revokeActivationTokens(id, 'activate').catch(() => {});
 
-    // Never log the password itself — only that a reset happened, and whether
-    // the admin chose it or the server generated it.
+    // Mail the user their own copy — but only a GENERATED password, and only if
+    // the caller did not opt out. An admin who typed a specific password is
+    // doing something deliberate (a shared lab machine, a credential read out
+    // over the phone) and putting that choice in a mailbox unasked is a
+    // different act from delivering one the server just invented.
+    let mail = null;
+    if (generated && req.body?.notify !== false) {
+      const mailer = require('../../utils/mailer');
+      if (mailer.mailEnabled() && mailer.mailKey() && mailer.checkRecipient(user.email).ok) {
+        let siteName = 'CyberHub';
+        try {
+          const s = await cybercoreQuery(`SELECT value FROM cybercore_site_settings WHERE key = 'site_name'`);
+          if (s.rows[0]?.value) siteName = s.rows[0].value;
+        } catch { /* branding is cosmetic; it must not block the reset */ }
+
+        try {
+          const body = require('../../utils/email-templates').credentialsIssued({
+            siteName,
+            publicUrl: mailer.publicUrl(),
+            firstName: user.first_name,
+            username: user.username,
+            password: generated,
+            expiresAt,
+          });
+          mail = await mailer.enqueue({
+            to: user.email,
+            toUserId: id,
+            templateKey: 'credentialsIssued',
+            subject: body.subject,
+            text: body.text,
+            html: body.html,
+            context: { reset_by: req.user.userId },
+            requestedBy: req.user.userId,
+          });
+        } catch (err) {
+          // The password is already changed. Losing the notification is
+          // recoverable — throwing here would tell the admin the reset failed
+          // when it did not.
+          console.warn('[Users] Could not queue credentials mail:', err.message);
+          mail = { status: 'suppressed', reason: err.message };
+        }
+      }
+    }
+
+    // Never log the password itself — only that a reset happened, whether the
+    // admin chose it or the server generated it, and whether it was mailed.
     logActivity(req, 'user_password_reset', 'cybercore_user', id, {
       email: user.email,
       source: generated ? 'generated' : 'admin-supplied',
+      emailed: mail ? mail.status === 'queued' : false,
     });
 
     res.json({
       success: true,
       ...(generated ? { generated_password: generated } : {}),
+      emailed: mail ? mail.status === 'queued' : false,
+      ...(mail && mail.status !== 'queued' ? { email_note: mail.reason } : {}),
       warnings: [
         'Sessions already signed in are not ended by this reset — their existing login stays '
         + 'valid until it expires (7 days by default).',

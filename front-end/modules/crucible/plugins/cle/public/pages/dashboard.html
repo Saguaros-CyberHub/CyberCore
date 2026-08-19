@@ -120,7 +120,17 @@
     document.addEventListener('DOMContentLoaded', async () => {
       const isLoggedIn = await Auth.requireAuth();
       if (!isLoggedIn) return;
-      Layout.init('cle');
+
+      // The /cle/* routes gate this server-side, but a cached page can still be
+      // restored by the back button. Bounce with a clear message rather than
+      // rendering a shell whose every panel says "Access denied".
+      if (!Auth.isInstructor()) {
+        Toast.error('Access Denied', 'You must be an instructor to access this page');
+        window.location.href = '/hub';
+        return;
+      }
+
+      Layout.init();
       loadDashboard();
     });
   </script>

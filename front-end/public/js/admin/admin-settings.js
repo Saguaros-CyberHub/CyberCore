@@ -197,3 +197,95 @@ async function saveModuleSettings() {
     Toast.error('Save Failed', e.message);
   }
 }
+
+// ============================================================================
+// EMAIL DELIVERY
+// ============================================================================
+//
+// Read-only by design: mail is configured by environment variables, and a
+// settings screen that appeared to change them would be lying. What this panel
+// is for is answering "will an invitation actually reach a student", which
+// previously required shell access to the container.
+
+/** One label/value row. Values come from the server, so they are escaped. */
+function mailRow(label, value, tone) {
+  const color = tone === 'bad' ? '#e53e3e' : tone === 'good' ? '#38a169' : 'inherit';
+  return `<div style="display: flex; justify-content: space-between; gap: 1rem; padding: 0.3rem 0; border-bottom: 1px solid var(--border-color, #e2e8f0);">
+      <span style="color: var(--gray-500);">${escHtml(label)}</span>
+      <span style="text-align: right; word-break: break-all; color: ${color};">${escHtml(value)}</span>
+    </div>`;
+}
+
+async function loadMailStatus() {
+  const box = document.getElementById('mailStatusBox');
+  if (!box) return;
+
+  try {
+    const s = await api('GET', '/mail/status');
+
+    // Both of these must be true for anything to send, and each fails in its
+    // own quiet way — enabled-without-a-key still records every message as
+    // suppressed, which looks identical to "working" from the outside.
+    const ready = s.enabled && s.encryption_key_configured;
+
+    let html = `<div style="padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.75rem; background: ${ready ? '#f0fff4' : '#fffbeb'}; color: ${ready ? '#276749' : '#b7791f'};">
+        <strong>${ready ? '✓ Mail is configured' : '⚠ Mail will not send'}</strong>
+      </div>`;
+
+    html += mailRow('Enabled', s.enabled ? 'yes' : 'no', s.enabled ? 'good' : 'bad');
+    html += mailRow('Encryption key', s.encryption_key_configured ? 'configured' : 'missing',
+      s.encryption_key_configured ? 'good' : 'bad');
+    html += mailRow('Relay', s.host ? `${s.host}:${s.port}` : '—');
+    html += mailRow('From', s.from || '—');
+    html += mailRow('Public URL', s.public_url || '— (activation links will be broken)',
+      s.public_url ? null : 'bad');
+    html += mailRow('Recipient allowlist',
+      (s.allowed_recipient_domains && s.allowed_recipient_domains.length)
+        ? s.allowed_recipient_domains.join(', ')
+        : 'any domain');
+    html += mailRow('Cohort domain (never emailed)', s.cohort_domain || '—');
+
+    const queue = s.queue || [];
+    html += `<div style="margin-top: 0.75rem;"><strong>Queue</strong></div>`;
+    html += queue.length
+      ? queue.map(q => mailRow(q.status, String(q.n), q.status === 'failed' ? 'bad' : null)).join('')
+      : `<div style="color: var(--gray-500); padding: 0.3rem 0;">empty</div>`;
+
+    for (const hint of [s.hint, s.hint_key].filter(Boolean)) {
+      html += `<div style="margin-top: 0.5rem; font-size: 0.78rem; color: #b7791f;">${escHtml(hint)}</div>`;
+    }
+
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = `<p style="color: #e53e3e; padding: 1rem 0;">Could not load mail status: ${escHtml(e.message)}</p>`;
+  }
+}
+
+async function sendMailTest() {
+  const to = document.getElementById('mailTestTo').value.trim();
+  const status = document.getElementById('mailTestStatus');
+  const btn = document.getElementById('mailTestBtn');
+
+  if (!to) {
+    Toast.warning('Missing', 'Enter an address to send the test to');
+    return;
+  }
+
+  Utils.setBtnLoading(btn, true, 'Sending…');
+  status.innerHTML = '';
+
+  try {
+    const result = await api('POST', '/mail/test', { to });
+    status.innerHTML = `<strong style="color: #38a169;">✓ Accepted by the relay</strong>
+      <div style="margin-top: 0.35rem; color: var(--gray-500);">${escHtml(result.note || '')}</div>`;
+    Toast.success('Test Sent', `The relay accepted a message for ${to}`);
+    loadMailStatus();
+  } catch (e) {
+    // A refusal here is the diagnostic, not an incidental error — it is the
+    // relay's own words about why it will not take the message.
+    status.innerHTML = `<strong style="color: #e53e3e;">Relay refused:</strong> ${escHtml(e.message)}`;
+    Toast.error('Test Failed', e.message);
+  } finally {
+    Utils.setBtnLoading(btn, false);
+  }
+}
