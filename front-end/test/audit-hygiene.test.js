@@ -124,6 +124,28 @@ test('ensureAuditLog mirrors every index the migration declares', () => {
   }
 });
 
+test('nothing follows the last semicolon in the migration', () => {
+  // Adminer splits a script on ';' and sends each piece as its own statement.
+  // A trailing comment block therefore becomes a final comment-only query,
+  // which Postgres answers with an empty result and Adminer surfaces as
+  // "Error in query: Unknown error." — after every real statement has already
+  // succeeded. It reads like a failed migration and is not one.
+  // (migrations/009_multi_vm_support.sql has the same latent papercut.)
+  const code = fs.readFileSync(path.join(ROOT, 'migrations', '032_audit_log.sql'), 'utf8')
+    .replace(/--.*$/gm, '');
+  assert.strictEqual(code.split(';').pop().trim(), '', 'no content after the final statement');
+});
+
+test('the migration and ensureAuditLog agree on the statement set', () => {
+  const code = fs.readFileSync(path.join(ROOT, 'migrations', '032_audit_log.sql'), 'utf8')
+    .replace(/--.*$/gm, '');
+  const statements = code.split(';').map(s => s.trim()).filter(Boolean);
+  // 1 table + 9 indexes + pg_trgm + the trigram index. If this count moves,
+  // ensureAuditLog() needs the same change or an existing deployment silently
+  // ends up with a different schema from a hand-applied one.
+  assert.strictEqual(statements.length, 12);
+});
+
 // Keys that must never appear in an audit call's metadata literal. `password`
 // covers temp_password / guac_password / password_hash; the rest are the live
 // credentials this platform actually hands out.

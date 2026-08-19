@@ -459,7 +459,13 @@ async function sendNow(to, message = {}) {
     });
     return { ok: true, messageId: info?.messageId || null, accepted: info?.accepted || [] };
   } catch (err) {
-    return { ok: false, error: err.message };
+    return {
+      ok: false,
+      error: err.message,
+      code: err.code || err.errno || null,
+      host: process.env.MAIL_HOST || null,
+      port: Number(process.env.MAIL_PORT) || 587,
+    };
   }
 }
 

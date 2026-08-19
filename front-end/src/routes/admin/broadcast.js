@@ -265,7 +265,14 @@ router.post('/broadcast/test', authenticateToken, adminOnly, async (req, res) =>
 
     logActivity(req, 'broadcast_test', 'email', null, { to: me.email, ok: result.ok });
 
-    if (!result.ok) return res.status(502).json({ error: result.error, sent: false });
+    if (!result.ok) {
+      // Log it as well as returning it. This used to go only to the browser, so
+      // container logs showed a bare "status: 502" with no reason - which is
+      // precisely the information needed to tell a wrong port from a blocked
+      // one from a refused sender.
+      console.error(`[Broadcast] Relay refused via ${result.host}:${result.port} -`, result.error, result.code || '');
+      return res.status(502).json({ error: result.error, code: result.code, sent: false });
+    }
 
     // A successful test is NOT proof a broadcast will send: sendNow() does not
     // need MAIL_ENCRYPT_KEY because it stores nothing, while enqueue() suppresses

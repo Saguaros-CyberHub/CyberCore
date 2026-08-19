@@ -1079,7 +1079,14 @@ router.post('/mail/test', authenticateToken, adminOnly, async (req, res) => {
 
     logActivity(req, 'mail_test', 'email', null, { to, ok: result.ok });
 
-    if (!result.ok) return res.status(502).json({ error: result.error, sent: false });
+    if (!result.ok) {
+      // Log it as well as returning it. This used to go only to the browser, so
+      // container logs showed a bare "status: 502" with no reason - which is
+      // precisely the information needed to tell a wrong port from a blocked
+      // one from a refused sender.
+      console.error(`[Mail] Relay refused via ${result.host}:${result.port} -`, result.error, result.code || '');
+      return res.status(502).json({ error: result.error, code: result.code, sent: false });
+    }
     res.json({
       sent: true,
       message_id: result.messageId,

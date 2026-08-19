@@ -46,6 +46,14 @@
 -- for operators who apply migrations by hand. Idempotent: safe to re-run.
 --
 --   psql -h 100.100.20.50 -U cactus-admin -d cybercore_db -f migrations/032_audit_log.sql
+--
+-- To roll back:  DROP TABLE IF EXISTS cybercore_audit_log;
+--
+-- That note lives up here rather than at the foot of the file on purpose.
+-- Adminer splits a script on ';' and sends each piece separately, so a trailing
+-- comment block becomes a final comment-only statement -- which Postgres
+-- answers with an empty result and Adminer reports as "Unknown error", after
+-- every real statement has already succeeded. Nothing may follow the last ';'.
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS cybercore_audit_log (
@@ -186,5 +194,3 @@ CREATE INDEX IF NOT EXISTS idx_audit_search_trgm
      action || ' ' || coalesce(reason,'')) gin_trgm_ops
   );
 
--- ROLLBACK
---   DROP TABLE IF EXISTS cybercore_audit_log;
