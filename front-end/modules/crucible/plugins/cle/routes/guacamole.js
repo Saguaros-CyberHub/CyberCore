@@ -5,6 +5,7 @@
  */
 
 const express = require('express');
+const audit = require('../../../../../src/utils/audit');
 const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
@@ -45,7 +46,20 @@ async function assertStudentInCourse(courseId, studentId, user) {
  * with the real action in metadata — a new enum value would need a migration and
  * would break older rows written by a previous deploy.
  */
-function logCredentialAccess({ actorId, studentId, courseId, action, detail }) {
+function logCredentialAccess({ req, actorId, studentId, courseId, action, detail }) {
+  // Also written to the unified audit log, where an admin can actually see it.
+  // The cle_activity_log insert below is kept so this plugin's own read at
+  // GET /active-sessions keeps working; it is the mis-filed copy, not the
+  // authoritative one.
+  audit.log({
+    req,
+    action: `access.${action}`,
+    source: 'cle',
+    target:     { type: 'guac_credential', id: studentId },
+    targetUser: { id: studentId },
+    metadata: { course_id: courseId, ...detail },
+  });
+
   return query(
     `INSERT INTO cle_activity_log (user_id, action_type, entity_type, entity_id, metadata)
      VALUES ($1, 'guac_session', 'guac_credential', $2, $3::jsonb)`,
@@ -74,6 +88,7 @@ router.get('/credentials', instructorOnly, async (req, res) => {
     const cred = await guacCreds.getGuacCredential(studentId, { create: false });
 
     logCredentialAccess({
+      req,
       actorId: req.user.userId, studentId, courseId,
       action: 'view_credential',
       detail: { available: cred.available, source: cred.source },
@@ -101,6 +116,7 @@ router.post('/credentials', instructorOnly, async (req, res) => {
     const cred = await guacCreds.getGuacCredential(studentId, { create: true });
 
     logCredentialAccess({
+      req,
       actorId: req.user.userId, studentId, courseId,
       action: 'issue_credential',
       detail: { available: cred.available, source: cred.source },
@@ -125,6 +141,7 @@ router.post('/credentials/reset', instructorOnly, async (req, res) => {
 
     const cred = await guacCreds.resetGuacCredential(studentId);
     logCredentialAccess({
+      req,
       actorId: req.user.userId, studentId, courseId,
       action: 'reset_credential', detail: { username: cred.username },
     });

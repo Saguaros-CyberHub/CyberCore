@@ -80,11 +80,19 @@ function paintBroadcastMailBanner() {
   const sendBtn = document.getElementById('broadcastSendBtn');
 
   if (ready) {
+    const notes = [];
     const allow = (s.allowed_recipient_domains || []);
-    box.innerHTML = allow.length
+    if (allow.length) {
+      notes.push(`<strong>This server only delivers to ${escHtml(allow.join(', '))}.</strong>
+        Everyone outside those domains is suppressed, so an "all users" audience may reach far fewer people than it names.`);
+    }
+    // Config that parses fine and still cannot deliver - worth saying before a
+    // send hangs rather than after.
+    if (s.hint_port) notes.push(escHtml(s.hint_port));
+
+    box.innerHTML = notes.length
       ? `<div style="padding: 0.6rem 0.85rem; border-radius: 8px; background: #fffbeb; color: #b7791f;">
-           <strong>&#9888; This server only delivers to ${escHtml(allow.join(', '))}.</strong>
-           Everyone outside those domains is suppressed, so an "all users" audience may reach far fewer people than it names.
+           &#9888; ${notes.join('<div style="margin-top: 0.4rem;"></div>')}
          </div>`
       : '';
     if (sendBtn) { sendBtn.disabled = false; sendBtn.style.opacity = '1'; }

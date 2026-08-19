@@ -25,6 +25,7 @@ const { authenticateToken, requireRole } = require('../../../../../src/middlewar
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
+const audit = require('../../../../../src/utils/audit');
 
 const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
 const { getOrGenerateVulnApp } = require('../utils/vuln-app-generator');
@@ -587,6 +588,18 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
       assetSelection: asset_selection,
       vulnAppOpts: vuln_app || {}
     });
+    audit.log({
+      req,
+      action: 'profile_lane.deployed',
+      source: 'ciab',
+      target: { type: 'group', id: result.group_id, label: group_name },
+      metadata: {
+        profile_id, num_lanes: parseInt(num_lanes, 10),
+        max_students: max_students != null ? parseInt(max_students, 10) : null,
+        attack_boxes: attack_boxes !== false,
+        subnet_scheme: subnet_scheme || 'v2',
+      },
+    });
     res.status(202).json({ success: true, ...result });
   } catch (err) {
     const status = err.statusCode || 500;
@@ -764,6 +777,18 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       [groupId, vxlanIds.length]
     );
 
+    audit.log({
+      req,
+      action: 'profile_lane.lanes_added',
+      source: 'ciab',
+      target: { type: 'group', id: groupId, label: group.group_name },
+      metadata: {
+        added: laneAllocations.length,
+        vxlan_ids: laneAllocations.map(a => a.vxlanId),
+        total_lanes_now: parseInt(group.num_lanes, 10) + laneAllocations.length,
+      },
+    });
+
     res.status(202).json({
       success: true,
       group_id: groupId,
@@ -929,6 +954,13 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
     await query(`UPDATE ciab_profile_lane_jobs SET status='pending', error_msg=NULL, started_at=NULL, finished_at=NULL WHERE id=$1`, [job.id]);
     await cybercoreQuery(`UPDATE cybercore_lane SET status='deploying', updated_at=NOW() WHERE lane_id=$1`, [laneId]);
 
+    audit.log({
+      req,
+      action: 'profile_lane.retried',
+      source: 'ciab',
+      target: { type: 'lane', id: laneId },
+      metadata: { group_id: req.params.groupId, job_id: job.id },
+    });
     res.status(202).json({ success: true, message: 'Retry started', lane_id: laneId, job_id: job.id });
 
     // Re-extract the company domain from the group's frozen profile snapshot
@@ -1037,6 +1069,9 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     }
 
     const errors = [];
+    // Populated by the cybercore_user DELETE further down — the only point at
+    // which these auto-provisioned accounts still have names.
+    let deletedStudents = [];
     for (const job of jobsRes.rows) {
       const result = await teardownLane({ laneId: job.lane_id, vmIds: job.vm_ids || [] });
       if (result.errors && result.errors.length > 0) errors.push(...result.errors);
@@ -1059,9 +1094,13 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
       }
       try {
         const r = await cybercoreQuery(
-          `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) AND username LIKE '%@clinic.local'`,
+          `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) AND username LIKE '%@clinic.local'
+           RETURNING user_id, email`,
           [studentIds]
         );
+        // Captured here because this DELETE is the last moment these accounts
+        // exist; afterwards there is nothing left to name in the audit row.
+        deletedStudents = r.rows || [];
         console.log(`[CIAB Teardown] ${group.group_name}: deleted ${r.rowCount}/${studentIds.length} auto-provisioned student account(s)`);
         if (r.rowCount < studentIds.length) {
           errors.push(`only ${r.rowCount}/${studentIds.length} student accounts deleted — check FK constraints`);
@@ -1099,6 +1138,19 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
 
     await query(`UPDATE ciab_profile_lane_groups SET status='deleted', updated_at=NOW() WHERE id=$1`,
                 [req.params.groupId]);
+
+    audit.batch({
+      req,
+      source: 'ciab',
+      action: 'profile_lane.group_destroyed',
+      targetAction: 'user.deleted',
+      target: { type: 'group', id: req.params.groupId, label: group.group_name },
+      metadata: { group_name: group.group_name, reason: 'profile_lane_teardown', errors: errors.length },
+      targets: deletedStudents.map(u => ({
+        id: u.user_id, label: u.email,
+        metadata: { group_name: group.group_name, auto_provisioned: true },
+      })),
+    });
 
     res.json({
       success: true,

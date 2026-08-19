@@ -27,6 +27,7 @@ const { buildDeployPreview } = require('../../../../../src/middleware/deployment
 const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
 const { buildLaneTopology } = require('../../../../../src/utils/lane-topology');
 const laneProvision = require('../utils/lane-provision');
+const audit = require('../../../../../src/utils/audit');
 const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
 const {
   resolveTargetStudents: resolveStudents,
@@ -276,6 +277,16 @@ router.post('/provision', instructorOnly, async (req, res) => {
       ...(skipped.length ? { skipped } : {}),
     });
 
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'vm.provisioned',
+      targetAction: 'vm.provisioned',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      metadata: { course_id: courseId, template: template.os_name, template_id, scope: 'selected' },
+      targets: students.map(st => ({ id: st.id, label: st.email, metadata: { course_id: courseId, template_id } })),
+    });
+
     startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students, resources });
   } catch (error) {
     console.error('[CLE] Provision VMs error:', error.message);
@@ -349,6 +360,16 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
       ...(skipped.length ? { skipped } : {}),
     });
 
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'vm.provisioned_bulk',
+      targetAction: 'vm.provisioned',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      metadata: { course_id: courseId, template: template.os_name, template_id, scope: 'whole_class' },
+      targets: students.map(st => ({ id: st.id, label: st.email, metadata: { course_id: courseId, template_id } })),
+    });
+
     startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students, resources });
   } catch (error) {
     console.error('[CLE] Provision-all error:', error.message);
@@ -410,6 +431,16 @@ router.get('/:laneId/console', instructorOnly, async (req, res) => {
     try { guacToken = (await mintGuacToken()).authToken; } catch (e) {
       console.warn(`[CLE] Guac token fetch failed: ${e.message}`);
     }
+
+    // An instructor opening a console on a student's machine is exactly the
+    // kind of access an admin needs to be able to review after the fact.
+    audit.log({
+      req,
+      action: 'access.console_opened',
+      source: 'cle',
+      target: { type: 'lane', id: laneId },
+      metadata: { course_id: courseId, connection_id: connId },
+    });
 
     res.json({
       launchUrl: buildGuacLaunchUrl(connId),
@@ -481,6 +512,13 @@ router.delete('/:laneId', instructorOnly, async (req, res) => {
     if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found in this course' });
 
     const result = await laneProvision.teardownLane(laneId);
+    audit.log({
+      req,
+      action: 'vm.destroyed',
+      source: 'cle',
+      target: { type: 'lane', id: laneId },
+      metadata: { course_id: courseId },
+    });
     res.json({ success: true, message: 'Workstation lane removed', ...result });
   } catch (error) {
     console.error('[CLE] Delete VM error:', error.message);

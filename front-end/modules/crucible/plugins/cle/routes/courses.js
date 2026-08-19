@@ -10,6 +10,7 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { reserveLabNetwork, teardownLabNetwork } = require('../../../../../src/utils/lab-network-provision');
 const laneProvision = require('../utils/lane-provision');
+const audit = require('../../../../../src/utils/audit');
 
 const instructorOnly = requireRole('instructor', 'admin');
 const adminOnly = requireRole('admin');
@@ -189,6 +190,14 @@ router.post('/', adminOnly, async (req, res) => {
       console.error('[CLE] Background lab provision crashed:', err.message)
     );
 
+    audit.log({
+      req,
+      action: 'course.created',
+      source: 'cle',
+      target: { type: 'course', id: course.course_id, label: course.course_name },
+      metadata: { code: course.code, instructor_id: course.instructor_id, max_students: course.max_students },
+    });
+
     res.status(201).json(course);
   } catch (error) {
     console.error('[CLE] Create course error:', error.message);
@@ -249,14 +258,15 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
 
     // Verify instructor owns this course or admin
     let ownerResult;
+    const OWNER_COLUMNS = 'course_id, course_name, description, code, instructor_id, is_active';
     if (userRole === 'admin') {
       ownerResult = await query(`
-        SELECT course_id FROM cle_course
+        SELECT ${OWNER_COLUMNS} FROM cle_course
         WHERE course_id = $1
       `, [courseId]);
     } else {
       ownerResult = await query(`
-        SELECT course_id FROM cle_course
+        SELECT ${OWNER_COLUMNS} FROM cle_course
         WHERE course_id = $1 AND instructor_id = $2
       `, [courseId, instructorId]);
     }
@@ -264,6 +274,8 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
     if (ownerResult.rows.length === 0) {
       return res.status(403).json({ error: 'You do not have permission to modify this course' });
     }
+    // Prior values, for the audit row's from/to diff.
+    const existing = ownerResult.rows[0];
 
     // Update course
     const updateResult = await query(`
@@ -279,7 +291,22 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
       RETURNING course_id, course_name, description, code, instructor_id, is_active, updated_at
     `, [course_name, description, code, instructor_id, is_active, courseId]);
 
-    res.json(updateResult.rows[0]);
+    const after = updateResult.rows[0];
+    const changes = {};
+    for (const field of ['course_name', 'description', 'code', 'instructor_id', 'is_active']) {
+      if (existing && String(existing[field]) !== String(after[field])) {
+        changes[field] = { from: existing[field], to: after[field] };
+      }
+    }
+    audit.log({
+      req,
+      action: 'course.updated',
+      source: 'cle',
+      target: { type: 'course', id: courseId, label: after.course_name },
+      changes,
+    });
+
+    res.json(after);
   } catch (error) {
     console.error('[CLE] Update course error:', error.message);
     res.status(500).json({ error: error.message });
@@ -344,6 +371,17 @@ router.delete('/:courseId', adminOnly, async (req, res) => {
 
     // Delete course (cascades to cle_* child records).
     await query(`DELETE FROM cle_course WHERE course_id = $1`, [courseId]);
+
+    audit.log({
+      req,
+      action: 'course.deleted',
+      source: 'cle',
+      target: { type: 'course', id: courseId },
+      metadata: {
+        lanes_removed: laneTeardown.lanes_deleted,
+        vms_destroyed: laneTeardown.vms_destroyed,
+      },
+    });
 
     res.json({
       success: true,

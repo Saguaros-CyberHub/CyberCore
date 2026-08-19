@@ -12,6 +12,7 @@ const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { query } = require('../../utils/db');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { logActivity } = require('../../middleware/activity-logger');
+const audit = require('../../utils/audit');
 // The single place local accounts are minted. Replaced four divergent
 // implementations that disagreed about bcrypt cost, username derivation, and —
 // the bug that mattered — whether the stored email was lowercased.
@@ -276,6 +277,16 @@ router.patch('/settings/modules', authenticateToken, adminOnly, async (req, res)
     if (!Array.isArray(modules)) modules = [];
     if (!Array.isArray(plugins)) plugins = [];
 
+    // Read current state first so the audit row can carry a real from/to per
+    // module rather than a count.
+    const beforeState = new Map();
+    try {
+      const cur = await cybercoreQuery('SELECT key, active FROM cybercore_module');
+      for (const row of cur.rows) beforeState.set(row.key, row.active);
+    } catch (err) {
+      console.warn('[Settings] Could not snapshot module state for audit:', err.message);
+    }
+
     for (const mod of modules) {
       if (!mod.key) continue;
       try {
@@ -300,8 +311,24 @@ router.patch('/settings/modules', authenticateToken, adminOnly, async (req, res)
       }
     }
 
-    logActivity(req, 'settings_update', 'cybercore_module', null,
-      { modules_updated: modules.length, plugins_updated: plugins.length });
+    const moduleChanges = {};
+    for (const item of [...modules, ...plugins]) {
+      if (!item.key) continue;
+      const before = beforeState.get(item.key);
+      const after = item.enabled === true;
+      if (before !== undefined && before !== after) moduleChanges[item.key] = { from: before, to: after };
+    }
+    audit.log({
+      req,
+      action: 'config.modules_updated',
+      target: { type: 'setting', id: 'cybercore_module' },
+      changes: moduleChanges,
+      metadata: {
+        modules_submitted: modules.length,
+        plugins_submitted: plugins.length,
+        changed: Object.keys(moduleChanges),
+      },
+    });
 
     res.json({
       success: true,
@@ -560,6 +587,17 @@ router.patch('/users/:id', authenticateToken, adminOnly, async (req, res) => {
         [id]
       );
       if (admins.rows[0].n === 0) {
+        // Its own event: an attempt to remove the last admin is a distinct
+        // thing to see in the log, not a generic failed update.
+        audit.log({
+          req,
+          action: 'user.update_denied',
+          status: 'denied',
+          reason: 'last_admin',
+          target:     { type: 'user', id, label: user.email },
+          targetUser: { id, label: user.email },
+          metadata: { attempted: { role: updates.role, active: updates.active } },
+        });
         return res.status(409).json({
           error: 'This is the last active admin — promote another admin before changing this one',
         });
@@ -659,7 +697,21 @@ router.patch('/users/:id', authenticateToken, adminOnly, async (req, res) => {
         changed[field] = { from: user[field], to: updates[field] };
       }
     }
-    logActivity(req, 'user_updated', 'cybercore_user', id, { email: user.email, changed });
+    const promotedToStaff = changed.role
+      && ['admin', 'instructor'].includes(String(updates.role))
+      && !['admin', 'instructor'].includes(String(user.role));
+
+    audit.log({
+      req,
+      action: promotedToStaff ? 'user.promoted_to_staff' : 'user.updated',
+      target:     { type: 'user', id, label: user.email },
+      targetUser: { id, label: user.email },
+      changes: changed,
+      metadata: {
+        email: user.email,
+        ...(promotedToStaff ? { provisioning_cleared: true } : {}),
+      },
+    });
 
     res.json({
       success: true,
@@ -993,6 +1045,13 @@ router.get('/mail/status', authenticateToken, adminOnly, async (req, res) => {
       ...(mailer.mailKey() ? {} : {
         hint_key: 'No MAIL_ENCRYPT_KEY (or MFA_ENCRYPT_KEY / GUAC_ENCRYPT_KEY) is set, so message bodies cannot be stored securely and every message will be suppressed.',
       }),
+      // The bundled relay binds submission (587) only, so port 25 does not get
+      // refused — it gets dropped, and the send hangs for the full connection
+      // timeout before reporting a bare "timeout". Naming it here turns a
+      // 20-minute network hunt into a one-line env change.
+      ...(String(process.env.MAIL_HOST || '') === 'mailrelay' && (Number(process.env.MAIL_PORT) || 587) === 25 ? {
+        hint_port: 'MAIL_HOST is the bundled relay but MAIL_PORT is 25, and that relay listens on 587 (submission) only. Sends will hang until they time out. Set MAIL_PORT=587.',
+      } : {}),
     });
   } catch (error) {
     console.error('[Mail] Status error:', error.message);

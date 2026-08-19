@@ -36,6 +36,7 @@ const templates = require('../../../../../src/utils/email-templates');
 const { query } = require('../utils/db');
 const { getManagedCourse } = require('../utils/course-access');
 const roster = require('../utils/roster');
+const audit = require('../../../../../src/utils/audit');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -432,6 +433,22 @@ router.post('/import', instructorOnly, async (req, res) => {
       },
     });
 
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'enrollment.roster_imported',
+      targetAction: 'enrollment.student_added',
+      target: { type: 'course', id: course.course_id, label: course.course_name },
+      metadata: { import_id: record.import_id, import_source: 'csv', ...finalSummary },
+      targets: [
+        ...created.map(c => ({ id: c.user_id, label: c.email, metadata: { course_id: course.course_id, new_account: true } })),
+        ...enrolled.filter(e => !e.already_enrolled).map(e => ({
+          id: e.user_id, label: e.email,
+          metadata: { course_id: course.course_id, new_account: false, elevated: !!e.elevated },
+        })),
+      ],
+    });
+
     const runWarnings = [];
     if (!mailer.mailEnabled() && created.length > 0) {
       runWarnings.push(
@@ -610,6 +627,22 @@ router.post('/cohort', instructorOnly, async (req, res) => {
       courseId: course.course_id,
       action: 'cohort_generate',
       detail: { import_id: record.import_id, ...finalSummary, slug: plan.slug },
+    });
+
+    // credentials[] carries plaintext passwords; only id and email travel into
+    // the audit row. redact() would strip a stray one, but not passing it is
+    // the actual guarantee.
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'enrollment.cohort_generated',
+      targetAction: 'enrollment.student_added',
+      target: { type: 'course', id: course.course_id, label: course.course_name },
+      metadata: { import_id: record.import_id, import_source: 'cohort', slug: plan.slug, ...finalSummary },
+      targets: credentials.map(c => ({
+        id: c.user_id, label: c.email,
+        metadata: { course_id: course.course_id, username: c.username, new_account: true },
+      })),
     });
 
     res.json({

@@ -92,6 +92,22 @@
       display: none; z-index: 1000; align-items: center; justify-content: center;
     }
     .modal-overlay.active { display: flex; }
+
+    /* Audit detail slide-over. Not a .modal-overlay: you scan the list and
+       want the row context still visible while reading one entry. */
+    .audit-drawer {
+      position: fixed; top: 0; right: 0; height: 100vh;
+      width: min(560px, 100%);
+      background: var(--bg-card, white);
+      border-left: 1px solid var(--border-color);
+      box-shadow: -4px 0 24px rgba(0,0,0,0.18);
+      transform: translateX(100%);
+      transition: transform 0.2s ease;
+      z-index: 1200; display: flex; flex-direction: column;
+    }
+    .audit-drawer.open { transform: translateX(0); }
+    .audit-drawer h4 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--gray-500); }
+    .audit-drawer pre { white-space: pre-wrap; word-break: break-word; }
     .modal-content {
       background: var(--bg-card, white); border-radius: 12px; width: 90%; max-width: 560px;
       max-height: 80vh; overflow-y: auto; padding: 1.5rem;
@@ -367,7 +383,7 @@
           <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lanes</button>
           <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
-          <button class="tab-btn" onclick="switchTab('actlog', this)">Activity Log</button>
+          <button class="tab-btn" onclick="switchTab('actlog', this); auditTabActivate()">Activity Log</button>
           <button class="tab-btn" onclick="switchTab('challenges', this)">Challenge Templates</button>
           <button class="tab-btn" onclick="switchTab('workstation-templates', this)">Workstation Templates</button>
           <button class="tab-btn" onclick="switchTab('crucible-events', this); loadCrucibleEvents()">Crucible Events</button>
@@ -520,29 +536,82 @@
 
         <!-- TAB: Activity Log -->
         <div class="tab-content" id="tab-actlog">
-          <div class="action-bar">
-            <input type="text" id="actlogSearch" placeholder="Search actions, users..." style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 200px;">
-            <select id="actlogAction" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
-              <option value="">All Actions</option>
-              <option value="login">Login</option>
-              <option value="logout">Logout</option>
-              <option value="register">Register</option>
-              <option value="deploy_lane">Deploy Lane</option>
-              <option value="deploy_group">Deploy Group</option>
-              <option value="delete_lane">Delete Lane</option>
-              <option value="delete_group">Delete Group</option>
-              <option value="toggle_accounts">Toggle Accounts</option>
-              <option value="submission">Submission</option>
-              <option value="review">Review</option>
-              <option value="profile_generation">Profile Generation</option>
+          <!-- Quick filters for the questions actually asked, so the common
+               case is one click rather than four dropdowns. -->
+          <div class="action-bar" style="flex-wrap: wrap;">
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({category:'auth', status:'failure'})">Failed logins</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({status:'denied'})">Denied</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({actor_role:'instructor'})">Instructor activity</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({category:'enrollment'})">Students added</button>
+            <button class="btn btn-sm btn-outline" onclick="auditApplyChip({category:'infra'})">VMs &amp; lanes</button>
+            <button class="btn btn-sm btn-outline" onclick="auditReset()">Reset</button>
+          </div>
+
+          <div class="action-bar" style="flex-wrap: wrap;">
+            <input type="text" id="auditSearch" placeholder="Search actor, target, action…" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 220px;">
+            <select id="auditCategory" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">All Categories</option>
+              <option value="user">Users</option>
+              <option value="enrollment">Enrollment</option>
+              <option value="infra">VMs &amp; Lanes</option>
+              <option value="auth">Auth</option>
+              <option value="access">Access</option>
+              <option value="config">Config</option>
+              <option value="content">Content</option>
             </select>
-            <button class="btn btn-outline" onclick="loadActivityLog()">Search</button>
+            <!-- Options are injected by loadAuditFacets(); never hardcode this
+                 list again, that is what went stale last time. -->
+            <select id="auditAction" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; max-width: 260px;">
+              <option value="">All Actions</option>
+            </select>
+            <select id="auditStatus" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">Any Status</option>
+              <option value="success">Success</option>
+              <option value="failure">Failure</option>
+              <option value="denied">Denied</option>
+            </select>
+            <select id="auditSource" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="">All Sources</option>
+              <option value="core">Core</option>
+              <option value="cle">CLE</option>
+              <option value="ciab">CIAB</option>
+              <option value="crucible">Crucible</option>
+              <option value="system">System</option>
+            </select>
+          </div>
+
+          <div class="action-bar" style="flex-wrap: wrap;">
+            <input type="text" id="auditActor" list="auditActorList" placeholder="Actor (email)" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 220px;">
+            <datalist id="auditActorList"></datalist>
+            <input type="text" id="auditTargetUser" placeholder="Target student (email or id)" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem; width: 220px;">
+            <input type="date" id="auditFrom" title="From" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+            <input type="date" id="auditTo" title="To" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+            <button class="btn btn-outline" onclick="loadAuditLog(0)">Search</button>
+            <button class="btn btn-outline" onclick="exportAuditCsv(this)">Export CSV</button>
+            <select id="auditPageSize" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
+              <option value="50">50 / page</option>
+              <option value="100">100 / page</option>
+              <option value="200">200 / page</option>
+            </select>
             <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; margin-left: auto;">
-              <input type="checkbox" id="actlogAutoRefresh" style="width: auto;"> Auto-refresh
+              <input type="checkbox" id="auditAutoRefresh" style="width: auto;"> Auto-refresh
             </label>
           </div>
-          <div id="actlogTable"></div>
-          <div id="actlogPagination" style="display: flex; gap: 0.5rem; justify-content: center; margin-top: 0.75rem;"></div>
+
+          <div id="auditActorCard" style="display: none; background: var(--bg-card, white); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.6rem 0.85rem; margin-bottom: 0.75rem; font-size: 0.85rem;"></div>
+
+          <div id="auditTable"></div>
+          <div id="auditPagination" style="display: flex; gap: 0.5rem; align-items: center; justify-content: center; margin-top: 0.75rem;"></div>
+        </div>
+
+        <!-- Detail drawer. A slide-over rather than a modal so the list stays
+             visible while reading one entry. -->
+        <div id="auditDrawer" class="audit-drawer">
+          <div style="display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 1rem; border-bottom: 1px solid var(--border-color);">
+            <strong>Audit Event</strong>
+            <button class="btn btn-sm btn-outline" onclick="closeAuditDrawer()">Close</button>
+          </div>
+          <div id="auditDrawerBody" style="padding: 1rem; overflow-y: auto; height: calc(100vh - 3.5rem);"></div>
         </div>
 
         <!-- TAB: Challenges -->
@@ -1957,7 +2026,7 @@ msmith@arizona.edu, Mark, Smith"
   <script src="/js/admin/admin-users.js"></script>
   <script src="/js/admin/admin-sessions.js"></script>
   <script src="/js/admin/admin-lanes.js"></script>
-  <script src="/js/admin/admin-activity-log.js"></script>
+  <script src="/js/admin/admin-audit.js"></script>
   <script src="/js/admin/admin-challenges.js"></script>
   <script src="/js/admin/admin-vuln-scripts.js"></script>
   <script src="/js/admin/admin-workstation-templates.js"></script>

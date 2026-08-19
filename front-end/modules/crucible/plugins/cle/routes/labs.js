@@ -30,6 +30,7 @@ const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const { getManagedCourse } = require('../utils/course-access');
 const { resolveTargetStudents, excludeStudentsWithLab, combineExclusions } = require('../utils/students');
 const vulnLab = require('../utils/vuln-lab-provision');
+const audit = require('../../../../../src/utils/audit');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -470,6 +471,24 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       ...(skipped.length ? { skipped } : {}),
     });
 
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'lab.deployed',
+      targetAction: 'lane.deployed',
+      target: { type: 'material', id: labId, label: challenge.name },
+      metadata: {
+        course_id: courseId, mode, challenge_key: challenge.challenge_key,
+        template_id, vm_count: caps.vm_count,
+        ...(skipped.length ? { skipped: skipped.length } : {}),
+      },
+      targets: students.map(st => ({
+        id: st.id,
+        label: st.email,
+        metadata: { course_id: courseId, material_id: labId, mode, challenge_key: challenge.challenge_key },
+      })),
+    });
+
     // The response is already sent, so a failure here can only be reported
     // through the lab's own state. Record it on the material row so GET /
     // can explain why nothing appeared, instead of showing an empty lab.
@@ -563,6 +582,17 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
     }
 
     await query(`DELETE FROM cle_course_material WHERE material_id = $1 AND course_id = $2`, [labId, courseId]);
+    audit.log({
+      req,
+      action: 'lab.destroyed',
+      source: 'cle',
+      target: { type: 'material', id: labId },
+      metadata: {
+        course_id: courseId,
+        lanes_destroyed: teardown.lanes_destroyed ?? null,
+        vms_destroyed: teardown.vms_destroyed ?? null,
+      },
+    });
     res.json({ success: true, message: 'Lab removed', ...teardown });
   } catch (error) {
     console.error('[CLE] Delete lab error:', error.message);
@@ -671,6 +701,15 @@ router.delete('/:labId/students/:userId', instructorOnly, async (req, res) => {
       });
     }
 
+    audit.log({
+      req,
+      action: 'lane.destroyed',
+      source: 'cle',
+      target:     { type: 'material', id: labId },
+      targetUser: { id: userId, label: students[0].email },
+      metadata: { course_id: courseId, material_id: labId, per_student: true },
+    });
+
     res.json({
       success: true,
       message: `Tore down ${students[0].email}'s machines for this lab`,
@@ -775,6 +814,15 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
     const progress = laneDeployer.initProgress(claimed, `Redeploy ${challenge.name} — ${student.email}`, 1);
     laneDeployer.setPhase(progress, 'preparing', 'Tearing down the current deployment');
     ctx = { course, challenge, student, mode };
+
+    audit.log({
+      req,
+      action: 'lane.redeployed',
+      source: 'cle',
+      target:     { type: 'material', id: labId, label: challenge.name },
+      targetUser: { id: userId, label: student.email },
+      metadata: { course_id: courseId, mode, reset_flags: resetFlags, challenge_key: challenge.challenge_key },
+    });
 
     res.status(202).json({
       success: true,

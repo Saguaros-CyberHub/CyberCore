@@ -111,7 +111,10 @@ function transport() {
   if (_transport) return _transport;
   _transport = nodemailer.createTransport({
     host: process.env.MAIL_HOST,
-    port: Number(process.env.MAIL_PORT) || 25,
+    // 587, matching the bundled relay that MAIL_HOST also defaults to (it binds
+    // submission only). Every external relay documented in example.env — Resend,
+    // SES, Gmail — is 587 as well, so 25 was the one port nothing here uses.
+    port: Number(process.env.MAIL_PORT) || 587,
     secure: process.env.MAIL_SECURE === 'true',
     // The relay sits on cybercore-net with no published port, so submission is
     // unauthenticated by design. Credentials are only set when relaying to an
@@ -238,14 +241,25 @@ async function enqueue(msg = {}) {
   const storeBody = status === 'queued';
 
   try {
+    // Every parameter this statement encrypts is cast explicitly, and the cast
+    // on $8's FIRST reference is the load-bearing one.
+    //
+    // Postgres fixes a parameter's type where it first appears. $8 used to first
+    // appear as a bare "$8 IS NOT NULL" - a NullTest, which supplies no type - so
+    // it stayed "unknown" and the whole INSERT failed to parse with "could not
+    // determine data type of parameter $8". Value-independent and therefore fatal
+    // to EVERY call, in every deployment, for every template. $6 escaped it only
+    // by luck of first appearing inside pgp_sym_encrypt(), which types its
+    // argument. The catch below turned that into a "suppressed" row rather than a
+    // throw, so the platform reported it had handled mail it had never queued.
     const result = await cybercoreQuery(
       `INSERT INTO cybercore_email_outbox
          (to_address, to_user_id, template_key, subject,
           body_text_cipher, body_html_cipher,
           status, max_attempts, last_error, context, requested_by)
        VALUES ($1, $2, $3, $4,
-               CASE WHEN $5::boolean THEN pgp_sym_encrypt($6, $7) END,
-               CASE WHEN $5::boolean AND $8 IS NOT NULL THEN pgp_sym_encrypt($8, $7) END,
+               CASE WHEN $5::boolean THEN pgp_sym_encrypt($6::text, $7::text) END,
+               CASE WHEN $5::boolean AND $8::text IS NOT NULL THEN pgp_sym_encrypt($8::text, $7::text) END,
                $9, $10, $11, $12::jsonb, $13)
        RETURNING email_id, status`,
       [

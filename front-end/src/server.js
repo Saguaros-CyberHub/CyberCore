@@ -632,6 +632,10 @@ async function start() {
     await require('./utils/activation').ensureActivationTokens();
     await require('./utils/mailer').ensureEmailOutbox();
 
+    // The unified audit trail (migrations/032_audit_log.sql). Non-fatal: a DDL
+    // permission problem must degrade to "no audit log", not "no server".
+    await require('./utils/audit').ensureAuditLog();
+
     // Drains queued mail in the background. No-ops when mail isn't configured,
     // so an offline deployment doesn't spin a pointless timer.
     require('./utils/email-worker').startEmailWorker();

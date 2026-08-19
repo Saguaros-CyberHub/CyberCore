@@ -23,6 +23,33 @@ const { cybercoreQuery } = require('./cybercore-db');
 const { generatePassword } = require('./password-generator');
 const { normalizeEmail, isEmailShaped } = require('./email-normalize');
 const guacCreds = require('./guac-credentials');
+const audit = require('./audit');
+
+/**
+ * Auditing happens HERE, not in the six route handlers that call this module,
+ * because this is the single path every local account is minted through. One
+ * instrumentation point therefore covers self-registration, admin single and
+ * batch create, group deploy, and the CLE roster import and cohort generator —
+ * and every future caller for free.
+ *
+ * There is no `req` at this depth, so the actor comes from the provenance the
+ * caller already supplies, and request context rides along in provenance.ctx
+ * (built by audit.ctx(req)) when the caller has one.
+ */
+function auditProvision(provenance = {}, action, { user, status = 'success', reason = null, metadata = {} }) {
+  return audit.log({
+    actor:   { userId: provenance.by || null, type: provenance.by ? 'user' : 'system' },
+    context: provenance.ctx || {},
+    action,
+    status,
+    reason,
+    target:     { type: 'user', id: user?.user_id, label: user?.email },
+    targetUser: { id: user?.user_id, label: user?.email },
+    metadata,
+    source: provenance.source || 'core',
+    eventGroupId: provenance.eventGroupId || null,
+  });
+}
 
 // One cost for the whole platform. The old split (10 in admin batch, 12
 // everywhere else) meant a roster-created account was measurably cheaper to
@@ -265,6 +292,14 @@ async function provisionAccount(spec = {}) {
       );
 
       taken.add(username);
+      auditProvision(provenance, 'user.created', {
+        user: result.rows[0],
+        metadata: {
+          via: provenance.via, ref: provenance.ref || null,
+          role, username, must_change_password: mustChange,
+          password_supplied: !!suppliedPassword,
+        },
+      });
       return {
         created: true,
         user: result.rows[0],
@@ -424,6 +459,11 @@ async function setPassword(userId, opts = {}) {
     [passwordHash, mustChange, expiresAt, userId]
   );
 
+  auditProvision({ by: opts.actorId, via: 'setPassword', ctx: opts.ctx }, 'user.password_set', {
+    user: { user_id: userId, email: user.email },
+    metadata: { must_change: mustChange, ttl_hours: opts.ttlHours || null, self: opts.actorId === userId },
+  });
+
   return { password, expires_at: expiresAt };
 }
 
@@ -471,9 +511,41 @@ async function completePasswordChange(userId, newPassword) {
  * and an enrolled admin is harmless. What must be impossible is an instructor
  * exercising account-level power over anyone who is not their own student.
  *
+ * A refusal here is an instructor reaching for account-level power over
+ * somebody who is not their student — the clearest privilege-escalation signal
+ * the platform has — so it is audited as status 'denied'. `opts.audit: false`
+ * suppresses that for canManageAccount(), which calls this speculatively on
+ * every row of a roster render and would otherwise fill the log with denials
+ * nobody attempted.
+ *
  * @throws {Error} with .status 403 or 409
  */
-function assertCourseProvisionedStudent(targetUser, caller, courseId) {
+function assertCourseProvisionedStudent(targetUser, caller, courseId, opts = {}) {
+  try {
+    checkCourseProvisionedStudent(targetUser, caller, courseId);
+  } catch (err) {
+    if (opts.audit !== false) {
+      audit.log({
+        actor: { userId: caller?.userId || null, email: caller?.email || null, role: caller?.role || null },
+        action: 'user.credential_action_denied',
+        status: 'denied',
+        reason: 'not_course_provisioned',
+        target:     { type: 'user', id: targetUser?.user_id, label: targetUser?.email },
+        targetUser: { id: targetUser?.user_id, label: targetUser?.email },
+        metadata: {
+          course_ref: courseId,
+          actor_role: caller?.role || null,
+          target_provisioned_via: targetUser?.provisioned_via || null,
+          message: err.message,
+        },
+        source: 'cle',
+      });
+    }
+    throw err;
+  }
+}
+
+function checkCourseProvisionedStudent(targetUser, caller, courseId) {
   if (!targetUser) throw httpError(404, 'User not found');
 
   // Admins already have POST /api/admin/users/:id/password; no reason to hold
@@ -512,7 +584,9 @@ function assertCourseProvisionedStudent(targetUser, caller, courseId) {
  */
 function canManageAccount(targetUser, caller, courseId) {
   try {
-    assertCourseProvisionedStudent(targetUser, caller, courseId);
+    // audit: false — this runs per row on every roster render; a speculative
+    // "would this be allowed" check is not an attempted action.
+    assertCourseProvisionedStudent(targetUser, caller, courseId, { audit: false });
     return true;
   } catch {
     return false;

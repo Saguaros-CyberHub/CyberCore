@@ -150,7 +150,8 @@ services:
       # note underneath, which is what makes that name resolvable at all.
       MAIL_ENABLED: ${MAIL_ENABLED:-false}
       MAIL_HOST: ${MAIL_HOST:-mailrelay}
-      MAIL_PORT: ${MAIL_PORT:-25}
+      # 587: the bundled relay below binds submission only, never 25.
+      MAIL_PORT: ${MAIL_PORT:-587}
       MAIL_SECURE: ${MAIL_SECURE:-false}
       MAIL_FROM: ${MAIL_FROM:-CyberHub <no-reply@localhost>}
       MAIL_REPLY_TO: ${MAIL_REPLY_TO:-}

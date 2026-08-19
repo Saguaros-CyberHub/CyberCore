@@ -255,7 +255,7 @@ async function loadMailStatus() {
       ? queue.map(q => mailRow(q.status, String(q.n), q.status === 'failed' ? 'bad' : null)).join('')
       : `<div style="color: var(--gray-500); padding: 0.3rem 0;">empty</div>`;
 
-    for (const hint of [s.hint, s.hint_key].filter(Boolean)) {
+    for (const hint of [s.hint, s.hint_key, s.hint_port].filter(Boolean)) {
       html += `<div style="margin-top: 0.5rem; font-size: 0.78rem; color: #b7791f;">${escHtml(hint)}</div>`;
     }
 

@@ -14,6 +14,7 @@ const { resolveSelfTarget } = require('../utils/students');
 const guacCreds = require('../../../../../src/utils/guac-credentials');
 const prov = require('../../../../../src/utils/account-provisioning');
 const activation = require('../../../../../src/utils/activation');
+const audit = require('../../../../../src/utils/audit');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -247,6 +248,15 @@ router.post('/', instructorOnly, async (req, res) => {
       RETURNING *
     `, [userId, courseId, enrollment_role || 'student']);
 
+    audit.log({
+      req,
+      action: 'enrollment.student_added',
+      source: 'cle',
+      target:     { type: 'course', id: courseId },
+      targetUser: { id: userId, label: user_email },
+      metadata: { course_id: courseId, enrollment_role: enrollment_role || 'student' },
+    });
+
     res.json({ success: true, enrollment: enrollResult.rows[0] });
   } catch (error) {
     console.error('[CLE] Add student error:', error.message);
@@ -271,6 +281,15 @@ router.delete('/:studentId', instructorOnly, async (req, res) => {
       SET status = 'dropped', updated_at = NOW()
       WHERE user_id = $1 AND course_id = $2
     `, [studentId, courseId]);
+
+    audit.log({
+      req,
+      action: 'enrollment.student_removed',
+      source: 'cle',
+      target:     { type: 'course', id: courseId },
+      targetUser: { id: studentId },
+      metadata: { course_id: courseId, soft_delete: true },
+    });
 
     res.json({ success: true, message: 'Student removed from course' });
   } catch (error) {

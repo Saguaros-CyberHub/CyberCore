@@ -16,6 +16,7 @@ router.use(require('./admin/groups'));
 router.use(require('./admin/lab-networks'));
 router.use(require('./admin/workstation-templates'));
 router.use(require('./admin/settings'));
+router.use(require('./admin/audit'));
 router.use(require('./admin/broadcast'));
 
 module.exports = router;

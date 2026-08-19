@@ -18,8 +18,36 @@ const { ensureGuacAccount } = require('../utils/guacamole');
 const mfa = require('../utils/mfa');
 const accountProvisioning = require('../utils/account-provisioning');
 const activation = require('../utils/activation');
+const audit = require('../utils/audit');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
+
+/**
+ * Audit an authentication event.
+ *
+ * Auth is the one place with no req.user to read an actor from — a failed
+ * login knows only the string somebody typed — so every call here uses the
+ * explicit-actor form. The typed identifier is recorded because "who is being
+ * guessed at" is the whole value of a failed-login trail; the password never
+ * is, in any form.
+ */
+function auditAuth(req, action, { user = null, email = null, status = 'success', reason = null, metadata = {} } = {}) {
+  return audit.log({
+    req,
+    actor: {
+      userId: user?.user_id ?? null,
+      email:  user?.email ?? email ?? null,
+      role:   user?.role ?? null,
+      type:   user?.user_id ? 'user' : 'anonymous',
+    },
+    action,
+    status,
+    reason,
+    target: user ? { type: 'user', id: user.user_id, label: user.email } : null,
+    metadata,
+    source: 'core',
+  });
+}
 
 // ============================================================================
 // VALIDATION RULES
@@ -321,6 +349,7 @@ router.post('/register', registerValidation, async (req, res) => {
     // issueSession keeps the cookie options in one place rather than a
     // hand-rolled copy that can drift.
     const session = issueSession(res, user);
+    auditAuth(req, 'auth.register', { user, metadata: { via: 'self_register' } });
 
     res.status(201).json({
       message: 'Registration successful',
@@ -349,17 +378,20 @@ router.post('/login', loginValidation, async (req, res) => {
     const user = await findUserForLogin(email);
 
     if (!user) {
+      auditAuth(req, 'auth.login', { email, status: 'failure', reason: 'unknown_user' });
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
     // Check if account is active
     if (!user.active || user.status !== 'active') {
+      auditAuth(req, 'auth.login', { user, status: 'failure', reason: 'account_disabled' });
       return res.status(403).json({ error: 'Account is deactivated. Please contact support.' });
     }
 
     // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password_hash);
     if (!isValidPassword) {
+      auditAuth(req, 'auth.login', { user, status: 'failure', reason: 'bad_password' });
       return res.status(401).json({ error: 'Invalid email or password' });
     }
 
@@ -385,6 +417,7 @@ router.post('/login', loginValidation, async (req, res) => {
     // Prove the second factor first, then rotate the weak credential.
     const gate = passwordChangeGate(user);
     if (gate?.expired) {
+      auditAuth(req, 'auth.login', { user, status: 'failure', reason: 'temp_password_expired' });
       return res.status(403).json({
         error: TEMP_PASSWORD_EXPIRED_MESSAGE,
         code: 'TEMP_PASSWORD_EXPIRED',
@@ -402,6 +435,7 @@ router.post('/login', loginValidation, async (req, res) => {
     );
 
     const session = issueSession(res, user);
+    auditAuth(req, 'auth.login', { user, metadata: { mfa: false } });
 
     res.json({
       message: 'Login successful',
@@ -461,7 +495,10 @@ router.post('/login/mfa', authenticateStage('mfa'), async (req, res) => {
         );
       }
     }
-    if (!ok) return res.status(401).json({ error: 'Invalid authentication code' });
+    if (!ok) {
+      auditAuth(req, 'auth.mfa_failed', { user, status: 'failure', reason: 'bad_totp' });
+      return res.status(401).json({ error: 'Invalid authentication code' });
+    }
 
     // The second factor is now proven, so the forced-password-change gate
     // applies here exactly as it does at the end of /login. Without this check
@@ -491,6 +528,7 @@ router.post('/login/mfa', authenticateStage('mfa'), async (req, res) => {
     await cybercoreQuery('UPDATE cybercore_user SET last_auth_at = NOW() WHERE user_id = $1', [userId]);
 
     const session = issueSession(res, user);
+    auditAuth(req, 'auth.login', { user, metadata: { mfa: true, ...recoveryInfo } });
 
     res.json({
       message: 'Login successful',
@@ -653,6 +691,9 @@ router.post('/mfa/disable', authenticate, async (req, res) => {
         WHERE user_id = $1`,
       [userId]
     );
+    auditAuth(req, 'auth.mfa_disabled', {
+      user: { user_id: userId, email: req.user.email, role: req.user.role },
+    });
     res.json({ message: 'MFA disabled' });
   } catch (error) {
     console.error('MFA disable error:', error);
@@ -730,7 +771,9 @@ router.post('/password/initial', authenticateStage('pwchange'), newPasswordValid
     // leaving it live would be a second way in that the user does not know about.
     await activation.revokeActivationTokens(userId, 'activate').catch(() => {});
 
+    auditAuth(req, 'auth.password_initial_set', { user: updated });
     const session = issueSession(res, updated);
+    auditAuth(req, 'auth.login', { user: updated, metadata: { via: 'password_initial' } });
     res.json({ message: 'Password set successfully', user: session.user, token: session.token });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
@@ -786,7 +829,9 @@ router.post('/activate', newPasswordValidation, async (req, res) => {
 
     await cybercoreQuery('UPDATE cybercore_user SET last_auth_at = NOW() WHERE user_id = $1', [redeemed.userId]);
 
+    auditAuth(req, 'auth.activated', { user: updated });
     const session = issueSession(res, updated);
+    auditAuth(req, 'auth.login', { user: updated, metadata: { via: 'activation' } });
     res.json({ message: 'Password set successfully', user: session.user, token: session.token });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
@@ -801,6 +846,9 @@ router.post('/activate', newPasswordValidation, async (req, res) => {
 router.post('/logout', authenticate, async (req, res) => {
   try {
     res.clearCookie('token');
+    auditAuth(req, 'auth.logout', {
+      user: { user_id: req.user.userId, email: req.user.email, role: req.user.role },
+    });
     res.json({ message: 'Logout successful' });
   } catch (error) {
     console.error('Logout error:', error);
@@ -959,6 +1007,9 @@ router.put('/password', authenticate, [
       actorId: req.user.userId,
     });
 
+    auditAuth(req, 'auth.password_changed', {
+      user: { user_id: req.user.userId, email: req.user.email, role: req.user.role },
+    });
     res.json({ message: 'Password changed successfully' });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });

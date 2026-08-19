@@ -5,6 +5,39 @@
  */
 
 const jwt = require('jsonwebtoken');
+const audit = require('../utils/audit');
+
+/**
+ * A 403 from requireRole is the clearest "somebody tried something they should
+ * not" signal the platform produces, and until now it vanished into a response
+ * body. Logging it here covers every gated route at once.
+ *
+ * Deduped for a minute per (user, route) so a broken client retrying in a loop
+ * cannot flood the table — the second attempt tells you nothing the first did
+ * not.
+ */
+const denialSeen = new Map();
+const DENIAL_TTL_MS = 60_000;
+
+function auditDenial(req, requiredRoles, userRole) {
+  const routePattern = req.route?.path ? `${req.baseUrl || ''}${req.route.path}` : (req.originalUrl || '').split('?')[0];
+  const key = `${req.user?.userId || 'anon'}:${routePattern}`;
+  const now = Date.now();
+  const last = denialSeen.get(key);
+  if (last && now - last < DENIAL_TTL_MS) return;
+  denialSeen.set(key, now);
+  if (denialSeen.size > 1000) {
+    for (const [k, t] of denialSeen) if (now - t > DENIAL_TTL_MS) denialSeen.delete(k);
+  }
+
+  audit.log({
+    req,
+    action: 'access.denied',
+    status: 'denied',
+    reason: 'role_denied',
+    metadata: { required_roles: requiredRoles, user_role: userRole },
+  });
+}
 
 /**
  * Middleware to authenticate JWT token
@@ -88,6 +121,7 @@ function requireRole(...roles) {
     const userRole = req.user.role || 'student';  // Added default role fallback
     
     if (!roles.includes(userRole)) {
+      auditDenial(req, roles, userRole);
       return res.status(403).json({ 
         error: 'Access denied. Insufficient permissions.',
         requiredRoles: roles,

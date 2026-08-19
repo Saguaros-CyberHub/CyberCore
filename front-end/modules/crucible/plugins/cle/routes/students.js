@@ -9,6 +9,7 @@ const router = express.Router();
 
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const audit = require('../../../../../src/utils/audit');
 
 // ============================================================================
 // LIST STUDENTS (per instructor's courses)
@@ -247,6 +248,12 @@ router.patch('/:studentId/:courseId/role', async (req, res) => {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
+    // Read the prior value first so the audit row carries a real from/to diff.
+    const before = await query(
+      `SELECT enrollment_role FROM cle_course_enrollment WHERE user_id = $1 AND course_id = $2`,
+      [studentId, courseId]
+    );
+
     // Update enrollment role
     const updateResult = await query(`
       UPDATE cle_course_enrollment
@@ -258,6 +265,16 @@ router.patch('/:studentId/:courseId/role', async (req, res) => {
     if (updateResult.rows.length === 0) {
       return res.status(404).json({ error: 'Enrollment not found' });
     }
+
+    audit.log({
+      req,
+      action: 'enrollment.role_changed',
+      source: 'cle',
+      target:     { type: 'course', id: courseId },
+      targetUser: { id: studentId },
+      changes: { enrollment_role: { from: before.rows[0]?.enrollment_role ?? null, to: enrollment_role } },
+      metadata: { course_id: courseId },
+    });
 
     res.json({ enrollment: updateResult.rows[0] });
   } catch (error) {
@@ -292,6 +309,11 @@ router.patch('/:studentId/:courseId/status', async (req, res) => {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
+    const before = await query(
+      `SELECT status FROM cle_course_enrollment WHERE user_id = $1 AND course_id = $2`,
+      [studentId, courseId]
+    );
+
     // Update enrollment status
     const updateResult = await query(`
       UPDATE cle_course_enrollment
@@ -304,6 +326,16 @@ router.patch('/:studentId/:courseId/status', async (req, res) => {
     if (updateResult.rows.length === 0) {
       return res.status(404).json({ error: 'Enrollment not found' });
     }
+
+    audit.log({
+      req,
+      action: 'enrollment.status_changed',
+      source: 'cle',
+      target:     { type: 'course', id: courseId },
+      targetUser: { id: studentId },
+      changes: { status: { from: before.rows[0]?.status ?? null, to: status } },
+      metadata: { course_id: courseId },
+    });
 
     res.json({ enrollment: updateResult.rows[0] });
   } catch (error) {

@@ -24,6 +24,17 @@ const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
 const goadDeploy = require('../../utils/goad-deploy');
+
+// Digests for the two remote-execution audit rows below. A hash proves what
+// ran or what was delivered without the audit table having to store it.
+function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+function sha256OfScript(script) {
+  const body = script.script_content ?? script.content ?? script.script ?? '';
+  return body ? sha256(String(body)) : null;
+}
+function sha256OfFile(p) {
+  try { return sha256(fs.readFileSync(p)); } catch { return null; }
+}
 const {
   V3_INTERNAL_TAG_OFFSET,
   resolveGatewayVmid,
@@ -542,6 +553,21 @@ router.post('/lab-networks/:laneId/run-script', authenticateToken, adminOnly, as
     if (scriptResult.rows.length === 0) return res.status(404).json({ error: `Script '${script_slug}' not found` });
     const script = scriptResult.rows[0];
 
+    // This is remote code execution on a lab VM, so the audit row carries the
+    // script itself, not just its name — a slug tells you nothing after the
+    // catalog row has been edited. Logged at dispatch; the outcome is tracked
+    // separately on deployment_vuln_selections.
+    logActivity(req, 'vm.script_executed', 'vm', String(vm.vm_id), {
+      lane_id: req.params.laneId,
+      vm_name: vm.name,
+      node: vm.node,
+      script_slug,
+      script_name: script.name,
+      script_type: script.script_type || null,
+      script_body: script.script_content ?? script.content ?? script.script ?? null,
+      script_sha256: sha256OfScript(script),
+    });
+
     // Respond immediately — script runs in background
     res.json({ success: true, message: `Running '${script.name}' on ${vm_name}...`, vm_id: vm.vm_id });
 
@@ -787,6 +813,20 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
     }
     if (!vm && config.vms?.length === 1) vm = config.vms[0];
     if (!vm) return res.status(404).json({ error: 'VM not found in lane' });
+
+    // Arbitrary file to an arbitrary path on a lab VM. The content hash is
+    // recorded rather than the bytes: this path handles multi-megabyte
+    // binaries, and a digest proves what was delivered without putting it in
+    // the database.
+    logActivity(req, 'vm.file_pushed', 'vm', String(vm.vm_id), {
+      lane_id,
+      vm_name: vm.name ?? vm_name,
+      node: vm.node,
+      filename: safeName,
+      dest_path,
+      file_size_bytes: fileSize,
+      file_sha256: sha256OfFile(localPath),
+    });
 
     res.json({
       success: true,

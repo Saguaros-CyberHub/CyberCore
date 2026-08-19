@@ -17,6 +17,7 @@ const { query } = require('../../utils/db');
 const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
+const audit = require('../../utils/audit');
 const accountProvisioning = require('../../utils/account-provisioning');
 const { runBatch } = require('../../utils/batch-deployer');
 const { allocateVxlanIds } = require('../../utils/lane-deployer');
@@ -337,6 +338,9 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     const config = typeof group.config === 'string' ? JSON.parse(group.config) : group.config;
     const allUsers = [...(config.instructors || []), ...(config.students || [])];
     const errors = [];
+    // Populated by the cybercore_user DELETE below, which is the only place the
+    // deleted accounts' emails still exist.
+    let deletedUsers = [];
     const students = config.students || [];
 
     const allVmsToDestroy = [];
@@ -596,10 +600,15 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
 
       allUserIds.length > 0
         ? cybercoreQuery(
-            `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) OR username = ANY($2)`,
+            `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) OR username = ANY($2)
+             RETURNING user_id, email, role`,
             [allUserIds, allUserEmails]
           )
           .then(r => {
+            // One row per account, not just a count. "Which students were
+            // deleted, and by whom" is unanswerable from a number, and this is
+            // the last point at which the identities exist.
+            deletedUsers = r.rows || [];
             console.log(`[Group Teardown] cybercore_user DELETE: ${r.rowCount}/${allUserIds.length} rows removed`);
             if (r.rowCount < allUserIds.length) {
               const msg = `Only ${r.rowCount}/${allUserIds.length} cybercore_user rows deleted — check for FK constraints (badges awarded, schedules overridden, etc.)`;
@@ -699,6 +708,18 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     if (orphanDiskErrors.length > 0) errors.push(...orphanDiskErrors.map(e => `Disk sweep: ${e}`));
 
     await query(`DELETE FROM deployed_groups WHERE id = $1`, [req.params.id]);
+
+    audit.batch({
+      req,
+      action: 'user.bulk_deleted',
+      targetAction: 'user.deleted',
+      target: { type: 'group', id: req.params.id, label: group.group_name },
+      metadata: { group_name: group.group_name, reason: 'group_teardown' },
+      targets: deletedUsers.map(u => ({
+        id: u.user_id, label: u.email,
+        metadata: { role: u.role, group_name: group.group_name },
+      })),
+    });
 
     logActivity(req, 'delete_group', 'group', req.params.id, {
       group_name: group.group_name, users_deleted: allUsers.length, lanes_deleted: laneIds.length,

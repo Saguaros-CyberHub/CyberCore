@@ -17,6 +17,7 @@ const { guacAPI, ensureGuacAccount } = require('../utils/guacamole');
 const { getDefaultTemplateNode } = require('../utils/site-config');
 const createLogger = require('../utils/logger');
 const log = createLogger('workstations');
+const audit = require('../utils/audit');
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -54,7 +55,13 @@ async function getOwnedWorkstation(userId, vmId, isAdmin = false) {
         vi.power_state, vi.metadata AS vi_metadata,
         r.resource_id, r.name AS vm_name, r.module_key,
         r.status AS resource_status,
-        r.metadata->>'provider_type' AS provider_type
+        r.metadata->>'provider_type' AS provider_type,
+        -- Owner, for the audit trail: an admin acting on someone else's
+        -- workstation is otherwise indistinguishable from self-service.
+        (SELECT a.user_id FROM cybercore_allocation a
+          WHERE a.resource_id = r.resource_id
+            AND (a.ends_at IS NULL OR a.ends_at > NOW())
+          ORDER BY a.starts_at DESC LIMIT 1) AS owner_user_id
       FROM cybercore_vm_instance vi
       JOIN cybercore_resource r ON r.resource_id = vi.resource_id
       WHERE vi.vm_instance_id = $1
@@ -67,7 +74,8 @@ async function getOwnedWorkstation(userId, vmId, isAdmin = false) {
         vi.power_state, vi.metadata AS vi_metadata,
         r.resource_id, r.name AS vm_name, r.module_key,
         r.status AS resource_status,
-        r.metadata->>'provider_type' AS provider_type
+        r.metadata->>'provider_type' AS provider_type,
+        a.user_id AS owner_user_id
       FROM cybercore_vm_instance vi
       JOIN cybercore_resource r ON r.resource_id = vi.resource_id
       JOIN cybercore_allocation a
@@ -501,6 +509,19 @@ router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
     const newVmid = await nextVmId();
 
     // 7. Respond immediately — client shows "Deploying…" card
+    audit.log({
+      req,
+      action: 'workstation.deployed',
+      target:     { type: 'vm', id: vmId, label: vmName },
+      targetUser: { id: userId },
+      metadata: {
+        template_id: templateId, template_key: tpl.template_key,
+        os_name: tpl.os_name, provider_type: providerType,
+        skip_lane: skipLane,
+        on_behalf_of: userId !== req.user.userId,
+      },
+    });
+
     res.status(202).json({ success: true, vmId, name: vmName, providerType });
 
     // 8. Clone + start in background
@@ -758,6 +779,17 @@ router.post('/:vmId/action', authenticateToken, async (req, res) => {
       [newState, req.params.vmId]
     );
 
+    audit.log({
+      req,
+      action: 'workstation.action',
+      target:     { type: 'vm', id: req.params.vmId, label: vm.vm_name },
+      targetUser: { id: vm.owner_user_id || null },
+      metadata: {
+        action, new_state: newState, node: vm.provider_node, vmid: vm.provider_vmid,
+        on_behalf_of: !!vm.owner_user_id && vm.owner_user_id !== req.user.userId,
+      },
+    });
+
     res.json({ success: true, action, upid });
   } catch (err) {
     log.error(`Action ${action} error:`, err.message);
@@ -859,6 +891,17 @@ router.delete('/:vmId', authenticateToken, async (req, res) => {
     `UPDATE cybercore_resource SET status = 'deleting', updated_at = now() WHERE resource_id = $1`,
     [vm.resource_id]
   );
+
+  audit.log({
+    req,
+    action: 'workstation.destroyed',
+    target:     { type: 'vm', id: vmId, label: vm.vm_name },
+    targetUser: { id: vm.owner_user_id || null },
+    metadata: {
+      provider_type: providerType, node: vm.provider_node, vmid: vm.provider_vmid,
+      on_behalf_of: !!vm.owner_user_id && vm.owner_user_id !== req.user.userId,
+    },
+  });
 
   res.json({ success: true, status: 'deleting' });
 
