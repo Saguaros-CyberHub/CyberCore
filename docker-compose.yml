@@ -355,6 +355,40 @@ services:
     networks:
       - cybercore-net
 
+
+  # ============================================================================
+  # CLOUDFLARED — Outbound-only ingress tunnel
+  # ----------------------------------------------------------------------------
+  # This orchestrator sits behind a school network that source-NATs every inbound
+  # connection to a single upstream address, so the NAT table in front of us is a
+  # shared, exhaustible resource we do not control. When it fills, inbound TCP
+  # handshakes stop completing: Caddy sends SYN-ACK, the final ACK never arrives,
+  # and the site times out for everyone while the server sits idle. Confirmed by
+  # packet capture — dozens of half-open connections, all peering with 10.0.254.1.
+  #
+  # cloudflared dials OUT to Cloudflare and serves requests back down that
+  # connection, so nothing has to traverse the inbound port-forward. The same box
+  # measured 400 Mbps outbound while its own public IP delivered 68 B/s.
+  #
+  # Points at caddy:80 rather than app:3000 so the existing http://:80 block keeps
+  # routing /guacamole* to the Guacamole container. Cloudflare terminates TLS, so
+  # no certificate is needed on this path — which also sidesteps the ACME renewal
+  # failures caused by the same NAT.
+  # ============================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cybercore-cloudflared
+    restart: unless-stopped
+    depends_on:
+      - caddy
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    networks:
+      - cybercore-net
   # ============================================================================
   # FTP — File transfer for profile delivery
   # ============================================================================
