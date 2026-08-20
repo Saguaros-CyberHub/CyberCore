@@ -204,9 +204,14 @@ async function assertProbeUsable(node) {
  * that dozens of simultaneous broadcast probes are exactly the condition that
  * produced the false positives above.
  */
-async function probeTakenAddresses(node, candidates) {
+async function probeTakenAddresses(node, rawCandidates) {
   const net = getV2LabNetwork();
-  if (!candidates.length) return new Set();
+  if (!rawCandidates.length) return { taken: new Set(), unknown: 0 };
+  // Belt and braces after the /32 incident: arping takes a bare address, and a
+  // caller handing it a masked one gets silence rather than an error it can act
+  // on. Strip here as well as at the query, so no future caller can reintroduce
+  // it.
+  const candidates = rawCandidates.map(ip => String(ip).split('/')[0]);
 
   const waitSecs = Math.max(2, Math.ceil((net.probe.timeout_ms || 2000) / 1000));
 
@@ -322,7 +327,12 @@ async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional,
             GROUP BY wan_ip`
         : `SELECT NULL::inet AS ip, NULL::timestamptz AS last_allocated_at WHERE FALSE`}
     )
-    SELECT p.ip::text AS ip
+    -- host(), NOT ::text. An inet with no mask renders as '100.100.60.11/32',
+    -- and these strings are handed straight to arping, which rejects them as
+    -- addresses and prints no "Received N response(s)" line -- so every probe
+    -- came back unparseable and, under the original exit-code reading, counted
+    -- as occupied. That is what reported a 242-address pool as fully taken.
+    SELECT host(p.ip) AS ip
       FROM pool p
       LEFT JOIN last_use lu ON lu.ip = p.ip
      WHERE NOT (p.ip = ANY($4::inet[]))
@@ -337,7 +347,14 @@ async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional,
      LIMIT $5
   `, [net.network + '/' + net.prefix_len, firstOffset, lastOffset, net.reserved, limit, exclude]);
 
-  return res.rows.map(r => r.ip);
+  // ONE normalization point for the whole module: every address leaving here is
+  // bare. host() above already does it in SQL, but this is the guarantee — a
+  // masked string escaping into the allocator breaks two things at once, and
+  // both failures are silent. It goes to arping, which rejects it and produces
+  // no verdict; and it becomes a _reservedWanIps key that releaseLaneWanIps,
+  // which strips, can never delete — so a released address stays held until the
+  // TTL expires.
+  return res.rows.map(r => String(r.ip).split('/')[0]);
 }
 
 /** Counts for the exhaustion message - worth one extra query when failing. */

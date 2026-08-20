@@ -50,6 +50,7 @@ const world = {
   execScripts: [],
   queryHook: null,   // (sql, params) => Error | null, for fault injection
   probeSilent: false,// model a probe that returns no verdicts at all
+  maskedRows: false, // model Postgres inet ::text output (a.b.c.d/32)
 };
 
 function reset(over = {}) {
@@ -68,6 +69,7 @@ function reset(over = {}) {
     execScripts: [],
     queryHook: null,
     probeSilent: false,
+    maskedRows: false,
   }, over);
   alloc._internal._reservedWanIps.clear();
   alloc._internal._probeReady.clear();
@@ -133,7 +135,11 @@ stubModule('cybercore-db.js', {
         }
         return toInt(a) - toInt(b);
       });
-      return { rows: out.slice(0, limit).map(ip => ({ ip })) };
+      // world.maskedRows models what a REAL Postgres inet column returns when
+      // selected with ::text -- '100.100.60.11/32'. The stub used to hand back
+      // bare addresses, which is why the whole suite stayed green while the
+      // allocator shipped masked strings straight into arping.
+      return { rows: out.slice(0, limit).map(ip => ({ ip: world.maskedRows ? ip + '/32' : ip })) };
     }
     return { rows: [] };
   },
@@ -432,4 +438,36 @@ test('the probe script targets the tagged VLAN interface, not the bare bridge', 
   // the false positives in the first place.
   assert.match(probe, /wait/);
   assert.ok(!/arping -q/.test(probe), 'must not suppress the output it parses');
+});
+
+test('REGRESSION: a masked address from the database never reaches arping', async () => {
+  // THE BUG THIS FILE MISSED FOR THREE ROUNDS. Postgres renders an inet with no
+  // mask as '100.100.60.11/32'. arping rejects that as an address, prints no
+  // "Received N response(s)" line, and exits non-zero -- which the original
+  // exit-code reading counted as OCCUPIED. Result: every candidate came back
+  // taken and a mostly-empty /24 was reported as full, twice, with two wrong
+  // root causes chased in between. The stub returned bare addresses, so the
+  // suite stayed green throughout.
+  reset({ probeEnabled: true, maskedRows: true });
+  const got = await addrs(2);
+  assert.deepStrictEqual(got, ['100.100.60.10', '100.100.60.11'],
+    'allocated addresses must be bare, never masked');
+
+  const probe = world.execScripts.find(s => /^IF=/m.test(s));
+  assert.ok(!/\/32/.test(probe), 'the probe script must contain no CIDR masks: ' + probe);
+  assert.match(probe, /probe 100\.100\.60\.10 /);
+});
+
+test('REGRESSION: masked rows still allocate correctly with the probe disabled', async () => {
+  reset({ probeEnabled: false, maskedRows: true });
+  assert.deepStrictEqual(await addrs(1), ['100.100.60.10']);
+});
+
+test('REGRESSION: a masked address is released by its bare form', async () => {
+  // _reservedWanIps was keyed by the masked string while releaseLaneWanIps
+  // stripped the mask before deleting, so releases silently never matched.
+  reset({ probeEnabled: false, maskedRows: true });
+  const [a] = await addrs(1);
+  await alloc.releaseLaneWanIps([a]);
+  assert.deepStrictEqual(await addrs(1), [a], 'released address must be reusable');
 });
