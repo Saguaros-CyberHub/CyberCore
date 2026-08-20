@@ -29,6 +29,19 @@ const DEFAULT_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS, 10) || 10 * 60 *
 const DEFAULT_CONCURRENCY = parseInt(process.env.LLM_MAX_CONCURRENT, 10) || 6;
 const DEFAULT_MAX_RETRIES = parseInt(process.env.LLM_MAX_RETRIES, 10) || 3;
 
+// Guards for the concurrency semaphore below. Why one full call-timeout for the
+// wait deadline: the SDK abandons any single call after DEFAULT_TIMEOUT_MS, so
+// every in-flight slot is guaranteed to turn over inside that window. A waiter
+// that has sat longer than one whole turnover of the pool is not "busy", it is
+// stuck behind something that is not draining — and it is already far past the
+// point where the browser that triggered the request gave up. Normal work never
+// approaches this: a real call returns in seconds, not minutes.
+const DEFAULT_QUEUE_WAIT_MS = parseInt(process.env.LLM_QUEUE_WAIT_MS, 10) || DEFAULT_TIMEOUT_MS;
+// 128 waiters behind 6 slots is already more queued work than any single request
+// path legitimately produces — past this we are looking at a runaway fan-out, and
+// joining the queue only delays a failure the caller could be told about now.
+const DEFAULT_MAX_QUEUE = parseInt(process.env.LLM_MAX_QUEUE, 10) || 128;
+
 // Map UI-friendly aliases to actual model IDs. Easy to add more later.
 const MODEL_ALIASES = {
   'claude-sonnet':      'claude-sonnet-4-5',
@@ -76,29 +89,140 @@ function isConfigured() {
 
 // ─── Concurrency semaphore ─────────────────────────────────────────────────
 
-function createSemaphore(max) {
+// Rejection raised when a caller cannot get a slot. Carries a 503 so route
+// handlers that already forward `err.status` surface "server busy" instead of a
+// generic 500, and `isSemaphoreRejection` so generate() does not burn its retry
+// budget re-queueing into a pool that just told us it is saturated.
+function semaphoreRejection(name, code, message) {
+  const err = new Error(message);
+  err.name = 'LLMOverloadedError';
+  err.code = code;                  // LLM_QUEUE_FULL | LLM_QUEUE_TIMEOUT
+  err.status = 503;
+  err.semaphore = name;
+  err.isSemaphoreRejection = true;
+  return err;
+}
+
+/**
+ * Bounded, deadline-aware counting semaphore.
+ *
+ * The original version parked waiters on a bare `new Promise(r => queue.push(r))`
+ * with no cap, no deadline and no abort path. One profile build takes several of
+ * the 6 slots and then fires 10-20 more calls into the same queue, so every other
+ * AI route (the chat widget, policy gen, an interview turn) sat behind it
+ * indefinitely — no error, no log line, just a request that never answers. Two
+ * bounds close that hole:
+ *
+ *   maxQueue      — refuse to enqueue at all once the backlog is absurd, so the
+ *                   caller fails fast instead of joining a queue that cannot drain.
+ *   waitTimeoutMs — refuse a waiter that has sat queued past the deadline.
+ *
+ * Slots are handed straight from a releasing holder to the next waiter instead of
+ * decrement-then-reacquire. The old code decremented `active` in `finally` and let
+ * the woken waiter increment it a microtask later, which let a brand-new caller
+ * slip into that gap and push `active` past `max`.
+ *
+ * @param {number} max                    slots allowed in flight at once
+ * @param {object} [opts]
+ * @param {string} [opts.name]            appears in rejection messages and logs
+ * @param {number} [opts.maxQueue]        waiters allowed before overflow rejection
+ * @param {number} [opts.waitTimeoutMs]   how long a waiter may sit queued
+ */
+function createSemaphore(max, opts = {}) {
+  const name          = opts.name || 'llm';
+  const maxQueue      = opts.maxQueue      != null ? opts.maxQueue      : DEFAULT_MAX_QUEUE;
+  const waitTimeoutMs = opts.waitTimeoutMs != null ? opts.waitTimeoutMs : DEFAULT_QUEUE_WAIT_MS;
+
   let active = 0;
-  const queue = [];
+  let rejectedFull = 0;
+  let rejectedTimeout = 0;
+  const queue = [];   // [{ resolve, reject, timer, settled }]
+
+  // Hand this slot to the oldest live waiter. Anything already settled (rejected
+  // on the deadline) is skipped: giving the slot to a dead promise would leak it
+  // permanently, since nobody is left to call release() for it.
+  function passSlot() {
+    while (queue.length) {
+      const waiter = queue.shift();
+      if (waiter.settled) continue;
+      waiter.settled = true;
+      clearTimeout(waiter.timer);
+      waiter.resolve();     // active stays put — the slot moved, it was never freed
+      return true;
+    }
+    return false;
+  }
+
+  function acquire() {
+    if (active < max) {
+      active++;
+      return Promise.resolve();
+    }
+    if (queue.length >= maxQueue) {
+      rejectedFull++;
+      const err = semaphoreRejection(name, 'LLM_QUEUE_FULL',
+        `LLM semaphore "${name}" queue is full — ${active} in flight, ${queue.length}/${maxQueue} waiting`);
+      console.warn(`[LLM] ${err.message}`);
+      return Promise.reject(err);
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, settled: false, timer: null };
+      waiter.timer = setTimeout(() => {
+        if (waiter.settled) return;
+        waiter.settled = true;
+        rejectedTimeout++;
+        // Drop it from the queue now so `pending` stays honest and passSlot()
+        // never has to walk a pile of corpses.
+        const idx = queue.indexOf(waiter);
+        if (idx !== -1) queue.splice(idx, 1);
+        const err = semaphoreRejection(name, 'LLM_QUEUE_TIMEOUT',
+          `LLM semaphore "${name}" wait exceeded ${waitTimeoutMs}ms — ${active} in flight, ${queue.length} still waiting`);
+        console.warn(`[LLM] ${err.message}`);
+        reject(err);
+      }, waitTimeoutMs);
+      // A queued waiter must not be the reason the process refuses to exit.
+      if (typeof waiter.timer.unref === 'function') waiter.timer.unref();
+      queue.push(waiter);
+    });
+  }
+
+  function release() {
+    // passSlot() transfers the slot; only give it back to the pool if nobody took it.
+    if (!passSlot()) active--;
+  }
+
   return {
     async run(fn) {
-      if (active >= max) {
-        await new Promise(resolve => queue.push(resolve));
-      }
-      active++;
+      // Throws on overflow/deadline — nothing was acquired, so there is nothing
+      // to release and no slot leaks out of the rejected path.
+      await acquire();
       try {
         return await fn();
       } finally {
-        active--;
-        const next = queue.shift();
-        if (next) next();
+        release();
       }
     },
     get active() { return active; },
-    get pending() { return queue.length; }
+    get pending() { return queue.length; },
+    get stats() {
+      return {
+        name, max, maxQueue, waitTimeoutMs,
+        active,
+        pending: queue.length,
+        rejectedFull,
+        rejectedTimeout
+      };
+    }
   };
 }
 
-const _globalSem = createSemaphore(DEFAULT_CONCURRENCY);
+const _globalSem = createSemaphore(DEFAULT_CONCURRENCY, { name: 'global' });
+
+// Live view of the process-global LLM pool, for a future /health or admin panel:
+// { name, max, maxQueue, waitTimeoutMs, active, pending, rejectedFull, rejectedTimeout }.
+function getConcurrencyStats() {
+  return _globalSem.stats;
+}
 
 // ─── Telemetry ─────────────────────────────────────────────────────────────
 
@@ -168,7 +292,12 @@ async function generate(opts = {}) {
     } catch (err) {
       lastErr = err;
       const status = err.status || err.response?.status;
-      const isRetryable = status === 429 || (status >= 500 && status < 600) || err.name === 'APIConnectionError';
+      // A semaphore rejection also carries a 5xx, but retrying it is exactly the
+      // wrong move: the pool just told us it is saturated, and three backoff
+      // rounds would turn a fast, visible 503 into a multi-minute silent stall
+      // while adding more pressure to the queue that rejected us.
+      const isRetryable = !err.isSemaphoreRejection &&
+        (status === 429 || (status >= 500 && status < 600) || err.name === 'APIConnectionError');
       const willRetry = isRetryable && attempt < maxRetries;
 
       const labelPrefix = label ? `[${label}] ` : '';
@@ -310,8 +439,19 @@ async function generateJson(opts) {
  * @returns {Promise<Array<{ ok:boolean, value?:any, error?:Error, index:number }>>}
  */
 async function generateParallel(optsList, globalOpts = {}) {
+  // A fan-out is a *closed* set of work: every item is queued up front and the
+  // tail legitimately waits ceil(N / maxConcurrent) rounds before it even starts.
+  // So the local queue must clear the batch (otherwise we would reject our own
+  // callers on overflow) and the local deadline is scaled by those rounds. The
+  // batch still cannot hang: each holder is itself bounded by the global
+  // semaphore's deadline plus the SDK's per-call timeout.
   const localSem = globalOpts.maxConcurrent
-    ? createSemaphore(globalOpts.maxConcurrent)
+    ? createSemaphore(globalOpts.maxConcurrent, {
+        name: `parallel-${globalOpts.maxConcurrent}`,
+        maxQueue: Math.max(DEFAULT_MAX_QUEUE, optsList.length),
+        waitTimeoutMs: DEFAULT_QUEUE_WAIT_MS *
+          Math.max(1, Math.ceil(optsList.length / globalOpts.maxConcurrent))
+      })
     : null;
   const failFast = !!globalOpts.failFast;
   const useJson = !!globalOpts.json;
@@ -362,6 +502,7 @@ module.exports = {
   repairAndParseJson,
   resolveModel,
   createSemaphore,
+  getConcurrencyStats,
   DEFAULT_MODEL,
   MODEL_ALIASES,
   // Test hooks

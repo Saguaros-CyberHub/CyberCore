@@ -18,7 +18,7 @@ const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { authenticateToken } = require('../middleware/auth');
-const { guacAPI, mintGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
+const { guacAPI, guacFetchText, mintGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
 const { proxmoxAPI } = require('../utils/proxmox');
 const { getV2LabNetwork } = require('../utils/site-config');
 const { ipInCidr } = require('../utils/ipv4');
@@ -158,14 +158,23 @@ async function refreshGuacHostname(connId, currentIps) {
 async function getUserGuacToken(guacUser, guacPassword) {
   if (!guacUser || !guacPassword) return null;
   try {
-    const resp = await fetch(`${GUAC_URL}/api/tokens`, {
+    // guacFetchText, never a bare fetch: a Guacamole blocked on the Postgres
+    // container it shares with CyberCore finishes the TCP handshake and then
+    // never answers, and an untimed fetch would hold this request open for
+    // undici's default 300s — on the console-launch path, where the user is
+    // sitting and watching a spinner.
+    const { ok, text } = await guacFetchText(`${GUAC_URL}/api/tokens`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: `username=${encodeURIComponent(guacUser)}&password=${encodeURIComponent(guacPassword)}`,
-    });
-    if (!resp.ok) return null;
-    return await resp.json(); // { authToken, username, dataSource, availableDataSources }
-  } catch (_) {
+    }, `POST /api/tokens (console login for ${guacUser})`);
+    if (!ok) return null;
+    return JSON.parse(text); // { authToken, username, dataSource, availableDataSources }
+  } catch (err) {
+    // Returning null stays the contract — the caller falls back to an admin
+    // token. But a timeout here is a Guacamole outage, not a wrong password,
+    // and the fully silent catch this used to be made the two identical.
+    if (err && err.code === 'GUAC_TIMEOUT') console.warn(`[guac-sessions] ${err.message}`);
     return null;
   }
 }

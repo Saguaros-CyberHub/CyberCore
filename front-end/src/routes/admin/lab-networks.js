@@ -32,8 +32,18 @@ function sha256OfScript(script) {
   const body = script.script_content ?? script.content ?? script.script ?? '';
   return body ? sha256(String(body)) : null;
 }
-function sha256OfFile(p) {
-  try { return sha256(fs.readFileSync(p)); } catch { return null; }
+// Streamed rather than fs.readFileSync: the vuln-assets this hashes run to
+// hundreds of megabytes, and a sync read parks the single event loop for the
+// whole read — while it runs nothing anywhere in the app is accepted, routed or
+// answered. Feeding a read stream into the hash keeps the same digest, yields
+// between chunks, and never holds more than one chunk in the heap. Still
+// resolves null on any read error, exactly as the sync version returned null.
+async function sha256OfFile(p) {
+  try {
+    const hash = crypto.createHash('sha256');
+    for await (const chunk of fs.createReadStream(p)) hash.update(chunk);
+    return hash.digest('hex');
+  } catch { return null; }
 }
 const {
   V3_INTERNAL_TAG_OFFSET,
@@ -832,7 +842,11 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
     // Arbitrary file to an arbitrary path on a lab VM. The content hash is
     // recorded rather than the bytes: this path handles multi-megabyte
     // binaries, and a digest proves what was delivered without putting it in
-    // the database.
+    // the database. sha256OfFile streams the read, so hashing a 600 MB asset
+    // costs this request a little latency instead of freezing every other
+    // request in the app for the duration of the read.
+    const fileSha256 = await sha256OfFile(localPath);
+
     logActivity(req, 'vm.file_pushed', 'vm', String(vm.vm_id), {
       lane_id,
       vm_name: vm.name ?? vm_name,
@@ -840,7 +854,7 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
       filename: safeName,
       dest_path,
       file_size_bytes: fileSize,
-      file_sha256: sha256OfFile(localPath),
+      file_sha256: fileSha256,
     });
 
     res.json({
@@ -856,6 +870,11 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
     // base64, so we chunk at 45 KB raw (~60,000 base64 chars) and reassemble on
     // the VM with a single PowerShell call.
     (async () => {
+      // Held open across the chunk loop below so the asset can be read a chunk
+      // at a time. Closed as soon as the last chunk lands, with the finally at
+      // the bottom as the safety net — a push that throws mid-way would
+      // otherwise leak the descriptor for the life of the process.
+      let fileHandle = null;
       try {
         const https = require('https');
         const PX_URL = process.env.PROXMOX_API_URL || 'https://100.100.10.10:8006';
@@ -894,8 +913,7 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
         // Proxmox caps agent/file-write `content` at 61,440 chars of base64.
         // 45 KB raw -> 60,000 base64 chars, leaving headroom under the cap.
         const CHUNK_SIZE = 45 * 1024;
-        const fileBuffer = fs.readFileSync(localPath);
-        const totalChunks = Math.ceil(fileBuffer.length / CHUNK_SIZE);
+        const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
         const tempDir = 'C:\\Windows\\Temp\\push_' + Date.now();
 
         console.log(`[PushFile] Pushing ${safeName} (${fileSizeMB} MB, ${totalChunks} chunks of ${CHUNK_SIZE / 1024}KB) to VM ${vm.vm_id}`);
@@ -910,12 +928,19 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
         );
         if (mkdirResult?.pid) await pollExecStatus(vm.node, vm.vm_id, mkdirResult.pid, 10000);
 
-        // Write each chunk
+        // Write each chunk, reading it off disk as we go. The file used to be
+        // slurped with fs.readFileSync first, which blocked the event loop for
+        // the whole read — no request anywhere in the app was served meanwhile —
+        // and then pinned up to 600 MB in the heap for the many minutes a push
+        // takes. Positional reads into one reusable scratch buffer produce
+        // byte-identical chunk boundaries, so the VM-side reassembly below and
+        // any partially-pushed temp dir from an older run stay compatible.
+        fileHandle = await fs.promises.open(localPath, 'r');
+        const chunkBuffer = Buffer.allocUnsafe(CHUNK_SIZE);
+
         for (let i = 0; i < totalChunks; i++) {
-          const start = i * CHUNK_SIZE;
-          const end = Math.min(start + CHUNK_SIZE, fileBuffer.length);
-          const chunkBuffer = fileBuffer.subarray(start, end);
-          const b64 = chunkBuffer.toString('base64');
+          const { bytesRead } = await fileHandle.read(chunkBuffer, 0, CHUNK_SIZE, i * CHUNK_SIZE);
+          const b64 = chunkBuffer.subarray(0, bytesRead).toString('base64');
           const chunkPath = `${tempDir}\\chunk_${String(i).padStart(4, '0')}`;
 
           let retries = 3;
@@ -936,6 +961,11 @@ router.post('/push-file', authenticateToken, adminOnly, async (req, res) => {
           }
           if (i % 10 === 9) await new Promise(r => setTimeout(r, 300));
         }
+
+        // Every byte is on the VM now, and the assemble step below can poll for
+        // minutes — drop the descriptor rather than hold it open for all of it.
+        await fileHandle.close();
+        fileHandle = null;
 
         // Reassemble chunks on the VM using PowerShell
         console.log(`[PushFile] Reassembling ${totalChunks} chunks on VM...`);
@@ -968,6 +998,8 @@ Write-Host "File assembled: ${dest_path} ($size bytes)"
         console.log(`[PushFile] Done: ${safeName} (${fileSizeMB} MB) -> ${dest_path} on VM ${vm.vm_id}`);
       } catch (err) {
         console.error(`[PushFile] Failed: ${err.message}`);
+      } finally {
+        if (fileHandle) await fileHandle.close().catch(() => {});
       }
     })();
 

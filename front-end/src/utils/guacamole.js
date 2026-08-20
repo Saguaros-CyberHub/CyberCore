@@ -10,8 +10,91 @@ const { randomBytes } = require('crypto');
 const GUAC_URL = process.env.GUAC_API_URL || 'http://100.100.70.10:8080/guacamole';
 const GUAC_DS = process.env.GUAC_DATASOURCE || 'postgresql';
 
+/**
+ * Hard deadline for ONE Guacamole HTTP call.
+ *
+ * Guacamole 1.5.5 shares its Postgres container with CyberCore, so when it
+ * blocks on that database — or on guacd — it still completes the TCP handshake
+ * and then simply never sends response headers. A bare fetch() waits that out
+ * for undici's default 300s headersTimeout and logs nothing, so a single
+ * stalled console call pins the request (and whatever deploy is awaiting it)
+ * for five minutes and looks, from outside, like the orchestrator has hung.
+ * 10s is two orders of magnitude above a healthy Guac round trip and well
+ * under any caller's patience.
+ */
+const GUAC_TIMEOUT_MS = Number(process.env.GUAC_HTTP_TIMEOUT_MS) || 10000;
+
+/**
+ * Ceiling for one logical guacAPI() call, which can cost up to four round trips
+ * (mint a token, make the call, then re-auth and call again on a 401/403).
+ * Capping each fetch on its own would still add up to 4 x GUAC_TIMEOUT_MS, so
+ * every fetch inside one call shares this single budget instead and the worst
+ * case stays at two round trips no matter how the retry falls.
+ */
+const GUAC_TOTAL_TIMEOUT_MS = GUAC_TIMEOUT_MS * 2;
+
 // Cache the Guac auth token (they last ~60 min)
 let guacTokenCache = { token: null, expires: 0 };
+
+/**
+ * The error every timed-out Guacamole call throws.
+ *
+ * Named deliberately: an aborted fetch reports "This operation was aborted",
+ * which names neither the host nor the call and reads like a generic network
+ * blip, and that is exactly what made these stalls unreadable in the log.
+ */
+function guacTimeoutError(operation, ms, wholeBudget = false) {
+  const secs = Math.round(ms / 100) / 10;
+  const err = new Error(wholeBudget
+    ? `Guacamole did not respond within the ${secs}s budget for this call — ${operation} at ${GUAC_URL}`
+    : `Guacamole did not respond in ${secs}s — ${operation} at ${GUAC_URL}`);
+  // Tagged so a caller that must swallow the failure (see getUserGuacToken in
+  // routes/guac-sessions.js) can still tell an outage from a bad password.
+  err.code = 'GUAC_TIMEOUT';
+  return err;
+}
+
+/**
+ * One Guacamole HTTP call with a hard deadline, flattened to
+ * `{ status, ok, text }`.
+ *
+ * Every fetch that talks to Guacamole goes through here — see GUAC_TIMEOUT_MS
+ * for why none of them may be a bare fetch().
+ *
+ * @param {string} operation Human-readable label ("GET /connections/7") used in
+ *   the timeout message.
+ * @param {number} [deadline] Absolute Date.now() stamp shared by every call in
+ *   one logical operation, so a re-auth + retry cannot multiply the worst case.
+ *   0 means "this call only", i.e. the full GUAC_TIMEOUT_MS.
+ */
+async function guacFetchText(url, opts, operation, deadline = 0) {
+  const budget = deadline ? Math.min(GUAC_TIMEOUT_MS, deadline - Date.now()) : GUAC_TIMEOUT_MS;
+  // Trimmed means an earlier round trip in this same logical call already spent
+  // most of the shared budget, so the honest number to report on a timeout is
+  // the whole budget rather than this last thin slice of it — "did not respond
+  // in 0.2s" would read like we expected an answer in 0.2s.
+  const trimmed = budget < GUAC_TIMEOUT_MS;
+  // Shared budget already spent by earlier round trips: fail now rather than
+  // open a request that is guaranteed to be aborted before it can answer.
+  if (budget <= 0) throw guacTimeoutError(operation, GUAC_TOTAL_TIMEOUT_MS, true);
+
+  try {
+    const resp = await fetch(url, { ...opts, signal: AbortSignal.timeout(budget) });
+    // The signal stays armed across the body read on purpose: a Guacamole that
+    // stalls AFTER sending headers hangs resp.text() in exactly the same way,
+    // and the caller wants the body either way (error text, or the payload).
+    const text = resp.status === 204 ? '' : await resp.text();
+    return { status: resp.status, ok: resp.ok, text };
+  } catch (err) {
+    // AbortSignal.timeout rejects the fetch with a TimeoutError DOMException;
+    // undici surfaces an aborted body read as an AbortError. Both mean the same
+    // thing here — no answer inside the budget.
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      throw guacTimeoutError(operation, trimmed ? GUAC_TOTAL_TIMEOUT_MS : budget, trimmed);
+    }
+    throw err;
+  }
+}
 
 /**
  * Authenticate as the service account and return Guacamole's full token
@@ -23,23 +106,27 @@ let guacTokenCache = { token: null, expires: 0 };
  * caching can end that session for the whole orchestrator — after which every
  * server-side call fails with 403 PERMISSION_DENIED until the cache turns over.
  * Mint a separate one for the client and let it own its own session.
+ *
+ * @param {number} [deadline] Optional shared budget stamp — see guacFetchText.
+ *   External callers omit it and get the plain per-call GUAC_TIMEOUT_MS.
  */
-async function mintGuacToken() {
+async function mintGuacToken(deadline = 0) {
   const username = process.env.GUAC_ADMIN_USER || 'cactus-admin';
   const password = process.env.GUAC_ADMIN_PASSWORD;
   if (!password) throw new Error('GUAC_ADMIN_PASSWORD not set in .env');
 
-  const resp = await fetch(`${GUAC_URL}/api/tokens`, {
+  // Logging in is the call most likely to stall: it is the one that always hits
+  // Guacamole's Postgres, which is the container that gets blocked.
+  const { status, ok, text } = await guacFetchText(`${GUAC_URL}/api/tokens`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`
-  });
+  }, 'POST /api/tokens (service-account login)', deadline);
 
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Guacamole auth failed (${resp.status}): ${text}`);
+  if (!ok) {
+    throw new Error(`Guacamole auth failed (${status}): ${text}`);
   }
-  return resp.json(); // { authToken, username, dataSource, availableDataSources }
+  return JSON.parse(text); // { authToken, username, dataSource, availableDataSources }
 }
 
 /**
@@ -54,13 +141,15 @@ function invalidateGuacToken() {
   guacTokenCache = { token: null, expires: 0 };
 }
 
-async function getGuacToken() {
+async function getGuacToken(deadline = 0) {
   // Return cached token if still valid (with 5-min buffer)
   if (guacTokenCache.token && Date.now() < guacTokenCache.expires - 300000) {
     return guacTokenCache.token;
   }
 
-  const data = await mintGuacToken();
+  // Pass the budget down: on a cache miss this login is the first of the round
+  // trips guacAPI is bounding, not a free one.
+  const data = await mintGuacToken(deadline);
   guacTokenCache = {
     token: data.authToken,
     expires: Date.now() + 55 * 60 * 1000 // ~55 min
@@ -78,9 +167,19 @@ async function getGuacToken() {
  * failing its Guac cleanup (which is enough to leave lanes stuck in 'error').
  * So the first 401/403 discards the cached token and retries ONCE with a fresh
  * one. A genuine permission error simply fails twice.
+ *
+ * That retry is also why this call carries a deadline rather than just a
+ * per-fetch timeout: it can cost four round trips (login, call, login, call),
+ * and four independent 10s waits is a 40s stall, not a bounded one. All four
+ * share GUAC_TOTAL_TIMEOUT_MS, and _retried keeps the recursion to one extra
+ * attempt no matter what.
  */
-async function guacAPI(method, path, body = null, _retried = false) {
-  const token = await getGuacToken();
+async function guacAPI(method, path, body = null, _retried = false, _deadline = 0) {
+  // Set on the first attempt only; the retry inherits it (see below) so it
+  // spends what is LEFT of the budget instead of opening a fresh one.
+  const deadline = _deadline || Date.now() + GUAC_TOTAL_TIMEOUT_MS;
+
+  const token = await getGuacToken(deadline);
   const url = `${GUAC_URL}/api/session/data/${GUAC_DS}${path}?token=${token}`;
 
   const opts = {
@@ -89,19 +188,20 @@ async function guacAPI(method, path, body = null, _retried = false) {
   };
   if (body) opts.body = JSON.stringify(body);
 
-  const resp = await fetch(url, opts);
+  const { status, ok, text } = await guacFetchText(url, opts, `${method} ${path}`, deadline);
 
   // Some DELETE calls return 204 with no body
-  if (resp.status === 204) return null;
+  if (status === 204) return null;
 
-  const text = await resp.text();
-  if (!resp.ok) {
-    if ((resp.status === 403 || resp.status === 401) && !_retried) {
-      console.warn(`[Guac] ${method} ${path} returned ${resp.status} — re-authenticating and retrying once`);
+  if (!ok) {
+    if ((status === 403 || status === 401) && !_retried) {
+      console.warn(`[Guac] ${method} ${path} returned ${status} — re-authenticating and retrying once`);
       invalidateGuacToken();
-      return guacAPI(method, path, body, true);
+      // _retried = true makes this the last attempt; the shared deadline makes
+      // it a cheap one if the first attempt already burned most of the budget.
+      return guacAPI(method, path, body, true, deadline);
     }
-    throw new Error(`Guac API ${method} ${path} failed (${resp.status}): ${text}`);
+    throw new Error(`Guac API ${method} ${path} failed (${status}): ${text}`);
   }
 
   try { return JSON.parse(text); } catch { return text; }
@@ -171,6 +271,7 @@ async function ensureGuacUserExists(username) {
 
 module.exports = {
   guacAPI,
+  guacFetchText,
   getGuacToken,
   mintGuacToken,
   invalidateGuacToken,
