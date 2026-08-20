@@ -49,6 +49,7 @@ const world = {
   leases: [],
   execScripts: [],
   queryHook: null,   // (sql, params) => Error | null, for fault injection
+  probeSilent: false,// model a probe that returns no verdicts at all
 };
 
 function reset(over = {}) {
@@ -66,6 +67,7 @@ function reset(over = {}) {
     leases: [],
     execScripts: [],
     queryHook: null,
+    probeSilent: false,
   }, over);
   alloc._internal._reservedWanIps.clear();
   alloc._internal._probeReady.clear();
@@ -145,7 +147,11 @@ stubModule('node-ssh.js', {
     if (/command -v arping/.test(script)) {
       return { stdout: (world.hasArping ? 'has-arping\n' : '') + (world.hasIface ? 'has-iface\n' : '') };
     }
-    const ips = [...script.matchAll(/-I "[$]IF" (\d+\.\d+\.\d+\.\d+)/g)].map(m => m[1]);
+    // The real script defines a probe() helper and calls `probe <ip> &` with
+    // bounded concurrency; the verdict lines it emits are what the allocator
+    // parses, so the stub short-circuits to those.
+    const ips = [...script.matchAll(/^probe (\d+\.\d+\.\d+\.\d+) /gm)].map(m => m[1]);
+    if (world.probeSilent) return { stdout: '' };
     return { stdout: ips.map(ip => (world.arpAnswers.has(ip) ? 'TAKEN ' : 'FREE ') + ip).join('\n') + '\n' };
   },
 });
@@ -349,16 +355,42 @@ test('a wall of squatters is reported as ONE line, not one per address', async (
   assert.match(squatterLines[0], /\+39 more/, 'the list is truncated, not dumped');
 });
 
-test('too many squatters blames the orphans, NOT the subnet prefix', async () => {
+test('squatters that leave nothing free blame the orphans, NOT the subnet prefix', async () => {
   // Wrong diagnosis is worse than no diagnosis: the operator widens a /24 that
-  // was never the problem and the orphaned gateways keep eating the pool.
+  // was never the constraint and the orphaned gateways eat the new space too.
+  // Sample kept under PROBE_SANITY_MIN so this exercises the orphan branch
+  // rather than the credibility guard below.
+  reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.15' });
+  for (let i = 10; i <= 15; i++) world.arpAnswers.add('100.100.60.' + i);
+  await assert.rejects(
+    () => alloc.allocateLaneWanIps(2),
+    (e) => /allocation failed/.test(e.message)
+        && /orphaned gateway LXCs/.test(e.message)
+        && !/pool is genuinely full/.test(e.message)
+  );
+});
+
+test('finding NOTHING free anywhere is called out as a broken probe, not a full pool', async () => {
+  // THE INCIDENT THIS GUARD EXISTS FOR. A 32-way concurrent probe against a
+  // 1-second deadline returned non-zero for ~every address without a single
+  // reply arriving; read as exit codes that meant "occupied", and the operator
+  // was told a 242-address pool was full and to go widen a subnet.
   reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254' });
   for (let i = 10; i <= 254; i++) world.arpAnswers.add('100.100.60.' + i);
   await assert.rejects(
     () => alloc.allocateLaneWanIps(1),
-    (e) => /allocation failed/.test(e.message)
-        && /orphaned gateway LXCs/.test(e.message)
+    (e) => /not a\s*\n?plausible network state/.test(e.message)
+        && /ONE AT A TIME/.test(e.message)
+        && /probe\.enabled=false/.test(e.message)
         && !/pool is genuinely full/.test(e.message)
+  );
+});
+
+test('a probe that returns no verdicts at all is caught by the same guard', async () => {
+  reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254', probeSilent: true });
+  await assert.rejects(
+    () => alloc.allocateLaneWanIps(1),
+    /not a\s*\n?plausible network state/
   );
 });
 
@@ -381,7 +413,16 @@ test('recordLaneWanLease strips any prefix and writes history', async () => {
 test('the probe script targets the tagged VLAN interface, not the bare bridge', async () => {
   reset();
   await addrs(1);
-  const probe = world.execScripts.find(s => /arping -q/.test(s));
+  // Not just /arping/ — the preflight script mentions it too (`command -v arping`).
+  const probe = world.execScripts.find(s => /^IF=/m.test(s));
   assert.match(probe, /IF=vmbr0\.60/);
-  assert.match(probe, /arping -q -c 2 -w 1 -D -I "[$]IF"/);
+  assert.match(probe, /arping -c 2 -w \d+ -D -I "[$]IF"/);
+  // Reads the REPLY COUNT, never the exit status: arping's exit code conflates
+  // "somebody replied" with "the command did not finish", and under concurrency
+  // the second one dominates.
+  assert.match(probe, /Received .*response/);
+  // And the fan-out is bounded, because unlimited concurrency is what produced
+  // the false positives in the first place.
+  assert.match(probe, /wait/);
+  assert.ok(!/arping -q/.test(probe), 'must not suppress the output it parses');
 });

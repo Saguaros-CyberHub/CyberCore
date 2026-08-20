@@ -58,6 +58,13 @@ const PROBE_PREFLIGHT_TTL_MS = 10 * 60 * 1000;
 // round trip worthwhile; the budget and round cap stop a pathological cluster
 // from ARPing an entire /22 on every deploy.
 const PROBE_BATCH_MIN   = 32;
+// Simultaneous arpings per ssh round trip. Unlimited fan-out is what produced
+// the false-positive storm this guard exists for: dozens of concurrent probes
+// against a short deadline return non-zero without any reply arriving.
+const PROBE_CONCURRENCY = 8;
+// A batch at least this large coming back 100% occupied is treated as a broken
+// probe, not a full pool. Below this a legitimate all-taken result is plausible.
+const PROBE_SANITY_MIN  = 8;
 const PROBE_ROUNDS_MAX  = 8;
 const PROBE_BUDGET      = 512;   // addresses probed in one allocate() call
 
@@ -176,47 +183,81 @@ async function assertProbeUsable(node) {
 }
 
 /**
- * ARP every candidate at once and return the set that answered.
+ * ARP the candidates and return the set that answered.
  *
- * arping -D is duplicate-address-detection mode: it sources from 0.0.0.0 (so the
- * probe interface needs no address of its own - vmbr0.60 is `inet manual` on
- * every node) and exits 0 when NOBODY replies. Layer 2, so a gateway's INPUT
- * firewall cannot hide it the way it can hide ICMP. Fanned out, so a whole batch
- * costs one ssh round trip rather than one per address.
+ * READS THE REPLY COUNT, NOT THE EXIT CODE. This is the whole design of this
+ * function and it is not a style choice. arping's exit status conflates two
+ * completely different outcomes: "somebody replied" and "the command did not
+ * finish". Fan 32 of them out at once against a one-second deadline and a busy
+ * node returns non-zero for most of them without a single reply having arrived —
+ * which read as "occupied" and reported an entire /24 as taken while sequential
+ * probes of the same addresses came back free. So: parse
+ * "Received N response(s)" from arping's own summary, which says exactly what
+ * happened and nothing else.
+ *
+ * arping -D is RFC 5227 duplicate-address-detection: it sources from 0.0.0.0, so
+ * the probe interface needs no address of its own (vmbr0.60 is `inet manual` on
+ * every node). Layer 2, so a gateway's INPUT firewall cannot hide it the way it
+ * can hide ICMP.
+ *
+ * Concurrency is bounded rather than unlimited. The point is not speed — it is
+ * that dozens of simultaneous broadcast probes are exactly the condition that
+ * produced the false positives above.
  */
 async function probeTakenAddresses(node, candidates) {
   const net = getV2LabNetwork();
   if (!candidates.length) return new Set();
 
-  const script =
-    'IF=' + net.probe.interface + '\n' +
-    candidates.map(ip =>
-      '( arping -q -c 2 -w 1 -D -I "$IF" ' + ip +
-      ' >/dev/null 2>&1 && echo "FREE ' + ip + '" || echo "TAKEN ' + ip + '" ) &'
-    ).join('\n') +
-    '\nwait\n';
+  const waitSecs = Math.max(2, Math.ceil((net.probe.timeout_ms || 2000) / 1000));
 
-  const budget = Math.max(30000, net.probe.timeout_ms + 15000);
+  const script = [
+    'IF=' + net.probe.interface,
+    'probe() {',
+    '  out=$(arping -c 2 -w ' + waitSecs + ' -D -I "$IF" "$1" 2>&1)',
+    // The summary line is "Received N response(s)". Anything else means arping
+    // did not run to completion, and that must NOT be read as either answer.
+    '  n=$(printf "%s" "$out" | sed -n "s/.*Received \\([0-9][0-9]*\\) response.*/\\1/p" | tail -1)',
+    '  if [ -z "$n" ]; then echo "UNKNOWN $1"',
+    '  elif [ "$n" -gt 0 ]; then echo "TAKEN $1"',
+    '  else echo "FREE $1"; fi',
+    '}',
+    'i=0',
+    ...candidates.map(ip =>
+      'probe ' + ip + ' & i=$((i+1)); [ $((i % ' + PROBE_CONCURRENCY + ')) -eq 0 ] && wait'
+    ),
+    'wait',
+  ].join('\n') + '\n';
+
+  const budget = Math.max(60000, candidates.length * 1500);
   const { stdout } = await nodeSsh.nodeExec(node, ['/bin/sh', '-c', script], { timeoutMs: budget });
 
   const taken = new Set();
+  const unknown = [];
   const seen = new Set();
   for (const line of String(stdout || '').split('\n')) {
-    const m = line.trim().match(/^(FREE|TAKEN)\s+(\S+)$/);
+    const m = line.trim().match(/^(FREE|TAKEN|UNKNOWN)\s+(\S+)$/);
     if (!m) continue;
     seen.add(m[2]);
     if (m[1] === 'TAKEN') taken.add(m[2]);
+    if (m[1] === 'UNKNOWN') { taken.add(m[2]); unknown.push(m[2]); }
   }
 
-  // A candidate with no verdict was never actually tested. Treat it as taken:
-  // the whole point of this function is that "no evidence" must not read as
-  // "free".
+  // A candidate with no verdict at all was never actually tested. Treat it as
+  // taken -- "no evidence" must never read as "free" -- but count it, because a
+  // pile of these means the probe is broken, not that the pool is full.
   for (const ip of candidates) {
-    if (!seen.has(ip)) {
-      taken.add(ip);
-      console.warn(LOG + ' ' + ip + ' produced no arping verdict on ' + node + ' - treating as in use.');
-    }
+    if (!seen.has(ip)) { taken.add(ip); unknown.push(ip); }
   }
+
+  if (unknown.length) {
+    console.warn(
+      LOG + ' ' + unknown.length + '/' + candidates.length + ' probe(s) on ' + node +
+      ' produced no usable verdict; counting them as occupied. If this persists the probe is ' +
+      'not working - verify by hand on the node with:  arping -c 2 -w 2 -D -I ' +
+      net.probe.interface + ' <address>'
+    );
+  }
+
   return taken;
 }
 
@@ -421,6 +462,30 @@ async function allocateLaneWanIps(count, { probeNode = null, logTag = LOG } = {}
         'Widen cluster.networking.v2_lab_network.subnet in config/site.json, and the matching\n' +
         'prefix on the OPNsense VLAN-' + net.vlan_tag + ' interface FIRST, or the new addresses\n' +
         'will have no route. Or tear down stale lanes: GET /api/admin/wan-conflicts.';
+
+      // CREDIBILITY GUARD, scoped to the whole search rather than one batch.
+      // Finding NOTHING free after probing a meaningful sample is not a real
+      // network state -- it is what a misbehaving probe looks like. Without this
+      // it presents as "the pool is full", which sends the operator off to widen
+      // a subnet that was never the constraint. (A single all-occupied batch is
+      // fine and expected; a run of orphaned gateways is contiguous. It is
+      // finding nothing free ANYWHERE that is implausible.)
+      if (chosen.length === 0 && tried.size >= PROBE_SANITY_MIN && squatters.length === tried.size) {
+        throw new Error(
+          header +
+          'Every one of the ' + tried.size + ' addresses probed came back occupied, which is not a\n' +
+          'plausible network state. Refusing to allocate on that basis rather than reporting a\n' +
+          'full pool.\n\n' +
+          'Check by hand on ' + (node || '(probe node)') + ' -- ONE AT A TIME, not in parallel:\n' +
+          '  arping -c 2 -w 2 -D -I ' + net.probe.interface + ' ' + squatters[0] + '\n' +
+          '  arping -c 2 -w 2 -D -I ' + net.probe.interface + ' ' + squatters[squatters.length - 1] + '\n' +
+          'If those report 0 responses, the probe is at fault, not the pool. Likely causes: proxy\n' +
+          'ARP on the VLAN gateway, or a node whose probe interface sees traffic it should not.\n\n' +
+          'To keep provisioning while you investigate, set\n' +
+          'cluster.networking.v2_lab_network.probe.enabled=false in config/site.json. The database\n' +
+          'uniqueness constraint, the live-lane check and the reserved list all still apply.'
+        );
+      }
 
       throw new Error(header + (squatters.length
         ? orphanAdvice + (dbExhausted
