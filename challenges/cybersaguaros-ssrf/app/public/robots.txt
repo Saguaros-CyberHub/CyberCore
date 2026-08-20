@@ -5,3 +5,4 @@
 User-agent: *
 Disallow: /admin/
 Disallow: /api/verify.php
+Disallow: /api/internal/provision.php
