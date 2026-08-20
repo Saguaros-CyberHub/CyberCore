@@ -565,11 +565,25 @@
           </select>
         </div>
         <div id="provisionVMTemplateInfo" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: -0.4rem 0 0.4rem;"></div>
-        <!-- Hardware sizing for THIS deploy. Applied to each student's clone
-             before it first boots; the catalog template is never modified, so
-             another course can deploy the same image at a different size. -->
+        <!-- Optional second machine, for courses where each student needs a pair
+             (CYBR 400: a Windows ELK box plus a Rocky sensor). The FIRST machine
+             takes the lane's .50 address and the gateway's console port, so it
+             should be the one students actually connect to. -->
         <div class="form-group">
-          <label>Workstation Resources</label>
+          <label>Second Machine <span style="font-weight:400;color:var(--text-muted,#6b7280);">— optional</span></label>
+          <select id="provisionVMTemplate2">
+            <option value="">None — one machine per student</option>
+          </select>
+        </div>
+        <div id="provisionVMTemplate2Info" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: -0.4rem 0 0.4rem;"></div>
+        <!-- Hardware sizing for THIS deploy. Applied to the clone before it
+             first boots; the catalog template is never modified, so another
+             course can deploy the same image at a different size.
+             These inputs are seeded from the FIRST template and apply only to
+             it — a second machine keeps its own template's sizing, so a small
+             sensor is never cloned at a big SIEM box's memory. -->
+        <div class="form-group">
+          <label>Workstation Resources <span style="font-weight:400;color:var(--text-muted,#6b7280);">— first machine</span></label>
           <div class="resource-grid">
             <label>CPU cores
               <input type="number" id="provisionCores" step="1" placeholder="template default">
@@ -1800,6 +1814,12 @@
           return;
         }
 
+        // Second machine: same catalog, plus a "None" option so the default
+        // stays one machine per student.
+        const select2 = document.getElementById('provisionVMTemplate2');
+        select2.innerHTML = '<option value="">None — one machine per student</option>'
+          + templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
+
         // Re-evaluate eligibility, the description AND the sizing defaults
         // whenever the template changes — each image ships its own sizing.
         select.onchange = () => {
@@ -1807,7 +1827,9 @@
           renderTemplateInfo();
           seedResourceInputs();
         };
+        select2.onchange = renderTemplate2Info;
         renderTemplateInfo();
+        renderTemplate2Info();
         seedResourceInputs();
       } catch (e) {
         toast('Error loading templates: ' + e.message, true);
@@ -1890,6 +1912,37 @@
     }
 
     /** Show OS/type/protocol and whether the student gets credentials automatically. */
+    /**
+     * The templates this deploy will build, IN SLOT ORDER.
+     *
+     * Slot 0 gets the lane's .50 address and the gateway's baked console port,
+     * so the first picker is the machine students connect to. Sending an array
+     * of one is identical to the old single-template request server-side.
+     */
+    function provisionTemplateIds() {
+      const first = document.getElementById('provisionVMTemplate').value;
+      const second = (document.getElementById('provisionVMTemplate2') || {}).value || '';
+      return [first, second].filter(Boolean);
+    }
+
+    function renderTemplate2Info() {
+      const el = document.getElementById('provisionVMTemplate2Info');
+      if (!el) return;
+      const ids = provisionTemplateIds();
+      if (ids.length < 2) { el.textContent = ''; return; }
+      if (ids[0] === ids[1]) {
+        el.innerHTML = '<span style="color:#c53030;">Pick a different image — two machines cannot share one template.</span>';
+        return;
+      }
+      const t = _provisionTemplates[ids[1]];
+      if (!t) { el.textContent = ''; return; }
+      // Say plainly which machine gets the console, because it is not obvious
+      // and getting it backwards means students RDP into the wrong box.
+      el.innerHTML = `Second machine lands on <code>.51</code> with its own `
+        + `${escHtml((t.console_protocol || 'rdp').toUpperCase())} console. `
+        + `The FIRST machine keeps <code>.50</code> and the lane's main console.`;
+    }
+
     function renderTemplateInfo() {
       const el = document.getElementById('provisionVMTemplateInfo');
       if (!el) return;
@@ -1996,21 +2049,26 @@
 
     async function provisionVMs() {
       try {
-        const templateId = document.getElementById('provisionVMTemplate').value;
+        const templateIds = provisionTemplateIds();
         // Skip checkboxes that are checked-but-disabled (already-deployed students)
         const selectedStudents = Array.from(
           document.querySelectorAll('#provisionVMStudents .modal-student-select:checked:not(:disabled)')
         ).map(c => c.value);
 
-        if (!templateId || selectedStudents.length === 0) {
+        if (!templateIds.length || selectedStudents.length === 0) {
           toast('Select template and at least one student', true);
           return;
         }
+        if (templateIds.length === 2 && templateIds[0] === templateIds[1]) {
+          toast('The two machines must use different templates', true);
+          return;
+        }
 
-        // Each student gets their own isolated lane (gateway + workstation),
+        // Each student gets their own isolated lane (gateway + workstation(s)),
         // drawn from the course's reserved VXLAN block, sized per this form.
         const res = await api('POST', `/courses/${currentCourseId}/vms/provision`, {
-          template_id: templateId,
+          template_id: templateIds[0],
+          template_ids: templateIds,
           student_ids: selectedStudents,
           resources: readRequestedResources(),
         });
@@ -2033,8 +2091,12 @@
       const btn = document.getElementById('provisionAllBtn');
       const preview = document.getElementById('provisionPreview');
       try {
-        const templateId = document.getElementById('provisionVMTemplate').value;
-        if (!templateId) { toast('Select a template first', true); return; }
+        const templateIds = provisionTemplateIds();
+        if (!templateIds.length) { toast('Select a template first', true); return; }
+        if (templateIds.length === 2 && templateIds[0] === templateIds[1]) {
+          toast('The two machines must use different templates', true);
+          return;
+        }
         // Read before the request so a bad number surfaces immediately, and
         // reuse the SAME object for the confirm call — re-reading the form
         // between the preview and the confirm would let the two disagree.
@@ -2044,7 +2106,8 @@
         btn.textContent = 'Checking capacity...';
 
         const res = await api('POST', `/courses/${currentCourseId}/vms/provision-all`, {
-          template_id: templateId,
+          template_id: templateIds[0],
+          template_ids: templateIds,
           resources,
         });
 
@@ -2095,7 +2158,9 @@
           btn.textContent = 'Deploying...';
           try {
             const done = await api('POST', `/courses/${currentCourseId}/vms/provision-all`, {
-              template_id: templateId, confirm: true, resources,
+              // Same templateIds the preview was costed against — re-reading
+              // the pickers here would let the two disagree.
+              template_id: templateIds[0], template_ids: templateIds, confirm: true, resources,
             });
             toast(done.message || 'Provisioning started');
             closeModal('provisionVMModal');

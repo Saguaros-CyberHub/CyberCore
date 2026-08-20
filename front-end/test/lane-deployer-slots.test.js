@@ -575,3 +575,44 @@ test('no Proxmox work happens when the pool is exhausted', async () => {
   console.log(failures === 0 ? `\n${tests.length} passed` : `\n${failures}/${tests.length} FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })();
+
+// ── 8. per-role DNS aliases ─────────────────────────────────────────────────
+//
+// The reservation hostname is per-lane (`cle-cybr400-10003`), so it cannot be
+// what one machine calls another by — a baked config on the sensor cannot know
+// its lane's name. metadata.dns_aliases publishes a stable name that resolves
+// to THIS lane's machine, which is what lets one baked elastic-agent.yml point
+// at elk.cybercore.lan in every lane.
+test('a template dns_alias becomes a lane-local host-record', async () => {
+  reset();
+  const ELK = { ...WIN, id: 't-elk', template_key: 'elk', metadata: { dns_aliases: ['elk'] } };
+  await laneDeployer.deployLanes({ users: USERS, templates: [ELK, KALI], vxlanBlock: BLOCK });
+
+  const conf = calls.dnsmasqFiles[0].content;
+  // Slot 0 is .50, and the alias must point there — not at the sensor.
+  assert.ok(
+    /host-record=elk,elk\.cybercore\.lan,10\.39\.16\.50/.test(conf),
+    `alias host-record missing or wrong address:\n${conf}`
+  );
+  // Still a normal reservation as well; the alias is additive, not a substitute.
+  assert.ok(/dhcp-host=02:00:CC:27:10:32,10\.39\.16\.50,/.test(conf), 'slot 0 reservation lost');
+});
+
+test('an invalid dns_alias is dropped rather than written into dnsmasq', async () => {
+  reset();
+  // A malformed line stops dnsmasq starting, which takes DHCP down for EVERY
+  // machine in the lane — so a bad alias must never reach the file.
+  const BAD = { ...WIN, id: 't-bad', metadata: { dns_aliases: ['not a label', 'a.b', '', 'ok'] } };
+  await laneDeployer.deployLanes({ users: USERS, templates: [BAD], vxlanBlock: BLOCK });
+
+  const conf = calls.dnsmasqFiles[0].content;
+  assert.ok(/host-record=ok,ok\.cybercore\.lan,/.test(conf), 'the valid alias should survive');
+  assert.ok(!/not a label/.test(conf), 'a spaced label must not be written');
+  assert.ok(!/host-record=a\.b/.test(conf), 'a dotted label must not be written');
+});
+
+test('no dns_aliases means no host-record lines at all', async () => {
+  reset();
+  await laneDeployer.deployLanes({ users: USERS, templates: [KALI, WIN], vxlanBlock: BLOCK });
+  assert.ok(!/host-record=/.test(calls.dnsmasqFiles[0].content));
+});

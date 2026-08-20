@@ -80,6 +80,42 @@ async function loadWorkstationTemplate(templateId) {
   return template;
 }
 
+/**
+ * Load every workstation template a provision request names, in SLOT ORDER.
+ *
+ * `template_ids: [elk, sensor]` is the multi-machine form — slot 0 lands on
+ * <lane>.50 with the gateway's baked wan0:3389 DNAT, slot 1 on .51, and so on
+ * (lane-deployer.js octetForSlot). `template_id` remains accepted so every
+ * existing caller and the single-machine UI path are unchanged.
+ *
+ * Loops the single-row loader rather than one `= ANY($1::uuid[])` query on
+ * purpose: `id` is a UUID column, so a malformed value in the array would turn
+ * today's clean 404 into a 500, and N is 2.
+ */
+async function loadWorkstationTemplates(body) {
+  const ids = Array.isArray(body.template_ids) && body.template_ids.length
+    ? body.template_ids
+    : (body.template_id ? [body.template_id] : []);
+
+  if (!ids.length) {
+    const err = new Error('template_id, or a non-empty template_ids array, is required');
+    err.status = 400;
+    throw err;
+  }
+  // Two slots sharing one catalog row would make attack-target.js's
+  // template-identity rung ambiguous (it requires exactly one match), and would
+  // collide outright if that template ever pins metadata.console_wan_port.
+  if (new Set(ids.map(String)).size !== ids.length) {
+    const err = new Error('template_ids must be distinct — two machines cannot share one catalog row');
+    err.status = 400;
+    throw err;
+  }
+
+  const templates = [];
+  for (const id of ids) templates.push(await loadWorkstationTemplate(id));
+  return templates;
+}
+
 /** Resolve the course's reserved lab (VXLAN block + challenge key). */
 async function loadCourseLab(course) {
   if (!course.challenge_id) {
@@ -127,19 +163,58 @@ function resolveTargetStudents(courseId, requestedIds, selfId = null) {
  * Sizing is applied to each CLONE before its first boot; the catalog template is
  * never modified, so two courses can deploy the same image at different sizes.
  */
-function parseRequestedResources(body) {
-  const { resources, errors } = normalizeResourceSpec(body.resources);
+function parseRequestedResources(body, slotCount = 1) {
+  const raw = body.resources;
+
+  // Explicit per-slot sizing: one entry per machine, index-matched to
+  // template_ids. deployLanes already supports this (resourcesFor); holes keep
+  // that slot's own template sizing.
+  if (Array.isArray(raw)) {
+    if (raw.length > slotCount) {
+      const err = new Error(`resources has ${raw.length} entries for ${slotCount} machine(s)`);
+      err.status = 400;
+      throw err;
+    }
+    const out = raw.map((entry) => {
+      const { resources, errors } = normalizeResourceSpec(entry);
+      if (errors.length) {
+        const err = new Error(errors.join('; '));
+        err.status = 400;
+        throw err;
+      }
+      return resources;
+    });
+    return out.some(Boolean) ? out : null;
+  }
+
+  const { resources, errors } = normalizeResourceSpec(raw);
   if (errors.length) {
     const err = new Error(errors.join('; '));
     err.status = 400;
     throw err;
   }
+
+  // A SCALAR spec sizes machine 1 only, never every machine.
+  //
+  // The provision modal PRE-FILLS its CPU/RAM/disk inputs from the selected
+  // template's live Proxmox sizing (courses.html seedResourceInputs), so a
+  // resources object is sent on essentially every deploy whether or not the
+  // instructor touched it. Applying it to all slots would clone a 4 GB Linux
+  // sensor at the ELK box's 16 GB — silently, and multiplied by the cohort.
+  // Later slots fall through to their own template's sizing instead.
+  if (resources && slotCount > 1) {
+    const perSlot = new Array(slotCount).fill(null);
+    perSlot[0] = resources;
+    return perSlot;
+  }
   return resources;
 }
 
 /** Kick off the background deploy. Shared by /provision and /provision-all. */
-function startProvision({ courseId, courseName, courseCode, challenge, template, students, resources }) {
-  laneProvision.provisionLanes({ courseId, courseName, courseCode, challenge, template, students, resources })
+function startProvision({ courseId, courseName, courseCode, challenge, templates, students, resources }) {
+  // `templates` only: deployLanes treats a 1-element array exactly as it treats
+  // a single `template`, so the single-machine path is byte-identical.
+  laneProvision.provisionLanes({ courseId, courseName, courseCode, challenge, templates, students, resources })
     .then(result => console.log(`[CLE] Provision finished for course ${courseId}:`, JSON.stringify({
       provisioned: result.provisioned.length, failed: result.failed.length,
     })))
@@ -180,11 +255,20 @@ router.get('/', instructorOnly, async (req, res) => {
     `, [courseId]);
 
     // Live power-state for the workstation VMs via a single cluster call.
+    // Live power state. Falling back to the lane's own status when Proxmox is
+    // unreachable is correct, but swallowing the reason is not: every row then
+    // renders 'unknown' with nothing anywhere saying why, which is
+    // indistinguishable from "the VMID does not match". Say which it is.
     let byVmid = {};
     try {
       const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
       for (const r of (resources || [])) byVmid[String(r.vmid)] = r;
-    } catch (_) { /* fall back to lane status if Proxmox is unreachable */ }
+      if (Object.keys(byVmid).length === 0) {
+        console.warn('[CLE] /cluster/resources returned no VMs — every lane will show power state "unknown". Check the Proxmox API token\'s read permission on /.');
+      }
+    } catch (e) {
+      console.warn(`[CLE] Could not read live VM state from Proxmox (${e.message}) — lanes will show their stored status instead of live power state.`);
+    }
 
     const vms = lanesResult.rows.map(row => {
       const cfg = row.config || {};
@@ -247,17 +331,18 @@ router.get('/', instructorOnly, async (req, res) => {
 router.post('/provision', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { template_id, student_ids } = req.body;
+    const { student_ids } = req.body;
 
-    if (!template_id || !Array.isArray(student_ids) || student_ids.length === 0) {
-      return res.status(400).json({ error: 'template_id and non-empty student_ids array required' });
+    if (!Array.isArray(student_ids) || student_ids.length === 0) {
+      return res.status(400).json({ error: 'non-empty student_ids array required' });
     }
 
     const course = await getManagedCourse(courseId, req.user);
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
-    const resources = parseRequestedResources(req.body);
-    const template = await loadWorkstationTemplate(template_id);
+    // Templates BEFORE resources: a scalar sizing spec is scoped by slot count.
+    const templates = await loadWorkstationTemplates(req.body);
+    const resources = parseRequestedResources(req.body, templates.length);
     const challenge = await loadCourseLab(course);
     // req.user.userId: an instructor may tick themselves in the picker and get
     // their own workstation on this course's network. provision-all below
@@ -283,11 +368,22 @@ router.post('/provision', instructorOnly, async (req, res) => {
       action: 'vm.provisioned',
       targetAction: 'vm.provisioned',
       target: { type: 'course', id: courseId, label: course.course_name },
-      metadata: { course_id: courseId, template: template.os_name, template_id, scope: 'selected' },
-      targets: students.map(st => ({ id: st.id, label: st.email, metadata: { course_id: courseId, template_id } })),
+      // template_id/template stay singular-shaped so existing audit readers keep
+      // working; template_ids carries the full slot order.
+      metadata: {
+        course_id: courseId,
+        template: templates.map(t => t.os_name).join(' + '),
+        template_id: templates[0].id,
+        template_ids: templates.map(t => t.id),
+        scope: 'selected',
+      },
+      targets: students.map(st => ({
+        id: st.id, label: st.email,
+        metadata: { course_id: courseId, template_id: templates[0].id },
+      })),
     });
 
-    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students, resources });
+    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, templates, students, resources });
   } catch (error) {
     console.error('[CLE] Provision VMs error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
@@ -305,14 +401,14 @@ router.post('/provision', instructorOnly, async (req, res) => {
 router.post('/provision-all', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
-    const { template_id, confirm } = req.body;
-    if (!template_id) return res.status(400).json({ error: 'template_id is required' });
+    const { confirm } = req.body;
 
     const course = await getManagedCourse(courseId, req.user);
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
-    const resources = parseRequestedResources(req.body);
-    const template = await loadWorkstationTemplate(template_id);
+    // Templates BEFORE resources: a scalar sizing spec is scoped by slot count.
+    const templates = await loadWorkstationTemplates(req.body);
+    const resources = parseRequestedResources(req.body, templates.length);
     const challenge = await loadCourseLab(course);
     const { students, skipped } = await resolveTargetStudents(courseId, null);
 
@@ -325,18 +421,21 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
 
     if (!confirm) {
       try {
-        // One workstation per lane; the gateway is counted by the guard itself.
+        // One entry per workstation slot; the gateway is counted by the guard
+        // itself. attackBoxes stays false — this path never deploys a Kali.
         const preview = await buildDeployPreview({
           numLanes: students.length,
           attackBoxes: false,
-          challengeVmCount: 1,
+          challengeVmCount: templates.length,
           proxmoxAPI,
           cybercoreQuery,
         });
         return res.json({
           preview: true,
           student_count: students.length,
-          template: template.os_name,
+          // Joined rather than an array: the UI renders this with escHtml, so a
+          // string needs no client change to describe a two-machine deploy.
+          template: templates.map(t => t.os_name).join(' + '),
           // Echoed so the confirm step can show what the cohort will cost at the
           // chosen size. buildDeployPreview gates on node headroom, not per-VM
           // sizing, so this is informational only.
@@ -366,11 +465,20 @@ router.post('/provision-all', instructorOnly, async (req, res) => {
       action: 'vm.provisioned_bulk',
       targetAction: 'vm.provisioned',
       target: { type: 'course', id: courseId, label: course.course_name },
-      metadata: { course_id: courseId, template: template.os_name, template_id, scope: 'whole_class' },
-      targets: students.map(st => ({ id: st.id, label: st.email, metadata: { course_id: courseId, template_id } })),
+      metadata: {
+        course_id: courseId,
+        template: templates.map(t => t.os_name).join(' + '),
+        template_id: templates[0].id,
+        template_ids: templates.map(t => t.id),
+        scope: 'whole_class',
+      },
+      targets: students.map(st => ({
+        id: st.id, label: st.email,
+        metadata: { course_id: courseId, template_id: templates[0].id },
+      })),
     });
 
-    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, template, students, resources });
+    startProvision({ courseId, courseName: course.course_name, courseCode: course.code, challenge, templates, students, resources });
   } catch (error) {
     console.error('[CLE] Provision-all error:', error.message);
     res.status(error.status || 500).json({ error: error.message });

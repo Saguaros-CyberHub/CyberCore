@@ -39,7 +39,7 @@
 # ============================================================================
 set -euo pipefail
 
-VMID=${VMID:-1006}
+VMID=${VMID:-1007}
 SRC_VMID=${SRC_VMID:-1001}                 # rocky-linux-template
 NAME=${NAME:-cybr400-loggen-template}
 STORAGE=${STORAGE:-vmpool}
@@ -59,19 +59,27 @@ LOGGEN_REPO="${LOGGEN_REPO:-https://github.com/summved/log-generator.git}"
 LOGGEN_REF="${LOGGEN_REF:-2db735a7a5c6fb56654187325bb36772d3c9c4d7}"
 NODE_STREAM="${NODE_STREAM:-20}"
 
-# The in-lane ELK box. Resolvable identically in EVERY lane because the lane
-# gateway's dnsmasq runs with `domain=cybercore.lan` + `expand-hosts`, so a DHCP
-# client's advertised hostname becomes a name — see
-# sdn-templates/bake-lane-gateway-v3.sh. That is what lets this config be baked
-# once instead of templated per lane. The Windows ELK box MUST have its computer
-# name set to match ELK_HOST's first label.
+# The in-lane ELK box. Resolves identically in EVERY lane, which is what lets
+# this config be baked once instead of templated per lane.
+#
+# The name is published by the LANE GATEWAY, not by the Windows box: set
+# metadata.dns_aliases = ["elk"] on the ELK catalog row and lane-deployer.js
+# writes a dnsmasq `host-record` into that lane's reservation file, pointing at
+# whatever address the ELK box actually took.
+#
+# It deliberately does NOT rely on the Windows machine advertising 'elk' over
+# DHCP. cloudbase-init's SetHostNamePlugin renames every clone to the Proxmox VM
+# name, truncates it to the 15-char NetBIOS limit, and with allow_reboot=false
+# applies it only at the next reboot — so that name is the baked one on first
+# boot and the lane name afterwards. See NEXTSTEPS step 3.
 ELK_HOST="${ELK_HOST:-elk.cybercore.lan}"
 ELK_PORT="${ELK_PORT:-9200}"
-ELK_USER="${ELK_USER:-elastic}"
-ELK_PASS="${ELK_PASS:-changeme}"
-# Self-signed is the norm for a lab stack. Set to 'full' if you bake a real CA.
-ELK_SSL_VERIFY="${ELK_SSL_VERIFY:-none}"
-ELASTIC_VERSION="${ELASTIC_VERSION:-8.15.3}"
+# REQUIRED, and deliberately has no default: the agent must match the stack
+# running on the lane's ELK box. Guessing produces an agent that installs
+# cleanly and then fails to ship, which reads as a network or DNS problem.
+# Find it with, on the ELK box:
+#     Invoke-RestMethod http://localhost:9200 | Select -Expand version
+ELASTIC_VERSION="${ELASTIC_VERSION:-}"
 
 # Baseline rate. Deliberately modest: the point is that an instructor's attack
 # arrives buried in ordinary traffic, not that the disk fills by Friday.
@@ -89,6 +97,16 @@ fi
 if ! qm status $SRC_VMID >/dev/null 2>&1; then
   echo "ERROR: source template $SRC_VMID (rocky-linux-template) not found on this node." >&2
   echo "       Run this on the node that holds it, or set SRC_VMID." >&2
+  exit 1
+fi
+if [ -z "$ELASTIC_VERSION" ]; then
+  echo "ERROR: ELASTIC_VERSION is required — the agent must match the ELK stack it ships to." >&2
+  echo "       On the ELK box: Invoke-RestMethod http://localhost:9200 | Select -Expand version" >&2
+  echo "       Then: ELASTIC_VERSION=<x.y.z> $0" >&2
+  exit 1
+fi
+if ! printf '%s' "$ELASTIC_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+  echo "ERROR: ELASTIC_VERSION='$ELASTIC_VERSION' is not an x.y.z version." >&2
   exit 1
 fi
 
@@ -122,7 +140,7 @@ mkdir -p "$(dirname "$USERDATA_PATH")"
 
 echo "==> Baking $NAME as VMID $VMID from source template $SRC_VMID"
 echo "    log-generator @ ${LOGGEN_REF:0:12}"
-echo "    ELK target    : ${ELK_HOST}:${ELK_PORT} (ssl verification: ${ELK_SSL_VERIFY})"
+echo "    ELK target    : http://${ELK_HOST}:${ELK_PORT} (no auth — lab stack runs with security disabled)"
 
 # ---------- 1. cloud-init user-data ----------
 cat > "$USERDATA_PATH" <<CLOUDINIT
@@ -203,13 +221,18 @@ write_files:
   - path: /etc/elastic-agent/elastic-agent.yml
     permissions: '0600'
     content: |
+      # Plain http, no credentials: the lab stack runs with
+      # xpack.security.enabled=false, which removes TLS, service-account tokens
+      # and enrollment in one move — and with them every failure mode that comes
+      # from cloning a machine whose certs were issued to its old hostname.
+      #
+      # ${ELK_HOST} resolves in EVERY lane to that lane's own ELK box, because
+      # lane-deployer publishes a dnsmasq host-record from the ELK template's
+      # metadata.dns_aliases. Nothing here is per-lane, which is the point.
       outputs:
         default:
           type: elasticsearch
-          hosts: ["https://${ELK_HOST}:${ELK_PORT}"]
-          username: "${ELK_USER}"
-          password: "${ELK_PASS}"
-          ssl.verification_mode: ${ELK_SSL_VERIFY}
+          hosts: ["http://${ELK_HOST}:${ELK_PORT}"]
       inputs:
         # BOTH trees. Shipping only the baseline path is the single easiest way
         # to make this whole feature look broken: attacks would run correctly
@@ -327,9 +350,16 @@ DEADLINE=$(( $(date +%s) + 2400 ))
 BAKE_ENV=""
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   if OUT=$(qm guest exec $VMID -- /bin/sh -c 'cat /etc/cybercore-bake.env 2>/dev/null' 2>/dev/null); then
-    BAKE_ENV=$(printf '%s' "$OUT" | sed -n 's/.*"out-data" : "\(.*\)"/\1/p')
-    # qm guest exec returns JSON; fall back to the raw text if the shape differs
+    # `qm guest exec` returns JSON, and out-data is a JSON STRING: the file's real
+    # newlines arrive as the two-character escape  \n. Decode them with printf %b,
+    # or the whole marker file parses as ONE line and every marker after the first
+    # reads as part of the first one's value -- which looks exactly like a bake
+    # that did nothing, on a bake that did everything.
+    # [^"] rather than .* so the match stops at out-data's own closing quote
+    # instead of running on to the last quote in the JSON object.
+    BAKE_ENV=$(printf '%s' "$OUT" | sed -n 's/.*"out-data"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
     [ -z "$BAKE_ENV" ] && BAKE_ENV="$OUT"
+    BAKE_ENV=$(printf '%b' "$BAKE_ENV")
     if printf '%s' "$BAKE_ENV" | grep -q 'BAKE_COMPLETE=yes'; then
       echo "==> cloud-init finished"
       break
@@ -420,35 +450,62 @@ cat <<NEXTSTEPS
 ============================================================================
  Template $VMID ($NAME) is built. Three things remain.
 
- 1. REGISTER IT IN THE CATALOG, tagged 'loggen'.
+ 1. REGISTER IT AS A WORKSTATION TEMPLATE, tagged 'loggen'.
 
-    The Attack Console's target resolver looks for
-        WHERE 'loggen' = ANY(role_hints) AND is_active
-    and that tag is what makes it identify the sensor deterministically
-    instead of falling back to elimination. Add the row through
-    Admin -> Workstation Templates (POST /api/admin/vm-templates), with:
+    template_type MUST be 'workstation'. CYBR 400 lanes are built by the CLE
+    provision path (lane-deployer.js), and its picker filters on
+    template_type = 'workstation' — an 'os_template' row is invisible there and
+    /provision 404s it. Add the row through Admin -> Workstation Templates:
 
         os_family      linux
         os_name        Rocky Linux (CYBR 400 sensor)
         template_vmid  $VMID
         template_key   cybr400-loggen-template
-        template_type  os_template
-        role_hints     {loggen}
+        template_type  workstation
+        metadata       {"console_protocol": "ssh"}
 
-    Then run POST /api/admin/vm-templates/sync-nodes so 'node' is filled in.
-    Do NOT add a seed migration for this: front-end/migrations/ has no
-    runner, so a file there would never execute.
+    console_protocol=ssh is not cosmetic. resolveConsole() defaults to rdp, so
+    leaving it unset publishes a gateway DNAT to port 3389 on a Linux box that
+    is not listening there.
 
- 2. POINT THE CYBR 400 CHALLENGE SPEC AT IT.
-    Set the Rocky machine's template_vmid to $VMID, then redeploy ONE lane
-    and confirm the console resolves it (resolved_by should read 'template').
+    Then POST /api/admin/vm-templates/sync-nodes so 'node' is filled in.
+    Do NOT add a seed migration: front-end/migrations/ has no runner, so a file
+    there would never execute.
 
- 3. NAME THE WINDOWS ELK BOX 'elk'.
-    The agent config baked in here targets ${ELK_HOST}. That resolves in every
-    lane only because the gateway's dnsmasq runs expand-hosts with
-    domain=cybercore.lan, and it indexes the name the box advertises in DHCP —
-    i.e. its Windows computer name. Set it on that template via sysprep /
-    cloudbase-init, not per deploy.
+ 2. TAG IT 'loggen' SO THE ATTACK CONSOLE FINDS IT.
+    The resolver looks for  WHERE 'loggen' = ANY(role_hints) AND is_active,
+    which identifies the sensor deterministically instead of probing both
+    machines. role_hints is NOT writable from any admin UI, so either:
+
+        UPDATE cybercore_template_catalog
+           SET role_hints = '{loggen}'
+         WHERE template_key = 'cybr400-loggen-template';
+
+    or skip SQL entirely and set, in the app environment:
+
+        CYBR400_LOGGEN_TEMPLATE_KEY=cybr400-loggen-template
+
+ 3. GIVE THE WINDOWS ELK TEMPLATE THE 'elk' DNS ALIAS.
+    The agent config baked in here targets ${ELK_HOST}, and that name is
+    published by the LANE GATEWAY, not by the Windows box. On the ELK catalog
+    row set:
+
+        metadata    {"dns_aliases": ["elk"]}
+
+    lane-deployer then writes a dnsmasq host-record per lane, so every lane
+    resolves 'elk' to its OWN ELK box.
+
+    Do NOT try to do this by naming the Windows machine 'elk'. cloudbase-init's
+    SetHostNamePlugin renames every clone to the Proxmox VM name, truncates it
+    to the 15-char NetBIOS limit, and with allow_reboot=false the rename only
+    takes effect at the NEXT reboot — so the advertised name is the baked one on
+    first boot and the lane name afterwards.
+
+ 4. DEPLOY BOTH MACHINES TOGETHER.
+    In the course's Provision Workstation VM modal, pick the ELK image as the
+    first machine and this sensor as the second. First machine = slot 0 = the
+    lane's .50 address and the gateway's baked RDP console, which is what
+    students connect to. This sensor lands on .51.
 
  Then, on a deployed lane, verify what this script cannot:
 

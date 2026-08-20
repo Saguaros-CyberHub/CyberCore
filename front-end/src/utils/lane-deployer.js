@@ -111,6 +111,18 @@ const CONSOLE_PROTOCOLS = {
 // would leave a stale reservation behind whenever a lane is re-provisioned with
 // fewer machines.
 const DNSMASQ_RESERVATION_PATH = '/etc/dnsmasq.d/lane-workstation.conf';
+
+// The search domain the lane gateway serves. Must match LANE_DOMAIN in the
+// gateway bakes (sdn-templates/bake-lane-gateway-v3.sh and v2_gateway's
+// firstboot hook both default to cybercore.lan), because host-record entries we
+// publish are read back by guests using that suffix.
+const LANE_DNS_DOMAIN = process.env.LANE_DNS_DOMAIN || 'cybercore.lan';
+
+// A DNS label: letters, digits and inner hyphens, max 63 octets. Anything else
+// is dropped rather than written — these land in a dnsmasq config file, and a
+// malformed line stops dnsmasq from starting, which takes DHCP down for the
+// WHOLE lane (see installLaneReservations).
+const DNS_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
 const LOG = '[LaneDeployer]';
 
 // ── generic helpers ──────────────────────────────────────────────────────────
@@ -289,6 +301,39 @@ function resolveConsole(template) {
   // then want the same port are a real conflict, and deployLanes rejects them
   // rather than letting the second DNAT shadow the first.
   return { protocol, guestPort, wanPort, wanPortPinned: pinnedWanPort !== null };
+}
+
+/**
+ * Stable in-lane DNS names this template should answer to, from
+ * `metadata.dns_aliases` (e.g. `["elk"]` on the CYBR 400 ELK image).
+ *
+ * The reservation hostname is per-lane, so it is useless as a link target: a
+ * baked config on one machine cannot know the other's lane name. An alias is
+ * the same in every lane while resolving to that lane's own machine, which is
+ * what lets a single baked elastic-agent.yml point at `elk.cybercore.lan`
+ * everywhere.
+ *
+ * Invalid labels are dropped with a warning rather than written through. These
+ * lines go into a dnsmasq config, and one malformed entry stops dnsmasq
+ * starting — which takes DHCP down for every machine in the lane, not just this
+ * one.
+ */
+function resolveDnsAliases(template) {
+  const raw = (template.metadata || {}).dns_aliases;
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const entry of raw) {
+    const alias = String(entry == null ? '' : entry).trim().toLowerCase();
+    if (DNS_LABEL_RE.test(alias)) {
+      if (!out.includes(alias)) out.push(alias);
+    } else {
+      console.warn(
+        `${LOG} Ignoring invalid dns_alias ${JSON.stringify(entry)} on template ` +
+        `'${template.template_key || template.id}' — must be a single DNS label`
+      );
+    }
+  }
+  return out;
 }
 
 /**
@@ -580,7 +625,7 @@ function resolveWorkstationCredentials(template, user) {
       `workstation but declares no cloud-init account, so it falls back to ` +
       `'${DEFAULT_WINDOWS_CI_USER}'. That is correct only if this image's cloudbase-init is ` +
       `pinned to that account. Check the template's ` +
-      `C:\Program Files\Cloudbase Solutions\Cloudbase-Init\conf\cloudbase-init.conf and set ` +
+      `C:\\Program Files\\Cloudbase Solutions\\Cloudbase-Init\\conf\\cloudbase-init.conf and set ` +
       `metadata.cloud_init_user (Admin -> Workstation Templates -> Cloud-Init Account) to the ` +
       `username= it names. A mismatch presents as an RDP login failure, not as a deploy error.`
     );
@@ -827,7 +872,7 @@ async function waitForGatewayFirstboot(node, gatewayVmid, { timeoutMs = 180000 }
  * Throws if that isn't wired up; the caller decides whether that is survivable
  * (it is for slot 0 alone — see deployLaneWorkstations).
  *
- * @param {Array} workstations [{ slot, mac, ip, hostname, console:{guestPort,wanPort} }]
+ * @param {Array} workstations [{ slot, mac, ip, hostname, console:{guestPort,wanPort}, dnsAliases?:string[] }]
  */
 async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }) {
   const lines = [
@@ -838,6 +883,35 @@ async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }
   for (const ws of workstations) {
     lines.push(`dhcp-host=${ws.mac},${ws.ip},${ws.hostname}`);
   }
+
+  // Stable in-lane DNS names, from the template's metadata.dns_aliases.
+  //
+  // The reservation hostname above is per-lane (`cle-cybr400-10003`), so it
+  // cannot be what one machine calls another by — a baked config would have to
+  // know its own lane. An alias solves that: every lane resolves `elk` to its
+  // OWN ELK box, so one baked elastic-agent.yml works everywhere.
+  //
+  // Why here and not in the guest's /etc/hosts: the bakes set
+  // `manage_etc_hosts: true`, and cloud-init's cc_update_etc_hosts runs
+  // PER_ALWAYS — it regenerates /etc/hosts on EVERY boot, so a guest-side entry
+  // survives exactly until the first reboot and then vanishes silently.
+  //
+  // host-record (not address=) because it answers both A and PTR and does not
+  // wildcard subdomains. `domain=cybercore.lan` + `expand-hosts` are set by the
+  // gateway firstboot hook, so both the short and FQDN forms are published.
+  // reservationIp() only parses `dhcp-host=` lines, so these are correctly
+  // excluded from collision-neutralisation.
+  const aliasLines = [];
+  for (const ws of workstations) {
+    for (const alias of (ws.dnsAliases || [])) {
+      aliasLines.push(`host-record=${alias},${alias}.${LANE_DNS_DOMAIN},${ws.ip}`);
+    }
+  }
+  if (aliasLines.length) {
+    lines.push('# Stable per-role names (template metadata.dns_aliases).');
+    lines.push(...aliasLines);
+  }
+
   await installLaneReservations({
     node, gatewayVmid, path: DNSMASQ_RESERVATION_PATH, lines, logTag: LOG,
   });
@@ -1845,6 +1919,7 @@ async function deployLanes({
     octet: octetForSlot(slot),
     console: consoleForSlot(resolveConsole(t), slot),
     resources: resourcesFor(slot),
+    dnsAliases: resolveDnsAliases(t),
     sourceNode: await findTemplateNode(t.template_vmid, t.node || getDefaultTemplateNode()),
   })));
 

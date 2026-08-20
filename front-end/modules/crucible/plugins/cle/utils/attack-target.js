@@ -18,9 +18,23 @@
  *   3 sole_linux exactly one non-infrastructure Linux VM is left
  *   4 probe      ask the guest whether log-generator is installed
  *
- * Rung 3 is what makes CYBR 400 work with zero configuration: the lane holds
- * one Windows ELK box and one Rocky sensor, so elimination is unambiguous.
- * Rungs 1 and 2 exist so a lane with more machines stays deterministic.
+ * WHICH RUNG ACTUALLY FIRES DEPENDS ON HOW THE LANE WAS BUILT.
+ *
+ * CYBR 400 lanes are WORKSTATION lanes — two catalog templates deployed as
+ * slots 0 and 1 by lane-deployer.js — and a workstation lane has no challenge
+ * spec at all. So `specVms` is empty, rungs 2 and 3 cannot fire (rung 3 reads
+ * `os` off the spec, and with none every candidate is unclassifiable), and
+ * resolution lands on:
+ *
+ *   - rung 1, matching `config.workstations[].template_id` directly against the
+ *     catalog row tagged `role_hints @> {loggen}` — no spec hop needed. This is
+ *     the intended path: tag the sensor template, or set
+ *     CYBR400_LOGGEN_TEMPLATE_KEY, and resolution is deterministic.
+ *   - failing that, rung 4, which probes each candidate. It will test the
+ *     WINDOWS box first (harmlessly failing) before finding the sensor.
+ *
+ * Rungs 2 and 3 serve CHALLENGE lanes, where a spec does exist. Rung 3 is what
+ * lets a hand-built two-VM challenge resolve with no tagging at all.
  *
  * NEVER GUESS. When two candidates survive, this returns null with a reason,
  * the target is recorded 'skipped', and the instructor sees why on that lane's
