@@ -12,7 +12,7 @@ const crypto = require('crypto');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { proxmoxAPI, waitForTask, forceDestroyVM, findTemplateNode } = require('../../utils/proxmox');
 const { getDefaultTemplateNode } = require('../../utils/site-config');
-const { cybercoreQuery } = require('../../utils/cybercore-db');
+const { cybercoreQuery, cybercorePool } = require('../../utils/cybercore-db');
 const { query } = require('../../utils/db');
 const { buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
@@ -573,8 +573,21 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
       [lane.lane_id]
     ).catch(e => errors.push(`Workspace resource cleanup: ${e.message}`));
 
-    for (const cid of laneGuacConnIds) {
-      await guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`).catch(() => {});
+    // Fan these out instead of awaiting them one at a time. Each DELETE is a
+    // call to Guacamole BY NAME, so a resolver or upstream stall costs the full
+    // per-call timeout — serialised, one dead connection held the entire rest of
+    // the teardown (the cybercore_lane DELETE below, and the response) behind it.
+    // allSettled keeps per-connection failures non-fatal exactly as the old
+    // .catch(() => {}) did: a connection that will not delete is an orphaned row
+    // in Guacamole's own database and holds nothing on the cluster. Chunked
+    // rather than all at once so a lane with many consoles cannot open an
+    // unbounded number of sockets against a single Guacamole instance.
+    const GUAC_DELETE_CONCURRENCY = 8;
+    for (let i = 0; i < laneGuacConnIds.length; i += GUAC_DELETE_CONCURRENCY) {
+      await Promise.allSettled(
+        laneGuacConnIds.slice(i, i + GUAC_DELETE_CONCURRENCY).map(cid =>
+          guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`))
+      );
     }
 
     await cybercoreQuery(
@@ -701,9 +714,23 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
           proxmoxAPI, waitForTask
         });
 
-        await cybercoreQuery('BEGIN');
+        // Read-modify-write of config under a real row lock, on ONE PINNED
+        // client. cybercoreQuery is cybercorePool.query(), which checks a client
+        // out per statement and releases it, so BEGIN / SELECT … FOR UPDATE /
+        // UPDATE / COMMIT ran on four unrelated backends: the lock was taken and
+        // dropped inside its own implicit transaction, the UPDATE autocommitted,
+        // the COMMIT landed on a connection with nothing open, and the backend
+        // that ran BEGIN went back to the pool idle-in-transaction — still
+        // holding the cybercore_lane row lock — to be inherited by whatever query
+        // grabbed it next. Two attaches (or an attach racing a detach) on the
+        // same lane would then both read the same attached_modules array and the
+        // second write would drop the first, leaving that module's VMs running
+        // with nothing referencing them. Same pattern as withLaneConfig() in
+        // modules/crucible/plugins/cle/utils/vuln-lab-provision.js.
+        const client = await cybercorePool.connect();
         try {
-          const cur = await cybercoreQuery(
+          await client.query('BEGIN');
+          const cur = await client.query(
             `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
             [lane.lane_id]
           );
@@ -713,14 +740,18 @@ router.post('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, 
           const list = Array.isArray(curCfg.attached_modules) ? curCfg.attached_modules : [];
           list.push(instance);
           curCfg.attached_modules = list;
-          await cybercoreQuery(
+          await client.query(
             `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
             [lane.lane_id, JSON.stringify(curCfg)]
           );
-          await cybercoreQuery('COMMIT');
+          await client.query('COMMIT');
         } catch (txErr) {
-          await cybercoreQuery('ROLLBACK').catch(() => {});
+          await client.query('ROLLBACK').catch(() => {});
           throw txErr;
+        } finally {
+          // Exactly once, on every path — a client leaked here is a pool slot
+          // gone for the life of the process.
+          client.release();
         }
         console.log(`[Attach] Module ${challenge_key} attached to lane ${lane.lane_id} as ${instance.module_instance_id}`);
       } catch (err) {
@@ -760,9 +791,14 @@ router.delete('/lanes/:laneId/modules/:moduleInstanceId', authenticateToken, adm
       forceDestroyVM
     });
 
-    await cybercoreQuery('BEGIN');
+    // One pinned client for the whole transaction — see the attach handler above
+    // for why routing these four statements through the pool a statement at a
+    // time strands an idle-in-transaction backend still holding this lane's row
+    // lock, and lets a concurrent attach clobber the write.
+    const client = await cybercorePool.connect();
     try {
-      const cur = await cybercoreQuery(
+      await client.query('BEGIN');
+      const cur = await client.query(
         `SELECT config FROM cybercore_lane WHERE lane_id = $1 FOR UPDATE`,
         [laneId]
       );
@@ -771,14 +807,16 @@ router.delete('/lanes/:laneId/modules/:moduleInstanceId', authenticateToken, adm
         : (cur.rows[0].config || {});
       curCfg.attached_modules = (curCfg.attached_modules || [])
         .filter(m => m.module_instance_id !== moduleInstanceId);
-      await cybercoreQuery(
+      await client.query(
         `UPDATE cybercore_lane SET config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
         [laneId, JSON.stringify(curCfg)]
       );
-      await cybercoreQuery('COMMIT');
+      await client.query('COMMIT');
     } catch (txErr) {
-      await cybercoreQuery('ROLLBACK').catch(() => {});
+      await client.query('ROLLBACK').catch(() => {});
       throw txErr;
+    } finally {
+      client.release();
     }
 
     logActivity(req, 'detach_module', 'lane', laneId, {

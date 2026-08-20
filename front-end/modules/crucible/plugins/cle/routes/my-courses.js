@@ -25,6 +25,7 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { query } = require('../utils/db');
 const flagManager = require('../../../../../src/utils/flag-manager');
+const { isFeatureEnabled } = require('../utils/course-features');
 
 /**
  * Courses this student is enrolled in, with their assignments and flag
@@ -33,7 +34,7 @@ const flagManager = require('../../../../../src/utils/flag-manager');
 async function loadEnrolledCourses(userId) {
   const courses = await query(
     `SELECT c.course_id, c.course_name, c.code, c.description,
-            c.start_date, c.end_date, c.is_active,
+            c.start_date, c.end_date, c.is_active, c.features,
             e.enrollment_role, e.status AS enrollment_status
        FROM cle_course_enrollment e
        JOIN cle_course c ON c.course_id = e.course_id
@@ -99,13 +100,21 @@ router.get('/courses', async (req, res) => {
   try {
     const userId = req.user.userId;
     const courses = await loadEnrolledCourses(userId);
+    // ATTRIBUTE AGAINST EVERY ENROLLED COURSE, filter for display afterwards.
+    // attributeLanes() folds un-attributed lanes into the sole course when
+    // there is exactly one, so pre-filtering here would take a student enrolled
+    // in two courses, one with Flags off, down to one course and hand that
+    // course the other one's lanes.
     const courseIds = courses.map(c => c.course_id);
 
     const flagRows = await flagManager.getUserFlagRows(userId);
     const { byCourse, unattributed } = attributeLanes(flagRows, courseIds);
     const assignments = await loadAssignments(courseIds);
 
-    const payload = courses.map(c => {
+    // This endpoint feeds the student flag board's course picker and nothing
+    // else, so a course whose instructor turned Flags off is dropped rather
+    // than rendered as a card that 404s when tapped.
+    const payload = courses.filter(c => isFeatureEnabled(c, 'flags')).map(c => {
       const rows = byCourse[c.course_id] || [];
       return {
         courseId: c.course_id,
@@ -148,7 +157,7 @@ router.get('/courses/:courseId/flags', async (req, res) => {
     // Enrollment is the authorization check — a student may only read the
     // board for a course they are actually in.
     const enrollment = await query(
-      `SELECT c.course_id, c.course_name, c.code, c.description
+      `SELECT c.course_id, c.course_name, c.code, c.description, c.features
          FROM cle_course_enrollment e
          JOIN cle_course c ON c.course_id = e.course_id
         WHERE e.user_id = $1
@@ -160,6 +169,12 @@ router.get('/courses/:courseId/flags', async (req, res) => {
       return res.status(403).json({ error: 'You are not enrolled in this course' });
     }
     const course = enrollment.rows[0];
+
+    // Enrollment says they may read this course; the feature says the course
+    // has a board at all. 404 to match every other disabled-feature route.
+    if (!isFeatureEnabled(course, 'flags')) {
+      return res.status(404).json({ error: 'Flags is not enabled for this course' });
+    }
 
     const allCourses = await loadEnrolledCourses(userId);
     const courseIds  = allCourses.map(c => c.course_id);

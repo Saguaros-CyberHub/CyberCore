@@ -15,6 +15,21 @@ const pool = new Pool({
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 2000,
+  // --- Bound how long a checked-out client may be held ----------------------
+  // connectionTimeoutMillis limits ACQUISITION only. Once pg-pool hands a client
+  // out, nothing here used to break a query that blocks server-side, so a single
+  // stuck statement removed a pool slot permanently and the pool bled out one
+  // request at a time — the site going unresponsive while the process looked
+  // perfectly healthy. keepAlive covers the other half: a silently blackholed
+  // TCP connection (as opposed to a cleanly closed one, which the pool's
+  // 'error' handler already deals with) would otherwise park a client forever
+  // on a reply that is never coming.
+  statement_timeout: 30000,
+  query_timeout: 35000,
+  lock_timeout: 10000,
+  idle_in_transaction_session_timeout: 60000,
+  keepAlive: true,
+  keepAliveInitialDelayMillis: 10000,
 });
 
 // Test connection on startup

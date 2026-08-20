@@ -52,6 +52,42 @@ const TAILSCALE_API = 'https://api.tailscale.com';
 // ---- Token cache (Tailscale OAuth tokens last 1h) --------------------------
 let tokenCache = { token: null, expires: 0 };
 
+/*
+ * Every request in this module targets api.tailscale.com — a PUBLIC name that
+ * has to be resolved at call time. Node's fetch() has NO default timeout, so a
+ * sick resolver or an unreachable upstream turns any of these into an
+ * unbounded hang: the lane deploy/teardown awaiting it parks forever, still
+ * holding its HTTP socket (and, upstream in admin.js, its DB client). This
+ * host has already hit EAI_AGAIN on exactly this path — see the `dns:` block
+ * in docker-compose.yml — which is why these are the calls that get a hard
+ * deadline first.
+ *
+ * All four fetches therefore go through here with an explicit budget, and the
+ * rejection is rewritten to name the operation and the budget it blew, so a
+ * stall shows up in the log as "Tailscale oauth-token timed out after 15000ms"
+ * instead of an anonymous "fetch failed" with no clue which call died.
+ *
+ * The Response is returned untouched: callers keep their existing .ok/.json()
+ * handling, including the best-effort paths that swallow failures.
+ */
+async function tsFetch(url, options, { op, timeoutMs }) {
+  try {
+    return await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (e) {
+    // AbortSignal.timeout() aborts with a DOMException named 'TimeoutError',
+    // but depending on the undici version fetch may surface the abort as
+    // 'AbortError' instead. Treat both as "we blew our own deadline".
+    if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) {
+      throw new Error(`Tailscale ${op} timed out after ${timeoutMs}ms (${url})`);
+    }
+    // DNS/connect/TLS failures land here. Node reports those as a bare
+    // "fetch failed" with the real reason (EAI_AGAIN, ECONNREFUSED, ...)
+    // buried on .cause, so unwrap it or the log says nothing useful.
+    const detail = (e && e.cause && e.cause.message) || (e && e.message) || String(e);
+    throw new Error(`Tailscale ${op} request failed: ${detail}`);
+  }
+}
+
 function isEnabled() {
   return !!(process.env.TAILSCALE_OAUTH_CLIENT_ID
          && process.env.TAILSCALE_OAUTH_CLIENT_SECRET
@@ -74,11 +110,11 @@ async function getAccessToken() {
     grant_type: 'client_credentials'
   }).toString();
 
-  const r = await fetch(`${TAILSCALE_API}/api/v2/oauth/token`, {
+  const r = await tsFetch(`${TAILSCALE_API}/api/v2/oauth/token`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body
-  });
+  }, { op: 'oauth-token', timeoutMs: 15000 });
   if (!r.ok) {
     const text = await r.text();
     throw new Error(`Tailscale OAuth token failed (${r.status}): ${text}`);
@@ -141,14 +177,14 @@ async function mintLaneAuthKey({ vxlanId, expirySeconds = 600, extraTags = [] })
     description: `cybercore-lane-${vxlanId}`
   };
 
-  const r = await fetch(`${TAILSCALE_API}/api/v2/tailnet/${encodeURIComponent(tailnet)}/keys`, {
+  const r = await tsFetch(`${TAILSCALE_API}/api/v2/tailnet/${encodeURIComponent(tailnet)}/keys`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json'
     },
     body: JSON.stringify(body)
-  });
+  }, { op: 'mintLaneAuthKey', timeoutMs: 15000 });
   if (!r.ok) {
     const text = await r.text();
     throw new Error(`Tailscale mintLaneAuthKey failed (${r.status}): ${text}`);
@@ -204,9 +240,10 @@ async function deleteLaneDevices({ vxlanId, logger = console }) {
   const hostnamePrefix = `lane-${vxlanId}`;
   try {
     const token = await getAccessToken();
-    const listResp = await fetch(
+    const listResp = await tsFetch(
       `${TAILSCALE_API}/api/v2/tailnet/${encodeURIComponent(tailnet)}/devices`,
-      { headers: { 'Authorization': `Bearer ${token}` } }
+      { headers: { 'Authorization': `Bearer ${token}` } },
+      { op: 'device-list', timeoutMs: 15000 }
     );
     if (!listResp.ok) {
       logger.warn?.(`[Tailscale] device list failed (${listResp.status}); skipping cleanup`);
@@ -219,10 +256,10 @@ async function deleteLaneDevices({ vxlanId, logger = console }) {
     );
     for (const d of matches) {
       try {
-        const delResp = await fetch(`${TAILSCALE_API}/api/v2/device/${d.id}`, {
+        const delResp = await tsFetch(`${TAILSCALE_API}/api/v2/device/${d.id}`, {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${token}` }
-        });
+        }, { op: `device-delete ${d.id}`, timeoutMs: 10000 });
         if (delResp.ok) {
           logger.log?.(`[Tailscale] deleted device ${d.hostname || d.id}`);
         } else {

@@ -11,6 +11,7 @@ const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { reserveLabNetwork, teardownLabNetwork } = require('../../../../../src/utils/lab-network-provision');
 const laneProvision = require('../utils/lane-provision');
 const audit = require('../../../../../src/utils/audit');
+const { attachFeatures, sanitizeFeaturesInput, defaultFeaturesForCode } = require('../utils/course-features');
 
 const instructorOnly = requireRole('instructor', 'admin');
 const adminOnly = requireRole('admin');
@@ -56,6 +57,7 @@ router.get('/', instructorOnly, async (req, res) => {
           c.instructor_id,
           c.is_active,
           c.provision_status,
+          c.features,
           c.created_at,
           COUNT(DISTINCT e.user_id) AS student_count
         FROM cle_course c
@@ -73,6 +75,7 @@ router.get('/', instructorOnly, async (req, res) => {
           c.instructor_id,
           c.is_active,
           c.provision_status,
+          c.features,
           c.created_at,
           COUNT(DISTINCT e.user_id) AS student_count
         FROM cle_course c
@@ -84,6 +87,9 @@ router.get('/', instructorOnly, async (req, res) => {
     }
 
     await attachLaneCounts(coursesResult.rows);
+    // Raw column -> complete {key: boolean} map. Done here rather than in the
+    // page so the defaulting rules live in exactly one place.
+    attachFeatures(coursesResult.rows);
     res.json({ courses: coursesResult.rows });
   } catch (error) {
     console.error('[CLE] Get courses error:', error.message);
@@ -111,6 +117,7 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
           c.instructor_id,
           c.is_active,
           c.provision_status,
+          c.features,
           c.created_at,
           c.updated_at,
           COUNT(DISTINCT e.user_id) AS student_count
@@ -129,6 +136,7 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
           c.instructor_id,
           c.is_active,
           c.provision_status,
+          c.features,
           c.created_at,
           c.updated_at,
           COUNT(DISTINCT e.user_id) AS student_count
@@ -144,6 +152,7 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
     }
 
     await attachLaneCounts(courseResult.rows);
+    attachFeatures(courseResult.rows);
     res.json(courseResult.rows[0]);
   } catch (error) {
     console.error('[CLE] Get course error:', error.message);
@@ -156,7 +165,7 @@ router.get('/:courseId', instructorOnly, async (req, res) => {
  */
 router.post('/', adminOnly, async (req, res) => {
   try {
-    const { course_name, description, code, instructor_id, is_active, max_students } = req.body;
+    const { course_name, description, code, instructor_id, is_active, max_students, features } = req.body;
 
     // Validate required fields
     if (!course_name) {
@@ -178,12 +187,19 @@ router.post('/', adminOnly, async (req, res) => {
     // the request open — so the reservation runs in the background and flips
     // provision_status to 'ready'/'failed' when it finishes. The UI shows an
     // "Initializing" label until then.
+    // Absent features fall back to the per-code defaults, so a section created
+    // as CYBR-480-* arrives with its Flags tab already on and does not need an
+    // immediate follow-up edit.
+    const newFeatures = sanitizeFeaturesInput(features) || defaultFeaturesForCode(code);
+
     const createResult = await query(`
-      INSERT INTO cle_course (course_name, description, code, instructor_id, is_active, max_students, provision_status)
-      VALUES ($1, $2, $3, $4, $5, $6, 'provisioning')
-      RETURNING course_id, course_name, description, code, instructor_id, is_active, max_students, provision_status, created_at
-    `, [course_name, description || null, code || null, instructor_id, is_active !== false, maxStudents]);
+      INSERT INTO cle_course (course_name, description, code, instructor_id, is_active, max_students, provision_status, features)
+      VALUES ($1, $2, $3, $4, $5, $6, 'provisioning', $7::jsonb)
+      RETURNING course_id, course_name, description, code, instructor_id, is_active, max_students, provision_status, features, created_at
+    `, [course_name, description || null, code || null, instructor_id, is_active !== false, maxStudents,
+        JSON.stringify(newFeatures)]);
     const course = createResult.rows[0];
+    attachFeatures([course]);
 
     // Fire-and-forget: provision the lab network out of band.
     provisionCourseLab(course).catch((err) =>
@@ -195,7 +211,8 @@ router.post('/', adminOnly, async (req, res) => {
       action: 'course.created',
       source: 'cle',
       target: { type: 'course', id: course.course_id, label: course.course_name },
-      metadata: { code: course.code, instructor_id: course.instructor_id, max_students: course.max_students },
+      metadata: { code: course.code, instructor_id: course.instructor_id, max_students: course.max_students,
+                  features: course.features },
     });
 
     res.status(201).json(course);
@@ -254,11 +271,11 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
     const instructorId = req.user.userId;
     const userRole = req.user.role;
     const { courseId } = req.params;
-    const { course_name, description, code, instructor_id, is_active } = req.body;
+    const { course_name, description, code, instructor_id, is_active, features } = req.body;
 
     // Verify instructor owns this course or admin
     let ownerResult;
-    const OWNER_COLUMNS = 'course_id, course_name, description, code, instructor_id, is_active';
+    const OWNER_COLUMNS = 'course_id, course_name, description, code, instructor_id, is_active, features';
     if (userRole === 'admin') {
       ownerResult = await query(`
         SELECT ${OWNER_COLUMNS} FROM cle_course
@@ -277,6 +294,10 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
     // Prior values, for the audit row's from/to diff.
     const existing = ownerResult.rows[0];
 
+    // Unknown keys are dropped and absent input becomes null, so COALESCE below
+    // reads it as "leave the column alone" -- same contract as every other field.
+    const nextFeatures = sanitizeFeaturesInput(features);
+
     // Update course
     const updateResult = await query(`
       UPDATE cle_course
@@ -286,15 +307,22 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
         code = COALESCE($3, code),
         instructor_id = COALESCE($4, instructor_id),
         is_active = COALESCE($5, is_active),
+        features = COALESCE($6::jsonb, features),
         updated_at = NOW()
-      WHERE course_id = $6
-      RETURNING course_id, course_name, description, code, instructor_id, is_active, updated_at
-    `, [course_name, description, code, instructor_id, is_active, courseId]);
+      WHERE course_id = $7
+      RETURNING course_id, course_name, description, code, instructor_id, is_active, features, updated_at
+    `, [course_name, description, code, instructor_id, is_active,
+        nextFeatures && JSON.stringify(nextFeatures), courseId]);
 
     const after = updateResult.rows[0];
     const changes = {};
-    for (const field of ['course_name', 'description', 'code', 'instructor_id', 'is_active']) {
-      if (existing && String(existing[field]) !== String(after[field])) {
+    // features is jsonb -- pg hydrates it to an object, and String({}) is
+    // '[object Object]' for every possible value, so a plain String() compare
+    // would report every features change as no change and the audit row would
+    // silently omit the one field this endpoint just learned to write.
+    const cmp = (v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v));
+    for (const field of ['course_name', 'description', 'code', 'instructor_id', 'is_active', 'features']) {
+      if (existing && cmp(existing[field]) !== cmp(after[field])) {
         changes[field] = { from: existing[field], to: after[field] };
       }
     }
@@ -306,6 +334,7 @@ router.patch('/:courseId', instructorOnly, async (req, res) => {
       changes,
     });
 
+    attachFeatures([after]);
     res.json(after);
   } catch (error) {
     console.error('[CLE] Update course error:', error.message);

@@ -139,7 +139,7 @@ const _pendingVmids = new Set();
 let   _vmidMutex   = Promise.resolve();
 
 async function nextVmId() {
-  return (_vmidMutex = _vmidMutex.then(async () => {
+  const work = async () => {
     const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
     const existing  = new Set((resources || []).map(r => Number(r.vmid)));
 
@@ -149,7 +149,16 @@ async function nextVmId() {
     }
     _pendingVmids.add(candidate);
     return candidate;
-  }));
+  };
+
+  // Pass `work` as BOTH handlers so the chain runs whether the previous link
+  // resolved or rejected, and keep a never-rejecting promise as the new head.
+  // Assigning the raw result would poison the chain permanently: one failed
+  // proxmoxAPI call and every future deploy replays that same rejection without
+  // ever running this function again.
+  const result = _vmidMutex.then(work, work);
+  _vmidMutex = result.catch(() => {});
+  return result;
 }
 
 /**

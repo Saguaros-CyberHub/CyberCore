@@ -91,10 +91,21 @@ function dateStr() {
 
 function openStream(name, date) {
   try {
-    return fs.createWriteStream(
+    const stream = fs.createWriteStream(
       path.join(LOG_DIR, `${name}-${date}.log`),
       { flags: 'a', encoding: 'utf8' }
     );
+    // A WriteStream with no 'error' listener turns an async ENOSPC or EROFS
+    // into an uncaught exception — the process dies with no usable stack,
+    // because the failure happened inside the logger itself. Drop the stream
+    // instead and keep serving; console output is unaffected.
+    stream.on('error', (e) => {
+      process.stderr.write(`[logger] ${name} log write failed, file logging disabled: ${e.message}
+`);
+      if (_streams[name] === stream) _streams[name] = null;
+      _paused[name] = false;
+    });
+    return stream;
   } catch (e) {
     process.stderr.write(`[logger] Could not open ${name} log: ${e.message}\n`);
     return null;
@@ -114,11 +125,28 @@ function getStreams() {
   return _streams;
 }
 
+// Set while a stream's internal buffer is above its high-water mark. Lines
+// logged during that window are dropped rather than queued: losing log lines
+// under disk pressure is strictly better than growing an unbounded buffer in a
+// process that has no memory limit.
+const _paused = { app: false, error: false };
+
+function writeTo(streams, name, line) {
+  const stream = streams[name];
+  if (!stream || _paused[name]) return;
+  try {
+    if (stream.write(line) === false) {
+      _paused[name] = true;
+      stream.once('drain', () => { _paused[name] = false; });
+    }
+  } catch (_) {}
+}
+
 function writeFile(level, line) {
   const s = getStreams();
-  try { s.app?.write(line);   } catch (_) {}
+  writeTo(s, 'app', line);
   if (level === 'error' || level === 'warn') {
-    try { s.error?.write(line); } catch (_) {}
+    writeTo(s, 'error', line);
   }
 }
 

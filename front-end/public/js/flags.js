@@ -88,9 +88,9 @@ const Flags = (() => {
     if (_courses.length === 0) {
       root.innerHTML = `
         <div class="flag-empty">
-          <p><strong>You are not enrolled in any courses yet.</strong></p>
-          <p>Once your instructor enrolls you and deploys your lab, the assignment
-             and its flags will appear here.</p>
+          <p><strong>No flag boards available yet.</strong></p>
+          <p>Once your instructor enrolls you in a course that uses flags and deploys
+             your lab, the assignment and its flags will appear here.</p>
         </div>`;
       return;
     }

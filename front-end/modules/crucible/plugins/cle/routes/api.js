@@ -23,6 +23,7 @@ const sessionRoutes = require('./sessions');
 const flagRoutes = require('./flags');
 const myCoursesRoutes = require('./my-courses');
 const courseRosterRoutes = require('./course-roster');
+const { requireCourseFeature } = require('../utils/course-features');
 
 // Student-facing: enrolled courses + their capture-flag boards. No role gate —
 // every route inside scopes to req.user.userId and checks enrollment itself.
@@ -68,10 +69,13 @@ router.use('/api/cle/courses/:courseId/attacks', authenticateToken, (req, res, n
   next();
 }, attacksRoutes);
 
+// Gated at the mount rather than in the handler so the whole router is covered
+// by one check. Unlike the attack console there is no in-flight work to strand:
+// this router is read-only reporting, so turning Flags off can close all of it.
 router.use('/api/cle/courses/:courseId/flags', authenticateToken, (req, res, next) => {
   res.locals.courseId = req.params.courseId;
   next();
-}, flagRoutes);
+}, requireCourseFeature('flags'), flagRoutes);
 
 router.use('/api/cle/courses/:courseId/students/:studentId/guac', authenticateToken, (req, res, next) => {
   res.locals.courseId = req.params.courseId;

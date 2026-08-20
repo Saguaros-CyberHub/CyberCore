@@ -20,6 +20,15 @@
  *   - Launch is OPT-OUT (exclude_lane_ids), not opt-in. A lane deployed between
  *     the instructor opening the tab and pressing Launch is then included by
  *     default rather than silently left out of the exercise.
+ *
+ *   - THE attack_console FEATURE GATE COVERS LAUNCH AND RETRY ONLY. Reads,
+ *     /status and abort stay open on a course that has since disabled the
+ *     feature: a chain runs up to 45 minutes in the guest whether or not this
+ *     app is interested, so gating the whole router would strand a live run
+ *     with no way to watch or stop it, and would hide the history of runs that
+ *     really happened. Disabling a feature stops new work; it does not
+ *     retroactively unmake old work. utils/attack-worker.js is likewise
+ *     ungated, or those runs would never reach a terminal state.
  * ============================================================================
  */
 
@@ -32,6 +41,7 @@ const { getManagedCourse } = require('../utils/course-access');
 const audit = require('../../../../../src/utils/audit');
 const catalogModule = require('../utils/loggen-catalog');
 const runner = require('../utils/attack-runner');
+const { isFeatureEnabled } = require('../utils/course-features');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -142,8 +152,11 @@ router.get('/', instructorOnly, async (req, res) => {
 router.post('/', instructorOnly, async (req, res) => {
   const courseId = courseIdOf(req, res);
   try {
-    const course = await getManagedCourse(courseId, req.user, 'course_id, course_name, code');
+    const course = await getManagedCourse(courseId, req.user, 'course_id, course_name, code, features');
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+    if (!isFeatureEnabled(course, 'attack_console')) {
+      return res.status(404).json({ error: 'Attack Console is not enabled for this course' });
+    }
 
     // Throws on anything the catalog does not offer, before a run row exists.
     let selection;
@@ -364,8 +377,12 @@ router.post('/:runId/abort', instructorOnly, async (req, res) => {
 router.post('/:runId/retry', instructorOnly, async (req, res) => {
   try {
     const courseId = courseIdOf(req, res);
-    const course = await getManagedCourse(courseId, req.user, 'course_id, course_name, code');
+    const course = await getManagedCourse(courseId, req.user, 'course_id, course_name, code, features');
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+    // Retry re-fires lanes, i.e. it creates new work — gated like launch.
+    if (!isFeatureEnabled(course, 'attack_console')) {
+      return res.status(404).json({ error: 'Attack Console is not enabled for this course' });
+    }
     const run = await getRunForCourse(req.params.runId, courseId);
     if (!run) return res.status(404).json({ error: 'Attack run not found' });
 

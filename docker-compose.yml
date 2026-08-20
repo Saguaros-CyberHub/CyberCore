@@ -69,6 +69,11 @@ services:
   # CYBERHUB APP — Node.js/Express application
   # ============================================================================
   app:
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
     build:
       context: ./front-end
       dockerfile: Dockerfile
@@ -142,9 +147,21 @@ services:
       TAILSCALE_OAUTH_CLIENT_SECRET: ${TAILSCALE_OAUTH_CLIENT_SECRET}
       TAILSCALE_TAILNET: ${TAILSCALE_TAILNET}
       TAILSCALE_LANE_TAG: ${TAILSCALE_LANE_TAG:-tag:lane}
+      # libuv threadpool. The default of 4 is shared by ALL fs reads, dns.lookup
+      # and crypto work; this app does enough of each that 4 threads can queue
+      # behind a handful of slow DNS lookups and stall static file serving.
+      UV_THREADPOOL_SIZE: "64"
+      # Turns on the per-request duration line that request-logger.js already
+      # emits on every response — it logs at level "http", which the default
+      # LOG_LEVEL=info suppresses, so slow requests currently leave no trace.
+      LOG_LEVEL: ${LOG_LEVEL:-http}
       # Rate Limiting
       RATE_LIMIT_WINDOW_MS: 900000
-      RATE_LIMIT_MAX_REQUESTS: 100
+      # 5000 matches the code default (src/server.js) and example.env. The
+      # previous value of 100 per 15 min is exhausted by normal dashboard use
+      # within minutes for any NON-ADMIN user (admins are exempt at
+      # server.js:215, which is why it never reproduced for operators).
+      RATE_LIMIT_MAX_REQUESTS: 5000
       # Outbound email — activation links and course notifications from the CLE
       # roster import. MAIL_HOST is the compose service name below; see the dns:
       # note underneath, which is what makes that name resolvable at all.
@@ -310,6 +327,17 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: cybercore-caddy
+    # Caddy resolves Let's Encrypt and OCSP responders during certificate
+    # work and during TLS handshakes. Without this block it inherits the
+    # daemon's resolvers from the host /etc/resolv.conf, where dead lab
+    # nameservers sit ahead of working ones — every lookup then pays their
+    # full timeout, which stalls handshakes and fails ACME renewal.
+    # 127.0.0.11 stays first so compose service names (app, guacamole)
+    # still resolve; public resolvers sit behind it.
+    dns:
+      - 127.0.0.11
+      - 1.1.1.1
+      - 100.100.10.1
     restart: unless-stopped
     depends_on:
       - app

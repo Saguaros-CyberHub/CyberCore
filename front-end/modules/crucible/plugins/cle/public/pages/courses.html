@@ -104,6 +104,15 @@
     .detail-tab.active { color: var(--accent-red, #ab0520); border-bottom-color: var(--accent-red, #ab0520); }
     .detail-tab-pane { display: none; }
     .detail-tab-pane.active { display: block; }
+    /* A tab switched off for this course. Hidden outright rather than dimmed:
+       a disabled-looking tab invites the click that the whole change exists to
+       stop being answered with an empty panel. */
+    .detail-tab[hidden] { display: none; }
+
+    .feature-toggle-list { display: flex; flex-direction: column; gap: 0.6rem; }
+    .feature-toggle { display: flex; gap: 0.6rem; align-items: flex-start; cursor: pointer; font-weight: 400; }
+    .feature-toggle input { margin-top: 0.2rem; flex: none; }
+    .feature-toggle-hint { font-size: 0.75rem; color: var(--text-muted, #6b7280); }
 
     .students-table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
     .students-table th { background: #f9fafb; padding: 0.75rem; text-align: left; font-weight: 600; border-bottom: 2px solid #e5e7eb; font-size: 0.9rem; }
@@ -213,8 +222,12 @@
             <div class="detail-tab" onclick="switchDetailTab('students', this)">👥 Students</div>
             <div class="detail-tab" onclick="switchDetailTab('vm-management', this)">🖥️ VM Management</div>
             <div class="detail-tab" onclick="switchDetailTab('vulnerable-labs', this)">⚠️ Vulnerable Labs</div>
-            <div class="detail-tab" onclick="switchDetailTab('flags', this)">🚩 Flags</div>
-            <div class="detail-tab" onclick="switchDetailTab('attack-console', this)">🎯 Attack Console</div>
+            <!-- data-feature marks a tab as optional per course. The value is the
+                 key in cle_course.features / utils/course-features.js; the
+                 onclick argument stays the pane id, which is not the same
+                 string for the attack console. -->
+            <div class="detail-tab" data-feature="flags" onclick="switchDetailTab('flags', this)">🚩 Flags</div>
+            <div class="detail-tab" data-feature="attack_console" onclick="switchDetailTab('attack-console', this)">🎯 Attack Console</div>
           </div>
 
           <!-- Overview Tab -->
@@ -318,6 +331,11 @@
             <option value="false">Draft</option>
           </select>
         </div>
+        <div class="form-group">
+          <label>Features</label>
+          <div id="createCourseFeatures" class="feature-toggle-list"></div>
+          <span style="font-size: 0.75rem; color: var(--text-muted, #6b7280);">Which optional tabs this course shows. Pre-filled from the code above; changeable any time from Edit Course.</span>
+        </div>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('createCourseModal')">Cancel</button>
           <button class="btn btn-primary" id="createCourseBtn" onclick="createCourse()">Create Course</button>
@@ -355,6 +373,11 @@
             <option value="true">Active</option>
             <option value="false">Draft</option>
           </select>
+        </div>
+        <div class="form-group">
+          <label>Features</label>
+          <div id="editCourseFeatures" class="feature-toggle-list"></div>
+          <span style="font-size: 0.75rem; color: var(--text-muted, #6b7280);">Hides the tab and closes its API for this course. Existing flags and attack history are kept.</span>
         </div>
         <div class="form-buttons">
           <button class="btn btn-secondary" onclick="closeModal('editCourseModal')">Cancel</button>
@@ -674,6 +697,63 @@
     let currentCourseId = null;
     let currentCourseData = null;
 
+    /**
+     * PRESENTATION MIRROR of the optional entries in
+     * modules/crucible/plugins/cle/utils/course-features.js.
+     *
+     * Labels and hints for the modal checkboxes live here; the server decides
+     * defaults and gates the APIs, so nothing a browser sends can turn a
+     * feature on. `codePrefix` is only a prefill hint for the create form --
+     * it is data, not a second copy of the rule, and a course whose code never
+     * matches it is simply created with everything off.
+     *
+     * Adding a feature: an entry here, a data-feature attribute on its tab, and
+     * an entry in course-features.js. No migration.
+     */
+    const COURSE_FEATURES = [
+      { key: 'flags',          label: '&#128681; Flags',          hint: 'Per-student capture-the-flag board and sharing report.', codePrefix: 'CYBR480' },
+      { key: 'attack_console', label: '&#127919; Attack Console', hint: 'Fire MITRE log-generator runs into every student lane at once.', codePrefix: 'CYBR400' },
+    ];
+
+    /** Same normalisation the server and migration 007 use: punctuation out, upcased. */
+    function _normalizeCode(code) {
+      return String(code == null ? '' : code).replace(/[^a-z0-9]/gi, '').toUpperCase();
+    }
+
+    function renderFeatureCheckboxes(containerId, idPrefix) {
+      const el = document.getElementById(containerId);
+      if (!el) return;
+      el.innerHTML = COURSE_FEATURES.map(f => `
+        <label class="feature-toggle">
+          <input type="checkbox" id="${escAttr(idPrefix + f.key)}" data-feature-key="${escAttr(f.key)}">
+          <span>${f.label}<br><span class="feature-toggle-hint">${escHtml(f.hint)}</span></span>
+        </label>`).join('');
+    }
+
+    function setFeatureCheckboxes(containerId, features) {
+      document.querySelectorAll(`#${containerId} input[data-feature-key]`).forEach(input => {
+        input.checked = !!(features && features[input.dataset.featureKey]);
+      });
+    }
+
+    /** Always returns every key, so an unchecked box is sent as an explicit false. */
+    function readFeatureCheckboxes(containerId) {
+      const out = {};
+      document.querySelectorAll(`#${containerId} input[data-feature-key]`).forEach(input => {
+        out[input.dataset.featureKey] = input.checked;
+      });
+      return out;
+    }
+
+    /** Prefill the create form's boxes from the code as it is typed. */
+    function prefillCreateFeaturesFromCode() {
+      const el = document.getElementById('createCourseCode');
+      const code = _normalizeCode(el && el.value);
+      const guess = {};
+      for (const f of COURSE_FEATURES) guess[f.key] = !!f.codePrefix && code.startsWith(f.codePrefix);
+      setFeatureCheckboxes('createCourseFeatures', guess);
+    }
+
     async function api(method, path, body) {
       const opts = { method, headers: headers() };
       if (body) opts.body = JSON.stringify(body);
@@ -855,13 +935,20 @@
         const isAdmin = Auth && Auth.user && Auth.user.role === 'admin';
         document.getElementById('deleteCourseBtn').style.display = isAdmin ? 'inline-block' : 'none';
 
+        // Before the loaders: it decides which of them run.
+        applyCourseFeatures(data.features);
+
         loadCourseOverview();
         loadStudents();
         loadVMManagement();
         loadVulnerableLabs();
-        loadCourseFlags();
+        if (data.features && data.features.flags) loadCourseFlags();
         // Not loaded here on purpose — see switchDetailTab. Only told which
         // course it now belongs to, so a stale panel cannot paint into it.
+        // Called even when the tab is hidden: reset() only clears in-memory
+        // state and stops timers, and skipping it would leave the console
+        // holding the PREVIOUS course's id. The expensive work is in load(),
+        // which is reachable only by showing a tab this course does not have.
         if (window.CleAttack) CleAttack.reset(courseId);
       } catch (e) {
         toast('Error loading course: ' + e.message, true);
@@ -881,6 +968,30 @@
       const overlay = document.getElementById('sidebarOverlay');
       if (sidebar) sidebar.classList.toggle('open');
       if (overlay) overlay.classList.toggle('open');
+    }
+
+    /**
+     * Show only the tabs this course has switched on, and skip the data loads
+     * behind the hidden ones so a disabled tab costs no requests.
+     *
+     * Must run BEFORE the loaders in viewCourse(): it decides which of them to
+     * call. It also re-homes the view when the tab that was open is not
+     * available on the course being opened -- switchDetailTab() has no such
+     * fallback, so without this, going from a course with Flags to one without
+     * leaves the Flags tab styled active over an empty body.
+     */
+    function applyCourseFeatures(features) {
+      const on = features || {};
+      let activeHidden = false;
+      document.querySelectorAll('.detail-tab[data-feature]').forEach(tab => {
+        const enabled = on[tab.dataset.feature] === true;
+        tab.hidden = !enabled;
+        if (!enabled && tab.classList.contains('active')) activeHidden = true;
+      });
+      if (activeHidden) {
+        const overviewTab = document.querySelector('.detail-tab:not([data-feature])');
+        if (overviewTab) switchDetailTab('overview', overviewTab);
+      }
     }
 
     function switchDetailTab(tabName, tabEl) {
@@ -945,6 +1056,7 @@
       const instructorId = document.getElementById('createCourseInstructor').value;
       const isActive = document.getElementById('createCourseStatus').value === 'true';
       const maxStudents = parseInt(document.getElementById('createCourseMaxStudents').value, 10);
+      const features = readFeatureCheckboxes('createCourseFeatures');
 
       if (!courseName) {
         toast('Please enter a course name', true);
@@ -973,6 +1085,7 @@
           code: code || null,
           instructor_id: instructorId,
           is_active: isActive,
+          features,
           max_students: maxStudents
         });
 
@@ -984,6 +1097,7 @@
         document.getElementById('createCourseInstructor').value = '';
         document.getElementById('createCourseStatus').value = 'true';
         document.getElementById('createCourseMaxStudents').value = '30';
+        prefillCreateFeaturesFromCode();
         loadCourses();
       } catch (e) {
         toast('Error creating course: ' + e.message, true);
@@ -991,6 +1105,13 @@
         creatingCourse = false;
         if (btn) { btn.disabled = false; btn.textContent = 'Create Course'; }
       }
+    }
+
+    /** Which optional tabs this course shows, so the state is legible without opening Edit. */
+    function _featureSummary(features) {
+      const on = COURSE_FEATURES.filter(f => features && features[f.key] === true);
+      if (!on.length) return '<span style="color: var(--text-muted, #6b7280);">none</span>';
+      return on.map(f => f.label).join(' &middot; ');
     }
 
     async function loadCourseOverview() {
@@ -1003,6 +1124,7 @@
           <p><strong>Created:</strong> ${d.created_at ? new Date(d.created_at).toLocaleDateString() : 'N/A'}</p>
           <p><strong>Students Enrolled:</strong> ${d.student_count || 0}</p>
           <p><strong>Active VMs:</strong> ${d.vm_count || 0}</p>
+          <p><strong>Optional features:</strong> ${_featureSummary(d.features)}</p>
         </div>
       `;
     }
@@ -1285,6 +1407,10 @@
 
     /** Flag-plant summary for one deployment, or null when nothing is planted yet. */
     function _flagSummary(flags) {
+      // The Flags TAB is not the only place flag state reaches the UI - this
+      // chip sits in the Vulnerable Labs table. Left in, a course with Flags
+      // switched off still reports capture counts and the toggle looks broken.
+      if (!currentCourseData || !currentCourseData.features || !currentCourseData.features.flags) return '';
       if (!flags) return '<span style="color: var(--text-muted, #6b7280);">—</span>';
       const bits = [];
       if (flags.planted) bits.push(`<span style="color:#16a34a;">${flags.planted} planted</span>`);
@@ -1608,6 +1734,7 @@
       document.getElementById('editCourseCode').value = currentCourseData.code || '';
       document.getElementById('editCourseInstructor').value = currentCourseData.instructor_id || '';
       document.getElementById('editCourseStatus').value = currentCourseData.is_active ? 'true' : 'false';
+      setFeatureCheckboxes('editCourseFeatures', currentCourseData.features);
       showModal('editCourseModal');
     }
 
@@ -1618,7 +1745,8 @@
           description: document.getElementById('editCourseDesc').value.trim() || null,
           code: document.getElementById('editCourseCode').value.trim() || null,
           instructor_id: document.getElementById('editCourseInstructor').value,
-          is_active: document.getElementById('editCourseStatus').value === 'true'
+          is_active: document.getElementById('editCourseStatus').value === 'true',
+          features: readFeatureCheckboxes('editCourseFeatures')
         };
 
         if (!courseData.course_name) {
@@ -2651,6 +2779,10 @@
       const isLoggedIn = await Auth.requireAuth();
       if (!isLoggedIn) return;
       Layout.init('cle');
+      renderFeatureCheckboxes('createCourseFeatures', 'createFeature_');
+      renderFeatureCheckboxes('editCourseFeatures', 'editFeature_');
+      const codeInput = document.getElementById('createCourseCode');
+      if (codeInput) codeInput.addEventListener('input', prefillCreateFeaturesFromCode);
       loadCourses();
     });
   </script>

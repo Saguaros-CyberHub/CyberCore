@@ -120,6 +120,14 @@ async function provisionDatabase(manifest, pluginDir) {
     max: 10,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
+    // Loose ceilings: this pool runs migrations at boot, where a slow DDL is
+    // legitimate. They exist to bound a genuine hang, not to police query time.
+    statement_timeout: 120000,
+    query_timeout: 125000,
+    lock_timeout: 30000,
+    idle_in_transaction_session_timeout: 120000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
   });
 
   // Run migrations

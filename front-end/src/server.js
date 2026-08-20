@@ -326,7 +326,17 @@ app.use('/api/flags/submit', flagSubmitLimiter);
 // BODY PARSING & COOKIES
 // ============================================================================
 
-app.use(express.json({ limit: '10mb' }));
+// 10mb is needed by API routes that carry generated profiles and asset
+// payloads, but it was previously applied to EVERY path — including
+// unauthenticated non-/api routes, which no rate limiter covers (the
+// limiter is mounted on '/api/' below). A large body on those paths is a
+// free multi-megabyte synchronous JSON.parse on the only event loop.
+// /api/ keeps the original 10mb limit, so no existing route changes.
+const _jsonApi   = express.json({ limit: '10mb' });
+const _jsonOther = express.json({ limit: '256kb' });
+app.use((req, res, next) => (
+  req.path.startsWith('/api/') ? _jsonApi : _jsonOther
+)(req, res, next));
 app.use(express.urlencoded({ extended: true }));
 // cookieParser already applied earlier (before rate limiter)
 

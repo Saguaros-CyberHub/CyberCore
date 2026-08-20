@@ -125,6 +125,21 @@ const LANE_DNS_DOMAIN = process.env.LANE_DNS_DOMAIN || 'cybercore.lan';
 const DNS_LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
 const LOG = '[LaneDeployer]';
 
+// Width of teardown's third-party API fan-outs (Guacamole, Tailscale).
+//
+// Both endpoints are reached by NAME with no per-call deadline, and
+// tailscale.deleteLaneDevices is 2 + N requests on its own (token, device list,
+// one DELETE per matched device). Mapped straight into a Promise.all, a 24-lane
+// teardown therefore opens ~70+ simultaneous requests against two hosts we do
+// not control — so a slow resolver, a rate limit or a hung upstream stalls all
+// of them at once instead of a handful, and phase 5 blocks long enough that the
+// lane rows — the ONLY handle on the VMs being deleted, which is why they are
+// not dropped until every phase after this one has finished — sit there
+// unresolved. Bounding it turns n concurrent stalls into ceil(n / 5) serialised
+// ones. Deliberately well under teardownLanes' own default concurrency of 15,
+// which applies to Proxmox — our own cluster, and far better behaved.
+const EXTERNAL_CLEANUP_CONCURRENCY = 5;
+
 // ── generic helpers ──────────────────────────────────────────────────────────
 
 function vmApiBase(node, vmid, providerType) {
@@ -2503,6 +2518,11 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   }
 
   // Phase 5: DB + Guacamole + Tailscale cleanup.
+  //
+  // The two remote fan-outs go through runBatch rather than being spread into
+  // the Promise.all: see EXTERNAL_CLEANUP_CONCURRENCY for why the width matters.
+  // Failure handling is unchanged — each job still swallows its own error, so a
+  // dead Guacamole or Tailscale API can no more fail this teardown than before.
   await Promise.all([
     cybercoreQuery(
       `DELETE FROM cybercore_resource
@@ -2515,13 +2535,16 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     // database — annoying, and worth reporting, but it holds nothing on the
     // cluster. Guacamole being unreachable (or answering 403 with a dead admin
     // session) must not be what decides whether this lane's record survives.
-    ...(process.env.GUAC_ENABLED === 'true'
-      ? [...guacConnIds].map(cid =>
-          guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`)
-            .catch(e => warnings.push(`Guac connection ${cid}: ${e.message}`)))
-      : []),
+    process.env.GUAC_ENABLED === 'true'
+      ? runBatch([...guacConnIds], async (cid) => {
+          await guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`)
+            .catch(e => warnings.push(`Guac connection ${cid}: ${e.message}`));
+        }, { concurrency: EXTERNAL_CLEANUP_CONCURRENCY })
+      : Promise.resolve(),
 
-    ...vxlanIds.map(vxlanId => tailscale.deleteLaneDevices({ vxlanId }).catch(() => {})),
+    runBatch(vxlanIds, async (vxlanId) => {
+      await tailscale.deleteLaneDevices({ vxlanId }).catch(() => {});
+    }, { concurrency: EXTERNAL_CLEANUP_CONCURRENCY }),
   ]);
 
   // Phase 6: sweep orphaned disks the delete left behind.

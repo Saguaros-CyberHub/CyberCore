@@ -344,7 +344,7 @@ Read the failures rather than retrying:
 
 | Symptom | Cause |
 |---|---|
-| `status: green`, `number_of_nodes: 1` | correct — this is the target |
+| `status: yellow` or `green`, `number_of_nodes: 1` | correct. **yellow is expected** on a single node: replica shards cannot be assigned with nowhere to put them, so any index created with `number_of_replicas: 1` stays yellow forever. Kibana starts fine against it. Only a cluster with every index at 0 replicas goes green |
 | "connection was closed unexpectedly" | still TLS — an `http.ssl` block still says `enabled: true` |
 | "Unable to connect to the remote server" | different failure: nothing is listening. TLS is off, but the node is not up — go to the foreground start above |
 | Service will not start; log says *"default discovery settings are unsuitable for production use"* | `discovery.type: single-node` is missing — you deleted `initial_master_nodes` without adding it |
@@ -372,6 +372,22 @@ elasticsearch.hosts: ["http://localhost:9200"]
 # dependency; it is not in the 9.x settings reference at all. The line below is
 # the documented switch ("Set to true (default) to enable Fleet").
 xpack.fleet.agents.enabled: false
+
+# Closed lab: nothing here can reach the internet, and both of these try to.
+# Kibana's own APM agent posts to kibana-cloud-apm.apm.us-east-1.aws.found.io
+# and telemetry to telemetry.elastic.co; in an isolated lane those attempts sit
+# waiting for a timeout on every start. Turning them off removes the stall and
+# the log noise, and stops a teaching lab phoning home about itself.
+telemetry.optIn: false
+telemetry.allowChangingOptInStatus: false
+```
+
+To silence Kibana's bundled APM agent as well, add an environment variable to the
+service (it is not a `kibana.yml` setting):
+
+```powershell
+& 'C:\CyberCore\nssm.exe' set Kibana AppEnvironmentExtra ELASTIC_APM_ACTIVE=false
+Restart-Service Kibana
 ```
 
 **Delete** these if present — they are bound to the old secured cluster and are meaningless now:
@@ -648,6 +664,7 @@ Chk "Elasticsearch is Automatic"  ((Get-Service elasticsearch-service-x64 -EA Si
 Chk "Fleet agent removed"         ($null -eq (Get-Service 'Elastic Agent' -EA SilentlyContinue)) "elastic-agent.exe uninstall --force"
 Chk "cloudbase-init is Automatic" ((Get-Service cloudbase-init -EA SilentlyContinue).StartType -eq 'Automatic') "must stay Automatic or RDP creds break"
 Chk "boot task registered"        ($null -ne (Get-ScheduledTask -TaskName 'CyberCore-ELK-Boot' -EA SilentlyContinue)) "step 4"
+Chk "boot script present"         (Test-Path 'C:\CyberCore\Start-ElkStack.ps1') "step 4 - the task cannot run without it"
 Chk "firewall 9200 open"          ($null -ne (Get-NetFirewallRule -DisplayName '*Elasticsearch 9200*' -EA SilentlyContinue)) "step 5 - the sensor cannot ship without it"
 
 if (-not $kyml -or -not (Test-Path $kyml)) { Chk "kibana.yml readable" $false "could not locate it from the Kibana service" }
