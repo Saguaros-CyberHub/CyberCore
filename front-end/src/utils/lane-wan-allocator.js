@@ -249,6 +249,12 @@ async function probeTakenAddresses(node, candidates) {
     if (!seen.has(ip)) { taken.add(ip); unknown.push(ip); }
   }
 
+  // UNKNOWN is the ONLY evidence that the probe itself misbehaved. A TAKEN
+  // carries a real "Received N response(s)" from the wire and is a fact; the
+  // caller keys its "is this probe trustworthy" decision on unknown, never on
+  // how many came back occupied. A genuinely full pool answers TAKEN for
+  // everything, and telling the operator that is a broken probe would be its own
+  // wrong diagnosis.
   if (unknown.length) {
     console.warn(
       LOG + ' ' + unknown.length + '/' + candidates.length + ' probe(s) on ' + node +
@@ -258,7 +264,7 @@ async function probeTakenAddresses(node, candidates) {
     );
   }
 
-  return taken;
+  return { taken, unknown: unknown.length };
 }
 
 // -- candidate selection -----------------------------------------------------
@@ -385,6 +391,7 @@ async function allocateLaneWanIps(count, { probeNode = null, logTag = LOG } = {}
     const chosen = [];
     const tried = new Set();     // candidates already offered to the probe
     const squatters = [];
+    let unknownTotal = 0;      // probes that produced no usable verdict
     let dbExhausted = false;
 
     for (let round = 0; chosen.length < n && round < PROBE_ROUNDS_MAX; round++) {
@@ -410,7 +417,8 @@ async function allocateLaneWanIps(count, { probeNode = null, logTag = LOG } = {}
       }
       if (tried.size > PROBE_BUDGET) break;
 
-      const taken = await probeTakenAddresses(node, batch);
+      const { taken, unknown } = await probeTakenAddresses(node, batch);
+      unknownTotal += unknown;
       for (const ip of batch) {
         if (taken.has(ip)) squatters.push(ip);
         else if (chosen.length < n) chosen.push(ip);
@@ -441,7 +449,8 @@ async function allocateLaneWanIps(count, { probeNode = null, logTag = LOG } = {}
         '  Reserved   ' + net.reserved.length + ' in config/site.json\n' +
         '  In flight  ' + (census.in_flight ?? '?') + ' held by unconsumed lane_bootstrap_tokens\n' +
         '  Probed     ' + tried.size + ', of which ' + squatters.length +
-          ' answered ARP with no lane row\n\n';
+          ' answered ARP with no lane row' +
+          (unknownTotal ? ' (' + unknownTotal + ' gave no usable verdict)' : '') + '\n\n';
 
       // Two genuinely different problems with two different fixes, and getting
       // the attribution wrong is worse than saying nothing: an operator told to
@@ -470,12 +479,18 @@ async function allocateLaneWanIps(count, { probeNode = null, logTag = LOG } = {}
       // a subnet that was never the constraint. (A single all-occupied batch is
       // fine and expected; a run of orphaned gateways is contiguous. It is
       // finding nothing free ANYWHERE that is implausible.)
-      if (chosen.length === 0 && tried.size >= PROBE_SANITY_MIN && squatters.length === tried.size) {
+      // Keyed on UNKNOWN verdicts, not on how many came back occupied. An
+      // earlier version fired whenever nothing was free, which is exactly what a
+      // legitimately exhausted pool looks like - it would have told an operator
+      // whose /24 really was full that their probe was broken. A TAKEN carries a
+      // reply count off the wire and is evidence; an UNKNOWN is the absence of
+      // evidence, and only a pile of those means the probe cannot be trusted.
+      if (chosen.length === 0 && tried.size >= PROBE_SANITY_MIN && unknownTotal * 2 >= tried.size) {
         throw new Error(
           header +
-          'Every one of the ' + tried.size + ' addresses probed came back occupied, which is not a\n' +
-          'plausible network state. Refusing to allocate on that basis rather than reporting a\n' +
-          'full pool.\n\n' +
+          unknownTotal + ' of the ' + tried.size + ' probes produced no usable verdict at all - not\n' +
+          '"occupied", but "arping did not answer the question". The probe cannot be trusted, so\n' +
+          'this is NOT being reported as a full pool.\n\n' +
           'Check by hand on ' + (node || '(probe node)') + ' -- ONE AT A TIME, not in parallel:\n' +
           '  arping -c 2 -w 2 -D -I ' + net.probe.interface + ' ' + squatters[0] + '\n' +
           '  arping -c 2 -w 2 -D -I ' + net.probe.interface + ' ' + squatters[squatters.length - 1] + '\n' +

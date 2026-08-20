@@ -370,27 +370,34 @@ test('squatters that leave nothing free blame the orphans, NOT the subnet prefix
   );
 });
 
-test('finding NOTHING free anywhere is called out as a broken probe, not a full pool', async () => {
-  // THE INCIDENT THIS GUARD EXISTS FOR. A 32-way concurrent probe against a
-  // 1-second deadline returned non-zero for ~every address without a single
-  // reply arriving; read as exit codes that meant "occupied", and the operator
-  // was told a 242-address pool was full and to go widen a subnet.
+test('a pool full of REAL squatters is reported as orphans, not as a broken probe', async () => {
+  // The correction that matters. Every address answering ARP with a genuine
+  // reply count is a fact about the wire, not a malfunction — a cluster that has
+  // accumulated orphaned gateway LXCs really can occupy its whole /24. Calling
+  // that a broken probe would be its own wrong diagnosis, and would hide the one
+  // thing the operator needs to do: go destroy the orphans.
   reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254' });
   for (let i = 10; i <= 254; i++) world.arpAnswers.add('100.100.60.' + i);
   await assert.rejects(
     () => alloc.allocateLaneWanIps(1),
-    (e) => /not a\s*\n?plausible network state/.test(e.message)
-        && /ONE AT A TIME/.test(e.message)
-        && /probe\.enabled=false/.test(e.message)
-        && !/pool is genuinely full/.test(e.message)
+    (e) => /orphaned gateway LXCs/.test(e.message)
+        && !/cannot be trusted/.test(e.message)
   );
 });
 
-test('a probe that returns no verdicts at all is caught by the same guard', async () => {
+test('a probe producing no usable verdicts IS called out as untrustworthy', async () => {
+  // The other half of the same distinction: UNKNOWN is the absence of evidence,
+  // and a pile of it means arping did not answer the question. That must never
+  // be reported as a full pool — which is exactly what the exit-code version did
+  // when 32 concurrent probes timed out against a one-second deadline.
   reset({ hostFirst: '100.100.60.10', hostLast: '100.100.60.254', probeSilent: true });
   await assert.rejects(
     () => alloc.allocateLaneWanIps(1),
-    /not a\s*\n?plausible network state/
+    (e) => /no usable verdict at all/.test(e.message)
+        && /cannot be trusted/.test(e.message)
+        && /ONE AT A TIME/.test(e.message)
+        && /probe\.enabled=false/.test(e.message)
+        && !/pool is genuinely full/.test(e.message)
   );
 });
 
