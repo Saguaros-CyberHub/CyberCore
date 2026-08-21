@@ -12,30 +12,12 @@ const { reserveLabNetwork, teardownLabNetwork } = require('../../../../../src/ut
 const laneProvision = require('../utils/lane-provision');
 const audit = require('../../../../../src/utils/audit');
 const { attachFeatures, sanitizeFeaturesInput, defaultFeaturesForCode } = require('../utils/course-features');
+// Lane counts live in cybercore_db and are needed by my-courses.js too, so the
+// cross-DB count lives in utils/ rather than inline here.
+const { attachLaneCounts } = require('../utils/course-lanes');
 
 const instructorOnly = requireRole('instructor', 'admin');
 const adminOnly = requireRole('admin');
-
-/**
- * Attach a live workstation-lane count to each course row. Lanes live in
- * cybercore_db (keyed by config.course_id), so this is a single cross-DB
- * grouped count merged onto the CLE-DB course rows.
- */
-async function attachLaneCounts(courseRows) {
-  if (!courseRows.length) return courseRows;
-  const ids = courseRows.map(c => c.course_id);
-  const counts = await cybercoreQuery(
-    `SELECT config->>'course_id' AS course_id, COUNT(*)::int AS vm_count
-        FROM cybercore_lane
-      WHERE config->>'course_id' = ANY($1) AND status <> 'deleted'
-      GROUP BY 1`,
-    [ids]
-  ).catch(() => ({ rows: [] }));
-  const byId = {};
-  for (const r of counts.rows) byId[r.course_id] = r.vm_count;
-  for (const c of courseRows) c.vm_count = byId[c.course_id] || 0;
-  return courseRows;
-}
 
 /**
  * GET /api/cle/courses — List all courses assigned to the instructor

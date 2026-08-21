@@ -708,8 +708,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // "User / Student" with no Admin button.
   if (typeof Auth !== 'undefined' && Auth.requireAuth) {
     if (!await Auth.requireAuth()) return;
+    // isRealAdmin(), not user.role: Student View rewrites the drawn role, and
+    // gating entry on it would bounce an admin off this page mid-recording.
     const user = Auth.getUser();
-    if (user && user.role !== 'admin') {
+    if (user && !Auth.isRealAdmin()) {
       if (typeof Toast !== 'undefined') Toast.error('Access Denied', 'Admin role required for this page.');
       window.location.href = '/ciab/dashboard';
       return;

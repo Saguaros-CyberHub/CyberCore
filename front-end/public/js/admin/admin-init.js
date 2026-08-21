@@ -25,8 +25,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   const loggedIn = await Auth.requireAuth();
   if (!loggedIn) return;
 
+  // isRealAdmin(), not user.role: Student View only changes what is drawn, so
+  // an admin with the mode on must still be able to open /admin.
   const user = Auth.getUser();
-  if (!user || user.role !== 'admin') {
+  if (!Auth.isRealAdmin()) {
     document.querySelector('.page-content').innerHTML = `
       <div style="text-align: center; padding: 4rem;">
         <div style="font-size: 3rem; margin-bottom: 1rem;">🔒</div>

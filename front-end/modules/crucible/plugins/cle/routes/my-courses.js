@@ -25,7 +25,10 @@ const express = require('express');
 const router = express.Router({ mergeParams: true });
 const { query } = require('../utils/db');
 const flagManager = require('../../../../../src/utils/flag-manager');
-const { isFeatureEnabled } = require('../utils/course-features');
+const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { isFeatureEnabled, resolveFeatures } = require('../utils/course-features');
+const { laneCountsByCourse } = require('../utils/course-lanes');
+const { buildOverviewCards } = require('../utils/course-overview');
 
 /**
  * Courses this student is enrolled in, with their assignments and flag
@@ -35,6 +38,7 @@ async function loadEnrolledCourses(userId) {
   const courses = await query(
     `SELECT c.course_id, c.course_name, c.code, c.description,
             c.start_date, c.end_date, c.is_active, c.features,
+            c.instructor_id, c.provision_status,
             e.enrollment_role, e.status AS enrollment_status
        FROM cle_course_enrollment e
        JOIN cle_course c ON c.course_id = e.course_id
@@ -66,6 +70,70 @@ async function loadAssignments(courseIds) {
     (byCourse[m.course_id] = byCourse[m.course_id] || []).push(m);
   }
   return byCourse;
+}
+
+/**
+ * Courses this person TEACHES. cle_course.instructor_id is a scalar and there
+ * is no instructor join table, so this one predicate is the whole relationship
+ * — and it is why loadEnrolledCourses() can never answer "my courses" for a
+ * professor: they are not enrolled in the course they run.
+ */
+async function loadTaughtCourses(userId) {
+  const result = await query(
+    `SELECT c.course_id, c.course_name, c.code, c.description,
+            c.start_date, c.end_date, c.is_active, c.features,
+            c.instructor_id, c.provision_status,
+            COUNT(DISTINCT e.user_id)::int AS student_count
+       FROM cle_course c
+       LEFT JOIN cle_course_enrollment e
+              ON e.course_id = c.course_id AND e.status = 'active'
+      WHERE c.instructor_id = $1
+      GROUP BY c.course_id
+      ORDER BY c.is_active DESC, c.start_date DESC NULLS LAST, c.course_name`,
+    [userId]
+  );
+  return result.rows;
+}
+
+/**
+ * An admin is neither enrolled in nor teaching most courses. Rendering all of
+ * them as cards would turn a personal home page into a fleet console, which
+ * /cle/courses already is — so they get a single count and a link instead.
+ */
+async function loadAdminSummary() {
+  const result = await query(
+    `SELECT COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE c.is_active)::int AS active
+       FROM cle_course c`
+  );
+  const row = result.rows[0] || {};
+  return { totalCourses: row.total || 0, activeCourses: row.active || 0 };
+}
+
+/**
+ * Instructor display names. Courses live in cle_db and users in cybercore_db
+ * with no FK between them, so this is the same two-step merge course-students.js
+ * does, in the other direction — a single JOIN is not available.
+ *
+ * Failure resolves to {}: an unreachable core DB must cost the page a NAME,
+ * not the page.
+ */
+async function loadInstructorProfiles(instructorIds) {
+  const ids = [...new Set((instructorIds || []).filter(Boolean))];
+  if (ids.length === 0) return {};
+  const result = await cybercoreQuery(
+    `SELECT user_id, email, first_name, last_name
+       FROM cybercore_user
+      WHERE user_id = ANY($1::uuid[])`,
+    [ids]
+  ).catch(() => ({ rows: [] }));
+
+  const byId = {};
+  for (const u of result.rows) {
+    const name = [u.first_name, u.last_name].filter(Boolean).join(' ').trim();
+    byId[u.user_id] = { userId: u.user_id, name: name || u.email || null, email: u.email || null };
+  }
+  return byId;
 }
 
 /** Split the student's flag rows into per-course buckets. See header note. */
@@ -205,6 +273,141 @@ router.get('/courses/:courseId/flags', async (req, res) => {
     });
   } catch (err) {
     console.error('[CLE MyCourses] Flag board error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/cle/my/overview
+ *
+ * Every course this person has a relationship with, for the CyberHub home page.
+ * Enrollment for students; cle_course.instructor_id for professors. Deliberately
+ * NOT filtered by the flags feature — that filter belongs to GET /courses, which
+ * feeds a flag board and nothing else. Each card carries its resolved feature
+ * map so the client picks the destination from the same rules the server uses.
+ *
+ * `?as=student` renders the professor's own home page the way a student's
+ * looks, for lecture recordings: no taught-course cards, no admin summary,
+ * just their enrollments.
+ *
+ * It is a PRESENTATION parameter, not an authorization one. Student View does
+ * not change roles server-side — req.user.role is always the caller's real
+ * role — so this can only ever return LESS than the caller is entitled to,
+ * never more. Same shape as ?scope=mine on the workspace lists, and for the
+ * same reason: the client has to ask, because the server has no idea the mode
+ * is on.
+ */
+router.get('/overview', async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    // Presentation only: it can hide the caller's own staff cards, never
+    // reveal anybody else's. See the note above.
+    const asStudent = req.query.as === 'student';
+    const role = asStudent ? 'student' : req.user.role;
+
+    const enrolled = await loadEnrolledCourses(userId);
+    // THE FULL ENROLLED LIST, and nothing narrower. attributeLanes() folds
+    // un-attributed lanes into the sole course when there is exactly one, so
+    // anything that filters before the call below hands one course another
+    // course's lanes. Same constraint as GET /courses — see its note.
+    const enrolledIds = enrolled.map(c => c.course_id);
+
+    const taught = (role === 'instructor' || role === 'admin')
+      ? await loadTaughtCourses(userId)
+      : [];
+
+    const flagRows = await flagManager.getUserFlagRows(userId);
+    const { byCourse, unattributed } = attributeLanes(flagRows, enrolledIds);
+
+    const allIds      = [...new Set([...enrolledIds, ...taught.map(c => c.course_id)])];
+    const assignments = await loadAssignments(allIds);
+    const laneCounts  = await laneCountsByCourse(taught.map(c => c.course_id));
+    const instructors = await loadInstructorProfiles(
+      [...enrolled, ...taught].map(c => c.instructor_id)
+    );
+
+    res.json({
+      courses: buildOverviewCards({
+        enrolled, taught, byCourse, assignments, laneCounts, instructors,
+      }),
+      unattributedFlags: unattributed.length,
+      adminSummary: role === 'admin' ? await loadAdminSummary() : null,
+      role,
+      // Echoed so the client's empty state can say "you are previewing"
+      // without a second round-trip to /auth/me.
+      viewingAsStudent: asStudent,
+    });
+  } catch (err) {
+    console.error('[CLE MyCourses] Overview error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/cle/my/courses/:courseId
+ * One course as its STUDENT sees it: the published brief, plus the flag board
+ * when the course has one.
+ *
+ * This exists alongside /courses/:courseId/flags because that route 404s when
+ * the Flags feature is off, which left a student in a non-flags course (CYBR
+ * 400, say) with no course view at all — and their home-page card with nowhere
+ * to go. Here the board is CONDITIONAL rather than required.
+ *
+ * Enrollment is still the authorization check, and flag VALUES are still never
+ * returned.
+ */
+router.get('/courses/:courseId', async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { courseId } = req.params;
+
+    const enrollment = await query(
+      `SELECT c.course_id, c.course_name, c.code, c.description, c.features
+         FROM cle_course_enrollment e
+         JOIN cle_course c ON c.course_id = e.course_id
+        WHERE e.user_id = $1
+          AND e.course_id = $2
+          AND e.status IN ('active', 'completed')`,
+      [userId, courseId]
+    );
+    if (enrollment.rows.length === 0) {
+      return res.status(403).json({ error: 'You are not enrolled in this course' });
+    }
+    const course   = enrollment.rows[0];
+    const features = resolveFeatures(course);
+
+    const assignments = (await loadAssignments([courseId]))[courseId] || [];
+
+    let board = { machines: [], captured: 0, total: 0 };
+    if (features.flags) {
+      const allCourses = await loadEnrolledCourses(userId);
+      const courseIds  = allCourses.map(c => c.course_id);
+      const flagRows   = await flagManager.getUserFlagRows(userId);
+      const { byCourse } = attributeLanes(flagRows, courseIds);
+      board = flagManager.buildStudentBoard(byCourse[courseId] || []);
+    }
+
+    res.json({
+      course: {
+        courseId: course.course_id,
+        courseName: course.course_name,
+        code: course.code,
+        description: course.description
+      },
+      features,
+      assignments: assignments.map(a => ({
+        materialId: a.material_id,
+        title: a.title,
+        description: a.description,
+        type: a.type,
+        content: a.content
+      })),
+      machines: board.machines,
+      captured: board.captured,
+      total: board.total
+    });
+  } catch (err) {
+    console.error('[CLE MyCourses] Course view error:', err.message);
     res.status(500).json({ error: err.message });
   }
 });

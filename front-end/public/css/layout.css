@@ -890,3 +890,79 @@
     display: block;
   }
 }
+
+/* ==========================================================================
+   STUDENT VIEW
+   --------------------------------------------------------------------------
+   Lets an instructor draw the interface the way a student's looks, so
+   instructor-only navigation stays out of lecture recordings. Presentation
+   only — the instructor keeps all of their access.
+
+   There is deliberately NO banner or overlay. The recording is the whole
+   point, and a bar reading "Student View" in every frame is exactly the
+   confusion this is meant to remove. The sidebar toggle going amber is the
+   indicator, and since nothing is actually blocked, leaving it on costs
+   nothing.
+   ========================================================================== */
+
+.student-view-row {
+  margin-bottom: 0.75rem;
+}
+
+/* Same shape as .theme-toggle-btn so the footer reads as one control group. */
+.student-view-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--border-radius);
+  color: var(--gray-400);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 500;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.student-view-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+/* Amber while active. This is the only on-screen indicator, so it has to read
+   at a glance without being loud enough to distract from the lecture. */
+.student-view-btn.is-on {
+  background: #b45309;
+  border-color: #d97706;
+  color: #fff;
+}
+
+.student-view-btn.is-on:hover {
+  background: #d97706;
+}
+
+.student-view-icon {
+  font-size: 1rem;
+  line-height: 1;
+}
+
+/* --------------------------------------------------------------------------
+   The general hook.
+
+   Most instructor-only chrome already hides itself, because it is drawn from a
+   role check and Auth.getUser().role reads 'student' in this mode. This covers
+   everything that ISN'T behind such a check: mark it `data-instructor-only` in
+   the markup and it disappears from recordings with no JS and no role plumbing.
+
+   Prefer this over adding another role check for new instructor-only UI.
+
+       <div class="card" data-instructor-only>Answer key</div>
+   -------------------------------------------------------------------------- */
+
+html[data-student-view] [data-instructor-only] {
+  display: none !important;
+}

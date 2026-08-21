@@ -61,6 +61,23 @@ const Flags = (() => {
   // hides every [id$="Content"] element on each nav change.
   function _root() { return document.getElementById('flagCoursesPanel'); }
 
+  // The hub home page owns the course LIST now; this module owns the board.
+  // With no handler registered the old behaviour is kept exactly, so any page
+  // that loads flags.js on its own still gets its own course list back.
+  let _onBack = null;
+  function setBackHandler(fn) { _onBack = fn; }
+
+  function closeBoard() {
+    _openCourseId = null;
+    if (_onBack) {
+      const root = _root();
+      if (root) root.innerHTML = '';
+      _onBack();
+    } else {
+      loadCourses(true);
+    }
+  }
+
   // ── Course list ─────────────────────────────────────────────────────────────
 
   async function loadCourses(force = false) {
@@ -141,11 +158,14 @@ const Flags = (() => {
     root.innerHTML = '<p style="color: var(--text-muted);">Loading assignment…</p>';
 
     try {
-      _board = await _get(`/api/cle/my/courses/${encodeURIComponent(courseId)}/flags`);
+      // The GENERAL student course view, not /flags. That route 404s when the
+      // Flags feature is off, which left a student in a non-flags course with
+      // no course view at all. Here the board is conditional — see _renderBoard.
+      _board = await _get(`/api/cle/my/courses/${encodeURIComponent(courseId)}`);
       _renderBoard();
     } catch (err) {
       root.innerHTML = `
-        <button class="btn btn-secondary btn-sm" onclick="Flags.loadCourses(true)">← Back to courses</button>
+        <button class="btn btn-secondary btn-sm" onclick="Flags.closeBoard()">← Back to courses</button>
         <p style="color: var(--danger); margin-top:12px;">Could not load this course: ${_esc(err.message)}</p>`;
     }
   }
@@ -155,6 +175,8 @@ const Flags = (() => {
     if (!root || !_board) return;
 
     const { course, assignments, machines, captured, total } = _board;
+    // Absent `features` means an older payload; assume a board, as before.
+    const flagsOn = !_board.features || _board.features.flags === true;
 
     const assignmentHtml = (assignments || []).length > 0
       ? (assignments).map(a => `
@@ -163,7 +185,7 @@ const Flags = (() => {
             ${a.description ? `<p class="flag-assignment-desc">${_esc(a.description)}</p>` : ''}
           </div>`).join('')
       : `<div class="flag-note">Your instructor has not published an assignment brief for this
-         course yet. The machines below are still live — the flags are on them.</div>`;
+         course yet.${flagsOn ? ' The machines below are still live — the flags are on them.' : ''}</div>`;
 
     const boardHtml = (machines || []).length > 0
       ? `<div class="flag-rows">${machines.map(_machineRow).join('')}</div>`
@@ -184,7 +206,7 @@ const Flags = (() => {
       : '';
 
     root.innerHTML = `
-      <button class="btn btn-secondary btn-sm" onclick="Flags.loadCourses(true)">← Back to courses</button>
+      <button class="btn btn-secondary btn-sm" onclick="Flags.closeBoard()">← Back to courses</button>
 
       <div class="flag-board-head">
         <h2 class="flag-board-title">${_esc(course.courseName)}</h2>
@@ -193,6 +215,7 @@ const Flags = (() => {
 
       ${assignmentHtml}
 
+      ${flagsOn ? `
       <div class="flag-panel">
         <div class="flag-summary">
           <strong>${captured} / ${total}</strong> flags captured
@@ -200,7 +223,9 @@ const Flags = (() => {
         </div>
         ${submitHtml}
         <div class="flag-progress">${boardHtml}</div>
-      </div>`;
+      </div>` : `
+      <div class="flag-note">This course does not use capture-the-flag. Your lab
+         machines are listed under <strong>Remote Workspaces</strong> on the home page.</div>`}`;
 
     const input = document.getElementById('flagInput');
     if (input) input.focus();
@@ -278,5 +303,5 @@ const Flags = (() => {
     }
   }
 
-  return { loadCourses, openCourse, submit, onKeyDown };
+  return { loadCourses, openCourse, closeBoard, setBackHandler, submit, onKeyDown };
 })();

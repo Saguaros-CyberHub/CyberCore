@@ -338,10 +338,74 @@ const Confirm = {
 };
 
 /**
+ * Student View — an instructor-facing PRESENTATION mode.
+ *
+ * Its only job is to make the interface look the way a student's does, so a
+ * lecture recording does not show instructor-only navigation that the audience
+ * cannot find on their own screens. Think of D2L's Student View: the
+ * staff-specific chrome goes away, everything a student would normally see
+ * stays.
+ *
+ * It is NOT a permission change and NOT impersonation. The instructor stays
+ * signed in as themselves and keeps every bit of access they had — nothing is
+ * blocked, no request is refused, no page redirects. Only what is DRAWN
+ * changes. That matters because this gets toggled mid-recording: a mode that
+ * started returning 403s would ruin the take.
+ *
+ * Because the server is not involved, the flag is plain localStorage, next to
+ * `ciab-theme`. It survives navigation for the length of a recording session.
+ */
+const ViewMode = {
+  KEY: 'cc-student-view',
+  VALUE: '1',
+
+  isActive() {
+    try { return localStorage.getItem(this.KEY) === this.VALUE; } catch (_) { return false; }
+  },
+
+  // Who is offered the toggle. Students and unprivileged users have no
+  // instructor chrome to hide, so it would do nothing for them.
+  canPreview(u) {
+    return !!u && (u.role === 'admin' || u.role === 'instructor');
+  },
+
+  enter() { this._write(true);  this._reload(); },
+  exit()  { this._write(false); this._reload(); },
+
+  // Silent — no reload. Used by logout and by the self-heal in Auth.check(),
+  // where reloading would loop.
+  clear() { this._write(false); },
+
+  _write(on) {
+    try {
+      if (on) localStorage.setItem(this.KEY, this.VALUE);
+      else localStorage.removeItem(this.KEY);
+    } catch (_) { /* private mode — the toggle simply won't stick */ }
+  },
+
+  _reload() {
+    // Required, not cosmetic: essentially every page reads Auth.getUser().role
+    // once at DOMContentLoaded and never re-renders.
+    window.location.reload();
+  }
+};
+
+// localStorage fires `storage` in OTHER tabs only, so a second window left open
+// on the same account follows along instead of showing a stale layout.
+window.addEventListener('storage', e => {
+  if (e.key === ViewMode.KEY) window.location.reload();
+});
+
+/**
  * Auth helper functions
  */
 const Auth = {
+  // EFFECTIVE user — role reads 'student' while previewing. Everything that
+  // gates UI reads this, which is why no per-page edits were needed.
   user: null,
+  // SERVER TRUTH — never rewritten. Read this for ACCESS decisions and for
+  // the Student View toggle itself, via isRealAdmin()/isRealInstructor().
+  realUser: null,
 
   /**
    * Resolve the current session via /auth/me.
@@ -358,7 +422,25 @@ const Auth = {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         const data = await API.auth.me();
-        this.user = data.user;
+        // realUser is what the server said. `user` is what the interface is
+        // DRAWN from, and in Student View its role reads 'student'.
+        //
+        // Splitting them here is what makes this a handful of lines instead of
+        // an edit to every page: the existing chrome checks — Auth.getUser(),
+        // Auth.isAdmin(), the `Auth.user.role === 'admin'` tests scattered
+        // through the pages, and the subnav filter in layout.js — all read
+        // `user`, so they flip together.
+        //
+        // The rule for new code: DRAW from `user`, decide ACCESS from
+        // realUser / isRealInstructor(). Getting that backwards is what would
+        // lock an instructor out of their own page mid-recording.
+        this.realUser = data.user;
+        this.user = (ViewMode.isActive() && ViewMode.canPreview(data.user))
+          ? { ...data.user, role: 'student', realRole: data.user.role, viewingAsStudent: true }
+          : data.user;
+        // A student has no instructor chrome to hide, so the flag is dead
+        // weight on their account. Clear it rather than carry it.
+        if (ViewMode.isActive() && !ViewMode.canPreview(data.user)) ViewMode.clear();
         window.dispatchEvent(new Event('authReady'));
         return true;
       } catch (error) {
@@ -401,8 +483,10 @@ const Auth = {
     
     // Clear token from localStorage
     localStorage.removeItem('token');
+    ViewMode.clear();
     
     this.user = null;
+    this.realUser = null;
     window.location.href = '/login';
   },
 
@@ -420,6 +504,21 @@ const Auth = {
 
   isInstructor() {
     return this.user?.role === 'instructor' || this.user?.role === 'admin';
+  },
+
+  // The REAL role, ignoring Student View. Use these wherever the question is
+  // "may this person do it?" — page access gates, destructive-action guards
+  // — and never for deciding what to draw, which would defeat the mode.
+  isRealAdmin() {
+    return this.realUser?.role === 'admin';
+  },
+
+  isRealInstructor() {
+    return this.realUser?.role === 'instructor' || this.realUser?.role === 'admin';
+  },
+
+  isViewingAsStudent() {
+    return this.user?.viewingAsStudent === true;
   },
 
   // Added for compatibility

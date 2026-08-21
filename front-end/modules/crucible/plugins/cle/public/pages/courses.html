@@ -842,7 +842,7 @@
 
     function courseItemHtml(c) {
       return `
-        <div class="course-item" onclick="selectCourse('${c.course_id}', this)">
+        <div class="course-item" data-course-id="${escAttr(c.course_id)}" onclick="selectCourse('${c.course_id}', this)">
           <h4>${escHtml(c.course_name)}</h4>
           <div class="course-item-meta">
             <span class="course-item-code">${escHtml(c.code || 'No code')}</span>
@@ -2821,7 +2821,22 @@
       renderFeatureCheckboxes('editCourseFeatures', 'editFeature_');
       const codeInput = document.getElementById('createCourseCode');
       if (codeInput) codeInput.addEventListener('input', prefillCreateFeaturesFromCode);
-      loadCourses();
+      await loadCourses();
+
+      // Deep link from the CyberHub home page: /cle/courses?course=<id>.
+      // The hub only emits this for rows the server tagged relationship
+      // "instructor" (i.e. instructor_id = you), and GET /courses/:courseId is
+      // instructorOnly with the same admin/owner split — so the link and the API
+      // agree by construction. A hand-typed id for someone else's course falls
+      // through to viewCourse(), which already toasts and leaves the list intact.
+      const wanted = new URLSearchParams(location.search).get('course');
+      if (wanted) {
+        const item = document.querySelector(`.course-item[data-course-id="${CSS.escape(wanted)}"]`);
+        if (item) selectCourse(wanted, item);
+        else viewCourse(wanted);
+        // Drop the param, or Back-to-list followed by a refresh reopens it.
+        history.replaceState({}, '', location.pathname);
+      }
     });
   </script>
 

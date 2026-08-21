@@ -227,6 +227,13 @@ const VmWorkspaces = (() => {
     return u && (u.role === 'admin' || u.role === 'instructor');
   }
 
+  // Drawing the list the way a student's looks, for lecture recordings.
+  function _studentView() {
+    return typeof Auth !== 'undefined'
+      && typeof Auth.isViewingAsStudent === 'function'
+      && Auth.isViewingAsStudent();
+  }
+
   function _powerBadge(state) {
     const b = POWER_BADGE[state] || POWER_BADGE.unknown;
     return `<span class="vml-badge ${b.cls}">${b.label}</span>`;
@@ -362,16 +369,45 @@ const VmWorkspaces = (() => {
   /**
    * Fetch and render the user's VM list into `listEl`.
    * `consoleContainerId` is the ID of the element VmConsole should render into.
+   *
+   * `opts` exists so the CyberHub home page can render a SECOND, embedded
+   * copy of this list without disturbing the My Workspaces tab. Called with
+   * two arguments this behaves exactly as it always has.
+   *
+   *   toggles:  false skips _renderHeaderToggle(), whose selector and element
+   *             ids (#vmlConsoleToggle / #vmlScopeToggle) are hard-bound to
+   *             #workspaces-myworkspacesContent — rendering twice would move
+   *             those toggles out of the tab that owns them.
+   *   embedded: true leaves _lastListEl/_lastConsoleId alone. They are
+   *             single-slot and the toggle handlers re-render through them, so
+   *             the tab's toggles must keep pointing at the tab's own list.
+   *   scope:    'mine' pins the per-user query. _scopeAll defaults to true for
+   *             admins and instructors, so without this a professor's HOME
+   *             page would list the whole cluster instead of their machines.
    */
-  async function render(listEl, consoleContainerId) {
-    _lastListEl = listEl;
-    _lastConsoleId = consoleContainerId;
-    _renderHeaderToggle();
+  async function render(listEl, consoleContainerId, opts = {}) {
+    const { toggles = true, scope = null, embedded = false } = opts;
+    if (!embedded) {
+      _lastListEl = listEl;
+      _lastConsoleId = consoleContainerId;
+    }
+    if (toggles) _renderHeaderToggle();
     listEl.innerHTML = '<div class="vml-loading">Loading workspaces…</div>';
 
     try {
       // Admins/instructors default to scope=all; non-admins ignore the param server-side.
-      const scopeQuery = _isPrivileged() && !_scopeAll ? '?scope=mine' : '';
+      // Student View has to ask for ?scope=mine EXPLICITLY.
+      //
+      // Both list endpoints treat a privileged caller as cluster-wide by DEFAULT
+      // and only narrow when the client requests it (`showAll = isPrivileged &&
+      // req.query.scope !== 'mine'`). Student View changes nothing on the server,
+      // so the caller is still privileged there — which means hiding the scope
+      // toggle alone would leave the full cluster on screen, every student's VM
+      // and email address included, in the middle of a recording.
+      // An embedded caller can pin it too — see opts.scope above.
+      const scopeQuery = (scope === 'mine' || _studentView() || (_isPrivileged() && !_scopeAll))
+        ? '?scope=mine'
+        : '';
       const data = await API.request(`/dashboard/vms${scopeQuery}`);
       const rawVms = data.vms || [];
       // Console filter: by default we only show cards the user can actually
@@ -381,7 +417,7 @@ const VmWorkspaces = (() => {
       const vms = _consoleOnly ? rawVms.filter(v => v.hasConsole) : rawVms;
 
       if (vms.length === 0) {
-        const adminAll = _isPrivileged() && _scopeAll;
+        const adminAll = _isPrivileged() && _scopeAll && scope !== 'mine' && !_studentView();
         // If the console filter is hiding everything, hint at the toggle.
         if (_consoleOnly && rawVms.length > 0) {
           listEl.innerHTML = `

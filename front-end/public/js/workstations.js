@@ -23,7 +23,23 @@ const Workstations = (() => {
     return u?.role === 'admin';
   }
 
+  // Drawing the list the way a student's looks, for lecture recordings.
+  function _studentView() {
+    return typeof Auth !== 'undefined'
+      && typeof Auth.isViewingAsStudent === 'function'
+      && Auth.isViewingAsStudent();
+  }
+
   function _scopeQuery() {
+    // Student View has to ask for ?scope=mine EXPLICITLY.
+    //
+    // Both list endpoints treat a privileged caller as cluster-wide by DEFAULT
+    // and only narrow when the client requests it (`showAll = isPrivileged &&
+    // req.query.scope !== 'mine'`). Student View changes nothing on the server,
+    // so the caller is still privileged there — which means hiding the scope
+    // toggle alone would leave the full cluster on screen, every student's VM
+    // and email address included, in the middle of a recording.
+    if (_studentView()) return '?scope=mine';
     return _isAdmin() && _adminScopeAll ? '?scope=all' : '';
   }
 

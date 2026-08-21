@@ -19,6 +19,7 @@ const Layout = {
   init() {
     this.initTheme();
     this.injectSidebar();
+    this.applyStudentViewFlag();
     this.injectGlobalChat();
     this.loadChatHistory();
     this.setupEventListeners();
@@ -35,6 +36,42 @@ const Layout = {
     const saved = localStorage.getItem('ciab-theme');
     if (saved === 'dark') {
       document.documentElement.setAttribute('data-theme', 'dark');
+    }
+  },
+
+  // ── Student View ────────────────────────────────────────────────
+  // Draws the interface the way a student sees it, so instructor-only
+  // navigation stays out of lecture recordings. Presentation only: the
+  // instructor keeps all of their access. See ViewMode in app.js.
+
+  toggleStudentView() {
+    if (Auth.isViewingAsStudent()) ViewMode.exit();
+    else ViewMode.enter();
+  },
+
+  exitStudentView() {
+    ViewMode.exit();
+  },
+
+  /**
+   * Stamp html[data-student-view] so CSS can hide instructor-only chrome.
+   *
+   * This is the general escape hatch: anything a student would not normally
+   * see can be marked `data-instructor-only` in the markup and it disappears
+   * in Student View, with no JS. Use it for new instructor-only UI rather
+   * than adding another role check.
+   *
+   * Deliberately NO banner. The whole point is that the recording looks like
+   * a student's screen, and a bar reading "Student View" in every frame is
+   * exactly the confusion this is meant to avoid. The amber toggle in the
+   * sidebar footer is the indicator, and since nothing is actually blocked,
+   * leaving it on by accident costs nothing.
+   */
+  applyStudentViewFlag() {
+    if (Auth.isViewingAsStudent()) {
+      document.documentElement.setAttribute('data-student-view', '');
+    } else {
+      document.documentElement.removeAttribute('data-student-view');
     }
   },
 
@@ -135,6 +172,16 @@ const Layout = {
             <span class="theme-label" id="themeLabel">Dark Mode</span>
           </button>
         </div>
+        ${Auth.isRealInstructor() ? `
+        <div class="student-view-row">
+          <button class="student-view-btn${Auth.isViewingAsStudent() ? ' is-on' : ''}"
+                  onclick="Layout.toggleStudentView()"
+                  aria-pressed="${Auth.isViewingAsStudent()}"
+                  title="Hide instructor-only menus so the interface looks the way a student's does — for lecture recordings. Your access is unchanged.">
+            <span class="student-view-icon">${Auth.isViewingAsStudent() ? '🎓' : '👁️'}</span>
+            <span class="student-view-label">${Auth.isViewingAsStudent() ? 'Exit Student View' : 'Student View'}</span>
+          </button>
+        </div>` : ''}
         <div class="user-menu">
           <div class="user-avatar" id="userAvatar">${initials}</div>
           <div class="user-info">
@@ -921,6 +968,10 @@ document.addEventListener('DOMContentLoaded', () => {
 // Re-update sidebar after auth check
 window.addEventListener('authReady', () => {
   Layout.injectSidebar();
+  // Auth.realUser is null on the first paint (it arrives with the async
+  // /auth/me), so this is the pass that settles the mode — the same reason
+  // the Admin gear only appears here.
+  Layout.applyStudentViewFlag();
   // Refresh site name from API for authenticated users
   Layout.loadSiteNameFromSettings();
 });

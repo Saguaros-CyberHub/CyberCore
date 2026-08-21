@@ -1088,9 +1088,13 @@
     document.addEventListener('DOMContentLoaded', async () => {
       if (!await Auth.requireAuth()) return;
 
-      // Check if user is instructor/admin
+      // Check if user is instructor/admin.
+      //
+      // isRealInstructor(), not user.role: Student View rewrites the drawn role
+      // to 'student', and gating entry on that would bounce an instructor off
+      // their own dashboard the moment they turned the mode on.
       const user = Auth.getUser();
-      if (user.role !== 'instructor' && user.role !== 'admin') {
+      if (!Auth.isRealInstructor()) {
         Toast.error('Access Denied', 'You must be an instructor to access this page');
         window.location.href = '/dashboard';
         return;
@@ -1102,8 +1106,10 @@
       updateInstructorCostEstimate();
 
       // Reveal the Vuln-App Cheat Sheet card for instructor + admin roles.
-      // Page-level auth already restricts entry to those two roles, so this
-      // is mostly belt-and-suspenders against a future page-auth change.
+      //
+      // user.role (the DRAWN role), not isRealInstructor(): this is chrome, and
+      // an answer key is the last thing that should be on screen in a lecture
+      // recording. In Student View it stays hidden.
       if (user.role === 'instructor' || user.role === 'admin') {
         const card = document.getElementById('vulnCheatSheetCard');
         if (card) card.style.display = '';
