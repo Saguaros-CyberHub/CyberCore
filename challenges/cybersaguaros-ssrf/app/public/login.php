@@ -49,10 +49,7 @@ render_header('Sign in', '');
     <?php endif; ?>
   <?php else: ?>
     <h1>Researcher sign-in</h1>
-    <p class="muted">Portal accounts are issued to CyberSaguaros research staff.
-       Signing in reveals unpublished working papers; administrators also get
-       the research control panel. SaguaroBot is available to everyone without
-       an account.</p>
+    <p class="muted">Portal accounts are issued to CyberSaguaros research staff.</p>
     <?php if ($error): ?><p class="formerr"><?= htmlspecialchars($error) ?></p><?php endif; ?>
     <form method="post" class="stack">
       <label>Username <input type="text" name="username" required></label>
