@@ -253,6 +253,10 @@ router.post('/import', instructorOnly, async (req, res) => {
       will_enroll_existing: classified.filter(r => r.action === roster.ACTIONS.ENROLL_EXISTING).length,
       will_reactivate: classified.filter(r => r.action === roster.ACTIONS.REACTIVATE).length,
       already_enrolled: classified.filter(r => r.action === roster.ACTIONS.ALREADY_ENROLLED).length,
+      // Existing accounts that are missing a name this file can supply. Shown
+      // so re-importing to repair a bad earlier import is visibly doing work
+      // rather than looking like a no-op.
+      will_fill_names: classified.filter(r => r.name_backfill).length,
       duplicates: classified.filter(r => r.action === roster.ACTIONS.SKIP).length,
       invalid: classified.filter(r => r.action === roster.ACTIONS.INVALID).length,
       seats_used: used,
@@ -340,6 +344,15 @@ router.post('/import', instructorOnly, async (req, res) => {
         } else {
           user = await prov.findUserByEmail(row.email);
           if (!user) throw new Error('account disappeared between preview and confirm');
+          // Only touches blank columns -- see backfillMissingName. This is the
+          // one thing an enroll-existing row is allowed to change about the
+          // account itself.
+          if (row.name_backfill) {
+            await prov.backfillMissingName(user.user_id, {
+              firstName: row.first_name,
+              lastName: row.last_name,
+            }).catch(() => false);
+          }
         }
 
         if (row.action !== roster.ACTIONS.ALREADY_ENROLLED) {

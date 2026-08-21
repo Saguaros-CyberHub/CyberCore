@@ -102,11 +102,20 @@ async function classifyRows(rows, courseId, caller) {
     // UI must not offer a button the API will refuse.
     const canRegenerate = prov.canManageAccount(user, caller, courseId);
 
+    // An account that already exists keeps whatever name it has, EXCEPT when
+    // it has none and the roster supplies one. That is the repair path for
+    // accounts created by an import that could not read the name column --
+    // without it, re-importing a corrected file changes nothing, because
+    // provisionAccount() short-circuits on an email that already exists.
+    const fillsFirst = !String(user.first_name || '').trim() && !!row.first_name;
+    const fillsLast  = !String(user.last_name  || '').trim() && !!row.last_name;
+
     const annotated = {
       ...row,
       user_id: user.user_id,
       elevated,
       can_regenerate: canRegenerate,
+      ...(fillsFirst || fillsLast ? { name_backfill: true } : {}),
       ...(elevated ? {
         warning: `This is a ${user.role} account. It will be enrolled in the course, but you have no password or credential controls over it.`,
       } : {}),

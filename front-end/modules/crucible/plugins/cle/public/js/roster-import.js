@@ -202,6 +202,7 @@
           ${statRow('Existing accounts to enroll', s.will_enroll_existing)}
           ${s.will_reactivate ? statRow('Re-enrolling (previously dropped)', s.will_reactivate) : ''}
           ${s.already_enrolled ? statRow('Already enrolled', s.already_enrolled) : ''}
+          ${s.will_fill_names ? statRow('Missing names to fill in', s.will_fill_names) : ''}
         </div>
         <div>
           ${statRow('Seats used now', `${s.seats_used}${s.max_students ? ` of ${s.max_students}` : ''}`)}
@@ -246,11 +247,22 @@
 
     // The confirm button reflects the server's verdict, not the client's. A
     // blocked run must not be one disabled attribute away from executing.
+    // Re-importing a corrected file over a class that is ALREADY enrolled has
+    // nothing to enroll, but it does have names to repair. Counting only
+    // enrollments there labelled the button "Import 0 student(s)" over a run
+    // that was about to do real work.
     const confirmBtn = document.getElementById('rosterConfirmBtn');
-    confirmBtn.disabled = !preview.canProceed;
-    confirmBtn.textContent = preview.canProceed
-      ? `Import ${s.will_create + s.will_enroll_existing + (s.will_reactivate || 0)} student(s)`
-      : 'Blocked — fix the errors above';
+    const toImport = s.will_create + s.will_enroll_existing + (s.will_reactivate || 0);
+    const toFill = s.will_fill_names || 0;
+
+    confirmBtn.disabled = !preview.canProceed || (toImport === 0 && toFill === 0);
+    confirmBtn.textContent = !preview.canProceed
+      ? 'Blocked — fix the errors above'
+      : toImport > 0
+        ? `Import ${toImport} student(s)` + (toFill ? ` and fill ${toFill} name(s)` : '')
+        : toFill > 0
+          ? `Fill in ${toFill} missing name${toFill === 1 ? '' : 's'}`
+          : 'Nothing to change';
   }
 
   // ==========================================================================

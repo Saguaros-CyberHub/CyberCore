@@ -186,6 +186,42 @@ async function findUsersByEmails(emails) {
   return out;
 }
 
+/**
+ * Fill in a name the account does not already have.
+ *
+ * WHY THIS EXISTS: provisionAccount() is idempotent on email -- it returns an
+ * existing account untouched (see its `if (existing)` branch) -- and the roster
+ * import's enroll-existing path never looked at names at all. So an account
+ * created by an import that could not read the roster's name column stayed
+ * nameless forever: re-importing a corrected file enrolled the same people
+ * again and changed nothing, because they already existed.
+ *
+ * ONLY fills columns that are NULL or blank. A roster export is not
+ * authoritative over a name someone has since corrected on their own profile,
+ * and instructors re-run an import repeatedly across a semester.
+ *
+ * @returns {Promise<boolean>} true when something was actually written
+ */
+async function backfillMissingName(userId, { firstName = null, lastName = null } = {}) {
+  const first = firstName ? String(firstName).trim() : '';
+  const last = lastName ? String(lastName).trim() : '';
+  if (!userId || (!first && !last)) return false;
+
+  // The WHERE clause is what makes this a BACKFILL rather than an overwrite:
+  // it matches only when at least one blank column has a value on offer.
+  const result = await cybercoreQuery(
+    `UPDATE cybercore_user
+        SET first_name = COALESCE(NULLIF(first_name, ''), NULLIF($2::text, '')),
+            last_name  = COALESCE(NULLIF(last_name,  ''), NULLIF($3::text, ''))
+      WHERE user_id = $1
+        AND ((NULLIF(first_name, '') IS NULL AND NULLIF($2::text, '') IS NOT NULL)
+          OR (NULLIF(last_name,  '') IS NULL AND NULLIF($3::text, '') IS NOT NULL))
+      RETURNING user_id`,
+    [userId, first, last]
+  );
+  return result.rowCount > 0;
+}
+
 /** Load the guard-relevant row by id, or null. */
 async function findUserById(userId) {
   const result = await cybercoreQuery(
@@ -674,6 +710,8 @@ module.exports = {
   deriveUsername, allocateUsername,
   // lookup
   findUserByEmail, findUsersByEmails, findUserById,
+  // repair
+  backfillMissingName,
   // create
   provisionAccount, provisionOrRotateAccount, provisionAccounts,
   // passwords
