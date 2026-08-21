@@ -240,7 +240,7 @@ async function loadChallenge(challengeId) {
     [challengeId]
   );
   if (r.rows.length === 0) {
-    const err = new Error('Challenge template not found, not active, or not deployable');
+    const err = new Error('Environment template not found, not active, or not deployable');
     err.status = 404;
     throw err;
   }
@@ -260,14 +260,14 @@ function describeChallenge(challenge) {
   const goadEnabled = !!spec.goad?.enabled;
 
   const attachBlockers = [];
-  if (spec.attachable !== true) attachBlockers.push('the challenge does not declare spec.attachable');
-  if (subnetScheme === 'v3') attachBlockers.push('v3 challenges need their own segmented gateway (ext0/int0)');
-  if (goadEnabled) attachBlockers.push('GOAD challenges provision Active Directory across the whole lane');
+  if (spec.attachable !== true) attachBlockers.push('the environment does not declare spec.attachable');
+  if (subnetScheme === 'v3') attachBlockers.push('v3 environments need their own segmented gateway (ext0/int0)');
+  if (goadEnabled) attachBlockers.push('GOAD environments provision Active Directory across the whole lane');
 
   const laneBlockers = [];
-  if (vms.length === 0) laneBlockers.push('the challenge declares no VMs');
+  if (vms.length === 0) laneBlockers.push('the environment declares no VMs');
   if (!spec.vxlan_block?.start || !spec.vxlan_block?.end) {
-    laneBlockers.push('the challenge has no reserved VXLAN block — recreate it via Admin → Create Lab');
+    laneBlockers.push('the environment has no reserved VXLAN block — recreate it via Admin → Environment Templates');
   }
   // Two VMs sharing a vm_offset clone to the same VMID; catching it here means
   // the picker greys the challenge out instead of the deploy dying mid-lane.
@@ -280,6 +280,13 @@ function describeChallenge(challenge) {
   // when a student says the box is unreachable.
   const goadMismatch = challengeLaneDeployer.findGoadHostMismatch(spec, vms);
 
+  // Which machine the environment's author designated as the student console,
+  // and whether it already ships an attacker box. Both feed the deploy modal:
+  // the first pre-selects its console picker, the second stops an instructor
+  // adding a second Kali onto <ext>.50 where the first one already sits.
+  const consoleVm = vms.find((v) => v.console_role === 'primary');
+  const hasSpecAttacker = vms.some((v) => String(v.role || '').toLowerCase() === 'attacker');
+
   return {
     challenge_id:   challenge.challenge_id,
     challenge_key:  challenge.challenge_key,
@@ -290,12 +297,20 @@ function describeChallenge(challenge) {
     goad_enabled:   goadEnabled,
     goad_prebaked:  !!spec.goad?.prebaked,
     attachable:     spec.attachable === true,
+    default_console_vm: consoleVm ? consoleVm.name : null,
+    has_spec_attacker:  hasSpecAttacker,
     can_deploy_lane:   laneBlockers.length === 0,
     can_attach:        attachBlockers.length === 0,
     lane_blockers:     laneBlockers,
     attach_blockers:   attachBlockers,
     // Deployable, but something about it will not behave as intended.
-    warnings:          goadMismatch ? [goadMismatch] : [],
+    warnings: [
+      ...(goadMismatch ? [goadMismatch] : []),
+      ...(hasSpecAttacker ? [
+        'This environment already declares an attacker box — adding a Kali attack ' +
+        'box as well puts two machines on <ext>.50 and dnsmasq will refuse to start.',
+      ] : []),
+    ],
   };
 }
 
@@ -352,12 +367,19 @@ async function findCourseLanes(userIds, courseId) {
  * Deploy a dedicated lab lane per student on the challenge's own VXLAN block.
  * Returns whatever deployChallengeLanes returns.
  */
-async function deployLabLanes({ course, challenge, students, materialId, instructorEmails, progressId, flagSeeds }) {
+async function deployLabLanes({
+  course, challenge, students, materialId, instructorEmails, progressId, flagSeeds,
+  attackBoxes = true, consoleVm = null, extraWorkstations = [],
+}) {
   return challengeLaneDeployer.deployChallengeLanes({
     users: students.map(s => ({ id: s.id, email: s.email })),
     challenge,
     moduleKey: challenge.module_key || laneProvision.MODULE_KEY,
-    attackBoxes: true,
+    // Was hardcoded `true`. Now the instructor's choice, still defaulting to
+    // true everywhere it is not sent.
+    attackBoxes,
+    consoleVm,
+    extraWorkstations,
     // config.course_id is how EVERY CLE read path finds these lanes again —
     // the VM list, the flag board, teardown. material_id ties them to the
     // specific lab assignment so one course can run several at once.
@@ -553,17 +575,27 @@ async function attachLabToStudents({ course, challenge, students, materialId, pr
  * @param {object} [a.flagSeeds]   { [userId]: snapshot rows } — 'lane' mode only;
  *   in 'attach' mode the host lane survives, so its flag rows do too and there is
  *   nothing to replay.
+ * @param {boolean} [a.attackBoxes=true]  deploy a Kali attack box per lane.
+ *   DEFAULTS TO TRUE, which is what this path hardcoded before it was a choice —
+ *   so an older client, and every course deployed before this field existed,
+ *   keeps behaving exactly as it did.
+ * @param {string}  [a.consoleVm]  which machine the student's console opens:
+ *   a spec VM name, 'kali', or 'ws:<index>'. Absent falls through to the
+ *   environment's own console_role, then Kali (see resolveConsolePlan).
+ * @param {Array}   [a.extraWorkstations] machines the instructor added at deploy
+ *   time, in slot order. 'lane' mode only.
  */
 async function deployVulnLab({
   course, challenge, students, materialId, mode, instructorEmails = [],
   progressId = null, flagSeeds = null,
+  attackBoxes = true, consoleVm = null, extraWorkstations = [],
 }) {
   if (!MODES.includes(mode)) throw new Error(`Unknown deploy mode '${mode}'`);
   if (!students.length) return { provisioned: [], failed: [], progressId: null };
 
   const caps = describeChallenge(challenge);
   if (mode === 'lane' && !caps.can_deploy_lane) {
-    const err = new Error(`Cannot deploy '${challenge.name}' as a lab lane: ${caps.lane_blockers.join('; ')}`);
+    const err = new Error(`Cannot deploy '${challenge.name}' as its own environment: ${caps.lane_blockers.join('; ')}`);
     err.status = 409;
     throw err;
   }
@@ -578,9 +610,25 @@ async function deployVulnLab({
     `in course ${course.course_id}`
   );
 
+  // Attach mode grafts into a lane that already exists, with its own console and
+  // its own .100+ address band. Adding machines or an attack box there is not a
+  // smaller version of the same thing — it is a different operation on someone
+  // else's lane — so it is refused rather than silently ignored.
+  if (mode === 'attach' && ((extraWorkstations && extraWorkstations.length) || consoleVm)) {
+    const err = new Error(
+      'Attach mode adds this environment to the lane the student already has, and keeps that ' +
+      'lane’s console. Deploy it as its own environment to add machines or choose a console.'
+    );
+    err.status = 400;
+    throw err;
+  }
+
   return mode === 'attach'
     ? attachLabToStudents({ course, challenge, students, materialId, progressId })
-    : deployLabLanes({ course, challenge, students, materialId, instructorEmails, progressId, flagSeeds });
+    : deployLabLanes({
+        course, challenge, students, materialId, instructorEmails, progressId, flagSeeds,
+        attackBoxes, consoleVm, extraWorkstations,
+      });
 }
 
 // ── teardown ─────────────────────────────────────────────────────────────────

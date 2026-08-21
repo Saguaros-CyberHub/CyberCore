@@ -143,6 +143,9 @@
             layout: vm.layout || null,
             // GOAD lab hosts are placed by the lab definition, not by hand.
             locked: isGoadVm(vm),
+            // So the authoring canvas marks the console machine the same way the
+            // instructor's deploy preview will — one visual language for both.
+            badge: vm.console_role === 'primary' ? 'console' : '',
             segments: deriveSegments(vm, scheme, isGoadVm(vm))
           };
         })
@@ -323,17 +326,51 @@
         '<div class="topo-field"><label>Services</label>' +
           '<input type="text" data-key="services" value="' + esc((vm.services || []).join(', ')) + '"></div>' +
         '<div class="topo-field"><label>Default scripts</label>' +
-          '<input type="text" data-key="default_scripts" value="' + esc((vm.default_scripts || []).join(', ')) + '"></div>';
+          '<input type="text" data-key="default_scripts" value="' + esc((vm.default_scripts || []).join(', ')) + '"></div>' +
+
+        // Console designation. Mirrors the VM table's radio — both are editors
+        // of the same templateVMs row, so an author who never opens the table
+        // must still be able to say which machine the student works from.
+        '<div class="topo-section-title">Student console</div>' +
+        '<div class="topo-field"><label>Role</label><select data-key="console_role">' +
+          '<option value=""' + (!vm.console_role ? ' selected' : '') + '>Not a console</option>' +
+          '<option value="primary"' + (vm.console_role === 'primary' ? ' selected' : '') + '>Primary — what the student opens</option>' +
+          '<option value="secondary"' + (vm.console_role === 'secondary' ? ' selected' : '') + '>Secondary</option>' +
+        '</select>' +
+        '<div class="topo-field-hint">Publishes this machine on the lane gateway and gives it a Guacamole connection.</div></div>' +
+        '<div class="topo-field"><label>Console protocol</label><select data-key="console_protocol">' +
+          '<option value=""' + (!vm.console_protocol ? ' selected' : '') + '>From the template catalog</option>' +
+          ['rdp', 'ssh', 'vnc'].map(function (pr) {
+            return '<option value="' + pr + '"' + (vm.console_protocol === pr ? ' selected' : '') + '>' + pr + '</option>';
+          }).join('') +
+        '</select></div>' +
+        f('Console guest port', 'console_port', 'number', '', 'Blank uses the protocol default: rdp 3389, ssh 22, vnc 5900.');
 
       panelEl.querySelectorAll('[data-key]').forEach(function (input) {
         input.addEventListener('change', function () {
           var key = input.getAttribute('data-key');
           var val = input.value;
-          if (key === 'template_vmid' || key === 'vm_offset') val = parseInt(val, 10) || null;
-          else if (key === 'services' || key === 'default_scripts') {
+          if (key === 'template_vmid' || key === 'vm_offset' || key === 'console_port') {
+            val = parseInt(val, 10) || null;
+          } else if (key === 'services' || key === 'default_scripts') {
             val = val.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
           }
-          vm[key] = val;
+          // Only ONE machine may be the primary console. The <select> cannot
+          // enforce that across rows, so the previous holder is cleared here —
+          // otherwise a spec saves with two primaries and the deploy throws.
+          if (key === 'console_role' && val === 'primary') {
+            vms.forEach(function (other) {
+              if (other !== vm && other.console_role === 'primary') delete other.console_role;
+            });
+          }
+          // An empty optional key is DELETED rather than stored as '', so a spec
+          // that designates nothing stays byte-identical to one written before
+          // these fields existed.
+          if ((key === 'console_role' || key === 'console_protocol' || key === 'console_port') && !val) {
+            delete vm[key];
+          } else {
+            vm[key] = val;
+          }
           toCanvas(false);
           if (opts.onChange) opts.onChange();
         });

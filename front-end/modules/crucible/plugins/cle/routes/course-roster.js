@@ -147,6 +147,58 @@ async function inviteNewAccount(user, { course, ctx, actorId, importId }) {
   }
 }
 
+/**
+ * Mint a reset link and queue it for an account that already exists.
+ *
+ * The sibling of inviteNewAccount above, and split from it deliberately rather
+ * than parameterised: issueActivationToken revokes per PURPOSE, so a reset must
+ * carry purpose 'reset' or it would silently cancel an outstanding invitation —
+ * and with it the roster's "invited" badge, which pendingActivationFor computes
+ * from live 'activate' tokens only.
+ *
+ * Failure is reported, not thrown. The caller turns a non-queued result into a
+ * 502, because unlike an invitation during an import there is nothing else this
+ * request accomplished.
+ */
+async function sendPasswordResetLink(user, { course, ctx, actorId }) {
+  try {
+    const { token, expiresAt } = await activation.issueActivationToken(user.user_id, {
+      purpose: 'reset',
+      createdBy: actorId,
+      context: { course_id: course.course_id, reason: 'instructor_reset' },
+    });
+
+    const body = templates.passwordReset({
+      siteName: ctx.siteName,
+      firstName: user.first_name,
+      username: user.username,
+      // mode=reset is cosmetic — it only picks the wording on /activate. See
+      // the note on activationUrl.
+      resetUrl: activation.activationUrl(token, ctx.publicUrl, 'reset'),
+      courseName: course.course_name,
+      courseCode: course.code,
+      instructorName: ctx.instructorName,
+      expiresAt,
+    });
+
+    const queued = await mailer.enqueue({
+      to: user.email,
+      toUserId: user.user_id,
+      templateKey: 'passwordReset',
+      subject: body.subject,
+      text: body.text,
+      html: body.html,
+      context: { course_id: course.course_id },
+      requestedBy: actorId,
+    });
+
+    return { status: queued.status, reason: queued.reason || null, expiresAt };
+  } catch (err) {
+    console.warn(`[CLE] Could not queue a reset link for ${user.email}:`, err.message);
+    return { status: 'suppressed', reason: `the reset link could not be prepared: ${err.message}`, expiresAt: null };
+  }
+}
+
 /** Queue the "you've been added to X" notice for an account that already existed. */
 async function notifyExisting(user, { course, ctx, actorId, importId }) {
   try {
@@ -171,43 +223,6 @@ async function notifyExisting(user, { course, ctx, actorId, importId }) {
     return { status: queued.status, reason: queued.reason || null };
   } catch (err) {
     console.warn(`[CLE] Could not notify ${user.email}:`, err.message);
-    return { status: 'suppressed', reason: err.message };
-  }
-}
-
-/**
- * Queue the "a temporary password has been set for you" notice after staff
- * regenerated a credential.
- *
- * Unlike an invitation this really does put a working password in a mailbox,
- * which is why setPassword() pairs it with mustChange and an expiry: the window
- * in which the copy in the mailbox is worth anything closes on first sign-in.
- */
-async function notifyCredentials(user, { password, expiresAt, course, ctx, actorId }) {
-  try {
-    const body = templates.credentialsIssued({
-      siteName: ctx.siteName,
-      publicUrl: ctx.publicUrl,
-      firstName: user.first_name,
-      username: user.username,
-      password,
-      expiresAt,
-      courseName: course && course.course_name,
-      courseCode: course && course.code,
-    });
-    const queued = await mailer.enqueue({
-      to: user.email,
-      toUserId: user.user_id,
-      templateKey: 'credentialsIssued',
-      subject: body.subject,
-      text: body.text,
-      html: body.html,
-      context: { course_id: course ? course.course_id : null },
-      requestedBy: actorId,
-    });
-    return { status: queued.status, reason: queued.reason || null };
-  } catch (err) {
-    console.warn(`[CLE] Could not send credentials to ${user.email}:`, err.message);
     return { status: 'suppressed', reason: err.message };
   }
 }
@@ -736,84 +751,93 @@ async function loadManageableStudent(req, res, course) {
   return target;
 }
 
-// The warning is reused verbatim from admin/settings.js:874 because it
-// describes the same true limitation: sessions are stateless JWTs and
-// middleware/auth.js never re-reads the row, so a reset ends nothing that is
-// already signed in.
-const SESSION_SURVIVAL_WARNING =
-  'Sessions already signed in are not ended by this reset — their existing login stays valid until it expires (7 days by default).';
-
 /**
  * POST /students/:studentId/password
- * Generate a new password for an account this course created.
+ *
+ * Email this student a single-use link to choose a new password.
+ *
+ * This used to mint a temporary password, display it once, AND mail the
+ * plaintext. That put a working credential in a mailbox where it stayed
+ * readable by anyone who later reached that mailbox, and kept working until
+ * somebody remembered to sign in — the exact failure activation.js was written
+ * to avoid. A token is spent on first use and dies on a clock.
+ *
+ * The account is NOT touched here. Nothing is invalidated, no session ends, and
+ * the student's current password keeps working until they redeem the link — so
+ * a misdirected click costs nothing, and there is no window in which they are
+ * locked out waiting for mail to arrive.
+ *
+ * MAIL IS THEREFORE MANDATORY, not a nicety: with no delivery there is no
+ * credential at all. An address the mailer will not accept gets a 409 naming
+ * the one path that still works, rather than a success that silently did
+ * nothing. Cohort-generated accounts (@cohort.invalid and anything else outside
+ * MAIL_ALLOWED_RECIPIENT_DOMAINS) land here by construction.
  */
 router.post('/students/:studentId/password', instructorOnly, async (req, res) => {
   try {
     const course = await loadCourse(req, res);
     if (!course) return;
 
+    // Unchanged: assertCourseProvisionedStudent still decides who may be
+    // targeted (student-tier, local auth, no MFA, provisioned by THIS course).
     const target = await loadManageableStudent(req, res, course);
     if (!target) return;
 
-    // Always server-generated. Letting a caller choose the password would make
-    // this a way to set a known credential on someone else's account, which is
-    // a materially different (and worse) capability than "issue a new random one".
-    //
-    // Bounded as well as rotate-on-first-use: this credential gets read aloud,
-    // written down, or left sitting in a mailbox, and an unbounded one stays
-    // valid for the rest of the term if the student simply never signs in.
-    const { password, expires_at: expiresAt } = await prov.setPassword(target.user_id, {
-      mustChange: true,
-      ttlHours: TEMP_PASSWORD_TTL_HOURS,
-      actorId: req.user.userId,
-    });
-
-    // An outstanding invitation would be a second, unrelated way in that the
-    // instructor does not know about.
-    await activation.revokeActivationTokens(target.user_id, 'activate').catch(() => {});
-
-    // Mail the student their own copy unless the caller opts out. The password
-    // is still returned either way: the instructor asked for a credential to
-    // hand over, and a student whose mail bounces still needs one. Which of the
-    // two actually happened is reported rather than assumed.
-    let mail = null;
-    if (req.body?.notify !== false && canInvite(target.email)) {
-      const ctx = await mailContext(req.user.userId);
-      mail = await notifyCredentials(target, {
-        password, expiresAt, course, ctx, actorId: req.user.userId,
+    if (!mailer.mailEnabled() || !mailer.mailKey()) {
+      return res.status(409).json({
+        error: 'Email is not configured on this server, so a password-reset link cannot be sent. '
+          + 'An administrator can set a password directly from Admin → Users.',
       });
     }
+
+    const recipient = mailer.checkRecipient(target.email);
+    if (!recipient.ok) {
+      // Names the remaining path explicitly. This is the cohort case: those
+      // accounts are created with placeholder addresses precisely so that no
+      // mail is attempted for them, so the instructor has nothing self-serve
+      // here and should not be left to guess that.
+      return res.status(409).json({
+        error: `Cannot email ${target.email}: ${recipient.reason}. `
+          + 'This account has no reachable address, so it cannot receive a reset link — '
+          + 'an administrator can set a password for it directly from Admin → Users.',
+      });
+    }
+
+    const ctx = await mailContext(req.user.userId);
+    const result = await sendPasswordResetLink(target, { course, ctx, actorId: req.user.userId });
 
     roster.logRosterActivity({
       actorId: req.user.userId,
       courseId: course.course_id,
-      action: 'password_regenerate',
+      action: 'password_reset_link',
       detail: {
         target_user_id: target.user_id,
         target_email: target.email,
         target_role: target.role,
-        emailed: mail ? mail.status === 'queued' : false,
+        status: result.status,
       },
     });
+
+    if (result.status !== 'queued') {
+      return res.status(502).json({ error: result.reason || 'The reset link could not be queued.' });
+    }
 
     res.json({
       user_id: target.user_id,
       username: target.username,
       email: target.email,
-      // Returned once, in this response only. Nothing stores the plaintext.
-      password,
-      expires_at: expiresAt,
-      emailed: mail ? mail.status === 'queued' : false,
-      ...(mail && mail.status !== 'queued' ? { email_note: mail.reason } : {}),
-      warnings: [SESSION_SURVIVAL_WARNING],
+      sent: true,
+      expires_at: result.expiresAt,
+      note: `A password-reset link is on its way to ${target.email}. `
+        + 'Their current password keeps working until they use it. '
+        + 'Any earlier reset link for this account has been invalidated.',
     });
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
-    console.error('[CLE] Password regenerate error:', error.message);
+    console.error('[CLE] Password reset link error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
-
 /**
  * POST /students/:studentId/activation/resend
  * Issue a fresh invitation link, invalidating any previous one.

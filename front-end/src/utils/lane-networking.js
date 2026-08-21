@@ -397,7 +397,13 @@ function resolveVmSegments(vmSpec, { subnetScheme, isGoadVm = false } = {}) {
  *   single qemu  → buildLaneNet0, carrying the GOAD MAC and NIC model
  */
 function resolveVmNics(vmSpec, ctx = {}) {
-  const { bridges = {}, goadMac, goadVm, isGoadVm = !!goadVm } = ctx;
+  // `pinnedMac` is the generic form of what `goadMac` always was: "put this
+  // exact MAC on net0". GOAD was simply the only caller that needed it. A
+  // console-designated machine needs the same thing, because a MAC-keyed DHCP
+  // reservation is the only way to give it a fixed address the gateway's DNAT
+  // can point at. `goadMac` is still accepted so existing callers are untouched.
+  const { bridges = {}, goadMac, pinnedMac, goadVm, isGoadVm = !!goadVm } = ctx;
+  const mac = pinnedMac || goadMac;
   const segments = resolveVmSegments(vmSpec, { ...ctx, isGoadVm });
   const type = vmSpec?.type || 'qemu';
 
@@ -415,7 +421,7 @@ function resolveVmNics(vmSpec, ctx = {}) {
   // LXC challenge VMs take net1 — the template already owns net0.
   if (type === 'lxc') {
     return {
-      nets: { net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, bridgeFor(segments[0]), goadMac) },
+      nets: { net1: goadDeploy.buildLaneNet0({ type: 'lxc' }, bridgeFor(segments[0]), mac) },
       segments: segments.slice(0, 1),
       dualHomed: false,
     };
@@ -428,7 +434,7 @@ function resolveVmNics(vmSpec, ctx = {}) {
   }
 
   return {
-    nets: { net0: goadDeploy.buildLaneNet0(vmSpec, bridgeFor(segments[0]), goadMac, goadVm?.nic_model) },
+    nets: { net0: goadDeploy.buildLaneNet0(vmSpec, bridgeFor(segments[0]), mac, goadVm?.nic_model) },
     segments,
     dualHomed: false,
   };

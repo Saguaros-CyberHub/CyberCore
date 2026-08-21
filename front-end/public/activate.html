@@ -26,7 +26,7 @@
 
         <!-- Set a password -->
         <div id="activateStep">
-          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;" id="activateIntro">
             Welcome! Choose a password to finish setting up your account.
           </p>
           <form id="activateForm">
@@ -62,6 +62,14 @@
 
   <script src="/js/app.js"></script>
   <script>
+    // Decided here rather than in the DOMContentLoaded handler below:
+    // loadSiteConfig() sets document.title asynchronously and would race a
+    // title set later, leaving a reset link titled "Activate Your Account".
+    const PAGE_TITLE = new URLSearchParams(location.search).get('mode') === 'reset'
+      ? 'Set a New Password'
+      : 'Activate Your Account';
+    document.title = PAGE_TITLE;
+
     async function loadSiteConfig() {
       try {
         const response = await fetch('/api/site-config');
@@ -69,7 +77,7 @@
         const config = await response.json();
         if (config.site_name) {
           document.getElementById('siteName').textContent = config.site_name;
-          document.title = `Activate Your Account | ${config.site_name}`;
+          document.title = `${PAGE_TITLE} | ${config.site_name}`;
         }
         if (config.site_description) {
           document.getElementById('siteDescription').textContent = config.site_description;
@@ -84,6 +92,19 @@
 
       const errorAlert = document.getElementById('errorAlert');
       const token = Utils.getQueryParam('token');
+
+      // Presentation only. The token is deliberately never inspected before
+      // the submit (see activationUrl in src/utils/activation.js), so this is
+      // the only thing that can tell a password RESET from a first-time
+      // activation — without it, a student recovering a forgotten password is
+      // greeted with "finish setting up your account", which reads like the
+      // link went to the wrong person. Nothing is authorized by it.
+      const isReset = Utils.getQueryParam('mode') === 'reset';
+      if (isReset) {
+        document.getElementById('activateIntro').textContent =
+          'Choose a new password for your account. Your old password stops working once you do.';
+        document.getElementById('activateSubmitBtn').textContent = 'Set New Password & Continue';
+      }
 
       function showError(msg) {
         errorAlert.textContent = msg || 'Something went wrong';
@@ -138,12 +159,15 @@
           // straight in. It has no session yet, so the login page has to redo
           // the sign-in it now has a real password for.
           if (result.enrollment_required) {
-            deadEnd('Your password is set. Your account also requires multi-factor authentication — sign in to finish setting it up.');
+            deadEnd(isReset
+              ? 'Your new password is set. Your account also requires multi-factor authentication — sign in to continue.'
+              : 'Your password is set. Your account also requires multi-factor authentication — sign in to finish setting it up.');
             return;
           }
 
           if (result.token) localStorage.setItem('token', result.token);
-          Toast.success('Welcome!', 'Your account is ready');
+          if (isReset) Toast.success('Password updated', 'Your new password is active');
+          else Toast.success('Welcome!', 'Your account is ready');
           setTimeout(() => { window.location.href = '/hub'; }, 600);
         } catch (error) {
           // A spent or expired token is terminal: no amount of retrying on this

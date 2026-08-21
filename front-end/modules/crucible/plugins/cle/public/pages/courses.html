@@ -123,6 +123,143 @@
     .btn-outline { background: transparent; border: 1px solid #d1d5db; color: #374151; }
     .btn-outline:hover { background: #f3f4f6; }
 
+    /* ====================================================================
+       DEPLOY ENVIRONMENT MODAL
+       --------------------------------------------------------------------
+       One screen replacing the old "Provision Workstation VM" and "Deploy
+       Vulnerable Lab" modals. Two columns: the form on the left, a live
+       topology on the right that redraws as machines are added, removed or
+       re-designated.
+
+       The GREEN accent means exactly one thing everywhere it appears — "this
+       is the machine the student opens". It is the same colour the admin
+       environment editor puts on its VM card and the same the topology
+       renderer paints the node border, so an instructor who has seen it once
+       in either place already knows what it means here.
+       ==================================================================== */
+    .deploy-env-modal { max-width: 1180px; padding: 1.75rem 2rem; }
+    .deploy-env-grid {
+      display: grid;
+      grid-template-columns: minmax(380px, 460px) 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+    /* The topology stays put while the form scrolls — on a 24-student deploy the
+       machine list is the long part, and the diagram is what you check against. */
+    .deploy-env-topo { position: sticky; top: 0; display: flex; flex-direction: column; }
+    .deploy-env-topo .topo-canvas {
+      min-height: 460px; flex: 1;
+      border: 1px solid #e5e7eb; border-radius: 10px 10px 0 0;
+      background: var(--bg-hover, #f9fafb);
+    }
+    .deploy-env-topo .topo-legend {
+      border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 10px 10px;
+    }
+    .deploy-env-hint { font-size: 0.78rem; color: var(--text-muted, #6b7280); }
+    .deploy-env-sub { font-weight: 400; color: var(--text-muted, #6b7280); font-size: 0.8rem; }
+
+    /* ── machine list ─────────────────────────────────────────────────── */
+    .env-machines { display: flex; flex-direction: column; gap: 0.5rem; }
+    .env-machine {
+      border: 1px solid #e5e7eb; border-radius: 10px;
+      padding: 0.7rem 0.8rem; background: var(--card-bg, white);
+      transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+    }
+    .env-machine:hover { border-color: #d1d5db; }
+    /* The console machine. Left border rather than a full outline: it marks the
+       row without boxing it in, matching .course-item's accent elsewhere. */
+    .env-machine.is-console {
+      border-color: #4f9153;
+      border-left: 4px solid #4f9153;
+      background: rgba(79, 145, 83, 0.06);
+      padding-left: 0.6rem;
+    }
+    .env-machine-head { display: flex; align-items: center; gap: 0.6rem; }
+    .env-machine-pick { flex: none; margin: 0; cursor: pointer; width: auto; }
+    .env-machine-name {
+      font-weight: 600; font-size: 0.88rem; color: #1f2937;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .env-machine-body { flex: 1; min-width: 0; }
+    .env-machine-meta {
+      display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap;
+      font-size: 0.72rem; color: var(--text-muted, #6b7280); margin-top: 0.15rem;
+    }
+    .env-chip {
+      display: inline-block; padding: 0.05rem 0.45rem; border-radius: 10px;
+      background: #f3f4f6; color: #4b5563; font-size: 0.68rem; font-weight: 600;
+    }
+    .env-chip-added { background: rgba(30,82,136,0.12); color: var(--primary-light, #1e5288); }
+    .env-chip-console { background: rgba(79,145,83,0.16); color: #2f6f33; }
+    .env-machine-drop {
+      background: transparent; border: none; color: #9ca3af; cursor: pointer;
+      font-size: 1rem; line-height: 1; padding: 0.2rem 0.3rem; border-radius: 4px; flex: none;
+    }
+    .env-machine-drop:hover { background: #fee2e2; color: #b91c1c; }
+    /* Per-machine sizing. Hidden until the machine is one the instructor added:
+       an environment's own machines are sized by its author, and offering to
+       resize them here would imply an override this screen does not send. */
+    .env-machine-res { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; margin-top: 0.55rem; }
+    .env-machine-res label {
+      display: flex; flex-direction: column; gap: 0.15rem;
+      font-size: 0.68rem; font-weight: 500; color: var(--text-muted, #6b7280);
+    }
+    .env-machine-res input {
+      padding: 0.28rem 0.4rem; border: 1px solid #e5e7eb; border-radius: 5px;
+      font: inherit; font-size: 0.78rem;
+    }
+    .env-machine-res input:focus {
+      outline: none; border-color: var(--primary, #0c234b);
+      box-shadow: 0 0 0 2px rgba(30, 82, 136, 0.12);
+    }
+
+    /* ── add-a-machine row ────────────────────────────────────────────── */
+    .env-addbar {
+      display: flex; gap: 0.4rem; align-items: center; margin-top: 0.6rem;
+      padding: 0.55rem; border: 1px dashed #d1d5db; border-radius: 10px;
+      background: var(--bg-hover, #f9fafb);
+    }
+    .env-addbar select {
+      flex: 1; min-width: 0; padding: 0.4rem; border: 1px solid #e5e7eb;
+      border-radius: 6px; font: inherit; font-size: 0.82rem; background: white;
+    }
+    .env-addbar .btn { padding: 0.4rem 0.7rem; font-size: 0.8rem; }
+    .env-addbar .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+    /* Kali is a toggle, not an add — there is exactly one attack box per lane
+       and it always lands on <ext>.50, so a second would collide. */
+    .env-kali-toggle.is-on { background: var(--primary, #0c234b); color: white; border-color: var(--primary, #0c234b); }
+    .env-empty {
+      text-align: center; padding: 1.1rem 0.75rem; border: 1px dashed #e5e7eb;
+      border-radius: 10px; color: var(--text-muted, #6b7280); font-size: 0.82rem;
+    }
+    /* Said out loud rather than left to the topology: a lane with no console is
+       legal (students may reach it from elsewhere) but is almost never intended. */
+    .env-warn {
+      display: flex; gap: 0.5rem; align-items: flex-start; margin-top: 0.6rem;
+      padding: 0.55rem 0.7rem; border-radius: 8px; font-size: 0.78rem;
+      background: rgba(245, 158, 11, 0.12); color: #92400e;
+      border-left: 3px solid #f59e0b;
+    }
+
+    /* ── student picker ───────────────────────────────────────────────── */
+    .env-students {
+      display: flex; flex-direction: column; gap: 0.35rem;
+      max-height: 190px; overflow-y: auto;
+      border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.5rem;
+    }
+    .env-selectall {
+      font-weight: 400; font-size: 0.78rem; color: var(--text-muted, #6b7280);
+      display: inline-flex; align-items: center; gap: 0.3rem; margin-left: auto; cursor: pointer;
+    }
+    .env-selectall input { width: auto; margin: 0; cursor: pointer; }
+    .form-group label.env-group-label { display: flex; align-items: center; gap: 0.5rem; }
+
+    @media (max-width: 1080px) {
+      .deploy-env-grid { grid-template-columns: 1fr; }
+      .deploy-env-topo { position: static; }
+      .deploy-env-topo .topo-canvas { min-height: 320px; }
+    }
+
     .info-box { background: rgba(30, 82, 136, 0.1); border-left: 4px solid var(--primary-light, #1e5288); padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
     .info-box p { margin: 0; color: var(--primary, #0c234b); font-size: 0.9rem; }
 
@@ -221,7 +358,7 @@
             <div class="detail-tab active" onclick="switchDetailTab('overview', this)">📋 Overview</div>
             <div class="detail-tab" onclick="switchDetailTab('students', this)">👥 Students</div>
             <div class="detail-tab" onclick="switchDetailTab('vm-management', this)">🖥️ VM Management</div>
-            <div class="detail-tab" onclick="switchDetailTab('vulnerable-labs', this)">⚠️ Vulnerable Labs</div>
+            <div class="detail-tab" onclick="switchDetailTab('vulnerable-labs', this)">🧪 Environments</div>
             <!-- data-feature marks a tab as optional per course. The value is the
                  key in cle_course.features / utils/course-features.js; the
                  onclick argument stays the pane id, which is not the same
@@ -257,10 +394,10 @@
             <div id="vmManagementContent"></div>
           </div>
 
-          <!-- Vulnerable Labs Tab -->
+          <!-- Environments Tab -->
           <div class="detail-tab-pane" id="vulnerable-labs-pane">
             <div class="info-box">
-              <p>Deploy vulnerable machines for specific learning objectives. Students can only access their assigned labs.</p>
+              <p>Deploy course environments for specific learning objectives. Students can only reach the environments assigned to them.</p>
             </div>
             <div id="vulnerableLabsContent"></div>
           </div>
@@ -576,114 +713,118 @@
     </div>
   </div>
 
-  <!-- Provision VM Modal -->
-  <div class="modal-overlay" id="provisionVMModal">
-    <div class="modal">
-      <h2>Provision Workstation VM</h2>
-      <div class="modal-form">
-        <div class="form-group">
-          <label>VM Template</label>
-          <select id="provisionVMTemplate">
-            <option value="">Loading templates...</option>
-          </select>
-        </div>
-        <div id="provisionVMTemplateInfo" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: -0.4rem 0 0.4rem;"></div>
-        <!-- Optional second machine, for courses where each student needs a pair
-             (CYBR 400: a Windows ELK box plus a Rocky sensor). The FIRST machine
-             takes the lane's .50 address and the gateway's console port, so it
-             should be the one students actually connect to. -->
-        <div class="form-group">
-          <label>Second Machine <span style="font-weight:400;color:var(--text-muted,#6b7280);">— optional</span></label>
-          <select id="provisionVMTemplate2">
-            <option value="">None — one machine per student</option>
-          </select>
-        </div>
-        <div id="provisionVMTemplate2Info" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: -0.4rem 0 0.4rem;"></div>
-        <!-- Hardware sizing for THIS deploy. Applied to the clone before it
-             first boots; the catalog template is never modified, so another
-             course can deploy the same image at a different size.
-             These inputs are seeded from the FIRST template and apply only to
-             it — a second machine keeps its own template's sizing, so a small
-             sensor is never cloned at a big SIEM box's memory. -->
-        <div class="form-group">
-          <label>Workstation Resources <span style="font-weight:400;color:var(--text-muted,#6b7280);">— first machine</span></label>
-          <div class="resource-grid">
-            <label>CPU cores
-              <input type="number" id="provisionCores" step="1" placeholder="template default">
+  <!-- ======================================================================
+       DEPLOY ENVIRONMENT
+       ----------------------------------------------------------------------
+       Replaces the old "Provision Workstation VM" and "Deploy Vulnerable Lab"
+       modals. They asked overlapping questions through different doors: one
+       deployed catalog workstations onto the COURSE's VXLAN block, the other
+       deployed an environment's machines onto the ENVIRONMENT's own block, and
+       an instructor had to know which door CYBR 400 went through and which one
+       CYBR 480 did.
+
+       One screen now asks the questions in the order they actually matter:
+         1. which environment
+         2. what is in it, and which machine the student opens
+         3. who gets it
+
+       The two backends stay separate behind it — deployEnvironment() dispatches
+       on the environment picker. They draw from different VXLAN blocks and
+       lane-deployer refuses v3 outright, so merging the engines would be a far
+       larger change than merging the screens.
+       ====================================================================== -->
+  <div class="modal-overlay" id="deployEnvModal">
+    <div class="modal deploy-env-modal">
+      <h2>Deploy Environment</h2>
+      <div class="deploy-env-grid">
+
+        <!-- ── left: the form ────────────────────────────────────────── -->
+        <div class="modal-form">
+          <div class="form-group">
+            <label for="deployEnvTemplate">Environment</label>
+            <select id="deployEnvTemplate" onchange="onEnvTemplateChange()">
+              <option value="">Loading environments…</option>
+            </select>
+            <div id="deployEnvTemplateInfo" class="deploy-env-hint" style="margin-top: 0.35rem;"></div>
+          </div>
+
+          <!-- Only meaningful for a real environment; hidden on the
+               workstation-only path, which has no second mode. -->
+          <div class="form-group" id="deployEnvModeGroup">
+            <label>Deployment mode</label>
+            <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400;">
+              <input type="radio" name="deployLabMode" value="lane" id="deployLabModeLane" checked style="width:auto; margin-top:0.2rem;">
+              <span>
+                <strong>Its own environment</strong> — a private network per student, holding the machines below.
+                <span id="deployLabModeLaneNote" class="deploy-env-hint" style="display:block;"></span>
+              </span>
             </label>
-            <label>Memory (GB)
-              <input type="number" id="provisionMemoryGb" step="0.5" placeholder="template default">
-            </label>
-            <label>Disk (GB)
-              <input type="number" id="provisionDiskGb" step="1" placeholder="template default">
+            <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400; margin-top:0.4rem;">
+              <input type="radio" name="deployLabMode" value="attach" id="deployLabModeAttach" style="width:auto; margin-top:0.2rem;">
+              <span>
+                <strong>Attach to existing workstation</strong> — add these machines to the lane the student already has in this course.
+                <span id="deployLabModeAttachNote" class="deploy-env-hint" style="display:block;"></span>
+              </span>
             </label>
           </div>
-          <div id="provisionResourceNote" style="font-size: 0.75rem; color: var(--text-muted, #6b7280); margin-top: 0.4rem;"></div>
-        </div>
-        <div class="form-group">
-          <label>Deploy to</label>
-          <div id="provisionVMStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
-        </div>
-        <p style="font-size: 0.8rem; color: var(--text-muted, #6b7280); margin: 0.25rem 0 0;">
-          Everyone selected gets their own isolated VXLAN lane (gateway + workstation), drawn from this course's reserved network.
-          Tick yourself at the top of the list to build one on your own account &mdash; <strong>Deploy Whole Class</strong> covers the roster only.
-        </p>
-        <div id="provisionPreview" style="display:none; margin-top: 0.75rem;"></div>
-        <div class="form-buttons">
-          <button class="btn btn-secondary" onclick="closeModal('provisionVMModal')">Cancel</button>
-          <button class="btn btn-outline" id="provisionAllBtn" onclick="provisionWholeClass()">Deploy Whole Class</button>
-          <button class="btn btn-primary" id="provisionSelectedBtn" onclick="provisionVMs()">Provision Selected</button>
-        </div>
-      </div>
-    </div>
-  </div>
 
-  <!-- Deploy Vulnerable Machine Modal -->
-  <div class="modal-overlay" id="deployVulnerableModal">
-    <div class="modal">
-      <h2>Deploy Vulnerable Machine</h2>
-      <div class="modal-form">
-        <div class="form-group">
-          <label>Vulnerable Application</label>
-          <select id="deployLabTemplate" onchange="onLabTemplateChange()">
-            <option value="">Loading templates...</option>
-          </select>
-          <div id="deployLabTemplateInfo" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin-top: 0.35rem;"></div>
+          <div class="form-group">
+            <label class="env-group-label">
+              Machines
+              <span class="deploy-env-sub">select the one the student opens</span>
+            </label>
+            <div class="env-machines" id="deployEnvMachines"></div>
+
+            <div class="env-addbar" id="deployEnvAddbar">
+              <button type="button" class="btn btn-outline env-kali-toggle" id="deployEnvKaliBtn"
+                      onclick="toggleEnvKali()">+ Kali attack box</button>
+              <select id="deployEnvAddTemplate" aria-label="Workstation to add">
+                <option value="">Add a workstation…</option>
+              </select>
+              <button type="button" class="btn btn-outline" id="deployEnvAddBtn" onclick="addEnvWorkstation()">Add</button>
+            </div>
+            <div id="deployEnvAddNote" class="deploy-env-hint" style="margin-top: 0.4rem;"></div>
+          </div>
+
+          <div class="form-group">
+            <label class="env-group-label">
+              Deploy to
+              <label class="env-selectall">
+                <input type="checkbox" id="deployEnvSelectAll" onchange="toggleEnvSelectAll(this)"> select all
+              </label>
+            </label>
+            <div class="env-students" id="deployEnvStudents"></div>
+            <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
+              Tick yourself at the top to get your own copy &mdash; it lands on your account,
+              appears in your workspaces, and is not added to the gradebook.
+            </p>
+          </div>
+
+          <div class="form-group" id="deployEnvObjectiveGroup">
+            <label for="deployEnvObjective">Learning objective</label>
+            <textarea id="deployEnvObjective" placeholder="Describe what students should learn…"></textarea>
+          </div>
+
+          <div id="deployEnvPreview" style="display:none;"></div>
+
+          <div class="form-buttons">
+            <button class="btn btn-secondary" onclick="closeDeployEnvModal()">Cancel</button>
+            <button class="btn btn-outline" id="deployEnvAllBtn" onclick="provisionWholeClass()">Deploy Whole Class</button>
+            <button class="btn btn-primary" id="deployEnvBtn" onclick="deployEnvironment()">Deploy Environment</button>
+          </div>
         </div>
-        <div class="form-group">
-          <label>Deployment Mode</label>
-          <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400;">
-            <input type="radio" name="deployLabMode" value="lane" id="deployLabModeLane" checked>
-            <span>
-              <strong>Full lab lane</strong> — its own network, the vulnerable machine(s) and a Kali attack box per student.
-              <span id="deployLabModeLaneNote" style="display:block; font-size:0.75rem; color:var(--text-muted, #6b7280);"></span>
-            </span>
-          </label>
-          <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400; margin-top:0.4rem;">
-            <input type="radio" name="deployLabMode" value="attach" id="deployLabModeAttach">
-            <span>
-              <strong>Attach to existing workstation</strong> — add the vulnerable machine to the lane the student already has in this course.
-              <span id="deployLabModeAttachNote" style="display:block; font-size:0.75rem; color:var(--text-muted, #6b7280);"></span>
-            </span>
-          </label>
+
+        <!-- ── right: the live topology ──────────────────────────────── -->
+        <div class="deploy-env-topo">
+          <div class="topo-canvas" id="deployEnvTopoCanvas"></div>
+          <div class="topo-legend">
+            <span><i class="topo-lg-ext"></i> External / Attacker</span>
+            <span><i class="topo-lg-int"></i> Internal / Corp</span>
+            <span><i class="topo-lg-console"></i> Student console</span>
+          </div>
+          <p id="deployEnvTopoMeta" class="deploy-env-hint" style="margin: 0.5rem 0 0;"></p>
         </div>
-        <div class="form-group">
-          <label>Deploy to</label>
-          <div id="deployLabStudents" style="display: flex; flex-direction: column; gap: 0.5rem;"></div>
-          <p style="font-size: 0.78rem; color: var(--text-muted, #6b7280); margin: 0.4rem 0 0;">
-            Tick yourself at the top of the list to get your own copy of the lab &mdash; it lands on your account,
-            appears in your workspaces, and is not added to the gradebook.
-          </p>
-        </div>
-        <div class="form-group">
-          <label>Learning Objective</label>
-          <textarea id="deployLabObjective" placeholder="Describe what students should learn..."></textarea>
-        </div>
-        <div id="deployLabPreview" style="display:none; margin-top: 0.75rem;"></div>
-        <div class="form-buttons">
-          <button class="btn btn-secondary" onclick="closeModal('deployVulnerableModal')">Cancel</button>
-          <button class="btn btn-primary" id="deployLabBtn" onclick="deployVulnerableMachines()">Deploy Labs</button>
-        </div>
+
       </div>
     </div>
   </div>
@@ -1330,7 +1471,7 @@
         const data = await api('GET', `/courses/${currentCourseId}/vms`);
         const vms = data.vms || [];
 
-        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Provision Workstation VMs</button>
+        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Deploy Workstations</button>
           <div id="provisionProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
 
         if (vms.length === 0) {
@@ -1437,7 +1578,7 @@
     /** Flag-plant summary for one deployment, or null when nothing is planted yet. */
     function _flagSummary(flags) {
       // The Flags TAB is not the only place flag state reaches the UI - this
-      // chip sits in the Vulnerable Labs table. Left in, a course with Flags
+      // chip sits in the Environments table. Left in, a course with Flags
       // switched off still reports capture counts and the toggle looks broken.
       if (!currentCourseData || !currentCourseData.features || !currentCourseData.features.flags) return '';
       if (!flags) return '<span style="color: var(--text-muted, #6b7280);">—</span>';
@@ -1481,11 +1622,11 @@
         const labs = data.labs || [];
 
         let html = `
-          <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Vulnerable Lab</button>
+          <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Environment</button>
           <div id="labProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
 
         if (labs.length === 0) {
-          html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No vulnerable labs deployed yet.</p>';
+          html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No environments deployed yet.</p>';
         } else {
           labs.forEach(l => {
             html += `
@@ -1522,7 +1663,7 @@
             } else {
               html += `<table class="students-table" style="margin-top:0.75rem;">
                 <thead><tr>
-                  <th>Student</th><th>Mode</th><th>Status</th><th>Machines</th><th>Attack Box</th><th>Flags</th><th>Actions</th>
+                  <th>Student</th><th>Mode</th><th>Status</th><th>Machines</th><th>Student console</th><th>Flags</th><th>Actions</th>
                 </tr></thead><tbody>`;
               (l.deployments || []).forEach(d => {
                 const vms = (d.vms || []).map(v =>
@@ -1809,7 +1950,7 @@
     // Permanently delete the course. The backend tears down every student
     // workstation lane (VM + gateway + Guac connection), the course's reserved
     // lab network (SDN zone + VNets), and cascade-removes all enrollments,
-    // deployed labs, and submissions.
+    // deployed environments, and submissions.
     async function deleteCurrentCourse() {
       const name = (currentCourseData && currentCourseData.course_name) || 'this course';
       const vmCount = (currentCourseData && currentCourseData.vm_count) || 0;
@@ -1817,7 +1958,7 @@
         + `This permanently destroys:\n`
         + `• every student workstation VM and its gateway${vmCount ? ` (${vmCount} currently provisioned)` : ''}\n`
         + `• the course's reserved lab network\n`
-        + `• all enrollments, deployed labs, and submissions\n\n`
+        + `• all enrollments, deployed environments, and submissions\n\n`
         + `This cannot be undone.`;
       if (!confirm(warning)) return;
 
@@ -1929,24 +2070,6 @@
     // already have a VM for the currently-selected template in the modal.
     let _provisionExistingVMs = [];
 
-    async function showProvisionVMModal() {
-      showModal('provisionVMModal');
-      resetProvisionAllButton();   // clear any confirm state left from a previous open
-
-      // Load templates, students, and current VMs in parallel, then update eligibility once
-      try {
-        const [, , vmsData] = await Promise.all([
-          loadVMTemplates(),
-          loadModalStudents('provisionVMStudents'),
-          api('GET', `/courses/${currentCourseId}/vms`).catch(() => ({ vms: [] })),
-        ]);
-        _provisionExistingVMs = (vmsData && vmsData.vms) || [];
-        updateProvisionEligibility();
-      } catch (e) {
-        toast('Error preparing provision modal: ' + e.message, true);
-      }
-    }
-
     // Templates keyed by id, so the picker can describe what's about to deploy.
     let _provisionTemplates = {};
     // Sizing bounds, served by /templates/vm from the same constants the
@@ -1958,118 +2081,30 @@
       disk_gb:   { min: 8,    max: 2048 },
     };
 
-    async function loadVMTemplates() {
-      try {
-        const data = await api('GET', '/templates/vm');
-        const templates = data.templates || [];
-        _provisionTemplates = {};
-        templates.forEach(t => { _provisionTemplates[String(t.template_id)] = t; });
-        if (data.resource_limits) _provisionLimits = data.resource_limits;
-        applyResourceLimits();
-
-        const select = document.getElementById('provisionVMTemplate');
-        select.innerHTML = templates.length
-          ? templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('')
-          : '<option value="">No active workstation templates available</option>';
-
-        // Surface WHY the picker is empty (usually a template left at the admin
-        // form's default status of 'draft') instead of a dead-end message.
-        if (!templates.length && data.hint) {
-          document.getElementById('provisionVMTemplateInfo').innerHTML =
-            `<span style="color:#b7791f;">${escHtml(data.hint)}</span>`;
-          return;
-        }
-
-        // Second machine: same catalog, plus a "None" option so the default
-        // stays one machine per student.
-        const select2 = document.getElementById('provisionVMTemplate2');
-        select2.innerHTML = '<option value="">None — one machine per student</option>'
-          + templates.map(t => `<option value="${t.template_id}">${escHtml(t.name)}</option>`).join('');
-
-        // Re-evaluate eligibility, the description AND the sizing defaults
-        // whenever the template changes — each image ships its own sizing.
-        select.onchange = () => {
-          updateProvisionEligibility();
-          renderTemplateInfo();
-          seedResourceInputs();
-        };
-        select2.onchange = renderTemplate2Info;
-        renderTemplateInfo();
-        renderTemplate2Info();
-        seedResourceInputs();
-      } catch (e) {
-        toast('Error loading templates: ' + e.message, true);
-      }
-    }
-
     // Field metadata for the sizing inputs. `scale` converts the API's unit
     // (cores, MiB, GiB) to the unit the input shows, so validation messages read
     // in the same units the instructor typed in.
+    //
+    // No fixed element ids any more: sizing is per MACHINE, rendered into each
+    // added machine's card. One set of inputs shared by every slot is what let a
+    // 4 GB sensor be cloned at a SIEM box's 16 GB, times the whole cohort.
     const RESOURCE_FIELDS = {
-      cores:     { input: 'provisionCores',     label: 'CPU cores', scale: 1,        unit: '' },
-      memory_mb: { input: 'provisionMemoryGb',  label: 'Memory',    scale: 1 / 1024, unit: ' GB' },
-      disk_gb:   { input: 'provisionDiskGb',    label: 'Disk',      scale: 1,        unit: ' GB' },
+      cores:     { label: 'Cores',  scale: 1,        unit: '' },
+      memory_mb: { label: 'Memory', scale: 1 / 1024, unit: ' GB' },
+      disk_gb:   { label: 'Disk',   scale: 1,        unit: ' GB' },
     };
-
-    /** Push the server's bounds onto the number inputs so the browser enforces them too. */
-    function applyResourceLimits() {
-      for (const [field, meta] of Object.entries(RESOURCE_FIELDS)) {
-        const el = document.getElementById(meta.input);
-        const bounds = _provisionLimits[field];
-        if (!el || !bounds) continue;
-        el.min = String(bounds.min * meta.scale);
-        el.max = String(bounds.max * meta.scale);
-      }
-    }
-
-    /**
-     * Pre-fill the sizing inputs with the selected template's own CPU/RAM/disk,
-     * so the form always shows what the student would actually get. A template
-     * Proxmox couldn't be read for leaves the inputs blank, which the provision
-     * endpoint treats as "keep the template's sizing".
-     */
-    function seedResourceInputs() {
-      const t = _provisionTemplates[document.getElementById('provisionVMTemplate').value];
-      const defaults = t?.default_resources || {};
-      for (const [field, meta] of Object.entries(RESOURCE_FIELDS)) {
-        const el = document.getElementById(meta.input);
-        if (!el) continue;
-        const val = defaults[field];
-        el.value = (val == null) ? '' : String(Math.round(val * meta.scale * 100) / 100);
-      }
-      const note = document.getElementById('provisionResourceNote');
-      if (!note) return;
-      note.textContent = Object.keys(defaults).length
-        ? 'Pre-filled from the template — adjust to change what every selected student gets. '
-          + 'The template itself is not modified. Disk can only be grown; a smaller value keeps the template\'s disk.'
-        : 'Template sizing is unavailable right now. Leave blank to deploy at the template\'s own CPU, RAM and disk.';
-    }
-
-    /**
-     * The { cores, memory_mb, disk_gb } to send, or null to deploy the template
-     * unchanged. Blank fields are omitted rather than zeroed — the backend reads
-     * a missing field as "leave this one alone". Throws so the caller can show
-     * the message instead of firing a request the API will reject.
-     */
-    function readRequestedResources() {
-      const out = {};
-      for (const [field, meta] of Object.entries(RESOURCE_FIELDS)) {
-        const raw = (document.getElementById(meta.input)?.value || '').trim();
-        if (raw === '') continue;
-        const n = Math.round(Number(raw) / meta.scale);
-        const bounds = _provisionLimits[field];
-        if (!Number.isFinite(n) || (bounds && (n < bounds.min || n > bounds.max))) {
-          const lo = bounds.min * meta.scale, hi = bounds.max * meta.scale;
-          throw new Error(`${meta.label} must be between ${lo}${meta.unit} and ${hi}${meta.unit}`);
-        }
-        out[field] = n;
-      }
-      return Object.keys(out).length ? out : null;
-    }
 
     /** "6 cores &middot; 8 GB RAM &middot; 80 GB disk" for the whole-class preview. */
     function describeResources(r) {
       if (!r) return 'template defaults';
+      // Sizing is per MACHINE now, so the server echoes an ARRAY back — one entry
+      // per slot, holes meaning "keep that template's own sizing". Rendering it
+      // as a scalar printed "template defaults" for every deploy, which is
+      // exactly wrong when the instructor did set a size.
+      if (Array.isArray(r)) {
+        const each = r.map((entry, i) => `#${i + 1} ${describeResources(entry)}`);
+        return each.length ? each.join(' · ') : 'template defaults';
+      }
       return [
         r.cores ? `${r.cores} core${r.cores === 1 ? '' : 's'}` : null,
         r.memory_mb ? `${Math.round(r.memory_mb / 102.4) / 10} GB RAM` : null,
@@ -2077,75 +2112,18 @@
       ].filter(Boolean).join(' · ');
     }
 
-    /** Show OS/type/protocol and whether the student gets credentials automatically. */
-    /**
-     * The templates this deploy will build, IN SLOT ORDER.
-     *
-     * Slot 0 gets the lane's .50 address and the gateway's baked console port,
-     * so the first picker is the machine students connect to. Sending an array
-     * of one is identical to the old single-template request server-side.
-     */
-    function provisionTemplateIds() {
-      const first = document.getElementById('provisionVMTemplate').value;
-      const second = (document.getElementById('provisionVMTemplate2') || {}).value || '';
-      return [first, second].filter(Boolean);
-    }
-
-    function renderTemplate2Info() {
-      const el = document.getElementById('provisionVMTemplate2Info');
-      if (!el) return;
-      const ids = provisionTemplateIds();
-      if (ids.length < 2) { el.textContent = ''; return; }
-      if (ids[0] === ids[1]) {
-        el.innerHTML = '<span style="color:#c53030;">Pick a different image — two machines cannot share one template.</span>';
-        return;
-      }
-      const t = _provisionTemplates[ids[1]];
-      if (!t) { el.textContent = ''; return; }
-      // Say plainly which machine gets the console, because it is not obvious
-      // and getting it backwards means students RDP into the wrong box.
-      el.innerHTML = `Second machine lands on <code>.51</code> with its own `
-        + `${escHtml((t.console_protocol || 'rdp').toUpperCase())} console. `
-        + `The FIRST machine keeps <code>.50</code> and the lane's main console.`;
-    }
-
-    function renderTemplateInfo() {
-      const el = document.getElementById('provisionVMTemplateInfo');
-      if (!el) return;
-      const t = _provisionTemplates[document.getElementById('provisionVMTemplate').value];
-      if (!t) { el.textContent = ''; return; }
-      const bits = [
-        (t.provider_type || 'qemu').toUpperCase(),
-        t.os_family ? escHtml(t.os_family) : null,
-        `${escHtml((t.console_protocol || 'rdp').toUpperCase())} console`,
-        `NIC ${escHtml(t.nic_model || 'virtio')}`,
-        t.credentials === 'template'
-          ? 'credentials baked into template'
-          : t.credentials === 'cloud-init'
-            ? `login <code>${escHtml(t.cloud_init_user)}</code>, password per student`
-            : 'credentials generated per student',
-      ].filter(Boolean);
-
-      // A Windows template with no declared cloud-init account is the shape that
-      // deploys "successfully" and then refuses every login: cloudbase-init can
-      // only set the password on the account it was baked with, so a guessed
-      // username authenticates as nobody. Say it here, before the deploy.
-      const guessing = t.credentials === 'cloud-init-guess'
-        && String(t.os_family || '').startsWith('windows');
-      el.innerHTML = bits.join(' &middot; ') + (guessing
-        ? `<div style="margin-top:0.4rem;color:var(--accent-red,#ab0520);font-size:0.78rem;">`
-          + `This Windows template declares no cloud-init account, so the deploy will guess `
-          + `<code>cactus-user</code>. If its image was baked with a different account the console `
-          + `will not log in. Set it under Admin &rarr; Workstation Templates &rarr; Cloud-Init Account.`
-          + `</div>`
-        : '');
+    /** Total RAM per student across every machine, for the whole-class preview. */
+    function totalMemoryMb(r) {
+      if (!r) return 0;
+      if (Array.isArray(r)) return r.reduce((sum, e) => sum + ((e && e.memory_mb) || 0), 0);
+      return r.memory_mb || 0;
     }
 
     /**
      * The checkbox list both deploy modals target.
      *
      * include_self=1 asks the API to prepend the instructor themselves, so they
-     * can build a copy of a workstation or a lab on their own account — walking
+     * can build a copy of a workstation or an environment on their own account — walking
      * an exercise before assigning it, or demoing it in class — without having
      * to enrol in their own course. That row comes back flagged `is_self`; it is
      * styled apart from the roster, and the whole-class buttons (which resolve
@@ -2178,69 +2156,52 @@
     }
 
     /**
-     * Greys out + permanently checks any student who already has an active VM
-     * built from the currently-selected template. Re-runs whenever the
-     * template select changes.
+     * The workstation-only path: the machines the instructor added, in SLOT
+     * ORDER with the console machine at index 0.
+     *
+     * Slot 0 is the whole mechanism here. It takes the lane's .50 and the
+     * gateway's baked console port, so "which machine does the student open?"
+     * is expressed purely by ordering — no console_vm field to send, and no
+     * server change needed for this path.
      */
-    function updateProvisionEligibility() {
-      const templateId = document.getElementById('provisionVMTemplate').value;
-      const container  = document.getElementById('provisionVMStudents');
-      if (!container) return;
-
-      const occupied = new Set(
-        _provisionExistingVMs
-          .filter(v => v.template_id && String(v.template_id) === String(templateId))
-          .map(v => v.user_id)
-      );
-
-      container.querySelectorAll('label[data-user-id]').forEach(label => {
-        const userId   = label.dataset.userId;
-        const checkbox = label.querySelector('input.modal-student-select');
-        const note     = label.querySelector('.provision-note');
-        if (occupied.has(userId)) {
-          checkbox.checked  = true;
-          checkbox.disabled = true;
-          label.style.opacity = '0.55';
-          label.style.cursor  = 'not-allowed';
-          if (note) note.textContent = '— already deployed';
-        } else {
-          checkbox.disabled = false;
-          checkbox.checked  = false;
-          label.style.opacity = '';
-          label.style.cursor  = '';
-          if (note) note.textContent = '';
-        }
-      });
+    function workstationSlotOrder() {
+      const consoleRef = selectedConsoleRef();
+      const ordered = _envAddons.map((a, i) => ({ addon: a, ref: 'ws:' + i }));
+      ordered.sort((x, y) => (y.ref === consoleRef) - (x.ref === consoleRef));
+      return ordered.map(o => o.addon);
     }
 
     async function provisionVMs() {
       try {
-        const templateIds = provisionTemplateIds();
+        const slots = workstationSlotOrder();
         // Skip checkboxes that are checked-but-disabled (already-deployed students)
         const selectedStudents = Array.from(
-          document.querySelectorAll('#provisionVMStudents .modal-student-select:checked:not(:disabled)')
+          document.querySelectorAll('#deployEnvStudents .modal-student-select:checked:not(:disabled)')
         ).map(c => c.value);
 
-        if (!templateIds.length || selectedStudents.length === 0) {
-          toast('Select template and at least one student', true);
+        if (!slots.length || selectedStudents.length === 0) {
+          toast('Add a workstation and select at least one student', true);
           return;
         }
-        if (templateIds.length === 2 && templateIds[0] === templateIds[1]) {
-          toast('The two machines must use different templates', true);
+        const ids = slots.map(a => String(a.template.template_id));
+        if (new Set(ids).size !== ids.length) {
+          toast('Each machine must use a different template', true);
           return;
         }
 
         // Each student gets their own isolated lane (gateway + workstation(s)),
-        // drawn from the course's reserved VXLAN block, sized per this form.
+        // drawn from the course's reserved VXLAN block. `resources` goes as an
+        // ARRAY, index-matched to template_ids, so each machine keeps its own
+        // sizing instead of every slot inheriting the first one's.
         const res = await api('POST', `/courses/${currentCourseId}/vms/provision`, {
-          template_id: templateIds[0],
-          template_ids: templateIds,
+          template_id: ids[0],
+          template_ids: ids,
           student_ids: selectedStudents,
-          resources: readRequestedResources(),
+          resources: slots.map(a => compactResources(a.resources)),
         });
 
         toast(res.message || 'VM provisioning started');
-        closeModal('provisionVMModal');
+        closeDeployEnvModal();
         loadVMManagement();
         pollProvisionProgress();
       } catch (e) {
@@ -2254,19 +2215,20 @@
      * cluster-capacity preview, the second (confirm) actually deploys.
      */
     async function provisionWholeClass() {
-      const btn = document.getElementById('provisionAllBtn');
-      const preview = document.getElementById('provisionPreview');
+      const btn = document.getElementById('deployEnvAllBtn');
+      const preview = document.getElementById('deployEnvPreview');
       try {
-        const templateIds = provisionTemplateIds();
-        if (!templateIds.length) { toast('Select a template first', true); return; }
-        if (templateIds.length === 2 && templateIds[0] === templateIds[1]) {
-          toast('The two machines must use different templates', true);
+        const slots = workstationSlotOrder();
+        if (!slots.length) { toast('Add a workstation first', true); return; }
+        const templateIds = slots.map(a => String(a.template.template_id));
+        if (new Set(templateIds).size !== templateIds.length) {
+          toast('Each machine must use a different template', true);
           return;
         }
         // Read before the request so a bad number surfaces immediately, and
-        // reuse the SAME object for the confirm call — re-reading the form
+        // reuse the SAME array for the confirm call — re-reading the form
         // between the preview and the confirm would let the two disagree.
-        const resources = readRequestedResources();
+        const resources = slots.map(a => compactResources(a.resources));
 
         btn.disabled = true;
         btn.textContent = 'Checking capacity...';
@@ -2280,7 +2242,7 @@
         // Already deploying (pre-flight unavailable) — nothing more to confirm.
         if (!res.preview) {
           toast(res.message || 'Provisioning started');
-          closeModal('provisionVMModal');
+          closeDeployEnvModal();
           loadVMManagement();
           pollProvisionProgress();
           return;
@@ -2300,9 +2262,9 @@
               ${s.currently_deploying || 0} deploying now
             </div>
             <div style="font-size:0.78rem; color:var(--text-secondary); margin-top:0.2rem;">
-              Each workstation: ${escHtml(describeResources(res.resources))}
-              ${res.resources?.memory_mb
-                ? ` &middot; ${Math.round(res.student_count * res.resources.memory_mb / 1024)} GB RAM total`
+              Each student: ${escHtml(describeResources(res.resources))}
+              ${totalMemoryMb(res.resources)
+                ? ` &middot; ${Math.round(res.student_count * totalMemoryMb(res.resources) / 1024)} GB RAM total`
                 : ''}
             </div>
             ${(res.warnings || []).map(w => `<div style="font-size:0.75rem;color:#b7791f;margin-top:0.3rem;">&#9888; ${escHtml(w)}</div>`).join('')}
@@ -2329,7 +2291,7 @@
               template_id: templateIds[0], template_ids: templateIds, confirm: true, resources,
             });
             toast(done.message || 'Provisioning started');
-            closeModal('provisionVMModal');
+            closeDeployEnvModal();
             loadVMManagement();
             pollProvisionProgress();
           } catch (e) {
@@ -2345,12 +2307,12 @@
     }
 
     function resetProvisionAllButton() {
-      const btn = document.getElementById('provisionAllBtn');
+      const btn = document.getElementById('deployEnvAllBtn');
       if (!btn) return;
       btn.disabled = false;
       btn.textContent = 'Deploy Whole Class';
       btn.onclick = provisionWholeClass;
-      const preview = document.getElementById('provisionPreview');
+      const preview = document.getElementById('deployEnvPreview');
       if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
     }
 
@@ -2383,56 +2345,243 @@
       }
     }
 
-    // ── Vulnerable lab deployment ─────────────────────────────────────────────
+    // ── Environment deployment ────────────────────────────────────────────────
+    //
+    // One screen, three backends. The picker decides which:
+    //
+    //   "Workstation only"        POST /vms/provision      lane-deployer
+    //                             catalog workstations on the COURSE's VXLAN block
+    //   environment + own lane    POST /labs/deploy        challenge-lane-deployer
+    //                             the environment's machines on ITS OWN block
+    //   environment + attach      POST /labs/deploy        attached-modules
+    //                             grafted into the lane the student already has
+    //
+    // They are deliberately not merged: they draw from different VXLAN blocks,
+    // and lane-deployer refuses v3 outright. Merging the screens was the ask;
+    // merging the engines would be a much larger and riskier change.
 
-    let _vulnTemplates = [];
+    /** The synthetic first option, so the workstation-only path survives the merge. */
+    const WORKSTATION_ONLY = '__workstation_only__';
 
-    function showDeployVulnerableModal() {
-      resetDeployLabButton();
-      loadVulnerableTemplates();
-      loadModalStudents('deployLabStudents');
-      showModal('deployVulnerableModal');
-    }
+    let _vulnTemplates = [];   // environments from GET /templates/vulnerable
+    let _envWsTemplates = [];  // catalog workstations from GET /templates/vm
+    let _envAddons = [];       // instructor-added machines, in slot order
+    let _envKali = false;      // attack box toggle
+    let _envConsole = null;    // ref of the machine the student opens, or null
+    let _envAddonSeq = 0;      // stable keys for the add-on rows
 
-    async function loadVulnerableTemplates() {
-      try {
-        const data = await api('GET', '/templates/vulnerable');
-        _vulnTemplates = data.templates || [];
-        const select = document.getElementById('deployLabTemplate');
-        select.innerHTML = _vulnTemplates.length
-          ? _vulnTemplates.map(t => `<option value="${escAttr(t.template_id)}">${escHtml(t.name)}</option>`).join('')
-          : '<option value="">No deployable vulnerable applications</option>';
-        if (data.hint) toast(data.hint, true);
-        onLabTemplateChange();
-      } catch (e) {
-        toast('Error loading templates: ' + e.message, true);
+    // ── machine model ────────────────────────────────────────────────────────
+    //
+    // Every machine on the prospective lane, in the order it will be built, each
+    // with a stable `ref` the console radio and the deploy payload both use:
+    //   'kali'          the attack box
+    //   'spec:<name>'   a machine the environment's author declared
+    //   'ws:<index>'    a machine the instructor added, by slot
+    //
+    // The refs match what challenge-lane-deployer.resolveConsolePlan accepts, so
+    // `console_vm` travels to the server as-is with nothing to translate.
+
+    function envMachines() {
+      const t = selectedVulnTemplate();
+      const out = [];
+
+      if (_envKali) {
+        out.push({
+          ref: 'kali', kind: 'kali', name: 'kali',
+          os: 'Kali Linux', role: 'attacker', protocol: 'rdp',
+          note: 'lands on the lane’s .50 with the gateway’s baked RDP rule',
+        });
       }
+
+      ((t && t.topology && t.topology.vms) || []).forEach(vm => {
+        out.push({
+          ref: 'spec:' + vm.name, kind: 'spec', name: vm.name,
+          os: vm.os || vm.os_family || '', role: vm.role || '',
+          protocol: vm.console_protocol || null,
+          // A pre-baked GOAD member has its cloud-init drive stripped at clone
+          // time to protect its baked hostname and domain secure channel, so it
+          // has no way to be handed a login. Saying so beats a console that
+          // deploys cleanly and then cannot authenticate.
+          blocked: isPrebakedGoadHost(t, vm.name)
+            ? 'pre-baked GOAD host — it cannot be handed a login'
+            : null,
+          fromSpec: true,
+        });
+      });
+
+      _envAddons.forEach((a, i) => {
+        out.push({
+          ref: 'ws:' + i, kind: 'extra', name: a.hostname,
+          os: a.template.name || a.template.os_family || '',
+          role: 'workstation', protocol: a.template.console_protocol || 'rdp',
+          addon: a, addonIndex: i,
+        });
+      });
+
+      return out;
     }
 
-    /** The template row currently selected in the modal, or null. */
-    function selectedVulnTemplate() {
-      const id = document.getElementById('deployLabTemplate').value;
-      return _vulnTemplates.find(t => String(t.template_id) === String(id)) || null;
+    /** GOAD lab hosts are placed and provisioned by the lab definition itself. */
+    function isPrebakedGoadHost(t, name) {
+      if (!t || !t.goad_prebaked) return false;
+      const names = (t.topology && t.topology.goad_host_names) || [];
+      return names.some(n => String(n).toLowerCase() === String(name).toLowerCase());
     }
 
     /**
-     * Describe the selected challenge and disable any mode it cannot support,
-     * with the server's own reason. The same checks run again server-side — this
-     * just stops the instructor from picking a combination that will 409.
+     * The machine the student opens. Falls back through the same order the
+     * server's resolveConsolePlan uses, so what the modal shows before you
+     * deploy is what the deploy actually does:
+     *   an explicit pick -> the environment's own console_role -> Kali -> the
+     *   first added workstation -> nothing.
      */
-    function onLabTemplateChange() {
-      const t = selectedVulnTemplate();
-      const info = document.getElementById('deployLabTemplateInfo');
-      const laneRadio  = document.getElementById('deployLabModeLane');
-      const attachRadio = document.getElementById('deployLabModeAttach');
-      const laneNote   = document.getElementById('deployLabModeLaneNote');
-      const attachNote = document.getElementById('deployLabModeAttachNote');
+    function selectedConsoleRef() {
+      const machines = envMachines();
+      if (_envConsole && machines.some(m => m.ref === _envConsole && !m.blocked)) return _envConsole;
 
-      if (!t) {
-        info.textContent = '';
-        laneNote.textContent = attachNote.textContent = '';
+      const t = selectedVulnTemplate();
+      if (t && t.default_console_vm) {
+        const declared = machines.find(m => m.ref === 'spec:' + t.default_console_vm);
+        if (declared && !declared.blocked) return declared.ref;
+      }
+      const kali = machines.find(m => m.kind === 'kali');
+      if (kali) return kali.ref;
+      const extra = machines.find(m => m.kind === 'extra');
+      if (extra) return extra.ref;
+      return null;
+    }
+
+    // ── modal lifecycle ──────────────────────────────────────────────────────
+
+    async function showDeployEnvModal() {
+      _envAddons = [];
+      _envKali = false;
+      _envConsole = null;
+      resetDeployEnvButton();
+
+      // MUST be visible before the canvas is mounted: Cytoscape measures its
+      // container at init, and a hidden one yields a 0x0 graph that never
+      // recovers. Same rule as the lane topology modal below.
+      showModal('deployEnvModal');
+      mountEnvTopology();
+
+      try {
+        const [, , vmsData] = await Promise.all([
+          loadEnvTemplates(),
+          loadModalStudents('deployEnvStudents'),
+          api('GET', `/courses/${currentCourseId}/vms`).catch(() => ({ vms: [] })),
+        ]);
+        _provisionExistingVMs = (vmsData && vmsData.vms) || [];
+        onEnvTemplateChange();
+      } catch (e) {
+        toast('Error preparing the deploy screen: ' + e.message, true);
+      }
+    }
+
+    // Kept under the old name so the existing entry points and any bookmarked
+    // handler still open the merged screen.
+    const showDeployVulnerableModal = showDeployEnvModal;
+    const showProvisionVMModal = () => showDeployEnvModal().then(() => {
+      // Same screen, opened from the Workstations tab: default to the path that
+      // tab has always taken rather than to the first environment in the list.
+      const sel = document.getElementById('deployEnvTemplate');
+      if (sel) { sel.value = WORKSTATION_ONLY; onEnvTemplateChange(); }
+    });
+
+    function closeDeployEnvModal() {
+      destroyEnvTopology();
+      closeModal('deployEnvModal');
+    }
+
+    /** Load both catalogs: the environments, and the workstations you can add. */
+    async function loadEnvTemplates() {
+      const [envData, wsData] = await Promise.all([
+        api('GET', '/templates/vulnerable').catch(e => ({ templates: [], hint: e.message })),
+        api('GET', '/templates/vm').catch(() => ({ templates: [] })),
+      ]);
+
+      _vulnTemplates = envData.templates || [];
+      _envWsTemplates = wsData.templates || [];
+      if (wsData.resource_limits) _provisionLimits = wsData.resource_limits;
+
+      const select = document.getElementById('deployEnvTemplate');
+      select.innerHTML =
+        `<option value="${WORKSTATION_ONLY}">Workstation only &mdash; no environment</option>`
+        + (_vulnTemplates.length
+            ? '<optgroup label="Environments">'
+              + _vulnTemplates.map(t =>
+                  `<option value="${escAttr(t.template_id)}">${escHtml(t.name)}</option>`).join('')
+              + '</optgroup>'
+            : '');
+
+      // An environment picker with nothing in it is ambiguous — "none exist" and
+      // "some exist but none can deploy" look identical. The server says which.
+      if (!_vulnTemplates.length && envData.hint) {
+        document.getElementById('deployEnvTemplateInfo').innerHTML =
+          `<span style="color:#b7791f;">${escHtml(envData.hint)}</span>`;
+      }
+
+      const add = document.getElementById('deployEnvAddTemplate');
+      add.innerHTML = '<option value="">Add a workstation&hellip;</option>'
+        + _envWsTemplates.map(t =>
+            `<option value="${escAttr(t.template_id)}">${escHtml(t.name)}</option>`).join('');
+      if (!_envWsTemplates.length) {
+        add.innerHTML = '<option value="">No workstation templates registered</option>';
+        document.getElementById('deployEnvAddBtn').disabled = true;
+      }
+    }
+
+    /** The environment row currently selected, or null on the workstation-only path. */
+    function selectedVulnTemplate() {
+      const id = document.getElementById('deployEnvTemplate').value;
+      if (!id || id === WORKSTATION_ONLY) return null;
+      return _vulnTemplates.find(t => String(t.template_id) === String(id)) || null;
+    }
+
+    function isWorkstationOnly() {
+      return document.getElementById('deployEnvTemplate').value === WORKSTATION_ONLY;
+    }
+
+    /**
+     * Describe the selection, gate the modes it cannot support, and reset the
+     * console pick — a machine from the previous environment is not on this one.
+     */
+    function onEnvTemplateChange() {
+      const t = selectedVulnTemplate();
+      const wsOnly = isWorkstationOnly();
+      const info = document.getElementById('deployEnvTemplateInfo');
+      const modeGroup = document.getElementById('deployEnvModeGroup');
+      const objective = document.getElementById('deployEnvObjectiveGroup');
+      const allBtn = document.getElementById('deployEnvAllBtn');
+
+      _envConsole = null;
+
+      // Deployment mode and a learning objective only mean anything for a real
+      // environment. "Deploy Whole Class" is the reverse: it maps to
+      // /vms/provision-all, which is the only endpoint carrying a class-wide
+      // capacity pre-flight, so it belongs to the workstation-only path.
+      modeGroup.style.display = wsOnly ? 'none' : '';
+      objective.style.display = wsOnly ? 'none' : '';
+      allBtn.style.display = wsOnly ? '' : 'none';
+
+      if (wsOnly) {
+        info.innerHTML = 'Each student gets their own isolated lane on this course’s network, '
+          + 'holding just the machines you add below.';
+        // Nothing is in the lane yet, so seed it with one workstation rather than
+        // opening on an empty list the instructor has to decipher.
+        if (!_envAddons.length && _envWsTemplates.length) addEnvWorkstation(_envWsTemplates[0].template_id);
+        renderEnvMachines();
         return;
       }
+
+      if (!t) { info.textContent = ''; renderEnvMachines(); return; }
+
+      // The environment ships its own machines, so drop anything carried over.
+      _envAddons = [];
+      // An environment that already declares an attacker box must not get a
+      // second Kali: both want <ext>.50, and two dhcp-host lines claiming one
+      // address stop dnsmasq, which takes DHCP down for the whole lane.
+      _envKali = !t.has_spec_attacker;
 
       const bits = [
         `${t.vm_count} machine${t.vm_count === 1 ? '' : 's'}`,
@@ -2440,17 +2589,18 @@
         t.goad_enabled ? (t.goad_prebaked ? 'GOAD (pre-baked)' : 'GOAD (~90 min bake per lane)') : null,
         t.free_lanes != null ? `${t.free_lanes} lane${t.free_lanes === 1 ? '' : 's'} free` : null,
       ].filter(Boolean);
-      // Deployable, but something in the spec will not behave as intended — a
-      // GOAD host whose name doesn't match the lab definition, for instance.
       const warnHtml = (t.warnings || []).length
-        ? `<div style="color:#b7791f; margin-top:0.3rem;">⚠ ${t.warnings.map(escHtml).join('<br>⚠ ')}</div>`
+        ? `<div style="color:#b7791f; margin-top:0.3rem;">&#9888; ${t.warnings.map(escHtml).join('<br>&#9888; ')}</div>`
         : '';
       info.innerHTML = bits.join(' &middot; ') + warnHtml;
 
+      const laneRadio = document.getElementById('deployLabModeLane');
+      const attachRadio = document.getElementById('deployLabModeAttach');
       laneRadio.disabled = !t.can_deploy_lane;
-      laneNote.textContent = t.can_deploy_lane ? '' : `Unavailable — ${t.lane_blockers.join('; ')}`;
+      document.getElementById('deployLabModeLaneNote').textContent =
+        t.can_deploy_lane ? '' : `Unavailable — ${t.lane_blockers.join('; ')}`;
       attachRadio.disabled = !t.can_attach;
-      attachNote.textContent = t.can_attach
+      document.getElementById('deployLabModeAttachNote').textContent = t.can_attach
         ? 'The student must already have a workstation in this course.'
         : `Unavailable — ${t.attach_blockers.join('; ')}`;
 
@@ -2458,69 +2608,321 @@
       if (laneRadio.disabled && !attachRadio.disabled) attachRadio.checked = true;
       else if (attachRadio.disabled && !laneRadio.disabled) laneRadio.checked = true;
 
-      resetDeployLabButton();
+      renderEnvMachines();
     }
 
-    function selectedLabMode() {
-      return document.querySelector('input[name="deployLabMode"]:checked')?.value || 'lane';
+    // ── the machine list ─────────────────────────────────────────────────────
+
+    function renderEnvMachines() {
+      const host = document.getElementById('deployEnvMachines');
+      const machines = envMachines();
+      const consoleRef = selectedConsoleRef();
+      const attachMode = selectedLabMode() === 'attach';
+
+      if (!machines.length) {
+        host.innerHTML = '<div class="env-empty">No machines yet. Add a workstation or a Kali attack box below.</div>';
+      } else {
+        host.innerHTML = machines.map(m => {
+          const isConsole = m.ref === consoleRef;
+          const meta = [
+            m.os ? escHtml(m.os) : null,
+            m.protocol ? `<span class="env-chip">${escHtml(String(m.protocol).toUpperCase())}</span>` : null,
+            m.kind === 'extra' ? '<span class="env-chip env-chip-added">ADDED</span>' : null,
+            isConsole ? '<span class="env-chip env-chip-console">STUDENT CONSOLE</span>' : null,
+            m.blocked ? `<span style="color:#b7791f;">${escHtml(m.blocked)}</span>` : (m.note ? escHtml(m.note) : null),
+          ].filter(Boolean).join(' ');
+
+          // Sizing is offered only for machines the instructor added. An
+          // environment's own machines are sized by its author, and showing
+          // inputs for them would imply an override this screen does not send.
+          const res = m.kind === 'extra' ? `
+            <div class="env-machine-res">
+              ${['cores', 'memory_mb', 'disk_gb'].map(field => {
+                const meta2 = RESOURCE_FIELDS[field];
+                const raw = m.addon.resources[field];
+                const shown = raw == null ? '' : String(Math.round(raw * meta2.scale * 100) / 100);
+                return `<label>${escHtml(meta2.label)}${escHtml(meta2.unit)}
+                  <input type="number" value="${escAttr(shown)}" placeholder="template default"
+                         onchange="setEnvAddonResource(${m.addonIndex}, '${field}', this.value)">
+                </label>`;
+              }).join('')}
+            </div>` : '';
+
+          return `
+          <div class="env-machine${isConsole ? ' is-console' : ''}">
+            <div class="env-machine-head">
+              <input type="radio" name="deployEnvConsole" class="env-machine-pick"
+                     value="${escAttr(m.ref)}" ${isConsole ? 'checked' : ''}
+                     ${m.blocked ? 'disabled' : ''}
+                     title="${m.blocked ? escAttr(m.blocked) : 'Make this the machine the student opens'}"
+                     onchange="setEnvConsole('${escAttr(m.ref)}')">
+              <div class="env-machine-body">
+                <div class="env-machine-name">${escHtml(m.name || '(unnamed)')}</div>
+                <div class="env-machine-meta">${meta}</div>
+              </div>
+              ${m.kind === 'extra'
+                ? `<button type="button" class="env-machine-drop" title="Remove this machine"
+                           onclick="removeEnvWorkstation(${m.addonIndex})">&times;</button>`
+                : ''}
+            </div>
+            ${res}
+          </div>`;
+        }).join('');
+      }
+
+      // A lane with no console is legal — students may reach it from a machine
+      // they already have — but it is almost never what was meant, so it is said
+      // out loud rather than left to be inferred from the diagram.
+      let warn = '';
+      if (machines.length && !consoleRef) {
+        warn = 'No machine is set as the student console, so this deploy creates no remote session. '
+             + 'Pick one above, or add a workstation.';
+      } else if (attachMode) {
+        warn = 'Attach mode adds these machines to the lane the student already has, and keeps that '
+             + 'lane’s existing console. Additions and the console pick are ignored.';
+      }
+      const warnEl = document.getElementById('deployEnvAddNote');
+      warnEl.innerHTML = warn ? `<div class="env-warn"><span>&#9888;</span><span>${escHtml(warn)}</span></div>` : '';
+
+      // Kali is one per lane and always at <ext>.50, so it is a toggle, and it is
+      // disabled outright when the environment already brings its own attacker.
+      const t = selectedVulnTemplate();
+      const kaliBtn = document.getElementById('deployEnvKaliBtn');
+      const blockedByAttacker = !!(t && t.has_spec_attacker);
+      kaliBtn.classList.toggle('is-on', _envKali);
+      kaliBtn.textContent = _envKali ? '✓ Kali attack box' : '+ Kali attack box';
+      kaliBtn.disabled = blockedByAttacker || attachMode;
+      kaliBtn.title = blockedByAttacker
+        ? 'This environment already includes an attacker box'
+        : (attachMode ? 'Not available in attach mode' : 'One Kali per lane, on the lane’s .50');
+      // Attach mode is the only path that cannot take additions: it grafts into a
+      // lane that already exists, with its own console and its own .100+ band.
+      document.getElementById('deployEnvAddbar').style.display = attachMode ? 'none' : '';
+
+      renderEnvTopology();
+      resetDeployEnvButton();
     }
 
-    function readDeployLabForm() {
-      const templateId = document.getElementById('deployLabTemplate').value;
-      // Scoped to this modal: the workstation modal has checkboxes with the same
-      // class, and a global query was picking those up too.
-      const studentIds = Array.from(
-        document.querySelectorAll('#deployLabStudents .modal-student-select:checked')
-      ).map(c => c.value);
-      return {
-        templateId,
-        studentIds,
-        objective: document.getElementById('deployLabObjective').value.trim(),
-        mode: selectedLabMode(),
-      };
+    function setEnvConsole(ref) { _envConsole = ref; renderEnvMachines(); }
+
+    function toggleEnvKali() { _envKali = !_envKali; renderEnvMachines(); }
+
+    function addEnvWorkstation(templateId) {
+      const sel = document.getElementById('deployEnvAddTemplate');
+      const id = templateId || sel.value;
+      if (!id) { toast('Pick a workstation template to add', true); return; }
+      const template = _envWsTemplates.find(t => String(t.template_id) === String(id));
+      if (!template) return;
+
+      // Seeded from the template's own live Proxmox sizing, so the row always
+      // shows what the student would actually get. Per-machine, never scalar:
+      // one number applied to every slot is what cloned a 4 GB sensor at a SIEM
+      // box's 16 GB, times the size of the cohort (see provision-slots.test.js).
+      const defaults = template.default_resources || {};
+      _envAddons.push({
+        key: ++_envAddonSeq,
+        template,
+        hostname: template.name,
+        resources: {
+          cores: defaults.cores ?? null,
+          memory_mb: defaults.memory_mb ?? null,
+          disk_gb: defaults.disk_gb ?? null,
+        },
+      });
+      sel.value = '';
+      renderEnvMachines();
     }
 
-    function resetDeployLabButton() {
-      const btn = document.getElementById('deployLabBtn');
-      if (!btn) return;
-      btn.disabled = false;
-      btn.textContent = 'Deploy Labs';
-      btn.onclick = deployVulnerableMachines;
-      const preview = document.getElementById('deployLabPreview');
-      if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
+    function removeEnvWorkstation(index) {
+      const gone = _envAddons[index];
+      _envAddons.splice(index, 1);
+      // The refs of every later add-on shift down by one, so a console pointing
+      // at one of them would silently move to a different machine. Clear it and
+      // let selectedConsoleRef() fall back.
+      if (gone && _envConsole && _envConsole.startsWith('ws:')) _envConsole = null;
+      renderEnvMachines();
+    }
+
+    function setEnvAddonResource(index, field, raw) {
+      const addon = _envAddons[index];
+      if (!addon) return;
+      const meta = RESOURCE_FIELDS[field];
+      const text = String(raw).trim();
+      if (text === '') { addon.resources[field] = null; return; }
+      const n = Math.round(Number(text) / meta.scale);
+      const bounds = _provisionLimits[field];
+      if (!Number.isFinite(n) || (bounds && (n < bounds.min || n > bounds.max))) {
+        const lo = bounds.min * meta.scale, hi = bounds.max * meta.scale;
+        toast(`${meta.label} must be between ${lo}${meta.unit} and ${hi}${meta.unit}`, true);
+        return;
+      }
+      addon.resources[field] = n;
+    }
+
+    function toggleEnvSelectAll(box) {
+      document.querySelectorAll('#deployEnvStudents .modal-student-select:not(:disabled)')
+        .forEach(c => { c.checked = box.checked; });
+    }
+
+    // ── the live topology ────────────────────────────────────────────────────
+
+    let _deployEnvTopo = null;
+
+    function mountEnvTopology() {
+      destroyEnvTopology();
+      const body = document.getElementById('deployEnvTopoCanvas');
+      if (!body || typeof CyberCoreTopology === 'undefined') return;
+      body.innerHTML = '';
+      const el = document.createElement('div');
+      el.style.cssText = 'position:absolute; inset:0;';
+      body.appendChild(el);
+      // The modal is already .active by the time this runs, so the container has
+      // a real size to measure.
+      _deployEnvTopo = CyberCoreTopology.create(el, { mode: 'view' });
+    }
+
+    function destroyEnvTopology() {
+      // destroy() is what disconnects the renderer's theme MutationObserver;
+      // skipping it leaks one observer per open.
+      if (_deployEnvTopo) { try { _deployEnvTopo.destroy(); } catch (e) { /* already gone */ } _deployEnvTopo = null; }
     }
 
     /**
-     * Deploy in two steps for 'lane' mode: the first POST returns a cluster
-     * capacity preview, the second (confirm: true) commits. 'attach' mode has no
-     * preview — it adds one VM to an existing lane — so it commits directly.
+     * Redraw from the CURRENT form state — called on every mutation: environment
+     * change, add, remove, Kali toggle, console pick.
+     *
+     * Instructor-added machines are merged into the spec BEFORE specToGraph runs,
+     * so their placement comes from CyberCoreTopologyEditor.deriveSegments — the
+     * same rule the server's lane-networking.resolveVmSegments uses, and the one
+     * test/topology-editor-derive.test.js pins the two together with. A separate
+     * placement rule here would have nothing keeping it honest.
      */
-    async function deployVulnerableMachines() {
-      const form = readDeployLabForm();
-      const btn = document.getElementById('deployLabBtn');
-      const preview = document.getElementById('deployLabPreview');
+    function renderEnvTopology() {
+      if (!_deployEnvTopo || typeof CyberCoreTopologySeed === 'undefined') return;
+      const t = selectedVulnTemplate();
+      const machines = envMachines();
+      const consoleRef = selectedConsoleRef();
+      const meta = document.getElementById('deployEnvTopoMeta');
 
-      if (!form.templateId || form.studentIds.length === 0) {
-        toast('Select a vulnerable application and at least one student', true);
-        return;
+      const specVms = machines.map(m => ({
+        name: m.name,
+        role: m.kind === 'kali' ? 'attacker' : (m.role || ''),
+        os: m.os || '',
+        os_family: (m.addon && m.addon.template.os_family) || '',
+        type: 'qemu',
+        // Only a spec machine can carry hand-authored NICs and a saved position;
+        // an added one is placed by the derivation rule.
+        nics: m.fromSpec ? specVmField(t, m.name, 'nics') : null,
+        layout: m.fromSpec ? specVmField(t, m.name, 'layout') : null,
+      }));
+
+      try {
+        const built = CyberCoreTopologySeed.specToGraph({
+          subnet_scheme: (t && t.subnet_scheme) || 'v2',
+          spec: { vms: specVms, network: (t && t.topology && t.topology.network) || null },
+        }, { goadHostNames: (t && t.topology && t.topology.goad_host_names) || [] });
+
+        // The badge is the same one the admin environment editor paints, so the
+        // green means the same thing in both places.
+        built.graph.nodes.forEach((n, i) => {
+          if (machines[i] && machines[i].ref === consoleRef) n.badge = 'console';
+        });
+
+        _deployEnvTopo.setData(built.graph, built.runLayout);
+        const con = machines.find(m => m.ref === consoleRef);
+        meta.innerHTML = machines.length
+          ? `${machines.length} machine${machines.length === 1 ? '' : 's'} per student`
+            + (con ? ` &middot; students open <strong>${escHtml(con.name)}</strong>` : ' &middot; no student console')
+            + ' &middot; drawn from the environment definition, not a deployed lane'
+          : 'Nothing to deploy yet.';
+      } catch (e) {
+        meta.innerHTML = `<span style="color:#ef4444;">Could not draw this environment: ${escHtml(e.message)}</span>`;
+      }
+    }
+
+    /** Read a hand-authored field off the environment's own spec machine. */
+    function specVmField(t, name, field) {
+      const vm = ((t && t.topology && t.topology.vms) || []).find(v => v.name === name);
+      return (vm && vm[field]) || null;
+    }
+
+    // ── deploy ───────────────────────────────────────────────────────────────
+
+    function selectedLabMode() {
+      if (isWorkstationOnly()) return 'lane';
+      return document.querySelector('input[name="deployLabMode"]:checked')?.value || 'lane';
+    }
+
+    function readDeployEnvForm() {
+      // Scoped to this modal's own container: `.modal-student-select` is shared
+      // with the other student pickers on this page, and a global query was
+      // picking those up too.
+      const studentIds = Array.from(
+        document.querySelectorAll('#deployEnvStudents .modal-student-select:checked')
+      ).map(c => c.value);
+
+      return {
+        templateId: document.getElementById('deployEnvTemplate').value,
+        studentIds,
+        objective: document.getElementById('deployEnvObjective').value.trim(),
+        mode: selectedLabMode(),
+        attackBox: _envKali,
+        consoleVm: selectedConsoleRef(),
+        extraWorkstations: _envAddons.map(a => ({
+          template_id: a.template.template_id,
+          resources: compactResources(a.resources),
+        })),
+      };
+    }
+
+    /** Drop the nulls, so "unchanged" reaches the server as absent, not as null. */
+    function compactResources(res) {
+      const out = {};
+      for (const [k, v] of Object.entries(res || {})) if (v != null) out[k] = v;
+      return Object.keys(out).length ? out : null;
+    }
+
+    function resetDeployEnvButton() {
+      const btn = document.getElementById('deployEnvBtn');
+      if (!btn) return;
+      btn.disabled = false;
+      btn.textContent = 'Deploy Environment';
+      btn.onclick = deployEnvironment;
+      const preview = document.getElementById('deployEnvPreview');
+      if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }
+    }
+
+    // Kept for the existing callers that still reset the old button by name.
+    const resetDeployLabButton = resetDeployEnvButton;
+
+    /**
+     * Deploy in two steps: the first POST returns a capacity preview, the second
+     * (confirm: true) commits.
+     */
+    async function deployEnvironment() {
+      const form = readDeployEnvForm();
+      const btn = document.getElementById('deployEnvBtn');
+      const preview = document.getElementById('deployEnvPreview');
+
+      if (!form.templateId) { toast('Pick an environment', true); return; }
+      if (!form.studentIds.length) { toast('Select at least one student', true); return; }
+
+      if (isWorkstationOnly()) {
+        if (!form.extraWorkstations.length) {
+          toast('Add at least one workstation', true);
+          return;
+        }
+        return provisionVMs();
       }
 
       btn.disabled = true;
-      btn.textContent = 'Checking resources...';
+      btn.textContent = 'Checking resources…';
 
       try {
-        const res = await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
-          template_id: form.templateId,
-          student_ids: form.studentIds,
-          learning_objective: form.objective,
-          mode: form.mode,
-        });
+        const res = await api('POST', `/courses/${currentCourseId}/labs/deploy`, deployEnvBody(form));
 
         // Committed straight away (attach mode, or the pre-flight was skipped).
-        if (!res.preview) {
-          finishLabDeploy(res);
-          return;
-        }
+        if (!res.preview) { finishLabDeploy(res); return; }
 
         const s = res.summary || {};
         preview.style.display = 'block';
@@ -2528,67 +2930,80 @@
           <div style="background: rgba(245,158,11,0.10); border:1px solid #f6e05e; border-radius:8px; padding:0.7rem; font-size:0.8rem;">
             <strong>Review before deploying</strong><br>
             ${res.student_count} student(s) &middot; ${s.new_vms != null ? `${s.new_vms} new VMs` : ''}
-            ${res.free_lanes != null ? ` &middot; ${res.free_lanes} lane(s) free in this challenge's network` : ''}
+            ${res.free_lanes != null ? ` &middot; ${res.free_lanes} lane(s) free in this environment's network` : ''}
             ${(res.warnings || []).length ? `<div style="color:#b7791f; margin-top:0.35rem;">${res.warnings.map(escHtml).join('<br>')}</div>` : ''}
             ${(res.errors || []).length ? `<div style="color:#ef4444; margin-top:0.35rem;">${res.errors.map(escHtml).join('<br>')}</div>` : ''}
             ${res.challenge?.goad_enabled && !res.challenge?.goad_prebaked
-              ? '<div style="color:#b7791f; margin-top:0.35rem;">This challenge runs a live GOAD bake — expect roughly 90 minutes per lane.</div>' : ''}
+              ? '<div style="color:#b7791f; margin-top:0.35rem;">This environment runs a live GOAD bake — expect roughly 90 minutes per lane.</div>' : ''}
           </div>`;
 
         btn.disabled = false;
         btn.textContent = `Confirm — deploy ${res.student_count}`;
         btn.onclick = async () => {
-          // Re-read the form: the preview stays on screen while the student list
-          // is still editable, and committing the snapshot would silently deploy
-          // to a different set than the one now ticked.
-          const now = readDeployLabForm();
+          // Re-read the form: the preview stays on screen while the student list,
+          // the machine list and the console pick are all still editable, and
+          // committing the snapshot would deploy something other than what is now
+          // on screen.
+          const now = readDeployEnvForm();
           const changed = now.templateId !== form.templateId
             || now.mode !== form.mode
+            || now.attackBox !== form.attackBox
+            || now.consoleVm !== form.consoleVm
+            || JSON.stringify(now.extraWorkstations) !== JSON.stringify(form.extraWorkstations)
             || now.studentIds.length !== form.studentIds.length
             || now.studentIds.some(id => !form.studentIds.includes(id));
           if (changed) {
             toast('Your selection changed — review the new preview before deploying', true);
-            resetDeployLabButton();
-            deployVulnerableMachines();
+            resetDeployEnvButton();
+            deployEnvironment();
             return;
           }
 
           btn.disabled = true;
-          btn.textContent = 'Deploying...';
+          btn.textContent = 'Deploying…';
           try {
-            const done = await api('POST', `/courses/${currentCourseId}/labs/deploy`, {
-              template_id: now.templateId,
-              student_ids: now.studentIds,
-              learning_objective: now.objective,
-              mode: now.mode,
-              confirm: true,
-            });
+            const done = await api('POST', `/courses/${currentCourseId}/labs/deploy`,
+              { ...deployEnvBody(now), confirm: true });
             finishLabDeploy(done);
           } catch (e) {
-            toast('Error deploying labs: ' + e.message, true);
-            resetDeployLabButton();
+            toast('Error deploying environments: ' + e.message, true);
+            resetDeployEnvButton();
           }
         };
       } catch (e) {
-        toast('Error deploying labs: ' + e.message, true);
-        resetDeployLabButton();
+        toast('Error deploying environments: ' + e.message, true);
+        resetDeployEnvButton();
       }
     }
 
+    function deployEnvBody(form) {
+      return {
+        template_id: form.templateId,
+        student_ids: form.studentIds,
+        learning_objective: form.objective,
+        mode: form.mode,
+        attack_box: form.attackBox,
+        console_vm: form.consoleVm,
+        extra_workstations: form.extraWorkstations,
+      };
+    }
+
+    // Kept under the old name for the callers that still reference it.
+    const deployVulnerableMachines = deployEnvironment;
+
     function finishLabDeploy(res) {
-      toast(res.message || 'Lab deployment started');
+      toast(res.message || 'Environment deployment started');
       if ((res.skipped || []).length) {
-        toast(`${res.skipped.length} student(s) skipped — see the lab list`, true);
+        toast(`${res.skipped.length} student(s) skipped — see the environment list`, true);
       }
-      closeModal('deployVulnerableModal');
-      resetDeployLabButton();
+      closeDeployEnvModal();
       loadVulnerableLabs();
       if (res.lab_id) pollLabProgress(res.lab_id);
     }
 
     /**
-     * Poll a lab deploy's phase/ETA while it runs. A 404 means it finished and
-     * aged out, at which point the lab table alone is enough.
+     * Poll an environment deploy's phase/ETA while it runs. A 404 means it finished and
+     * aged out, at which point the environment table alone is enough.
      */
     // One banner and one timer, shared by the class-wide deploy and any
     // per-student redeploy: starting a second redeploy simply retargets the
@@ -2733,14 +3148,14 @@
     }
 
     /**
-     * Tear down ONE student's machines for a lab. Their assignment, grade and
+     * Tear down ONE student's machines for an environment. Their assignment, grade and
      * feedback are untouched — this destroys infrastructure, not coursework.
      */
     async function removeStudentLab(btn) {
       const { labId, userId, email } = btn.dataset;
       const ok = await Confirm.show({
         title: 'Tear down this student\'s machines?',
-        message: `Destroys every machine this lab deployed for ${email}. `
+        message: `Destroys every machine this environment deployed for ${email}. `
                + `Their grade, feedback and the assignment itself are kept — use Redeploy to rebuild.`,
         confirmText: 'Tear down', danger: true,
       });
@@ -2772,8 +3187,8 @@
     async function redeployStudentLab(btn) {
       const { labId, userId, email } = btn.dataset;
       const res0 = await Confirm.show({
-        title: 'Redeploy this student\'s lab?',
-        message: `Destroys and rebuilds ${email}'s machines for this lab. `
+        title: 'Redeploy this student\'s environment?',
+        message: `Destroys and rebuilds ${email}'s machines for this environment. `
                + `Flags they have already captured are kept, and their grade is untouched.`,
         confirmText: 'Redeploy', danger: true,
         checkbox: { label: 'Also reset flags (new values, clears their captures)', checked: false },
@@ -2795,7 +3210,7 @@
     }
 
     async function deleteLab(labId) {
-      if (!confirm('Remove this lab and destroy every machine it deployed? This cannot be undone.')) return;
+      if (!confirm('Remove this environment and destroy every machine it deployed? This cannot be undone.')) return;
       try {
         const res = await api('DELETE', `/courses/${currentCourseId}/labs/${labId}`);
         // 207: some VMs survived, so the assignment was deliberately kept to
@@ -2804,11 +3219,11 @@
           toast(res.message || 'Some resources could not be destroyed', true);
           (res.errors || []).slice(0, 3).forEach(e => toast(e, true));
         } else {
-          toast(`Lab removed — ${res.vms_destroyed || 0} machine(s) destroyed`);
+          toast(`Environment removed — ${res.vms_destroyed || 0} machine(s) destroyed`);
         }
         loadVulnerableLabs();
       } catch (e) {
-        toast('Error removing lab: ' + e.message, true);
+        toast('Error removing environment: ' + e.message, true);
       }
     }
 
@@ -2849,13 +3264,29 @@
   <script src="/cle/js/roster-import.js"></script>
   <script src="/cle/js/attack-console.js"></script>
 
-  <!-- Lane topology renderer, VIEW MODE ONLY. cytoscape-edgehandles (and the
-       lodash it needs) is guarded behind mode === 'edit' in topology-render.js,
-       and an instructor authors nothing here — so those two are deliberately not
-       loaded. Served from the core public/ dir, which server.js exposes with a
-       plain express.static, so a plugin page can reference them directly. -->
+  <!-- Topology renderer, VIEW MODE ONLY, for two screens: the deployed-lane
+       diagram and the live preview inside Deploy Environment.
+
+       cytoscape-edgehandles (and the lodash it needs) is guarded behind
+       mode === 'edit' in topology-render.js, and an instructor authors nothing
+       here — so those two are deliberately still not loaded.
+
+       topology-editor.js IS loaded, but only for its pure helpers:
+       topology-seed.specToGraph resolves CyberCoreTopologyEditor at CALL time to
+       reach segmentsForScheme/deriveSegments, which are the same placement rule
+       the server uses (test/topology-editor-derive.test.js pins the two
+       together). Its mount() — the only part that touches edgehandles or the
+       admin API — is never called from this page.
+
+       test/topology-console-badge.test.js asserts this exact five-file set is
+       sufficient, so the omission above is verified rather than assumed.
+
+       Served from the core public/ dir, which server.js exposes with a plain
+       express.static, so a plugin page can reference them directly. -->
   <script src="/vendor/cytoscape.min.js"></script>
   <script src="/js/topology/topology-icons.js"></script>
   <script src="/js/topology/topology-render.js"></script>
+  <script src="/js/topology/topology-editor.js"></script>
+  <script src="/js/topology/topology-seed.js"></script>
 </body>
 </html>

@@ -175,8 +175,8 @@ function excludeStudentsWithLab(materialId) {
     return new Map(existing.rows.map(r => [
       r.user_id,
       r.status === 'error'
-        ? 'has a failed deployment of this lab — remove it before re-deploying'
-        : 'already has this lab deployed',
+        ? 'has a failed deployment of this environment — remove it before re-deploying'
+        : 'already has this environment deployed',
     ]));
   };
 }

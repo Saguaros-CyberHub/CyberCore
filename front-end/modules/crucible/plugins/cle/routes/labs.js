@@ -25,6 +25,7 @@ const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
+const { resolveLaneWorkstationCredential } = require('../../../../../src/utils/lane-credentials');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const { getManagedCourse } = require('../utils/course-access');
@@ -215,6 +216,11 @@ router.get('/', instructorOnly, async (req, res) => {
     const deploymentsByMaterial = {};
     for (const row of laneRows.rows) {
       const cfg = row.config || {};
+      // One resolve per lane, shared by both shapes below. A dedicated lab
+      // lane has no workstations[] array at all (challenge-lane-deployer
+      // writes only the flattened keys); an attached module rides a
+      // workstation lane whose slot 0 is workstation_vmid.
+      const wsCred = resolveLaneWorkstationCredential(cfg, cfg.workstation_vmid);
       const student = {
         lane_id: row.lane_id,
         user_id: row.user_id,
@@ -237,8 +243,9 @@ router.get('/', instructorOnly, async (req, res) => {
           vms: (cfg.vms || []).map(v => ({ ...v, power_state: powerOf(v.vm_id) })),
           attack_box_vm_id: cfg.attack_box_vm_id || null,
           attack_box_power: cfg.attack_box_vm_id ? powerOf(cfg.attack_box_vm_id) : null,
-          workstation_user: cfg.workstation_user || null,
-          workstation_pass: cfg.workstation_pass || null,
+          workstation_user: wsCred.username,
+          workstation_pass: wsCred.password,
+          credentials_shared: wsCred.shared,
           has_console: !!cfg.guac_connection_id,
         });
       }
@@ -252,8 +259,9 @@ router.get('/', instructorOnly, async (req, res) => {
           module_instance_id: mod.module_instance_id,
           vms: (mod.vms || []).map(v => ({ ...v, power_state: powerOf(v.vm_id) })),
           attack_box_vm_id: cfg.attack_box_vm_id || cfg.workstation_vmid || null,
-          workstation_user: cfg.workstation_user || null,
-          workstation_pass: cfg.workstation_pass || null,
+          workstation_user: wsCred.username,
+          workstation_pass: wsCred.password,
+          credentials_shared: wsCred.shared,
           has_console: !!cfg.guac_connection_id,
         });
       }
@@ -323,6 +331,12 @@ router.post('/deploy', instructorOnly, async (req, res) => {
     const { courseId } = req.params;
     const { template_id, student_ids, learning_objective, confirm } = req.body;
     const mode = req.body.mode || 'lane';
+    // Absent means true. This path hardcoded `attackBoxes: true` before it was a
+    // choice, so an older client and every course deployed before this field
+    // existed must keep getting a Kali.
+    const attackBoxes = req.body.attack_box === undefined ? true : req.body.attack_box === true;
+    const consoleVm = req.body.console_vm || null;
+    const extraWorkstations = Array.isArray(req.body.extra_workstations) ? req.body.extra_workstations : [];
 
     if (!template_id || !Array.isArray(student_ids) || student_ids.length === 0) {
       return res.status(400).json({ error: 'template_id and non-empty student_ids array required' });
@@ -340,7 +354,7 @@ router.post('/deploy', instructorOnly, async (req, res) => {
     // Reject an impossible combination up front rather than after the material
     // row exists — a 409 here leaves nothing behind to clean up.
     if (mode === 'lane' && !caps.can_deploy_lane) {
-      return res.status(409).json({ error: `Cannot deploy '${challenge.name}' as a lab lane: ${caps.lane_blockers.join('; ')}`, capabilities: caps });
+      return res.status(409).json({ error: `Cannot deploy '${challenge.name}' as its own environment: ${caps.lane_blockers.join('; ')}`, capabilities: caps });
     }
     if (mode === 'attach' && !caps.can_attach) {
       return res.status(409).json({ error: `Cannot attach '${challenge.name}' to an existing lane: ${caps.attach_blockers.join('; ')}`, capabilities: caps });
@@ -385,7 +399,7 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       if (freeLanes < students.length) {
         return res.status(409).json({
           error: `'${challenge.name}' has ${freeLanes} free lane(s) in its VXLAN block but ${students.length} student(s) were selected. `
-               + `Tear down finished lanes, or recreate the challenge with a larger max_lanes.`,
+               + `Tear down finished lanes, or recreate the environment with a larger max_lanes.`,
           free_lanes: freeLanes,
           required: students.length,
         });
@@ -395,8 +409,8 @@ router.post('/deploy', instructorOnly, async (req, res) => {
         try {
           const preview = await buildDeployPreview({
             numLanes: students.length,
-            attackBoxes: true,
-            challengeVmCount: caps.vm_count,
+            attackBoxes,
+            challengeVmCount: caps.vm_count + extraWorkstations.length,
             proxmoxAPI,
             cybercoreQuery,
           });
@@ -428,7 +442,10 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       `, [
         courseId, template_id, challenge.name,
         learning_objective || challenge.description || '',
-        JSON.stringify({ challenge_key: challenge.challenge_key, mode }),
+        JSON.stringify({
+          challenge_key: challenge.challenge_key, mode,
+          attack_box: attackBoxes, console_vm: consoleVm, extra_workstations: extraWorkstations,
+        }),
         instructorId,
       ]);
       labId = labResult.rows[0].material_id;
@@ -437,13 +454,22 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       // the student board on it, so a row created before this endpoint set it
       // (or unpublished by hand) would stay invisible to the students whose
       // machines are about to appear.
+      // `content` is REWRITTEN, not left alone. The per-student redeploy route
+      // reads its options back out of this column, so a blob written at first
+      // deploy would make Redeploy rebuild a DIFFERENT environment than the one
+      // the instructor last chose — silently, and only visible to the student.
+      // The same staleness already bit `mode`; see the note in POST /:labId/redeploy.
       await query(
         `UPDATE cle_course_material
             SET description = COALESCE(NULLIF($2, ''), description),
+                content = $3::jsonb,
                 is_published = TRUE,
                 updated_at = NOW()
           WHERE material_id = $1`,
-        [labId, learning_objective || '']
+        [labId, learning_objective || '', JSON.stringify({
+          challenge_key: challenge.challenge_key, mode,
+          attack_box: attackBoxes, console_vm: consoleVm, extra_workstations: extraWorkstations,
+        })]
       );
     }
 
@@ -493,7 +519,10 @@ router.post('/deploy', instructorOnly, async (req, res) => {
     // through the lab's own state. Record it on the material row so GET /
     // can explain why nothing appeared, instead of showing an empty lab.
     const instructorEmails = await courseInstructorEmails(courseId).catch(() => []);
-    vulnLab.deployVulnLab({ course, challenge, students, materialId: labId, mode, instructorEmails })
+    vulnLab.deployVulnLab({
+      course, challenge, students, materialId: labId, mode, instructorEmails,
+      attackBoxes, consoleVm, extraWorkstations,
+    })
       .then(result => console.log(
         `[CLE] Lab '${challenge.challenge_key}' (${mode}) for course ${courseId}: ` +
         `${result.provisioned.length} deployed, ${result.failed.length} failed`
@@ -531,13 +560,13 @@ router.get('/:labId/progress', instructorOnly, async (req, res) => {
       [labId, courseId]
     );
     if (owned.rows.length === 0) {
-      return res.status(404).json({ error: 'Lab not found in this course' });
+      return res.status(404).json({ error: 'Environment not found in this course' });
     }
     // ?user_id= reads one student's redeploy instead of the lab-wide deploy. No
     // extra authorization needed: a per-student key can only exist under a
     // material this course was just confirmed to own.
     const progress = vulnLab.getLabProgress(labId, req.query.user_id || null);
-    if (!progress) return res.status(404).json({ error: 'No active deployment for this lab' });
+    if (!progress) return res.status(404).json({ error: 'No active deployment for this environment' });
     res.json(progress);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -563,7 +592,7 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
       [labId, courseId]
     );
     if (owned.rows.length === 0) {
-      return res.status(404).json({ error: 'Lab not found in this course' });
+      return res.status(404).json({ error: 'Environment not found in this course' });
     }
 
     const teardown = await vulnLab.teardownLab(labId);
@@ -575,7 +604,7 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
     if (teardown.errors.length > 0) {
       return res.status(207).json({
         success: false,
-        message: `Some machines could not be destroyed. The lab and its ${teardown.lanes_kept_for_retry} `
+        message: `Some machines could not be destroyed. The environment and its ${teardown.lanes_kept_for_retry} `
                + `lane record(s) were kept so you can press Remove again once the cause is cleared.`,
         ...teardown,
       });
@@ -593,7 +622,7 @@ router.delete('/:labId', instructorOnly, async (req, res) => {
         vms_destroyed: teardown.vms_destroyed ?? null,
       },
     });
-    res.json({ success: true, message: 'Lab removed', ...teardown });
+    res.json({ success: true, message: 'Environment removed', ...teardown });
   } catch (error) {
     console.error('[CLE] Delete lab error:', error.message);
     res.status(error.status || 500).json({ error: error.message });
@@ -662,7 +691,7 @@ router.delete('/:labId/students/:userId', instructorOnly, async (req, res) => {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
     if (!(await getOwnedLab(labId, courseId))) {
-      return res.status(404).json({ error: 'Lab not found in this course' });
+      return res.status(404).json({ error: 'Environment not found in this course' });
     }
     // extraUserIds: an instructor's own copy of the lab has no enrollment row,
     // so without this they could deploy one and never tear it down from here.
@@ -712,7 +741,7 @@ router.delete('/:labId/students/:userId', instructorOnly, async (req, res) => {
 
     res.json({
       success: true,
-      message: `Tore down ${students[0].email}'s machines for this lab`,
+      message: `Tore down ${students[0].email}'s machines for this environment`,
       ...teardown,
     });
   } catch (error) {
@@ -756,7 +785,7 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
     if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
 
     const lab = await getOwnedLab(labId, courseId);
-    if (!lab) return res.status(404).json({ error: 'Lab not found in this course' });
+    if (!lab) return res.status(404).json({ error: 'Environment not found in this course' });
 
     // extraUserIds: see the teardown route — the instructor's own copy is not
     // an enrollment, and must still be rebuildable.
@@ -782,11 +811,23 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
     // is written once at material creation and never updated when the same lab
     // is later deployed in the other mode, so it can disagree with reality.
     const held = await probeStudentLabMode(labId, userId);
-    const declared = parseMaterialContent(lab.content).mode;
+    const savedOptions = parseMaterialContent(lab.content);
+    const declared = savedOptions.mode;
     const mode = held || (vulnLab.MODES.includes(declared) ? declared : 'lane');
 
+    // Replay the SHAPE the instructor chose, not just the mode. Without these
+    // three, a rebuild would quietly hand the student a different environment
+    // than their classmates have — no attack box where there was one, the
+    // console on a different machine, the added workstation gone — with nothing
+    // in the UI saying so. POST /deploy rewrites `content` on every deploy
+    // precisely so these are current.
+    const attackBoxes = savedOptions.attack_box === undefined ? true : savedOptions.attack_box === true;
+    const consoleVm = savedOptions.console_vm || null;
+    const extraWorkstations = Array.isArray(savedOptions.extra_workstations)
+      ? savedOptions.extra_workstations : [];
+
     if (mode === 'lane' && !caps.can_deploy_lane) {
-      return res.status(409).json({ error: `Cannot rebuild '${challenge.name}' as a lab lane: ${caps.lane_blockers.join('; ')}`, capabilities: caps });
+      return res.status(409).json({ error: `Cannot rebuild '${challenge.name}' as its own environment: ${caps.lane_blockers.join('; ')}`, capabilities: caps });
     }
     if (mode === 'attach' && !caps.can_attach) {
       return res.status(409).json({ error: `Cannot re-attach '${challenge.name}': ${caps.attach_blockers.join('; ')}`, capabilities: caps });
@@ -893,6 +934,10 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
         instructorEmails, progressId: claimedId,
         // 'attach' ignores this — its host lane kept the rows already.
         flagSeeds: mode === 'lane' ? flagSeeds : null,
+        // Same shape the class got. 'attach' refuses the last two outright, so
+        // they are only sent on the path that accepts them.
+        attackBoxes,
+        ...(mode === 'lane' ? { consoleVm, extraWorkstations } : {}),
       });
 
       if ((result.failed || []).length > 0) {

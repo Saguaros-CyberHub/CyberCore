@@ -22,6 +22,7 @@ const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
+const { resolveLaneWorkstationCredential } = require('../../../../../src/utils/lane-credentials');
 const { mintGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
@@ -272,6 +273,7 @@ router.get('/', instructorOnly, async (req, res) => {
 
     const vms = lanesResult.rows.map(row => {
       const cfg = row.config || {};
+      const wsCred = resolveLaneWorkstationCredential(cfg, cfg.workstation_vmid);
       const live = byVmid[String(cfg.workstation_vmid)];
       const powerState = live
         ? (live.status === 'running' ? 'running' : live.status === 'stopped' ? 'stopped' : live.status)
@@ -303,8 +305,14 @@ router.get('/', instructorOnly, async (req, res) => {
         console_via:      cfg.console_via || null,
         console_protocol: cfg.console_protocol || null,
         console_endpoint: cfg.console_host ? `${cfg.console_host}:${cfg.console_port}` : null,
-        workstation_user: cfg.workstation_user || null,
-        workstation_pass: cfg.workstation_pass || null,
+        // Through the shared resolver rather than reading the two flattened
+        // keys directly, so this list, the labs list and the student's own
+        // card cannot disagree about which slot's login they are showing.
+        workstation_user: wsCred.username,
+        workstation_pass: wsCred.password,
+        // 'template' means the password is the image's built-in one and is
+        // identical on every lane from it — not this student's alone.
+        credentials_shared: wsCred.shared,
         // How the machine was actually sized. While it's still deploying only
         // the request exists; `resource_warnings` says what Proxmox refused
         // (e.g. a disk target smaller than the template's image).

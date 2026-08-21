@@ -42,7 +42,7 @@ const COURSE_FEATURES = [
   { key: 'overview',         label: 'Overview',        optional: false },
   { key: 'students',         label: 'Students',        optional: false },
   { key: 'vm-management',    label: 'VM Management',   optional: false },
-  { key: 'vulnerable-labs',  label: 'Vulnerable Labs', optional: false },
+  { key: 'vulnerable-labs',  label: 'Environments',    optional: false },
   {
     key: 'flags',
     label: 'Flags',

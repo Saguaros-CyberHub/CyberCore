@@ -22,6 +22,8 @@ const { guacAPI, guacFetchText, mintGuacToken, GUAC_DS, GUAC_URL } = require('..
 const { proxmoxAPI } = require('../utils/proxmox');
 const { getV2LabNetwork } = require('../utils/site-config');
 const { ipInCidr } = require('../utils/ipv4');
+const laneCreds = require('../utils/lane-credentials');
+const audit = require('../utils/audit');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -383,6 +385,12 @@ router.get('/vms', authenticateToken, async (req, res) => {
         powerState:     row.power_state,
         resourceStatus: row.resource_status,
         hasConsole:     !!row.guac_connection_id,
+        // Whether a Credentials button should render — never the credential
+        // itself. The privileged branch of this query is cluster-wide, so a
+        // password here would be disclosed to every instructor on every page
+        // load, unlogged. The secret is fetched per-VM below instead.
+        hasCredentials: laneCreds.resolveLaneWorkstationCredential(
+                          row.lane_config, row.provider_vmid).available,
         ...(showAll ? { ownerEmail: row.owner_email || null, ownerId: row.owner_id || null } : {}),
       };
     });
@@ -574,6 +582,88 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
         ? `Failed to create console session: ${err.message}`
         : 'Failed to create console session.'
     });
+  }
+});
+
+// ============================================================================
+// GET /api/dashboard/vms/:vmId/credentials
+// The OS login for one lane workstation, so the student who owns it can read it
+// back instead of asking their instructor to look it up.
+//
+// Guacamole types this password into the guest for them, which is exactly why
+// they never learn it — and then cannot get past a locked Windows session, a
+// sudo prompt, or their own RDP client.
+//
+// GET, not POST: strictly read-only. Nothing here mints, rotates or writes, so
+// the usual objection to a state-changing GET does not apply. (The CLE
+// POST /credentials route is POST because it CREATES a Guacamole account.)
+//
+// Authorization lives in laneCreds.getLaneWorkstationCredentialForVm and is
+// deliberately tighter than the console-launch route below it: owner or admin,
+// NOT `isPrivileged`. That route's instructor branch is cluster-wide with no
+// course scoping, and reusing it here would let any instructor read any other
+// instructor's students' machine passwords.
+// ============================================================================
+router.get('/vms/:vmId/credentials', authenticateToken, async (req, res) => {
+  const { vmId } = req.params;
+
+  if (!UUID_RE.test(vmId)) {
+    return res.status(400).json({ error: 'Invalid VM identifier.' });
+  }
+
+  const isAdmin = req.user.role === 'admin';
+
+  try {
+    const cred = await laneCreds.getLaneWorkstationCredentialForVm(vmId, {
+      userId: req.user.userId,
+      isAdmin,
+    });
+
+    if (!cred) {
+      // 404 rather than 403, matching the console route: a caller must not be
+      // able to use this endpoint to learn which vmIds exist.
+      return res.status(404).json({ error: 'VM not found or access denied.' });
+    }
+
+    // Awaited, not fire-and-forget. This is a credential disclosure, so the row
+    // has to be durable before the secret leaves the process — audit.log never
+    // rejects, so this cannot fail the request. audit.redact() strips anything
+    // matching /pass|cred|secret|.../ from metadata, so the password cannot land
+    // in the log even if a future edit passes it in.
+    await audit.log({
+      req,
+      action: 'access.credential_viewed',
+      target: { type: 'lane_credential', id: vmId, label: cred.vmName },
+      targetUser: { id: cred.ownerUserId },
+      metadata: {
+        // `kind`, not `credential`: audit.redact() blanks any key matching
+        // /cred|pass|secret|.../, so the more natural name would log as
+        // '[redacted]' and cost the row the one field that says WHICH kind of
+        // credential was disclosed.
+        kind: 'lane_workstation',
+        source: cred.source,
+        available: cred.available,
+        shared: cred.shared,
+        on_behalf_of: !!cred.ownerUserId && cred.ownerUserId !== req.user.userId,
+      },
+    });
+
+    res.json({
+      vmId,
+      username:  cred.username,
+      password:  cred.password,
+      source:    cred.source,
+      available: cred.available,
+      // True when this password is the template's own built-in account rather
+      // than one generated for this lane — the same secret on every student's
+      // machine. The UI must say so; treating it as private is how a shared
+      // bake credential ends up believed to be personal.
+      shared:    cred.shared,
+      ...(cred.reason ? { reason: cred.reason } : {}),
+    });
+  } catch (err) {
+    console.error('[guac-sessions] GET /vms/:vmId/credentials error:', err.message);
+    res.status(500).json({ error: 'Failed to read the workstation login.' });
   }
 });
 

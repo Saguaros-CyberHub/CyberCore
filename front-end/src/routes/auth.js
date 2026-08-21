@@ -815,6 +815,16 @@ router.post('/activate', newPasswordValidation, async (req, res) => {
 
     const updated = await accountProvisioning.completePasswordChange(redeemed.userId, newPassword);
 
+    // consumeActivationToken spends ONE token. Now that staff can issue a
+    // 'reset' link to an account that may still hold an unredeemed 'activate'
+    // invitation (and the reverse), the other one would stay live — a second
+    // way in that the account holder does not know about, on an account whose
+    // password just changed. Revoke both, the way /password/initial already
+    // does for invitations.
+    await Promise.all(
+      ['activate', 'reset'].map(p => activation.revokeActivationTokens(redeemed.userId, p).catch(() => {}))
+    );
+
     // An activating account has, by construction, never enrolled in MFA. If
     // policy requires it for their role, send them through enrollment rather
     // than handing out a session that skips a mandatory control.

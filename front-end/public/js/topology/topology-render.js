@@ -138,6 +138,10 @@
           'color': theme.textMuted
         }
       },
+      // The student's console machine. Placed BEFORE the severity rules on
+      // purpose: a console that is also broken must still read as broken, so the
+      // later rule wins on a node carrying both.
+      { selector: 'node[badge="console"]', style: { 'border-color': theme.success, 'border-width': 4 } },
       // Validation state. Painted from data so a re-validate is a data update,
       // not a restyle.
       { selector: 'node[severity="error"]',   style: { 'border-color': theme.danger,  'border-width': 3 } },
@@ -266,9 +270,17 @@
           group: 'nodes',
           data: {
             id: vmEl(n.id), kind: 'vm', vmId: n.id,
-            label: n.ip ? n.name + '\n' + n.ip : n.name,
+            label: (n.ip ? n.name + '\n' + n.ip : n.name)
+                   + (n.badge === 'console' ? '\n\u25b8 student console' : ''),
             role: n.role || '', locked: !!n.locked,
             severity: n.severity || '',
+            // Which machine the student's Guacamole session opens onto.
+            // Deliberately NOT folded into `severity` (already used here for
+            // "not running", so the two would paint the same amber and cancel
+            // out) and NOT into `role` (that drives the icon via
+            // Icons.glyphKey, so role:'console' would break the dmz/attacker/dc
+            // glyphs).
+            badge: n.badge || '',
             icon: Icons.for(n, theme.text)
           },
           position: n.layout || null,
@@ -419,7 +431,8 @@
 
       /**
        * data: { segments:[{id,role,label,cidr,layout}],
-       *         nodes:[{id?,name,role,os,os_family,segments:[segId],layout,...}],
+       *         nodes:[{id?,name,role,os,os_family,segments:[segId],layout,
+       *                 severity:'error'|'warning', badge:'console', ...}],
        *         gateway:{label,layout}|null }
        * Nodes without an `id` get a stable one, so renaming a machine never
        * orphans its attachments.

@@ -333,6 +333,39 @@ test('gateway is configured once with every slot in one file and one rule pass',
   assert.ok(rules.includes('--dport 3389') && rules.includes('10.39.16.50:3389'), 'slot 0 DNAT missing');
   assert.ok(rules.includes('--dport 3390') && rules.includes('10.39.16.51:3389'), 'slot 1 DNAT missing');
   assert.strictEqual((rules.match(/iptables-save \| grep -v "LANE-CONSOLE"/g) || []).length, 1);
+
+  // INSERTED at the head, never appended. The gateway template bakes its own
+  // `-A PREROUTING … 3389 → .50` at firstboot, which sits ahead of anything we
+  // append — invisible while slot 0 shares that destination, silently wrong the
+  // moment a console at another address claims 3389. The substring checks above
+  // pass either way, so the position needs its own assertion.
+  assert.ok(/-t nat -I PREROUTING 1 /.test(rules), 'console DNAT must be inserted at the head');
+  assert.ok(!/-t nat -A PREROUTING /.test(rules), 'console DNAT must never be appended');
+});
+
+test('installConsoleDnat refuses an empty target list', async () => {
+  reset();
+  // The strip half runs before the install half, so an empty call would delete
+  // every LANE-CONSOLE rule on the gateway and add none back — a working
+  // console silently going dark. It must throw instead.
+  await assert.rejects(
+    () => laneDeployer.installConsoleDnat({ node: 'n1', gatewayVmid: 110010, targets: [] }),
+    /targets is empty/
+  );
+  assert.strictEqual(calls.pctExecs.length, 0, 'nothing may reach the gateway');
+});
+
+test('installConsoleDnat honours a non-default lane interface (v3 has no lan0)', async () => {
+  reset();
+  // A v3 gateway has ext0/int0 and no lan0 at all, so a hardcoded lan0 FORWARD
+  // rule matches nothing and the DNATed packet is dropped by the filter.
+  await laneDeployer.installConsoleDnat({
+    node: 'n1', gatewayVmid: 110010, lanIface: 'ext0',
+    targets: [{ ip: '10.39.16.60', console: { guestPort: 3389, wanPort: 3389 } }],
+  });
+  const script = calls.pctExecs[0].script;
+  assert.ok(script.includes('-o ext0'), 'FORWARD ACCEPT must use the requested interface');
+  assert.ok(!script.includes('-o lan0'), 'lan0 must not leak into a v3 rule set');
 });
 
 // ── 4. gateway failure: survivable at 1 slot, fatal past it ──────────────────

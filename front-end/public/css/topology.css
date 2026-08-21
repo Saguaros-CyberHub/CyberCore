@@ -204,6 +204,14 @@
 }
 .topo-legend .topo-lg-ext { color: #f59e0b; }
 .topo-legend .topo-lg-int { color: #378dbd; }
+/* The student's console machine. SOLID, not dashed: it marks a node border,
+   not a broadcast domain, and must not read as a third network segment.
+   Colour tracks --success so it matches theme.success in topology-render.js. */
+.topo-legend .topo-lg-console {
+  border-top-style: solid;
+  border-top-width: 3px;
+  color: var(--success, #4f9153);
+}
 
 /* ==========================================================================
    Topology TAB (admin.html #tab-topology)

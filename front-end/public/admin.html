@@ -384,7 +384,7 @@
           <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
           <button class="tab-btn" onclick="switchTab('actlog', this); auditTabActivate()">Activity Log</button>
-          <button class="tab-btn" onclick="switchTab('challenges', this)">Challenge Templates</button>
+          <button class="tab-btn" onclick="switchTab('challenges', this)">Environment Templates</button>
           <button class="tab-btn" onclick="switchTab('workstation-templates', this)">Workstation Templates</button>
           <button class="tab-btn" onclick="switchTab('crucible-events', this); loadCrucibleEvents()">Crucible Events</button>
           <button class="tab-btn" onclick="switchTab('vulnscripts', this)">Scripts</button>
@@ -617,7 +617,7 @@
         <!-- TAB: Challenges -->
         <div class="tab-content" id="tab-challenges">
           <div class="action-bar">
-            <button class="btn btn-primary" onclick="showCreateChallengeForm()">+ New Challenge</button>
+            <button class="btn btn-primary" onclick="showCreateChallengeForm()">+ New Environment</button>
             <button class="btn btn-outline" onclick="loadChallengeTemplates()">Refresh</button>
           </div>
 
@@ -633,7 +633,7 @@
           <!-- Create Challenge Form (hidden by default) -->
           <div id="createChallengeForm" style="display: none; background: var(--bg-card, white); border-radius: 12px; padding: 1.5rem; box-shadow: 0 2px 8px rgba(0,0,0,0.08); margin-bottom: 1.5rem;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
-              <h3 style="margin: 0;">Create New Challenge</h3>
+              <h3 style="margin: 0;">Create New Environment</h3>
               <button class="btn btn-sm btn-outline" onclick="document.getElementById('createChallengeForm').style.display='none'">&times; Close</button>
             </div>
 
@@ -650,7 +650,7 @@
             </div>
             <div class="form-group">
               <label>Description</label>
-              <textarea id="newChalDesc" rows="2" placeholder="What this challenge environment contains..."></textarea>
+              <textarea id="newChalDesc" rows="2" placeholder="What this environment contains..."></textarea>
             </div>
 
             <!-- Settings Row -->
@@ -868,7 +868,7 @@
                 </div>
                 <div class="topo-settings-wide">
                   <label for="topoDesc">Description</label>
-                  <textarea id="topoDesc" rows="2" placeholder="What this challenge network simulates..."></textarea>
+                  <textarea id="topoDesc" rows="2" placeholder="What this environment simulates..."></textarea>
                 </div>
               </div>
             </details>
@@ -962,7 +962,8 @@
               <div class="topo-legend">
                 <span><i class="topo-lg-ext"></i> External / Attacker</span>
                 <span><i class="topo-lg-int"></i> Internal / Corp</span>
-                <span>Double border = placement fixed by the GOAD lab</span>
+                <span><i class="topo-lg-console"></i> Student console</span>
+          <span>Double border = placement fixed by the GOAD lab</span>
               </div>
               <div id="topoDesignFindings"></div>
             </div>
@@ -1791,11 +1792,11 @@ msmith@arizona.edu, Mark, Smith"
     </div>
   </div>
 
-  <!-- Challenge Template Editor Modal -->
+  <!-- Environment Template Editor Modal -->
   <div class="modal-overlay" id="templateEditorModal">
     <div class="modal-content" style="max-width: 800px; max-height: 90vh; overflow-y: auto;">
       <div class="modal-header">
-        <h3 id="templateEditorTitle">New Challenge Template</h3>
+        <h3 id="templateEditorTitle">New Environment Template</h3>
         <button class="modal-close" onclick="closeModal('templateEditorModal')">&times;</button>
       </div>
       <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 1rem;">
@@ -1814,7 +1815,7 @@ msmith@arizona.edu, Mark, Smith"
         <div class="form-group">
           <label>Challenge Key (for VXLAN block)</label>
           <input type="text" id="tplChallengeKey" placeholder="e.g., metasploitable2-basic">
-          <span style="font-size: 0.7rem; color: var(--gray-400);">Must match an existing challenge key (see the Challenges tab)</span>
+          <span style="font-size: 0.7rem; color: var(--gray-400);">Must match an existing challenge key (see the Environment Templates tab)</span>
         </div>
       </div>
 
@@ -1889,6 +1890,7 @@ msmith@arizona.edu, Mark, Smith"
         <div class="topo-legend">
           <span><i class="topo-lg-ext"></i> External / Attacker</span>
           <span><i class="topo-lg-int"></i> Internal / Corp</span>
+          <span><i class="topo-lg-console"></i> Student console</span>
           <span>Double border = placement fixed by the GOAD lab</span>
         </div>
         <div id="tplTopoFindings"></div>

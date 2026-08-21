@@ -381,7 +381,7 @@ async function createChallenge() {
     default_scripts: vm.default_scripts ? vm.default_scripts.split(',').map(s => s.trim()).filter(Boolean) : []
   }));
 
-  status.textContent = goad ? `Creating GOAD challenge (${goad.version}) + SDN infrastructure...` : 'Creating challenge + SDN infrastructure...';
+  status.textContent = goad ? `Creating GOAD environment (${goad.version}) + SDN infrastructure...` : 'Creating environment + SDN infrastructure...';
   status.style.color = 'var(--gray-500)';
 
   try {
@@ -394,7 +394,7 @@ async function createChallenge() {
     const data = await api('POST', '/create-lab', body);
 
     status.innerHTML = `
-      <strong style="color: #38a169;">Challenge created!</strong><br>
+      <strong style="color: #38a169;">Environment created!</strong><br>
       <span style="font-size: 0.8rem;">
         Key: <code>${escHtml(data.challenge_key)}</code> |
         Zone: <code>${escHtml(data.zone_abbrev)}</code> |
@@ -407,7 +407,7 @@ async function createChallenge() {
         <div style="background: #f7fafc; padding: 0.5rem; border-radius: 4px; margin-top: 0.25rem; white-space: pre-wrap;">${data.steps.join('\n')}</div>
       </details>`;
 
-    Toast.success('Challenge Created', `${vms.length} VM(s), ${data.vnets_created} VNets`);
+    Toast.success('Environment Created', `${vms.length} VM(s), ${data.vnets_created} VNets`);
 
     // If this challenge was built from a real-client intake, link them.
     if (activeIntakeContext && activeIntakeContext.id && data.challenge_id) {
@@ -423,7 +423,7 @@ async function createChallenge() {
         document.getElementById('intakeContextPanel').style.display = 'none';
       } catch (linkErr) {
         console.warn('[intake link] failed:', linkErr);
-        Toast.warning('Link failed', 'Challenge created but could not be linked to intake: ' + linkErr.message);
+        Toast.warning('Link failed', 'Environment created but could not be linked to intake: ' + linkErr.message);
       }
     }
 
@@ -439,10 +439,10 @@ async function createChallenge() {
 }
 
 async function deleteChallenge(id, name) {
-  if (!confirm(`Delete challenge "${name}"?\n\nThis will also remove the SDN zone and VNets from Proxmox.\n\nActive lanes using this challenge will NOT be affected.`)) return;
+  if (!confirm(`Delete environment "${name}"?\n\nThis will also remove the SDN zone and VNets from Proxmox.\n\nActive lanes using this environment will NOT be affected.`)) return;
   try {
     const data = await api('DELETE', `/lab-templates/${id}`);
-    Toast.success('Deleted', `Challenge "${name}" deleted${data.vnets_removed ? ` (${data.vnets_removed} VNets removed)` : ''}`);
+    Toast.success('Deleted', `Environment "${name}" deleted${data.vnets_removed ? ` (${data.vnets_removed} VNets removed)` : ''}`);
     loadChallengeTemplates();
     loadModulesAndChallenges();
   } catch (e) { Toast.error('Error', e.message); }
@@ -470,13 +470,13 @@ async function loadChallengeTemplates() {
     cachedTemplates = templates;
 
     if (templates.length === 0) {
-      container.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--gray-500);">No challenges found. Click "+ New Challenge" to create one.</div>';
+      container.innerHTML = '<div style="text-align: center; padding: 2rem; color: var(--gray-500);">No environments found. Click "+ New Environment" to create one.</div>';
       return;
     }
 
     container.innerHTML = `
       <table class="admin-table">
-        <thead><tr><th>Challenge</th><th>Key</th><th>Difficulty</th><th>VXLAN Block</th><th>VMs</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Environment</th><th>Key</th><th>Difficulty</th><th>VXLAN Block</th><th>VMs</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead>
         <tbody>
           ${templates.map(t => `
             <tr>
@@ -654,7 +654,7 @@ function applyTemplateEditorMode(spec) {
 }
 
 function showCreateTemplateModal() {
-  document.getElementById('templateEditorTitle').textContent = 'New Challenge Template';
+  document.getElementById('templateEditorTitle').textContent = 'New Environment Template';
   document.getElementById('tplEditId').value = '';
   document.getElementById('tplName').value = '';
   document.getElementById('tplDesc').value = '';
@@ -722,10 +722,15 @@ function removeTemplateVM(idx) { templateVMs.splice(idx, 1); renderTemplateVMs()
  */
 function renderTemplateVMs(fromCanvas) {
   if (!fromCanvas && tplTopo) tplTopo.refresh(templateVMs);
-  document.getElementById('tplVmList').innerHTML = templateVMs.map((vm, i) => `
-    <div style="background: #f7fafc; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem; border: 1px solid #e2e8f0;">
+  document.getElementById('tplVmList').innerHTML = templateVMs.map((vm, i) => {
+    // The console machine is called out on the CARD, not just by a checked
+    // radio: on a six-machine environment a lone radio dot is easy to miss, and
+    // picking the wrong one is not visible again until a student cannot connect.
+    const isConsole = vm.console_role === 'primary';
+    return `
+    <div style="background: ${isConsole ? 'rgba(79,145,83,0.07)' : '#f7fafc'}; border-radius: 8px; padding: 0.75rem; margin-bottom: 0.5rem; border: 1px solid ${isConsole ? '#4f9153' : '#e2e8f0'};">
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem;">
-        <strong style="font-size: 0.85rem;">VM ${i + 1}</strong>
+        <strong style="font-size: 0.85rem;">VM ${i + 1}${isConsole ? ' <span style="font-weight:600; font-size:0.68rem; color:#2f6f33; background:rgba(79,145,83,0.16); border-radius:999px; padding:0.1rem 0.5rem; margin-left:0.35rem; vertical-align:middle;">STUDENT CONSOLE</span>' : ''}</strong>
         <button class="btn btn-sm" style="font-size: 0.65rem; padding: 0.1rem 0.3rem; border: 1px solid #e53e3e; color: #e53e3e; background: transparent;" onclick="removeTemplateVM(${i})">Remove</button>
       </div>
       <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0.5rem; font-size: 0.85rem;">
@@ -739,8 +744,39 @@ function renderTemplateVMs(fromCanvas) {
         <div><label style="font-size: 0.75rem;">Services (comma-sep)</label><input type="text" value="${(vm.services || []).join(', ')}" onchange="templateVMs[${i}].services=this.value.split(',').map(s=>s.trim()).filter(Boolean)" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
       </div>
       <div style="margin-top: 0.5rem;"><label style="font-size: 0.75rem;">Default Scripts (comma-sep slugs)</label><input type="text" value="${(vm.default_scripts || []).join(', ')}" onchange="templateVMs[${i}].default_scripts=this.value.split(',').map(s=>s.trim()).filter(Boolean)" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+      <div style="display: grid; grid-template-columns: 1.2fr 1fr 1fr; gap: 0.5rem; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #e2e8f0; font-size: 0.85rem; align-items: end;">
+        <label style="font-size: 0.75rem; display: flex; align-items: center; gap: 0.4rem; cursor: pointer; margin: 0;">
+          <input type="radio" name="tplConsolePrimary" ${isConsole ? 'checked' : ''} onchange="setTemplateConsolePrimary(${i})" style="width: auto; margin: 0; cursor: pointer;">
+          <span>Student console<br><span style="color: var(--gray-500); font-size: 0.68rem;">the machine they open</span></span>
+        </label>
+        <div><label style="font-size: 0.75rem;">Console protocol</label>
+          <select onchange="templateVMs[${i}].console_protocol=this.value||null" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;">
+            <option value=""${!vm.console_protocol ? ' selected' : ''}>from catalog</option>
+            ${['rdp', 'ssh', 'vnc'].map(pr => `<option value="${pr}"${vm.console_protocol === pr ? ' selected' : ''}>${pr}</option>`).join('')}
+          </select></div>
+        <div><label style="font-size: 0.75rem;">Console guest port</label><input type="number" value="${vm.console_port || ''}" placeholder="protocol default" onchange="templateVMs[${i}].console_port=parseInt(this.value)||null" style="width: 100%; padding: 0.3rem; border-radius: 4px; border: 1px solid #e2e8f0; font-size: 0.8rem;"></div>
+      </div>
     </div>
-  `).join('');
+  `;
+  }).join('');
+}
+
+/**
+ * Exactly one machine is the student console. A radio group rendered over an
+ * array does not enforce that on the DATA — the browser only clears the other
+ * inputs — so the previous holder has to be cleared explicitly, or a spec can be
+ * saved with two primaries and resolveConsolePlan throws at deploy time.
+ *
+ * Clicking the checked radio again clears the designation, which is the only way
+ * to get back to "no console machine" once one is set.
+ */
+function setTemplateConsolePrimary(idx) {
+  const wasPrimary = templateVMs[idx] && templateVMs[idx].console_role === 'primary';
+  templateVMs.forEach((vm, i) => {
+    if (i === idx && !wasPrimary) vm.console_role = 'primary';
+    else if (vm.console_role === 'primary') delete vm.console_role;
+  });
+  renderTemplateVMs();
 }
 
 function addTemplatePhantom() {
@@ -1037,7 +1073,7 @@ async function deployChallengeNetwork() {
     if (preview.preview) {
       showDeployConfirmation(preview, () => deployChallengeNetworkConfirmed(tplId, userInput, selected));
       btn.disabled = false;
-      btn.textContent = 'Deploy Challenge Network';
+      btn.textContent = 'Deploy Environment Network';
       status.textContent = '';
       return;
     }
@@ -1045,12 +1081,12 @@ async function deployChallengeNetwork() {
     status.textContent = `Error: ${e.message}`;
     status.style.color = '#e53e3e';
     btn.disabled = false;
-    btn.textContent = 'Deploy Challenge Network';
+    btn.textContent = 'Deploy Environment Network';
     return;
   }
 
   btn.disabled = false;
-  btn.textContent = 'Deploy Challenge Network';
+  btn.textContent = 'Deploy Environment Network';
 }
 
 async function deployChallengeNetworkConfirmed(tplId, userInput, selected) {
@@ -1086,7 +1122,7 @@ async function deployChallengeNetworkConfirmed(tplId, userInput, selected) {
     Toast.error('Deploy Failed', e.message);
   } finally {
     btn.disabled = false;
-    btn.textContent = 'Deploy Challenge Network';
+    btn.textContent = 'Deploy Environment Network';
   }
 }
 
@@ -1113,7 +1149,7 @@ async function generateChallengeProfile(laneId) {
   const difficulty = prompt('Difficulty (beginner/intermediate/advanced):') || 'intermediate';
 
   try {
-    Toast.info('Generating', 'Creating challenge network profile...');
+    Toast.info('Generating', 'Creating environment network profile...');
     const data = await api('POST', `/lab-networks/${laneId}/generate-profile`, {
       industry, difficulty, client_type: 'SMB'
     });

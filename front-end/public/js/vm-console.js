@@ -276,6 +276,24 @@ const VmWorkspaces = (() => {
     const tooltip = [vm.name, vm.vmid ? `VMID ${vm.vmid}` : null]
       .filter(Boolean).join(' · ');
 
+    // Deliberately NOT gated on powerState the way the console button is: a
+    // stopped machine's password is still worth reading, and a student who has
+    // just been told to start their VM should not have to start it first to
+    // find out how to log in.
+    //
+    // The label is read back out of the rendered DOM rather than interpolated
+    // into this handler: vm.displayName is server data, and anything carrying
+    // a quote would break out of the attribute string.
+    const credBtn = vm.hasCredentials
+      ? `<button
+             class="btn btn-sm vml-cred-btn"
+             onclick="VmWorkspaces.credentials(&quot;${vm.id}&quot;, this.closest(&quot;.vml-card&quot;).querySelector(&quot;.vml-vm-name&quot;).textContent)"
+             title="Show the username and password for this machine"
+           >
+             🔑 Credentials
+           </button>`
+      : '';
+
     return `
       <div class="vml-card">
         <div class="vml-card-header">
@@ -290,7 +308,7 @@ const VmWorkspaces = (() => {
             </div>
           </div>
         </div>
-        <div class="vml-card-actions">${launchBtn}</div>
+        <div class="vml-card-actions">${credBtn}${launchBtn}</div>
       </div>
     `;
   }
@@ -455,6 +473,171 @@ const VmWorkspaces = (() => {
     }
   }
 
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Workstation credentials
+  // ──────────────────────────────────────────────────────────────────────────
+  //
+  // Guacamole types the workstation password into the guest, so a student never
+  // sees it — and then cannot get past a locked Windows session, a sudo prompt,
+  // or their own RDP client, and has to ask their instructor to look it up.
+  //
+  // Fetched on demand rather than carried in the list payload: the server logs
+  // every disclosure, so merely opening the page must not count as reading every
+  // password. Same reasoning as the instructor roster's "Show console logins".
+  //
+  // EVERYTHING BELOW USES DOM NODES AND textContent — never innerHTML, never an
+  // inline onclick. Utils.escapeHtml is HTML-escaping, and the browser
+  // HTML-DECODES an attribute before the JS inside it is parsed, so a generated
+  // password containing an apostrophe would break straight out of the string.
+  // (The instructor-side renderCredentialCell carries the same warning.)
+
+  let _credOverlay = null;
+
+  function _closeCredentials() {
+    if (_credOverlay) { _credOverlay.remove(); _credOverlay = null; }
+  }
+
+  function _copy(text, label) {
+    navigator.clipboard.writeText(text).then(
+      () => Toast.success('Copied', `${label} copied to clipboard`),
+      () => Toast.error('Could not copy', 'Select the text and copy it manually.')
+    );
+  }
+
+  /** One labelled row: value in a <code>, plus its buttons. */
+  function _credRow(label, value, { secret = false } = {}) {
+    const row = document.createElement('div');
+    row.className = 'vml-cred-row';
+
+    const key = document.createElement('span');
+    key.className = 'vml-cred-key';
+    key.textContent = label;
+
+    const code = document.createElement('code');
+    code.className = 'vml-cred-value';
+    // The real value only ever reaches the DOM as text. Masking is a display
+    // state, so the node keeps the truth and the mask is re-rendered from it.
+    let revealed = !secret;
+    const paint = () => { code.textContent = revealed ? value : '•'.repeat(Math.min(value.length, 16)); };
+    paint();
+
+    const actions = document.createElement('span');
+    actions.className = 'vml-cred-actions';
+
+    if (secret) {
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'btn btn-sm vml-cred-mini';
+      toggle.textContent = 'Show';
+      toggle.addEventListener('click', () => {
+        revealed = !revealed;
+        toggle.textContent = revealed ? 'Hide' : 'Show';
+        paint();
+      });
+      actions.appendChild(toggle);
+    }
+
+    const copy = document.createElement('button');
+    copy.type = 'button';
+    copy.className = 'btn btn-sm vml-cred-mini';
+    copy.textContent = 'Copy';
+    copy.addEventListener('click', () => _copy(value, label));
+    actions.appendChild(copy);
+
+    row.append(key, code, actions);
+    return row;
+  }
+
+  function _renderCredentialModal(vmLabel, cred) {
+    _closeCredentials();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) _closeCredentials(); });
+
+    const dialog = document.createElement('div');
+    dialog.className = 'modal-dialog';
+    dialog.style.maxWidth = '520px';
+
+    const header = document.createElement('div');
+    header.className = 'modal-header';
+    const title = document.createElement('h3');
+    title.className = 'modal-title';
+    title.textContent = 'Workstation login';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'modal-close';
+    close.textContent = '✕';
+    close.addEventListener('click', _closeCredentials);
+    header.append(title, close);
+
+    const body = document.createElement('div');
+    body.className = 'modal-body';
+
+    const which = document.createElement('p');
+    which.className = 'vml-cred-subject';
+    which.textContent = vmLabel;
+    body.appendChild(which);
+
+    if (!cred.available) {
+      const note = document.createElement('p');
+      note.className = 'vml-cred-note';
+      note.textContent = cred.reason || 'No login is recorded for this machine.';
+      body.appendChild(note);
+      if (cred.username) body.appendChild(_credRow('Username', cred.username));
+    } else {
+      if (cred.username) body.appendChild(_credRow('Username', cred.username));
+      body.appendChild(_credRow('Password', cred.password, { secret: true }));
+
+      if (cred.shared) {
+        // Never let a shared bake credential pass as a personal one. This is the
+        // template's own built-in account: the same password is on every
+        // classmate's machine, so it protects nothing.
+        const warn = document.createElement('p');
+        warn.className = 'vml-cred-warn';
+        warn.textContent = 'This login is built into the machine image, so every student in '
+          + 'this class has the same one. Treat it as shared, not private.';
+        body.appendChild(warn);
+      }
+
+      const hint = document.createElement('p');
+      hint.className = 'vml-cred-note';
+      hint.textContent = 'Open Console signs you in automatically. You need this login when the '
+        + 'screen locks, when a task asks for an administrator or sudo password, or if you '
+        + 'connect with your own RDP or SSH client.';
+      body.appendChild(hint);
+    }
+
+    const footer = document.createElement('div');
+    footer.className = 'modal-footer';
+    const done = document.createElement('button');
+    done.type = 'button';
+    done.className = 'btn btn-primary';
+    done.textContent = 'Done';
+    done.addEventListener('click', _closeCredentials);
+    footer.appendChild(done);
+
+    dialog.append(header, body, footer);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    _credOverlay = overlay;
+  }
+
+  /**
+   * Triggered by the "Credentials" button in a VM card.
+   * `vmLabel` is passed through only for the modal heading.
+   */
+  async function credentials(vmId, vmLabel) {
+    try {
+      const cred = await API.request(`/dashboard/vms/${encodeURIComponent(vmId)}/credentials`);
+      _renderCredentialModal(vmLabel || 'This workstation', cred);
+    } catch (err) {
+      const msg = err?.data?.error || err?.message || 'Could not read the workstation login.';
+      Toast.error('Credentials unavailable', msg);
+    }
+  }
+
   /**
    * Triggered by "Open Console" button in a VM card.
    */
@@ -465,5 +648,5 @@ const VmWorkspaces = (() => {
     VmConsole.open(vmId, container);
   }
 
-  return { render, launch };
+  return { render, launch, credentials };
 })();

@@ -159,10 +159,20 @@ async function pendingActivationFor(userIds) {
   return out;
 }
 
-/** Build the link that goes in the email. */
-function activationUrl(token, baseUrl) {
+/**
+ * Build the link that goes in the email.
+ *
+ * `mode` is COSMETIC ONLY, and nothing is authorized by it. /activate never
+ * inspects the token before the submit — checking it would mean either
+ * spending it or exposing an endpoint that reports whether a given token is
+ * live — so the page cannot otherwise tell an activation from a reset, and
+ * would greet a student recovering a forgotten password with "Welcome!
+ * Finish setting up your account". A tampered value only changes wording.
+ */
+function activationUrl(token, baseUrl, mode = null) {
   const base = String(baseUrl || process.env.MAIL_PUBLIC_URL || '').replace(/\/+$/, '');
-  return `${base}/activate?token=${encodeURIComponent(token)}`;
+  const suffix = mode ? `&mode=${encodeURIComponent(mode)}` : '';
+  return `${base}/activate?token=${encodeURIComponent(token)}${suffix}`;
 }
 
 /**

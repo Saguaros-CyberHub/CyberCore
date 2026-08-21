@@ -111,6 +111,122 @@ function resolveSpecVms(spec, challengeKey) {
 // without importing a deploy path. They are still re-exported from this module
 // (see module.exports) because cle/utils/vuln-lab-provision.js calls them here.
 
+// Lane octets that a console-designated machine draws from. Deliberately a
+// SUBSET of lane-deployer's .50-.79 workstation band, starting at .60:
+//   .50      is Kali's, and the value the gateway template bakes its wan0:3389
+//            DNAT against — never hand it to anything else.
+//   .10-.23  are GOAD's lab hosts + controller.
+//   .240     is the v3 dual-homed DMZ pivot.
+//   .100+    is attached-modules' band.
+// So .60-.79 is the one stretch inside the reserved workstation range that no
+// other actor on a challenge lane touches, and it sits above the .10-.200 DHCP
+// pool's live leases.
+const CONSOLE_OCTET_MIN = 60;
+const CONSOLE_OCTET_MAX = 79;
+
+/**
+ * Decide which machines on a lane get a Guacamole console, and which one the
+ * student's console button opens (the "primary").
+ *
+ * Pure over its inputs, so the back-compat rule below is unit-testable without a
+ * deploy. That rule is the whole point of the function:
+ *
+ *   precedence for the PRIMARY console:
+ *     1. an explicit per-deploy `override` (the modal's console_vm)
+ *     2. a spec VM carrying console_role === 'primary'
+ *     3. the Kali attack box, when attackBoxes is on   <-- today's behaviour
+ *     4. the first instructor-added workstation
+ *     5. none
+ *
+ *   membership of the console list (each gets its own connection):
+ *     - Kali, when attackBoxes is on
+ *     - a spec VM whose console_role is 'primary' or 'secondary'
+ *     - every instructor-added workstation (a machine you add is one to work from)
+ *
+ * "5. none" is deliberate and is what keeps every existing challenge
+ * byte-identical: before this function existed, the ONLY console a challenge
+ * lane ever created was Kali's. A spec that declares no console_role and deploys
+ * with attackBoxes:false must therefore still create none — promoting
+ * spec.vms[0] would hand every legacy challenge a brand-new DNAT, Guac
+ * connection and cloud-init pass on its next redeploy, which nobody asked for.
+ *
+ * @param {object} a
+ * @param {Array}   a.specVms            resolveSpecVms(spec, key) output
+ * @param {boolean} a.attackBoxes
+ * @param {Array}   [a.extraWorkstations] [{ name/hostname, ... }] instructor add-ons, slot order
+ * @param {string}  [a.override]         a machine name, 'kali', or 'ws:<index>'
+ * @returns {{ primary: object|null, consoles: Array }}
+ *   each console: { ref, kind:'kali'|'spec'|'extra', name, primary, vm?, extra?, index? }
+ * @throws when two spec VMs both claim 'primary', or override names nothing
+ */
+function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstations = [], override = null }) {
+  const candidates = [];
+  if (attackBoxes) {
+    candidates.push({ ref: 'kali', kind: 'kali', name: 'kali', consoleRole: 'primary' });
+  }
+  specVms.forEach((vm) => {
+    candidates.push({
+      ref: 'spec:' + (vm.name || ''), kind: 'spec', name: vm.name || '', vm,
+      consoleRole: vm.console_role || null,
+    });
+  });
+  extraWorkstations.forEach((w, i) => {
+    candidates.push({
+      ref: 'ws:' + i, kind: 'extra', name: w.hostname || w.name || ('ws' + i),
+      extra: w, index: i, consoleRole: w.console || null,
+    });
+  });
+
+  // At most one SPEC VM may declare itself primary — a lane cannot open two
+  // "the machine the student works from" consoles at once. (Kali and extras are
+  // never the source of this ambiguity: Kali's role is implicit, and an extra's
+  // primary flag is set by the same picker that sets `override`.)
+  const specPrimaries = candidates.filter((c) => c.kind === 'spec' && c.consoleRole === 'primary');
+  if (specPrimaries.length > 1) {
+    throw new Error(
+      `Two machines both declare console_role 'primary' (` +
+      specPrimaries.map((c) => c.name).join(', ') +
+      `); exactly one machine can be the student console`
+    );
+  }
+
+  // Which machines get a console connection at all.
+  const consoles = candidates.filter((c) =>
+    c.kind === 'kali' ||
+    c.kind === 'extra' ||
+    (c.kind === 'spec' && (c.consoleRole === 'primary' || c.consoleRole === 'secondary'))
+  );
+
+  // Pick the primary.
+  let primary = null;
+  if (override) {
+    primary = consoles.find((c) => c.ref === override || c.name === override) || null;
+    if (!primary) {
+      // The instructor named a machine the SPEC never designated. That is the
+      // point of the override — "which machine do students open?" has to be
+      // answerable with any machine on the lane, not only the ones the author
+      // thought of — so promote it into the console list rather than refusing.
+      // Only a name that matches nothing at all is an error.
+      const promoted = candidates.find((c) => c.ref === override || c.name === override);
+      if (!promoted) {
+        throw new Error(`console override '${override}' names no machine on this lane`);
+      }
+      promoted.consoleRole = 'primary';
+      consoles.push(promoted);
+      primary = promoted;
+    }
+  } else if (specPrimaries.length === 1) {
+    primary = specPrimaries[0];
+  } else if (attackBoxes) {
+    primary = consoles.find((c) => c.kind === 'kali') || null;
+  } else {
+    primary = consoles.find((c) => c.kind === 'extra') || null;
+  }
+
+  consoles.forEach((c) => { c.primary = (c === primary); });
+  return { primary, consoles };
+}
+
 /** The Kali login for a user: their email local-part, plus a password. */
 function resolveAttackBoxCredentials(user) {
   const username = String(user.email || 'student').split('@')[0]
@@ -199,6 +315,55 @@ async function resolveTemplateNodes(specVms, spec, includeKali) {
 }
 
 // ── phase 1: gateways ────────────────────────────────────────────────────────
+
+/**
+ * Resolve the instructor's added machines to catalog rows.
+ *
+ * Filtered on the SAME predicate the picker and the workstation provision
+ * endpoint use, so a template that is offered can always be deployed, and one
+ * that cannot is refused here rather than half-way through building a lane.
+ *
+ * @param {Array} extras [{ template_id, resources }] in slot order
+ * @returns {Promise<Array>} [{ template, hostname, resources }]
+ */
+async function loadExtraWorkstations(extras, logTag) {
+  if (!Array.isArray(extras) || extras.length === 0) return [];
+
+  const ids = extras.map(e => e.template_id).filter(Boolean);
+  if (ids.length !== extras.length) throw new Error('Every added machine needs a template_id');
+  // Two slots sharing one catalog row would give the lane two machines wanting
+  // the same reservation hostname, and dnsmasq keys DNS off that name.
+  if (new Set(ids.map(String)).size !== ids.length) {
+    throw new Error('Each added machine must use a different workstation template');
+  }
+
+  const result = await cybercoreQuery(`
+    SELECT id AS template_id, os_name AS name, template_key, os_family, os_version,
+           provider_type, template_vmid, node, metadata
+      FROM cybercore_template_catalog
+     WHERE id = ANY($1::uuid[])
+       AND template_type = 'workstation'
+       AND is_active     = TRUE
+       AND status        = 'active'
+       AND template_vmid IS NOT NULL
+  `, [ids]);
+
+  const byId = {};
+  for (const row of result.rows) byId[String(row.template_id)] = row;
+
+  return extras.map((e, i) => {
+    const template = byId[String(e.template_id)];
+    if (!template) {
+      throw new Error(
+        `Added machine ${i + 1} is not a deployable workstation template — it may be inactive, ` +
+        `still a draft, or missing its VMID. Check Admin -> Workstation Templates.`
+      );
+    }
+    const slug = String(template.template_key || template.name || `ws${i}`)
+      .toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    return { template, hostname: `${slug || 'ws'}-${i}`, resources: e.resources || null };
+  });
+}
 
 /**
  * Replicate the gateway LXC template onto every target node, so the per-lane
@@ -353,13 +518,32 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
   // Single owner for "which VNet does this VM attach to": the spec's explicit
   // nics[] when the topology canvas authored them, the historical name/role
   // derivation otherwise. See lane-networking.resolveVmNics.
+  // A console-designated machine gets a deterministic MAC so the lane's DHCP
+  // reservation can pin it to a fixed address. Without that it takes an ordinary
+  // pool lease and the gateway's DNAT points at nothing — which is exactly why
+  // the console used to be Kali-only. Same macForOctet() cloneAttackBox uses, so
+  // the reservation and the NIC cannot disagree.
+  const consoleOctet = (ctx._consoleOctetForVm || {})[vmName];
   const { nets, dualHomed } = resolveVmNics(vmSpec, {
     subnetScheme,
     bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
     goadMac: goadVm?.mac,
+    pinnedMac: goadVm?.mac
+      || (consoleOctet != null ? goadDeploy.macForOctet(consoleOctet, vxlanId) : null),
     goadVm,
     isGoadVm,
   });
+
+  // A dual-homed machine builds its NICs inline and ignores the pin entirely, so
+  // it would come up with no reservation and a dead console. v3 pins those to
+  // .240 by design; say so rather than deploying something that cannot work.
+  if (dualHomed && consoleOctet != null) {
+    throw new Error(
+      `'${vmName}' is dual-homed and cannot be the student console: it is pinned to .240 on both ` +
+      `segments by the v3 layout, which the console reservation cannot override. ` +
+      `Point the console at a single-homed machine.`
+    );
+  }
 
   await cloneSem.run(async () => {
     console.log(`${logTag} Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName}) for ${user.email}`);
@@ -443,6 +627,110 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
 }
 
 /**
+ * Clone one CATALOG workstation the instructor added at deploy time.
+ *
+ * Everything template-shaped goes through lane-deployer's own resolvers rather
+ * than a second copy here: each of them encodes a failure that has already
+ * happened once on this cluster —
+ *   - resolveNicModel: a stock Windows image has no virtio-net driver and never
+ *     DHCPs, so it must get e1000;
+ *   - resolveCitype: an unset citype means `nocloud`, which cloudbase-init finds,
+ *     cannot parse, and REPORTS SUCCESS on — the account keeps its bake-time
+ *     password while the lane advertises a generated one;
+ *   - findCloudInitDrive: a template with no drive must fall back to its baked
+ *     accounts, because publishing a credential Guacamole can only fail to
+ *     authenticate with is worse than prompting.
+ *
+ * Addressing is DHCP against the MAC-keyed reservation, never a static
+ * ipconfig0 — a static pin races the guest's own DHCP client and loses. That is
+ * the same bug the Kali clone above carries its own note about.
+ *
+ * @returns a deployedVMs-shaped record, so it lands in config.vms[] with
+ *   everything else. That placement is load-bearing: teardownLanes reads
+ *   config.workstations ONLY when config.vms is empty, which on a challenge lane
+ *   it never is — so a machine recorded anywhere else would never be destroyed.
+ */
+async function cloneExtraWorkstation({
+  extra, vmid, octet, vxlanId, targetNode, laneId, user, ctx, net, vnet, laneSubnetBase,
+}) {
+  const { moduleKey, description, logTag, cloneSem, subnetScheme } = ctx;
+  const template = extra.template;
+  const providerType = template.provider_type === 'lxc' ? 'lxc' : 'qemu';
+  const cloneName = hostnameFor(`${extra.hostname}-${String(user.email).split('@')[0]}`);
+  const mac = goadDeploy.macForOctet(octet, vxlanId);
+  const templateNode = ctx.templateNodeByVmid[template.template_vmid] || getDefaultTemplateNode();
+  const gatewayIp = subnetScheme === 'v3' ? net.lanExt.gatewayIp : net.lan.gatewayIp;
+
+  let creds = laneDeployer.resolveWorkstationCredentials(template, user);
+
+  await cloneSem.run(async () => {
+    console.log(`${logTag} Cloning added workstation ${template.template_vmid} → ${vmid} (${extra.hostname}) for ${user.email}`);
+    const upid = await proxmoxAPI('POST',
+      `/api2/json/nodes/${templateNode}/${providerType}/${template.template_vmid}/clone`, {
+        newid: vmid, full: 1, target: targetNode,
+        ...(providerType === 'lxc' ? { hostname: cloneName } : { name: cloneName }),
+        description: `Added workstation: ${extra.hostname}
+User: ${user.email}
+Lane: ${laneId}${description ? `
+${description}` : ''}`,
+        pool: `${moduleKey}-pool`,
+      });
+    if (upid) await waitForTask(templateNode, upid, 600000);
+
+    const base = `/api2/json/nodes/${targetNode}/${providerType}/${vmid}`;
+    const nicVal = providerType === 'lxc'
+      ? `name=eth0,bridge=${vnet.vnet},hwaddr=${mac},firewall=0,ip=dhcp`
+      : `${laneDeployer.resolveNicModel(template)},bridge=${vnet.vnet},macaddr=${mac},firewall=0`;
+    await proxmoxAPI('PUT', `${base}/config`, { net0: nicVal });
+
+    // Sizing before the first boot, so cloud-init's growpart sees the resized disk.
+    await laneDeployer.applyResources({
+      node: targetNode, vmid, providerType,
+      resources: extra.resources || null, laneName: cloneName,
+    }).catch((e) => console.warn(`${logTag} Could not size ${cloneName}: ${e.message}`));
+
+    if (providerType === 'qemu' && creds.source === 'cloudinit' && template.metadata?.cloud_init !== false) {
+      let ciDrive = null;
+      try { ciDrive = await laneDeployer.findCloudInitDrive(targetNode, vmid); }
+      catch (e) { console.warn(`${logTag} cloud-init probe failed for ${cloneName}: ${e.message}`); }
+
+      if (ciDrive) {
+        const citype = laneDeployer.resolveCitype(template);
+        await proxmoxAPI('PUT', `${base}/config`, {
+          ...(citype ? { citype } : {}),
+          ciuser: creds.username,
+          cipassword: creds.password,
+          ipconfig0: 'ip=dhcp',
+          nameserver: gatewayIp,
+        });
+        await proxmoxAPI('PUT', `${base}/cloudinit`).catch(() => {});
+      } else {
+        console.log(`${logTag} ${cloneName}: no cloud-init drive — using the template's own accounts`);
+        creds = { username: null, password: null, source: 'baked' };
+      }
+    } else if (providerType === 'lxc' && creds.source === 'cloudinit') {
+      creds = { username: null, password: null, source: 'baked' };
+    }
+  });
+
+  return {
+    vm_id: vmid,
+    name: extra.hostname,
+    proxmox_name: cloneName,
+    type: providerType,
+    node: targetNode,
+    // Marks it as an instructor addition rather than part of the environment's
+    // own definition — flag planting keys on the spec, not on this list.
+    source: 'instructor',
+    octet,
+    ip: `${laneSubnetBase}.${octet}`,
+    template_id: template.template_id || template.id || null,
+    template_name: template.name || template.os_name || null,
+    _creds: creds,
+  };
+}
+
+/**
  * Clone + configure the Kali attack box. Addressing is DHCP with a deterministic
  * MAC; the gateway's dnsmasq (fed by goadDeploy's hostMap, which reserves
  * <ext>.50 for that MAC) hands it .50 — matching the gateway's baked
@@ -511,7 +799,7 @@ async function cloneAttackBox({ attackBoxVmId, vxlanId, targetNode, laneId, user
  * up, so this logs loudly rather than failing the deploy.
  */
 async function writeLaneReservations({
-  gatewayVmId, node, vxlanId, goadMacs, attackBoxOctet,
+  gatewayVmId, node, vxlanId, goadMacs, attackBoxOctet, consoleOctets,
   extSubnetBase, intSubnetBase, liveGoadController, laneId, logTag,
 }) {
   const lines = [
@@ -524,6 +812,17 @@ async function writeLaneReservations({
     // Kali always lives on the EXTERNAL segment, which is where the RDP DNAT is.
     lines.push(`dhcp-host=${goadDeploy.macForOctet(attackBoxOctet, vxlanId)},` +
                `${extSubnetBase}.${attackBoxOctet},kali`);
+  }
+  // Console-designated machines. Same MAC cloneChallengeVm pinned on net0, so
+  // the guest's very first DHCPREQUEST already lands on the address the DNAT
+  // installed below points at. Goes in THIS file, not a second one: dnsmasq reads
+  // every *.conf in the directory and refuses to start when two claim one
+  // address, and installLaneReservations is what neutralises the gateway's own
+  // baked `dhcp-host=kali,<ext>.50` before writing.
+  for (const [name, octet] of Object.entries(consoleOctets || {})) {
+    const label = String(name).toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+    if (!label) continue;
+    lines.push(`dhcp-host=${goadDeploy.macForOctet(octet, vxlanId)},${extSubnetBase}.${octet},${label}`);
   }
   if (liveGoadController) {
     const octet = goadDeploy.INFRA_IP_OCTETS.controller;
@@ -614,7 +913,11 @@ async function resolveGatewayTransitIp(targetNode, gatewayVmId) {
 }
 
 /**
- * Create the Kali RDP connection and grant it to the owner + any instructors.
+ * Create ONE Guacamole connection for a lane machine and grant it to the owner
+ * plus any instructors.
+ *
+ * Generalised from createAttackBoxConsole, which hardcoded rdp/3389 — the only
+ * console a challenge lane could have. Protocol and port are now the caller's.
  *
  * The owner's Guacamole account is ensured first. The admin group deploy creates
  * accounts for the users it mints, but the CLE path deploys to a real roster
@@ -625,32 +928,38 @@ async function resolveGatewayTransitIp(targetNode, gatewayVmId) {
  * account's password. The group deploy prints each student their credential
  * seconds earlier, and a rotation here would invalidate every one of them.
  */
-async function createAttackBoxConsole({ connName, hostname, creds, user, guacParent, instructorEmails, logTag }) {
+async function createLaneConsole({
+  connName, hostname, port = 3389, protocol = 'rdp', creds,
+  template = {}, user, guacParent, instructorEmails, logTag,
+}) {
   await guacCreds.ensureGuacUser(user.id, user.email).catch((e) =>
     console.warn(`${logTag} Could not ensure a Guacamole account for ${user.email}: ${e.message}`));
 
+  // Parameters come from the SAME builder the workstation path uses, so an SSH
+  // console gets a colour scheme rather than an RDP negotiation, and a Windows
+  // target gets security:'any' forced — guacd fails the handshake outright
+  // against a pinned 'tls', which reads as a broken lane, not a config error.
+  const params = laneDeployer.buildGuacParameters({
+    protocol, hostname, port, creds, template: template || {},
+  });
+  if (protocol === 'rdp') {
+    // Kept from the Kali-only version: without server-layout the Guac UI shows
+    // "Keyboard layout" as unset and keystrokes never reach xrdp.
+    params['server-layout'] = params['server-layout'] || 'en-us-qwerty';
+    params['ignore-cert'] = 'true';
+    params['enable-wallpaper'] = 'true';
+    params['enable-theming'] = 'true';
+    params['enable-font-smoothing'] = 'true';
+    params['enable-full-window-drag'] = 'true';
+    params['color-depth'] = '24';
+    params['resize-method'] = 'display-update';
+  }
+
   const connBody = {
     name: connName,
-    protocol: 'rdp',
+    protocol,
     parentIdentifier: guacParent || 'ROOT',
-    parameters: {
-      hostname,
-      port: '3389',
-      username: creds.username,
-      password: creds.password,
-      security: 'any',
-      'ignore-cert': 'true',
-      // Without server-layout the Guac UI shows "Keyboard layout" as unset and
-      // keystrokes never reach xrdp. en-us-qwerty matches the default xrdp
-      // keymap on Kali.
-      'server-layout': 'en-us-qwerty',
-      'enable-wallpaper': 'true',
-      'enable-theming': 'true',
-      'enable-font-smoothing': 'true',
-      'enable-full-window-drag': 'true',
-      'color-depth': '24',
-      'resize-method': 'display-update',
-    },
+    parameters: params,
     attributes: {
       'max-connections': '2',
       'max-connections-per-user': '1',
@@ -806,10 +1115,12 @@ async function registerWorkspaceVms({ laneId, user, vxlanId, moduleKey, challeng
 async function deployLaneVms(job, ctx) {
   const {
     laneId, user, vxlanId, vnet, vnetInt, targetNode, attackBoxCreds, wanIp,
+    extraVmids = [],
   } = job;
   const {
     spec, subnetScheme, moduleKey, challengeKey, attackBoxes, vulnScripts,
     laneConfig, guacParent, instructorEmails, progress, logTag,
+    consoleVm, extraWorkstations, extraSpecs = [],
   } = ctx;
 
   const isV3 = subnetScheme === 'v3';
@@ -826,6 +1137,66 @@ async function deployLaneVms(job, ctx) {
 
   const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, goadSubnetBase);
   const specVms  = resolveSpecVms(spec, challengeKey);
+
+  // Which machines get a console, and which one the student opens. Resolved
+  // BEFORE any clone, because a spec VM chosen as the console needs a
+  // deterministic MAC set on net0 at clone time — a machine that takes an
+  // ordinary pool lease has no fixed address for a DNAT to point at, which is
+  // the whole reason the console used to be Kali-only.
+  const consolePlan = resolveConsolePlan({
+    specVms, attackBoxes, extraWorkstations: extraSpecs, override: consoleVm,
+  });
+
+  // Address assignment for every machine that needs a fixed one. Kali keeps .50 (the
+  // gateway bakes its DNAT against that value); everything else draws from
+  // .60-.79, which is the one stretch of the reserved workstation band no other
+  // actor on a challenge lane touches. An explicit spec.vms[].ipOctet wins — the
+  // same key attached-modules and the GOAD lab definitions already honour.
+  const consoleOctets = {};
+  {
+    const taken = new Set([goadDeploy.INFRA_IP_OCTETS.Kali]);
+    Object.values(goadMacs || {}).forEach((g) => {
+      const last = Number(String(g.static_ip || '').split('.').pop());
+      if (Number.isFinite(last)) taken.add(last);
+    });
+    let next = CONSOLE_OCTET_MIN;
+    for (const c of consolePlan.consoles) {
+      if (c.kind === 'kali') { consoleOctets[c.ref] = goadDeploy.INFRA_IP_OCTETS.Kali; continue; }
+      const wanted = Number(c.vm && c.vm.ipOctet);   // spec machines only; extras never pin
+      if (Number.isFinite(wanted)) {
+        if (taken.has(wanted)) {
+          throw new Error(
+            `Machine '${c.name}' requested IP octet .${wanted}, which is already taken on this lane`
+          );
+        }
+        taken.add(wanted);
+        consoleOctets[c.ref] = wanted;
+        continue;
+      }
+      while (taken.has(next)) next += 1;
+      if (next > CONSOLE_OCTET_MAX) {
+        throw new Error(
+          `Too many console machines on one lane — the .${CONSOLE_OCTET_MIN}-.${CONSOLE_OCTET_MAX} band is full`
+        );
+      }
+      taken.add(next);
+      consoleOctets[c.ref] = next;
+    }
+  }
+  // Handed to cloneChallengeVm so a designated machine gets a pinned MAC.
+  // Keyed by NAME, because cloneChallengeVm looks itself up by spec name. Extras
+  // are keyed by the hostname they clone as, so writeLaneReservations emits one
+  // dhcp-host line per machine with a label distinct within the lane.
+  ctx._consoleOctetForVm = {};
+  const reservationOctets = {};
+  for (const c of consolePlan.consoles) {
+    if (c.kind === 'spec') {
+      ctx._consoleOctetForVm[c.name] = consoleOctets[c.ref];
+      reservationOctets[c.name] = consoleOctets[c.ref];
+    } else if (c.kind === 'extra') {
+      reservationOctets[c.name] = consoleOctets[c.ref];
+    }
+  }
 
   if (progress) {
     progress.lanes[laneId] = {
@@ -850,7 +1221,24 @@ async function deployLaneVms(job, ctx) {
       })
     : Promise.resolve();
 
-  const [deployedVMs] = await Promise.all([Promise.all(clonePromises), kaliPromise]);
+  // Added machines clone in the same concurrent phase as the environment's own,
+  // through the same semaphore, so a lane with extras is not serialised behind
+  // one that has none.
+  const extraPromises = extraSpecs.map((extra, i) => cloneExtraWorkstation({
+    extra,
+    vmid: extraVmids[i],
+    octet: consoleOctets['ws:' + i],
+    vxlanId, targetNode, laneId, user, ctx, net, vnet, laneSubnetBase,
+  }));
+
+  const [deployedVMs, deployedExtras] = await Promise.all([
+    Promise.all(clonePromises), Promise.all(extraPromises), kaliPromise,
+  ]);
+
+  // Appended to the SAME list the environment's own machines are in. This is
+  // what makes teardown find them: teardownLanes reads config.workstations only
+  // when config.vms is empty, and on a challenge lane it never is.
+  deployedVMs.push(...deployedExtras.map(({ _creds, ...rest }) => rest));
 
   // 2. Boot the gateway first so dnsmasq is answering before anything DHCPs.
   setStatus('starting');
@@ -862,11 +1250,13 @@ async function deployLaneVms(job, ctx) {
   await writeLaneReservations({
     gatewayVmId, node: targetNode, vxlanId, goadMacs,
     attackBoxOctet: attackBoxVmId ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
+    consoleOctets: reservationOctets,
     extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
     liveGoadController: !!(spec.goad?.enabled && !spec.goad?.prebaked),
     laneId, logTag,
   });
 
+  // Every machine on the lane, added ones included — they are in deployedVMs now.
   for (const dvm of deployedVMs) {
     await proxmoxAPI('POST',
       `/api2/json/nodes/${dvm.node}/${dvm.type === 'lxc' ? 'lxc' : 'qemu'}/${dvm.vm_id}/status/start`);
@@ -906,37 +1296,133 @@ async function deployLaneVms(job, ctx) {
     }
   }
 
-  // 4. Kali: boot, find it, and publish a console on the gateway's WAN IP.
-  let kaliGuacConnId = null;
+  // 4. Consoles: boot what needs booting, publish each on the gateway's WAN IP,
+  //    and create one Guacamole connection per console.
+  //
+  //    Guacamole ALWAYS targets the gateway's wan0 transit address, never a
+  //    lane-local one: guacd runs on the orchestrator's Docker bridge with no
+  //    route into the lane subnet.
+  const gatewayTransitIp = consolePlan.consoles.length
+    ? await resolveGatewayTransitIp(targetNode, gatewayVmId)
+    : null;
+
   if (attackBoxVmId) {
     setStatus('configuring_kali');
     await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${attackBoxVmId}/status/start`);
     console.log(`${logTag} Kali attack box ${attackBoxVmId} started for ${user.email}`);
-
     await new Promise(r => setTimeout(r, 30000)); // guest agent needs a head start
-    let kaliIp = await discoverKaliIp(targetNode, attackBoxVmId, logTag);
-    if (!kaliIp) {
-      // Kali's DHCP reservation targets .50, so that's the correct fallback when
-      // the guest agent is slow — and it matches the gateway's wan0:3389 DNAT.
+    const found = await discoverKaliIp(targetNode, attackBoxVmId, logTag);
+    if (!found) {
+      // Kali's DHCP reservation targets .50, so that is the correct fallback when
+      // the guest agent is slow — and it matches the gateway's baked wan0:3389.
       console.warn(`${logTag} Could not get Kali IP via guest agent — assuming the reserved .50`);
-      kaliIp = `${laneSubnetBase}.50`;
     }
+  }
 
-    const gatewayTransitIp = await resolveGatewayTransitIp(targetNode, gatewayVmId);
-    const guacTargetIp = gatewayTransitIp || kaliIp;
-    console.log(`${logTag} Guac RDP target: ${guacTargetIp} (${gatewayTransitIp ? 'via gateway DNAT' : 'direct to Kali'})`);
+  // Publish every console port in ONE pass. installConsoleDnat strips its own
+  // LANE-CONSOLE tag before re-adding, so a per-machine call would delete the
+  // previous machine's rule — the same regression the workstation path already
+  // carries a test for.
+  const consoleTargets = consolePlan.consoles.map((c) => {
+    const octet = consoleOctets[c.ref];
+    let proto;
+    let template = {};
+    if (c.kind === 'kali') {
+      proto = { protocol: 'rdp', guestPort: 3389, wanPort: 3389 };
+    } else if (c.kind === 'extra') {
+      // An added machine is a catalog workstation, so its console comes from the
+      // same metadata the workstation path reads — an SSH-only image published
+      // on 3389 is a console that connects to nothing.
+      template = c.extra.template;
+      proto = laneDeployer.resolveConsole(template);
+    } else {
+      proto = laneDeployer.resolveConsole({
+        metadata: {
+          console_protocol: (c.vm && c.vm.console_protocol) || 'rdp',
+          console_port: c.vm && c.vm.console_port,
+        },
+      });
+    }
+    return { ...c, octet, template, ip: `${laneSubnetBase}.${octet}`, console: proto };
+  });
 
+  // Distinct gateway ports. The primary keeps its protocol's base port, which is
+  // the one the v2 gateway already bakes an RDP rule for — so even a failed DNAT
+  // install leaves the machine students actually open reachable.
+  {
+    const used = new Set();
+    const ordered = [...consoleTargets].sort((a, b) => (b.primary === true) - (a.primary === true));
+    for (const t of ordered) {
+      let port = t.console.wanPort || t.console.guestPort;
+      while (used.has(port)) port += 1;
+      used.add(port);
+      t.console = { ...t.console, wanPort: port };
+    }
+  }
+
+  let consoleDnatOk = consoleTargets.length === 0;
+  if (consoleTargets.length) {
     try {
-      kaliGuacConnId = await createAttackBoxConsole({
-        connName: `${laneConfig.group_name || laneConfig.course_name || challengeKey} - ${attackBoxCreds.username} - Kali`,
-        hostname: guacTargetIp,
-        creds: attackBoxCreds,
+      await laneDeployer.installConsoleDnat({
+        node: targetNode, gatewayVmid: gatewayVmId, targets: consoleTargets,
+        // A v3 gateway has ext0/int0 and no lan0 at all, so the FORWARD ACCEPT
+        // has to name the interface this lane actually has.
+        lanIface: isV3 ? 'ext0' : 'lan0',
+        logTag,
+      });
+      consoleDnatOk = true;
+    } catch (dnatErr) {
+      // Recorded, not just logged. The gateway's baked wan0:3389 -> <ext>.50 rule
+      // still covers ONE case — Kali, on the base RDP port — and covers nothing
+      // else: a spec machine at .60 on 3389 would have the student land on Kali
+      // instead, and a second console has no baked rule at all. console_via is
+      // what the CLE VM list renders, so this reaches the instructor rather than
+      // presenting as "the console just doesn't work".
+      console.error(`${logTag} Console DNAT install failed for ${user.email}: ${dnatErr.message}`);
+    }
+  }
+
+  for (const t of consoleTargets) {
+    const creds = t.kind === 'kali'
+      ? attackBoxCreds
+      : (t.kind === 'extra'
+          // Resolved at clone time: cloneExtraWorkstation downgrades to
+          // {source:'baked'} when the image has no cloud-init drive, so this is
+          // the credential that is actually in force on the guest.
+          ? ((deployedExtras[t.index] || {})._creds || { username: null, password: null })
+          : { username: null, password: null });
+    const connName = t.kind === 'kali'
+      // Unchanged for Kali, so an existing lane's connection is FOUND and
+      // updated rather than duplicated — Guacamole's schema carries
+      // UNIQUE(connection_name, parent_id) and a blind POST would fail, leaving
+      // the old connection live with the old password.
+      ? `${laneConfig.group_name || laneConfig.course_name || challengeKey} - ${attackBoxCreds.username} - Kali`
+      : `${laneConfig.course_name || challengeKey} - ${user.email.split('@')[0]} - ${t.name}`;
+    try {
+      t.guacConnId = await createLaneConsole({
+        connName,
+        hostname: gatewayTransitIp || `${laneSubnetBase}.${t.octet}`,
+        port: t.console.wanPort,
+        protocol: t.console.protocol,
+        creds,
+        template: t.template || {},
         user, guacParent, instructorEmails, logTag,
       });
     } catch (guacErr) {
-      console.warn(`${logTag} Could not create Guac connection for ${user.email}: ${guacErr.message}`);
+      console.warn(`${logTag} Could not create Guac connection for ${user.email} (${t.name}): ${guacErr.message}`);
     }
   }
+
+  const primaryConsole = consoleTargets.find((t) => t.primary) || null;
+  const primaryCreds = !primaryConsole
+    ? { username: null, password: null, source: 'baked' }
+    : primaryConsole.kind === 'kali'
+      ? { username: attackBoxCreds.username, password: attackBoxCreds.password, source: 'cloudinit' }
+      : primaryConsole.kind === 'extra'
+        ? ((deployedExtras[primaryConsole.index] || {})._creds
+            || { username: null, password: null, source: 'baked' })
+        : { username: null, password: null, source: 'baked' };
+  const kaliGuacConnId = (consoleTargets.find((t) => t.kind === 'kali') || {}).guacConnId || null;
 
   // 5. Vuln scripts.
   if (vulnScripts && vulnScripts.length > 0) {
@@ -963,7 +1449,10 @@ async function deployLaneVms(job, ctx) {
     await plantFlagsForLane({
       laneId,
       userId: user.id,
-      vms: deployedVMs,
+      // Only the environment's OWN machines. An instructor's added workstation is
+      // where the student works FROM; planting user.txt/root.txt on it would hand
+      // them a flag for owning their own box.
+      vms: deployedVMs.filter(v => v.source !== 'instructor'),
       specVms,
       api: proxmoxAPI,
       logTag: `${logTag}[Flags]`,
@@ -982,7 +1471,10 @@ async function deployLaneVms(job, ctx) {
         vmid: v.vm_id,
         node: v.node,
         providerType: v.type === 'lxc' ? 'lxc' : 'qemu',
-        guacConnId: null,
+        // A machine with a console now HAS a connection — a designated spec
+        // machine or one the instructor added — so the student's workspace card
+        // opens it instead of showing a dead tile.
+        guacConnId: (consoleTargets.find(t => t.kind !== 'kali' && t.name === v.name) || {}).guacConnId || null,
         templateName: v.name,
       })),
       ...(attackBoxVmId ? [{
@@ -1012,16 +1504,47 @@ async function deployLaneVms(job, ctx) {
     lane_subnet_base: laneSubnetBase,
     vnet:             vnetExtName,
     ...(isV3 ? { vnet_internal: vnetIntName, lane_subnet_internal: goadSubnetBase } : {}),
-    ...(attackBoxVmId ? {
-      // Same keys lane-deployer.js writes for a catalog workstation, so the CLE
-      // VM list and any other console/credential reader works unchanged.
-      workstation_user:   attackBoxCreds.username,
-      workstation_pass:   attackBoxCreds.password,
-      credentials_source: 'cloudinit',
-      guac_connection_id: kaliGuacConnId,
+    ...(primaryConsole ? {
+      // The same FLAT keys lane-deployer.js writes for a catalog workstation.
+      // cle/routes/vms.js and labs.js read them directly, and the Console button
+      // plus the My Workspaces card both resolve from them — drop one and both
+      // go blank at once, with no error anywhere.
+      //
+      // Driven by the console PLAN now, not by `attackBoxVmId`, so they describe
+      // whichever machine actually won. On a lane where Kali is still the console
+      // — every environment that predates console_role — these are byte-identical
+      // to what this block wrote before.
+      // Whatever credential is actually in force on the machine the student
+      // opens: Kali's generated pair, an added workstation's cloud-init pair, or
+      // nothing at all for a spec machine that keeps its baked accounts.
+      workstation_user:   primaryCreds.username,
+      workstation_pass:   primaryCreds.password,
+      credentials_source: primaryCreds.source,
+      guac_connection_id: primaryConsole.guacConnId || null,
       guac_user:          user.email,
-      console_protocol:   'rdp',
-      console_port:       3389,
+      console_protocol:   primaryConsole.console.protocol,
+      console_port:       primaryConsole.console.wanPort,
+      console_host:       gatewayTransitIp || null,
+      console_via:        consoleDnatOk
+        ? 'gateway'
+        : (primaryConsole.kind === 'kali' && primaryConsole.console.wanPort === 3389
+            ? 'gateway-baked-dnat'
+            : 'unreachable'),
+      // WHICH machine the console points at. attack_box_vm_id keeps meaning
+      // Kali's vmid (labs.js reads it for the attack-box column), so it must not
+      // be repurposed for this.
+      console_vm_name:    primaryConsole.name,
+    } : {}),
+    // Every console on the lane, primary first. teardownLanes reads Guacamole
+    // ids from here — without it each secondary console leaks one connection per
+    // student on every teardown.
+    ...(consoleTargets.length ? {
+      consoles: consoleTargets.map((t) => ({
+        ref: t.ref, name: t.name, kind: t.kind, primary: !!t.primary,
+        ip: t.ip, protocol: t.console.protocol,
+        wan_port: t.console.wanPort, guest_port: t.console.guestPort,
+        guac_connection_id: t.guacConnId || null,
+      })),
     } : {}),
   };
   await cybercoreQuery(
@@ -1129,6 +1652,11 @@ async function deployChallengeLanesInner({
   challenge,
   moduleKey,
   attackBoxes = false,
+  // Which machine the student's console opens, and any machines the instructor
+  // added at deploy time. Both default to the pre-existing behaviour: no
+  // override (so Kali wins when it is present) and no extras.
+  consoleVm = null,
+  extraWorkstations = [],
   vulnScripts = null,
   laneConfig = {},
   namePrefix = null,
@@ -1150,6 +1678,11 @@ async function deployChallengeLanesInner({
   const resolvedModule = moduleKey || challenge.module_key || 'crucible';
   const challengeKey = challenge.challenge_key;
   const logTag = `${LOG}[${challengeKey}]`;
+
+  // Machines the instructor added at deploy time. Resolved to catalog rows ONCE
+  // for the whole batch — every lane clones the same images, so a per-lane
+  // lookup would be one query per student for an identical answer.
+  const extraSpecs = await loadExtraWorkstations(extraWorkstations, logTag);
 
   const specVms = resolveSpecVms(spec, challengeKey);
   if (specVms.length === 0) {
@@ -1213,7 +1746,13 @@ async function deployChallengeLanesInner({
 
   const gatewayVmid  = resolveGatewayVmid(resolvedModule, subnetScheme, spec);
   const gwSourceNode = await findTemplateNode(gatewayVmid, spec.template_node || getDefaultTemplateNode());
-  const templateNodeByVmid = await resolveTemplateNodes(specVms, spec, attackBoxes);
+  const templateNodeByVmid = await resolveTemplateNodes(
+    // Added machines clone from their own catalog images, which may live on a
+    // different node than the environment's — resolving only the spec's would
+    // send every added clone to the wrong source.
+    [...specVms, ...extraSpecs.map(e => ({ template_vmid: e.template.template_vmid }))],
+    spec, attackBoxes
+  );
   console.log(
     `${logTag} Deploying ${users.length} lane(s): scheme=${subnetScheme}, gateway template=${gatewayVmid}@${gwSourceNode}, ` +
     `${specVms.length} challenge VM(s)${attackBoxes ? ` + Kali ${KALI_TEMPLATE_VMID}` : ''}; ` +
@@ -1303,6 +1842,18 @@ async function deployChallengeLanesInner({
   }
   if (unusedWan.length) await laneWan.releaseLaneWanIps(unusedWan);
 
+  // VMIDs for the added machines: one scan for the whole batch, before any
+  // clone. They CANNOT be derived from vxlan_id the way spec machines are —
+  // vm_offset is the environment author's namespace and findVmOffsetCollision
+  // guards it, so an id invented per deploy would collide with it. These come
+  // from lane-deployer's scanned 300000-399999 band instead, and are recorded on
+  // the lane because a scanned id cannot be re-derived at teardown.
+  if (extraSpecs.length && jobs.length) {
+    const ids = await laneDeployer.reserveWorkstationVmids(extraSpecs.length * jobs.length);
+    let cursor = 0;
+    for (const job of jobs) job.extraVmids = ids.slice(cursor, cursor += extraSpecs.length);
+  }
+
   if (jobs.length === 0) {
     if (progress) { progress.failed = failed.length; progress.completed = failed.length; }
     laneDeployer.finishProgress(progressId);
@@ -1314,7 +1865,8 @@ async function deployChallengeLanesInner({
 
   const ctx = {
     spec, subnetScheme, moduleKey: resolvedModule, challengeKey,
-    attackBoxes, vulnScripts, laneConfig, guacParent, instructorEmails,
+    attackBoxes, consoleVm, extraWorkstations, extraSpecs,
+    vulnScripts, laneConfig, guacParent, instructorEmails,
     description, progress, logTag, cloneSem, templateNodeByVmid,
   };
 
@@ -1404,6 +1956,9 @@ module.exports = {
   KALI_TEMPLATE_VMID,
   parseSpec,
   resolveSpecVms,
+  resolveConsolePlan,
+  CONSOLE_OCTET_MIN,
+  CONSOLE_OCTET_MAX,
   findVmOffsetCollision,
   findGoadHostMismatch,
   resolveAttackBoxCredentials,

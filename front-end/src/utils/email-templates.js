@@ -135,6 +135,68 @@ function activation(opts = {}) {
 }
 
 /**
+ * An EXISTING account needs a new password: here is a one-time link to choose one.
+ *
+ * The sibling of activation() above, and deliberately the same shape — a link,
+ * never a password. Staff used to hand out a generated temporary password here
+ * instead, which put a working credential in a mailbox where it sat readable by
+ * anyone who later reached that mailbox, and kept working until someone
+ * remembered to sign in. A token is spent on first use and dies on a clock.
+ *
+ * Kept separate from activation() rather than parameterised: the two say
+ * genuinely different things ("an account has been created for you" vs "your
+ * password is being reset"), and a recipient who gets the wrong one has no way
+ * to tell whether the other kind of request was made on their account.
+ */
+function passwordReset(opts = {}) {
+  const {
+    siteName = 'CyberHub', firstName, resetUrl,
+    courseName, courseCode, instructorName, expiresAt, username,
+  } = opts;
+
+  const course = courseLabel(courseName, courseCode);
+  const expiry = formatExpiry(expiresAt);
+  const by = instructorName ? ` by ${instructorName}` : '';
+
+  const subject = `Set a new password for your ${siteName} account`;
+
+  const textLines = [
+    greeting(firstName),
+    '',
+    `A password reset was requested${by} for your ${siteName} account`
+      + `${courseName || courseCode ? ` (${course})` : ''}.`,
+    '',
+    'Choose a new password using this link:',
+    resetUrl,
+    '',
+  ];
+  if (username) textLines.push(`Your username is: ${username}`, '');
+  if (expiry) textLines.push(`This link can only be used once, and expires on ${expiry}.`, '');
+  textLines.push(
+    // Says plainly that nothing has changed yet. Otherwise a recipient who did
+    // not expect this mail cannot tell whether they are already locked out.
+    'Your current password keeps working until you use this link.',
+    "If you weren't expecting this, you can ignore this message — or tell your instructor.",
+    '',
+    `— ${siteName}`
+  );
+
+  const html = shell(siteName, `
+    <p style="margin:0 0 16px;">${esc(greeting(firstName))}</p>
+    <p style="margin:0 0 16px;">A password reset was requested${esc(by)} for your <strong>${esc(siteName)}</strong> account${courseName || courseCode ? ` (<strong>${esc(course)}</strong>)` : ''}.</p>
+    <p style="margin:0;">Choose a new password:</p>
+    ${button(resetUrl, 'Set a New Password')}
+    ${username ? `<p style="margin:0 0 16px;">Your username is <strong>${esc(username)}</strong>.</p>` : ''}
+    ${expiry ? `<p style="margin:0 0 16px;color:#5a6072;">This link can only be used once, and expires on <strong>${esc(expiry)}</strong>.</p>` : ''}
+    <p style="margin:0 0 16px;color:#5a6072;">Your current password keeps working until you use this link. If you weren't expecting this, you can ignore this message — or tell your instructor.</p>
+    <p style="margin:0 0 8px;font-size:12px;color:#8a90a0;">If the button doesn't work, copy this address into your browser:<br>
+      <span style="word-break:break-all;">${esc(resetUrl)}</span></p>
+  `);
+
+  return { subject, text: textLines.join('\n'), html };
+}
+
+/**
  * An existing account has been enrolled in a course. Carries no credential —
  * this person already has one — so it is purely a notification.
  */
@@ -344,7 +406,7 @@ function broadcast(opts = {}) {
   };
 }
 
-const TEMPLATES = { activation, courseAdded, credentialsIssued, testMessage, broadcast };
+const TEMPLATES = { activation, passwordReset, courseAdded, credentialsIssued, testMessage, broadcast };
 
 module.exports = {
   ...TEMPLATES,

@@ -638,6 +638,95 @@
       display: flex;
       align-items: center;
       justify-content: flex-end;
+      gap: 8px;
+    }
+
+    /* Secondary to .vml-launch-btn on purpose: opening the console is the
+       primary action on the card, and reading the password is the thing you do
+       once, when the console has already let you down. */
+    .vml-cred-btn {
+      background: transparent;
+      color: var(--text-secondary, #4a5568);
+      border: 1px solid var(--border-color, #e5e7eb);
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    .vml-cred-btn:hover {
+      background: var(--gray-100, #edf2f7);
+      border-color: var(--primary-light, #1e5288);
+    }
+    [data-theme="dark"] .vml-cred-btn:hover { background: rgba(255,255,255,0.07); }
+
+    /* ===== Workstation credential modal ===== */
+    .vml-cred-subject {
+      font-weight: 600;
+      margin: 0 0 14px;
+      word-break: break-all;
+    }
+    .vml-cred-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border-color, #e5e7eb);
+    }
+    .vml-cred-row:last-of-type { border-bottom: none; }
+    .vml-cred-key {
+      flex: 0 0 84px;
+      font-size: 0.8rem;
+      color: var(--text-secondary, #4a5568);
+    }
+    /* min-width:0 so a long password wraps inside the row instead of pushing the
+       Show/Copy buttons off the dialog. */
+    .vml-cred-value {
+      flex: 1 1 auto;
+      min-width: 0;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.9rem;
+      word-break: break-all;
+      user-select: all;
+    }
+    .vml-cred-actions {
+      flex: 0 0 auto;
+      display: inline-flex;
+      gap: 6px;
+    }
+    .vml-cred-mini {
+      background: transparent;
+      color: var(--text-secondary, #4a5568);
+      border: 1px solid var(--border-color, #e5e7eb);
+      border-radius: 5px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      cursor: pointer;
+    }
+    .vml-cred-mini:hover { background: var(--gray-100, #edf2f7); }
+    [data-theme="dark"] .vml-cred-mini:hover { background: rgba(255,255,255,0.07); }
+
+    .vml-cred-note {
+      font-size: 0.8rem;
+      color: var(--text-secondary, #4a5568);
+      margin: 14px 0 0;
+      line-height: 1.5;
+    }
+    .vml-cred-warn {
+      font-size: 0.8rem;
+      line-height: 1.5;
+      margin: 14px 0 0;
+      padding: 8px 10px;
+      border-radius: 6px;
+      background: #fffaf0;
+      color: #7b341e;
+      border: 1px solid #f6ad55;
+    }
+    [data-theme="dark"] .vml-cred-warn {
+      background: rgba(246,173,85,0.12);
+      color: #f6ad55;
+      border-color: rgba(246,173,85,0.35);
     }
 
     .vml-launch-btn {

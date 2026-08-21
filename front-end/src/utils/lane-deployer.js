@@ -931,33 +931,78 @@ async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }
     node, gatewayVmid, path: DNSMASQ_RESERVATION_PATH, lines, logTag: LOG,
   });
 
-  // wan0:<wanPort> → <slot ip>:<guestPort>, one pair per workstation. The v2
-  // gateway template already bakes this for 3389 → .50, but only for that one
-  // port and address — re-adding it is harmless (same destination) and it is the
-  // only path for a non-RDP template or any slot past 0. Strip our own tag first
-  // so a re-provision doesn't stack duplicates, then persist so the rules survive
-  // a gateway reboot (Alpine reloads /etc/iptables/rules-save at boot, before
-  // firstboot re-adds its own rules).
-  const rules = ['iptables-save | grep -v "LANE-CONSOLE" | iptables-restore || true'];
-  for (const ws of workstations) {
-    const { guestPort, wanPort } = ws.console;
+  await installConsoleDnat({ node, gatewayVmid, targets: workstations, lanIface: 'lan0' });
+}
+
+/**
+ * Publish console ports on a lane gateway: wan0:<wanPort> → <ip>:<guestPort>,
+ * one pair per target, plus the FORWARD ACCEPT that lets the reply through.
+ *
+ * Split out of applyGatewayWorkstationAccess so challenge-lane-deployer.js can
+ * publish a console WITHOUT also writing a second dnsmasq reservations file.
+ * That half is deliberately not shared: this file owns
+ * /etc/dnsmasq.d/lane-workstation.conf and challenge-lane-deployer owns
+ * /etc/dnsmasq.d/lane-reservations.conf; dnsmasq reads every file in that
+ * directory and refuses to start when two dhcp-host lines claim one address,
+ * which takes DHCP down for the WHOLE lane.
+ *
+ * INSERTED AT THE HEAD OF PREROUTING, not appended. The v2 gateway firstboot
+ * hook bakes `-A PREROUTING … --dport 3389 … -j DNAT --to <base>.50:3389`
+ * (sdn-templates/v2_gateway/files/local.d/00-cybercore-firstboot.start), so an
+ * appended rule for the same port sits BELOW it and never fires. That was
+ * invisible for as long as every caller's slot-0 rule shared the baked rule's
+ * destination, and becomes a silently-wrong console the moment a machine at a
+ * different address claims 3389. Ports within our own set are distinct by
+ * construction, so the relative order of OUR rules does not matter.
+ *
+ * CALL ONCE PER GATEWAY PER TAG. The strip is `iptables-save | grep -v "<tag>"`,
+ * a substring match over the whole ruleset, so a second call with the same tag
+ * deletes the first call's rules. Build the full target list first. For the same
+ * reason a second tag must not be a substring of the first: grep -v
+ * "LANE-CONSOLE" would also remove "LANE-CONSOLE-X".
+ *
+ * @param {object} a
+ * @param {string} a.node
+ * @param {number} a.gatewayVmid
+ * @param {Array}  a.targets  [{ ip, console: { guestPort, wanPort }, hostname? }] — must be non-empty
+ * @param {string} [a.lanIface='lan0']  gateway-side interface for the FORWARD
+ *   ACCEPT. v1/v2 gateways have lan0; a v3 gateway has ext0/int0 and NO lan0 at
+ *   all (sdn-templates/bake-lane-gateway-v3.sh), so a hardcoded lan0 there
+ *   matches nothing and the console is DNATed to a packet the filter drops.
+ * @param {string} [a.tag='LANE-CONSOLE']
+ * @param {string} [a.logTag]
+ */
+async function installConsoleDnat({ node, gatewayVmid, targets, lanIface = 'lan0', tag = 'LANE-CONSOLE', logTag = LOG }) {
+  // An empty call would strip every existing rule and add none — a working
+  // console silently going dark. A caller with nothing to publish must not call.
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw new Error('installConsoleDnat: targets is empty — that would strip every console rule on this gateway and install none');
+  }
+
+  // Strip our own tag first so a re-provision doesn't stack duplicates, then
+  // persist at the end so the rules survive a gateway reboot (Alpine reloads
+  // /etc/iptables/rules-save at boot, before firstboot re-adds its own).
+  const rules = [`iptables-save | grep -v "${tag}" | iptables-restore || true`];
+  for (const t of targets) {
+    const { guestPort, wanPort } = t.console;
     rules.push(
-      `iptables -t nat -A PREROUTING -i wan0 -p tcp --dport ${wanPort} ` +
-        `-m comment --comment "LANE-CONSOLE" -j DNAT --to-destination ${ws.ip}:${guestPort}`
+      `iptables -t nat -I PREROUTING 1 -i wan0 -p tcp --dport ${wanPort} ` +
+        `-m comment --comment "${tag}" -j DNAT --to-destination ${t.ip}:${guestPort}`
     );
     // Position 2 keeps this above the base template's perimeter DROP block
     // (position 1 is the global RELATED,ESTABLISHED ACCEPT). Fall back to a
     // plain insert if the chain is shorter than that — iptables rejects an
     // index past the end of the chain, and `;` separators would hide it.
     rules.push(
-      `iptables -I FORWARD 2 -i wan0 -o lan0 -p tcp -d ${ws.ip} --dport ${guestPort} ` +
-        `-m comment --comment "LANE-CONSOLE" -j ACCEPT ` +
-        `|| iptables -I FORWARD -i wan0 -o lan0 -p tcp -d ${ws.ip} --dport ${guestPort} ` +
-        `-m comment --comment "LANE-CONSOLE" -j ACCEPT`
+      `iptables -I FORWARD 2 -i wan0 -o ${lanIface} -p tcp -d ${t.ip} --dport ${guestPort} ` +
+        `-m comment --comment "${tag}" -j ACCEPT ` +
+        `|| iptables -I FORWARD -i wan0 -o ${lanIface} -p tcp -d ${t.ip} --dport ${guestPort} ` +
+        `-m comment --comment "${tag}" -j ACCEPT`
     );
   }
   rules.push('mkdir -p /etc/iptables && iptables-save > /etc/iptables/rules-save');
   await nodeSsh.pctExec(node, gatewayVmid, ['/bin/sh', '-c', rules.join('; ')]);
+  console.log(`${logTag} Published ${targets.length} console port(s) on gateway ${gatewayVmid} (${lanIface})`);
 }
 
 // ── Guacamole ────────────────────────────────────────────────────────────────
@@ -2257,6 +2302,13 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     for (const ws of (Array.isArray(cfg.workstations) ? cfg.workstations : [])) {
       if (ws?.guac_connection_id) guacConnIds.add(ws.guac_connection_id);
     }
+    // Challenge lanes record their consoles here instead — a lane can now have
+    // more than one, and only the primary's id reaches the flat key above. Miss
+    // these and every secondary console leaks a Guacamole connection per student
+    // on every teardown.
+    for (const c of (Array.isArray(cfg.consoles) ? cfg.consoles : [])) {
+      if (c?.guac_connection_id) guacConnIds.add(c.guac_connection_id);
+    }
 
     // A live lane has recycled this row's VXLAN. Nearly every VMID here —
     // including the ones recorded in cfg.vms and cfg.attack_box_vm_id — was
@@ -2676,6 +2728,22 @@ module.exports = {
   // start and the whole lane comes up with no leases.
   installLaneReservations,
   restartDnsmasq,
+  // The iptables half of applyGatewayWorkstationAccess, on its own, so a
+  // challenge lane can publish a console without a second dnsmasq file.
+  // applyGatewayWorkstationAccess itself is deliberately NOT exported — see its
+  // docblock for why the two halves cannot both be shared.
+  installConsoleDnat,
+  // Template-shaped resolvers the challenge path reuses so a machine added at
+  // deploy time behaves exactly like one deployed through the workstation path.
+  // Every one of these encodes a failure that has already happened once —
+  // citype on Windows, the e1000 NIC, the cloud-init-drive probe — so the
+  // challenge path must go through them rather than grow a second copy.
+  resolveDnsAliases,
+  reserveWorkstationVmids,
+  buildGuacParameters,
+  resolveCitype,
+  findCloudInitDrive,
+  applyResources,
   // Progress registry. Exported so challenge-lane-deployer.js drives the SAME
   // global._batchDeployProgress shape instead of inventing a second contract —
   // admin-lanes.js and the CLE pollers both already speak it.

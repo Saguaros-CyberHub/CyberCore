@@ -604,99 +604,27 @@
   // ==========================================================================
 
   /**
-   * Regenerate one student's password.
+   * Email one student a link to set a new password.
+   *
+   * Nothing changes on the account here: their current password keeps working
+   * until they redeem the link, so this is safe to click twice and there is no
+   * window in which the student is locked out waiting for mail.
    *
    * Only rendered when the server said can_regenerate, but the server re-checks
    * regardless — this button is a convenience, not the authorization.
    */
   async function regenerateStudentPassword(studentId) {
-    if (!confirm('Generate a new password for this student?\n\nTheir current password stops working immediately, and the new one is shown only once.')) return;
+    if (!confirm('Email this student a link to set a new password?\n\nTheir current password keeps working until they use it. Any earlier reset link stops working now.')) return;
 
     try {
       const result = await api('POST', `/courses/${currentCourseId}/roster/students/${studentId}/password`, {});
-      showPasswordResult(result);
+      toast(result.note || 'A password-reset link is on its way');
       if (typeof loadStudents === 'function') loadStudents();
     } catch (err) {
-      toast(err.message || 'Could not regenerate the password', true);
+      // Carries the 409 verbatim: for a cohort account it names the admin path,
+      // which is the only thing that still works and is not guessable.
+      toast(err.message || 'Could not send the reset link', true);
     }
-  }
-
-  /**
-   * Show a regenerated password once.
-   *
-   * Built with DOM nodes and textContent rather than innerHTML — the same rule
-   * courses.html documents for renderCredentialCell. A password interpolated
-   * into markup or an inline handler is one apostrophe away from breaking out
-   * of the string.
-   */
-  function showPasswordResult(result) {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay active';
-
-    const modal = document.createElement('div');
-    modal.className = 'modal';
-    modal.style.maxWidth = '520px';
-
-    const h2 = document.createElement('h2');
-    h2.textContent = 'New password';
-    modal.appendChild(h2);
-
-    // Whether the student already has their own copy changes what the
-    // instructor has to do next, so it leads rather than sitting in a footnote.
-    const warn = document.createElement('div');
-    warn.className = result.emailed ? 'alert alert-success' : 'alert alert-warning';
-    warn.style.marginBottom = '1rem';
-    warn.textContent = result.emailed
-      ? `Emailed to ${result.email}. It is also shown below, once — it cannot be retrieved later.`
-      : 'This is shown once and cannot be retrieved later. Give it to the student now.'
-        + (result.email_note ? ` Not emailed: ${result.email_note}.` : '');
-    modal.appendChild(warn);
-
-    const box = document.createElement('div');
-    box.style.cssText = 'background:var(--bg-muted,#f4f4f6); padding:0.75rem; border-radius:6px; margin-bottom:1rem;';
-    const line = (label, value) => {
-      const row = document.createElement('div');
-      row.style.marginBottom = '0.25rem';
-      const strong = document.createElement('strong');
-      strong.textContent = `${label}: `;
-      const code = document.createElement('code');
-      code.textContent = value;
-      row.appendChild(strong);
-      row.appendChild(code);
-      return row;
-    };
-    box.appendChild(line('Username', result.username || result.email));
-    box.appendChild(line('Password', result.password));
-    modal.appendChild(box);
-
-    const note = document.createElement('div');
-    note.style.cssText = 'font-size:0.8rem; color:var(--text-secondary,#777); margin-bottom:1rem;';
-    // An expiry the instructor cannot see is an expiry they will be surprised
-    // by when the student calls a week later saying the password stopped working.
-    const expiry = result.expires_at
-      ? ` It stops working on ${new Date(result.expires_at).toLocaleString()}.`
-      : '';
-    note.textContent = 'They will be asked to choose their own password at their next sign-in.'
-      + expiry
-      + (result.warnings && result.warnings.length ? ' ' + result.warnings.join(' ') : '');
-    modal.appendChild(note);
-
-    const buttons = document.createElement('div');
-    buttons.className = 'form-buttons';
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'btn btn-secondary';
-    copyBtn.textContent = 'Copy password';
-    copyBtn.addEventListener('click', () => copyText(result.password));
-    const doneBtn = document.createElement('button');
-    doneBtn.className = 'btn btn-primary';
-    doneBtn.textContent = 'Done';
-    doneBtn.addEventListener('click', () => overlay.remove());
-    buttons.appendChild(copyBtn);
-    buttons.appendChild(doneBtn);
-    modal.appendChild(buttons);
-
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
   }
 
   /** Reissue an invitation link, invalidating any earlier one. */

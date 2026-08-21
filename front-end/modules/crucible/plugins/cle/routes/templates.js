@@ -11,7 +11,9 @@ const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const {
   resolveConsole, resolveNicModel, RESOURCE_LIMITS,
 } = require('../../../../../src/utils/lane-deployer');
+const challengeLaneDeployer = require('../../../../../src/utils/challenge-lane-deployer');
 const vulnLab = require('../utils/vuln-lab-provision');
+const { goadHostNames } = require('../../../../../src/utils/topology-validate');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
@@ -153,6 +155,36 @@ router.get('/vm', instructorOnly, async (req, res) => {
 });
 
 /**
+ * The drawable subset of a challenge spec: machines, their segment attachments
+ * and the canvas layout, with nothing sensitive attached.
+ *
+ * Per-VM keys are enumerated rather than spread, so a spec key added later for
+ * some other purpose cannot start leaking to instructors by accident.
+ */
+function buildTopologyPayload(spec, subnetScheme) {
+  const vms = challengeLaneDeployer.resolveSpecVms(spec || {}, '');
+  return {
+    subnet_scheme: subnetScheme,
+    // Canvas positions, so a hand-arranged environment draws the way its author
+    // laid it out instead of being auto-arranged into a different shape.
+    network: (spec && spec.network) || null,
+    goad_host_names: Array.from(goadHostNames(spec || {})),
+    vms: vms.map(v => ({
+      name:             v.name,
+      role:             v.role || null,
+      os:               v.os || null,
+      os_family:        v.os_family || null,
+      type:             v.type || 'qemu',
+      template_vmid:    v.template_vmid || null,
+      nics:             v.nics || null,
+      layout:           v.layout || null,
+      console_role:     v.console_role || null,
+      console_protocol: v.console_protocol || null,
+    })),
+  };
+}
+
+/**
  * GET /api/cle/templates/vulnerable — Vulnerable applications an instructor can
  * actually deploy, and in which mode.
  *
@@ -188,12 +220,13 @@ router.get('/vulnerable', instructorOnly, async (req, res) => {
     const blocked = [];
 
     for (const row of result.rows) {
+      const spec = typeof row.spec === 'string' ? JSON.parse(row.spec) : (row.spec || {});
       const caps = vulnLab.describeChallenge({
         challenge_id:  row.template_id,
         challenge_key: row.challenge_key,
         name:          row.name,
         subnet_scheme: row.subnet_scheme,
-        spec:          typeof row.spec === 'string' ? JSON.parse(row.spec) : (row.spec || {}),
+        spec,
       });
 
       // Neither mode possible = not a deployable lab. Report it separately with
@@ -219,6 +252,17 @@ router.get('/vulnerable', instructorOnly, async (req, res) => {
         module_key:    row.module_key,
         ...caps,
         free_lanes:    freeLanes,
+        // Enough to DRAW the environment before it is deployed, and no more.
+        //
+        // Deliberately not the raw spec: that carries vxlan_block, zone,
+        // template_node and spec.goad.admin_password, none of which an
+        // instructor's browser has any business holding. The client re-wraps
+        // this into the row shape CyberCoreTopologySeed.specToGraph expects.
+        //
+        // This exists because the obvious source — GET /admin/lab-templates/:id,
+        // which the admin topology viewer uses — is admin-only, and an
+        // instructor cannot call it.
+        topology: buildTopologyPayload(spec, caps.subnet_scheme),
       });
     }
 
@@ -227,10 +271,10 @@ router.get('/vulnerable', instructorOnly, async (req, res) => {
     const payload = { templates: usable };
     if (usable.length === 0) {
       payload.hint = blocked.length > 0
-        ? `${blocked.length} challenge(s) exist but none can be deployed: `
+        ? `${blocked.length} environment(s) exist but none can be deployed: `
           + blocked.map(b => `${b.name} (${b.reason})`).join(', ')
-          + '. Create one in Admin -> Create Lab.'
-        : 'No vulnerable applications are registered yet. Create one in Admin -> Create Lab.';
+          + '. Create one in Admin -> Environment Templates.'
+        : 'No environments are registered yet. Create one in Admin -> Environment Templates.';
     } else if (blocked.length > 0) {
       payload.excluded = blocked;
     }
