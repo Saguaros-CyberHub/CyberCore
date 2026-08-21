@@ -154,6 +154,16 @@ router.get('/vm', instructorOnly, async (req, res) => {
   }
 });
 
+/** Never let one unrenderable environment empty the picker for every other. */
+function safeTopologyPayload(spec, subnetScheme, key) {
+  try {
+    return buildTopologyPayload(spec, subnetScheme);
+  } catch (err) {
+    console.warn(`[CLE] Could not build a topology preview for '${key}': ${err.message}`);
+    return { subnet_scheme: subnetScheme, network: null, goad_host_names: [], vms: [] };
+  }
+}
+
 /**
  * The drawable subset of a challenge spec: machines, their segment attachments
  * and the canvas layout, with nothing sensitive attached.
@@ -168,7 +178,9 @@ function buildTopologyPayload(spec, subnetScheme) {
     // Canvas positions, so a hand-arranged environment draws the way its author
     // laid it out instead of being auto-arranged into a different shape.
     network: (spec && spec.network) || null,
-    goad_host_names: Array.from(goadHostNames(spec || {})),
+    // goadHostNames returns NULL for a non-GOAD environment, not an empty Set —
+    // and Array.from(null) throws, which took the whole endpoint down with it.
+    goad_host_names: Array.from(goadHostNames(spec || {}) || []),
     vms: vms.map(v => ({
       name:             v.name,
       role:             v.role || null,
@@ -262,7 +274,9 @@ router.get('/vulnerable', instructorOnly, async (req, res) => {
         // This exists because the obvious source — GET /admin/lab-templates/:id,
         // which the admin topology viewer uses — is admin-only, and an
         // instructor cannot call it.
-        topology: buildTopologyPayload(spec, caps.subnet_scheme),
+        // Best-effort: a spec this cannot draw is still an environment that
+        // deploys. Letting one bad row throw here emptied the whole picker.
+        topology: safeTopologyPayload(spec, caps.subnet_scheme, row.challenge_key),
       });
     }
 

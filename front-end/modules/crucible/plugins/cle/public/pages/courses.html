@@ -140,15 +140,21 @@
     .deploy-env-modal { max-width: 1180px; padding: 1.75rem 2rem; }
     .deploy-env-grid {
       display: grid;
-      grid-template-columns: minmax(380px, 460px) 1fr;
+      /* minmax(0, 1fr) on the topology column for the same reason as the sizing
+         inputs below: a bare 1fr cannot shrink under its content, and Cytoscape
+         sizes its canvas from the container. Without this a wide graph widens
+         the whole modal instead of scrolling inside its own pane. */
+      grid-template-columns: minmax(380px, 460px) minmax(0, 1fr);
       gap: 1.5rem;
       align-items: start;
     }
     /* The topology stays put while the form scrolls — on a 24-student deploy the
        machine list is the long part, and the diagram is what you check against. */
-    .deploy-env-topo { position: sticky; top: 0; display: flex; flex-direction: column; }
+    .deploy-env-topo { position: sticky; top: 0; display: flex; flex-direction: column; min-width: 0; }
+    .deploy-env-grid > .modal-form { min-width: 0; }
     .deploy-env-topo .topo-canvas {
       min-height: 460px; flex: 1;
+      min-width: 0; max-width: 100%; overflow: hidden;
       border: 1px solid #e5e7eb; border-radius: 10px 10px 0 0;
       background: var(--bg-hover, #f9fafb);
     }
@@ -199,12 +205,19 @@
     /* Per-machine sizing. Hidden until the machine is one the instructor added:
        an environment's own machines are sized by its author, and offering to
        resize them here would imply an override this screen does not send. */
-    .env-machine-res { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; margin-top: 0.55rem; }
+    /* minmax(0, …) not 1fr: a grid item's implicit min-width is `auto`, so it
+       cannot shrink below its content's intrinsic width — and a number input's
+       is roughly 20 characters. With three of them the track overflows the card
+       and the last one hangs out past the border. Same fix .resource-grid above
+       already carries. width:100% then makes the inputs fill the tracks rather
+       than sit at their intrinsic size inside them. */
+    .env-machine-res { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem; margin-top: 0.55rem; }
     .env-machine-res label {
-      display: flex; flex-direction: column; gap: 0.15rem;
+      display: flex; flex-direction: column; gap: 0.15rem; min-width: 0;
       font-size: 0.68rem; font-weight: 500; color: var(--text-muted, #6b7280);
     }
     .env-machine-res input {
+      width: 100%; min-width: 0; box-sizing: border-box;
       padding: 0.28rem 0.4rem; border: 1px solid #e5e7eb; border-radius: 5px;
       font: inherit; font-size: 0.78rem;
     }
@@ -255,7 +268,7 @@
     .form-group label.env-group-label { display: flex; align-items: center; gap: 0.5rem; }
 
     @media (max-width: 1080px) {
-      .deploy-env-grid { grid-template-columns: 1fr; }
+      .deploy-env-grid { grid-template-columns: minmax(0, 1fr); }
       .deploy-env-topo { position: static; }
       .deploy-env-topo .topo-canvas { min-height: 320px; }
     }
@@ -2369,6 +2382,7 @@
     let _envKali = false;      // attack box toggle
     let _envConsole = null;    // ref of the machine the student opens, or null
     let _envAddonSeq = 0;      // stable keys for the add-on rows
+    let _envLoadHint = null;   // why the environment list is empty, if it is
 
     // ── machine model ────────────────────────────────────────────────────────
     //
@@ -2516,10 +2530,11 @@
 
       // An environment picker with nothing in it is ambiguous — "none exist" and
       // "some exist but none can deploy" look identical. The server says which.
-      if (!_vulnTemplates.length && envData.hint) {
-        document.getElementById('deployEnvTemplateInfo').innerHTML =
-          `<span style="color:#b7791f;">${escHtml(envData.hint)}</span>`;
-      }
+      //
+      // Stashed rather than written straight to the info line: onEnvTemplateChange()
+      // runs immediately after this and rewrites that element, which swallowed the
+      // explanation entirely — the picker just looked empty for no stated reason.
+      _envLoadHint = (!_vulnTemplates.length && envData.hint) ? envData.hint : null;
 
       const add = document.getElementById('deployEnvAddTemplate');
       add.innerHTML = '<option value="">Add a workstation&hellip;</option>'
@@ -2566,7 +2581,8 @@
 
       if (wsOnly) {
         info.innerHTML = 'Each student gets their own isolated lane on this course’s network, '
-          + 'holding just the machines you add below.';
+          + 'holding just the machines you add below.'
+          + (_envLoadHint ? `<div style="color:#b7791f; margin-top:0.35rem;">&#9888; ${escHtml(_envLoadHint)}</div>` : '');
         // Nothing is in the lane yet, so seed it with one workstation rather than
         // opening on an empty list the instructor has to decipher.
         if (!_envAddons.length && _envWsTemplates.length) addEnvWorkstation(_envWsTemplates[0].template_id);
