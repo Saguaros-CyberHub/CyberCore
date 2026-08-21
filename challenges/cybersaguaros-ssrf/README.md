@@ -5,10 +5,23 @@ as the **CyberSaguaros Research Group**, a fictional cactus research group
 applying "cyber algorithms" to cactus research.
 
 The challenge is the web-exploitation front of a multi-stage attack path:
-**SSRF → admin access → file-upload RCE → reverse shell as `saguarobot` →
+**admin access → file-upload RCE → reverse shell as `saguarobot` →
 lateral movement to `hrivera` via a leaked deploy key → SSH → user flag →
 Linux privilege escalation → root flag**. The GOAD / Active Directory pivot is
 its own challenge — this box only foreshadows it (planted notes).
+
+**Two independent routes reach the admin panel, and both are complete:**
+
+1. **SSRF** — SaguaroBot's dataset verifier fetches the loopback-only
+   provisioning API, which hands back an `admin_session` token.
+2. **SQLi → crack → sign in** — dump `users` from `/research.php?q=`, crack
+   the unsalted SHA-256 rockyou hashes, and sign in at `/login.php` as
+   `dr.wagner`, whose portal role is `admin`. Legitimate functionality,
+   abused — which is what most operators would reach for first.
+
+They converge at the **RCE** row below. `hrivera` stays deliberately absent
+from the portal `users` table, so route 2 is a second way *in* and not a way
+*past* — it still cannot shortcut the SSH, lateral-movement or privesc stages.
 
 ## Deploying the challenge
 
@@ -59,9 +72,16 @@ deploy/          nginx site config + PHP-FPM pool config
 | Stage | Action |
 |-------|--------|
 | Recon | `/etc/hosts`: `cybersaguaros.local` → lane IP. `ffuf` finds `/chat`, `/gallery`, `/admin`, `/api/`. `/robots.txt` discloses the SaguaroBot endpoint `/api/verify.php`. |
+| *— route 1 —* | |
 | **SSRF** | SaguaroBot's "dataset integrity check" (`/api/verify.php`) fetches any URL. |
 | Steal admin session | SSRF `http://127.0.0.1/api/internal/provision.php` → response leaks an `admin_session` token. |
-| Admin access | Set cookie `admin_session=<token>` → `/admin/` authorises. |
+| Admin access | Set cookie `admin_session=<token>` → `/admin/` authorises. The panel reports *"Authorised by an admin session token"*, naming which surface let you in. |
+| *— route 2 —* | |
+| **SQLi** | `/research.php?q=` concatenates straight into a `LIKE` — `sqlmap` dumps `users`: three accounts, unsalted SHA-256. |
+| **Crack** | `hashcat -m 1400 hashes rockyou.txt` → `arizona` / `cactus` / `sunshine`. |
+| Which account? | The hashes alone do not say which one matters. `/publications.php` and `/article.php` byline the corresponding author as **`@dr.wagner`**, and `/author.php?u=dr.wagner` labels the role *Portal administrator*. Note the convention is **not** uniform — `rgreen` and `dvalmont` are finitial+lastname, `dr.wagner` is not — so the admin username has to be read off the site, not guessed. This is also the discovery path for a login brute-force / spray. |
+| Admin access | Sign in at `/login.php` as `dr.wagner` / `arizona`. The role is `admin`, so the redirect lands on `/admin/` and the header shows an **Admin Panel** button. |
+| *— both routes converge —* | |
 | **RCE** | `/admin/storage.php` ("Cloud Storage") validates only the *last* file extension — `shell.php` is rejected, but `shell.php.jpg` passes (last ext `.jpg`). nginx runs PHP on any path *containing* `.php` (`location ~ \.php`) and PHP-FPM's `security.limit_extensions` is widened, so the double-extension webshell executes from `/uploads/`. |
 | shellpop | Browse the webshell → reverse shell as `saguarobot`. **`saguarobot` has no sudo at all** — `sudo -l` is a dead end by design. |
 | Find the deploy key | `/opt/saguaro/field-sync.sh` is world-readable and, being a real sync script, names the key it authenticates with: `ssh -i /opt/saguaro/deploy/id_rsa`. `linpeas` also flags the readable private key directly. |
@@ -72,11 +92,37 @@ deploy/          nginx site config + PHP-FPM pool config
 | &nbsp;&nbsp;sudo `python3` | `sudo python3 -c 'import os; os.system("/bin/bash")'` |
 | &nbsp;&nbsp;writable root cron | `/etc/cron.d/saguaro-fieldsync` runs `/opt/saguaro/field-sync.sh` as root every minute; the script is `0775 root:fieldops`. Append a payload and wait 60s. |
 | root flag | `cat /root/root.txt` |
-| SQLi (off-path) | `/research.php?q=` is injectable — `sqlmap` dumps `users`. Hashes are unsalted SHA-256 of rockyou words; `hashcat -m 1400` cracks them. **`hrivera` is deliberately absent from that table**, so this route cannot shortcut the chain. |
+| Researcher login (recon) | `rgreen` / `cactus` and `dvalmont` / `sunshine` grant **no** admin, but they do reveal two unpublished working papers on `/publications.php`. One explains why `/api/internal/` was left unauthenticated — a legitimate accelerator for route 1, not a shortcut. |
 | XSS (off-path) | `/research.php?q=<script>alert(1)</script>` reflects unencoded. Always on; no victim bot and no session worth stealing — a demo target only. |
 
 ### Notes for the instructor
 
+- **Two surfaces reach `/admin/`, and `require_admin()` accepts either.**
+  `admin_identity()` in `app/includes/auth.php` resolves them: a portal
+  session whose `users.role` is `admin`, or a valid `admin_sessions` row
+  keyed by the `admin_session` cookie. The control panel prints *which* one
+  authorised the request, which is the clearest way to show a class that two
+  independent chains ended at the same door.
+- **Only `role = 'admin'` counts on the session side.** This is the single
+  most fragile line in the app. A regression from
+  `($r['role'] ?? '') === 'admin'` to a bare `if ($r)` would hand admin — and
+  therefore the upload RCE — to `rgreen` and `dvalmont` as well, and
+  `dvalmont` is also a real Linux SSH account whose password is in the SQLi
+  dump. Nothing in the bake asserts this; if you touch `auth.php`, confirm by
+  hand that `rgreen` / `cactus` still gets a **403** from `/admin/`.
+- **The role badge on `/author.php` is the difficulty knob.** It tells a
+  student outright which cracked hash is the administrator's. That is
+  deliberate — it is what makes route 2 discoverable rather than a guessing
+  game. Removing that one badge is the cleanest way to make the box harder.
+- **Articles are DB-backed** (`articles` table, `author_id` → `users.id`).
+  `status = 'draft'` hides a piece from anonymous visitors and shows it to
+  *any* signed-in portal account, which is the entire payoff for a non-admin
+  login. Drafts carry hints, never credentials — keep it that way.
+- **`/admin/chat.php` renders raw visitor input.** Every field is
+  `htmlspecialchars()`'d on purpose: students will have typed XSS payloads
+  into SaguaroBot long before an instructor opens the transcript page, and an
+  unescaped render there would be an accidental stored-XSS sink firing inside
+  the admin panel. `/research.php` is the one injection surface in this app.
 - **The privesc is sudo, not setuid.** `/usr/bin/find` and `/usr/bin/python3`
   are completely untouched at 0755 with no setuid bit — there are no setuid
   binaries on this box beyond the distro's own set, which the `NO_STRAY_SUID`
@@ -200,5 +246,8 @@ four of the markers (`SUDO_GATED`, `KEY_ENCRYPTED`, `SUDOERS_CLEAN`,
 `NO_STRAY_SUID`) are
 *negative* assertions that catch a collapsed chain rather than a missing file.
 
-The bot/SSRF is reachable without any login — the researcher login, the SQLi and
-the reflected XSS are secondary recon / demo surfaces, not on the critical line.
+The bot/SSRF is reachable without any login. It is **one** of two critical
+lines, not the only one: SQLi → crack → portal sign-in is a complete second
+route to the same RCE. The reflected XSS on `/research.php` remains the only
+genuinely off-path surface — no victim bot, no session worth stealing, a live
+demo target for the lesson and nothing more.

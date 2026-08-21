@@ -1,16 +1,56 @@
 <?php
 // ============================================================================
 // SaguaroBot conversation backend — canned research-assistant replies.
-// Not security-relevant; the integrity-check feature lives in verify.php.
 // ============================================================================
-require_once __DIR__ . '/../../includes/db.php';
+// Not security-relevant; the integrity-check feature lives in verify.php.
+// Conversations are recorded into chat_logs and reviewed at /admin/chat.php.
+//
+// NOTE: verify.php deliberately has NO database dependency and must keep it
+// that way. The floating widget POSTs the visitor's message here BEFORE it
+// calls verify.php, so any URL a visitor pastes is already recorded by this
+// file. Adding db.php to verify.php would buy nothing and would put a 500 path
+// on the SSRF endpoint, which the SSRF_ENDPOINT bake marker asserts returns a
+// clean 400.
+// ============================================================================
+require_once __DIR__ . '/../../includes/auth.php';   // brings db.php with it
 header('Content-Type: application/json');
+
+// The widget's fetch() is same-origin and so carries PHPSESSID; this groups a
+// visitor's turns into one reviewable transcript.
+start_session_once();
+$chatSessionId = substr(session_id(), 0, 64);
+
+/**
+ * Record one turn. Logging must NEVER break the bot — a DB hiccup here would
+ * turn the chat widget into a 500 on every page of the site.
+ */
+function log_chat(string $speaker, string $message): void {
+    global $pdo, $chatSessionId;
+    if ($chatSessionId === '' || $message === '') {
+        return;
+    }
+    try {
+        $stmt = $pdo->prepare(
+            'INSERT INTO chat_logs (session_id, speaker, message) VALUES (?, ?, ?)'
+        );
+        $stmt->execute([$chatSessionId, $speaker, $message]);
+    } catch (Throwable $e) {
+        // swallow
+    }
+}
 
 $raw  = file_get_contents('php://input');
 $data = json_decode($raw, true) ?: [];
-$msg  = strtolower(trim($data['message'] ?? ''));
+// Accept a form post as well as the JSON body the widget sends.
+$rawMsg = trim($data['message'] ?? ($_POST['message'] ?? ''));
+// Keep the RAW message for the log — the matching below lowercases, and a
+// pasted URL should be recorded verbatim and case-correct.
+$msg = strtolower($rawMsg);
+
+log_chat('user', $rawMsg);
 
 function reply(string $r): void {
+    log_chat('bot', $r);          // must precede the exit
     echo json_encode(['reply' => $r]);
     exit;
 }
@@ -27,6 +67,11 @@ if (str_contains($msg, 'verify') || str_contains($msg, 'submit')
 if (str_contains($msg, 'bloom')) {
     reply("Bloom telemetry is one of our flagship datasets — see Research for "
         . "the latest Saguaro Bloom Telemetry set.");
+}
+if (str_contains($msg, 'article') || str_contains($msg, 'publication')
+    || str_contains($msg, 'paper')) {
+    reply("Our published work is on the Publications page — each article lists "
+        . "its corresponding author, so you can see who to contact.");
 }
 if (str_contains($msg, 'admin') || str_contains($msg, 'login')
     || str_contains($msg, 'password')) {

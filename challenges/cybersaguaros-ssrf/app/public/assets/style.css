@@ -180,3 +180,86 @@ ul.pubs li {
 #sbot-form { display: flex; gap: .4rem; padding: .6rem;
   border-top: 1px solid #e0d6c6; }
 #sbot-form input { flex: 1; }
+
+/* ---- header right cluster + identity chip ---- */
+/* .site-header is display:flex; justify-content:space-between with exactly two
+   children. .header-right keeps it that way now that the chip has joined the
+   nav on the right. The bare `nav` rules above still apply untouched. */
+.header-right { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+
+.userchip {
+  display: flex; align-items: center; gap: .55rem;
+  padding: .28rem .3rem .28rem .55rem;
+  background: rgba(0,0,0,.18);
+  border: 1px solid rgba(244,236,224,.25);
+  border-radius: 999px; font-size: .82rem; line-height: 1.2;
+}
+.userchip.anon { background: none; border: none; padding: 0; }
+.userchip .avatar {
+  width: 30px; height: 30px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--cactus); color: var(--sand);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: .78rem;
+}
+.userchip .who { display: flex; flex-direction: column; }
+.userchip .who b { font-weight: 600; }
+.userchip .who span { opacity: .75; font-size: .72rem; }
+
+/* Scoped under .site-header (0,2,0) so these beat the existing
+   `.site-header a { color: var(--sand) }` rule (0,1,1) without !important. */
+.site-header .chip-btn {
+  display: inline-block; padding: .3rem .7rem; border-radius: 999px;
+  background: var(--cactus); color: var(--sand);
+  font-size: .78rem; font-weight: 600; white-space: nowrap;
+}
+.site-header .chip-btn:hover { background: var(--bloom); }
+.site-header .chip-btn.admin { background: var(--bloom); }
+.site-header .chip-btn.ghost {
+  background: transparent; border: 1px solid rgba(244,236,224,.45);
+}
+
+/* ---- badges ---- */
+.badge {
+  display: inline-block; padding: .1rem .5rem; border-radius: 999px;
+  font-size: .7rem; font-weight: 700; letter-spacing: .04em;
+  text-transform: uppercase; vertical-align: middle;
+}
+.badge.draft { background: var(--bloom);  color: #fff; }
+.badge.role  { background: var(--cactus); color: var(--sand); }
+
+/* ---- articles ---- */
+article.paper { max-width: 72ch; }
+article.paper h1 { margin-bottom: .2rem; }
+.byline { color: var(--muted); font-size: .9rem; margin: .2rem 0 1.4rem; }
+.byline a { font-weight: 600; }
+.abstract { font-size: 1.05rem; }
+.paper-body { margin-top: 1.2rem; }
+.paper-body p { margin: 0 0 1rem; }
+.notice {
+  background: #fff; border: 1px solid #e0d6c6;
+  border-left: 4px solid var(--bloom);
+  border-radius: 6px; padding: .9rem 1rem;
+}
+ul.pubs li .byline { margin: .2rem 0 .5rem; }
+
+/* ---- author header ---- */
+.authorhead { display: flex; align-items: center; gap: 1rem; margin-bottom: .5rem; }
+.authorhead .avatar-lg {
+  width: 64px; height: 64px; border-radius: 50%; flex: 0 0 auto;
+  background: var(--cactus); color: var(--sand);
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 1.4rem;
+}
+.authorhead h1 { margin: 0; }
+
+/* ---- admin chat transcripts ---- */
+.transcript { display: flex; flex-direction: column; gap: .5rem; }
+.transcript .turn {
+  background: #1e1b16; color: #d7c9a8; padding: .6rem .8rem; border-radius: 8px;
+  white-space: pre-wrap; word-break: break-word;
+  font-family: monospace; font-size: .82rem;
+}
+.transcript .turn.user { background: #2b2620; }
+.transcript .turn .speaker {
+  display: block; color: var(--bloom); font-weight: 700; margin-bottom: .2rem;
+}
