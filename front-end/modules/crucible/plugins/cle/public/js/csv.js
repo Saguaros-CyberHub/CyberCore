@@ -132,9 +132,47 @@
   const EMAIL_HEADERS = /^(e-?mail|e-?mail\s*address|login\s*id|sis\s*login\s*id)$/i;
   const FIRST_HEADERS = /^(first|first\s*name|given\s*name|forename)$/i;
   const LAST_HEADERS = /^(last|last\s*name|surname|family\s*name)$/i;
-  // A single combined name column. Deliberately NOT parsed into first/last —
-  // see toRosterRows.
+  // A single combined name column. Split into first/last ONLY when the cell
+  // itself disambiguates with a comma — see splitLastFirst.
   const FULL_NAME_HEADERS = /^(name|full\s*name|student|student\s*name)$/i;
+
+  // D2L (Brightspace) classlist exports carry a Role column and include the
+  // teaching staff in the same file as the students. Importing that file
+  // unfiltered enrolls the instructor as one of their own students, and
+  // classifyRows() cannot catch it: `elevated` is derived from an EXISTING
+  // account's role, and a staff member with no CyberCore account yet simply
+  // looks like another new student to create.
+  const ROLE_HEADERS = /^(role|user\s*role|enrollment\s*role|section\s*role)$/i;
+  // Everything else in the column (Instructor, TA, Teaching Assistant,
+  // Designer, Observer, Auditor...) is held back rather than enumerated, so an
+  // unfamiliar staff role is never imported by default.
+  const STUDENT_ROLES = /^(student|learner|participant|enrolled)$/i;
+
+  /**
+   * "Last, First Middle" -> { first, last }, or null when the value cannot be
+   * split without guessing.
+   *
+   * The comma is the whole point. "Ada Lovelace" and "Lovelace Ada" are
+   * genuinely ambiguous and are still refused, but "Lovelace, Ada" is not: every
+   * LMS that emits a combined name column — D2L, Canvas's sortable_name,
+   * Blackboard — writes surname first when it writes a comma. Splitting that is
+   * reading the format, not guessing at it.
+   *
+   * The middle name is dropped. D2L writes "Bargeron, Jacob Michael" and the
+   * invitation email greets people by first_name, so keeping the whole tail
+   * produces "Hi Jacob Michael". There is nowhere to store a middle name, and
+   * the import preview shows exactly what was parsed before anything is
+   * created.
+   */
+  function splitLastFirst(value) {
+    const s = String(value == null ? '' : value).trim();
+    const comma = s.indexOf(',');
+    if (comma < 0) return null;
+    const last = s.slice(0, comma).trim();
+    const rest = s.slice(comma + 1).trim();
+    if (!last || !rest) return null;
+    return { first: rest.split(/\s+/)[0], last };
+  }
 
   function findHeader(cells, pattern) {
     return cells.findIndex(c => pattern.test(String(c).trim()));
@@ -150,14 +188,16 @@
    *
    * @returns {{rows: Array<{line:number,email:string,first_name:?string,last_name:?string}>,
    *            problems: Array<{line:number,message:string}>,
+   *            skipped: Array<{line:number,email:string,name:?string,role:string}>,
    *            hasHeader: boolean}}
    */
   function toRosterRows(matrix) {
     const problems = [];
+    const skipped = [];
     const out = [];
 
     if (!matrix || matrix.length === 0) {
-      return { rows: out, problems: [{ line: 0, message: 'The file is empty.' }], hasHeader: false };
+      return { rows: out, problems: [{ line: 0, message: 'The file is empty.' }], skipped, hasHeader: false };
     }
 
     const header = matrix[0];
@@ -171,22 +211,18 @@
         first: findHeader(header, FIRST_HEADERS),
         last: findHeader(header, LAST_HEADERS),
         full: findHeader(header, FULL_NAME_HEADERS),
+        role: findHeader(header, ROLE_HEADERS),
       };
     } else {
-      idx = { email: 0, first: 1, last: 2, full: -1 };
+      idx = { email: 0, first: 1, last: 2, full: -1, role: -1 };
     }
 
-    // A combined name column is reported, never guessed at. "Lovelace, Ada" and
-    // "Ada Lovelace" are both common and a splitter cannot tell them apart, so
-    // silently guessing would put surnames in the first-name field for a whole
-    // class — visible to every one of those students in the greeting of their
-    // invitation email.
-    if (hasHeader && idx.first < 0 && idx.last < 0 && idx.full >= 0) {
-      problems.push({
-        line: 1,
-        message: 'This file has a single "name" column. Split it into first and last name columns, or the roster will be imported without names.',
-      });
-    }
+    // Only consult the combined column when there are no dedicated ones.
+    const useFullName = idx.first < 0 && idx.last < 0 && idx.full >= 0;
+    // Names that could not be split are reported ONCE at the end rather than
+    // per row, so a file with no commas anywhere does not bury the real
+    // problems under forty identical warnings.
+    const unsplittable = [];
 
     const startRow = hasHeader ? 1 : 0;
     for (let r = startRow; r < matrix.length; r++) {
@@ -196,20 +232,51 @@
       const line = r + 1;
 
       const email = String(cells[idx.email] ?? '').trim();
+      const fullName = useFullName ? String(cells[idx.full] ?? '').trim() : '';
+
+      // Role first: a staff row with no email is not a defective student row,
+      // and reporting it as one sends the instructor looking for a typo.
+      if (idx.role >= 0) {
+        const role = String(cells[idx.role] ?? '').trim();
+        if (role && !STUDENT_ROLES.test(role)) {
+          skipped.push({ line, email, name: fullName || null, role });
+          continue;
+        }
+      }
+
       if (!email) {
         problems.push({ line, message: 'No email address in this row.' });
         continue;
       }
 
-      out.push({
-        line,
-        email,
-        first_name: idx.first >= 0 ? (String(cells[idx.first] ?? '').trim() || null) : null,
-        last_name: idx.last >= 0 ? (String(cells[idx.last] ?? '').trim() || null) : null,
+      let first = idx.first >= 0 ? (String(cells[idx.first] ?? '').trim() || null) : null;
+      let last = idx.last >= 0 ? (String(cells[idx.last] ?? '').trim() || null) : null;
+
+      if (useFullName && fullName) {
+        const split = splitLastFirst(fullName);
+        if (split) {
+          first = split.first;
+          last = split.last;
+        } else {
+          unsplittable.push(line);
+        }
+      }
+
+      out.push({ line, email, first_name: first, last_name: last });
+    }
+
+    if (unsplittable.length) {
+      const shown = unsplittable.slice(0, 5).join(', ');
+      problems.push({
+        line: unsplittable[0],
+        message: `This file has a single "name" column, and ${unsplittable.length} row${unsplittable.length === 1 ? '' : 's'} ` +
+                 `(line${unsplittable.length === 1 ? '' : 's'} ${shown}${unsplittable.length > 5 ? ', …' : ''}) ` +
+                 'could not be read as "Last, First". Those students will be imported without a name. ' +
+                 'Split the column into first and last name columns to fix it.',
       });
     }
 
-    return { rows: out, problems, hasHeader };
+    return { rows: out, problems, skipped, hasHeader };
   }
 
   /** Parse raw text straight to roster records. */

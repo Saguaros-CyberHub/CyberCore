@@ -30,6 +30,7 @@
 
   let parsedRows = [];
   let parseProblems = [];
+  let parseSkipped = [];
   let lastPreview = null;
   let lastResult = null;
 
@@ -40,6 +41,7 @@
   function showRosterImportModal() {
     parsedRows = [];
     parseProblems = [];
+    parseSkipped = [];
     lastPreview = null;
     lastResult = null;
 
@@ -89,6 +91,7 @@
     if (!text.trim()) {
       parsedRows = [];
       parseProblems = [];
+      parseSkipped = [];
       summary.innerHTML = '';
       return;
     }
@@ -96,6 +99,7 @@
     const parsed = CleCsv.parseRoster(text);
     parsedRows = parsed.rows;
     parseProblems = parsed.problems;
+    parseSkipped = parsed.skipped || [];
 
     const bits = [];
     bits.push(`<strong>${parsedRows.length}</strong> row${parsedRows.length === 1 ? '' : 's'} read`);
@@ -103,6 +107,20 @@
     else bits.push('no header found — reading columns as <code>email, first name, last name</code>');
 
     let html = `<div style="font-size:0.85rem; color:var(--text-secondary,#555);">${bits.join(' · ')}</div>`;
+
+    // Held-back staff rows are NOT a problem — a D2L classlist legitimately
+    // contains the instructor. Shown separately from the warning block so it
+    // reads as "handled", and shown at all so nobody concludes the import
+    // silently lost a row.
+    if (parseSkipped.length > 0) {
+      html += `<div class="alert alert-info" style="margin-top:0.5rem; font-size:0.85rem;">
+        <div><strong>${parseSkipped.length} non-student row${parseSkipped.length === 1 ? '' : 's'} held back</strong>
+          — a classlist export includes teaching staff, who should not be enrolled as students.</div>
+        ${parseSkipped.slice(0, 5).map(k =>
+          `<div>Line ${k.line}: ${escHtml(k.name || k.email || '(no name)')} — ${escHtml(k.role)}</div>`).join('')}
+        ${parseSkipped.length > 5 ? `<div>…and ${parseSkipped.length - 5} more.</div>` : ''}
+      </div>`;
+    }
 
     if (parseProblems.length > 0) {
       html += `<div class="alert alert-warning" style="margin-top:0.5rem; font-size:0.85rem;">

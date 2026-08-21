@@ -81,6 +81,15 @@ ELK_PORT="${ELK_PORT:-9200}"
 #     Invoke-RestMethod http://localhost:9200 | Select -Expand version
 ELASTIC_VERSION="${ELASTIC_VERSION:-}"
 
+# SELinux mode written into the sensor image. See the runcmd note: enforcing
+# breaks the Attack Console's guest-exec dispatch outright.
+SELINUX_MODE="${SELINUX_MODE:-permissive}"
+
+# Caps the runaway `endpoint` generator. Everything else stays at its stock
+# 8-40, so the total lands near 5 events/sec -- plenty of noise to hide an
+# attack in, about 100 MB/day rather than 36 GB.
+BASELINE_ENDPOINT_FREQ="${BASELINE_ENDPOINT_FREQ:-60}"
+
 # Baseline rate. Deliberately modest: the point is that an instructor's attack
 # arrives buried in ordinary traffic, not that the disk fills by Friday.
 BASELINE_ARGS="${BASELINE_ARGS:---duration 24h}"
@@ -188,6 +197,20 @@ write_files:
       BLOCK_RPCS=
       FSFREEZE_HOOK_PATHNAME=/etc/qemu-ga/fsfreeze-hook
 
+  # Students reach the sensor through Guacamole, which authenticates over SSH
+  # with the per-lane password lane-deployer generates. The base image ships
+  # 'PasswordAuthentication no', and cloud-init's 'ssh_pwauth: true' does NOT
+  # survive templating: 'cloud-init clean' at seal time discards this bake's
+  # user-data, and the clone's deploy-time cloud-init never re-asserts it. A
+  # drop-in file does survive, so the setting lives here rather than above.
+  #
+  # 00- so it sorts ahead of 50-redhat.conf. In sshd_config the FIRST
+  # occurrence of a keyword wins, not the last -- the opposite of most configs.
+  - path: /etc/ssh/sshd_config.d/00-cybercore.conf
+    permissions: '0600'
+    content: |
+      PasswordAuthentication yes
+
   # Always-on benign traffic, so an instructor's attack has something to hide
   # in. Runs from the PRIMARY checkout; attacks run from the attack checkout.
   - path: /etc/systemd/system/loggen-baseline.service
@@ -262,6 +285,32 @@ runcmd:
   #      not then reach the process group. ----
   - [ sh, -c, 'dnf install -y --allowerasing git tar coreutils util-linux qemu-guest-agent' ]
 
+  # ---- SELinux. Clearing BLACKLIST_RPC above enables the guest-exec RPC, but
+  #      that is only HALF the story on RHEL derivatives: qemu-ga also runs
+  #      confined in the virt_qemu_ga_t domain, which cannot write files or
+  #      fork detached processes. Measured on a deployed Rocky sensor:
+  #
+  #        context=system_u:system_r:virt_qemu_ga_t:s0
+  #        /opt/cybercore/probe: Permission denied
+  #        nohup setsid ... -> never ran
+  #        pgrep/ausearch/getenforce -> denied
+  #
+  #      The Attack Console needs ALL of those: it stages cc-attack.sh, forks it
+  #      under setsid, and reads /proc for liveness. Confined, every dispatch
+  #      fails while the VM looks perfectly healthy.
+  #
+  #      The boolean is the narrow fix, but on its own it is not enough: the
+  #      unconfined transition requires the script to carry the
+  #      virt_qemu_ga_unconfined_exec_t label, and the wrapper is written fresh
+  #      by each dispatch -- which is the very operation that is denied.
+  #      Permissive is what actually makes this work. Defensible here: the
+  #      sensor is a single-purpose synthetic-log box on an isolated per-student
+  #      network with no sensitive data. Set SELINUX_MODE=enforcing to opt out
+  #      and supply your own policy module.
+  - [ sh, -c, 'setsebool -P virt_qemu_ga_run_unconfined 1 2>/dev/null || true' ]
+  - [ sh, -c, 'sed -i "s/^SELINUX=.*/SELINUX=${SELINUX_MODE}/" /etc/selinux/config || true' ]
+  - [ sh, -c, 'setenforce 0 2>/dev/null || true' ]
+
   # ---- Node. Rocky AppStream carries several streams; pin one so the pinned
   #      log-generator commit is not paired with a surprise runtime. ----
   - [ sh, -c, 'dnf module reset -y nodejs || true' ]
@@ -275,6 +324,15 @@ runcmd:
   # npm ci, NOT --omit=dev: the CLI runs through ts-node, which is a devDep.
   # Installing at bake time also keeps class-time deploys off the npm registry.
   - [ sh, -c, 'cd /opt/log-generator && npm ci' ]
+
+  # ---- Baseline RATE. Stock default.yaml runs the 'endpoint' generator at
+  #      frequency 10000 -- roughly 40x every other generator combined. Measured
+  #      on a deployed lane that is ~125 KB/s, i.e. ~36 GB/day: it fills the
+  #      disk within hours and swamps the lane's single-node Elasticsearch.
+  #
+  #      Scale the PRIMARY checkout only. The attack checkout keeps stock rates
+  #      because an attack run is minutes long and volume is the point there.
+  - [ sh, -c, 'sed -i "s/frequency: 10000/frequency: ${BASELINE_ENDPOINT_FREQ}/" /opt/log-generator/src/config/default.yaml' ]
 
   # ---- Second checkout for attacks. A copy rather than a second clone: same
   #      bytes, same commit, no second dependency install, and provably not a
@@ -312,6 +370,9 @@ runcmd:
   - [ sh, -c, 'for B in setsid timeout nohup npm node git; do command -v \$B >/dev/null || { echo "MISSING_BIN=\$B" >> /etc/cybercore-bake.env; }; done; echo "BINS_CHECKED=yes" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'systemctl is-enabled loggen-baseline >/dev/null && echo "BASELINE_ENABLED=yes" >> /etc/cybercore-bake.env || echo "BASELINE_ENABLED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'systemctl is-enabled elastic-agent >/dev/null 2>&1 && echo "ELASTIC_AGENT=yes" >> /etc/cybercore-bake.env || echo "ELASTIC_AGENT=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'sshd -T 2>/dev/null | grep -qx "passwordauthentication yes" && echo "SSH_PASSWORD_AUTH=yes" >> /etc/cybercore-bake.env || echo "SSH_PASSWORD_AUTH=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "^SELINUX=${SELINUX_MODE}" /etc/selinux/config && echo "SELINUX_MODE_SET=yes" >> /etc/cybercore-bake.env || echo "SELINUX_MODE_SET=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "frequency: 10000" /opt/log-generator/src/config/default.yaml && echo "BASELINE_RATE_CAPPED=no" >> /etc/cybercore-bake.env || echo "BASELINE_RATE_CAPPED=yes" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 CLOUDINIT
 echo "==> Appended runcmd"
@@ -397,6 +458,9 @@ check TS_NODE              yes "ts-node is absent — npm ci ran with --omit=dev
 check BASELINE_ENABLED     yes "loggen-baseline is not enabled — lanes would boot silent, with no noise to hide an attack in"
 check ELASTIC_AGENT        yes "elastic-agent is not enabled — events would land on disk and never reach Kibana"
 check BINS_CHECKED         yes "binary check did not run"
+check SELINUX_MODE_SET     yes "SELinux is still enforcing — guest-exec runs confined in virt_qemu_ga_t and CANNOT stage or fork the attack wrapper, so every dispatch fails silently"
+check SSH_PASSWORD_AUTH    yes "sshd refuses password auth — the student's Guacamole SSH console for this box cannot authenticate, because Guacamole logs in with the per-lane password"
+check BASELINE_RATE_CAPPED yes "the endpoint generator is still at frequency 10000 — the baseline writes ~36 GB/day and will fill the disk and swamp the lane's Elasticsearch"
 
 MISSING=$(marker MISSING_BIN)
 if [ -n "$MISSING" ]; then

@@ -1024,6 +1024,35 @@
       document.getElementById('instructorFilterPanel').style.display = 'block';
     }
 
+    /**
+     * Point the Edit Course instructor select at `instructorId`, injecting an
+     * option for it when the list does not contain one.
+     *
+     * THE BUG THIS FIXES: loadInstructors() is called only for admins, so for a
+     * plain instructor the select held nothing but its "Select an instructor..."
+     * placeholder. Assigning .value then silently did nothing, the field showed
+     * as unselected, and saveEditedCourse()'s own "Please select an instructor"
+     * guard blocked every save — an instructor could not edit their own course
+     * at all. Also covers an admin whose list omits a deactivated account.
+     *
+     * Assigning .value and reading it back is the check: a <select> rejects a
+     * value it has no option for and reports '' instead.
+     */
+    function ensureSelectedInstructorOption(instructorId) {
+      const sel = document.getElementById('editCourseInstructor');
+      if (!sel) return;
+      sel.value = instructorId || '';
+      if (!instructorId || sel.value === instructorId) return;
+
+      const me = (window.Auth && Auth.user) || {};
+      const label = String(me.id) === String(instructorId)
+        ? ([me.firstName, me.lastName].filter(Boolean).join(' ') || me.email || 'You')
+        : 'Current instructor';
+      sel.insertAdjacentHTML('afterbegin',
+        `<option value="${escAttr(instructorId)}">${escHtml(label)}</option>`);
+      sel.value = instructorId;
+    }
+
     async function loadInstructors() {
       try {
         const data = await api('GET', '/students/instructors');
@@ -1732,7 +1761,16 @@
       document.getElementById('editCourseName').value = currentCourseData.course_name;
       document.getElementById('editCourseDesc').value = currentCourseData.description || '';
       document.getElementById('editCourseCode').value = currentCourseData.code || '';
-      document.getElementById('editCourseInstructor').value = currentCourseData.instructor_id || '';
+      // Reassigning a course belongs to an admin: a non-admin can only ever
+      // load courses they already own (the GET filters on instructor_id), so
+      // the only valid value for them is themselves.
+      const instructorSel = document.getElementById('editCourseInstructor');
+      const isAdminUser = window.Auth && Auth.user && Auth.user.role === 'admin';
+      ensureSelectedInstructorOption(currentCourseData.instructor_id);
+      instructorSel.disabled = !isAdminUser;
+      instructorSel.title = isAdminUser
+        ? ''
+        : 'Only an administrator can reassign a course to a different instructor.';
       document.getElementById('editCourseStatus').value = currentCourseData.is_active ? 'true' : 'false';
       setFeatureCheckboxes('editCourseFeatures', currentCourseData.features);
       showModal('editCourseModal');
