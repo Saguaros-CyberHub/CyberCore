@@ -27,6 +27,17 @@ async function initHub() {
   }
   document.getElementById('headerUser').textContent = user?.email || '';
 
+  // The self-service workstation catalog is instructor/admin only — students use
+  // the lane VMs and workstations provisioned for them. Marked elements start
+  // hidden in the markup, so this only ever ADDS access, never removes it.
+  //
+  // Drawn from the EFFECTIVE role (isInstructor, not isRealInstructor) so the tab
+  // also disappears in Student View — the house rule at app.js:434-436. Hiding is
+  // cosmetic; the server returns an audited 403 either way.
+  if (Auth.isInstructor()) {
+    document.querySelectorAll('[data-staff-only]').forEach(el => { el.hidden = false; });
+  }
+
   // Init sidebar — this is what still lists the modules.
   Layout.init();
 

@@ -199,6 +199,69 @@ test('concurrency is respected — pveproxy is a single daemon with few workers'
   assert.ok(px.peak() <= 3, `peak in-flight was ${px.peak()}, cap was 3`);
 });
 
+test('a transient node-storage failure is retried before giving up', async () => {
+  // Requests for a peer are forwarded by the API host over the cluster link,
+  // and that hop fails transiently under load. One retry recovers it.
+  let n2Calls = 0;
+  const px = fakeProxmox({
+    nodes: online('n1', 'n2'),
+    storages: [LOCAL],
+    overrides: {
+      // Guarded: overrides match by substring, and the CONTENT path for this
+      // node contains '/n2/storage' too.
+      '/n2/storage': async (p) => {
+        if (!p.endsWith('/storage')) return [];
+        n2Calls++;
+        if (n2Calls === 1) throw new Error('596 connection error');
+        return [LOCAL];
+      },
+    },
+  });
+
+  const r = await scanClusterVolumes({ proxmoxAPI: px.api, deadlineAt: Date.now() + 30000 });
+  assert.strictEqual(n2Calls, 2, 'retried once');
+  assert.strictEqual(r.nodes_scanned, 2);
+  assert.strictEqual(r.complete, true, 'a recovered node is not a coverage hole');
+});
+
+test('a node that fails every attempt is named with its reason', async () => {
+  const px = fakeProxmox({
+    nodes: online('n1', 'n2'),
+    storages: [LOCAL],
+    overrides: { '/n2/storage': async () => { throw new Error('595 no route to host'); } },
+  });
+
+  const r = await scanClusterVolumes({
+    proxmoxAPI: px.api, deadlineAt: Date.now() + 30000, nodeListAttempts: 2,
+  });
+  assert.strictEqual(r.nodes_scanned, 1);
+  const n2 = r.skipped.nodes.find(n => n.node === 'n2');
+  assert.ok(n2, 'the node must appear in the skip list, not vanish');
+  assert.match(n2.reason, /595 no route to host/,
+    'the raw Proxmox error is the only thing that points at a cause');
+  assert.deepStrictEqual(r.coverage.nodes_unlisted, ['n2']);
+});
+
+test('losing nodes leaves shared coverage complete on a Ceph cluster', async () => {
+  const px = fakeProxmox({
+    nodes: online('n1', 'n2', 'n3'),
+    storages: [CEPH, LOCAL],
+    contents: { 'ceph-vm': [{ volid: 'ceph-vm:vm-600001-disk-0', size: 5 }] },
+    overrides: {
+      '/n2/storage': async () => { throw new Error('596 connection error'); },
+      '/n3/storage': async () => { throw new Error('596 connection error'); },
+    },
+  });
+
+  const r = await scanClusterVolumes({ proxmoxAPI: px.api, deadlineAt: Date.now() + 30000 });
+  assert.strictEqual(r.nodes_scanned, 1, 'only n1 answered');
+  assert.strictEqual(r.coverage.shared_complete, true,
+    'the Ceph pool was still read in full — from n1, which is all it takes');
+  assert.strictEqual(r.coverage.shared_read, 1);
+  assert.ok(r.volumes.some(v => v.storage === 'ceph-vm'), 'and its volumes are present');
+  assert.strictEqual(r.complete, false, 'n2/n3 local images remain unknown');
+});
+
 test('storageFilter narrows the scan (used by the disk sweep)', async () => {
   const px = fakeProxmox({ nodes: online('n1', 'n2'), storages: [CEPH, LOCAL] });
   await scanClusterVolumes({

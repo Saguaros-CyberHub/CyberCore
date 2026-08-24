@@ -21,6 +21,13 @@ const { planStorageScan } = require('./reconcile-audit');
 /** Don't start a job that cannot plausibly finish. */
 const MIN_SLICE_MS = 1500;
 
+function sleep(ms) {
+  return new Promise(resolve => {
+    const t = setTimeout(resolve, ms);
+    if (typeof t.unref === 'function') t.unref();
+  });
+}
+
 function sleepUntil(deadlineAt) {
   const ms = Math.max(0, deadlineAt - Date.now());
   return new Promise(resolve => {
@@ -56,6 +63,7 @@ async function scanClusterVolumes({
   concurrency = Number(process.env.RECONCILE_SCAN_CONCURRENCY) || 4,
   perCallTimeoutMs = Number(process.env.RECONCILE_SCAN_CALL_TIMEOUT_MS) || 12000,
   maxReaderAttempts = 2,
+  nodeListAttempts = Number(process.env.RECONCILE_NODE_LIST_ATTEMPTS) || 2,
   preferredNode = null,
   storageFilter = null,
   signal = null,
@@ -72,6 +80,7 @@ async function scanClusterVolumes({
     storages_failed: [],
     storages_scanned: 0,
     stats: { calls_naive: 0, shared_storages: 0 },
+    coverage: { shared_total: 0, shared_read: 0, local_total: 0, local_read: 0, shared_complete: false, nodes_unlisted: [] },
     calls_made: 0,
     complete: false,
     duration_ms: Date.now() - startedAt,
@@ -106,25 +115,35 @@ async function scanClusterVolumes({
     const nodesTotal = nodes.length;
 
     // ---- 2. per-node storage listings (parallel, cheap) ---------------------
-    const listings = await runBatch(
-      nodes,
-      async (n) => {
-        if (!n.online) return { node: n.node, online: false, storages: null, error: null };
+    // Every call lands on the ONE host in PROXMOX_API_URL, which forwards
+    // anything addressed to a peer over the cluster link — a second internal
+    // TLS hop through that peer's pveproxy. Those forwarded requests are the
+    // ones that fail under load, with 595/596 or a reset, and they fail
+    // transiently: the same node answers fine a moment later. One retry with a
+    // short backoff turns most of that noise into a successful scan.
+    const listNodeStorage = async (n) => {
+      if (!n.online) return { node: n.node, online: false, storages: null, error: null };
+
+      let lastErr = null;
+      for (let attempt = 1; attempt <= nodeListAttempts; attempt++) {
         if (remaining() <= MIN_SLICE_MS) {
-          return { node: n.node, online: true, storages: null, error: 'deadline reached' };
+          return { node: n.node, online: true, storages: null, error: 'audit budget exhausted before this node was reached' };
         }
         try {
+          callsMade++;
           const storages = await proxmoxAPI('GET', `/api2/json/nodes/${n.node}/storage`, null, {
             timeoutMs: Math.min(perCallTimeoutMs, remaining()), signal,
           });
-          return { node: n.node, online: true, storages: storages || [], error: null };
+          return { node: n.node, online: true, storages: storages || [], error: null, attempts: attempt };
         } catch (e) {
-          return { node: n.node, online: true, storages: null, error: e.message };
+          lastErr = e;
+          if (attempt < nodeListAttempts) await sleep(300 * attempt);
         }
-      },
-      { concurrency }
-    );
-    callsMade += nodes.filter(n => n.online).length;
+      }
+      return { node: n.node, online: true, storages: null, error: lastErr ? lastErr.message : 'unknown error' };
+    };
+
+    const listings = await runBatch(nodes, listNodeStorage, { concurrency });
 
     const nodeStorages = listings.results.map((r, i) =>
       r && r.node ? r : { node: nodes[i].node, online: nodes[i].online, storages: null, error: 'worker failed' }
@@ -136,6 +155,7 @@ async function scanClusterVolumes({
     const scannedNodes = new Set();
     const storagesFailed = [];
     const volumes = [];
+    const jobOutcomes = [];
     let contentCalls = 0;
     let progressDone = 0;
 
@@ -165,15 +185,15 @@ async function scanClusterVolumes({
             });
           }
           scannedNodes.add(node);
+          jobOutcomes.push({ storage: job.storage, shared: job.shared, ok: true, node });
           return true;
         } catch (e) {
           lastErr = e;
         }
       }
-      storagesFailed.push({
-        node: attempts[0] || '?', storage: job.storage,
-        reason: lastErr ? lastErr.message : 'no reader available',
-      });
+      const reason = lastErr ? lastErr.message : 'no reader available';
+      storagesFailed.push({ node: attempts[0] || '?', storage: job.storage, shared: job.shared, reason });
+      jobOutcomes.push({ storage: job.storage, shared: job.shared, ok: false, reason });
       return false;
     };
 
@@ -202,12 +222,33 @@ async function scanClusterVolumes({
       n => n.online && Array.isArray(n.storages)
     ).length;
 
+    // Losing a node does NOT cost the same coverage on both storage kinds, and
+    // conflating them badly overstates the damage on a Ceph cluster. A shared
+    // pool is one logical volume list readable from ANY node that has it
+    // active, so one reachable node covers it completely. Only node-LOCAL
+    // images (local-lvm, local ZFS) go unseen when a node is unreachable — and
+    // for a node whose storage list never came back, we cannot even say whether
+    // it had any.
+    const sharedJobs = jobOutcomes.filter(j => j.shared);
+    const localJobs = jobOutcomes.filter(j => !j.shared);
+    const coverage = {
+      shared_total: sharedJobs.length,
+      shared_read: sharedJobs.filter(j => j.ok).length,
+      local_total: localJobs.length,
+      local_read: localJobs.filter(j => j.ok).length,
+      // True when every shared pool we know about was read: shared-storage
+      // orphans are then a complete list, whatever happened elsewhere.
+      shared_complete: sharedJobs.length > 0 && sharedJobs.every(j => j.ok),
+      nodes_unlisted: nodeStorages.filter(n => n.online && !Array.isArray(n.storages)).map(n => n.node),
+    };
+
     return {
       volumes,
       skipped: plan.skipped,
       storages_failed: storagesFailed,
       storages_scanned: plan.jobs.length - storagesFailed.length,
       stats: plan.stats,
+      coverage,
       calls_made: callsMade,
       complete,
       duration_ms: Date.now() - startedAt,

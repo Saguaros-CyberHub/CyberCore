@@ -412,6 +412,33 @@ function renderReconcileResult(r, meta) {
         </tr>`).join('');
     }
 
+    // ---- scan coverage ----------------------------------------------------
+    // When the scan misses nodes, "which ones, and why" is the only thing that
+    // leads anywhere. The reasons were in the payload from the start and simply
+    // were not rendered, which left the operator with a percentage and no
+    // thread to pull.
+    const ds = r.disk_scan || {};
+    const cov = ds.coverage || {};
+    const skippedNodes = ds.nodes_skipped || [];
+    const failedStorages = ds.storages_failed || [];
+    const showCoverage = !ds.complete && (skippedNodes.length || failedStorages.length);
+
+    let coverageRows = '';
+    if (showCoverage) {
+      coverageRows = skippedNodes.map(n => `
+        <tr>
+          <td><code>${escHtml(n.node)}</code></td>
+          <td>node storage list</td>
+          <td style="color:${/offline/i.test(n.reason || '') ? '#d69e2e' : '#e53e3e'};">${escHtml(n.reason || 'unknown')}</td>
+        </tr>`).join('')
+        + failedStorages.map(f => `
+        <tr>
+          <td><code>${escHtml(f.node)}</code></td>
+          <td><code>${escHtml(f.storage)}</code>${f.shared ? ' <span style="color:var(--gray-400); font-size:0.7rem;">(shared)</span>' : ''}</td>
+          <td style="color:#e53e3e;">${escHtml(f.reason || 'unknown')}</td>
+        </tr>`).join('');
+    }
+
     const warnings = (r.warnings || []);
 
     document.getElementById('reconcileResults').innerHTML = `
@@ -498,6 +525,23 @@ function renderReconcileResult(r, meta) {
           <table class="admin-table" style="font-size:0.8rem;">
             <thead><tr><th>Lane ID</th><th>Name</th><th>VXLAN</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
             <tbody>${staleRows}</tbody>
+          </table>` : ''}
+        ${showCoverage ? `
+          <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Disk Scan Coverage</h4>
+          <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">
+            Reached <strong>${ds.nodes_scanned} of ${ds.nodes_total}</strong> nodes
+            ${cov.shared_total ? `&middot; shared pools read <strong>${cov.shared_read}/${cov.shared_total}</strong>` : ''}
+            ${cov.local_total ? `&middot; node-local stores read <strong>${cov.local_read}/${cov.local_total}</strong>` : ''}
+            ${ds.duration_ms ? `&middot; ${(ds.duration_ms / 1000).toFixed(1)}s` : ''}
+            ${ds.calls_made ? `&middot; ${ds.calls_made} API calls` : ''}.
+            Every request goes to the one host in <code>PROXMOX_API_URL</code>, which forwards
+            anything addressed to a peer over the cluster link &mdash; so repeated failures on
+            the same nodes usually mean that hop, not the nodes themselves.
+            Retry once before reading too much into a single run.
+          </p>
+          <table class="admin-table" style="font-size:0.8rem;">
+            <thead><tr><th>Node</th><th>Target</th><th>Why it was not scanned</th></tr></thead>
+            <tbody>${coverageRows}</tbody>
           </table>` : ''}
         ${diskRows ? `
           <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e; display:flex; align-items:center; justify-content:space-between;">

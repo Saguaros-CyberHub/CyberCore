@@ -123,6 +123,25 @@
     .btn-outline { background: transparent; border: 1px solid #d1d5db; color: #374151; }
     .btn-outline:hover { background: #f3f4f6; }
 
+    /* A selected row. BOTH selectors on purpose: `.students-table tbody tr:hover`
+       above is (0,2,2), so a bare `.is-selected` at (0,1,0) loses to it and the row
+       reverts to plain hover grey under the cursor — which reads as "I just
+       deselected that". The :hover variant is (0,3,2) and settles it. */
+    .students-table tbody tr.is-selected,
+    .students-table tbody tr.is-selected:hover { background: rgba(30,82,136,0.08); }
+    .students-table tbody tr.is-busy { opacity: 0.6; }
+
+    /* Sits between the Deploy button and the table. Never hidden and never sticky:
+       a bar that appears on the first tick shifts every row down by its own height,
+       under a cursor already travelling to the second tick. */
+    .vm-bulkbar {
+      display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+      padding: 0.5rem 0.7rem; margin-bottom: 0.5rem;
+      border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb;
+    }
+    .vm-bulkbar-count { font-size: 0.82rem; color: var(--text-secondary, #4b5563); }
+    .vm-bulkbar .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
     /* ====================================================================
        DEPLOY ENVIRONMENT MODAL
        --------------------------------------------------------------------
@@ -842,6 +861,71 @@
     </div>
   </div>
 
+  <!-- ======================================================================
+       REDEPLOY ONE LANE
+       ----------------------------------------------------------------------
+       In place by default: the machines INSIDE the lane are destroyed and
+       rebuilt while the lane itself — VXLAN, gateway, console host:port,
+       Guacamole connection — is untouched. That is the whole reason this is a
+       picker rather than a plain confirm: with the lane staying put, "which
+       machines?" is a real question, and leaving one unticked leaves it
+       running and untouched.
+
+       The whole-lane opt-in at the bottom is the ONLY control here that
+       changes a student's connection details, which is why it is the only one
+       with a warning strip attached.
+       ====================================================================== -->
+  <div class="modal-overlay" id="vmRedeployModal">
+    <div class="modal" style="max-width: 620px;">
+      <h2>Redeploy <span id="vmRedeployWho"></span></h2>
+      <div class="modal-form">
+
+        <div class="info-box"><p id="vmRedeployLaneLine" style="margin:0;"></p></div>
+
+        <div class="form-group">
+          <label class="env-group-label">
+            Machines to rebuild
+            <label class="env-selectall">
+              <input type="checkbox" id="vmRedeploySelectAll" onchange="toggleVMRedeploySelectAll(this)">
+              select all
+            </label>
+          </label>
+          <div class="env-students" id="vmRedeployMachines"></div>
+          <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
+            <span id="vmRedeployCount" aria-live="polite"></span> &middot;
+            Unticked machines are left running and untouched.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400;">
+            <input type="checkbox" id="vmRedeployWholeLane" style="width:auto; margin-top:0.2rem;"
+                   onchange="onVMRedeployWholeLaneChange(this)">
+            <span>
+              <strong>Rebuild the whole lane instead</strong>
+              <span class="deploy-env-hint" style="display:block;">
+                Destroys and recreates the lane itself. For a lane whose gateway is broken &mdash;
+                the rows showing <em>Error</em>.
+              </span>
+            </span>
+          </label>
+          <div class="env-warn" id="vmRedeployWholeLaneWarn" style="display:none;">
+            <span aria-hidden="true">&#9888;</span>
+            <span>New VXLAN, new console address and port, new Guacamole connection. Any connection
+                  details this student already has stop working. The machine picker above does not
+                  apply &mdash; everything is rebuilt.</span>
+          </div>
+        </div>
+
+        <div class="form-buttons">
+          <button type="button" class="btn btn-secondary" onclick="closeVMRedeployModal()">Cancel</button>
+          <button type="button" class="btn btn-danger" id="vmRedeployBtn"
+                  onclick="submitVMRedeploy(this)">Redeploy</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
   <script>
@@ -1067,7 +1151,16 @@
       clearTimeout(_provisionProgressTimer);
       clearTimeout(_labRefreshTimer);
       clearTimeout(_labProgressTimer);
-      _vmRefreshTimer = _provisionProgressTimer = _labRefreshTimer = _labProgressTimer = null;
+      clearTimeout(_vmRebuildProgressTimer);
+      // The chained assignment matters as much as the clearTimeout: a stale
+      // non-null handle would survive into the next course.
+      _vmRefreshTimer = _provisionProgressTimer = _labRefreshTimer = _labProgressTimer =
+        _vmRebuildProgressTimer = null;
+      // Lane ids are course-scoped, so a selection carried into the next course is
+      // meaningless. The render-time intersect would drop them anyway — clearing
+      // here removes the need to reason about it at all.
+      _vmSelected.clear();
+      _vmBusyLanes.clear();
     }
 
     async function viewCourse(courseId) {
@@ -1466,6 +1559,148 @@
 
     let _vmRefreshTimer = null;
 
+    // ── bulk selection ───────────────────────────────────────────────────────
+    //
+    // POSITIVELY keyed, unlike attack-console.js's `excluded` Set. That screen
+    // broadcasts to the whole class, so a lane arriving on a later refresh SHOULD
+    // be included and missing a student is the failure. Here the buttons are
+    // Delete and Redeploy and the fail-safe direction reverses: a lane the
+    // instructor has never seen a row for must never end up in one. An inverted
+    // Set would have the "select all, refresh adds rows, delete more than
+    // intended" hazard by construction.
+    //
+    // The Set is the only source of truth. Checkboxes are rendered FROM it and
+    // never read back into it, which is what lets the 8s poll rebuild the whole
+    // table without losing the selection.
+    let _vmSelected = new Set();   // lane_id
+    let _vmRows = [];              // the array the CURRENT table was rendered from
+    let _vmBulkBusy = false;       // a bulk request is in flight
+    let _vmBusyLanes = new Set();  // aimed at, before the server admits 'deploying'
+
+    /** A row the instructor may put in a bulk action. */
+    function _vmSelectable(v) {
+      // 'deploying' is excluded on both sides: tearing down a lane mid-clone races
+      // the deployer, and rebuilding one that is already being built is nonsense.
+      // 'error' rows stay selectable — they are what the whole-lane rebuild and
+      // the cleanup pass exist for.
+      //
+      // Not-enrolled students and the instructor's own lane also stay selectable.
+      // routes/vms.js lists them precisely so they can be cleaned up ("a hidden
+      // lane cannot be deleted from this tab either"); disabling the checkbox
+      // would re-create that hole for the bulk path. The safety lives in the
+      // confirm copy, which names them.
+      return !!v.lane_id && v.lane_status !== 'deploying' && !_vmBusyLanes.has(v.lane_id);
+    }
+
+    /** The selected rows, from the LAST RENDER's array — never from the DOM. */
+    function _selectedVMRows() {
+      return _vmRows.filter(v => _vmSelected.has(v.lane_id) && _vmSelectable(v));
+    }
+
+    function _vmTableHasFocus() {
+      const root = document.getElementById('vmManagementContent');
+      return !!(root && root.contains(document.activeElement));
+    }
+
+    /** "Alice Chen (a@x.edu), Bob Ruiz (b@x.edu) and 3 more" — PLAIN TEXT.
+     *  Confirm.show escapes `message` into a bare div with no white-space rule,
+     *  so a newline-separated list would not merely fail to be HTML — it would
+     *  collapse into one run-on line. Hence inline, and capped. */
+    function _vmSelectionNames(rows, cap = 6) {
+      const seen = {};
+      rows.forEach(v => { seen[v.student_email] = (seen[v.student_email] || 0) + 1; });
+      const names = rows.map(v => {
+        const n = [v.first_name, v.last_name].filter(Boolean).join(' ');
+        const base = n ? n + ' (' + v.student_email + ')' : (v.student_email || v.lane_id);
+        // A student CAN hold two lanes — routes/vms.js scopes by course, not one
+        // per head — and a list naming someone twice with no way to tell the rows
+        // apart is worse than no list.
+        return seen[v.student_email] > 1 ? base + ' VXLAN ' + v.vxlan_id : base;
+      });
+      if (names.length > cap) {
+        return names.slice(0, cap).join(', ') + ' and ' + (names.length - cap) + ' more';
+      }
+      return names.length > 1
+        ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
+        : (names[0] || '');
+    }
+
+    function toggleVMSelect(box) {
+      const laneId = box.dataset.vmSelectLane;
+      if (!laneId) return;
+      if (box.checked) _vmSelected.add(laneId); else _vmSelected.delete(laneId);
+      const tr = box.closest('tr');
+      if (tr) tr.classList.toggle('is-selected', box.checked);
+      _syncVMBulkBar();
+    }
+
+    function toggleVMSelectAll(box) {
+      document.querySelectorAll('#vmManagementContent .vm-select:not(:disabled)').forEach(cb => {
+        cb.checked = box.checked;
+        if (box.checked) _vmSelected.add(cb.dataset.vmSelectLane);
+        else _vmSelected.delete(cb.dataset.vmSelectLane);
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.toggle('is-selected', box.checked);
+      });
+      _syncVMBulkBar();
+    }
+
+    function clearVMSelection() {
+      _vmSelected.clear();
+      document.querySelectorAll('#vmManagementContent .vm-select').forEach(cb => {
+        cb.checked = false;
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.remove('is-selected');
+      });
+      _syncVMBulkBar();
+    }
+
+    /** Additive: adds the broken lanes to whatever is already picked. "I
+     *  hand-picked two, now add all the broken ones" is the real flow, and wiping
+     *  a hand-built selection is never what was meant. */
+    function selectVMErrorLanes() {
+      document.querySelectorAll(
+        '#vmManagementContent .vm-select:not(:disabled)[data-lane-status="error"]'
+      ).forEach(cb => {
+        cb.checked = true;
+        _vmSelected.add(cb.dataset.vmSelectLane);
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.add('is-selected');
+      });
+      _syncVMBulkBar();
+    }
+
+    /**
+     * Counter, buttons and the header tri-state, recomputed from the DOM's checked
+     * flags. Every selection change ends here, and this is the ONLY place
+     * `indeterminate` is set — it is a property, not an attribute, so it cannot be
+     * expressed in the HTML string and has to be re-applied after every render.
+     * Missing that is exactly why #deployEnvSelectAll never goes mixed.
+     */
+    function _syncVMBulkBar() {
+      const boxes = [...document.querySelectorAll('#vmManagementContent .vm-select:not(:disabled)')];
+      const n = boxes.filter(b => b.checked).length;
+      const total = boxes.length;
+
+      const all = document.getElementById('vmSelectAll');
+      if (all) {
+        all.checked = total > 0 && n === total;
+        all.indeterminate = n > 0 && n < total;
+      }
+      const count = document.getElementById('vmBulkCount');
+      if (count) {
+        count.innerHTML = n
+          ? '<strong>' + n + '</strong> of ' + total + ' lane' + (total === 1 ? '' : 's') + ' selected'
+          : 'Select lanes to redeploy or delete';
+      }
+      ['vmBulkRedeployBtn', 'vmBulkDeleteBtn', 'vmClearBtn'].forEach(id => {
+        const b = document.getElementById(id);
+        // _vmBulkBusy outranks the count: a re-render mid-flight must not
+        // re-enable a button the in-flight operation has taken.
+        if (b) b.disabled = _vmBulkBusy || n === 0;
+      });
+    }
+
     function _powerBadge(state) {
       const map = {
         running:   ['#38a169', 'Running'],
@@ -1478,11 +1713,32 @@
       return `<span style="background:${color}20;color:${color};border-radius:4px;padding:2px 8px;font-size:0.78rem;font-weight:600;">${label}</span>`;
     }
 
-    async function loadVMManagement() {
+    async function loadVMManagement(opts) {
       clearTimeout(_vmRefreshTimer);
+      const polled = !!(opts && opts.polled);
+      // A poll landing mid-selection rebuilds the table under the cursor: the row
+      // the instructor was about to tick moves, and the click lands on someone
+      // else's lane. The Set survives a rebuild; the pointer does not. So a POLL —
+      // never a user-initiated load — stands down while a selection is live and
+      // focus is inside the table, and while a bulk request is in flight. It
+      // self-heals the moment focus leaves.
+      if (polled && (_vmBulkBusy || (_vmSelected.size > 0 && _vmTableHasFocus()))) {
+        _vmRefreshTimer = setTimeout(() => loadVMManagement({ polled: true }), 8000);
+        return;
+      }
       try {
         const data = await api('GET', `/courses/${currentCourseId}/vms`);
         const vms = data.vms || [];
+
+        // Never carry a selection across a refresh for a lane that has vanished or
+        // become unselectable — either would silently change what the next bulk
+        // action hits. Same hygiene attack-console.js applies to its exclusions,
+        // for the stronger reason that this Set feeds Delete.
+        const live = new Set(vms.filter(_vmSelectable).map(v => v.lane_id));
+        _vmSelected = new Set([..._vmSelected].filter(id => live.has(id)));
+        // A lane the server now agrees is settled is no longer ours to hold busy.
+        vms.forEach(v => { if (v.lane_status !== 'deploying') _vmBusyLanes.delete(v.lane_id); });
+        _vmRows = vms;
 
         let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Deploy Workstations</button>
           <div id="provisionProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
@@ -1490,8 +1746,40 @@
         if (vms.length === 0) {
           html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No workstation VMs provisioned yet.</p>';
         } else {
+          const selCount = vms.filter(v => _vmSelected.has(v.lane_id)).length;
+          const selTotal = vms.filter(_vmSelectable).length;
+          // lane_status, NOT power_state: routes/vms.js collapses power_state to the
+          // lane status whenever the lane is not active, and _powerBadge also renders
+          // raw live Proxmox strings through the same cell. Filtering on it would be
+          // filtering on a display value.
+          const errCount = vms.filter(v => v.lane_status === 'error' && _vmSelectable(v)).length;
+          const dis = selCount ? '' : ' disabled';
+
+          html += `<div class="vm-bulkbar">
+            <span class="vm-bulkbar-count" id="vmBulkCount" aria-live="polite">
+              ${selCount ? `<strong>${selCount}</strong> of ${selTotal} lane${selTotal === 1 ? '' : 's'} selected`
+                         : 'Select lanes to redeploy or delete'}
+            </span>
+            <span style="flex:1"></span>
+            ${errCount ? `<button type="button" class="btn btn-sm btn-outline" id="vmSelectErrorsBtn"
+                title="Adds every lane whose deploy failed to the current selection"
+                onclick="selectVMErrorLanes()">Select ${errCount} broken lane${errCount === 1 ? '' : 's'}</button>` : ''}
+            <button type="button" class="btn btn-sm btn-outline" id="vmClearBtn"
+                    onclick="clearVMSelection()"${dis}>Clear</button>
+            <button type="button" class="btn btn-sm btn-outline" id="vmBulkRedeployBtn"
+                    style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
+                    onclick="bulkRedeployLanes(this)"${dis}>Redeploy</button>
+            <button type="button" class="btn btn-sm btn-outline" id="vmBulkDeleteBtn"
+                    style="color:#e53e3e;border-color:#e53e3e;"
+                    onclick="bulkDeleteLanes(this)"${dis}>Delete</button>
+          </div>`;
+
           html += `<table class="students-table">
             <thead><tr>
+              <th style="width:2.25rem;text-align:center;">
+                <input type="checkbox" id="vmSelectAll" onchange="toggleVMSelectAll(this)"
+                       aria-label="Select all lanes">
+              </th>
               <th>Student</th>
               <th>VM Name</th>
               <th>Lane (VXLAN)</th>
@@ -1543,7 +1831,26 @@
                 + `${(v.resource_warnings || []).length ? ' <span style="color:#d69e2e;">&#9888;</span>' : ''}</span>`
               : '';
 
-            html += `<tr${errTitle}>
+            const sel = _vmSelected.has(v.lane_id);
+            const selectable = _vmSelectable(v);
+            const who = [v.first_name, v.last_name].filter(Boolean).join(' ')
+              || v.student_email || 'this lane';
+            // Pre-disabled per-row buttons, _labActionCell's idiom. Dimming these
+            // at request time rather than waiting for the server to flip
+            // lane_status closes a several-second window in which Delete points at
+            // a lane that is already mid-rebuild.
+            const rowDis = selectable ? '' : ' disabled';
+            const busyTitle = selectable ? '' : ' title="This lane is being deployed or rebuilt"';
+
+            html += `<tr${sel ? ' class="is-selected"' : (selectable ? '' : ' class="is-busy"')}${errTitle} data-lane-id="${escAttr(v.lane_id)}">
+              <td style="text-align:center;">
+                <input type="checkbox" class="vm-select"
+                       data-vm-select-lane="${escAttr(v.lane_id)}"
+                       data-lane-status="${escAttr(v.lane_status || '')}"
+                       aria-label="Select ${escAttr(who)}"
+                       ${sel ? 'checked' : ''}${rowDis}${busyTitle}
+                       onchange="toggleVMSelect(this)">
+              </td>
               <td>${studentLabel}</td>
               <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}${sizeCell}</td>
               <td style="font-size:0.85rem;">${laneLabel}</td>
@@ -1551,9 +1858,11 @@
               <td>${credCell}</td>
               <td>${_powerBadge(v.power_state)}</td>
               <td style="display:flex;gap:0.4rem;align-items:center;">
-                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" onclick="openVMConsole('${escAttr(v.lane_id)}')">Console</button>` : ''}
-                <button class="btn btn-sm btn-outline" onclick="showLaneTopology('${escAttr(v.lane_id)}', '${escAttr(v.vm_name || v.lane_id)}')">Topology</button>
-                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" onclick="deleteVM('${escAttr(v.lane_id)}')">Delete</button>
+                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" data-lane-id="${escAttr(v.lane_id)}" onclick="openVMConsole(this.dataset.laneId)"${rowDis}${busyTitle}>Console</button>` : ''}
+                <!-- Topology stays live while a lane rebuilds: it is read-only, and
+                     it is exactly what you want to look at mid-rebuild. -->
+                <button class="btn btn-sm btn-outline" data-lane-id="${escAttr(v.lane_id)}" data-label="${escAttr(v.vm_name || v.lane_id)}" onclick="showLaneTopology(this.dataset.laneId, this.dataset.label)">Topology</button>
+                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" data-lane-id="${escAttr(v.lane_id)}" onclick="deleteVM(this.dataset.laneId)"${rowDis}${busyTitle}>Delete</button>
               </td>
             </tr>`;
           });
@@ -1562,11 +1871,24 @@
 
           // Auto-refresh while any lane is still deploying
           if (vms.some(v => v.lane_status === 'deploying')) {
-            _vmRefreshTimer = setTimeout(loadVMManagement, 8000);
+            _vmRefreshTimer = setTimeout(() => loadVMManagement({ polled: true }), 8000);
           }
         }
 
+        // Focus is the one thing a full re-render loses that the Set cannot
+        // restore, and losing it mid-keyboard-selection is how a Space lands on
+        // the wrong row.
+        const focusedLane = (document.activeElement && document.activeElement.dataset)
+          ? document.activeElement.dataset.vmSelectLane : null;
         document.getElementById('vmManagementContent').innerHTML = html;
+        // `indeterminate` is a PROPERTY and cannot live in the HTML string, so the
+        // header tri-state has to be re-applied after EVERY render.
+        _syncVMBulkBar();
+        if (focusedLane) {
+          const back = document.querySelector(
+            '#vmManagementContent input[data-vm-select-lane="' + CSS.escape(focusedLane) + '"]');
+          if (back) back.focus();
+        }
       } catch (e) {
         document.getElementById('vmManagementContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
@@ -3174,14 +3496,381 @@
       closeModal('laneTopologyModal');
     }
 
+    /**
+     * One lane, from its own row.
+     *
+     * On Confirm.show rather than the native confirm() it used to use: with bulk
+     * Delete sitting directly above this table, a browser dialog from the row and
+     * a styled one from the bar is an inconsistency this feature would have
+     * introduced. Confirm.show also brings Esc, click-outside, focus return and
+     * the danger styling for free.
+     */
     async function deleteVM(laneId) {
-      if (!confirm('Delete this workstation lane (workstation + gateway)?')) return;
+      const row = _vmRows.find(v => v.lane_id === laneId);
+      const who = row
+        ? ([row.first_name, row.last_name].filter(Boolean).join(' ') || row.student_email)
+        : 'this student';
+      const machines = row && Array.isArray(row.machines) ? row.machines.length : 0;
+      const ok = await Confirm.show({
+        title: 'Delete this lane?',
+        message:
+          'This destroys ' + who + '\u2019s lane and every machine on it'
+          + (machines ? ' (' + machines + ' machine' + (machines === 1 ? '' : 's') + ')' : '')
+          + ', plus the gateway, the VXLAN network and the Guacamole connection. '
+          + 'Anything saved on those machines is lost and the connection details they '
+          + 'already have stop working. Their enrolment, grades and captured flags are '
+          + 'untouched. This cannot be undone.'
+          + (row && row.is_self ? ' This is your own machine.' : ''),
+        confirmText: 'Delete lane',
+        danger: true,
+      });
+      if (!ok) return;
       try {
         await api('DELETE', `/courses/${currentCourseId}/vms/${laneId}`);
         toast('Workstation lane deleted');
         loadVMManagement();
       } catch (e) {
         toast('Error deleting VM: ' + e.message, true);
+      }
+    }
+
+    /**
+     * Every selected lane, in one request.
+     *
+     * The endpoint is synchronous — teardownLanes' dominant costs are per-CALL
+     * rather than per-lane — so there is no banner and no poller here, just a
+     * spinner on the button. A deleted row simply vanishing from the next GET /
+     * is already the completion signal.
+     */
+    async function bulkDeleteLanes(btn) {
+      // _vmBulkBusy, not the button state, is the real double-submit guard:
+      // Confirm.show is awaited BEFORE setBtnLoading ever runs, so for the whole
+      // life of the dialog the bar button is still live and a second click would
+      // open a second dialog.
+      if (_vmBulkBusy) return;
+      const rows = _selectedVMRows();
+      if (!rows.length) return;
+
+      // Captured now: the instructor may navigate to another course while this is
+      // in flight, and every refresh below has to be checked against it.
+      const courseId = currentCourseId;
+      const n = rows.length;
+      const machines = rows.reduce(
+        (sum, v) => sum + (Array.isArray(v.machines) ? v.machines.length : 0), 0);
+
+      _vmBulkBusy = true; _syncVMBulkBar();
+      try {
+        const ok = await Confirm.show({
+          title: n === 1 ? 'Delete this lane?' : 'Delete ' + n + ' lanes?',
+          message:
+            'This destroys ' + (n === 1 ? 'the lane' : 'all ' + n + ' lanes') + ' and every '
+            + 'machine on ' + (n === 1 ? 'it' : 'them')
+            + (machines ? ' \u2014 ' + machines + ' machine' + (machines === 1 ? '' : 's') + ' in total' : '')
+            + ', plus the gateways, the VXLAN networks and the Guacamole connections. '
+            + 'Anything saved on those machines is lost and the connection details the '
+            + 'students already have stop working. Their enrolment, grades and captured '
+            + 'flags are untouched. This cannot be undone. '
+            + 'Deleting: ' + _vmSelectionNames(rows) + '.'
+            + (rows.some(v => v.is_self) ? ' One of these is your own machine.' : ''),
+          confirmText: n === 1 ? 'Delete lane' : 'Delete ' + n + ' lanes',
+          danger: true,
+        });
+        if (!ok) return;
+
+        Utils.setBtnLoading(btn, true, 'Deleting\u2026');
+        const res = await api('POST', `/courses/${courseId}/vms/bulk-delete`, {
+          lane_ids: rows.map(v => v.lane_id),
+        });
+
+        // 207-shaped: teardownLanes commits its rows all-or-nothing, so a single
+        // refusing gateway keeps EVERY record. res.message says so; surface it
+        // verbatim rather than inventing a count.
+        if (res.success === false) {
+          toast(res.message || 'Some lanes could not be deleted', true);
+          (res.errors || []).slice(0, 3).forEach(e => toast(String(e), true));
+        } else {
+          toast(res.message || 'Lanes deleted');
+        }
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast('Skipped ' + sk.lane_id + ': ' + sk.reason, true));
+      } catch (e) {
+        toast('Error deleting lanes: ' + e.message, true);
+      } finally {
+        _vmBulkBusy = false;
+        // Restore BEFORE the reload: loadVMManagement replaces the innerHTML, so
+        // btn is detached by the time a later call would run.
+        Utils.setBtnLoading(btn, false);
+        if (currentCourseId === courseId) { clearVMSelection(); loadVMManagement(); }
+      }
+    }
+
+    // ── redeploy ─────────────────────────────────────────────────────────────
+
+    let _vmRedeployLane = null;         // the row the picker is aimed at
+    let _vmRebuildProgressTimer = null;
+
+    /**
+     * Poll a rebuild, into the SAME banner the deploy uses.
+     *
+     * A separate timer from pollProvisionProgress because the two read different
+     * registry keys — multiplexing one poller would make a provision finishing
+     * mid-rebuild hide the rebuild's banner.
+     */
+    async function pollRebuildProgress(url) {
+      clearTimeout(_vmRebuildProgressTimer);
+      const banner = document.getElementById('provisionProgressBanner');
+      if (!banner) return;
+      try {
+        const p = await api('GET', url.replace(/^\/api\/cle/, ''));
+        banner.style.display = 'block';
+        const eta = p.eta_s ? ` &middot; ~${Math.ceil(p.eta_s / 60)} min left` : '';
+        banner.innerHTML =
+          `<strong>${escHtml(p.error || p.phase_detail || p.phase || 'Rebuilding')}</strong> &mdash; `
+          + `${p.completed}/${p.total} complete (${p.succeeded} ok, ${p.failed} failed)${eta}`;
+        if (p.phase !== 'complete') {
+          _vmRebuildProgressTimer = setTimeout(() => pollRebuildProgress(url), 5000);
+        } else {
+          setTimeout(() => { banner.style.display = 'none'; }, 8000);
+          loadVMManagement();
+        }
+      } catch (e) {
+        // A 404 means the entry aged out or the rebuild never started; the table
+        // below is the durable record either way.
+        banner.style.display = 'none';
+      }
+    }
+
+    /**
+     * One lane is the only case where "which machines?" is a real question, so
+     * it is the only case that gets a picker. With two or more the answer is
+     * always "all of them" — a per-lane machine matrix would be a table, not a
+     * dialog.
+     */
+    async function bulkRedeployLanes(btn) {
+      if (_vmBulkBusy) return;
+      const rows = _selectedVMRows();
+      if (!rows.length) return;
+      if (rows.length === 1) return showVMRedeployModal(rows[0]);
+      return _bulkRedeployConfirm(btn, rows);
+    }
+
+    async function _bulkRedeployConfirm(btn, rows) {
+      const courseId = currentCourseId;
+      const n = rows.length;
+      const machines = rows.reduce(
+        (sum, v) => sum + (Array.isArray(v.machines) ? v.machines.length : 0), 0);
+      // A selection that came from "Select N broken lanes" is exactly the case
+      // the whole-lane path exists for, and an in-place rebuild behind a dead
+      // gateway is the null operation.
+      const allBroken = rows.every(v => v.lane_status === 'error');
+
+      _vmBulkBusy = true; _syncVMBulkBar();
+      try {
+        // Copy order is deliberate: what is destroyed, then what SURVIVES named
+        // individually, then the consequence the instructor actually cares
+        // about. "In place" means nothing to someone worried their students'
+        // RDP links are about to break; naming the four survivors does.
+        const r = await Confirm.show({
+          title: `Redeploy ${n} lanes?`,
+          message:
+            `Every machine on these ${n} lanes is destroyed and rebuilt from each `
+            + `student's own recorded machines and sizing`
+            + (machines ? ` \u2014 ${machines} machines in total` : '')
+            + `. The lanes themselves are kept: the VXLAN network, the gateway, the `
+            + `console address and port, and each student's Guacamole connection all stay `
+            + `exactly as they are, so connection details you have already handed out keep `
+            + `working. Anything saved inside the machines is lost. `
+            + `Rebuilding: ${_vmSelectionNames(rows)}.`,
+          confirmText: `Redeploy ${n} lanes`,
+          danger: true,
+          checkbox: {
+            label: 'Rebuild the whole lane instead \u2014 new network and new connection '
+                 + 'details (for lanes whose gateway is broken)',
+            checked: allBroken,
+          },
+        });
+        if (!r) return;                  // false on cancel
+        const wholeLane = !!r.checked;   // an object when a checkbox was passed
+
+        // The checkbox turned this into a different, worse action, and it is the
+        // only path that invalidates data already in students' hands. Two
+        // dialogs is normally a smell; here the second one is the point.
+        if (wholeLane) {
+          const sure = await Confirm.show({
+            title: 'New connection details for these students?',
+            message: `Rebuilding the whole lane gives all ${n} students a new VXLAN, a new `
+                   + `console address and a new Guacamole connection. Every address, port and `
+                   + `link you have already sent them stops working and has to be sent again. `
+                   + `Use this only for lanes whose gateway is broken.`,
+            confirmText: 'Rebuild the lanes', danger: true,
+          });
+          if (!sure) return;
+        }
+
+        Utils.setBtnLoading(btn, true, 'Starting\u2026');
+        const ids = rows.map(v => v.lane_id);
+        const res = await api('POST', `/courses/${courseId}/vms/redeploy`, {
+          lane_ids: ids,
+          ...(wholeLane ? { full_lane: true } : {}),
+        });
+        // Dim the per-row buttons NOW rather than waiting for the server to flip
+        // lane_status — on a 24-lane job that gap is several seconds of a live
+        // Delete button pointing at a lane that is already mid-rebuild.
+        ids.forEach(id => _vmBusyLanes.add(id));
+        toast(res.message || 'Rebuild started');
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.lane_id}: ${sk.reason}`, true));
+        if (res.progress_url) pollRebuildProgress(res.progress_url);
+      } catch (e) {
+        toast('Error redeploying: ' + e.message, true);
+      } finally {
+        _vmBulkBusy = false;
+        Utils.setBtnLoading(btn, false);   // BEFORE the reload detaches btn
+        if (currentCourseId === courseId) { clearVMSelection(); loadVMManagement(); }
+      }
+    }
+
+    /** One machine row in the picker. */
+    function _vmMachineRow(m) {
+      const proto = (m.console_protocol || '').toUpperCase();
+      const conn = proto ? `${proto}${m.console_port ? ':' + m.console_port : ''}` : '';
+      const meta = [m.template_name, m.ip, conn].filter(Boolean).join(' \u00b7 ');
+      // Pre-ticked when its last rebuild failed: that is the single highest-value
+      // use of the persisted per-slot outcome.
+      const failed = !!m.rebuild_error;
+      return `
+      <label style="display:flex; align-items:flex-start; gap:0.5rem;">
+        <input type="checkbox" class="vm-redeploy-machine" value="${escAttr(String(m.slot))}" checked
+               aria-label="Rebuild ${escAttr(m.hostname || ('slot ' + m.slot))}"
+               onchange="_syncVMRedeployPicker()">
+        <span style="min-width:0;">
+          <span style="font-family:monospace; font-size:0.82rem;">${escHtml(m.hostname || '\u2014')}</span>
+          <span class="env-chip" style="margin-left:0.35rem;">slot ${escHtml(String(m.slot))}</span>
+          ${m.slot === 0 ? '<span class="env-chip env-chip-console">student console</span>' : ''}
+          ${_powerBadge(m.power_state)}
+          ${failed ? `<span title="${escAttr(m.rebuild_error)}" style="color:#d69e2e;font-size:0.72rem;">&#9888; last rebuild failed</span>` : ''}
+          <span style="display:block; font-size:0.72rem; color:var(--text-muted, #6b7280);">${escHtml(meta)}</span>
+        </span>
+      </label>`;
+    }
+
+    /**
+     * The picker reads machines[] off the row the table was rendered from, so
+     * there is no second fetch and no spinner — and no window in which the modal
+     * describes a lane other than the one that was clicked.
+     */
+    function showVMRedeployModal(row) {
+      // Reset BEFORE showing, every time — the same discipline showDeployEnvModal
+      // follows. A modal that keeps the previous open's state is the classic way
+      // a dialog acts on something the instructor never picked.
+      _vmRedeployLane = row;
+      const machines = Array.isArray(row.machines) ? row.machines : [];
+
+      document.getElementById('vmRedeployWho').textContent =
+        [row.first_name, row.last_name].filter(Boolean).join(' ') || row.student_email || 'this lane';
+      document.getElementById('vmRedeployLaneLine').textContent =
+        `The lane stays exactly as it is \u2014 VXLAN ${row.vxlan_id != null ? row.vxlan_id : '\u2014'}`
+        + `${row.console_endpoint ? `, console ${row.console_endpoint}` : ''}, and the same Guacamole `
+        + `connection. Only the machines inside it are destroyed and rebuilt, so the connection `
+        + `details this student already has keep working.`;
+
+      const list = document.getElementById('vmRedeployMachines');
+      const whole = document.getElementById('vmRedeployWholeLane');
+      const go = document.getElementById('vmRedeployBtn');
+
+      Utils.setBtnLoading(go, false);   // clear a spinner left by a failed submit
+      list.innerHTML = machines.length
+        ? machines.map(_vmMachineRow).join('')
+        : '<p class="deploy-env-hint" style="margin:0;">This lane records no machines \u2014 only the whole-lane rebuild is available.</p>';
+      // The case the checkbox exists for, pre-selected.
+      whole.checked = (row.lane_status === 'error') || machines.length === 0;
+      onVMRedeployWholeLaneChange(whole);
+
+      showModal('vmRedeployModal');
+    }
+
+    function closeVMRedeployModal() {
+      _vmRedeployLane = null;
+      closeModal('vmRedeployModal');
+    }
+
+    function toggleVMRedeploySelectAll(box) {
+      document.querySelectorAll('#vmRedeployMachines .vm-redeploy-machine')
+        .forEach(cb => { cb.checked = box.checked; });
+      _syncVMRedeployPicker();
+    }
+
+    function onVMRedeployWholeLaneChange(box) {
+      // The picker is not merely ignored when the whole lane goes — it is
+      // meaningless, and a live-looking control that does nothing is worse than
+      // a dimmed one.
+      const list = document.getElementById('vmRedeployMachines');
+      list.style.opacity = box.checked ? '0.45' : '';
+      list.querySelectorAll('.vm-redeploy-machine').forEach(cb => { cb.disabled = box.checked; });
+      document.getElementById('vmRedeploySelectAll').disabled = box.checked;
+      // .env-warn is display:flex — restoring it as 'block' would stack the icon
+      // above the text.
+      document.getElementById('vmRedeployWholeLaneWarn').style.display = box.checked ? 'flex' : 'none';
+      document.getElementById('vmRedeployBtn').textContent = box.checked ? 'Rebuild whole lane' : 'Redeploy';
+      _syncVMRedeployPicker();
+    }
+
+    function _syncVMRedeployPicker() {
+      const boxes = [...document.querySelectorAll('#vmRedeployMachines .vm-redeploy-machine')];
+      const n = boxes.filter(b => b.checked).length;
+      const whole = document.getElementById('vmRedeployWholeLane').checked;
+
+      const all = document.getElementById('vmRedeploySelectAll');
+      all.checked = boxes.length > 0 && n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+
+      document.getElementById('vmRedeployCount').textContent = whole
+        ? `Whole lane \u2014 all ${boxes.length} machine${boxes.length === 1 ? '' : 's'}`
+        : `${n} of ${boxes.length} machine${boxes.length === 1 ? '' : 's'}`;
+
+      // Nothing ticked is not a redeploy. The whole-lane path ignores the
+      // picker, so it must not be gated on it.
+      document.getElementById('vmRedeployBtn').disabled = !whole && n === 0;
+    }
+
+    async function submitVMRedeploy(btn) {
+      const row = _vmRedeployLane;
+      if (!row || _vmBulkBusy) return;
+      const courseId = currentCourseId;
+      const whole = document.getElementById('vmRedeployWholeLane').checked;
+      const boxes = [...document.querySelectorAll('#vmRedeployMachines .vm-redeploy-machine')];
+      const slots = boxes.filter(b => b.checked).map(b => Number(b.value));
+
+      if (whole) {
+        const sure = await Confirm.show({
+          title: 'New connection details for this student?',
+          message: `Rebuilding the whole lane gives ${row.student_email || 'this student'} a new `
+                 + `VXLAN, a new console address and a new Guacamole connection. Every address, `
+                 + `port and link they already have stops working and has to be sent again. `
+                 + `Use this only when the lane's gateway is broken.`,
+          confirmText: 'Rebuild the lane', danger: true,
+        });
+        if (!sure) return;
+      }
+
+      _vmBulkBusy = true;
+      Utils.setBtnLoading(btn, true, 'Starting\u2026');
+      try {
+        const body = { lane_ids: [row.lane_id], ...(whole ? { full_lane: true } : {}) };
+        // Omitted when everything is ticked, so "all" is the wire default and the
+        // single-lane and multi-lane calls hit one server path.
+        if (!whole && slots.length !== boxes.length) body.slots = slots;
+        const res = await api('POST', `/courses/${courseId}/vms/redeploy`, body);
+        _vmBusyLanes.add(row.lane_id);
+        toast(res.message || 'Rebuild started');
+        closeVMRedeployModal();
+        if (res.progress_url) pollRebuildProgress(res.progress_url);
+      } catch (e) {
+        toast('Error redeploying: ' + e.message, true);
+      } finally {
+        _vmBulkBusy = false;
+        Utils.setBtnLoading(btn, false);
+        if (currentCourseId === courseId) { clearVMSelection(); loadVMManagement(); }
       }
     }
 

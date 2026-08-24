@@ -25,9 +25,11 @@ const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { resolveLaneWorkstationCredential } = require('../../../../../src/utils/lane-credentials');
 const { mintGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
-const { normalizeResourceSpec } = require('../../../../../src/utils/lane-deployer');
+const laneDeployer = require('../../../../../src/utils/lane-deployer');
+const { normalizeResourceSpec, WORKSTATION_MAX_SLOTS } = laneDeployer;
 const { buildLaneTopology } = require('../../../../../src/utils/lane-topology');
 const laneProvision = require('../utils/lane-provision');
+const vulnLab = require('../utils/vuln-lab-provision');
 const audit = require('../../../../../src/utils/audit');
 const { getManagedCourse: getManagedCourseRow } = require('../utils/course-access');
 const {
@@ -226,6 +228,284 @@ function startProvision({ courseId, courseName, courseCode, challenge, templates
     .catch(err => console.error(`[CLE] Provision failed for course ${courseId}: ${err.message}`));
 }
 
+// A bulk cluster operation is nothing like a bulk DB write: 50 lanes is ~150
+// VMs handed to teardownLanes in one call, already 10x its own concurrency of
+// 15. admin/settings.js caps its user batch at 500 because that one only
+// touches Postgres.
+const MAX_BULK_LANES = 50;
+
+// lane_id is a uuid column. A malformed element inside `= ANY($1::uuid[])`
+// turns a clean result into a 500 — the same reason loadWorkstationTemplates
+// loops instead of using ANY.
+const LANE_ID_RE = /^[0-9a-f-]{36}$/i;
+
+/**
+ * Validate and de-duplicate a bulk request's lane_ids.
+ *
+ * Malformed ids become `skipped` rather than a rejection of the whole batch,
+ * matching how both provision routes report the students they could not act on.
+ * The table polls every 8s, so one row torn down by a co-instructor three
+ * seconds ago must not fail the other eleven with no way to tell which.
+ *
+ * The cap is a hard 400, never a silent truncation: an instructor who ticked 60
+ * rows and saw 50 deleted has no way to know which ten survived.
+ *
+ * @throws {Error & {status:400}}
+ */
+function parseLaneIds(body) {
+  const raw = (body || {}).lane_ids;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    const e = new Error(`non-empty lane_ids array required`); e.status = 400; throw e;
+  }
+  const skipped = [];
+  const seen = new Set();
+  const ids = [];
+  for (const v of raw) {
+    const id = typeof v === 'string' ? v.trim() : '';
+    if (!LANE_ID_RE.test(id)) { skipped.push({ lane_id: String(v), reason: 'not a lane id' }); continue; }
+    if (seen.has(id)) continue;          // de-duped BEFORE the cap, so the
+    seen.add(id);                        // counts reported back cannot lie
+    ids.push(id);
+  }
+  if (ids.length > MAX_BULK_LANES) {
+    const e = new Error(`select at most ${MAX_BULK_LANES} lanes at a time (got ${ids.length})`);
+    e.status = 400; throw e;
+  }
+  if (ids.length === 0) {
+    const e = new Error(`no valid lane ids in the request`); e.status = 400; throw e;
+  }
+  return { ids, skipped };
+}
+
+/**
+ * Validate a redeploy request against the lanes it actually resolved to.
+ *
+ * `slots` is expressed as SLOT NUMBERS, never vmids. Slot is the stable
+ * identity — it determines the octet, the console WAN port, the DHCP
+ * reservation and the DNAT rule — whereas a vmid is cluster-global, and an
+ * unvalidated one would be a cluster-wide destroy primitive if a scope check
+ * were ever dropped.
+ *
+ * An unknown slot is a 400 NAMING it, not a silent skip: with exactly one lane
+ * there is no batch to partially honour, and quietly rebuilding fewer machines
+ * than asked is the class of bug that is invisible until a student reports it.
+ *
+ * @throws {Error & {status:400}}
+ */
+function parseRedeployRequest(body, lanes) {
+  const b = body || {};
+  const fullLane = b.full_lane === true;
+  let slots = null;
+
+  if (b.slots !== undefined && b.slots !== null) {
+    if (fullLane) {
+      const e = new Error(`slots cannot be combined with full_lane \u2014 a whole-lane rebuild replaces every machine`); e.status = 400; throw e;
+    }
+    if (!Array.isArray(b.slots) || b.slots.length === 0) {
+      const e = new Error(`slots must be a non-empty array of slot numbers`); e.status = 400; throw e;
+    }
+    if (lanes.length !== 1) {
+      const e = new Error(
+        `slots can only be used when exactly one lane is selected (got ${lanes.length})`);
+      e.status = 400; throw e;
+    }
+    const known = new Set(machineSlotsOf(lanes[0]));
+    const out = new Set();
+    for (const raw of b.slots) {
+      // Number() alone is not a validator here: Number(null), Number('') and
+      // Number([]) are all 0 — a slot that exists on every lane — so a malformed
+      // body would silently rebuild slot 0, the one machine holding the
+      // student's console. Accept a real integer, or a string of digits.
+      const n = typeof raw === 'number' ? raw
+        : (typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN);
+      if (!Number.isInteger(n) || n < 0 || n >= WORKSTATION_MAX_SLOTS) {
+        const e = new Error(`'${raw}' is not a slot number`); e.status = 400; throw e;
+      }
+      if (!known.has(n)) {
+        const e = new Error(`This lane has no machine in slot ${n}`); e.status = 400; throw e;
+      }
+      out.add(n);
+    }
+    slots = [...out].sort((a, b2) => a - b2);
+  }
+  return { slots, fullLane };
+}
+
+/** The slot numbers a lane row records, synthesizing slot 0 for legacy lanes. */
+function machineSlotsOf(lane) {
+  const cfg = lane.config || {};
+  const ws = Array.isArray(cfg.workstations) ? cfg.workstations : [];
+  if (ws.length) return ws.filter(w => w && w.slot != null).map(w => w.slot);
+  return cfg.workstation_vmid ? [0] : [];
+}
+
+/**
+ * Which lanes an IN-PLACE rebuild may touch.
+ *
+ * Only 'active'. The whole premise is that the gateway, VXLAN, WAN address,
+ * DNAT rules and Guacamole connection survive, and an 'error' lane got there
+ * one of two ways, neither of which preserves them: markLaneError after a
+ * gateway or workstation failure (so there may be nothing to rebuild INTO), or
+ * teardownLanes marking it (so the row is a tombstone pointing at survivors).
+ * Those go to the full-lane path, which is teardown + fresh deploy and is
+ * exactly what an error state is designed to be recovered by.
+ *
+ * 'deploying' is refused on both paths — the mutex should already have caught
+ * it, and this is the belt.
+ */
+function redeployEligibility(lane, fullLane) {
+  if (lane.status === 'deploying') {
+    return { ok: false, reason: 'a deploy or rebuild is already running on this lane' };
+  }
+  if (fullLane) return { ok: true };
+  if (lane.status !== 'active') {
+    return {
+      ok: false,
+      reason: `lane is in an ${lane.status} state \u2014 use a whole-lane rebuild`,
+    };
+  }
+  if (!machineSlotsOf(lane).length) {
+    return { ok: false, reason: 'lane records no machines \u2014 use a whole-lane rebuild' };
+  }
+  return { ok: true };
+}
+
+/**
+ * HTTP status + message for a teardownLanes result.
+ *
+ * KEYS ON lanes_kept_for_retry, NEVER errors.length. teardownLanes returns
+ * `errors: [...errors, ...warnings]` while its row decision keys on `errors`
+ * alone, so a Guacamole 403 — which leaves nothing running anywhere — lands in
+ * that array. Keying on it would turn every Guacamole hiccup into a partial-
+ * failure banner.
+ *
+ * The 207 message states teardownLanes' all-or-nothing row commit out loud:
+ * one refusing gateway leaves EVERY lane in the batch as 'error', including
+ * the eleven that tore down perfectly. Without saying so, the instructor sees
+ * twelve failed rows and no way to know eleven of them are already clean.
+ */
+function bulkDeleteStatus(result, requested) {
+  const kept = result.lanes_kept_for_retry || 0;
+  if (kept === 0) {
+    const n = result.lanes_deleted || 0;
+    return {
+      status: 200, success: true,
+      message: `Removed ${n} workstation lane${n === 1 ? '' : 's'} (${result.vms_destroyed || 0} machine${(result.vms_destroyed || 0) === 1 ? '' : 's'} destroyed)`,
+    };
+  }
+  return {
+    status: 207, success: false,
+    message:
+      `Some machines could not be destroyed. All ${kept} selected lane record${kept === 1 ? '' : 's'} ` +
+      `were kept so the survivors stay reachable — press Delete again once the cause is ` +
+      `cleared, and the retry will find nothing left and remove them.`,
+  };
+}
+/**
+ * One entry per MACHINE on a lane, in slot order.
+ *
+ * A lane holds N workstations — lane-deployer records each one in
+ * config.workstations[] and additionally flattens SLOT 0 onto the top-level
+ * config keys this file has always read. The lane row above describes slot 0
+ * only; this is what lets the UI offer "rebuild just these machines" and what
+ * gives the row an honest machine count.
+ *
+ * Lanes deployed before config.workstations[] existed have the flat keys and
+ * no array, so slot 0 is synthesized from them — the same fallback
+ * laneDeployer.teardownLanes carries. Those lanes get a one-machine picker
+ * rather than none.
+ *
+ * Credentials go through resolveLaneWorkstationCredential PER VMID rather than
+ * reading the flat keys, because reversing that order hands every slot of a
+ * multi-machine lane slot 0's password (see src/utils/lane-credentials.js).
+ * The plaintext password belongs here for the same reason it is already on the
+ * row: this route is instructorOnly and course-scoped, and handing a student
+ * their slot-1 login is the workflow. It must never reach audit metadata or a
+ * log line.
+ *
+ * DELIBERATELY ABSENT: mac and octet (derivable, pure noise on an 8s poll),
+ * workspace_resource_id, and guac_connection_id — the last is the identifier
+ * GET /:laneId/console mints tokens against, and no UI needs raw Guacamole ids
+ * in a polled document.
+ *
+ * @param {object} cfg        cybercore_lane.config
+ * @param {object} byVmid     live /cluster/resources rows keyed by String(vmid)
+ * @param {string} laneStatus cybercore_lane.status
+ * @param {string} laneName   cybercore_lane.name
+ */
+function projectMachines(cfg, byVmid, laneStatus, laneName) {
+  const c = cfg || {};
+  const recorded = Array.isArray(c.workstations) ? c.workstations : [];
+
+  // Legacy single-machine lane: rebuild slot 0 from the flat keys.
+  const slots = recorded.length > 0 ? recorded : (c.workstation_vmid ? [{
+    slot: 0,
+    vmid: c.workstation_vmid,
+    hostname: laneName || null,
+    provider_type: c.provider_type || null,
+    template_id: c.template_id || null,
+    template_name: c.template_name || null,
+    ip: c.workstation_ip || c.ip || null,
+    console_protocol: c.console_protocol || null,
+    console_port: c.console_port || null,
+    console_host: c.console_host || null,
+    console_via: c.console_via || null,
+    guac_connection_id: c.guac_connection_id || null,
+    resources: c.resources || c.requested_resources || null,
+    resource_warnings: c.resource_warnings || null,
+  }] : []);
+
+  const wsIp = c.ws_ip || {};
+  const wsIpOk = c.ws_ip_confirmed || {};
+  const rebuiltSlots = (c.rebuild && c.rebuild.slots) || {};
+
+  return slots
+    .filter(w => w && w.slot != null)
+    .slice()
+    .sort((a, b) => a.slot - b.slot)
+    .map((w) => {
+      const key = String(w.slot);
+      const cred = resolveLaneWorkstationCredential(c, w.vmid);
+      const live = byVmid[String(w.vmid)];
+      const powerState = live
+        ? (live.status === 'running' ? 'running' : live.status === 'stopped' ? 'stopped' : live.status)
+        : (laneStatus === 'active' ? 'unknown' : laneStatus);
+      const rb = rebuiltSlots[key] || null;
+      return {
+        slot:              w.slot,
+        vmid:              w.vmid ?? null,
+        hostname:          w.hostname || null,
+        provider_type:     w.provider_type || null,
+        template_id:       w.template_id || null,
+        template_name:     w.template_name || null,
+        ip:                w.ip || null,
+        // Per-slot, and deliberately NOT falling back to the flat slot-0 key:
+        // slot 1 inheriting slot 0's confirmation would claim a machine took a
+        // reserved lease that nothing ever checked.
+        ip_confirmed:      wsIpOk[key] === true,
+        observed_ip:       wsIp[key] || null,
+        console_protocol:  w.console_protocol || null,
+        console_port:      w.console_port ?? null,
+        console_via:       w.console_via || null,
+        console_endpoint:  w.console_host ? `${w.console_host}:${w.console_port}` : null,
+        has_console:       !!w.guac_connection_id,
+        // Live, per machine. The row-level power_state above collapses to the
+        // LANE status whenever the lane is not active, which is right for a
+        // one-row-per-lane table but useless in a picker that has to say which
+        // of these three machines is actually running.
+        power_state:       powerState,
+        workstation_user:  cred.username,
+        workstation_pass:  cred.password,
+        credentials_shared: cred.shared,
+        resources:         w.resources || null,
+        resource_warnings: w.resource_warnings || null,
+        // Survives the 1h progress eviction and a restart, so the picker can
+        // pre-tick the slots whose last rebuild failed.
+        rebuild_error:     rb && rb.status === 'error' ? (rb.message || 'Rebuild failed') : null,
+        rebuilt_at:        rb ? (rb.at || null) : null,
+      };
+    });
+}
 /**
  * GET / — List provisioned workstation lanes for all students in this course.
  * Reads cybercore_lane (source of truth) and live-syncs workstation power state.
@@ -248,16 +528,11 @@ router.get('/', instructorOnly, async (req, res) => {
     );
     const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
 
-    const lanesResult = await cybercoreQuery(`
-      SELECT l.lane_id, l.status, l.vxlan_id, l.config, l.created_at, l.user_id,
-             u.email AS student_email, u.first_name, u.last_name
-        FROM cybercore_lane l
-        JOIN cybercore_user u ON u.user_id = l.user_id
-       WHERE l.config->>'course_id' = $1
-         AND l.config->>'material_id' IS NULL
-         AND l.status <> 'deleted'
-       ORDER BY l.created_at DESC
-    `, [courseId]);
+    // Through the shared scoped read rather than a fourth copy of the
+    // predicate. The `material_id IS NULL` guard is the reason the bulk
+    // endpoints below cannot be pointed at a vulnerable-lab lane; keeping one
+    // query is what keeps them honest.
+    const laneRows = await laneProvision.findCourseWorkstationLanes(courseId);
 
     // Live power-state for the workstation VMs via a single cluster call.
     // Live power state. Falling back to the lane's own status when Proxmox is
@@ -275,7 +550,7 @@ router.get('/', instructorOnly, async (req, res) => {
       console.warn(`[CLE] Could not read live VM state from Proxmox (${e.message}) — lanes will show their stored status instead of live power state.`);
     }
 
-    const vms = lanesResult.rows.map(row => {
+    const vms = laneRows.map(row => {
       const cfg = row.config || {};
       const wsCred = resolveLaneWorkstationCredential(cfg, cfg.workstation_vmid);
       const live = byVmid[String(cfg.workstation_vmid)];
@@ -327,7 +602,16 @@ router.get('/', instructorOnly, async (req, res) => {
         resources:          cfg.resources || cfg.requested_resources || null,
         resource_warnings:  cfg.resource_warnings || null,
         error:            cfg.error || null,
+        // Amber, not the red `error` badge: a lane whose rebuild failed on one
+        // slot is still active with its other machines running, so badging the
+        // whole row broken would be a lie.
+        rebuild_status:   cfg.rebuild ? (cfg.rebuild.status || null) : null,
+        rebuild_error:    cfg.rebuild ? (cfg.rebuild.error || null) : null,
+        rebuild_at:       cfg.rebuild ? (cfg.rebuild.at || null) : null,
         created_at:     row.created_at,
+        // Every machine on the lane. The row above still describes slot 0, so
+        // nothing that reads this list today has to change.
+        machines:       projectMachines(cfg, byVmid, row.status, row.name),
       };
     });
 
@@ -515,6 +799,425 @@ router.get('/provision-progress', instructorOnly, async (req, res) => {
 
     const progress = laneProvision.getProvisionProgress(courseId);
     if (!progress) return res.status(404).json({ error: 'No active deployment for this course' });
+    res.json(progress);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /bulk-delete — Tear down several workstation lanes in one pass.
+ *
+ * POST rather than DELETE-with-a-body: every existing bulk operation in this
+ * codebase is a POST with an array, and DELETE bodies are unspecified in
+ * RFC 9110 and stripped by some intermediaries.
+ *
+ * Takes lane_ids, never student_ids. The lane is the thing being destroyed, a
+ * user can hold more than one row in a course, and GET / deliberately lists
+ * lanes whose owner has dropped the course — exactly the leftovers an
+ * instructor needs to clean up, which student resolution would skip as
+ * "not enrolled".
+ *
+ * SYNCHRONOUS on purpose. teardownLanes' dominant costs are per-CALL, not
+ * per-lane — one 30s stop-wait ceiling, up to three 8s orphan rounds, one disk
+ * sweep per node — so twelve lanes cost roughly what the single-lane DELETE
+ * below already costs synchronously today, and twelve sequential calls would
+ * pay all of it twelve times. Nothing in front of this sets a response timeout
+ * (Caddy has no transport block; server.js sets no requestTimeout).
+ */
+router.post('/bulk-delete', instructorOnly, async (req, res) => {
+  let claimed = null;
+  try {
+    const { courseId } = req.params;
+    // Shape first, before any DB work — the order /provision uses.
+    const { ids, skipped } = parseLaneIds(req.body);
+
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    // ONE scoped query. Its material_id IS NULL predicate is the only thing
+    // standing between this endpoint and an assignment's lanes being destroyed
+    // through a teardown path that knows nothing about flag snapshots.
+    const lanes = await laneProvision.findCourseWorkstationLanes(courseId, ids);
+    const found = new Set(lanes.map(l => l.lane_id));
+    for (const id of ids) {
+      // One opaque reason on purpose. Distinguishing "another course" from
+      // "that is a lab lane" from "already gone" would make this endpoint an
+      // oracle for lanes the caller cannot otherwise see.
+      if (!found.has(id)) skipped.push({ lane_id: id, reason: 'not in this course' });
+    }
+    if (lanes.length === 0) {
+      return res.status(404).json({
+        error: 'None of the selected lanes are in this course', skipped,
+      });
+    }
+
+    // Check and claim in ONE synchronous block, every await already done. A
+    // check, an await, then a claim leaves the double-click window open —
+    // Node cannot interleave two synchronous statements, and that is the only
+    // property making this a mutex at all.
+    laneProvision.assertNoConflictingWorkstationOperation({ courseId });
+    claimed = laneProvision.progressIdForCourseRebuild(courseId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Delete — ${course.course_name}`, lanes.length);
+    // Nothing polls this: the response is synchronous and a deleted row simply
+    // vanishing from GET / is already a completion signal on the 8s refresh.
+    // The entry exists so courseOperationsInFlight can see the lock.
+    laneDeployer.setPhase(progress, 'deleting',
+      `Removing ${lanes.length} workstation lane(s)`);
+
+    // SERVER-DERIVED ids — never req.body.lane_ids. Everything in this array
+    // has been through the scoped query above.
+    const laneIds = lanes.map(l => l.lane_id);
+    const result = await laneDeployer.teardownLanes(laneIds);
+    const { status, success, message } = bulkDeleteStatus(result, laneIds.length);
+
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'vm.destroyed_bulk',
+      targetAction: 'vm.destroyed',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      status: success ? 'success' : 'failure',
+      metadata: {
+        course_id: courseId, scope: 'selected',
+        requested: laneIds.length,
+        lanes_deleted: result.lanes_deleted,
+        lanes_kept_for_retry: result.lanes_kept_for_retry,
+        vms_destroyed: result.vms_destroyed,
+        orphan_disks_swept: result.orphan_disks_swept,
+        errors: (result.errors || []).slice(0, 5),
+      },
+      // targets[].id is the USER id, with the lane in metadata — the shape
+      // every other per-student row in this file uses.
+      targets: lanes.map(l => ({
+        id: l.user_id, label: l.student_email,
+        status: success ? 'success' : 'failure',
+        reason: success ? null : 'teardown left machines behind',
+        metadata: { course_id: courseId, lane_id: l.lane_id, vxlan_id: l.vxlan_id },
+      })),
+    });
+
+    res.status(status).json({
+      success,
+      message,
+      requested: laneIds.length,
+      lanes_deleted: result.lanes_deleted,
+      lanes_kept_for_retry: result.lanes_kept_for_retry,
+      vms_destroyed: result.vms_destroyed,
+      orphan_disks_swept: result.orphan_disks_swept,
+      errors: result.errors || [],
+      warnings: result.warnings || [],
+      ...(skipped.length ? { skipped } : {}),
+    });
+  } catch (error) {
+    console.error('[CLE] Bulk delete error:', error.message);
+    res.status(error.status || 500).json({ error: error.message });
+  } finally {
+    // A leaked claim 409s every workstation operation on this course for an
+    // hour — finishProgress only schedules the entry for deletion then.
+    if (claimed) laneDeployer.finishProgress(claimed);
+  }
+});
+
+/**
+ * POST /redeploy — Rebuild the machines on the selected lanes.
+ *
+ * DEFAULT (in place): destroys and re-clones the machines INSIDE each lane.
+ * The lane row, vxlan_id, gateway, gateway_wan_ip, console host:port and
+ * Guacamole connections all survive, so connection details already handed to
+ * students keep working. With exactly one lane selected, `slots` narrows it to
+ * a subset; every other machine is left running and untouched.
+ *
+ * full_lane: tears the lane down and deploys a fresh one. New VXLAN, new
+ * console address, new Guacamole connections — everything a student has
+ * written down becomes wrong. For lanes whose gateway is broken, which the
+ * in-place path refuses by design.
+ *
+ * Both replay each lane's OWN recorded machines and sizing. There is no
+ * template picking: a roster where some students have one machine and others
+ * three stays that way.
+ *
+ * 202 + progress_url, mirroring the per-student lab redeploy. Everything that
+ * can be checked cheaply is checked BEFORE the 202, while the student still
+ * has working machines.
+ */
+router.post('/redeploy', instructorOnly, async (req, res) => {
+  let claimed = null;
+  try {
+    const { courseId } = req.params;
+    const { ids, skipped } = parseLaneIds(req.body);
+
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const found = await laneProvision.findCourseWorkstationLanes(courseId, ids);
+    const foundIds = new Set(found.map(l => l.lane_id));
+    for (const id of ids) {
+      if (!foundIds.has(id)) skipped.push({ lane_id: id, reason: 'not in this course' });
+    }
+    if (found.length === 0) {
+      return res.status(404).json({
+        error: 'None of the selected lanes are in this course', skipped,
+      });
+    }
+
+    const { slots, fullLane } = parseRedeployRequest(req.body, found);
+
+    const lanes = [];
+    for (const l of found) {
+      const verdict = redeployEligibility(l, fullLane);
+      if (verdict.ok) lanes.push(l);
+      else skipped.push({ lane_id: l.lane_id, reason: verdict.reason });
+    }
+    if (lanes.length === 0) {
+      // With one lane there is no batch to partially honour, so an empty
+      // success would just look like nothing happened.
+      const e = new Error(found.length === 1
+        ? `This lane cannot be rebuilt in place: ${skipped[skipped.length - 1].reason}.`
+        : 'None of the selected lanes can be rebuilt.');
+      e.status = 409; throw e;
+    }
+
+    // Pre-flight the templates for the whole batch in one query. Safe to use
+    // ANY here precisely because these ids come from lane config rather than
+    // from the client.
+    const wantTemplates = [...new Set(
+      lanes.flatMap(l => (l.config?.workstations || [])
+        .map(w => w && w.template_id)
+        .concat([l.config?.template_id]))
+        .filter(Boolean)
+    )];
+    if (wantTemplates.length) {
+      const okT = await cybercoreQuery(
+        `SELECT id FROM cybercore_template_catalog`,
+        [wantTemplates]
+      );
+      const alive = new Set(okT.rows.map(r => r.id));
+      const dead = wantTemplates.filter(t => !alive.has(t));
+      if (dead.length) {
+        const e = new Error(
+          `${dead.length} template(s) these lanes were built from are no longer active in the catalog, so the machines cannot be replaced. Re-activate them, or rebuild the whole lane with a template you choose.`);
+        e.status = 409; throw e;
+      }
+    }
+
+    // Capacity BEFORE any teardown. Afterwards is too late — the student has
+    // nothing and cannot be rebuilt.
+    let challenge = null;
+    if (fullLane) {
+      challenge = await loadCourseLab(course);
+      const free = await vulnLab.countFreeLanes(challenge.vxlan_block);
+      if (free + lanes.length < lanes.length) {
+        const e = new Error(`Not enough free lanes in this course's VXLAN block to rebuild ${lanes.length}.`); e.status = 409; throw e;
+      }
+    }
+
+    const single = lanes.length === 1 ? lanes[0].lane_id : null;
+
+    // Check and claim in ONE synchronous block, every await already done.
+    laneProvision.assertNoConflictingWorkstationOperation({ courseId, laneId: single });
+    claimed = single
+      ? laneProvision.progressIdForLane(courseId, single)
+      : laneProvision.progressIdForCourseRebuild(courseId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Rebuild \u2014 ${course.course_name}`, lanes.length);
+    laneDeployer.setPhase(progress, 'preparing',
+      `Rebuilding ${lanes.length} lane(s)`);
+    // Seed every row so the client renders the whole batch from its first poll
+    // instead of watching lanes appear one at a time.
+    for (const l of lanes) {
+      progress.lanes[l.lane_id] = {
+        user: l.student_email, vxlan: l.vxlan_id, node: (l.config || {}).node || null,
+        status: 'pending', workstations: machineSlotsOf(l).length,
+        slots: slots || machineSlotsOf(l), error: null,
+      };
+    }
+
+    const progressUrl = `/api/cle/courses/${courseId}/vms/redeploy-progress${single ? `?lane_id=${single}` : ''}`;
+
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'lane.redeployed_bulk',
+      targetAction: 'lane.redeployed',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      metadata: {
+        course_id: courseId,
+        mode: fullLane ? 'full_lane' : 'in_place',
+        full_lane: fullLane,
+        // An auditor tracing "why did this student's RDP address change"
+        // needs this to be findable.
+        endpoint_changed: fullLane,
+        scope: lanes.length === 1 ? 'single' : 'selected',
+        lane_count: lanes.length,
+        ...(slots ? { slots } : {}),
+      },
+      targets: lanes.map(l => ({
+        id: l.user_id, label: l.student_email,
+        metadata: {
+          course_id: courseId, lane_id: l.lane_id, vxlan_id: l.vxlan_id,
+          slots: slots || machineSlotsOf(l),
+        },
+      })),
+    });
+
+    res.status(202).json({
+      success: true,
+      message: fullLane
+        ? `Rebuilding ${lanes.length} whole lane(s)`
+        : `Rebuilding machines on ${lanes.length} lane(s)`,
+      mode: fullLane ? 'full_lane' : 'in_place',
+      count: lanes.length,
+      lanes: lanes.map(l => ({
+        lane_id: l.lane_id, user_id: l.user_id, student_email: l.student_email,
+        slots: slots || machineSlotsOf(l),
+        console_via: (l.config || {}).console_via || null,
+      })),
+      progress_id: claimed,
+      progress_url: progressUrl,
+      ...(skipped.length ? { skipped } : {}),
+    });
+
+    // Frozen before the IIFE: re-deriving any of this inside the background
+    // block would read post-teardown state.
+    const claimedId = claimed;
+    claimed = null;   // ownership handed to the background block
+    const ctx = Object.freeze({
+      courseId, course, lanes, slots, fullLane, challenge, progress,
+      courseCode: course.code, courseName: course.course_name,
+    });
+
+    (async () => {
+      try {
+        if (ctx.fullLane) await runFullLaneRebuild(ctx, claimedId);
+        else await runInPlaceRebuild(ctx, claimedId);
+      } catch (e) {
+        console.error('[CLE] Rebuild batch failed:', e.message);
+        if (ctx.progress) ctx.progress.error = e.message;
+      } finally {
+        laneDeployer.finishProgress(claimedId);
+      }
+    })();
+  } catch (error) {
+    console.error('[CLE] Redeploy error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    // Only the 202 itself can throw with headers already sent, and replying
+    // twice throws again out of an async handler Express 4 does not catch.
+    if (res.headersSent) return;
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/** In-place: one shared clone semaphore, lanes bounded by max_concurrent_lanes. */
+async function runInPlaceRebuild(ctx, progressId) {
+  const { lanes, slots, progress } = ctx;
+  // ONE semaphore for the whole batch: max_concurrent_clones is what keeps a
+  // 24-lane rebuild from flattening a node's disks, and a per-lane semaphore
+  // would bound nothing across the batch.
+  const cloneSem = laneDeployer.createCloneSemaphore();
+  laneDeployer.setPhase(progress, 'cloning', `Rebuilding machines: 0/${lanes.length} complete`);
+
+  let done = 0;
+  for (const lane of lanes) {
+    try {
+      const r = await laneDeployer.rebuildLaneWorkstations({
+        laneId: lane.lane_id,
+        slots: slots || null,
+        progress,
+        cloneSem,
+      });
+      if (r.status === 'active' && r.errors.length === 0) progress.succeeded++;
+      else progress.failed++;
+    } catch (e) {
+      progress.failed++;
+      if (progress.lanes[lane.lane_id]) {
+        progress.lanes[lane.lane_id].status = 'error';
+        progress.lanes[lane.lane_id].error = e.message;
+      }
+      console.error(`[CLE] Rebuild of lane ${lane.lane_id} failed: ${e.message}`);
+    }
+    progress.completed = ++done;
+    laneDeployer.setPhase(progress, 'cloning',
+      `Rebuilding machines: ${done}/${lanes.length} complete`);
+  }
+}
+
+/**
+ * Whole lane: teardown, then a fresh deploy from the machines the lane
+ * recorded. Gated on the teardown coming back clean — teardownLanes keeps the
+ * row as 'error' when machines survive, and deploying over survivors collides
+ * on the gateway VMID, which is derived from the VXLAN.
+ */
+async function runFullLaneRebuild(ctx, progressId) {
+  const { courseId, lanes, challenge, progress, courseName, courseCode } = ctx;
+  laneDeployer.setPhase(progress, 'preparing', 'Tearing down the current lanes');
+
+  let done = 0;
+  for (const lane of lanes) {
+    try {
+      const cfg = lane.config || {};
+      const recorded = Array.isArray(cfg.workstations) ? cfg.workstations : [];
+      const templateIds = recorded.length
+        ? recorded.slice().sort((a, b) => a.slot - b.slot).map(w => w.template_id)
+        : [cfg.template_id];
+      const resources = recorded.length
+        ? recorded.slice().sort((a, b) => a.slot - b.slot).map(w => w.resources || null)
+        : (cfg.resources || null);
+
+      const templates = [];
+      for (const id of templateIds) templates.push(await loadWorkstationTemplate(id));
+
+      const teardown = await laneDeployer.teardownLanes([lane.lane_id]);
+      if (teardown.lanes_kept_for_retry > 0) {
+        throw new Error(
+          `Could not fully tear the lane down (${(teardown.errors || [])[0] || 'machines survived'}), so it was not rebuilt.`);
+      }
+
+      await laneProvision.provisionLanes({
+        courseId, challenge, templates, resources,
+        students: [{ id: lane.user_id, email: lane.student_email }],
+        courseName, courseCode,
+        // Publish under the claim this route already holds, not under the
+        // provision key — otherwise the two progress endpoints disagree and
+        // deployLanes finishes a claim that is not its own.
+        progressId, progressLabel: `Rebuild \u2014 ${courseName}`,
+      });
+      progress.succeeded++;
+    } catch (e) {
+      progress.failed++;
+      if (progress.lanes[lane.lane_id]) {
+        progress.lanes[lane.lane_id].status = 'error';
+        progress.lanes[lane.lane_id].error = e.message;
+      }
+      console.error(`[CLE] Full rebuild of lane ${lane.lane_id} failed: ${e.message}`);
+    }
+    progress.completed = ++done;
+  }
+}
+
+/**
+ * GET /redeploy-progress — Live progress for a rebuild.
+ *
+ * Separate from /provision-progress, which is hard-wired to the course-wide
+ * provision key. Multiplexing the two would make each return the other's
+ * numbers depending on timing, and the client stops polling on
+ * phase === 'complete' — so a provision finishing mid-rebuild would kill the
+ * wrong banner.
+ */
+router.get('/redeploy-progress', instructorOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const laneId = req.query.lane_id ? String(req.query.lane_id) : null;
+    // Validated before it becomes part of a registry key.
+    if (laneId && !LANE_ID_RE.test(laneId)) {
+      return res.status(400).json({ error: 'lane_id is not a lane id' });
+    }
+    const progress = laneProvision.getRebuildProgress(courseId, laneId);
+    if (!progress) return res.status(404).json({ error: 'No active rebuild for this course' });
     res.json(progress);
   } catch (error) {
     res.status(500).json({ error: error.message });

@@ -221,4 +221,49 @@ async function findTemplateNode(vmid, declaredNode) {
   return declaredNode;
 }
 
-module.exports = { proxmoxAPI, waitForTask, forceDestroyVM, findTemplateNode, PROXMOX_URL };
+/**
+ * Poll the cluster until these VMIDs are gone.
+ *
+ * Proxmox DELETE is ASYNCHRONOUS — it returns a UPID and destroys in the
+ * background — and nothing in this codebase waits on that task. Anything that
+ * re-uses a VMID it just destroyed (an in-place lane rebuild, an attach-mode
+ * lab redeploy) therefore clones into an id still being purged, and gets
+ * either "VM already exists" or, worse, a destroy task that lands AFTER the
+ * clone and eats the new disk.
+ *
+ * Doubles as the survivor check. A caller's own error list is unreliable in
+ * both directions — forceDestroyVM reports failure for a VM that merely moved
+ * node, and teardown paths drop instance records even when VMs survive. The
+ * cluster is the only authority.
+ *
+ * Lives here rather than in a plugin because src/utils must never require one:
+ * lane-deployer needs this for the same reason vuln-lab-provision does.
+ *
+ * @returns {Promise<{surviving:number[]}>}
+ */
+async function waitForVmidsGone(vmids, { timeoutMs = 120000, intervalMs = 5000 } = {}) {
+  const want = new Set((vmids || []).filter(v => v != null).map(v => String(v)));
+  if (want.size === 0) return { surviving: [] };
+
+  const deadline = Date.now() + timeoutMs;
+  let surviving = [...want];
+
+  while (Date.now() < deadline) {
+    try {
+      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      const live = new Set((resources || []).map(r => String(r.vmid)));
+      surviving = [...want].filter(v => live.has(v));
+      if (surviving.length === 0) return { surviving: [] };
+    } catch (e) {
+      // A cluster read failure must not be reported as "they're gone" — keep
+      // the last known survivor list and try again until the deadline.
+      console.warn(`[Proxmox] Could not read cluster resources while waiting for destroy: ${e.message}`);
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  return { surviving: surviving.map(v => Number(v)) };
+}
+module.exports = {
+  proxmoxAPI, waitForTask, forceDestroyVM, findTemplateNode, waitForVmidsGone, PROXMOX_URL,
+};

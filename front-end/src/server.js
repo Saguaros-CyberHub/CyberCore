@@ -677,6 +677,33 @@ async function warnWanIpConflicts() {
 async function recoverStrandedLanes() {
   try {
     const { cybercoreQuery } = require('./utils/cybercore-db');
+
+    // An IN-PLACE lane rebuild also parks the row at 'deploying', but its
+    // gateway, VXLAN and WAN address are all still legitimately held — the
+    // gateway LXC is running, answering ARP, with untouched student machines
+    // live behind it. Sweeping those to 'error' like an interrupted deploy
+    // would drop them out of ux_cybercore_lane_vxlan_active and
+    // allocateVxlanIds, and the next deployLanes could clone a gateway on top
+    // of the running one. So they go back to 'active' with an explanation,
+    // and this MUST run before the blanket sweep below.
+    const rebuilt = await cybercoreQuery(`
+      UPDATE cybercore_lane
+         SET status = 'active',
+             config = (config - 'rebuild') || jsonb_build_object(
+                        'error',
+                        'An in-place rebuild was interrupted by a server restart \u2014 some '
+                     || 'machines may be missing. Rebuild them from the VM Management tab.',
+                        'rebuild_interrupted_at', to_jsonb(NOW())),
+             updated_at = NOW()
+       WHERE status = 'deploying'
+         AND config->'rebuild' IS NOT NULL
+       RETURNING lane_id, vxlan_id
+    `);
+    if (rebuilt.rowCount > 0) {
+      console.warn(
+        `\u26a0\ufe0f  ${rebuilt.rowCount} lane(s) were mid-rebuild when the previous run stopped (vxlan ${rebuilt.rows.map(r => r.vxlan_id).join(', ')}). Their gateways are intact, so they are back to 'active' — re-run the rebuild to replace whatever is missing.`);
+    }
+
     const result = await cybercoreQuery(`
       UPDATE cybercore_lane
          SET status = 'error',

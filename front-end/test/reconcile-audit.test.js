@@ -423,12 +423,54 @@ test('non-vxlan zones are not peer-checked', () => {
 // REPORTING
 // ============================================================================
 
-test('an incomplete scan names how much was covered', () => {
+test('missing nodes do NOT invalidate shared-pool findings', () => {
+  // The Ceph case: 3 of 9 nodes answered, but every shared pool was read. The
+  // orphan list for shared storage is complete; only node-local images are
+  // unknown. Saying "orphaned disks on the other 6 are not listed" here reads
+  // as "this whole finding is unreliable", which is the opposite of true.
   const s = A.summarizeScan(
-    { complete: false, nodes_total: 10, nodes_scanned: 8, storages_failed: [], stats: {} },
-    { trusted: true, nodes_online: 10, nodes_total: 10 });
-  assert.match(s.warnings[0], /8 of 10 nodes scanned/);
-  assert.strictEqual(s.complete, false);
+    { complete: false, nodes_total: 9, nodes_scanned: 3, storages_failed: [], stats: {},
+      coverage: { shared_total: 2, shared_read: 2, local_total: 3, local_read: 3, shared_complete: true } },
+    { trusted: true, nodes_online: 9, nodes_total: 9 });
+
+  assert.match(s.warnings[0], /reached 3 of 9 nodes/);
+  assert.match(s.warnings[0], /read in full/, 'shared coverage must be stated as complete');
+  assert.match(s.warnings[0], /node-local images on the other 6 nodes/);
+  assert.ok(!/INCOMPLETE list/.test(s.warnings[0]));
+  assert.strictEqual(s.complete, false, 'still partial — local storage really was missed');
+});
+
+test('an unread shared pool DOES invalidate the list, and says so', () => {
+  const s = A.summarizeScan(
+    { complete: false, nodes_total: 9, nodes_scanned: 3, storages_failed: [], stats: {},
+      coverage: { shared_total: 2, shared_read: 1, local_total: 3, local_read: 3, shared_complete: false } },
+    { trusted: true, nodes_online: 9, nodes_total: 9 });
+
+  assert.match(s.warnings[0], /could not read 1 of 2 shared pool/);
+  assert.match(s.warnings[0], /INCOMPLETE list/);
+  assert.match(s.warnings[0], /unknown, not absent/,
+    'an absent orphan and an unscanned one are different claims');
+});
+
+test('coverage rides along on the summary for the UI to render', () => {
+  const coverage = { shared_total: 2, shared_read: 2, local_total: 3, local_read: 1, shared_complete: true, nodes_unlisted: ['n4'] };
+  const s = A.summarizeScan(
+    { complete: false, nodes_total: 9, nodes_scanned: 3, stats: {}, coverage,
+      storages_failed: [{ node: 'n4', storage: 'local-lvm', reason: '595 no route to host' }] },
+    { trusted: true, nodes_online: 9, nodes_total: 9 });
+
+  assert.deepStrictEqual(s.coverage, coverage);
+  assert.deepStrictEqual(s.storages_failed[0].reason, '595 no route to host',
+    'the per-target reason is the only actionable thing in a partial scan');
+});
+
+test('a scan that finished every node reports no coverage warning', () => {
+  const s = A.summarizeScan(
+    { complete: true, nodes_total: 9, nodes_scanned: 9, storages_failed: [], stats: {},
+      coverage: { shared_total: 2, shared_read: 2, local_total: 9, local_read: 9, shared_complete: true } },
+    { trusted: true, nodes_online: 9, nodes_total: 9 });
+  assert.deepStrictEqual(s.warnings, []);
+  assert.strictEqual(s.complete, true);
 });
 
 test('a degraded cluster view is untrusted and says why', () => {

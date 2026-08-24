@@ -217,6 +217,43 @@ test('an untrusted scan disables Sweep All but still lists the disks', () => {
   assert.ok(html.includes('8 of 10 nodes scanned'), 'the warning is surfaced, not just logged');
 });
 
+test('a partial scan names every node it missed, and why', () => {
+  // The original report was a bare "3 of 9 nodes scanned" with no way to find
+  // out which six or what went wrong. The reasons were in the payload all
+  // along and simply were not rendered.
+  const r = clone(RESULT);
+  r.disk_scan = {
+    complete: false, trusted: false, nodes_total: 9, nodes_scanned: 3,
+    duration_ms: 8200, calls_made: 14,
+    coverage: { shared_total: 2, shared_read: 2, local_total: 3, local_read: 3, shared_complete: true },
+    nodes_skipped: [
+      { node: 'cyberhub-node-6', reason: '595 no route to host' },
+      { node: 'cyberhub-node-7', reason: 'offline' },
+    ],
+    storages_failed: [{ node: 'cyberhub-node-8', storage: 'local-lvm', shared: false, reason: 'timed out after 12s' }],
+    warnings: [],
+  };
+
+  const { context, el } = makeContext();
+  context.renderReconcileResult(r, { age_seconds: 0 });
+  const html = el('reconcileResults').innerHTML;
+
+  assert.ok(html.includes('Disk Scan Coverage'));
+  assert.ok(html.includes('cyberhub-node-6') && html.includes('595 no route to host'));
+  assert.ok(html.includes('cyberhub-node-7') && html.includes('offline'));
+  assert.ok(html.includes('cyberhub-node-8') && html.includes('timed out after 12s'),
+    'a failed storage is a coverage hole just like an unreachable node');
+  assert.ok(html.includes('3 of 9'), 'the ratio is still stated');
+  assert.ok(html.includes('PROXMOX_API_URL'),
+    'point at the forwarding hop — repeated same-node failures are usually that');
+});
+
+test('a complete scan shows no coverage table', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 0 });
+  assert.ok(!el('reconcileResults').innerHTML.includes('Disk Scan Coverage'));
+});
+
 test('a shared-storage disk is labelled as such', () => {
   const { context, el } = makeContext();
   context.renderReconcileResult(clone(RESULT), { age_seconds: 0 });

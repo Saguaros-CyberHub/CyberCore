@@ -23,6 +23,14 @@ const Workstations = (() => {
     return u?.role === 'admin';
   }
 
+  // Who may deploy from the template catalog. Mirrors the server's
+  // staffOnly = requireRole('instructor','admin') on GET /templates and
+  // POST /:templateId/deploy. Effective role, so Student View sees it too.
+  function _isStaff() {
+    const u = (typeof Auth !== 'undefined') ? Auth.getUser() : null;
+    return u?.role === 'instructor' || u?.role === 'admin';
+  }
+
   // Drawing the list the way a student's looks, for lecture recordings.
   function _studentView() {
     return typeof Auth !== 'undefined'
@@ -86,6 +94,10 @@ const Workstations = (() => {
     if (_availLoaded) return;
     const el = document.getElementById('wksTemplateGrid');
     if (!el) return;
+    // The Available tab is hidden from students, but switchDashboardTab is a
+    // global anyone can call from the console. Bail before the fetch so they get
+    // an empty panel rather than requireRole's raw 403 text in .wks-error.
+    if (!_isStaff()) { el.innerHTML = ''; return; }
     el.innerHTML = '<div class="wks-loading">Loading templates…</div>';
     try {
       const data = await _api('GET', '/templates');
@@ -277,10 +289,17 @@ const Workstations = (() => {
              <div class="wks-empty-icon">🖥</div>
              <p>No workstations have been deployed by any user yet.</p>
            </div>`
-        : `<div class="wks-empty">
+        : _isStaff()
+        ? `<div class="wks-empty">
              <div class="wks-empty-icon">🖥</div>
              <p>You haven't deployed any workstations yet.</p>
              <p class="wks-empty-sub">Go to <strong>Available</strong> to deploy a template.</p>
+           </div>`
+        // Students have no Available tab to be pointed at.
+        : `<div class="wks-empty">
+             <div class="wks-empty-icon">🖥</div>
+             <p>No workstations have been assigned to you yet.</p>
+             <p class="wks-empty-sub">Your instructor provisions these for your course.</p>
            </div>`;
       return;
     }

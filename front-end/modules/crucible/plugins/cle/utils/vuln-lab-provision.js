@@ -25,7 +25,9 @@
  */
 
 const { cybercoreQuery, cybercorePool } = require('../../../../../src/utils/cybercore-db');
-const { proxmoxAPI, waitForTask, forceDestroyVM } = require('../../../../../src/utils/proxmox');
+const {
+  proxmoxAPI, waitForTask, forceDestroyVM, waitForVmidsGone,
+} = require('../../../../../src/utils/proxmox');
 const { getDefaultTemplateNode } = require('../../../../../src/utils/site-config');
 const { resolveLaneNetworking } = require('../../../../../src/utils/lane-networking');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
@@ -185,44 +187,19 @@ function assertNoConflictingLabOperation({ materialId, userId = null, ignoreProg
 }
 
 /**
- * Poll the cluster until these VMIDs are gone.
+ * waitForVmidsGone now lives in src/utils/proxmox.js and is imported above.
  *
- * Needed because Proxmox DELETE is asynchronous — it returns a UPID and destroys
- * in the background — and detachModuleFromLane never waits on the task. An
- * attach-mode redeploy re-attaches into the slots it just freed, which
- * findFreeSlots hands back immediately, so vmidForSlot yields exactly the ids
- * still being destroyed and the clone fails with "VM already exists".
+ * It moved because lane-deployer needs it for the in-place workstation rebuild
+ * and src/utils must never require a plugin. The single call site in this file
+ * (teardownLabScoped) is unchanged. It was never on this module's exports, so
+ * nothing outside this file is affected.
  *
- * Doubles as the survivor check: detachModuleFromLane reports "not destroyed"
- * for a VM that merely moved node, and drops the instance record even when VMs
- * survive, so its `errors` are unreliable in both directions. The cluster is the
- * only authority.
- *
- * @returns {Promise<{surviving:number[]}>}
+ * The reason it exists is easy to lose in a move, so it is worth restating
+ * here: Proxmox DELETE is asynchronous, and an attach-mode redeploy re-attaches
+ * into the slots it just freed — findFreeSlots hands them back immediately, so
+ * vmidForSlot yields exactly the ids still being destroyed and the clone fails
+ * with "VM already exists".
  */
-async function waitForVmidsGone(vmids, { timeoutMs = 120000, intervalMs = 5000 } = {}) {
-  const want = new Set((vmids || []).filter(v => v != null).map(v => String(v)));
-  if (want.size === 0) return { surviving: [] };
-
-  const deadline = Date.now() + timeoutMs;
-  let surviving = [...want];
-
-  while (Date.now() < deadline) {
-    try {
-      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
-      const live = new Set((resources || []).map(r => String(r.vmid)));
-      surviving = [...want].filter(v => live.has(v));
-      if (surviving.length === 0) return { surviving: [] };
-    } catch (e) {
-      // A cluster read failure must not be reported as "they're gone" — keep the
-      // last known survivor list and try again until the deadline.
-      console.warn(`${LOG} Could not read cluster resources while waiting for destroy: ${e.message}`);
-    }
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
-
-  return { surviving: surviving.map(v => Number(v)) };
-}
 
 /**
  * Load a deployable vulnerable challenge by id. Rejects the per-course network

@@ -530,13 +530,30 @@ function summarizeScan(scan, clusterView) {
   const nodesScanned = scan.nodes_scanned || 0;
   const skippedNodes = (scan.skipped && scan.skipped.nodes) || [];
   const failedStorages = scan.storages_failed || [];
+  const cov = scan.coverage || {};
+  const missedNodes = nodesTotal - nodesScanned;
 
   if (!scan.complete) {
-    if (nodesScanned < nodesTotal) {
-      warnings.push(
-        `Disk scan incomplete — ${nodesScanned} of ${nodesTotal} nodes scanned; ` +
-        `orphaned disks on the other ${nodesTotal - nodesScanned} are not listed.`
-      );
+    if (missedNodes > 0) {
+      // Say what is actually missing. A shared pool is one volume list readable
+      // from any node holding it, so losing nodes costs NOTHING on Ceph as long
+      // as some node answered — only node-local images go unseen. The earlier
+      // wording ("orphaned disks on the other N are not listed") implied the
+      // whole finding was suspect on a cluster where it was in fact complete.
+      const plural = missedNodes === 1 ? 'node' : 'nodes';
+      if (cov.shared_complete) {
+        warnings.push(
+          `Disk scan reached ${nodesScanned} of ${nodesTotal} nodes. Shared storage ` +
+          `(${cov.shared_read} of ${cov.shared_total} pool(s)) was read in full, so orphans there are ` +
+          `complete — but node-local images on the other ${missedNodes} ${plural} are not listed.`
+        );
+      } else {
+        warnings.push(
+          `Disk scan reached ${nodesScanned} of ${nodesTotal} nodes and could not read ` +
+          `${cov.shared_total - cov.shared_read} of ${cov.shared_total} shared pool(s) — orphaned disks are ` +
+          `an INCOMPLETE list. Treat anything missing here as unknown, not absent.`
+        );
+      }
     } else {
       warnings.push('Disk scan incomplete — it hit its time budget before finishing.');
     }
@@ -558,6 +575,7 @@ function summarizeScan(scan, clusterView) {
   return {
     complete: !!scan.complete,
     trusted: !!clusterView.trusted,
+    coverage: cov,
     duration_ms: scan.duration_ms || 0,
     budget_ms: scan.budget_ms || 0,
     nodes_total: nodesTotal,

@@ -994,7 +994,12 @@
             </summary>
             <div class="dashboard-submenu">
               <a href="#" class="dashboard-submenu-item" data-page="workspaces-myworkspaces" onclick="switchDashboardTab(event, 'workspaces-myworkspaces')">My Workspaces</a>
-              <a href="#" class="dashboard-submenu-item" data-page="workspaces-available" onclick="switchDashboardTab(event, 'workspaces-available')">Available</a>
+              <!-- Staff-only: revealed by hub.js once Auth resolves. Starts hidden so a
+                   failed auth check hides the tab rather than exposing it. The real
+                   control is staffOnly in src/routes/workstations.js. -->
+              <a href="#" class="dashboard-submenu-item" data-staff-only hidden
+                 data-page="workspaces-available"
+                 onclick="switchDashboardTab(event, 'workspaces-available')">Available</a>
             </div>
           </details>
 

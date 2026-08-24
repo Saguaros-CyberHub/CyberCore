@@ -9,7 +9,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, requireRole } = require('../middleware/auth');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
 const { selectBestNode } = require('../utils/node-selector');
@@ -18,6 +18,13 @@ const { getDefaultTemplateNode } = require('../utils/site-config');
 const createLogger = require('../utils/logger');
 const log = createLogger('workstations');
 const audit = require('../utils/audit');
+
+// Self-service deploy is staff-only. Students use lane VMs and the workstations
+// their instructor provisions for them; they do not mint their own cluster VMs.
+// Allowlist, never a denylist: the DB default role is 'user', not 'student'
+// (001_init_db.sql:27), so a `role !== 'student'` check would quietly keep the
+// feature for every legacy 'user' row.
+const staffOnly = requireRole('instructor', 'admin');
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -262,9 +269,11 @@ async function syncPowerStates(rows) {
 
 // ──────────────────────────────────────────────────────────────────────────────
 // GET /api/workstations/templates
-// List active workstation templates visible to all authenticated users.
+// Lists the active workstation templates a caller may deploy from. Staff only:
+// this is the catalog behind the hub's "Available" tab, and students are not
+// permitted to provision their own VMs.
 // ──────────────────────────────────────────────────────────────────────────────
-router.get('/templates', authenticateToken, async (req, res) => {
+router.get('/templates', authenticateToken, staffOnly, async (req, res) => {
   try {
     const result = await cybercoreQuery(`
       SELECT
@@ -438,7 +447,7 @@ router.get('/:vmId/status', authenticateToken, async (req, res) => {
 // Validates, creates DB records immediately, responds 202, then clones/starts
 // in the background — same non-blocking pattern as DELETE.
 // ──────────────────────────────────────────────────────────────────────────────
-router.post('/:templateId/deploy', authenticateToken, async (req, res) => {
+router.post('/:templateId/deploy', authenticateToken, staffOnly, async (req, res) => {
   const { templateId } = req.params;
 
   // Admins can deploy on behalf of another user (e.g. CLE bulk provisioning)

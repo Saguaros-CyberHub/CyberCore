@@ -48,7 +48,9 @@
 const crypto = require('crypto');
 
 const { cybercoreQuery } = require('./cybercore-db');
-const { proxmoxAPI, waitForTask, findTemplateNode } = require('./proxmox');
+const {
+  proxmoxAPI, waitForTask, findTemplateNode, forceDestroyVM, waitForVmidsGone,
+} = require('./proxmox');
 const { selectBestNode } = require('./node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('./batch-deployer');
 const {
@@ -92,7 +94,15 @@ const EXTRA_WS_VMID_MAX  = 399999;
 // (ATTACHED_IP_OCTET_MIN), and starts above GOAD's lab hosts (.10–.12) and the
 // .1 gateway / .5 controller reservations.
 const WORKSTATION_OCTET_BASE = INFRA_IP_OCTETS.Kali;
-const WORKSTATION_MAX_SLOTS  = 30;                  // .50 – .79
+const WORKSTATION_MAX_SLOTS  = 30;
+// The keys deployLanes' laneConfig contributes to cybercore_lane.config.
+// registerWorkspaceVm spreads laneConfig straight into cybercore_resource.metadata,
+// so an in-place rebuild has to hand it the same set the original deploy did or the
+// workspace row silently loses its course scoping. Enumerated rather than inferred
+// because config also holds deployer-owned keys that must NOT be echoed back.
+const LANE_CONFIG_PASSTHROUGH_KEYS = [
+  'cle', 'course_id', 'challenge_key', 'material_id', 'cohort_id',
+];                  // .50 – .79
 const WORKSTATION_OCTET = WORKSTATION_OCTET_BASE;   // back-compat alias: slot 0
 
 // Console protocols a template may expose, and the port the gateway publishes
@@ -220,6 +230,24 @@ async function reserveWorkstationVmids(count) {
     );
   }
   return ids;
+}
+
+/**
+ * Hold slot-1+ VMIDs against the in-process allocator across a destroy/re-clone
+ * window.
+ *
+ * An in-place rebuild re-uses the VMIDs it just destroyed. Between the DELETE
+ * landing and the clone claiming the id again, that id is free in the cluster
+ * AND absent from _reservedWsVmids — so a concurrent deployLanes in this same
+ * process (an instructor provisioning another course) would scan, see it free,
+ * and hand it to a brand-new lane. Both then clone into it.
+ *
+ * Slot 0 needs no hold: WORKSTATION_VMID_OFFSET + vxlanId is derived, never
+ * scanned for.
+ */
+function holdWorkstationVmids(vmids) {
+  const now = Date.now();
+  for (const id of vmids || []) if (Number.isInteger(id)) _reservedWsVmids.set(id, now);
 }
 
 /** First non-loopback IPv4 from the guest agent (qemu) or interfaces API (lxc). */
@@ -2705,7 +2733,753 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   };
 }
 
+// ── in-place workstation rebuild ─────────────────────────────────────────────
+//
+// Destroy and re-clone specific machines INSIDE an existing lane. The lane row,
+// vxlan_id, gateway LXC, gateway_wan_ip, console host:port and Guacamole
+// connections all survive, so connection details already handed to students
+// keep working. That promise is the whole point, and it is what dictates every
+// design choice below — above all the decision to RE-USE VMIDs rather than
+// allocate fresh ones.
+
+/**
+ * The slot records a lane actually has, in slot order.
+ *
+ * Lanes deployed before config.workstations[] existed carry only the flat
+ * slot-0 keys, so slot 0 is synthesized from them — the same fallback
+ * teardownLanes carries. Every field is either recorded or deterministic.
+ *
+ * Pure, so the synthesis can be tested without a cluster.
+ */
+function laneWorkstationRecords(lane) {
+  const cfg = lane.config || {};
+  const recorded = Array.isArray(cfg.workstations) ? cfg.workstations : [];
+  if (recorded.length) {
+    return recorded.filter(w => w && w.slot != null).slice().sort((a, b) => a.slot - b.slot);
+  }
+  if (lane.vxlan_id == null) return [];
+  return [{
+    slot: 0,
+    vmid: cfg.workstation_vmid || (WORKSTATION_VMID_OFFSET + lane.vxlan_id),
+    octet: octetForSlot(0),
+    ip: cfg.workstation_ip || cfg.ip || null,
+    mac: cfg.workstation_mac || macForOctet(octetForSlot(0), lane.vxlan_id),
+    // Slot 0 clones under the bare lane name (deployLanes), and the dnsmasq
+    // reservation plus teardown's ownership guard both key on it.
+    hostname: lane.name || null,
+    provider_type: cfg.provider_type || null,
+    template_id: cfg.template_id || null,
+    template_name: cfg.template_name || null,
+    console_protocol: cfg.console_protocol || null,
+    console_port: cfg.console_port || null,
+    console_host: cfg.console_host || null,
+    console_via: cfg.console_via || null,
+    guac_connection_id: cfg.guac_connection_id || null,
+    workspace_resource_id: cfg.workspace_resource_id || null,
+    resources: cfg.resources || null,
+    _synthesized: true,
+  }];
+}
+
+/**
+ * The flat slot-0 mirror patch for a set of REBUILT slot records.
+ *
+ * THE SINGLE MOST DANGEROUS LINE IN THIS FEATURE IS THE ONE THIS FUNCTION
+ * EXISTS TO PREVENT. deployLaneWorkstations does `const primary = deployed[0]`
+ * and mirrors it onto config.ip / console_* / guac_connection_id /
+ * workstation_user / workstation_pass, which is correct there because it owns
+ * every slot. Copying that line into a SUBSET rebuild would take deployed[0] —
+ * the first REBUILT slot, which on a `slots: [3]` rebuild is slot 3 — and
+ * overwrite a healthy slot 0's credentials and console with a different
+ * machine's. plugins/cle/routes/{vms,labs}.js and
+ * lane-credentials.resolveLaneWorkstationCredential all read those flat keys.
+ *
+ * So: the mirror is written ONLY when slot 0 is genuinely among the rebuilt.
+ *
+ * Pure, and unit-tested for exactly that.
+ */
+function flatMirrorPatch(deployed) {
+  const zero = (deployed || []).find(d => d && d.slot === 0) || null;
+  if (!zero) return {};
+  return {
+    workstation_vmid: zero.vmid,
+    ip: zero.ip,
+    ip_confirmed: false,
+    workstation_mac: zero.mac,
+    console_via: zero.console_via,
+    console_host: zero.console_host,
+    console_port: zero.console_port,
+    guac_connection_id: zero.guac_connection_id,
+    workspace_resource_id: zero.workspace_resource_id || null,
+    // confirmWorkstationIp may have downgraded the lane with a "took a pool
+    // lease" message describing the machine we just destroyed. Left in place it
+    // would outlive the thing it described.
+    console_error: null,
+    ...(zero.resources ? { resources: zero.resources } : {}),
+    ...(zero.resource_warnings ? { resource_warnings: zero.resource_warnings } : {}),
+    ...(zero.workstation_user ? { workstation_user: zero.workstation_user } : {}),
+    ...(zero.workstation_pass ? { workstation_pass: zero.workstation_pass } : {}),
+    credentials_source: zero.credentials_source,
+  };
+}
+
+/**
+ * Delete every disk volume belonging to one VMID on one node.
+ *
+ * teardownLanes sweeps orphaned disks because `purge=1` does not always take
+ * the volumes with it. On a normal teardown a survivor wastes a gigabyte; on a
+ * REBUILD it makes the clone fail outright with "volume already exists", because
+ * the clone targets the same vm-<vmid>-disk-0 name it just tried to free. Hence
+ * mandatory here, and scoped to the one node the VM was on rather than the
+ * whole cluster.
+ */
+async function sweepVmDisks(node, vmid) {
+  const survivors = [];
+  let storages;
+  try {
+    storages = await proxmoxAPI('GET', `/api2/json/nodes/${node}/storage`);
+  } catch (e) {
+    return { swept: 0, survivors: [`storage listing on ${node} failed: ${e.message}`] };
+  }
+  let swept = 0;
+  for (const st of (storages || [])) {
+    if (st.content && !st.content.includes('images')) continue;
+    let contents;
+    try {
+      contents = await proxmoxAPI(
+        'GET', `/api2/json/nodes/${node}/storage/${st.storage}/content?content=images`);
+    } catch (_) { continue; }
+    for (const item of (contents || [])) {
+      const m = (item.volid || '').match(/vm-(\d+)-(disk|cloudinit)/);
+      if (!m || Number(m[1]) !== Number(vmid)) continue;
+      let ok = false;
+      let lastErr = null;
+      for (let attempt = 1; attempt <= 3 && !ok; attempt++) {
+        try {
+          await proxmoxAPI('DELETE',
+            `/api2/json/nodes/${node}/storage/${st.storage}/content/${encodeURIComponent(item.volid)}`);
+          ok = true; swept++;
+        } catch (e) {
+          lastErr = e;
+          // Same backoff teardownLanes uses: a volume can still be held for a
+          // moment by the destroy task that was meant to remove it.
+          if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
+        }
+      }
+      if (!ok) survivors.push(`${item.volid}: ${lastErr && lastErr.message}`);
+    }
+  }
+  return { swept, survivors };
+}
+
+/**
+ * Destroy specific workstations of ONE lane and prove to the cluster's
+ * satisfaction that they are gone — VM config AND disks.
+ *
+ * Does NOT touch the gateway, the lane row, config.workstations[], or any
+ * Guacamole connection. Pure per-machine demolition.
+ *
+ * Built on proxmox.forceDestroyVM rather than a copy of teardownLanes phases
+ * 2-3: that batch version is the same sequence with parallelism across many VMs,
+ * which a per-lane sequential rebuild does not want. What it lacks, and what is
+ * added here, is the wait-for-gone gate and the targeted disk sweep.
+ *
+ * @param {Array} a.targets [{ slot, vmid, providerType, hostname, node }]
+ * @returns {Promise<{destroyed:Array, absent:Array, failed:Array}>}
+ */
+async function destroyWorkstationSlots({ laneId, targets, waitTimeoutMs = 120000 }) {
+  const destroyed = [];
+  const absent = [];
+  const failed = [];
+
+  for (const t of targets) {
+    if (t.vmid == null) { absent.push({ slot: t.slot, vmid: null }); continue; }
+
+    // A VM that is not on the cluster is not an error: it is the "deploy died
+    // after insertLane wrote the planned VMIDs but before the clone" case, and
+    // rebuilding is its repair path.
+    if (!t.node) { absent.push({ slot: t.slot, vmid: t.vmid }); continue; }
+
+    const type = t.providerType === 'lxc' ? 'lxc' : 'qemu';
+    try {
+      await forceDestroyVM(t.vmid, type, t.node);
+    } catch (e) {
+      // forceDestroyVM is documented not to throw, but a caller that assumes so
+      // and is wrong would skip the gate below and clone onto a live machine.
+      failed.push({ slot: t.slot, vmid: t.vmid, phase: 'delete', error: e.message });
+      continue;
+    }
+
+    // THE HARD GATE. Proxmox DELETE is asynchronous, and cloning into an id it
+    // is still purging either fails with "VM already exists" or lets the destroy
+    // task land AFTER the clone and eat the new disk. A survivor is a failed
+    // slot, never a retry.
+    const { surviving } = await waitForVmidsGone([t.vmid], { timeoutMs: waitTimeoutMs });
+    if (surviving.length) {
+      failed.push({
+        slot: t.slot, vmid: t.vmid, phase: 'wait',
+        error: `VM ${t.vmid} is still on the cluster ${Math.round(waitTimeoutMs / 1000)}s after being destroyed`,
+      });
+      continue;
+    }
+
+    const sweep = await sweepVmDisks(t.node, t.vmid);
+    if (sweep.survivors.length) {
+      failed.push({
+        slot: t.slot, vmid: t.vmid, phase: 'disk',
+        error: `disk volumes survived the destroy: ${sweep.survivors.join('; ')}`,
+      });
+      continue;
+    }
+
+    destroyed.push({ slot: t.slot, vmid: t.vmid, node: t.node, disks_swept: sweep.swept });
+    console.log(`${LOG} Lane ${laneId} slot ${t.slot}: destroyed ${type} ${t.vmid} on ${t.node} (${sweep.swept} disk volume(s) swept)`);
+  }
+
+  return { destroyed, absent, failed };
+}
+
+/**
+ * Retire the workspace rows naming ONE destroyed machine.
+ *
+ * teardownLanes deletes by metadata->>'lane_id', which on a subset rebuild would
+ * strip the workspace rows of every machine on the lane — including the ones
+ * left running. Scope by the per-slot workspace_resource_id instead.
+ *
+ * This delete is REQUIRED, not tidy-up: registerWorkspaceVm is a plain INSERT
+ * against UNIQUE (module_key, name), and re-using the VMID makes the name
+ * byte-identical — so without it the rebuilt machine silently vanishes from the
+ * student's dashboard with only a console warning.
+ *
+ * Failures are warnings: a stale resource row is a ghost card, not a running
+ * machine.
+ */
+async function retireWorkspaceRowForSlot(laneId, ws) {
+  try {
+    if (ws.workspace_resource_id) {
+      await cybercoreQuery(
+        `DELETE FROM cybercore_resource
+          WHERE resource_id = $1::uuid
+            AND metadata->>'vm_category' = 'lane_vm'`,
+        [ws.workspace_resource_id]
+      );
+      return null;
+    }
+    // No recorded id: the original registration failed, or this is a pre-slots
+    // lane. Scope by VMID — never by lane. provider_vmid is TEXT (the deployers
+    // write String(vmid)), and lane_id is compared AS TEXT and never cast to
+    // uuid: Postgres does not guarantee AND-evaluation order, so a cast blows up
+    // if any resource row anywhere holds a non-uuid there.
+    if (ws.vmid == null) return null;
+    await cybercoreQuery(
+      `DELETE FROM cybercore_resource r
+        USING cybercore_vm_instance vi
+        WHERE vi.resource_id = r.resource_id
+          AND r.metadata->>'vm_category' = 'lane_vm'
+          AND r.metadata->>'lane_id'     = $1::text
+          AND vi.provider_vmid           = $2::text`,
+      [String(laneId), String(ws.vmid)]
+    );
+    return null;
+  } catch (e) {
+    return `workspace rows for slot ${ws.slot} (vmid ${ws.vmid}): ${e.message}`;
+  }
+}
+
+/** A failure that happened BEFORE anything was destroyed. */
+function preflightError(msg, phase = 'preflight') {
+  const e = new Error(msg);
+  e.phase = phase;
+  e.destroyed = false;
+  return e;
+}
+
+/**
+ * Rebuild machines in place inside an EXISTING lane.
+ *
+ * The lane row, vxlan_id, gateway LXC, gateway_wan_ip, console host:port and
+ * Guacamole connections all survive, so connection details already given to
+ * students keep working. Slots not named are never stopped and never touched.
+ *
+ * VMIDs ARE RE-USED, deliberately, and that is what makes the promise true:
+ *   - Slot 0 has no choice — its id is WORKSTATION_VMID_OFFSET + vxlanId, and
+ *     teardown derives the same value for a lane with no recorded array.
+ *   - The Guacamole connection name is `<laneName>-<vmid>`, and the launch URL
+ *     a student holds is keyed on the connection IDENTIFIER, which survives the
+ *     PUT createGuacConnection does and dies with a fresh POST.
+ *   - cybercore_resource.name embeds the VMID, so the row can be deleted and
+ *     re-inserted deterministically.
+ *   - Every downstream reader (attack-target, lane-credentials, guac-sessions,
+ *     teardownLanes) keys on vmid, and none of them goes blind mid-rebuild.
+ *   - The admin group teardown in routes/admin/groups.js shares no code with
+ *     this file and finds the workstation by deriving 600000 + vxlan_id. Change
+ *     slot 0's id and that path silently destroys nothing and orphans the real
+ *     machine.
+ * The cost is the purge race, and destroyWorkstationSlots pays it in full.
+ *
+ * ORDERING: the gateway is wired FIRST, then machines are destroyed. That
+ * inverts deployLaneWorkstations on purpose. On a first deploy the reservations
+ * must exist before the guest's first DHCPREQUEST; on a rebuild they already
+ * exist and are unchanged, so writing them first is a no-op on the wire — and
+ * it means a broken gateway fails the operation while the student still has
+ * every machine they started with.
+ *
+ * Per-slot failures RETURN. Only pre-flight and gateway failures throw, and
+ * they carry err.destroyed === false.
+ *
+ * @param {number[]|null} a.slots  null = every recorded slot
+ */
+async function rebuildLaneWorkstations({
+  laneId,
+  slots = null,
+  progress = null,
+  cloneSem = null,
+  description = '',
+  guacParent = undefined,
+  destroyWaitMs = 120000,
+}) {
+  // ── load ────────────────────────────────────────────────────────────────
+  const laneRes = await cybercoreQuery(
+    `SELECT lane_id, user_id, module_key, name, status, vxlan_id,
+            gateway_wan_ip::text AS gateway_wan_ip, config
+       FROM cybercore_lane WHERE lane_id = $1`,
+    [laneId]
+  );
+  if (!laneRes.rows.length) throw preflightError('Lane not found');
+  const lane = laneRes.rows[0];
+  const cfg = lane.config || {};
+  const moduleKey = lane.module_key || 'crucible';
+  const subnetScheme = cfg.subnet_scheme || 'v2';
+
+  // ── pre-flight: everything that can fail, before anything is destroyed ───
+  if (lane.status !== 'active') {
+    throw preflightError(
+      `This lane is ${lane.status}, not active. An in-place rebuild keeps the existing gateway and network, which only makes sense for a working lane — rebuild the whole lane instead.`);
+  }
+  // Same guard deployLanes applies: this file builds single-LAN lanes and reads
+  // net.lan throughout, while resolveLaneNetworking's v3 branch returns no `lan`.
+  if (subnetScheme !== 'v1' && subnetScheme !== 'v2') {
+    throw preflightError(
+      `subnetScheme '${subnetScheme}' is not rebuildable here — segmented lanes go through challenge-lane-deployer.`);
+  }
+  if (lane.vxlan_id == null) throw preflightError('Lane has no VXLAN id');
+
+  const records = laneWorkstationRecords(lane);
+  if (!records.length) {
+    throw preflightError(
+      'This lane records no machines, so there is nothing to rebuild in place.');
+  }
+  const bySlot = new Map(records.map(r => [r.slot, r]));
+  const wanted = slots == null
+    ? records.map(r => r.slot)
+    : [...new Set(slots)].sort((a, b) => a - b);
+  for (const sl of wanted) {
+    if (!bySlot.has(sl)) {
+      throw preflightError(`This lane has no slot ${sl}`);
+    }
+  }
+  if (!wanted.length) throw preflightError('No slots selected');
+
+  // The user row, not cfg.user_email: that is a snapshot from insertLane, and
+  // Guacamole permissions are email-keyed.
+  const userRes = await cybercoreQuery(
+    `SELECT user_id AS id, email FROM cybercore_user WHERE user_id = $1`, [lane.user_id]);
+  const user = userRes.rows[0] || { id: lane.user_id, email: cfg.user_email || null };
+  if (!user.email) {
+    throw preflightError('The owner of this lane has no email address, so its Guacamole ' +
+      'connection cannot be refreshed.');
+  }
+
+  // ── cluster snapshot: one read for the whole rebuild ─────────────────────
+  const gatewayVmid = GATEWAY_VMID_OFFSET + lane.vxlan_id;
+  let live = [];
+  try {
+    live = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm') || [];
+  } catch (e) {
+    throw preflightError(`Could not read cluster state: ${e.message}`);
+  }
+  const liveByVmid = {};
+  for (const r of live) liveByVmid[String(r.vmid)] = r;
+
+  const gw = liveByVmid[String(gatewayVmid)];
+  if (!gw) {
+    throw preflightError(
+      `This lane's gateway (LXC ${gatewayVmid}) is not on the cluster, so there is nothing to rebuild the machines behind. Rebuild the whole lane instead.`);
+  }
+  // The gateway can have been migrated since deploy, and every gateway write
+  // goes through pctExec on a NAMED node — a stale name fails all of them.
+  const gatewayNode = gw.node || cfg.node;
+  const targetNode = cfg.node;
+  if (!targetNode) throw preflightError('Lane does not record which node it was built on');
+
+  // ── templates, resolved FRESH for every slot ─────────────────────────────
+  // Untouched slots need theirs too: dns_aliases and the console guest port
+  // feed the whole-lane gateway render below, and neither is recorded on the
+  // slot. A template deactivated since the original deploy fails here, while
+  // the student still has working machines.
+  const templates = new Map();
+  for (const r of records) {
+    if (!r.template_id) {
+      throw preflightError(
+        `Slot ${r.slot} does not record which template it was built from, so it cannot be rebuilt in place.`);
+    }
+    if (templates.has(r.template_id)) continue;
+    const t = await cybercoreQuery(
+      `SELECT id, template_key, os_name, os_family, os_version,
+              template_vmid, node, provider_type, metadata
+         FROM cybercore_template_catalog
+        WHERE id = $1 AND template_type = 'workstation'
+          AND is_active = TRUE AND status = 'active'`,
+      [r.template_id]
+    );
+    if (!t.rows.length) {
+      throw preflightError(
+        `The template slot ${r.slot} was built from is no longer active in the catalog. Re-activate it, or rebuild the whole lane with a template you choose.`);
+    }
+    if (!t.rows[0].template_vmid) {
+      throw preflightError(
+        `Template '${t.rows[0].os_name}' has no Proxmox VMID configured`);
+    }
+    templates.set(r.template_id, t.rows[0]);
+  }
+
+  // ── networking ───────────────────────────────────────────────────────────
+  // gateway_wan_ip is read from the COLUMN, which migration 033 made
+  // authoritative; the config key of the same name is a legacy mirror.
+  const net = resolveLaneNetworking(subnetScheme, moduleKey, lane.vxlan_id,
+    lane.gateway_wan_ip ? { wanIp: lane.gateway_wan_ip } : {});
+  let vnet = null;
+  try {
+    vnet = (await loadVnetsByTag())[String(lane.vxlan_id)] || null;
+  } catch (e) {
+    throw preflightError(`Could not read the SDN VNet list: ${e.message}`);
+  }
+  if (!vnet && cfg.vnet) vnet = { vnet: cfg.vnet };
+  if (!vnet) {
+    throw preflightError(
+      `No SDN VNet for VXLAN ${lane.vxlan_id} — a rebuilt machine would be cabled to nothing.`);
+  }
+
+  // ── per-slot plans ───────────────────────────────────────────────────────
+  const rebuildSet = new Set(wanted);
+  const workstations = records.map((r) => {
+    const tpl = templates.get(r.template_id);
+    const providerType = tpl.provider_type || 'qemu';
+    const octet = octetForSlot(r.slot);
+    const derived = consoleForSlot(resolveConsole(tpl), r.slot);
+
+    if (rebuildSet.has(r.slot)) {
+      // A catalog row re-pointed at a different guest type would clone an LXC
+      // into a slot whose recorded VMID belongs to a QEMU machine.
+      if (r.provider_type && r.provider_type !== providerType) {
+        throw preflightError(
+          `Slot ${r.slot} was built as ${r.provider_type} but its template is now ${providerType}.`);
+      }
+      // A template edit to metadata.console_wan_port between deploy and rebuild
+      // would move the port under the student's existing Guacamole connection,
+      // and can collide with an untouched slot's port. deployLanes catches this
+      // class at deploy time; nothing else catches it here.
+      if (r.console_port != null && derived.wanPort !== r.console_port) {
+        throw preflightError(
+          `Slot ${r.slot} is published on gateway port ${r.console_port}, but its template now asks for ${derived.wanPort}. Rebuilding would move the port under the student's existing connection.`);
+      }
+    }
+
+    // UNTOUCHED slots render from their RECORDED values; only rebuilt slots
+    // take freshly derived ones. Otherwise a template edit could move a running
+    // student's console port as a side effect of rebuilding a DIFFERENT machine.
+    const con = rebuildSet.has(r.slot)
+      ? derived
+      : { ...derived, wanPort: r.console_port != null ? r.console_port : derived.wanPort };
+
+    return {
+      slot: r.slot,
+      template: tpl,
+      providerType,
+      vmid: r.vmid,
+      octet,
+      // Deterministic, but prefer the RECORDED mac and hostname: a live gateway
+      // already holds that reservation and an untouched neighbour may depend on
+      // it, and teardown's ownership guard compares the hostname.
+      mac: r.mac || macForOctet(octet, lane.vxlan_id),
+      ip: r.ip || `${net.lan.base3}.${octet}`,
+      hostname: r.hostname || (r.slot === 0 ? lane.name : `${lane.name}-ws${r.slot}`),
+      console: con,
+      dnsAliases: resolveDnsAliases(tpl),
+      // The sizing that was ACHIEVED, not the request. Replaying applied.disk_gb
+      // is a no-op when the template already grew, which is correct.
+      resources: r.resources || (r.slot === 0 ? (cfg.resources || null) : null),
+      sourceNode: null,   // resolved below, only for the slots being rebuilt
+      _record: r,
+    };
+  });
+
+  for (const ws of workstations) {
+    if (!rebuildSet.has(ws.slot)) continue;
+    ws.sourceNode = await findTemplateNode(
+      ws.template.template_vmid, ws.template.node || getDefaultTemplateNode());
+  }
+
+  // ── the Guacamole parent, which nothing records ──────────────────────────
+  // deployLanes takes guacParent as an argument and CLE never passes one, so
+  // every CLE connection is at ROOT — but createGuacConnection defaults a
+  // missing parent to ROOT, so a rebuild that passed nothing would MOVE a
+  // grouped connection. Read it back instead.
+  let parentIdentifier = guacParent;
+  if (parentIdentifier === undefined) {
+    parentIdentifier = null;
+    if (process.env.GUAC_ENABLED === 'true') {
+      const zero = workstations.find(w => w.slot === 0);
+      const wantName = zero ? `${lane.name}-${zero.vmid}` : null;
+      const existing = await guacAPI('GET', '/connections').catch(() => null);
+      if (wantName && existing && typeof existing === 'object') {
+        for (const c of Object.values(existing)) {
+          if (c && c.name === wantName) { parentIdentifier = c.parentIdentifier || null; break; }
+        }
+      }
+    }
+  }
+
+  // ── the job deployOneWorkstation expects ─────────────────────────────────
+  // moduleKey and laneConfig are NOT optional: registerWorkspaceVm destructures
+  // both off the job, and omitting laneConfig strips course_id from the
+  // workspace metadata.
+  const laneConfig = {};
+  for (const k of LANE_CONFIG_PASSTHROUGH_KEYS) {
+    if (cfg[k] !== undefined) laneConfig[k] = cfg[k];
+  }
+  const job = {
+    laneId, user, vxlanId: lane.vxlan_id, vnet, targetNode, net,
+    laneName: lane.name, description, progress, guacParent: parentIdentifier,
+    moduleKey, laneConfig, workstations,
+    cloneSem: cloneSem || createCloneSemaphore(),
+    _gatewayAccessOk: false,
+  };
+  if (progress && !progress.lanes[laneId]) {
+    progress.lanes[laneId] = {
+      user: user.email, vxlan: lane.vxlan_id, node: targetNode,
+      status: 'cloning', workstations: workstations.length,
+      slots: wanted, error: null, _startedAt: Date.now(),
+    };
+  } else if (progress) {
+    Object.assign(progress.lanes[laneId], { status: 'cloning', slots: wanted, error: null });
+  }
+
+  // ── gateway FIRST, from the FULL slot list ───────────────────────────────
+  // Both halves are whole-unit operations: dnsmasq reservations live in one
+  // file, and installConsoleDnat strips every rule carrying its tag before
+  // re-adding. A per-machine call would erase the untouched machines' access.
+  //
+  // No baked-DNAT fallback on this path. deployLaneWorkstations tolerates a
+  // failed gateway for a single slot because a degraded lane beats no lane; here
+  // the alternative is "leave the student's working machines alone", which is
+  // strictly better than a degraded rebuild.
+  await waitForGatewayFirstboot(gatewayNode, gatewayVmid, { timeoutMs: 30000 });
+  try {
+    await applyGatewayWorkstationAccess({ node: gatewayNode, gatewayVmid, workstations });
+    job._gatewayAccessOk = true;
+  } catch (e) {
+    throw preflightError(
+      `Could not configure the lane gateway, so nothing was rebuilt and every machine is still running: ${e.message}`, 'gateway');
+  }
+
+  // ── mark in flight, and clear the stale lease evidence ───────────────────
+  // jsonb - text[] removes only the rebuilt slots' keys. A `config || {ws_ip:{}}`
+  // merge replaces the whole nested object and would erase the other slots'
+  // confirmations — the same trap confirmWorkstationIp documents.
+  const rebuiltKeys = wanted.map(String);
+  await cybercoreQuery(
+    `UPDATE cybercore_lane
+        SET status = 'deploying',
+            config = jsonb_set(
+                       jsonb_set(
+                         COALESCE(config, '{}'::jsonb),
+                         '{ws_ip}',
+                         COALESCE(config->'ws_ip', '{}'::jsonb) - $2::text[]
+                       ),
+                       '{ws_ip_confirmed}',
+                       COALESCE(config->'ws_ip_confirmed', '{}'::jsonb) - $2::text[]
+                     ) || $3::jsonb,
+            updated_at = NOW()
+      WHERE lane_id = $1`,
+    [laneId, rebuiltKeys, JSON.stringify({
+      rebuild: {
+        at: new Date().toISOString(),
+        mode: 'in_place',
+        slots_requested: wanted,
+        status: 'running',
+        slots: {},
+      },
+    })]
+  );
+
+  // Between the DELETE landing and the clone claiming the id again, a slot-1+
+  // VMID is free in the cluster AND absent from the in-process reservation map,
+  // so a concurrent deployLanes would hand it to a different lane.
+  holdWorkstationVmids(
+    workstations.filter(w => rebuildSet.has(w.slot) && w.slot !== 0).map(w => w.vmid));
+
+  // ── rebuild, one slot at a time ──────────────────────────────────────────
+  // Sequential on purpose: the gateway is already configured, the slots share
+  // one node, and progress.lanes[laneId].status is per-LANE so concurrent slots
+  // would fight over one field.
+  const deployed = [];
+  const slotResults = [];
+  const errors = [];
+  const warnings = [];
+
+  for (const ws of workstations) {
+    if (!rebuildSet.has(ws.slot)) continue;
+    const rec = ws._record;
+    const liveVm = liveByVmid[String(ws.vmid)];
+
+    // Ownership guard, mirroring teardownLanes: a slot-1+ VMID can have been
+    // reallocated to another lane since this one recorded it. Destroying it
+    // would take out somebody else's machine.
+    if (liveVm && ws.hostname && liveVm.name && liveVm.name !== ws.hostname) {
+      const msg = `VM ${ws.vmid} is now named '${liveVm.name}', not '${ws.hostname}' — it belongs to something else now and was left alone.`;
+      slotResults.push({ slot: ws.slot, vmid: ws.vmid, status: 'failed', error: msg });
+      errors.push(`slot ${ws.slot}: ${msg}`);
+      continue;
+    }
+
+    const destroy = await destroyWorkstationSlots({
+      laneId,
+      targets: [{
+        slot: ws.slot, vmid: ws.vmid, providerType: ws.providerType,
+        hostname: ws.hostname, node: liveVm ? liveVm.node : null,
+      }],
+      waitTimeoutMs: destroyWaitMs,
+    });
+    if (destroy.failed.length) {
+      const f = destroy.failed[0];
+      slotResults.push({ slot: ws.slot, vmid: ws.vmid, status: 'failed', error: f.error, phase: f.phase });
+      errors.push(`slot ${ws.slot}: ${f.error}`);
+      continue;
+    }
+
+    const warn = await retireWorkspaceRowForSlot(laneId, rec);
+    if (warn) warnings.push(warn);
+
+    try {
+      const record = await deployOneWorkstation(job, ws);
+      // createGuacConnection returns null when Guacamole is off or erroring, but
+      // the EXISTING connection is still there — so keep the previous id rather
+      // than blanking the student's console. Deliberately NOT symmetric with
+      // workspace_resource_id: that row really was deleted above.
+      if (record.guac_connection_id == null && rec.guac_connection_id) {
+        record.guac_connection_id = rec.guac_connection_id;
+      }
+      record.rebuilt_at = new Date().toISOString();
+      deployed.push(record);
+      slotResults.push({
+        slot: ws.slot, vmid: record.vmid, status: 'rebuilt',
+        template_id: record.template_id, template_name: record.template_name,
+        console_protocol: record.console_protocol, console_port: record.console_port,
+        console_host: record.console_host, console_via: record.console_via,
+        guac_connection_id: record.guac_connection_id,
+        workspace_resource_id: record.workspace_resource_id,
+      });
+    } catch (e) {
+      // Keep the slot's record with its VMID so teardown still finds the id and
+      // a retry still finds the slot.
+      deployed.push({ ...rec, rebuild_failed: true, rebuild_failed_at: new Date().toISOString() });
+      slotResults.push({ slot: ws.slot, vmid: ws.vmid, status: 'failed', error: e.message });
+      errors.push(`slot ${ws.slot}: ${e.message}`);
+    }
+  }
+
+  // ── write back ───────────────────────────────────────────────────────────
+  // Splice server-side: rebuilt records win, untouched entries are copied from
+  // the row itself and never materialised here. A `config || {workstations:[…]}`
+  // merge would replace the whole array, which is only correct when the caller
+  // owns every slot.
+  //
+  // status goes back to ACTIVE even on partial failure, NOT to 'error'. An
+  // 'error' lane drops out of ux_cybercore_lane_vxlan_active and
+  // ux_cybercore_lane_wan_ip_active and out of allocateVxlanIds — while this
+  // lane's gateway is running, answering ARP on its WAN address, with untouched
+  // student machines live behind it. Releasing those identifiers would let the
+  // next deployLanes clone a gateway on top of a running one.
+  const ok = errors.length === 0;
+  const slotsPatch = {};
+  for (const r of slotResults) {
+    slotsPatch[String(r.slot)] = r.status === 'rebuilt'
+      ? { status: 'ok', at: new Date().toISOString(), vmid: r.vmid }
+      : { status: 'error', at: new Date().toISOString(), message: String(r.error || '').slice(0, 500) };
+  }
+  const rebuildPatch = {
+    rebuild: {
+      at: new Date().toISOString(),
+      mode: 'in_place',
+      slots_requested: wanted,
+      status: ok ? 'ok' : (deployed.some(d => !d.rebuild_failed) ? 'partial' : 'failed'),
+      error: ok ? null : errors[0],
+      slots: slotsPatch,
+    },
+  };
+
+  await cybercoreQuery(
+    `UPDATE cybercore_lane l
+        SET config = jsonb_set(
+                       COALESCE(l.config, '{}'::jsonb),
+                       '{workstations}',
+                       COALESCE((
+                         SELECT jsonb_agg(ws ORDER BY (ws->>'slot')::int)
+                           FROM (
+                             SELECT p AS ws FROM jsonb_array_elements($2::jsonb) AS p
+                             UNION ALL
+                             SELECT e AS ws
+                               FROM jsonb_array_elements(
+                                      COALESCE(l.config->'workstations', '[]'::jsonb)) AS e
+                              WHERE (e->>'slot') IS NULL
+                                 OR NOT ((e->>'slot') = ANY($3::text[]))
+                           ) u
+                       ), '[]'::jsonb)
+                     ) || $4::jsonb,
+            status = 'active',
+            updated_at = NOW()
+      WHERE lane_id = $1`,
+    [
+      laneId,
+      JSON.stringify(deployed),
+      rebuiltKeys,
+      JSON.stringify({ ...flatMirrorPatch(deployed), ...rebuildPatch }),
+    ]
+  );
+
+  if (progress && progress.lanes[laneId]) {
+    progress.lanes[laneId].status = ok ? 'active' : 'error';
+    progress.lanes[laneId].error = ok ? null : errors[0];
+  }
+  console.log(
+    `${LOG} Lane ${laneId} rebuilt slot(s) ${wanted.join(',')}: ${slotResults.filter(r => r.status === 'rebuilt').length} ok, ${errors.length} failed`);
+
+  return {
+    lane_id: laneId,
+    vxlan_id: lane.vxlan_id,
+    lane_name: lane.name,
+    user_email: user.email,
+    status: ok ? 'active' : 'error',
+    safe_to_rebuild: true,
+    slots: slotResults,
+    untouched: records.map(r => r.slot).filter(sl => !rebuildSet.has(sl)),
+    errors,
+    warnings,
+  };
+}
+
 module.exports = {
+  rebuildLaneWorkstations,
+  destroyWorkstationSlots,
+  // Re-exported so a BATCH of rebuilds shares one clone budget. Without it each
+  // lane would build its own semaphore and max_concurrent_clones would bound
+  // nothing across the batch — which is the limit that keeps a 24-lane rebuild
+  // from flattening a node's disks.
+  createCloneSemaphore,
+  laneWorkstationRecords,
+  flatMirrorPatch,
+  holdWorkstationVmids,
   GATEWAY_VMID_OFFSET,
   WORKSTATION_VMID_OFFSET,
   WORKSTATION_OCTET,
