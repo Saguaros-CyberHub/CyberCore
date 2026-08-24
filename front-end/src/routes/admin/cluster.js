@@ -15,23 +15,20 @@ const { query } = require('../../utils/db');
 const { guacAPI } = require('../../utils/guacamole');
 const { getClusterHealth, buildDeployPreview } = require('../../middleware/deployment-guards');
 const { logActivity } = require('../../middleware/activity-logger');
-const attachedModules = require('../../utils/attached-modules');
+const audit = require('../../utils/audit');
+const reconcileJob = require('../../utils/reconcile-job');
+const { runReconcileScan, RANGES } = require('../../utils/reconcile-scan');
+const { scanClusterVolumes } = require('../../utils/storage-scan');
+const { parseVolid, inCyberhubRange, vmidRole, computeExpectedPeers } = require('../../utils/reconcile-audit');
+const { ZONE_RE } = require('../../utils/lab-network-provision');
+const { getPhysicalClusterIps } = require('../../utils/site-config');
 const { waitForGuestAgent } = require('../../utils/script-executor');
 
 const adminOnly = requireRole('admin');
 
-// VMID ranges owned by CyberHub (mirrors the ranges in deploy/teardown logic)
-const CYBERHUB_RANGES = [
-  { min: 100000, max: 199999, role: 'gateway' },
-  { min: 200000, max: 299999, role: 'goad_controller' },
-  { min: 600000, max: 699999, role: 'challenge' },
-  { min: 700000, max: 799999, role: 'attack_box' },
-  {
-    min: attachedModules.ATTACHED_VMID_BASE,
-    max: attachedModules.ATTACHED_VMID_BASE + (attachedModules.ATTACHED_MAX_SLOTS * attachedModules.ATTACHED_VMID_STEP) - 1,
-    role: 'attached_module'
-  }
-];
+// The VMID ranges owned by CyberHub live in utils/reconcile-scan.js (RANGES),
+// built from utils/attached-modules.js. Single-sourced so the audit and the
+// disk sweep below cannot drift apart on what counts as "ours".
 
 
 // ============================================================================
@@ -76,268 +73,121 @@ router.post('/deploy-preview', authenticateToken, adminOnly, async (req, res) =>
 // ============================================================================
 // RECONCILE — compare DB state against live Proxmox resources
 // ============================================================================
+// The audit runs DETACHED from the request that starts it.
+//
+// It used to run inline, and on a Ceph cluster of any size it outlived
+// Cloudflare's 100s origin timeout — which answers with an HTML page, so the
+// admin UI reported a JSON parse error rather than a timeout. The scan is much
+// faster now (see utils/storage-scan.js), but "fast enough today" is not a
+// property worth depending on: one wedged node can still eat the budget. So the
+// request only ever starts or reads a job, and the browser polls.
+//
+//   POST /reconcile/run           start (or join) a scan          -> 202
+//   GET  /reconcile/status/:id    progress; result on the last poll
+//   GET  /reconcile               the last completed audit, instantly
+// ============================================================================
 
 router.get('/reconcile', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const pxResources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
-    const pxVMs = (Array.isArray(pxResources) ? pxResources : []).map(vm => ({
-      vmid: vm.vmid,
-      name: vm.name || '',
-      status: vm.status,
-      node: vm.node,
-      type: vm.type
-    }));
-
-    let pxVNets = [];
-    try {
-      const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
-      pxVNets = (Array.isArray(vnets) ? vnets : []).map(v => ({
-        vnet: v.vnet, zone: v.zone, tag: v.tag, alias: v.alias || ''
-      }));
-    } catch (e) { /* SDN may not be configured */ }
-
-    const dbLanes = (await cybercoreQuery(
-      `SELECT lane_id, vxlan_id, name, status, config, created_at
-       FROM cybercore_lane WHERE status NOT IN ('deleted')
-       ORDER BY created_at DESC`
-    )).rows;
-
-    const dbGroups = (await query(
-      `SELECT id, group_name, config, created_at FROM deployed_groups ORDER BY created_at DESC`
-    )).rows;
-
-    const dbExpectedVmIds = new Set();
-    const laneVmMap = {};
-    for (const lane of dbLanes) {
-      const vxlan = lane.vxlan_id;
-      if (!vxlan) continue;
-      const cfg = lane.config || {};
-      const vmIds = [];
-
-      if (Array.isArray(cfg.vms)) {
-        cfg.vms.forEach(vm => { if (vm.vm_id) vmIds.push(vm.vm_id); });
-      } else {
-        vmIds.push(cfg.challenge_vm_id || (600000 + vxlan));
-      }
-      const gwId = cfg.gateway_vm_id || (100000 + vxlan);
-      vmIds.push(gwId);
-      if (cfg.attack_box_vm_id) vmIds.push(cfg.attack_box_vm_id);
-      else if (cfg.attack_box) vmIds.push(700000 + vxlan);
-
-      if (Array.isArray(cfg.attached_modules)) {
-        for (const mod of cfg.attached_modules) {
-          for (const vm of (mod.vms || [])) {
-            if (vm.vm_id) vmIds.push(vm.vm_id);
-          }
-        }
-      }
-
-      vmIds.forEach(id => {
-        dbExpectedVmIds.add(id);
-        laneVmMap[id] = { lane_id: lane.lane_id, name: lane.name, vxlan_id: vxlan, status: lane.status };
-      });
+    // ?fresh=1 exists for curl and scripts; it starts a scan and returns the
+    // job rather than blocking. The UI uses POST /reconcile/run.
+    if (req.query.fresh === '1') {
+      const claim = await reconcileJob.acquireJob({ startedBy: req.user?.userId });
+      if (!claim.attached) startReconcileRun(req, claim.job.job_id);
+      return res.status(202).json({ ...claim.job, attached: claim.attached });
     }
 
-    let pxZones = [];
-    try {
-      const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
-      pxZones = (Array.isArray(zones) ? zones : []).filter(z => z.type === 'vxlan');
-    } catch (e) { /* SDN may not be configured */ }
+    const [cached, runningJobId] = await Promise.all([
+      reconcileJob.getCachedResult(),
+      reconcileJob.getLockOwner(),
+    ]);
 
-    const dbChallenges = (await cybercoreQuery(
-      `SELECT challenge_key, name, spec FROM crucible_challenge`
-    )).rows;
-
-    const dbZoneNames = new Set();
-    for (const ch of dbChallenges) {
-      const spec = typeof ch.spec === 'string' ? JSON.parse(ch.spec || '{}') : (ch.spec || {});
-      const zoneName = spec.zone?.abbrev
-        || ch.challenge_key?.substring(0, 8)?.replace(/[^a-z0-9]/gi, '').substring(0, 8);
-      if (zoneName) dbZoneNames.add(zoneName);
+    if (!cached) {
+      // 200, not 404: "no audit has run yet" is a normal render state. A 404
+      // would take the api() helper's throw branch and paint a red error.
+      return res.json({ cached: false, empty: true, age_seconds: null, running: !!runningJobId, job_id: runningJobId });
     }
-
-    const laneZoneNames = new Set();
-    for (const vnet of pxVNets) {
-      if (vnet.zone) laneZoneNames.add(vnet.zone);
-    }
-
-    const orphanedZones = pxZones
-      .filter(z => !dbZoneNames.has(z.zone) && z.zone !== 'localnetwork')
-      .map(z => ({
-        zone: z.zone,
-        type: z.type,
-        has_vnets: laneZoneNames.has(z.zone),
-        vnet_count: pxVNets.filter(v => v.zone === z.zone).length
-      }));
-
-    const activeZoneNames = new Set(pxZones.map(z => z.zone));
-    const orphanedVNets = pxVNets.filter(v => v.zone && !activeZoneNames.has(v.zone))
-      .map(v => ({ vnet: v.vnet, zone: v.zone, tag: v.tag, alias: v.alias }));
-
-    const pxCyberhubVMs = pxVMs.filter(vm =>
-      CYBERHUB_RANGES.some(r => vm.vmid >= r.min && vm.vmid <= r.max)
-    );
-    const pxVmIdSet = new Set(pxCyberhubVMs.map(vm => vm.vmid));
-
-    const orphanedOnProxmox = pxCyberhubVMs
-      .filter(vm => !dbExpectedVmIds.has(vm.vmid))
-      .map(vm => ({
-        vmid: vm.vmid,
-        name: vm.name,
-        status: vm.status,
-        node: vm.node,
-        type: vm.type,
-        role: CYBERHUB_RANGES.find(r => vm.vmid >= r.min && vm.vmid <= r.max)?.role,
-        vxlan_inferred: vm.vmid % 100000
-      }));
-
-    const staleInDB = dbLanes
-      .filter(lane => {
-        const vxlan = lane.vxlan_id;
-        if (!vxlan) return false;
-        const cfg = lane.config || {};
-        const vmIds = [];
-        if (Array.isArray(cfg.vms)) {
-          cfg.vms.forEach(vm => { if (vm.vm_id) vmIds.push(vm.vm_id); });
-        } else {
-          vmIds.push(cfg.challenge_vm_id || (600000 + vxlan));
-        }
-        return vmIds.length > 0 && vmIds.every(id => !pxVmIdSet.has(id));
-      })
-      .map(lane => ({
-        lane_id: lane.lane_id,
-        name: lane.name,
-        vxlan_id: lane.vxlan_id,
-        status: lane.status,
-        created_at: lane.created_at
-      }));
-
-    // Orphaned disk audit
-    const liveVmIdSet = new Set(pxVMs.map(v => v.vmid));
-    const orphanedDisks = [];
-    const seenDiskVolids = new Set();
-
-    try {
-      const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
-      const nodeNames = (nodeList || []).map(n => n.node);
-
-      for (const node of nodeNames) {
-        let nodeStorages;
-        try {
-          nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node}/storage`);
-        } catch (_) { continue; }
-
-        for (const s of nodeStorages || []) {
-          if (s.content && !s.content.includes('images')) continue;
-          let contents;
-          try {
-            contents = await proxmoxAPI('GET',
-              `/api2/json/nodes/${node}/storage/${s.storage}/content?content=images`);
-          } catch (_) { continue; }
-
-          for (const item of contents || []) {
-            const match = item.volid?.match(/vm-(\d+)-(disk|cloudinit)/);
-            if (!match) continue;
-            const vmid = parseInt(match[1]);
-            const kind = match[2];
-            const inRange = CYBERHUB_RANGES.some(r => vmid >= r.min && vmid <= r.max);
-            if (!inRange) continue;
-            if (liveVmIdSet.has(vmid)) continue;
-            if (seenDiskVolids.has(item.volid)) continue;
-            seenDiskVolids.add(item.volid);
-            orphanedDisks.push({
-              node,
-              storage: s.storage,
-              volid: item.volid,
-              vmid,
-              kind,
-              role: CYBERHUB_RANGES.find(r => vmid >= r.min && vmid <= r.max)?.role,
-              size_bytes: item.size || 0,
-              size_gb: item.size ? (item.size / (1024 ** 3)).toFixed(2) : '0.00'
-            });
-          }
-        }
-      }
-    } catch (e) {
-      console.warn(`[Reconcile] Disk scan failed: ${e.message}`);
-    }
-
-    const orphanedDiskTotalGb = orphanedDisks.reduce((sum, d) => sum + (d.size_bytes || 0), 0) / (1024 ** 3);
-
-    // Orphaned Guacamole connection audit
-    const orphanedGuacConnections = [];
-    try {
-      const allGuacConns = await guacAPI('GET', '/connections');
-      const connList = Array.isArray(allGuacConns)
-        ? allGuacConns
-        : Object.values(allGuacConns || {});
-
-      const trackedConnIds = new Set();
-      for (const g of dbGroups) {
-        const gCfg = typeof g.config === 'string' ? JSON.parse(g.config) : (g.config || {});
-        for (const c of (gCfg.guac_connections || [])) {
-          if (c?.id) trackedConnIds.add(String(c.id));
-        }
-      }
-
-      const activeGuacGroupIds = new Set();
-      for (const g of dbGroups) {
-        const gCfg = typeof g.config === 'string' ? JSON.parse(g.config) : (g.config || {});
-        if (gCfg.guac_group?.identifier) activeGuacGroupIds.add(String(gCfg.guac_group.identifier));
-      }
-
-      for (const c of connList) {
-        const name = c.name || '';
-        const id = String(c.identifier || c.id || '');
-        const parent = String(c.parentIdentifier || 'ROOT');
-
-        const looksLikeCyberhub = / - .* - (Kali|VulnWin|Target|Attack|RDP)/i.test(name)
-          || trackedConnIds.has(id);
-        if (!looksLikeCyberhub) continue;
-
-        const isOrphan = !activeGuacGroupIds.has(parent) || parent === 'ROOT';
-        if (isOrphan) {
-          orphanedGuacConnections.push({
-            id,
-            name,
-            protocol: c.protocol || '',
-            parent,
-            tracked: trackedConnIds.has(id)
-          });
-        }
-      }
-    } catch (e) {
-      console.warn(`[Reconcile] Guac connection scan failed: ${e.message}`);
-    }
-
-    res.json({
-      timestamp: new Date().toISOString(),
-      summary: {
-        proxmox_cyberhub_vms: pxCyberhubVMs.length,
-        db_active_lanes: dbLanes.length,
-        db_expected_vms: dbExpectedVmIds.size,
-        orphaned_on_proxmox: orphanedOnProxmox.length,
-        stale_in_db: staleInDB.length,
-        sdn_zones: pxZones.length,
-        orphaned_zones: orphanedZones.length,
-        sdn_vnets: pxVNets.length,
-        orphaned_vnets: orphanedVNets.length,
-        deployed_groups: dbGroups.length,
-        orphaned_disks: orphanedDisks.length,
-        orphaned_disks_total_gb: orphanedDiskTotalGb.toFixed(2),
-        orphaned_guac_connections: orphanedGuacConnections.length
-      },
-      orphaned_on_proxmox: orphanedOnProxmox,
-      stale_in_db: staleInDB,
-      orphaned_zones: orphanedZones,
-      orphaned_vnets: orphanedVNets,
-      orphaned_disks: orphanedDisks,
-      orphaned_guac_connections: orphanedGuacConnections,
-      sdn_vnets: pxVNets,
-      all_proxmox_cyberhub_vms: pxCyberhubVMs
-    });
+    res.json({ ...cached, cached: true, running: !!runningJobId, job_id: runningJobId || null });
   } catch (error) {
-    console.error('[Reconcile] Error:', error.message);
+    console.error('[Reconcile] Cache read failed:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Kick off the detached scan.
+ *
+ * The actor is snapshotted HERE, synchronously: the runner outlives the
+ * response and req.user must not be read from a closure after that point.
+ */
+function startReconcileRun(req, jobId) {
+  const actor = req.user
+    ? { userId: req.user.userId, email: req.user.email, role: req.user.role, type: 'user' }
+    : null;
+
+  (async () => {
+    const t0 = Date.now();
+    try {
+      const result = await runReconcileScan({
+        onPhase: (phase, detail, done, total) =>
+          reconcileJob.updateJob(jobId, { phase, phase_detail: detail, done, total }),
+      });
+      await reconcileJob.finishJob(jobId, result, Date.now() - t0);
+      audit.log({
+        actor, action: 'reconcile_scan_completed', source: 'core',
+        target: { type: 'infra', id: jobId },
+        metadata: { duration_ms: Date.now() - t0, ...result.summary },
+      });
+    } catch (err) {
+      console.error(`[Reconcile] Job ${jobId} failed: ${err.message}`);
+      await reconcileJob.failJob(jobId, err.message);
+      audit.log({
+        actor, action: 'reconcile_scan_failed', status: 'failure', source: 'core',
+        target: { type: 'infra', id: jobId }, metadata: { error: err.message },
+      });
+    } finally {
+      await reconcileJob.releaseJob(jobId);
+    }
+  })();
+}
+
+router.post('/reconcile/run', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const claim = await reconcileJob.acquireJob({
+      force: req.body?.force === true,
+      startedBy: req.user?.userId,
+    });
+
+    // Two admins clicking at once share ONE scan. Not a 409 — the second admin
+    // did nothing wrong, and doubling the load on pveproxy helps nobody.
+    if (claim.attached) return res.status(202).json({ ...claim.job, attached: true });
+
+    logActivity(req, 'reconcile_scan_started', 'infra', claim.job.job_id, { job_id: claim.job.job_id });
+    startReconcileRun(req, claim.job.job_id);
+    res.status(202).json({ ...claim.job, attached: false });
+  } catch (error) {
+    console.error('[Reconcile] Could not start scan:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/reconcile/status/:job_id', authenticateToken, adminOnly, async (req, res) => {
+  const jobId = req.params.job_id;
+  if (!reconcileJob.isValidJobId(jobId)) {
+    return res.status(400).json({ error: 'Malformed job id', state: 'unknown' });
+  }
+  try {
+    const status = await reconcileJob.getJobStatus(jobId);
+    if (!status) return res.status(404).json({ error: 'Unknown or expired job', state: 'unknown' });
+
+    // The result rides along ONLY on the terminal poll — the client stops
+    // there, so it costs one payload and saves a follow-up round trip.
+    if (status.state === 'done') {
+      const cached = await reconcileJob.getCachedResult();
+      return res.json({ ...status, result: cached || null });
+    }
+    res.json(status);
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -364,6 +214,7 @@ router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, r
       : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
     await proxmoxAPI('DELETE', delPath);
     console.log(`[Reconcile] Destroyed orphaned VM ${vmid} on ${node}`);
+    logActivity(req, 'destroy_orphan_vm', 'vm', vmid, { vmid, node, type });
     res.json({ ok: true, vmid, node });
   } catch (error) {
     console.error(`[Reconcile] Failed to destroy VM ${vmid}: ${error.message}`);
@@ -380,6 +231,7 @@ router.post('/reconcile/mark-deleted', authenticateToken, adminOnly, async (req,
       [lane_id]
     );
     console.log(`[Reconcile] Marked lane ${lane_id} as deleted (stale — no Proxmox VMs)`);
+    logActivity(req, 'lane_mark_deleted', 'lane', lane_id, { lane_id, reason: 'stale — no Proxmox VMs' });
     res.json({ ok: true, lane_id });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -423,6 +275,8 @@ router.post('/reconcile/destroy-guac-connection', authenticateToken, adminOnly, 
 router.post('/reconcile/destroy-zone', authenticateToken, adminOnly, async (req, res) => {
   const { zone } = req.body;
   if (!zone) return res.status(400).json({ error: 'zone required' });
+  // Validated before it reaches a Proxmox URL. Same guard the create path uses.
+  if (!ZONE_RE.test(zone)) return res.status(400).json({ error: 'zone must be 1-8 alphanumeric characters starting with a letter' });
   try {
     const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
     const zoneVnets = (Array.isArray(vnets) ? vnets : []).filter(v => v.zone === zone);
@@ -434,6 +288,7 @@ router.post('/reconcile/destroy-zone', authenticateToken, adminOnly, async (req,
     await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/zones/${zone}`);
     try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (e) { /* best effort */ }
     console.log(`[Reconcile] Zone '${zone}' destroyed (${zoneVnets.length} VNets removed)`);
+    logActivity(req, 'destroy_orphan_zone', 'network', zone, { zone, vnets_removed: zoneVnets.length });
     res.json({ ok: true, zone, vnets_removed: zoneVnets.length });
   } catch (error) {
     console.error(`[Reconcile] Failed to destroy zone ${zone}: ${error.message}`);
@@ -444,10 +299,12 @@ router.post('/reconcile/destroy-zone', authenticateToken, adminOnly, async (req,
 router.post('/reconcile/destroy-vnet', authenticateToken, adminOnly, async (req, res) => {
   const { vnet } = req.body;
   if (!vnet) return res.status(400).json({ error: 'vnet required' });
+  if (!/^[a-z][a-z0-9]{0,9}$/.test(vnet)) return res.status(400).json({ error: 'malformed vnet name' });
   try {
     await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet}`);
     try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (e) { /* best effort */ }
     console.log(`[Reconcile] Deleted orphaned VNet '${vnet}'`);
+    logActivity(req, 'destroy_orphan_vnet', 'network', vnet, { vnet });
     res.json({ ok: true, vnet });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -458,75 +315,76 @@ router.post('/reconcile/destroy-vnet', authenticateToken, adminOnly, async (req,
 // ============================================================================
 // ORPHANED DISK SWEEP
 // ============================================================================
+// Shares the parallel, shared-storage-aware scan with the audit. It used to
+// carry its own copy of the same triple-nested serial loop, so "Sweep All" hit
+// the same tunnel timeout the audit did.
+//
+// Deletes still run SEQUENTIALLY, deliberately — concurrent RBD removals
+// contend on cfs-lock and start failing each other.
+// ============================================================================
 
 router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, res) => {
   const dry_run = req.body?.dry_run !== false;
   const storageFilter = req.body?.storage || null;
   const vmidPattern = req.body?.vmid_pattern ? new RegExp(req.body.vmid_pattern) : null;
-  const orphans = [];
+  const budgetMs = Number(process.env.RECONCILE_BUDGET_MS) || 45000;
   const deleted = [];
   const errors = [];
 
   try {
-    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
+    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources', null, { timeoutMs: 15000 });
     const liveVmIds = new Set();
     for (const r of resources || []) {
-      if (r.type === 'qemu' || r.type === 'lxc') {
-        if (typeof r.vmid === 'number') liveVmIds.add(r.vmid);
-      }
+      if ((r.type === 'qemu' || r.type === 'lxc') && typeof r.vmid === 'number') liveVmIds.add(r.vmid);
     }
 
-    const nodes = await proxmoxAPI('GET', '/api2/json/nodes');
-
-    for (const node of nodes || []) {
-      let nodeStorages;
-      try {
-        nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node.node}/storage`);
-      } catch (e) {
-        errors.push(`List storages on ${node.node}: ${e.message}`);
-        continue;
-      }
-
-      for (const s of nodeStorages || []) {
-        if (storageFilter && s.storage !== storageFilter) continue;
-        if (s.content && !s.content.includes('images')) continue;
-
-        let contents;
-        try {
-          contents = await proxmoxAPI('GET',
-            `/api2/json/nodes/${node.node}/storage/${s.storage}/content?content=images`);
-        } catch (e) {
-          errors.push(`Content of ${s.storage} on ${node.node}: ${e.message}`);
-          continue;
-        }
-
-        for (const item of contents || []) {
-          const match = item.volid?.match(/vm-(\d+)-disk/);
-          if (!match) continue;
-          const vmid = parseInt(match[1]);
-          if (vmidPattern && !vmidPattern.test(String(vmid))) continue;
-          if (liveVmIds.has(vmid)) continue;
-          orphans.push({
-            node: node.node,
-            storage: s.storage,
-            volid: item.volid,
-            vmid,
-            size_bytes: item.size || 0,
-            size_gb: item.size ? (item.size / (1024 ** 3)).toFixed(2) : '0.00'
-          });
-        }
-      }
+    // Refuse to sweep against an empty cluster view: every image on shared
+    // storage would classify as an orphan, and this endpoint deletes.
+    if (liveVmIds.size === 0) {
+      return res.status(409).json({
+        error: 'Cluster reported no VMs — refusing to sweep. Every disk would look orphaned.',
+      });
     }
 
-    const dedupedOrphans = [];
+    const scan = await scanClusterVolumes({
+      proxmoxAPI,
+      deadlineAt: Date.now() + budgetMs,
+      storageFilter,
+      concurrency: Number(process.env.RECONCILE_SCAN_CONCURRENCY) || 4,
+    });
+    if (scan.error) errors.push(scan.error);
+    for (const f of scan.storages_failed) errors.push(`Content of ${f.storage} on ${f.node}: ${f.reason}`);
+    for (const n of scan.skipped.nodes) errors.push(`Skipped node ${n.node}: ${n.reason}`);
+
     const seenVolids = new Set();
-    for (const o of orphans) {
-      if (seenVolids.has(o.volid)) continue;
-      seenVolids.add(o.volid);
-      dedupedOrphans.push(o);
+    const dedupedOrphans = [];
+    for (const v of scan.volumes) {
+      const parsed = parseVolid(v.volid);
+      if (!parsed) continue;
+      // Range-filter server-side. The UI used to send a vmid_pattern of
+      // ^[167][0-9]{5}$, which silently excluded the goad_controller (2xxxxx)
+      // and attached_module (8xxxxx) disks the audit had just listed.
+      if (!inCyberhubRange(parsed.vmid, RANGES)) continue;
+      if (vmidPattern && !vmidPattern.test(String(parsed.vmid))) continue;
+      if (liveVmIds.has(parsed.vmid)) continue;
+      if (seenVolids.has(v.volid)) continue;
+      seenVolids.add(v.volid);
+      dedupedOrphans.push({
+        node: v.node, storage: v.storage, volid: v.volid, vmid: parsed.vmid,
+        role: vmidRole(parsed.vmid, RANGES),
+        size_bytes: v.size || 0,
+        size_gb: v.size ? (v.size / (1024 ** 3)).toFixed(2) : '0.00',
+      });
     }
+    dedupedOrphans.sort((a, b) => a.volid.localeCompare(b.volid));
 
     if (!dry_run) {
+      if (!scan.complete) {
+        return res.status(409).json({
+          error: 'Disk scan was incomplete — refusing to sweep on a partial view. Re-run the audit.',
+          scan_errors: errors,
+        });
+      }
       for (const o of dedupedOrphans) {
         let ok = false;
         let lastErr = null;
@@ -558,6 +416,7 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
       dry_run,
       storage_filter: storageFilter,
       vmid_pattern: req.body?.vmid_pattern || null,
+      scan_complete: scan.complete,
       orphans_found: dedupedOrphans.length,
       orphans_deleted: deleted.length,
       total_orphan_size_gb: (totalBytes / (1024 ** 3)).toFixed(2),
@@ -566,6 +425,93 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+// ============================================================================
+// SDN ZONE PEER REPAIR
+// ============================================================================
+// A VXLAN zone's `peers` list is written ONCE, when the zone is created
+// (utils/lab-network-provision.js). Join a node to the cluster afterwards and
+// no existing zone ever learns about it, so a lane placed on that node comes up
+// with no VXLAN peering and nothing in the app notices. This is the repair.
+//
+// One zone per call, explicitly, matching the other reconcile actions — there
+// is deliberately no "fix all", because applying SDN commits every pending SDN
+// change on the cluster, not just ours.
+// ============================================================================
+
+router.post('/reconcile/fix-zone-peers', authenticateToken, adminOnly, async (req, res) => {
+  const { zone, expected, digest, apply } = req.body || {};
+  if (!zone) return res.status(400).json({ error: 'zone required' });
+  if (!ZONE_RE.test(zone)) {
+    return res.status(400).json({ error: 'zone must be 1-8 alphanumeric characters starting with a letter' });
+  }
+
+  try {
+    const [zones, clusterStatus] = await Promise.all([
+      proxmoxAPI('GET', '/api2/json/cluster/sdn/zones', null, { timeoutMs: 15000 }),
+      proxmoxAPI('GET', '/api2/json/cluster/status', null, { timeoutMs: 15000 }),
+    ]);
+
+    const target = (Array.isArray(zones) ? zones : []).find(z => z.zone === zone);
+    if (!target) return res.status(404).json({ error: `Zone '${zone}' not found` });
+    if (target.type !== 'vxlan') {
+      return res.status(400).json({ error: `Zone '${zone}' is type '${target.type}' — peers only apply to vxlan zones` });
+    }
+
+    // Recomputed server-side from a fresh /cluster/status. The client's list is
+    // a confirmation token, never the source of truth.
+    const fresh = computeExpectedPeers(clusterStatus, getPhysicalClusterIps());
+    if (fresh.ips.length < 2) {
+      return res.status(400).json({
+        error: `Refusing to write a ${fresh.ips.length}-peer VXLAN zone — only ${fresh.ips.length} online node address(es) resolved`,
+      });
+    }
+
+    if (Array.isArray(expected) && expected.length) {
+      const claimed = [...new Set(expected.map(String))].sort().join(',');
+      if (claimed !== fresh.csv) {
+        // 409 means re-check, not fail. The api() helper preserves err.data, so
+        // the UI can show the operator the set that is actually current.
+        return res.status(409).json({
+          error: 'The peer set changed since the audit — re-run it before repairing.',
+          expected: fresh.ips,
+        });
+      }
+    }
+
+    const peersBefore = target.peers || '';
+    const body = { peers: fresh.csv };
+    // Proxmox rejects a stale digest, which turns "someone edited this zone
+    // since your audit" into a clean 400 instead of a silent clobber.
+    if (digest) body.digest = digest;
+    await proxmoxAPI('PUT', `/api2/json/cluster/sdn/zones/${encodeURIComponent(zone)}`, body, { timeoutMs: 20000 });
+
+    let applied = false;
+    if (apply !== false) {
+      await proxmoxAPI('PUT', '/api2/json/cluster/sdn', null, { timeoutMs: 30000 });
+      applied = true;
+    }
+
+    const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets', null, { timeoutMs: 15000 })
+      .catch(() => []);
+    const vnetsInZone = (Array.isArray(vnets) ? vnets : []).filter(v => v.zone === zone).length;
+
+    console.log(`[Reconcile] Zone '${zone}' peers: '${peersBefore}' -> '${fresh.csv}' (applied=${applied})`);
+    logActivity(req, 'fix_zone_peers', 'network', zone, {
+      zone, peers_before: peersBefore, peers_after: fresh.csv, applied, vnets_in_zone: vnetsInZone,
+    });
+
+    res.json({
+      ok: true, zone,
+      peers_before: peersBefore, peers_after: fresh.csv,
+      applied, vnets_in_zone: vnetsInZone,
+    });
+  } catch (error) {
+    console.error(`[Reconcile] Failed to fix peers on zone ${zone}: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
 });

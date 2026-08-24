@@ -33,6 +33,7 @@ const { getManagedCourse: getManagedCourseRow } = require('../utils/course-acces
 const {
   resolveTargetStudents: resolveStudents,
   excludeStudentsWithCourseLane,
+  courseStaffIds,
 } = require('../utils/students');
 
 const instructorOnly = requireRole('instructor', 'admin');
@@ -57,7 +58,9 @@ function buildGuacLaunchUrl(connId) {
  *  (with its reserved-lab linkage) or null. Admin-aware via the shared helper. */
 function getManagedCourse(courseId, user) {
   // `code` names the lanes (cle-<code>-<vxlanId>) — see lane-provision.laneNamePrefix.
-  return getManagedCourseRow(courseId, user, 'course_id, course_name, code, challenge_id, challenge_key');
+  // instructor_id feeds courseStaffIds: an admin managing someone else's course
+  // must be able to deploy for that course's instructor, who is never enrolled.
+  return getManagedCourseRow(courseId, user, 'course_id, course_name, code, challenge_id, challenge_key, instructor_id');
 }
 
 /** Load + validate the workstation template a provision request names. */
@@ -141,17 +144,18 @@ async function loadCourseLab(course) {
  * The filter itself lives in utils/students.js so the vulnerable-lab path applies
  * exactly the same rules.
  *
- * `selfId` is the caller, passed only by the routes that let an instructor build
- * a workstation for THEMSELVES. It exempts that one id from the enrollment
+ * `staffIds` is the course's staff — the caller and the course's own instructor,
+ * from courseStaffIds() — passed by the routes that let a workstation be built
+ * for whoever RUNS the course. It exempts those ids from the enrollment
  * requirement and nothing else: they still need an email, and the
  * already-has-a-lane exclusion applies to them exactly as it does to a student.
- * Every route that passes it has already run getManagedCourse, so the id is one
- * the caller is authorised to act on.
+ * Every route that passes it has already run getManagedCourse, so the ids are
+ * ones the caller is authorised to act on.
  */
-function resolveTargetStudents(courseId, requestedIds, selfId = null) {
+function resolveTargetStudents(courseId, requestedIds, staffIds = []) {
   return resolveStudents(courseId, requestedIds, {
     excludeIf: excludeStudentsWithCourseLane(courseId),
-    extraUserIds: selfId ? [selfId] : [],
+    extraUserIds: staffIds || [],
   });
 }
 
@@ -292,6 +296,10 @@ router.get('/', instructorOnly, async (req, res) => {
         // members.
         enrolled:       enrolledIds.has(row.user_id),
         is_self:        row.user_id === req.user.userId,
+        // Distinguishes the instructor's machine from a dropped student's
+        // leftovers. Without it an admin sees the instructor's box badged
+        // "not enrolled", which reads as an orphan to be cleaned up.
+        is_course_instructor: row.user_id === course.instructor_id,
         template_id:    cfg.template_id || null,
         vm_name:        cfg.template_name || `cle-${row.vxlan_id}`,
         ip_address:     cfg.ip || null,
@@ -352,10 +360,11 @@ router.post('/provision', instructorOnly, async (req, res) => {
     const templates = await loadWorkstationTemplates(req.body);
     const resources = parseRequestedResources(req.body, templates.length);
     const challenge = await loadCourseLab(course);
-    // req.user.userId: an instructor may tick themselves in the picker and get
-    // their own workstation on this course's network. provision-all below
-    // deliberately does NOT pass it — "the whole class" is the roster.
-    const { students, skipped } = await resolveTargetStudents(courseId, student_ids, req.user.userId);
+    // Course staff may be ticked in the picker and get a workstation on this
+    // course's network: an instructor building their own, or an admin building
+    // one FOR the instructor. provision-all below deliberately does NOT pass
+    // them — "the whole class" is the roster.
+    const { students, skipped } = await resolveTargetStudents(courseId, student_ids, courseStaffIds(course, req.user));
 
     if (!students.length) {
       return res.status(400).json({ error: 'No eligible students to provision', skipped });

@@ -11,9 +11,41 @@ const PROXMOX_URL = process.env.PROXMOX_API_URL || 'https://100.100.10.10:8006';
 const PROXMOX_TOKEN_ID = process.env.PROXMOX_TOKEN_ID || 'root@pam!clinic-app-token';
 const PROXMOX_TOKEN_SECRET = process.env.PROXMOX_TOKEN_SECRET || '';
 
-async function proxmoxAPI(method, path, body = null) {
+/**
+ * Default socket-inactivity deadline for one Proxmox call.
+ *
+ * NOTE this is an INACTIVITY timeout, not a wall-clock deadline: a response
+ * that trickles bytes resets it indefinitely. Callers that need a hard ceiling
+ * (the reconcile scan does — Cloudflare kills the request at 100s) must pass an
+ * AbortSignal as well, not instead.
+ */
+const DEFAULT_TIMEOUT_MS = Number(process.env.PROXMOX_HTTP_TIMEOUT_MS) || 30000;
+
+function proxmoxTimeoutError(method, pathname, ms) {
+  return new Error(`Proxmox ${method} ${pathname} timed out after ${Math.round(ms / 1000)}s`);
+}
+
+function proxmoxAbortError(method, pathname) {
+  const err = new Error(`Proxmox ${method} ${pathname} aborted (deadline reached)`);
+  err.code = 'PROXMOX_ABORTED';
+  return err;
+}
+
+/**
+ * @param {string} method
+ * @param {string} path
+ * @param {object|string|null} body
+ * @param {{timeoutMs?: number, signal?: AbortSignal}} [opts]
+ *
+ * `opts` is a fourth, optional parameter so the ~32 existing two- and
+ * three-argument call sites are untouched.
+ */
+async function proxmoxAPI(method, path, body = null, opts = {}) {
   const https = require('https');
   const url = new URL(`${PROXMOX_URL}${path}`);
+
+  const timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : DEFAULT_TIMEOUT_MS;
+  const signal = opts.signal || null;
 
   let bodyStr = null;
   if (body) {
@@ -23,6 +55,8 @@ async function proxmoxAPI(method, path, body = null) {
       bodyStr = Object.entries(body).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join('&');
     }
   }
+
+  if (signal && signal.aborted) return Promise.reject(proxmoxAbortError(method, url.pathname));
 
   return new Promise((resolve, reject) => {
     const reqOpts = {
@@ -37,28 +71,47 @@ async function proxmoxAPI(method, path, body = null) {
       rejectUnauthorized: false  // Proxmox uses self-signed certs
     };
 
+    let onAbort = null;
+    let settled = false;
+    // One shared deadline signal can be handed to every call in a fan-out. The
+    // listener MUST come off on settle or the signal accumulates one per call
+    // and trips MaxListenersExceededWarning partway through a scan.
+    const cleanup = () => {
+      if (settled) return;
+      settled = true;
+      if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    };
+    const done = (fn) => (arg) => { cleanup(); fn(arg); };
+    const ok = done(resolve);
+    const fail = done(reject);
+
     const req = https.request(reqOpts, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
         if (res.statusCode >= 400) {
-          return reject(new Error(`Proxmox ${method} ${url.pathname} failed (${res.statusCode}): ${data}`));
+          return fail(new Error(`Proxmox ${method} ${url.pathname} failed (${res.statusCode}): ${data}`));
         }
         try {
           const json = JSON.parse(data);
-          resolve(json.data !== undefined ? json.data : json);
+          ok(json.data !== undefined ? json.data : json);
         } catch {
-          resolve(data);
+          ok(data);
         }
       });
     });
 
-    // 30-second socket timeout prevents hanging if Proxmox stops responding mid-request
-    req.setTimeout(30000, () => {
-      req.destroy(new Error(`Proxmox ${method} ${url.pathname} timed out after 30s`));
+    if (signal) {
+      onAbort = () => req.destroy(proxmoxAbortError(method, url.pathname));
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    // Socket timeout prevents hanging if Proxmox stops responding mid-request.
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(proxmoxTimeoutError(method, url.pathname, timeoutMs));
     });
 
-    req.on('error', reject);
+    req.on('error', fail);
     if (bodyStr) req.write(bodyStr);
     req.end();
   });

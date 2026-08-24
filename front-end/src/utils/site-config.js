@@ -19,12 +19,48 @@ const { ipToInt, intToIp, parseCidr, ipInCidr } = require('./ipv4');
 const CONFIG_PATH = path.resolve(__dirname, '../../../config/site.json');
 
 let _cache = null;
+// mtime of the file at the moment _cache was populated. The cache is never
+// invalidated (deliberately - nothing reading config mid-deploy should shift
+// underneath itself), so an operator who edits site.json and does not restart
+// gets no feedback at all. Recording this lets the audit SAY so.
+let _cacheMtimeMs = null;
 
 function getConfig() {
   if (!_cache) {
     _cache = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    try { _cacheMtimeMs = fs.statSync(CONFIG_PATH).mtimeMs; } catch (_) { _cacheMtimeMs = null; }
   }
   return _cache;
+}
+
+/**
+ * The raw name -> management IP map. getClusterNodes() returns only the keys,
+ * but node-drift reporting needs the addresses to tell a node that is missing
+ * from one that is merely mis-addressed.
+ */
+function getPhysicalClusterIps() {
+  return getConfig().cluster?.physical_cluster_ips || {};
+}
+
+/**
+ * Whether the site.json on disk has moved on from the copy this process parsed.
+ *
+ * Two ways this reads stale, with different fixes:
+ *   - mtime advanced: the app needs a restart to see the edit.
+ *   - mtime unchanged after an edit: the editor wrote-and-renamed, replacing the
+ *     inode, and the single-file :ro bind mount is still serving the OLD file to
+ *     the container. A restart will not help - it has to be edited IN PLACE.
+ */
+function getConfigFreshness() {
+  getConfig();
+  let diskMtimeMs = null;
+  try { diskMtimeMs = fs.statSync(CONFIG_PATH).mtimeMs; } catch (_) {}
+  return {
+    config_path: CONFIG_PATH,
+    config_mtime: diskMtimeMs ? new Date(diskMtimeMs).toISOString() : null,
+    config_loaded_mtime: _cacheMtimeMs ? new Date(_cacheMtimeMs).toISOString() : null,
+    config_stale_in_memory: !!(diskMtimeMs && _cacheMtimeMs && diskMtimeMs > _cacheMtimeMs),
+  };
 }
 
 /** All node names declared in physical_cluster_ips, in definition order. */
@@ -189,6 +225,8 @@ function getV1LanSubnet() {
 module.exports = {
   getConfig,
   getClusterNodes,
+  getPhysicalClusterIps,
+  getConfigFreshness,
   getNodeAddress,
   getDefaultTemplateNode,
   getSchedulingConfig,

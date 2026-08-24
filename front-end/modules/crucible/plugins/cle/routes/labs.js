@@ -29,7 +29,7 @@ const { resolveLaneWorkstationCredential } = require('../../../../../src/utils/l
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const { getManagedCourse } = require('../utils/course-access');
-const { resolveTargetStudents, excludeStudentsWithLab, combineExclusions } = require('../utils/students');
+const { resolveTargetStudents, excludeStudentsWithLab, combineExclusions, courseStaffIds } = require('../utils/students');
 const vulnLab = require('../utils/vuln-lab-provision');
 const audit = require('../../../../../src/utils/audit');
 
@@ -126,7 +126,10 @@ async function courseInstructorEmails(courseId) {
 router.get('/', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
-    if (!(await getCourse(courseId, req.user))) {
+    // The row, not just the access boolean: instructor_id labels a staff-owned
+    // lane below.
+    const course = await getCourse(courseId, req.user);
+    if (!course) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
@@ -229,6 +232,9 @@ router.get('/', instructorOnly, async (req, res) => {
         last_name: row.last_name,
         enrolled: enrolledIds.has(row.user_id),
         is_self: row.user_id === req.user.userId,
+        // Tells the instructor's own copy apart from a dropped student's
+        // leftovers, which are the other reason a lane's owner is not enrolled.
+        is_course_instructor: row.user_id === course.instructor_id,
         lane_status: row.status,
         vxlan_id: row.vxlan_id,
         flags: flagsByLane[row.lane_id] || null,
@@ -327,7 +333,10 @@ router.get('/', instructorOnly, async (req, res) => {
  */
 router.post('/deploy', instructorOnly, async (req, res) => {
   try {
-    const instructorId = req.user.userId;
+    // The CALLER — which is not necessarily this course's instructor. It was
+    // called instructorId, and that name is precisely how an admin ended up
+    // exempting themselves instead of the instructor they were deploying for.
+    const callerId = req.user.userId;
     const { courseId } = req.params;
     const { template_id, student_ids, learning_objective, confirm } = req.body;
     const mode = req.body.mode || 'lane';
@@ -380,12 +389,12 @@ router.post('/deploy', instructorOnly, async (req, res) => {
       excludeIf: materialId
         ? combineExclusions(excludeStudentsWithLab(materialId), vulnLab.excludeStudentsInFlight(materialId))
         : undefined,
-      // An instructor may tick themselves in the picker and get their own copy
-      // of the lab — to walk it before assigning it, or to demo it. getCourse
-      // above has already proved they may manage this course; the exemption is
-      // from the ENROLLMENT check only, and every collision exclusion still
-      // applies to them.
-      extraUserIds: [instructorId],
+      // Course staff may be ticked in the picker and get their own copy of the
+      // lab — an instructor walking it before assigning it, or an admin building
+      // one FOR that instructor. getCourse above has already proved the caller
+      // may manage this course; the exemption is from the ENROLLMENT check only,
+      // and every collision exclusion still applies to them.
+      extraUserIds: courseStaffIds(course, req.user),
     });
     if (!students.length) {
       return res.status(400).json({ error: 'No eligible students to deploy to', skipped });
@@ -446,7 +455,7 @@ router.post('/deploy', instructorOnly, async (req, res) => {
           challenge_key: challenge.challenge_key, mode,
           attack_box: attackBoxes, console_vm: consoleVm, extra_workstations: extraWorkstations,
         }),
-        instructorId,
+        callerId,
       ]);
       labId = labResult.rows[0].material_id;
     } else {
@@ -687,16 +696,19 @@ router.delete('/:labId/students/:userId', instructorOnly, async (req, res) => {
   const { courseId, labId, userId } = req.params;
   let claimed = null;
   try {
-    if (!(await getCourse(courseId, req.user))) {
+    const course = await getCourse(courseId, req.user);
+    if (!course) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
     if (!(await getOwnedLab(labId, courseId))) {
       return res.status(404).json({ error: 'Environment not found in this course' });
     }
-    // extraUserIds: an instructor's own copy of the lab has no enrollment row,
-    // so without this they could deploy one and never tear it down from here.
+    // extraUserIds: a staff copy of the lab has no enrollment row, so without
+    // this it could be deployed and then never torn down from here. It must be
+    // the same staff set POST /deploy used, or an admin can build the instructor
+    // a lab that nobody can remove.
     const { students, skipped } = await resolveTargetStudents(courseId, [userId], {
-      extraUserIds: [req.user.userId],
+      extraUserIds: courseStaffIds(course, req.user),
     });
     if (!students.length) {
       return res.status(404).json({
@@ -787,10 +799,10 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
     const lab = await getOwnedLab(labId, courseId);
     if (!lab) return res.status(404).json({ error: 'Environment not found in this course' });
 
-    // extraUserIds: see the teardown route — the instructor's own copy is not
-    // an enrollment, and must still be rebuildable.
+    // extraUserIds: see the teardown route — a staff copy is not an enrollment,
+    // and must still be rebuildable.
     const { students, skipped } = await resolveTargetStudents(courseId, [userId], {
-      extraUserIds: [req.user.userId],
+      extraUserIds: courseStaffIds(course, req.user),
     });
     if (!students.length) {
       return res.status(404).json({

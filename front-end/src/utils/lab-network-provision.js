@@ -18,6 +18,8 @@
 
 const { cybercoreQuery } = require('./cybercore-db');
 const { proxmoxAPI } = require('./proxmox');
+const { computeExpectedPeers, normalizePeers } = require('./reconcile-audit');
+const { getPhysicalClusterIps } = require('./site-config');
 
 // A v3 lane's internal VNet uses tag = (vxlanId + this offset). MUST match
 // V3_INTERNAL_TAG_OFFSET in utils/lane-networking.js.
@@ -90,23 +92,25 @@ async function ensureSdnZoneAndVnets({ zone, vxlanStart, vxlanEnd, subnetScheme 
   // 1. Zone
   const zones = await proxmoxAPI('GET', '/api2/json/cluster/sdn/zones');
   let zoneCreated = false;
-  if (!zones.some(z => z.zone === zone)) {
+  const existingZone = zones.find(z => z.zone === zone);
+
+  if (!existingZone) {
     log(`Creating SDN zone '${zone}'...`);
-    const nodeList = await proxmoxAPI('GET', '/api2/json/nodes');
-    const peerIps = [];
-    for (const node of nodeList) {
-      try {
-        const nodeStatus = await proxmoxAPI('GET', `/api2/json/nodes/${node.node}/status`);
-        if (nodeStatus.network) {
-          for (const [, iface] of Object.entries(nodeStatus.network)) {
-            if (iface.address && !iface.address.startsWith('127.')) { peerIps.push(iface.address); break; }
-          }
-        }
-      } catch (_) {}
-    }
-    const peers = peerIps.length === nodeList.length
-      ? peerIps.join(',')
-      : nodeList.map((_, i) => `100.100.10.${10 + i}`).join(',');
+
+    // Peers come from /cluster/status, whose type:'node' entries are the only
+    // place Proxmox hands back a node's address directly.
+    //
+    // What this replaces read nodeStatus.network from /nodes/<node>/status — a
+    // key that endpoint does not return — so peerIps was ALWAYS empty and the
+    // fallback always fired, writing peers derived from each node's INDEX in the
+    // array: 100.100.10.10, .11, .12 and so on. That happened to match the
+    // original six nodes, which is why it went unnoticed; any node added since,
+    // or addressed outside that run, got a fabricated peer.
+    //
+    // computeExpectedPeers throws rather than guessing. reserveLabNetwork
+    // already rolls back on a throw, so failing here is safe and loud.
+    const clusterStatus = await proxmoxAPI('GET', '/api2/json/cluster/status');
+    const peers = computeExpectedPeers(clusterStatus, getPhysicalClusterIps()).csv;
 
     // Deliberately NOT passing ipam: 'pve' — CyberCore manages lane IP space
     // internally (dnsmasq inside each lane gateway). ipam:'pve' writes per-VNet
@@ -115,7 +119,29 @@ async function ensureSdnZoneAndVnets({ zone, vxlanStart, vxlanEnd, subnetScheme 
     zoneCreated = true;
     log(`SDN zone '${zone}' created with peers: ${peers}`);
   } else {
+    // An EXISTING zone keeps whatever peers it was created with — joining a
+    // node to the cluster never updates it, so lanes placed on a new node come
+    // up with no VXLAN peering. Report it here; the repair is deliberately
+    // operator-driven (Audit Proxmox -> Fix Peers), because applying SDN
+    // commits every pending SDN change on the cluster, not just this one.
     log(`SDN zone '${zone}' already exists`);
+    try {
+      const clusterStatus = await proxmoxAPI('GET', '/api2/json/cluster/status');
+      const expected = computeExpectedPeers(clusterStatus, getPhysicalClusterIps());
+      const current = normalizePeers(existingZone.peers);
+      if (current === null) {
+        log(`WARNING: zone '${zone}' reports no peers — check it in Audit Proxmox`);
+      } else {
+        const missing = expected.ips.filter(ip => !current.includes(ip));
+        if (missing.length) {
+          log(`WARNING: zone '${zone}' is missing VXLAN peers ${missing.join(', ')} — ` +
+              `lanes on those nodes will have no VXLAN peering. ` +
+              `Repair with Audit Proxmox -> Fix Peers.`);
+        }
+      }
+    } catch (e) {
+      log(`Could not verify peers on zone '${zone}': ${e.message}`);
+    }
   }
 
   // 2. VNets
@@ -385,6 +411,7 @@ async function teardownLabNetwork(challengeId, { force = false, log = () => {} }
 
 module.exports = {
   V3_INTERNAL_TAG_OFFSET,
+  ZONE_RE,
   sanitizeZoneAbbrev,
   encodeBase20,
   allocateVxlanBlock,

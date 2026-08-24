@@ -7,16 +7,27 @@
  * about to be deployed. Keeping one copy means a deploy can't silently disagree
  * with the list the UI showed the instructor.
  *
- * SELF-DEPLOY. An instructor also needs their OWN copy of a workstation or a
- * vulnerable lab — to walk the exercise before assigning it, and to demo it in
- * class. They are not enrolled in their own course (cle_course.instructor_id is
- * the relationship, and enrollment_role has no 'instructor' value), so the
- * enrolment filter above would reject them. `opts.extraUserIds` is the narrow
- * exemption: ids the route has already authorised — in practice only
- * req.user.userId, once getManagedCourse has confirmed they may manage the
- * course — may be targeted without an enrollment row. Everything downstream
- * (the email requirement, the collision exclusions) still applies to them
- * exactly as it does to a student, so a self-deploy cannot double-book VMIDs.
+ * STAFF-DEPLOY. The people who RUN a course need machines on it too — an
+ * instructor walks an exercise before assigning it, and demos it in class — but
+ * they are not enrolled in their own course: cle_course.instructor_id is the
+ * relationship, and enrollment_role has no 'instructor' value, so the enrolment
+ * filter above would reject them. `opts.extraUserIds` is the narrow exemption:
+ * ids the route has already authorised may be targeted without an enrollment
+ * row.
+ *
+ * That exemption used to be req.user.userId alone, which is only half the rule.
+ * It let an instructor deploy for THEMSELVES while leaving an ADMIN unable to
+ * deploy for the instructor they were trying to equip: the admin is the caller,
+ * so the exemption covered the admin's own id and the instructor was still
+ * dropped as 'not enrolled'. courseStaffIds() below states the whole rule — the
+ * caller AND the course's own instructor. Both are safe to exempt because every
+ * route using it has already run getManagedCourse, which is admin-aware (an
+ * admin passes on any course, an instructor only on their own), so a caller who
+ * may manage the course may equip the person who runs it.
+ *
+ * Everything downstream (the email requirement, the collision exclusions) still
+ * applies to staff exactly as it does to a student, so a staff deploy cannot
+ * double-book VMIDs.
  */
 
 const { query } = require('./db');
@@ -78,45 +89,92 @@ async function resolveTargetStudents(courseId, requestedIds, opts = {}) {
 }
 
 /**
- * The caller as a deploy target: the row the deploy modals list alongside the
- * roster so an instructor can tick themselves.
+ * The ids that count as this course's STAFF: the caller, and the course's own
+ * instructor. Deduped, falsy-filtered, caller first.
  *
- * Returns null when the account has no email. Guacamole accounts are
- * email-keyed, so a machine deployed to such a user would come up with no
- * console — offering the option would only produce a deploy that half-works.
+ * This is the single definition of "who may be targeted without an enrollment
+ * row", handed to resolveTargetStudents' `extraUserIds` by every deploy,
+ * teardown and redeploy route. Keeping one definition is the point: the bug this
+ * replaced was five call sites each passing req.user.userId, which silently
+ * means "the admin" whenever an admin is the one managing the course.
+ *
+ * Caller-first ordering matters downstream — when the caller IS the instructor,
+ * the single resulting row is labelled "you" rather than "instructor".
+ *
+ * Pure: it reads a course row the caller has ALREADY proved they may manage via
+ * getManagedCourse. It performs no authorisation itself, and must never be
+ * called with a course row that was not fetched through that check.
+ *
+ * @param {{ instructor_id?: string }|null} course  a managed course row. Pass one
+ *   selected WITHOUT instructor_id (or null) and this degrades to the caller
+ *   alone, which is the old self-deploy-only behaviour.
+ * @param {{ userId: string }|null} user  req.user
+ * @returns {string[]}
+ */
+function courseStaffIds(course, user) {
+  const ids = [];
+  for (const id of [user && user.userId, course && course.instructor_id]) {
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * The course's staff as deploy targets: the rows the deploy modals list
+ * alongside the roster, so a machine can be built for someone who RUNS the
+ * course rather than takes it.
+ *
+ * Rows with no email are dropped. Guacamole accounts are email-keyed, so such a
+ * machine would come up with no console — offering it would only produce a
+ * deploy that half-works.
  *
  * Callers MUST have already proved the user may manage this course
  * (getManagedCourse / canManageCourse); this helper does no authorisation of its
- * own. `enrolled` is reported rather than filtered on, because an instructor who
- * IS also enrolled (a TA teaching their own section) is already in the roster
- * list and must not be offered twice.
+ * own. `enrolled` is reported rather than filtered on, because someone who IS
+ * also enrolled (a TA teaching their own section) is already in the roster list
+ * and must not be offered twice — the route drops those rows.
  *
  * @param {string} courseId
  * @param {{ userId: string }} user  req.user
+ * @param {{ instructor_id?: string }} [course]  the managed course row
+ * @returns {Promise<Array<{user_id, email, first_name, last_name, enrolled, is_self, is_course_instructor}>>}
  */
-async function resolveSelfTarget(courseId, user) {
+async function resolveCourseStaffTargets(courseId, user, course = null) {
+  const ids = courseStaffIds(course, user);
+  if (ids.length === 0) return [];
+
   const found = await cybercoreQuery(
     `SELECT user_id, email, first_name, last_name
-       FROM cybercore_user WHERE user_id = $1::uuid`,
-    [user.userId]
+       FROM cybercore_user WHERE user_id = ANY($1::uuid[])`,
+    [ids]
   );
-  const row = found.rows[0];
-  if (!row || !row.email) return null;
+  if (found.rows.length === 0) return [];
+  const byId = new Map(found.rows.map(r => [r.user_id, r]));
 
+  // One probe for both ids rather than one each: the array is at most 2 long,
+  // but this path runs on every open of both deploy modals.
   const enrolled = await query(
-    `SELECT 1 FROM cle_course_enrollment
-      WHERE course_id = $1 AND user_id = $2 AND status = 'active'`,
-    [courseId, user.userId]
+    `SELECT user_id FROM cle_course_enrollment
+      WHERE course_id = $1 AND user_id = ANY($2::uuid[]) AND status = 'active'`,
+    [courseId, ids]
   );
+  const enrolledIds = new Set(enrolled.rows.map(r => r.user_id));
 
-  return {
-    user_id: row.user_id,
-    email: row.email,
-    first_name: row.first_name || '',
-    last_name: row.last_name || '',
-    enrolled: enrolled.rows.length > 0,
-    is_self: true,
-  };
+  const rows = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (!row || !row.email) continue;
+    rows.push({
+      user_id: row.user_id,
+      email: row.email,
+      first_name: row.first_name || '',
+      last_name: row.last_name || '',
+      enrolled: enrolledIds.has(row.user_id),
+      is_self: row.user_id === user.userId,
+      is_course_instructor: !!(course && row.user_id === course.instructor_id),
+    });
+  }
+  return rows;
 }
 
 /**
@@ -205,7 +263,8 @@ function combineExclusions(...fns) {
 
 module.exports = {
   resolveTargetStudents,
-  resolveSelfTarget,
+  courseStaffIds,
+  resolveCourseStaffTargets,
   excludeStudentsWithCourseLane,
   excludeStudentsWithLab,
   combineExclusions,

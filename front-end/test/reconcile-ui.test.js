@@ -1,0 +1,347 @@
+/**
+ * reconcile-ui.test.js — the audit panel and the admin API client.
+ *
+ * TWO THINGS ARE PINNED HERE
+ *
+ * 1. The refactor that moved the audit off the request path rewrote
+ *    runReconcile() around a poller and moved the result markup into
+ *    renderReconcileResult(). Every row in that markup carries a destroy
+ *    button, and several are wired by delegation on data attributes rather
+ *    than inline onclick — so dropping one during the move would be invisible
+ *    in review and would silently disarm a repair the audit still advertises.
+ *    The first block asserts each hook survives.
+ *
+ * 2. api() used to call resp.json() BEFORE checking resp.ok. When the
+ *    Cloudflare tunnel gave up on the origin at 100s it returned an HTML page,
+ *    so the operator saw `Unexpected token '<', "<!DOCTYPE "... is not valid
+ *    JSON` — a parse error standing in for a timeout, with the status that
+ *    explained it thrown away. The second block pins the readable message AND
+ *    the err.status / err.data contract that existing callers depend on.
+ *
+ * Follows the repo's vm-stub idiom (see audit-ui.test.js, sidebar-nav.test.js).
+ *
+ * Run: node front-end/test/reconcile-ui.test.js   (or npm test)
+ */
+
+const { test } = require('node:test');
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const PUB = path.join(__dirname, '..', 'public');
+const LANES_SRC = fs.readFileSync(path.join(PUB, 'js', 'admin', 'admin-lanes.js'), 'utf8');
+const CORE_SRC = fs.readFileSync(path.join(PUB, 'js', 'admin', 'admin-core.js'), 'utf8');
+const ADMIN_HTML = fs.readFileSync(path.join(PUB, 'admin.html'), 'utf8');
+
+// ============================================================================
+// A reconcile payload exercising every section at once.
+// ============================================================================
+const RESULT = {
+  timestamp: '2026-08-24T18:02:11.412Z',
+  duration_ms: 6400,
+  summary: {
+    proxmox_cyberhub_vms: 42, db_active_lanes: 20, db_expected_vms: 60,
+    orphaned_on_proxmox: 1, stale_in_db: 1, sdn_zones: 3, orphaned_zones: 1,
+    sdn_vnets: 9, orphaned_vnets: 1, deployed_groups: 2,
+    orphaned_disks: 1, orphaned_disks_total_gb: '32.00', orphaned_guac_connections: 1,
+    cluster_nodes_live: 10, cluster_nodes_declared: 6, nodes_undeclared: 1,
+    nodes_stale_declared: 0, nodes_ip_mismatch: 0, nodes_offline: 0,
+    zones_peer_drift: 1, node_drift_issues: 2,
+    disk_scan_complete: true, disk_scan_trusted: true,
+  },
+  orphaned_on_proxmox: [{ vmid: 600999, name: 'ghost', status: 'stopped', node: 'n1', type: 'qemu', role: 'challenge', vxlan_inferred: 999 }],
+  stale_in_db: [{ lane_id: 'aaaaaaaa-bbbb', name: 'dead lane', vxlan_id: 12, status: 'active', created_at: '2026-08-01T00:00:00Z' }],
+  orphaned_zones: [{ zone: 'ghostz', type: 'vxlan', vnet_count: 2 }],
+  orphaned_vnets: [{ vnet: 'ghostv', zone: 'gonez', tag: 55 }],
+  orphaned_disks: [{ vmid: 600999, role: 'challenge', volid: 'ceph-vm:vm-600999-disk-0', node: 'n1', storage: 'ceph-vm', size_gb: '32.00', shared: true }],
+  orphaned_guac_connections: [{ id: '77', name: 'x - y - Kali', protocol: 'rdp', parent: 'ROOT', tracked: true }],
+  cluster_nodes: {
+    live: [
+      { node: 'n1', status: 'online', live_ip: '100.100.10.10', declared_ip: '100.100.10.10', declared: true, vm_count: 4 },
+      { node: 'n6', status: 'online', live_ip: '100.100.10.16', declared_ip: null, declared: false, vm_count: 2 },
+    ],
+    undeclared: [{ node: 'n6', status: 'online', live_ip: '100.100.10.16', schedulable: true }],
+    stale_declared: [], ip_mismatch: [], offline: [],
+    declared_count: 6, live_count: 10, issue_count: 1,
+    config_stale_in_memory: false,
+  },
+  zone_peer_drift: [{
+    zone: 'goadlab', type: 'vxlan', readable: true,
+    peers: '100.100.10.10', peers_list: ['100.100.10.10'],
+    expected_peers: ['100.100.10.10', '100.100.10.16'],
+    missing_peers: ['100.100.10.16'], extra_peers: [], vnet_count: 12, digest: 'abc123',
+  }],
+  sdn_pending: false,
+  disk_scan: { complete: true, trusted: true, warnings: [] },
+  guac_scan: { ok: true },
+  cluster_view: { nodes_total: 10, nodes_online: 10, trusted: true },
+  warnings: [],
+};
+
+const clone = (o) => JSON.parse(JSON.stringify(o));
+
+function makeContext() {
+  const elements = new Map();
+  const el = (id) => {
+    if (!elements.has(id)) {
+      elements.set(id, {
+        id, value: '', innerHTML: '', textContent: '', disabled: false, style: {},
+        dataset: {}, classList: { add() {}, remove() {}, contains: () => false },
+        closest: () => null, querySelectorAll: () => [],
+      });
+    }
+    return elements.get(id);
+  };
+
+  const context = {
+    document: {
+      getElementById: el,
+      addEventListener() {},
+      querySelectorAll: () => [],
+      visibilityState: 'visible',
+      createElement: () => ({ style: {}, click() {} }),
+    },
+    escHtml: (s) => String(s ?? '')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;'),
+    formatTime: (s) => `${s}s`,
+    api: async () => ({}),
+    Toast: { success() {}, error() {}, warning() {}, info() {} },
+    Confirm: { show: async () => true },
+    Utils: { setBtnLoading() {} },
+    navigator: { clipboard: { writeText: async () => {} } },
+    setInterval: () => 0, clearInterval() {}, setTimeout: () => 0, clearTimeout() {},
+    Date, JSON, Math, console, encodeURIComponent, URLSearchParams, parseFloat, parseInt,
+  };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(LANES_SRC, context);
+  return { context, el };
+}
+
+// ============================================================================
+// 1. THE MOVE DROPPED NOTHING
+// ============================================================================
+
+test('every repair hook survives the render refactor', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 12 });
+  const html = el('reconcileResults').innerHTML;
+
+  for (const hook of [
+    'destroyOrphanVM(600999',
+    "markLaneDeleted('aaaaaaaa-bbbb'",
+    "destroyOrphanZone('ghostz'",
+    "destroyOrphanVNet('ghostv'",
+    'destroyOrphanDisk(',
+    'class="btn btn-sm guac-conn-delete"',
+    'data-conn-id="77"',
+    'sweepAllOrphanDisks(this)',
+    'sweepAllOrphanGuacConns(this)',
+  ]) {
+    assert.ok(html.includes(hook), `missing repair hook: ${hook}`);
+  }
+});
+
+test('the header shows relative age and a re-scan control', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 240 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('Last audited'));
+  assert.ok(html.includes('4m ago'));
+  assert.ok(html.includes('runReconcile()'), 'Re-scan button');
+});
+
+test('node drift alone flips the badge off "In Sync"', () => {
+  const r = clone(RESULT);
+  // Everything clean EXCEPT the new node checks.
+  Object.assign(r.summary, {
+    orphaned_on_proxmox: 0, stale_in_db: 0, orphaned_zones: 0,
+    orphaned_vnets: 0, orphaned_disks: 0, orphaned_guac_connections: 0,
+  });
+  r.orphaned_on_proxmox = []; r.stale_in_db = []; r.orphaned_zones = [];
+  r.orphaned_vnets = []; r.orphaned_disks = []; r.orphaned_guac_connections = [];
+
+  const { context, el } = makeContext();
+  context.renderReconcileResult(r, { age_seconds: 0 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('Issues Found'),
+    'a node that is invisible to SSH must not read as "In Sync"');
+  assert.ok(!html.includes('All clear'));
+});
+
+test('an undeclared node gets a copyable site.json snippet naming it', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 0 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('Nodes missing from site.json'));
+  assert.ok(html.includes('&quot;n6&quot;: &quot;100.100.10.16&quot;'), 'the snippet names node and IP');
+  assert.ok(html.includes('copySiteJsonSnippet'));
+  assert.ok(html.includes('already receiving lane deployments'),
+    'the operator has to know these nodes are live, not merely misconfigured');
+});
+
+test('a drifted zone offers a repair; an unreadable one does not', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 0 });
+  let html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('class="btn btn-sm zone-peers-fix"'));
+  assert.ok(html.includes('data-zone="goadlab"'));
+  assert.ok(html.includes('data-digest="abc123"'));
+  assert.ok(!html.includes('Fix All'), 'applying SDN is cluster-wide — no bulk control');
+
+  const r = clone(RESULT);
+  r.zone_peer_drift = [{ zone: 'z', type: 'vxlan', readable: false, peers: null, peers_list: [], expected_peers: ['1.2.3.4'], missing_peers: [], extra_peers: [], vnet_count: 0, digest: null }];
+  const ctx2 = makeContext();
+  ctx2.context.renderReconcileResult(r, { age_seconds: 0 });
+  html = ctx2.el('reconcileResults').innerHTML;
+  assert.ok(!html.includes('zone-peers-fix'),
+    'never offer to overwrite peers nobody managed to read');
+  assert.ok(html.includes('no repair offered'));
+});
+
+test('an untrusted scan disables Sweep All but still lists the disks', () => {
+  const r = clone(RESULT);
+  r.disk_scan = { complete: false, trusted: false, warnings: ['Disk scan incomplete — 8 of 10 nodes scanned.'] };
+  r.warnings = ['Disk scan incomplete — 8 of 10 nodes scanned.'];
+
+  const { context, el } = makeContext();
+  context.renderReconcileResult(r, { age_seconds: 0 });
+  const html = el('reconcileResults').innerHTML;
+
+  assert.ok(!html.includes('sweepAllOrphanDisks(this)'),
+    'a bulk delete against a partial cluster view can destroy a live VM disk');
+  assert.ok(html.includes('Sweep All disabled'));
+  assert.ok(html.includes('destroyOrphanDisk('), 'individual rows remain — the finding is still real');
+  assert.ok(html.includes('8 of 10 nodes scanned'), 'the warning is surfaced, not just logged');
+});
+
+test('a shared-storage disk is labelled as such', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 0 });
+  assert.ok(el('reconcileResults').innerHTML.includes('(shared)'),
+    'otherwise the Node column implies the disk lives only on that one node');
+});
+
+test('progress renders a counted phase line', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileProgress({ phase: 'storage', done: 6, total: 11, elapsed_s: 74 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('Scanning storage — 6/11 storage targets'));
+  assert.ok(html.includes('55%'), 'progress bar width: round(6/11 * 100)');
+});
+
+test('an aborted job offers a forced re-run; an ordinary failure does not', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileError('Scan aborted — the server restarted during the audit. Re-run it.', true);
+  assert.ok(el('reconcileResults').innerHTML.includes('runReconcile(true)'));
+
+  context.renderReconcileError('Proxmox unreachable', false);
+  assert.ok(!el('reconcileResults').innerHTML.includes('runReconcile(true)'));
+});
+
+test('reconcileAgeLabel reads naturally across scales', () => {
+  const { context } = makeContext();
+  assert.strictEqual(context.reconcileAgeLabel(null), 'never');
+  assert.strictEqual(context.reconcileAgeLabel(3), 'just now');
+  assert.strictEqual(context.reconcileAgeLabel(240), '4m ago');
+  assert.strictEqual(context.reconcileAgeLabel(7200), '2h ago');
+});
+
+test('the Active Lanes tab triggers a cached render', () => {
+  assert.ok(
+    /switchTab\('lanes', this\);\s*reconcileTabActivate\(\)/.test(ADMIN_HTML),
+    'without this the panel only ever appears after clicking Audit Proxmox');
+});
+
+test('Sweep All no longer sends a VMID pattern that skips two ranges', () => {
+  assert.ok(!LANES_SRC.includes('^[167][0-9]{5}$') || LANES_SRC.includes('// audited with. The old'),
+    'the literal may survive only inside the comment explaining why it went');
+  const sweepCall = LANES_SRC.slice(LANES_SRC.indexOf('async function sweepAllOrphanDisks'));
+  const body = sweepCall.slice(0, sweepCall.indexOf('\n}'));
+  assert.ok(!/vmid_pattern:\s*'/.test(body),
+    'goad_controller (2xxxxx) and attached_module (8xxxxx) disks were listed in ' +
+    'the table but excluded from the sweep the button ran');
+});
+
+// ============================================================================
+// 2. THE api() CONTRACT
+// ============================================================================
+
+function makeApi(fetchImpl) {
+  const context = {
+    localStorage: { getItem: () => 'tok' },
+    fetch: fetchImpl,
+    AbortController, setTimeout, clearTimeout,
+    document: { getElementById: () => ({ style: {}, classList: { add() {}, remove() {} } }), querySelectorAll: () => [], addEventListener() {} },
+    Toast: { success() {}, error() {} },
+    console, JSON, Date, Math, URLSearchParams, encodeURIComponent,
+  };
+  context.window = context;
+  vm.createContext(context);
+  vm.runInContext(CORE_SRC, context);
+  return context.api;
+}
+
+const resp = (status, body, ok) => async () => ({
+  ok: ok !== undefined ? ok : status < 400,
+  status,
+  text: async () => body,
+});
+
+test('THE REPORTED BUG: an HTML 524 page reads as a gateway timeout', async () => {
+  const api = makeApi(resp(524, '<!DOCTYPE html><html><head><title>524</title></head></html>'));
+  const err = await api('GET', '/reconcile').then(() => null, e => e);
+
+  assert.ok(err, 'must still throw');
+  assert.match(err.message, /^Gateway timeout \(524\)/,
+    "the operator saw `Unexpected token '<'` — a parse error standing in for a timeout");
+  assert.strictEqual(err.status, 524, 'the status that explains the failure must survive');
+  assert.ok(err.data.raw.startsWith('<!DOCTYPE'), 'the body is kept for diagnosis');
+});
+
+test('the err.status / err.data contract is unchanged for JSON errors', async () => {
+  const api = makeApi(resp(409, JSON.stringify({ error: 'Audience shifted', recipients: 12 })));
+  const err = await api('POST', '/broadcast', { x: 1 }).then(() => null, e => e);
+
+  assert.strictEqual(err.message, 'Audience shifted');
+  assert.strictEqual(err.status, 409);
+  assert.strictEqual(err.data.recipients, 12,
+    'callers read err.data to tell a re-check apart from a failure');
+});
+
+test('a JSON 2xx still returns its parsed body; an empty one returns null', async () => {
+  assert.deepStrictEqual(await makeApi(resp(200, '{"ok":true}'))('GET', '/x'), { ok: true });
+  assert.strictEqual(await makeApi(resp(204, ''))('GET', '/x'), null,
+    'an empty 2xx used to throw on resp.json()');
+});
+
+test('a 2xx carrying HTML throws rather than returning a string', async () => {
+  const err = await makeApi(resp(200, '<html>login</html>'))('GET', '/x').then(() => null, e => e);
+  assert.match(err.message, /Unexpected non-JSON response \(200\)/);
+  assert.strictEqual(err.status, 200);
+});
+
+test('a client-side abort reports the timeout and keeps status numeric', async () => {
+  const api = makeApi(async () => { const e = new Error('aborted'); e.name = 'AbortError'; throw e; });
+  const err = await api('GET', '/slow', null, { timeoutMs: 5000 }).then(() => null, e => e);
+  assert.match(err.message, /Request timed out after 5s/);
+  assert.strictEqual(err.status, 0);
+  assert.strictEqual(err.data, null);
+});
+
+test('a dead network is named as such', async () => {
+  const api = makeApi(async () => { throw new TypeError('Failed to fetch'); });
+  const err = await api('GET', '/x').then(() => null, e => e);
+  assert.match(err.message, /Network error: Failed to fetch/);
+  assert.strictEqual(err.status, 0);
+});
+
+test('every gateway status the tunnel can emit has a readable message', async () => {
+  for (const status of [502, 503, 504, 520, 521, 522, 523, 524]) {
+    const err = await makeApi(resp(status, '<html>err</html>'))('GET', '/x').then(() => null, e => e);
+    assert.ok(!/Unexpected token/.test(err.message), `${status} leaked a parse error`);
+    assert.ok(err.message.includes(String(status)), `${status} is not named in its message`);
+  }
+});

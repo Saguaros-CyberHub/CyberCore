@@ -73,21 +73,203 @@ async function loadLanes() {
 // ============================================================================
 // PROXMOX AUDIT / RECONCILIATION
 // ============================================================================
+// The audit runs on the SERVER, detached from any request. This side starts a
+// job, polls it, and renders the result. It used to be one blocking GET, which
+// on a cluster of any size outlived the Cloudflare tunnel's 100s origin timeout
+// and came back as an HTML error page — reported to the operator as
+// "Unexpected token '<'".
+//
+// The panel also renders the LAST result on tab activation, so the common case
+// (wanting to see what the audit said) costs nothing at all.
+// ============================================================================
 
-async function runReconcile() {
+const RECONCILE_POLL_MS = 1500;
+const RECONCILE_MAX_MISSES = 12;   // ~18s of consecutive poll failures
+const _rec = { jobId: null, pollTimer: null, ageTimer: null, polling: false, misses: 0, notFound: 0 };
+
+const RECONCILE_PHASES = {
+  cluster: 'Reading cluster inventory and database',
+  storage: 'Scanning storage',
+  guacamole: 'Reading Guacamole connections',
+  done: 'Finishing up',
+};
+
+function reconcileSetBusy(on, label) {
   const btn = document.getElementById('btnReconcile');
-  const panel = document.getElementById('reconcileResults');
-  btn.disabled = true;
-  btn.textContent = 'Auditing...';
-  panel.style.display = 'block';
-  panel.innerHTML = '<p style="color: var(--gray-500);">Querying Proxmox and DB...</p>';
+  if (!btn) return;
+  btn.disabled = !!on;
+  btn.textContent = on ? (label || 'Auditing...') : 'Audit Proxmox';
+}
 
+function reconcileAgeLabel(sec) {
+  if (sec === null || sec === undefined) return 'never';
+  if (sec < 45) return 'just now';
+  if (sec < 3600) return `${Math.round(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.round(sec / 3600)}h ago`;
+  return `${Math.round(sec / 86400)}d ago`;
+}
+
+function startReconcileAgeTicker(ageSeconds) {
+  if (_rec.ageTimer) clearInterval(_rec.ageTimer);
+  if (ageSeconds === null || ageSeconds === undefined) return;
+  let age = ageSeconds;
+  _rec.ageTimer = setInterval(() => {
+    age += 30;
+    const el = document.getElementById('reconcileAge');
+    if (!el) { clearInterval(_rec.ageTimer); _rec.ageTimer = null; return; }
+    el.textContent = reconcileAgeLabel(age);
+  }, 30000);
+}
+
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+async function runReconcile(force) {
+  const panel = document.getElementById('reconcileResults');
+  panel.style.display = 'block';
+  reconcileSetBusy(true, 'Starting...');
   try {
-    const r = await api('GET', '/reconcile');
+    const job = await api('POST', '/reconcile/run', force ? { force: true } : {}, { timeoutMs: 15000 });
+    _rec.jobId = job.job_id;
+    reconcileSetBusy(true, 'Auditing...');
+    panel.innerHTML = `<p style="color: var(--gray-500);">${
+      job.attached ? 'Joined an audit already in progress...' : 'Querying Proxmox and DB...'}</p>`;
+    startReconcilePoll(job.job_id);
+  } catch (e) {
+    renderReconcileError(e.message);
+    reconcileSetBusy(false);
+  }
+}
+
+/**
+ * Called when the Active Lanes tab is opened. Shows the cached result, or
+ * attaches to a scan someone else started. Never paints an error: a tab click
+ * that reports a failure the operator did not ask for is just noise.
+ */
+async function reconcileTabActivate() {
+  const panel = document.getElementById('reconcileResults');
+  if (!panel) return;
+  try {
+    const r = await api('GET', '/reconcile', null, { timeoutMs: 15000 });
+    if (r.running && r.job_id) {
+      panel.style.display = 'block';
+      reconcileSetBusy(true, 'Auditing...');
+      if (r.cached) renderReconcileResult(r, { age_seconds: r.age_seconds, stale: true });
+      startReconcilePoll(r.job_id);
+      return;
+    }
+    if (!r.cached) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    renderReconcileResult(r, { age_seconds: r.age_seconds });
+  } catch (e) {
+    panel.style.display = 'none';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Polling
+// ---------------------------------------------------------------------------
+
+function stopReconcilePoll() {
+  if (_rec.pollTimer) clearInterval(_rec.pollTimer);
+  _rec.pollTimer = null;
+  _rec.polling = false;
+  _rec.misses = 0;
+  _rec.notFound = 0;
+}
+
+function startReconcilePoll(jobId) {
+  stopReconcilePoll();
+  _rec.jobId = jobId;
+
+  _rec.pollTimer = setInterval(async () => {
+    // A poll slower than the interval must not stack, and a backgrounded tab
+    // has no business polling for the length of a multi-minute scan.
+    if (_rec.polling) return;
+    if (document.visibilityState === 'hidden') return;
+    _rec.polling = true;
+    try {
+      const p = await api('GET', `/reconcile/status/${jobId}`, null, { timeoutMs: 10000 });
+      _rec.misses = 0;
+
+      if (p.state === 'done') {
+        stopReconcilePoll();
+        reconcileSetBusy(false);
+        if (p.result) {
+          renderReconcileResult(p.result, { age_seconds: 0 });
+        } else {
+          reconcileTabActivate();
+        }
+        if (typeof Toast !== 'undefined') {
+          Toast.success('Audit Complete', `Scanned in ${formatTime(p.elapsed_s || 0)}`);
+        }
+      } else if (p.state === 'error') {
+        stopReconcilePoll();
+        reconcileSetBusy(false);
+        renderReconcileError(p.error, p.aborted);
+      } else {
+        renderReconcileProgress(p);
+      }
+    } catch (e) {
+      // A job id that aged out is not a failure — the result is almost
+      // certainly cached. Fall back to it once rather than showing an error.
+      if (e.status === 404) {
+        _rec.notFound++;
+        if (_rec.notFound >= 2) {
+          stopReconcilePoll();
+          reconcileSetBusy(false);
+          reconcileTabActivate();
+        }
+      } else if (++_rec.misses >= RECONCILE_MAX_MISSES) {
+        stopReconcilePoll();
+        reconcileSetBusy(false);
+        renderReconcileError('Lost contact with the server while the audit was running.');
+      }
+    } finally {
+      _rec.polling = false;
+    }
+  }, RECONCILE_POLL_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function renderReconcileProgress(p) {
+  const label = RECONCILE_PHASES[p.phase] || p.phase || 'Working';
+  const counted = p.total > 1;
+  const line = counted ? `${label} — ${p.done}/${p.total} storage targets` : `${label}...`;
+  const pct = counted ? Math.round((p.done / p.total) * 100) : null;
+  document.getElementById('reconcileResults').innerHTML = `
+    <div style="background:var(--bg-card, white); border-radius:12px; padding:1rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid #ed8936;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.5rem;">
+        <strong style="font-size:0.85rem;">&#9881; ${escHtml(line)}</strong>
+        <span style="font-size:0.75rem; color:var(--gray-500);">Elapsed: ${formatTime(p.elapsed_s || 0)}</span>
+      </div>
+      ${pct !== null ? `
+        <div style="background:var(--border-color, #e2e8f0); border-radius:4px; height:10px; overflow:hidden;">
+          <div style="width:${pct}%; height:100%; background:#ed8936; transition:width 0.3s;"></div>
+        </div>` : ''}
+      <p style="font-size:0.75rem; color:var(--gray-500); margin:0.5rem 0 0;">
+        This runs on the server — you can leave this tab.</p>
+    </div>`;
+}
+
+function renderReconcileError(msg, aborted) {
+  document.getElementById('reconcileResults').innerHTML = `
+    <p style="color:#e53e3e;">Audit failed: ${escHtml(msg || 'unknown error')}</p>
+    ${aborted ? `<button class="btn btn-outline btn-sm" style="font-size:0.8rem;" onclick="runReconcile(true)">Re-run audit</button>` : ''}`;
+}
+
+function renderReconcileResult(r, meta) {
+    const m = meta || {};
     const s = r.summary;
-    const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0 || (s.orphaned_disks || 0) > 0 || (s.orphaned_guac_connections || 0) > 0;
+    const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0 || (s.orphaned_disks || 0) > 0 || (s.orphaned_guac_connections || 0) > 0 || (s.node_drift_issues || 0) > 0;
     const statusColor = hasIssues ? '#e53e3e' : '#38a169';
     const statusLabel = hasIssues ? 'Issues Found' : 'In Sync';
+    // A partial or degraded scan must not offer a bulk delete. See disk_scan.trusted.
+    const scanTrusted = !r.disk_scan || (r.disk_scan.trusted && r.disk_scan.complete);
 
     let orphanRows = '';
     if (r.orphaned_on_proxmox.length) {
@@ -158,21 +340,71 @@ async function runReconcile() {
           <td><code>${d.vmid}</code></td>
           <td>${d.role || '-'}</td>
           <td><code style="font-size:0.75rem;">${escHtml(d.volid)}</code></td>
-          <td>${escHtml(d.node)}</td>
+          <td>${escHtml(d.node)}${d.shared ? ' <span style="color:var(--gray-400); font-size:0.7rem;">(shared)</span>' : ''}</td>
           <td>${escHtml(d.storage)}</td>
           <td style="text-align:right;">${d.size_gb} GB</td>
           <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanDisk('${escHtml(d.node)}', '${escHtml(d.storage)}', '${escHtml(d.volid)}', this)">Delete</button></td>
         </tr>`).join('');
     }
 
-    panel.innerHTML = `
+    // ---- node drift -------------------------------------------------------
+    const cn = r.cluster_nodes || {};
+    let nodeRows = '';
+    if (cn.live?.length) {
+      nodeRows = cn.live.map(n => {
+        let verdict = '<span style="color:#38a169;">OK</span>';
+        if (!n.declared) verdict = '<span style="color:#e53e3e;">not in site.json — SSH will fail</span>';
+        else if (n.status !== 'online') verdict = `<span style="color:#d69e2e;">${escHtml(n.status)}</span>`;
+        else if (n.live_ip && n.declared_ip && n.live_ip !== n.declared_ip) verdict = '<span style="color:#e53e3e;">IP mismatch</span>';
+        return `
+        <tr>
+          <td><code>${escHtml(n.node)}</code></td>
+          <td>${escHtml(n.status)}</td>
+          <td>${escHtml(n.live_ip || '-')}</td>
+          <td>${escHtml(n.declared_ip || '-')}</td>
+          <td>${n.vm_count}</td>
+          <td>${verdict}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    const undeclared = cn.undeclared || [];
+    const snippet = undeclared.length
+      ? undeclared.map(n => `  "${n.node}": "${n.live_ip || '<management IP>'}"`).join(',\n')
+      : '';
+
+    let peerRows = '';
+    if (r.zone_peer_drift?.length) {
+      peerRows = r.zone_peer_drift.map(z => `
+        <tr>
+          <td><code>${escHtml(z.zone)}</code></td>
+          <td><code style="font-size:0.7rem;">${escHtml(z.readable ? (z.peers || '(none)') : 'unreadable')}</code></td>
+          <td style="color:#e53e3e;">${escHtml((z.missing_peers || []).join(', ') || '-')}</td>
+          <td style="color:#d69e2e;">${escHtml((z.extra_peers || []).join(', ') || '-')}</td>
+          <td>${z.vnet_count}</td>
+          <td>${z.readable
+            ? `<button class="btn btn-sm zone-peers-fix" data-zone="${escHtml(z.zone)}" data-digest="${escHtml(z.digest || '')}" data-expected="${escHtml((z.expected_peers || []).join(','))}" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #d69e2e; color:#d69e2e; background:transparent;">Fix Peers</button>`
+            : '<span style="color:var(--gray-400); font-size:0.7rem;">no repair offered</span>'}</td>
+        </tr>`).join('');
+    }
+
+    const warnings = (r.warnings || []);
+
+    document.getElementById('reconcileResults').innerHTML = `
       <div style="background:var(--bg-card, white); border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); border-left:4px solid ${statusColor};">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
           <h3 style="margin:0; font-size:1rem;">Proxmox Audit
             <span style="font-size:0.8rem; padding:0.15rem 0.5rem; border-radius:12px; color:white; background:${statusColor}; margin-left:0.5rem;">${statusLabel}</span>
           </h3>
-          <span style="font-size:0.75rem; color:var(--gray-400);">${r.timestamp}</span>
+          <span style="font-size:0.75rem; color:var(--gray-400);" title="${escHtml(r.timestamp || '')}">
+            Last audited <span id="reconcileAge">${reconcileAgeLabel(m.age_seconds)}</span>${r.duration_ms ? ` &middot; took ${(r.duration_ms/1000).toFixed(1)}s` : ''}
+            <button class="btn btn-sm btn-outline" style="font-size:0.7rem; padding:0.2rem 0.6rem; margin-left:0.5rem;" onclick="runReconcile()">Re-scan</button>
+          </span>
         </div>
+        ${warnings.length ? `
+          <div style="background:rgba(214,158,46,0.12); border-left:3px solid #d69e2e; border-radius:6px; padding:0.6rem 0.8rem; margin-bottom:1rem;">
+            ${warnings.map(w => `<div style="font-size:0.75rem; color:#975a16;">&#9888; ${escHtml(w)}</div>`).join('')}
+          </div>` : ''}
         <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:0.75rem; margin-bottom:1rem;">
           <div style="text-align:center; padding:0.5rem; background:var(--gray-50, #f7fafc); border-radius:8px;">
             <div style="font-size:1.25rem; font-weight:700;">${s.proxmox_cyberhub_vms}</div>
@@ -206,6 +438,14 @@ async function runReconcile() {
             <div style="font-size:1.25rem; font-weight:700; color:${(s.orphaned_guac_connections||0)?'#e53e3e':'inherit'};">${s.orphaned_guac_connections || 0}</div>
             <div style="font-size:0.75rem; color:var(--gray-500);">Orphaned Guac Conns</div>
           </div>
+          <div style="text-align:center; padding:0.5rem; background:${(s.nodes_undeclared||0)?'rgba(229,62,62,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
+            <div style="font-size:1.25rem; font-weight:700; color:${(s.nodes_undeclared||0)?'#e53e3e':'inherit'};">${s.cluster_nodes_live || 0}</div>
+            <div style="font-size:0.75rem; color:var(--gray-500);">Cluster Nodes${(s.nodes_undeclared||0) ? ` (${s.nodes_undeclared} undeclared)` : ''}</div>
+          </div>
+          <div style="text-align:center; padding:0.5rem; background:${(s.zones_peer_drift||0)?'rgba(229,62,62,0.12)':'var(--gray-50, #f7fafc)'}; border-radius:8px;">
+            <div style="font-size:1.25rem; font-weight:700; color:${(s.zones_peer_drift||0)?'#e53e3e':'inherit'};">${s.zones_peer_drift || 0}</div>
+            <div style="font-size:0.75rem; color:var(--gray-500);">Zones Missing Peers</div>
+          </div>
         </div>
         ${orphanRows ? `
           <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Orphaned VMs (no DB lane)</h4>
@@ -238,7 +478,9 @@ async function runReconcile() {
         ${diskRows ? `
           <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e; display:flex; align-items:center; justify-content:space-between;">
             <span>Orphaned Disk Images (${r.orphaned_disks.length}, ${s.orphaned_disks_total_gb} GB total)</span>
-            <button class="btn btn-sm" style="font-size:0.7rem; padding:0.2rem 0.6rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="sweepAllOrphanDisks(this)">Sweep All</button>
+            ${scanTrusted
+              ? `<button class="btn btn-sm" style="font-size:0.7rem; padding:0.2rem 0.6rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="sweepAllOrphanDisks(this)">Sweep All</button>`
+              : `<span style="font-size:0.7rem; color:var(--gray-500); font-weight:400;" title="Sweep All is disabled while the cluster view is partial or degraded">Sweep All disabled &mdash; partial scan</span>`}
           </h4>
           <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">Disk images on Proxmox storage whose parent VM no longer exists. Common after failed teardowns on multi-disk VMs. Deletes run sequentially to avoid Ceph/cfs-lock contention.</p>
           <table class="admin-table" style="font-size:0.8rem;">
@@ -255,16 +497,96 @@ async function runReconcile() {
             <thead><tr><th>ID</th><th>Name</th><th>Protocol</th><th>Parent</th><th>Match</th><th>Action</th></tr></thead>
             <tbody>${guacConnRows}</tbody>
           </table>` : ''}
+        ${undeclared.length ? `
+          <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Nodes missing from site.json (${undeclared.length})</h4>
+          <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">
+            Node selection reads the LIVE Proxmox cluster, so these nodes are <strong>already receiving lane deployments</strong>.
+            Everything that opens a socket to a node (SSH, <code>pct exec</code>, <code>pct push</code>) resolves through
+            <code>cluster.physical_cluster_ips</code>, so every such operation on them fails with exit 255.
+            CyberCore cannot fix this itself &mdash; <code>config/site.json</code> is bind-mounted read-only.
+          </p>
+          <pre id="siteJsonSnippet" style="background:var(--gray-50, #f7fafc); padding:0.6rem; border-radius:6px; font-size:0.75rem; overflow-x:auto;">${escHtml(snippet)}</pre>
+          <button class="btn btn-sm btn-outline" style="font-size:0.7rem;" onclick="copySiteJsonSnippet(this)">Copy</button>
+          <ol style="font-size:0.75rem; color:var(--gray-500); margin-top:0.5rem; padding-left:1.2rem;">
+            <li>On the orchestrator host, add these entries to <code>cluster.physical_cluster_ips</code> in <code>config/site.json</code>.</li>
+            <li>Edit the file <strong>in place</strong> &mdash; a write-and-rename (vim and friends) replaces the inode, and a single-file bind mount keeps serving the OLD file to the container.</li>
+            <li>Run <code>docker compose restart app</code> &mdash; the config is cached for the process lifetime.</li>
+            <li>Re-run this audit, then repair any zone peers below.</li>
+          </ol>` : ''}
+        ${nodeRows ? `
+          <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem;">Cluster Node Registry</h4>
+          <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">Live Proxmox cluster membership against <code>cluster.physical_cluster_ips</code>${cn.config_stale_in_memory ? ' <span style="color:#d69e2e;">(site.json changed on disk since the app started &mdash; restart to pick it up)</span>' : ''}.</p>
+          <table class="admin-table" style="font-size:0.8rem;">
+            <thead><tr><th>Node</th><th>Status</th><th>Cluster IP</th><th>site.json IP</th><th>VMs</th><th>Verdict</th></tr></thead>
+            <tbody>${nodeRows}</tbody>
+          </table>` : ''}
+        ${peerRows ? `
+          <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">SDN Zones with Peer Drift (${r.zone_peer_drift.length})</h4>
+          <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">
+            A VXLAN zone's peer list is written once, when the zone is created &mdash; joining a node afterwards never updates it,
+            so lanes placed on the new node get no VXLAN peering. Repairs are one zone at a time on purpose:
+            applying SDN commits every pending SDN change on the cluster${r.sdn_pending ? ' <strong style="color:#e53e3e;">and there are pending changes right now</strong>' : ''}.
+          </p>
+          <table class="admin-table" style="font-size:0.8rem;">
+            <thead><tr><th>Zone</th><th>Current Peers</th><th>Missing</th><th>Extra</th><th>VNets</th><th>Action</th></tr></thead>
+            <tbody>${peerRows}</tbody>
+          </table>` : ''}
         ${!hasIssues ? '<p style="color:#38a169; font-weight:600; margin-top:0.5rem;">All clear -- DB and Proxmox are in sync.</p>' : ''}
         <button class="btn btn-outline" style="margin-top:1rem; font-size:0.8rem;" onclick="document.getElementById('reconcileResults').style.display='none'">Dismiss</button>
       </div>`;
-  } catch (e) {
-    panel.innerHTML = `<p style="color:#e53e3e;">Audit failed: ${escHtml(e.message)}</p>`;
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'Audit Proxmox';
-  }
+
+    startReconcileAgeTicker(m.age_seconds);
 }
+
+function copySiteJsonSnippet(btn) {
+  const el = document.getElementById('siteJsonSnippet');
+  if (!el) return;
+  navigator.clipboard.writeText(el.textContent).then(() => {
+    const prev = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = prev; }, 1500);
+  });
+}
+
+// Event delegation for the per-zone peer repair. Same reason as the Guac
+// delete buttons below: data attributes sidestep inline-onclick quote escaping.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button.zone-peers-fix');
+  if (!btn || btn.disabled) return;
+  const zone = btn.dataset.zone;
+  const expected = (btn.dataset.expected || '').split(',').filter(Boolean);
+  const digest = btn.dataset.digest || undefined;
+  if (!zone) return;
+
+  const ok = await Confirm.show({
+    title: 'Fix Zone Peers',
+    message: `Set peers on zone "${zone}" to:\n${expected.join(', ')}\n\n` +
+      `This then applies the SDN config cluster-wide, which commits ANY other pending SDN changes as well. Continue?`,
+    confirmText: 'Fix Peers', danger: true,
+  });
+  if (!ok) return;
+
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const res = await api('POST', '/reconcile/fix-zone-peers', { zone, expected, digest });
+    btn.textContent = 'Fixed';
+    btn.style.color = '#38a169';
+    btn.style.borderColor = '#38a169';
+    Toast.success('Zone Peers Updated', `${zone}: ${res.peers_after}`);
+    setTimeout(() => runReconcile(), 1500);
+  } catch (err) {
+    // 409 means the cluster moved under the audit — a prompt to re-check.
+    if (err.status === 409) {
+      Toast.error('Audit Out Of Date', err.message);
+      setTimeout(() => runReconcile(), 1000);
+    } else {
+      Toast.error('Peer Fix Failed', err.message);
+    }
+    btn.disabled = false;
+    btn.textContent = 'Fix Peers';
+  }
+});
 
 async function destroyOrphanVM(vmid, node, type, btn) {
   if (!await Confirm.show({ title: 'Destroy VM', message: 'Destroy VM ' + vmid + ' on ' + node + '? This cannot be undone.', confirmText: 'Destroy', danger: true })) return;
@@ -393,11 +715,10 @@ async function sweepAllOrphanDisks(btn) {
   btn.disabled = true;
   btn.textContent = 'Sweeping...';
   try {
-    // CyberHub range regex: VMIDs starting with 1, 6, or 7, exactly 6 digits
-    const result = await api('POST', '/sweep-orphaned-disks', {
-      dry_run: false,
-      vmid_pattern: '^[167][0-9]{5}$'
-    });
+    // No vmid_pattern: the server filters by the CyberHub ranges it just
+    // audited with. The old '^[167][0-9]{5}$' silently excluded goad_controller
+    // (2xxxxx) and attached_module (8xxxxx) disks listed in the table above.
+    const result = await api('POST', '/sweep-orphaned-disks', { dry_run: false }, { timeoutMs: 120000 });
     btn.textContent = `Swept ${result.orphans_deleted}/${result.orphans_found} (${result.reclaimed_size_gb} GB)`;
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';

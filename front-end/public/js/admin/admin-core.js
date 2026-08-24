@@ -4,22 +4,75 @@
 const TOKEN = () => localStorage.getItem('token');
 const headers = () => ({ 'Authorization': `Bearer ${TOKEN()}`, 'Content-Type': 'application/json' });
 
-async function api(method, path, body = null) {
-  const opts = { method, headers: headers() };
-  if (body) opts.body = JSON.stringify(body);
-  const resp = await fetch(`/api/admin${path}`, opts);
-  const data = await resp.json();
-  if (!resp.ok) {
-    // Callers have always read e.message and still can. The status and body ride
-    // along for the ones that need to tell responses apart - a broadcast whose
-    // audience shifted comes back 409 with fresh counts, which is a prompt to
-    // re-check rather than an error to show and forget.
-    const err = new Error(data.error || `Request failed (${resp.status})`);
-    err.status = resp.status;
-    err.data = data;
+// A gateway that gives up on the origin answers with an HTML page, not JSON.
+// Mapped here so the message names the real failure instead of surfacing a JSON
+// parse error from the body of a Cloudflare interstitial. The audit button hit
+// 524 routinely and reported `Unexpected token '<'`, which named neither the
+// timeout nor the tunnel.
+const GATEWAY_MESSAGES = {
+  502: 'Bad gateway (502) - the app did not answer the proxy',
+  503: 'Service unavailable (503) - the app is starting or overloaded',
+  504: 'Gateway timeout (504)',
+  520: 'Cloudflare: unknown origin error (520)',
+  521: 'Cloudflare: the origin refused the connection (521)',
+  522: 'Cloudflare: the connection to the origin timed out (522)',
+  523: 'Cloudflare: origin unreachable (523)',
+  524: "Gateway timeout (524) - the request ran past the tunnel's 100s limit",
+};
+
+async function api(method, path, body = null, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 30000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  let resp;
+  try {
+    const fetchOpts = { method, headers: headers(), signal: controller.signal };
+    if (body) fetchOpts.body = JSON.stringify(body);
+    resp = await fetch(`/api/admin${path}`, fetchOpts);
+  } catch (e) {
+    // Never reached the server: our own abort, or a dead network. status 0 is
+    // deliberate - no caller tests for it, and it keeps err.status a number.
+    const err = new Error(e.name === 'AbortError'
+      ? `Request timed out after ${Math.round(timeoutMs / 1000)}s`
+      : `Network error: ${e.message}`);
+    err.status = 0;
+    err.data = null;
     throw err;
+  } finally {
+    clearTimeout(timer);
   }
-  return data;
+
+  // Read the body ONCE, as text. resp.json() used to run BEFORE the resp.ok
+  // check, so an HTML error page threw `Unexpected token '<'` and destroyed the
+  // status that actually explained the failure.
+  const raw = await resp.text();
+  let data = null;
+  let parsed = false;
+  try { data = raw ? JSON.parse(raw) : null; parsed = true; } catch (_) { /* not JSON */ }
+
+  if (resp.ok) {
+    if (!parsed) {
+      const err = new Error(`Unexpected non-JSON response (${resp.status})`);
+      err.status = resp.status;
+      err.data = { raw: raw.slice(0, 500) };
+      throw err;
+    }
+    return data;   // an empty 2xx body now yields null instead of throwing
+  }
+
+  // Callers have always read e.message and still can. The status and body ride
+  // along for the ones that need to tell responses apart - a broadcast whose
+  // audience shifted comes back 409 with fresh counts, which is a prompt to
+  // re-check rather than an error to show and forget.
+  const err = new Error(
+    (parsed && data && data.error) ||
+    GATEWAY_MESSAGES[resp.status] ||
+    `Request failed (${resp.status})`
+  );
+  err.status = resp.status;
+  err.data = parsed ? data : { raw: raw.slice(0, 500) };
+  throw err;
 }
 
 function switchTab(tabId, btn) {

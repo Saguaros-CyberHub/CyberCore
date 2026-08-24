@@ -381,7 +381,7 @@
           <button class="tab-btn active" onclick="switchTab('connections', this)">Connections</button>
           <button class="tab-btn" onclick="switchTab('sessions', this)">Active Sessions</button>
           <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lanes</button>
-          <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
+          <button class="tab-btn" onclick="switchTab('lanes', this); reconcileTabActivate()">Active Lanes</button>
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
           <button class="tab-btn" onclick="switchTab('actlog', this); auditTabActivate()">Activity Log</button>
           <button class="tab-btn" onclick="switchTab('challenges', this)">Environment Templates</button>

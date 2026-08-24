@@ -9,8 +9,8 @@ const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { canManageCourse } = require('../utils/course-access');
-const { resolveSelfTarget } = require('../utils/students');
+const { canManageCourse, getManagedCourse } = require('../utils/course-access');
+const { resolveCourseStaffTargets } = require('../utils/students');
 const guacCreds = require('../../../../../src/utils/guac-credentials');
 const prov = require('../../../../../src/utils/account-provisioning');
 const activation = require('../../../../../src/utils/activation');
@@ -21,29 +21,44 @@ const instructorOnly = requireRole('instructor', 'admin');
 /**
  * GET / — List students in a course
  *
- * ?include_self=1 appends the CALLER as an extra, clearly-marked row
- * (`is_self`, enrollment_role 'instructor'), so the deploy modals can offer an
- * instructor a machine of their own without them having to enrol in their own
- * course. The Students tab does not pass it, so the roster — and every count
- * derived from it — is unchanged.
+ * ?include_staff=1 appends the course's STAFF as extra, clearly-marked rows
+ * (`is_self` / `is_course_instructor`, enrollment_role 'instructor'), so the
+ * deploy modals can offer a machine to whoever runs the course without them
+ * having to enrol in it. Two people qualify and are usually one: the caller, and
+ * cle_course.instructor_id. The second is what lets an ADMIN deploy for the
+ * instructor of a course they do not teach themselves — with only the caller,
+ * an admin saw nobody but themselves here.
  *
- * Appended only when they are NOT already actively enrolled: a TA teaching
- * their own section is in the roster already, and would otherwise be listed
- * twice with two checkboxes for one person.
+ * ?include_self=1 is the older spelling of the same flag and still works; the
+ * shipped courses.html asks for it by that name.
+ *
+ * The Students tab passes neither, so the roster — and every count derived from
+ * it — is unchanged.
+ *
+ * A staff row is appended only when that person is NOT already actively
+ * enrolled: a TA teaching their own section is in the roster already, and would
+ * otherwise be listed twice with two checkboxes for one person.
  */
 router.get('/', instructorOnly, async (req, res) => {
   try {
     const { courseId } = req.params;
-    const includeSelf = req.query.include_self === '1' || req.query.include_self === 'true';
+    const staffFlag = req.query.include_staff ?? req.query.include_self;
+    const includeStaff = staffFlag === '1' || staffFlag === 'true';
 
-    if (!(await canManageCourse(courseId, req.user))) {
+    // instructor_id is selected (not just an access boolean) because the staff
+    // rows below are derived from it. getManagedCourse is admin-aware, so this
+    // is the same authorisation canManageCourse performed before.
+    const course = await getManagedCourse(courseId, req.user, 'course_id, instructor_id');
+    if (!course) {
       return res.status(403).json({ error: 'Course not found or access denied' });
     }
 
-    // Resolved before the roster queries so its id can ride along in the same
+    // Resolved before the roster queries so these ids can ride along in the same
     // user / lane-count / activation lookups rather than costing three more.
-    const self = includeSelf ? await resolveSelfTarget(courseId, req.user).catch(() => null) : null;
-    const selfRow = (self && !self.enrolled) ? self : null;
+    const staff = includeStaff
+      ? await resolveCourseStaffTargets(courseId, req.user, course).catch(() => [])
+      : [];
+    const staffRows = staff.filter(s => !s.enrolled);
 
     // Get enrolled students
     // Step 1: Get enrollments from cle_db
@@ -60,7 +75,7 @@ router.get('/', instructorOnly, async (req, res) => {
 
     // Step 2: Get user details + workstation-lane counts from cybercore_db
     const userIds = enrollmentsResult.rows.map(r => r.user_id);
-    if (selfRow) userIds.push(selfRow.user_id);
+    for (const s of staffRows) userIds.push(s.user_id);
     let userMap = {};
     const laneCounts = {}; // user_id → count
     let pendingActivation = {};
@@ -115,29 +130,32 @@ router.get('/', instructorOnly, async (req, res) => {
       };
     });
 
-    // The caller's own row, marked so the UI can label it "you" and keep it out
-    // of anything that means "the class" (counts, Deploy Whole Class). It is
-    // deliberately FIRST: it is the row the instructor is looking for when they
-    // opened the modal to build themselves a machine.
-    if (selfRow) {
-      const u = userMap[selfRow.user_id];
+    // The staff rows, marked so the UI can label them ("you" / "instructor") and
+    // keep them out of anything that means "the class" (counts, Deploy Whole
+    // Class). They go FIRST, and in reverse so the caller ends up at the very
+    // top: these are the rows someone opened the modal looking for.
+    for (const staffRow of [...staffRows].reverse()) {
+      const u = userMap[staffRow.user_id];
       students.unshift({
-        user_id: selfRow.user_id,
-        email: selfRow.email,
+        user_id: staffRow.user_id,
+        email: staffRow.email,
         username: u?.username || null,
-        first_name: selfRow.first_name,
-        last_name: selfRow.last_name,
+        first_name: staffRow.first_name,
+        last_name: staffRow.last_name,
         enrollment_role: 'instructor',
         enrolled_at: null,
         status: 'active',
-        vm_count: laneCounts[selfRow.user_id] || 0,
+        vm_count: laneCounts[staffRow.user_id] || 0,
         elevated: u ? prov.isElevatedAccount(u) : true,
-        // No account-management controls on your own row — the credential
-        // routes refuse a self-target, so offering the buttons would only 403.
+        // No account-management controls on a staff row. For your own row the
+        // credential routes refuse a self-target, and for the instructor's row
+        // GET /credentials is restricted to enrollment_role IN ('student',
+        // 'guest') — so offering the buttons would only 403.
         can_regenerate: false,
         activation_pending: false,
         activated: true,
-        is_self: true,
+        is_self: staffRow.is_self,
+        is_course_instructor: staffRow.is_course_instructor,
       });
     }
 

@@ -27,6 +27,7 @@ const router = express.Router({ mergeParams: true });
 const { requireRole } = require('../../../../../src/middleware/auth');
 const { query } = require('../utils/db');
 const { getManagedCourse } = require('../utils/course-access');
+const { courseStaffIds } = require('../utils/students');
 const flagManager = require('../../../../../src/utils/flag-manager');
 
 const instructorOnly = requireRole('instructor', 'admin');
@@ -59,9 +60,8 @@ router.get('/', instructorOnly, async (req, res) => {
     // before a class hits them. Adding the ids is free — buildCohortRows only
     // emits a row for a user who HAS flags, so nobody who hasn't self-deployed
     // appears here.
-    const staffIds = [course.instructor_id, req.user.userId]
-      .filter(id => id && !enrolledIds.has(id));
-    const userIds = [...enrolledIds, ...new Set(staffIds)];
+    const staffIds = courseStaffIds(course, req.user).filter(id => !enrolledIds.has(id));
+    const userIds = [...enrolledIds, ...staffIds];
 
     const state = await flagManager.getFlagStateForUsers(userIds);
     // `staff` keeps the instructor's own row out of anything the UI presents as
