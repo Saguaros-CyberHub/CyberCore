@@ -287,8 +287,9 @@ const codeOnly = (src) => src.split(/\r?\n/)
 test('every extraUserIds in labs.js is the shared staff set, not the caller', () => {
   const extras = [...codeOnly(LABS).matchAll(/extraUserIds:\s*(.+)$/gm)]
     .map(m => m[1].trim().replace(/,$/, ''));
-  // deploy, teardown, redeploy.
-  assert.strictEqual(extras.length, 3, `expected 3 extraUserIds sites, found ${extras.length}`);
+  // deploy, per-student teardown, planStudentRedeploy (shared by the
+  // per-student and bulk redeploy routes), bulk teardown.
+  assert.strictEqual(extras.length, 4, `expected 4 extraUserIds sites, found ${extras.length}`);
   for (const e of extras) {
     assert.strictEqual(e, 'courseStaffIds(course, req.user)',
       `an extraUserIds site passes ${e} — every site must pass the same staff set`);

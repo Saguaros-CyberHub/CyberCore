@@ -1161,6 +1161,7 @@
       // here removes the need to reason about it at all.
       _vmSelected.clear();
       _vmBusyLanes.clear();
+      _labSelected.clear();
     }
 
     async function viewCourse(courseId) {
@@ -1896,6 +1897,116 @@
 
     let _labRefreshTimer = null;
 
+    // ── bulk selection, Environments tab ─────────────────────────────────────
+    //
+    // Keyed by "<labId>::<userId>", not by user: this tab renders one CARD PER
+    // ENVIRONMENT, each with its own student table, and the same student appears
+    // in every environment they are assigned. A user-keyed Set would tick them
+    // in all of them at once.
+    //
+    // Positively keyed for the same reason the VM tab is: the buttons are
+    // Redeploy and Tear down, so a row the instructor has never seen must never
+    // end up in one.
+    let _labSelected = new Set();
+    let _labRowsByLab = {};        // labId -> the rows its table was rendered from
+    let _labBulkBusy = false;
+
+    const _labKey = (labId, userId) => labId + '::' + userId;
+
+    /** A row the instructor may put in a bulk action. */
+    function _labSelectable(d) {
+      // Anything already working is excluded on both sides: tearing down
+      // mid-rebuild races the deployer, and rebuilding something already being
+      // built is nonsense. `busy` covers the in-flight registry; lane_status
+      // covers a first deploy still cloning.
+      return !!d.user_id && !d._busy && d.lane_status !== 'deploying';
+    }
+
+    /** The selected rows of ONE lab, from the last render — never from the DOM. */
+    function _selectedLabRows(labId) {
+      return (_labRowsByLab[labId] || [])
+        .filter(d => _labSelected.has(_labKey(labId, d.user_id)) && _labSelectable(d));
+    }
+
+    function toggleLabSelect(box) {
+      const key = box.dataset.labKey;
+      if (!key) return;
+      if (box.checked) _labSelected.add(key); else _labSelected.delete(key);
+      const tr = box.closest('tr');
+      if (tr) tr.classList.toggle('is-selected', box.checked);
+      _syncLabBulkBar(box.dataset.labId);
+    }
+
+    function toggleLabSelectAll(box) {
+      const labId = box.dataset.labId;
+      // Scoped to this card: `.lab-select` is shared by every environment on the
+      // page, so an unscoped selector would tick the whole tab.
+      document.querySelectorAll(
+        `#vulnerableLabsContent .lab-select[data-lab-id="${CSS.escape(labId)}"]:not(:disabled)`
+      ).forEach(cb => {
+        cb.checked = box.checked;
+        if (box.checked) _labSelected.add(cb.dataset.labKey);
+        else _labSelected.delete(cb.dataset.labKey);
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.toggle('is-selected', box.checked);
+      });
+      _syncLabBulkBar(labId);
+    }
+
+    function clearLabSelection(labId) {
+      document.querySelectorAll(
+        `#vulnerableLabsContent .lab-select[data-lab-id="${CSS.escape(labId)}"]`
+      ).forEach(cb => {
+        cb.checked = false;
+        _labSelected.delete(cb.dataset.labKey);
+        const tr = cb.closest('tr');
+        if (tr) tr.classList.remove('is-selected');
+      });
+      _syncLabBulkBar(labId);
+    }
+
+    /**
+     * Counter, buttons and the header tri-state for ONE environment card.
+     * `indeterminate` is a property and cannot live in the HTML string, so this
+     * has to run after every render as well as on every tick.
+     */
+    function _syncLabBulkBar(labId) {
+      if (!labId) return;
+      const sel = `[data-lab-id="${CSS.escape(labId)}"]`;
+      const boxes = [...document.querySelectorAll(
+        `#vulnerableLabsContent .lab-select${sel}:not(:disabled)`)];
+      const n = boxes.filter(b => b.checked).length;
+      const total = boxes.length;
+
+      const all = document.querySelector(`#vulnerableLabsContent .lab-select-all${sel}`);
+      if (all) {
+        all.checked = total > 0 && n === total;
+        all.indeterminate = n > 0 && n < total;
+      }
+      const count = document.querySelector(`#vulnerableLabsContent .lab-bulk-count${sel}`);
+      if (count) {
+        count.innerHTML = n
+          ? '<strong>' + n + '</strong> of ' + total + ' student' + (total === 1 ? '' : 's') + ' selected'
+          : 'Select students to redeploy or tear down';
+      }
+      document.querySelectorAll(`#vulnerableLabsContent .lab-bulk-btn${sel}`).forEach(b => {
+        // _labBulkBusy outranks the count: a re-render mid-flight must not
+        // re-enable a button the in-flight operation has taken.
+        b.disabled = _labBulkBusy || n === 0;
+      });
+    }
+
+    /** "a@x.edu, b@x.edu and 3 more" — plain text, for Confirm.show. */
+    function _labSelectionNames(rows, cap = 6) {
+      const names = rows.map(d => d.student_email || d.user_id);
+      if (names.length > cap) {
+        return names.slice(0, cap).join(', ') + ' and ' + (names.length - cap) + ' more';
+      }
+      return names.length > 1
+        ? names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]
+        : (names[0] || '');
+    }
+
     /**
      * Marks a row whose owner is not on the roster. Three ways that happens: you
      * deployed the machine to yourself, it belongs to the course's instructor
@@ -1956,11 +2067,33 @@
       </div>`;
     }
 
-    async function loadVulnerableLabs() {
+    async function loadVulnerableLabs(opts) {
       clearTimeout(_labRefreshTimer);
+      const polled = !!(opts && opts.polled);
+      // A poll landing mid-selection rebuilds the tables under the cursor, so the
+      // row the instructor was about to tick moves and the click lands on someone
+      // else. The Set survives a rebuild; the pointer does not.
+      if (polled && (_labBulkBusy || (_labSelected.size > 0 && _labTabHasFocus()))) {
+        _labRefreshTimer = setTimeout(() => loadVulnerableLabs({ polled: true }), 8000);
+        return;
+      }
       try {
         const data = await api('GET', `/courses/${currentCourseId}/labs`);
         const labs = data.labs || [];
+
+        // Never carry a selection across a refresh for a row that has vanished or
+        // become unselectable — either would silently change what the next bulk
+        // action hits.
+        _labRowsByLab = {};
+        const liveKeys = new Set();
+        labs.forEach(l => {
+          const inFlight = {};
+          (l.in_flight || []).forEach(o => { inFlight[o.user_id] = o; });
+          const rows = (l.deployments || []).map(d => ({ ...d, _busy: !!inFlight[d.user_id] }));
+          _labRowsByLab[l.lab_id] = rows;
+          rows.filter(_labSelectable).forEach(d => liveKeys.add(_labKey(l.lab_id, d.user_id)));
+        });
+        _labSelected = new Set([..._labSelected].filter(k => liveKeys.has(k)));
 
         let html = `
           <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Environment</button>
@@ -2002,8 +2135,35 @@
               html += `<p style="font-size:0.8rem; color: var(--text-muted, #6b7280); margin:0.75rem 0 0;">
                 Assigned, but nothing is deployed for it yet.</p>`;
             } else {
-              html += `<table class="students-table" style="margin-top:0.75rem;">
+              const labRows = _labRowsByLab[l.lab_id] || [];
+              const selN = labRows.filter(
+                d => _labSelected.has(_labKey(l.lab_id, d.user_id))).length;
+              const selTotal = labRows.filter(_labSelectable).length;
+              const labDis = selN ? '' : ' disabled';
+              const labAttr = `data-lab-id="${escAttr(l.lab_id)}"`;
+
+              html += `<div class="vm-bulkbar" style="margin-top:0.75rem;">
+                <span class="vm-bulkbar-count lab-bulk-count" ${labAttr} aria-live="polite">
+                  ${selN ? `<strong>${selN}</strong> of ${selTotal} student${selTotal === 1 ? '' : 's'} selected`
+                        : 'Select students to redeploy or tear down'}
+                </span>
+                <span style="flex:1"></span>
+                <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                        onclick="clearLabSelection(this.dataset.labId)"${labDis}>Clear</button>
+                <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                        style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
+                        onclick="bulkRedeployStudentLabs(this)"${labDis}>Redeploy</button>
+                <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                        style="color:#e53e3e;border-color:#e53e3e;"
+                        onclick="bulkRemoveStudentLabs(this)"${labDis}>Tear down</button>
+              </div>`;
+
+              html += `<table class="students-table" style="margin-top:0.5rem;">
                 <thead><tr>
+                  <th style="width:2.25rem;text-align:center;">
+                    <input type="checkbox" class="lab-select-all" ${labAttr}
+                           onchange="toggleLabSelectAll(this)" aria-label="Select all students">
+                  </th>
                   <th>Student</th><th>Mode</th><th>Status</th><th>Machines</th><th>Student console</th><th>Flags</th><th>Actions</th>
                 </tr></thead><tbody>`;
               (l.deployments || []).forEach(d => {
@@ -2015,7 +2175,17 @@
                   : '';
                 const busy = inFlightById[d.user_id];
                 const failed = (l.redeploy_errors || {})[d.user_id];
-                html += `<tr>
+                const rowKey = _labKey(l.lab_id, d.user_id);
+                const rowSel = _labSelected.has(rowKey);
+                const rowPick = !busy && d.lane_status !== 'deploying';
+                html += `<tr${rowSel ? ' class="is-selected"' : ''}>
+                  <td style="text-align:center;">
+                    <input type="checkbox" class="lab-select" data-lab-id="${escAttr(l.lab_id)}"
+                           data-lab-key="${escAttr(rowKey)}"
+                           aria-label="Select ${escAttr(d.student_email || d.user_id)}"
+                           ${rowSel ? 'checked' : ''}${rowPick ? '' : ' disabled title="This deployment is already being worked on"'}
+                           onchange="toggleLabSelect(this)">
+                  </td>
                   <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code>${_ownerBadge(d)}</td>
                   <td><span class="badge badge-gray">${d.mode === 'attach' ? 'attached' : 'own lane'}</span></td>
                   <td>${busy
@@ -2034,7 +2204,11 @@
               });
 
               ghostRows.forEach(o => {
+                // No checkbox: a row that exists only because work is in flight is
+                // exactly what a bulk action must not touch. The cell is still
+                // rendered so the columns line up.
                 html += `<tr>
+                  <td></td>
                   <td style="font-size:0.8rem;"><code>${escHtml(o.student_email || o.user_id)}</code></td>
                   <td><span class="badge badge-gray">—</span></td>
                   <td><span style="color:#1e5288;">${escHtml(o.phase_detail || o.phase || 'working…')}</span></td>
@@ -2046,7 +2220,10 @@
               // Torn down but never rebuilt. Nothing else on this page would show
               // them — this is the only trace that the student is missing machines.
               errorRows.forEach(([uid, err]) => {
+                // Torn down and never rebuilt: there is no deployment to act on in
+                // bulk, only the per-row Redeploy.
                 html += `<tr>
+                  <td></td>
                   <td style="font-size:0.8rem;"><code>${escHtml(uid)}</code></td>
                   <td><span class="badge badge-gray">—</span></td>
                   <td colspan="4" style="color:#ef4444; font-size:0.78rem;">
@@ -2063,10 +2240,13 @@
         }
 
         document.getElementById('vulnerableLabsContent').innerHTML = html;
+        // indeterminate is a property, so every card's tri-state has to be
+        // re-applied after each render.
+        labs.forEach(l => _syncLabBulkBar(l.lab_id));
 
         // Keep refreshing while anything is still building.
         if (labs.some(l => l.in_progress)) {
-          _labRefreshTimer = setTimeout(loadVulnerableLabs, 8000);
+          _labRefreshTimer = setTimeout(() => loadVulnerableLabs({ polled: true }), 8000);
         }
       } catch (e) {
         document.getElementById('vulnerableLabsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
@@ -3933,6 +4113,102 @@
         toast('Error redeploying: ' + e.message, true);
         Utils.setBtnLoading(btn, false);
         loadVulnerableLabs();
+      }
+    }
+
+    function _labTabHasFocus() {
+      const root = document.getElementById('vulnerableLabsContent');
+      return !!(root && root.contains(document.activeElement));
+    }
+
+    /** Tear down every selected student of ONE environment, in one request. */
+    async function bulkRemoveStudentLabs(btn) {
+      if (_labBulkBusy) return;
+      const labId = btn.dataset.labId;
+      const rows = _selectedLabRows(labId);
+      if (!rows.length) return;
+      const courseId = currentCourseId;
+      const n = rows.length;
+
+      _labBulkBusy = true; _syncLabBulkBar(labId);
+      try {
+        const ok = await Confirm.show({
+          title: n === 1 ? 'Tear down this student\u2019s machines?' : `Tear down ${n} students\u2019 machines?`,
+          message: `Destroys every machine this environment deployed for `
+                 + (n === 1 ? 'this student' : `these ${n} students`)
+                 + `. Their grades, feedback and the assignment itself are kept \u2014 use Redeploy `
+                 + `to rebuild. Tearing down: ${_labSelectionNames(rows)}.`,
+          confirmText: n === 1 ? 'Tear down' : `Tear down ${n}`,
+          danger: true,
+        });
+        if (!ok) return;
+
+        Utils.setBtnLoading(btn, true, 'Removing\u2026');
+        const res = await api('POST', `/courses/${courseId}/labs/${labId}/students/bulk-remove`,
+          { user_ids: rows.map(d => d.user_id) });
+        if (res.success === false) {
+          toast(res.message || 'Some machines could not be destroyed', true);
+          (res.results || []).filter(r => !r.success).slice(0, 3)
+            .forEach(r => toast(`${r.email}: ${(r.errors || [])[0] || 'failed'}`, true));
+        } else {
+          toast(res.message || `Tore down ${n} deployment(s)`);
+        }
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.student_id || sk.user_id}: ${sk.reason}`, true));
+      } catch (e) {
+        toast('Error tearing down: ' + e.message, true);
+      } finally {
+        _labBulkBusy = false;
+        Utils.setBtnLoading(btn, false);   // BEFORE the reload detaches btn
+        if (currentCourseId === courseId) { clearLabSelection(labId); loadVulnerableLabs(); }
+      }
+    }
+
+    /**
+     * Rebuild every selected student of ONE environment.
+     *
+     * Flags carry across by default, exactly as the per-student Redeploy does —
+     * the point is to rescue broken boxes, not to reset the exercise — so the
+     * reset stays an explicit opt-in, and here it applies to the whole batch.
+     */
+    async function bulkRedeployStudentLabs(btn) {
+      if (_labBulkBusy) return;
+      const labId = btn.dataset.labId;
+      const rows = _selectedLabRows(labId);
+      if (!rows.length) return;
+      const courseId = currentCourseId;
+      const n = rows.length;
+
+      _labBulkBusy = true; _syncLabBulkBar(labId);
+      try {
+        const r = await Confirm.show({
+          title: n === 1 ? 'Redeploy this student\u2019s environment?' : `Redeploy ${n} students\u2019 environments?`,
+          message: `Destroys and rebuilds every machine this environment deployed for `
+                 + (n === 1 ? 'this student' : `these ${n} students`)
+                 + `, one at a time. Flags they have already captured are kept and their `
+                 + `grades are untouched. Anything saved inside the machines is lost. `
+                 + `Rebuilding: ${_labSelectionNames(rows)}.`,
+          confirmText: n === 1 ? 'Redeploy' : `Redeploy ${n}`,
+          danger: true,
+          checkbox: { label: 'Also reset flags (new values, clears their captures)', checked: false },
+        });
+        if (!r) return;
+
+        Utils.setBtnLoading(btn, true, 'Starting\u2026');
+        const res = await api('POST', `/courses/${courseId}/labs/${labId}/students/bulk-redeploy`,
+          { user_ids: rows.map(d => d.user_id), reset_flags: !!r.checked });
+        toast(res.message || 'Rebuild started');
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.user_id}: ${sk.reason}`, true));
+        // The lab-scoped progress key is what the banner polls, and it is the
+        // same one a class-wide deploy uses — so no user_id here.
+        pollLabProgress(labId);
+      } catch (e) {
+        toast('Error redeploying: ' + e.message, true);
+      } finally {
+        _labBulkBusy = false;
+        Utils.setBtnLoading(btn, false);
+        if (currentCourseId === courseId) { clearLabSelection(labId); loadVulnerableLabs(); }
       }
     }
 
