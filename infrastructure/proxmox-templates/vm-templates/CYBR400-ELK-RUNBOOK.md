@@ -514,6 +514,13 @@ if ($k -and $k.Status -ne 'Running') {
     Start-Service Kibana -ErrorAction SilentlyContinue
 }
 Log "kibana status: $((Get-Service Kibana -ErrorAction SilentlyContinue).Status)"
+
+# Mappings, retention and the professor's dashboard. Safe to call every boot --
+# it waits for Kibana itself, imports once, and drops a marker. See section 4b.
+if (Test-Path 'C:\CyberCore\Import-CybrDashboard.ps1') {
+    Log 'running dashboard import'
+    & 'C:\CyberCore\Import-CybrDashboard.ps1'
+}
 ```
 
 Register it:
@@ -527,6 +534,104 @@ $p = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunL
 $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero)
 Register-ScheduledTask -TaskName 'CyberCore-ELK-Boot' -Action $a -Trigger $t -Principal $p -Settings $s -Force
 ```
+
+---
+
+## 4b. The professor's dashboard
+
+Kibana ships dashboards for the *System* integration (Windows event logs, syslog, SSH). None of them
+know anything about `logs-loggen.*`, so out of the box a professor opening Kibana sees a dashboard
+list with nothing relevant in it.
+
+Two files from the repo go on the box, both into `C:\CyberCore\`:
+
+| File | Purpose |
+|---|---|
+| `cybr400-kibana/cybr400-loggen-dashboard.ndjson` | Data view + 7 Lens panels + the dashboard |
+| `cybr400-kibana/Import-CybrDashboard.ps1` | Applies mappings and retention, then imports the above |
+
+```powershell
+# From wherever you have the repo checked out, or copy them over RDP.
+Copy-Item .\cybr400-kibana\cybr400-loggen-dashboard.ndjson C:\CyberCore\
+Copy-Item .\cybr400-kibana\Import-CybrDashboard.ps1        C:\CyberCore\
+
+# Run it once by hand to confirm before templating.
+# NOTE: this is a PowerShell prompt. From cmd.exe, typing a .ps1 path does not
+# run it -- cmd hands the file to its association and you get Notepad.
+& 'C:\CyberCore\Import-CybrDashboard.ps1' -Force -Verbose
+Get-Content C:\CyberCore\dashboard-import.log -Tail 20
+```
+
+From `cmd.exe`, or anywhere the execution policy is unset, invoke the interpreter explicitly:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\CyberCore\Import-CybrDashboard.ps1" -Force -Verbose
+```
+
+Then open `http://localhost:5601/app/dashboards#/view/cybr400-dashboard`.
+
+**The mappings are the load-bearing part, not the panels.** The script applies a `logs@custom`
+component template that types `loggen.source.type`, `loggen.level` and `loggen.mitre.technique` as
+`keyword`. Without it those fields arrive under dynamic mapping, can land as `text`, and every
+terms-based panel renders *empty* — the dashboard imports cleanly and simply shows nothing, which is
+a miserable thing to debug in front of a class. `loggen.metadata` is mapped `flattened` because
+log-generator emits a different metadata shape per generator and does not substitute its placeholders
+at the pinned commit; mapping those keys individually invites a type conflict, and a type conflict on
+a data stream does not warn, it rejects the document.
+
+A component template only affects indices created after it lands, so the script also rolls the data
+stream. A 404 on the rollover is normal on a box where no events have shipped yet.
+
+### Nothing here tells a student which events are the attack
+
+That is deliberate, and it took closing three separate leaks — the dashboard was only the visible one:
+
+| Leak | Fix |
+|---|---|
+| Panels split on `data_stream.dataset` | Timeline now splits on `loggen.source.type`; the "Attack events" metric became "Warnings & errors" |
+| Discover offers `loggen.attack` / `loggen.baseline` as a one-click field | Both agent inputs ship to a single `loggen.events` dataset |
+| Only attack events carried `loggen.mitre.*`, so `mitre.technique : *` was a perfect answer key | `BASELINE_STRIP_MITRE` now defaults to `0`, leaving MITRE labels on ~15% of benign traffic |
+| A "MITRE techniques observed" panel read the labels straight off raw events | Panel removed entirely — replaced by "Authentication warnings & errors" and "Top source hosts" |
+
+That last one is a realism fix as much as an answer-key fix. **Raw logs in a real environment carry no
+ATT&CK labels.** A firewall log, an nginx access line, a Windows 4625 — none of them know what a
+technique is. Attribution is produced by *detection rules* and lands on an alert, as ECS
+`threat.technique.id`, never on the event. Elastic Security's own "MITRE ATT&CK coverage" view shows
+which techniques your **rules** cover, not which appear in your logs. Aggregating
+`loggen.mitre.technique` off raw documents is an artifact of synthetic data, so the panel is gone and
+the dashboard reads like a real raw-log overview: volume by source, severity rate, failed auth, top
+talkers.
+
+The genuinely realistic version of that second tier — actual detection rules producing alerts — is
+**not available on this stack**. The Elastic detection engine requires `xpack.security.enabled: true`,
+and section 2 turns security off on purpose to fix the certificate and cloning failures. Building an
+alerting layer means reversing that decision first.
+
+Fixing only the dashboard would have been cosmetic: the dataset dropdown sits in Discover's field list
+whatever the dashboard does, and the MITRE oracle is the first thing a curious student clicking
+through fields would trip over.
+
+**The instructor's discriminator is `log.file.path`**, which still differs between the two checkouts:
+
+```
+log.file.path : "/opt/log-generator-attack/logs/current/logs.json"
+```
+
+Findable by a determined student, but it is not offered up the way a dataset name is.
+
+For a genuinely hard assignment, pick a technique that the baseline *also* emits — `T1078`, `T1098`,
+`T1110`, `T1110.001`, `T1496`, `T1499`, `T1562.001`, `T1562.004` or `T1059.003`. Those nine are in
+both `loggen-catalog.js` and the stock baseline templates, so the technique label alone cannot
+separate the attack from the noise and the student has to work from timing, volume and source.
+
+**This depends on the sensor re-bake.** The panels read `loggen.*` fields, which only exist once the
+Elastic Agent config carries the `ndjson` parser (`parsers: - ndjson: target: loggen`). Against a
+sensor baked before that change, the whole log line sits in `message` as one opaque string: the two
+metric panels still work, because they only count documents, but every terms panel will be empty.
+Re-bake the sensor first, or expect exactly that.
+
+The import is idempotent and marker-guarded, so a professor who rearranges the dashboard keeps their
+layout across reboots. `-Force` re-imports and overwrites.
 
 ---
 
@@ -665,6 +770,9 @@ Chk "Fleet agent removed"         ($null -eq (Get-Service 'Elastic Agent' -EA Si
 Chk "cloudbase-init is Automatic" ((Get-Service cloudbase-init -EA SilentlyContinue).StartType -eq 'Automatic') "must stay Automatic or RDP creds break"
 Chk "boot task registered"        ($null -ne (Get-ScheduledTask -TaskName 'CyberCore-ELK-Boot' -EA SilentlyContinue)) "step 4"
 Chk "boot script present"         (Test-Path 'C:\CyberCore\Start-ElkStack.ps1') "step 4 - the task cannot run without it"
+Chk "dashboard ndjson present"    (Test-Path 'C:\CyberCore\cybr400-loggen-dashboard.ndjson') "step 4b"
+Chk "dashboard importer present"  (Test-Path 'C:\CyberCore\Import-CybrDashboard.ps1') "step 4b"
+Chk "loggen component template"   ((Invoke-RestMethod "http://localhost:9200/_component_template/logs@custom" -EA SilentlyContinue) -ne $null) "step 4b - without it every terms panel renders empty"
 Chk "firewall 9200 open"          ($null -ne (Get-NetFirewallRule -DisplayName '*Elasticsearch 9200*' -EA SilentlyContinue)) "step 5 - the sensor cannot ship without it"
 
 if (-not $kyml -or -not (Test-Path $kyml)) { Chk "kibana.yml readable" $false "could not locate it from the Kibana service" }
@@ -794,10 +902,16 @@ the sensor as the **second**. First machine takes `.50` and the gateway's RDP co
    curl http://elk.cybercore.lan:9200      # hangs => Windows Firewall, not DNS
    systemctl is-active elastic-agent loggen-baseline
    ```
-5. **In Kibana**, confirm `loggen.baseline` documents are arriving — create a data view for `logs-*` if
-   there isn't one. Events on disk are *not* success; that is the exact failure this runbook exists to
-   rule out.
+5. **In Kibana**, confirm `loggen.events` documents are arriving — the `CYBR 400 log-generator` data
+   view from step 4b covers it. Events on disk are *not* success; that is the exact failure this
+   runbook exists to rule out.
 6. **Reboot the ELK box**, wait two minutes, re-check 2, 3 and 5. This is when cloudbase-init's rename
    and password rotation take effect — the conditions that were killing the service. If Kibana is down
    here, read `C:\CyberCore\elk-boot.log`: it will say whether 9200 ever came up.
-7. Attack Console → fire `T1082` for 60 s and confirm `loggen.attack` documents land.
+7. Attack Console → fire `T1082` for 60 s and confirm the attack's documents land. Both the baseline
+   and the attack ship to the single `loggen.events` dataset on purpose (see step 4b), so verify with
+   the instructor-side discriminator rather than a dataset filter:
+
+   ```
+   log.file.path : "/opt/log-generator-attack/logs/current/logs.json"
+   ```

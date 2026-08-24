@@ -230,8 +230,14 @@ async function applyPhase(t, p) {
   const next = p.phase === 'running' ? 'running' : 'scheduled';
   await query(
     `UPDATE cle_attack_target
-        SET status = $2, clock_skew_s = $3, guest_state = $4,
-            started_at = COALESCE(started_at, CASE WHEN $2 = 'running' THEN NOW() ELSE NULL END),
+        SET status = $2::text, clock_skew_s = $3, guest_state = $4,
+            -- Both occurrences of $2 carry an explicit ::text, and they have to.
+            -- Bare, the SET clause deduces $2 from the column (VARCHAR(24)) while
+            -- the comparison against an unknown-type literal deduces text, and
+            -- Postgres rejects the whole statement with "inconsistent types
+            -- deduced for parameter $2" -- every sweep, so no target ever
+            -- advanced past 'scheduled'. Same reason mailer.js writes $5::boolean.
+            started_at = COALESCE(started_at, CASE WHEN $2::text = 'running' THEN NOW() ELSE NULL END),
             last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
       WHERE target_id = $1`,
     [t.target_id, next, skew, guestState]

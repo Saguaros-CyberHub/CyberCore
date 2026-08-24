@@ -317,8 +317,10 @@ router.patch('/:studentId/:courseId/status', async (req, res) => {
     // Update enrollment status
     const updateResult = await query(`
       UPDATE cle_course_enrollment
-      SET status = $1, updated_at = NOW(),
-          completion_date = CASE WHEN $1 IN ('completed', 'dropped') THEN NOW() ELSE completion_date END
+      SET status = $1::text, updated_at = NOW(),
+          -- ::text on both, or Postgres deduces $1 as VARCHAR(50) from the SET
+          -- and text from the IN-list and refuses the statement outright.
+          completion_date = CASE WHEN $1::text IN ('completed', 'dropped') THEN NOW() ELSE completion_date END
       WHERE user_id = $2 AND course_id = $3
       RETURNING *
     `, [status, studentId, courseId]);

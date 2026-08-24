@@ -59,6 +59,11 @@ function nodeAddress(node) {
   }
 }
 
+/** Whether site.json declares a management address for this node. */
+function nodeIsDeclared(node) {
+  try { return !!getNodeAddress(node); } catch (_) { return false; }
+}
+
 /**
  * One-line preflight so a misconfigured SSH channel reports the actual cause.
  * Without it the failure surfaces as ssh's own "Identity file ... not
@@ -126,7 +131,23 @@ function nodeExec(node, args, opts = {}) {
       clearTimeout(t);
       if (killed) return reject(new Error(`nodeExec timed out after ${timeoutMs}ms on ${node}: ${args.join(' ')}`));
       if (code !== 0) {
-        const e = new Error(`nodeExec exit ${code} on ${node}: ${args.join(' ')}\nstderr: ${stderr.trim()}\nstdout: ${stdout.trim()}`);
+        // 255 is ssh's OWN failure code — it never reached the remote command,
+        // so nothing about the command text is the cause. The common reason on
+        // this cluster is a node that exists in Proxmox but not in site.json:
+        // node-selector picks targets from the LIVE cluster API, so a newly
+        // joined node is schedulable the moment it joins, while everything that
+        // opens a socket to it resolves through physical_cluster_ips. Until that
+        // map is updated, ssh gets a bare hostname its resolvers cannot answer
+        // and the failure reads like a broken command.
+        let hint = '';
+        if (code === 255) {
+          hint = nodeIsDeclared(node)
+            ? `\nssh could not reach '${node}' (${nodeAddress(node)}). It IS declared in site.json, so check that the orchestrator's public key is in ${SSH_USER}@${node}:~/.ssh/authorized_keys and that the node is up.`
+            : `\n'${node}' is NOT declared in site.json cluster.physical_cluster_ips, so ssh was handed the bare name and could not resolve it. Node selection reads the LIVE Proxmox cluster, so a newly joined node becomes schedulable BEFORE this map knows about it. Add \"${node}\": \"<management IP>\" and restart the app.`;
+        }
+        const e = new Error(
+          `nodeExec exit ${code} on ${node}: ${args.join(' ')}${hint}\nstderr: ${stderr.trim()}\nstdout: ${stdout.trim()}`
+        );
         e.code = code; e.stdout = stdout; e.stderr = stderr;
         return reject(e);
       }
