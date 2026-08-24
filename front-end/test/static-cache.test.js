@@ -128,7 +128,7 @@ test('the reconcile client never renders a payload it has not confirmed', () => 
   // The old client did `const s = r.summary` with no guard, which is why an
   // unexpected response shape surfaced as a TypeError instead of a message.
   const guarded = /if \(r\.cached\) renderReconcileResult\(/.test(src)
-    && /if \(!r\.cached\) \{ panel\.style\.display = 'none'; return; \}/.test(src);
+    && /if \(!r\.cached\) \{ renderReconcileEmpty\(\); return; \}/.test(src);
   assert.ok(guarded,
     'GET /reconcile returns {empty:true} with no summary before the first scan — ' +
     'rendering that unguarded is what produced the original TypeError');

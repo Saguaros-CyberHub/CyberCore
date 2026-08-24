@@ -381,7 +381,10 @@
           <button class="tab-btn active" onclick="switchTab('connections', this)">Connections</button>
           <button class="tab-btn" onclick="switchTab('sessions', this)">Active Sessions</button>
           <button class="tab-btn" onclick="switchTab('deploy', this)">Deploy Lanes</button>
-          <button class="tab-btn" onclick="switchTab('lanes', this); reconcileTabActivate()">Active Lanes</button>
+          <button class="tab-btn" onclick="switchTab('lanes', this)">Active Lanes</button>
+          <!-- Lazy, like Topology and Broadcast: the audit reads the last
+               cached result on activation and scans only when asked. -->
+          <button class="tab-btn" onclick="switchTab('audit', this); reconcileTabActivate()">Proxmox Audit</button>
           <button class="tab-btn" onclick="switchTab('users', this)">Users</button>
           <button class="tab-btn" onclick="switchTab('actlog', this); auditTabActivate()">Activity Log</button>
           <button class="tab-btn" onclick="switchTab('challenges', this)">Environment Templates</button>
@@ -508,7 +511,6 @@
         <div class="tab-content" id="tab-lanes">
           <div class="action-bar">
             <button class="btn btn-outline" onclick="loadLanes()">Refresh</button>
-            <button class="btn btn-outline" onclick="runReconcile()" id="btnReconcile" style="border-color:#ed8936; color:#ed8936;">Audit Proxmox</button>
             <select id="lanesFilter" onchange="loadLanes()" style="padding: 0.4rem 0.8rem; border-radius: 6px; border: 1px solid var(--border-color); font-size: 0.85rem;">
               <option value="">All Statuses</option>
               <option value="active">Active</option>
@@ -519,7 +521,6 @@
             </select>
           </div>
           <div id="lanesTable"></div>
-          <div id="reconcileResults" style="display:none; margin-top:1rem;"></div>
 
           <!-- Persistent script execution panel (stays visible when modal closes) -->
           <div id="scriptExecPanel" style="display: none; margin-top: 1rem; background: var(--bg-card, white); border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); overflow: hidden;">
@@ -532,6 +533,19 @@
             </div>
             <div id="scriptExecOutputs" style="padding: 0.75rem; max-height: 500px; overflow-y: auto;"></div>
           </div>
+        </div>
+
+        <!-- TAB: Proxmox Audit -->
+        <!-- Cluster-wide reconciliation: orphaned VMs, disks, SDN zones and
+             Guacamole connections, plus node/site.json drift. It lived under
+             Active Lanes, which scoped it wrongly - most of what it reports is
+             not lane-shaped, and half of it concerns nodes that hold no lanes
+             at all. -->
+        <div class="tab-content" id="tab-audit">
+          <div class="action-bar">
+            <button class="btn btn-outline" onclick="runReconcile()" id="btnReconcile" style="border-color:#ed8936; color:#ed8936;">Audit Proxmox</button>
+          </div>
+          <div id="reconcileResults"></div>
         </div>
 
         <!-- TAB: Activity Log -->

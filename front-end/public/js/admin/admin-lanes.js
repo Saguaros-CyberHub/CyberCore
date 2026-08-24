@@ -143,28 +143,52 @@ async function runReconcile(force) {
 }
 
 /**
- * Called when the Active Lanes tab is opened. Shows the cached result, or
- * attaches to a scan someone else started. Never paints an error: a tab click
- * that reports a failure the operator did not ask for is just noise.
+ * Called when the Proxmox Audit tab is opened. Shows the last completed audit,
+ * or attaches to a scan someone else started.
+ *
+ * This tab has nothing else on it, so every branch must render something. The
+ * panel used to be tucked under Active Lanes, where hiding it just revealed the
+ * lane table; here, hiding it leaves an empty page with no way forward.
  */
 async function reconcileTabActivate() {
   const panel = document.getElementById('reconcileResults');
   if (!panel) return;
+  panel.style.display = 'block';
   try {
     const r = await api('GET', '/reconcile', null, { timeoutMs: 15000 });
     if (r.running && r.job_id) {
-      panel.style.display = 'block';
       reconcileSetBusy(true, 'Auditing...');
       if (r.cached) renderReconcileResult(r, { age_seconds: r.age_seconds, stale: true });
       startReconcilePoll(r.job_id);
       return;
     }
-    if (!r.cached) { panel.style.display = 'none'; return; }
-    panel.style.display = 'block';
+    if (!r.cached) { renderReconcileEmpty(); return; }
     renderReconcileResult(r, { age_seconds: r.age_seconds });
   } catch (e) {
-    panel.style.display = 'none';
+    // Opening a tab is not a request for an error report, so this stays a
+    // prompt rather than a red failure - but it must still say that the LAST
+    // result could not be read, or a stale panel would pass for a fresh one.
+    renderReconcileEmpty('Could not load the last audit result.');
   }
+}
+
+/**
+ * Nothing cached yet. The first thing an operator sees on this tab, so it
+ * explains what the audit does rather than just offering a button.
+ */
+function renderReconcileEmpty(note) {
+  document.getElementById('reconcileResults').innerHTML = `
+    <div style="background:var(--bg-card, white); border-radius:12px; padding:2rem 1.25rem; box-shadow:0 2px 8px rgba(0,0,0,0.08); text-align:center;">
+      ${note ? `<p style="color:#d69e2e; font-size:0.85rem; margin:0 0 0.75rem;">${escHtml(note)}</p>` : ''}
+      <p style="font-size:0.95rem; font-weight:600; margin:0 0 0.4rem;">No audit has been run yet</p>
+      <p style="font-size:0.8rem; color:var(--gray-500); margin:0 auto 1rem; max-width:44rem;">
+        Compares live Proxmox state against the database: VMs and disk images with no lane,
+        lanes whose VMs are gone, orphaned SDN zones and VNets, stray Guacamole connections,
+        and cluster nodes missing from <code>site.json</code>. Read-only &mdash; nothing is
+        changed until you click a repair.
+      </p>
+      <button class="btn btn-outline" style="border-color:#ed8936; color:#ed8936;" onclick="runReconcile()">Run Audit</button>
+    </div>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -532,7 +556,6 @@ function renderReconcileResult(r, meta) {
             <tbody>${peerRows}</tbody>
           </table>` : ''}
         ${!hasIssues ? '<p style="color:#38a169; font-weight:600; margin-top:0.5rem;">All clear -- DB and Proxmox are in sync.</p>' : ''}
-        <button class="btn btn-outline" style="margin-top:1rem; font-size:0.8rem;" onclick="document.getElementById('reconcileResults').style.display='none'">Dismiss</button>
       </div>`;
 
     startReconcileAgeTicker(m.age_seconds);

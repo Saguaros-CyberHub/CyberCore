@@ -249,10 +249,54 @@ test('reconcileAgeLabel reads naturally across scales', () => {
   assert.strictEqual(context.reconcileAgeLabel(7200), '2h ago');
 });
 
-test('the Active Lanes tab triggers a cached render', () => {
+test('the audit lives on its own tab, wired to render the cached result', () => {
   assert.ok(
-    /switchTab\('lanes', this\);\s*reconcileTabActivate\(\)/.test(ADMIN_HTML),
-    'without this the panel only ever appears after clicking Audit Proxmox');
+    /switchTab\('audit', this\);\s*reconcileTabActivate\(\)/.test(ADMIN_HTML),
+    'without this the tab only fills in after clicking Audit Proxmox');
+  assert.ok(/<div class="tab-content" id="tab-audit">/.test(ADMIN_HTML));
+  assert.ok(/id="btnReconcile"/.test(ADMIN_HTML) && /id="reconcileResults"/.test(ADMIN_HTML));
+});
+
+test('the audit is no longer scoped to Active Lanes', () => {
+  assert.ok(
+    /switchTab\('lanes', this\)"/.test(ADMIN_HTML),
+    'the lanes tab should carry no audit hook');
+  assert.ok(!/switchTab\('lanes', this\);\s*reconcileTabActivate/.test(ADMIN_HTML));
+
+  // Both ids must exist exactly once, or switchTab and getElementById would
+  // resolve to whichever copy the parser saw first.
+  assert.strictEqual((ADMIN_HTML.match(/id="reconcileResults"/g) || []).length, 1);
+  assert.strictEqual((ADMIN_HTML.match(/id="btnReconcile"/g) || []).length, 1);
+
+  const lanesTab = ADMIN_HTML.slice(
+    ADMIN_HTML.indexOf('id="tab-lanes"'), ADMIN_HTML.indexOf('id="tab-audit"'));
+  assert.ok(!lanesTab.includes('reconcileResults'), 'the panel moved out of the lanes tab');
+  assert.ok(!lanesTab.includes('runReconcile()'), 'so did the trigger');
+});
+
+test('the empty state explains the audit and offers to run it', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileEmpty();
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('No audit has been run yet'));
+  assert.ok(html.includes('runReconcile()'), 'a dedicated tab needs a way forward');
+  assert.ok(/[Rr]ead-only/.test(html), 'say that looking costs nothing before they click');
+});
+
+test('an unreadable cache says so rather than passing for a fresh result', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileEmpty('Could not load the last audit result.');
+  assert.ok(el('reconcileResults').innerHTML.includes('Could not load the last audit result.'));
+});
+
+test('the result panel cannot blank its own tab', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 0 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(!html.includes('Dismiss'),
+    'Dismiss made sense under Active Lanes, where hiding the panel revealed the ' +
+    'lane table; on its own tab it just empties the page');
+  assert.ok(html.includes('runReconcile()'), 'Re-scan remains the way to refresh');
 });
 
 test('Sweep All no longer sends a VMID pattern that skips two ranges', () => {
