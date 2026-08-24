@@ -260,3 +260,98 @@ test('a course row without instructor_id yields only the caller', async () => {
   assert.deepStrictEqual(rows.map(r => r.user_id), [ADMIN]);
   assert.strictEqual(rows[0].is_course_instructor, false);
 });
+
+// ============================================================================
+// Call-site invariants (source assertions)
+//
+// The unit tests above hand resolveTargetStudents an array directly, so they
+// are blind to WHICH array each route actually passes — and that is the whole
+// bug. These pin the wiring instead, the same way provision-slots.test.js and
+// deploy-env-modal.test.js assert against source text.
+//
+// The invariant: every deploy, teardown and redeploy site must pass the SAME
+// staff set. Widen deploy but not teardown and an admin can build the
+// instructor a lab that nobody can remove — a stranded lane holding a VXLAN.
+// ============================================================================
+
+const fs = require('node:fs');
+const LABS = fs.readFileSync(path.join(CLE, 'routes', 'labs.js'), 'utf8');
+const VMS = fs.readFileSync(path.join(CLE, 'routes', 'vms.js'), 'utf8');
+const PAGE = fs.readFileSync(path.join(CLE, 'public', 'pages', 'courses.html'), 'utf8');
+
+/** Drop whole-line `//` comments — these files explain extraUserIds in prose
+ *  right above each call site, and a source scan must not count the prose. */
+const codeOnly = (src) => src.split(/\r?\n/)
+  .filter(l => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+
+test('every extraUserIds in labs.js is the shared staff set, not the caller', () => {
+  const extras = [...codeOnly(LABS).matchAll(/extraUserIds:\s*(.+)$/gm)]
+    .map(m => m[1].trim().replace(/,$/, ''));
+  // deploy, teardown, redeploy.
+  assert.strictEqual(extras.length, 3, `expected 3 extraUserIds sites, found ${extras.length}`);
+  for (const e of extras) {
+    assert.strictEqual(e, 'courseStaffIds(course, req.user)',
+      `an extraUserIds site passes ${e} — every site must pass the same staff set`);
+  }
+});
+
+test('no route exempts the bare caller any more', () => {
+  // The literal shape of the original bug.
+  for (const [name, src] of [['labs.js', LABS], ['vms.js', VMS]]) {
+    assert.ok(!/extraUserIds:\s*\[req\.user\.userId\]/.test(src),
+      `${name} still exempts only the caller`);
+    assert.ok(!/resolveTargetStudents\([^)]*,\s*req\.user\.userId\s*\)/.test(src),
+      `${name} still passes the caller as a scalar staff set`);
+  }
+});
+
+test('vms.js provision passes the staff set and provision-all still passes none', () => {
+  assert.ok(VMS.includes('resolveTargetStudents(courseId, student_ids, courseStaffIds(course, req.user))'),
+    'the provision route must pass the staff set');
+  // "The whole class" means the roster. If the staff set leaked in here, every
+  // provision-all would silently build the instructor another machine.
+  assert.ok(VMS.includes('resolveTargetStudents(courseId, null)'),
+    'provision-all must resolve the roster with no staff set');
+});
+
+test('every route reading course.instructor_id selects it and binds course first', () => {
+  for (const [name, src] of [['labs.js', LABS], ['vms.js', VMS]]) {
+    const lines = src.split(/\r?\n/);
+    lines.forEach((line, i) => {
+      if (!/courseStaffIds\(course, req\.user\)|course\.instructor_id/.test(line)) return;
+      let route = null;
+      for (let j = i; j >= 0; j--) {
+        if (/^router\.(get|post|delete|put|patch)\(/.test(lines[j])) { route = j; break; }
+      }
+      if (route === null) return; // module-scope helper, not a route
+      const between = lines.slice(route, i).join('\n');
+      assert.match(between, /const course\s*=\s*await get(Managed)?Course/,
+        `${name}:${i + 1} uses \`course\` with no binding in its route (starting line ${route + 1})`);
+    });
+  }
+});
+
+test('the course loaders select instructor_id', () => {
+  // courseStaffIds silently degrades to caller-only when instructor_id is absent,
+  // which would reintroduce the bug without any error.
+  assert.match(LABS, /getManagedCourse\(courseId, user, '[^']*instructor_id[^']*'\)/,
+    'labs.js getCourse must select instructor_id');
+  assert.match(VMS, /getManagedCourseRow\(courseId, user, '[^']*instructor_id[^']*'\)/,
+    'vms.js getManagedCourse must select instructor_id');
+});
+
+test('the deploy modal distinguishes "you" from "instructor"', () => {
+  // An admin's own row is staff but is NOT this course's instructor. Keying the
+  // badge off is_self alone puts two rows claiming "instructor" in one picker.
+  assert.ok(PAGE.includes("s.is_self && s.is_course_instructor ? 'you &middot; instructor'"),
+    'the combined badge must require BOTH flags');
+  assert.ok(PAGE.includes('include_staff=1'), 'the modal must ask for staff rows');
+});
+
+test('the Students tab still asks for no staff rows', () => {
+  // Roster counts, the gradebook and CSV exports are deliberately unchanged.
+  const loadStudents = PAGE.slice(PAGE.indexOf('async function loadStudents('));
+  const body = loadStudents.slice(0, loadStudents.indexOf('\n    }'));
+  assert.ok(!/include_staff|include_self/.test(body),
+    'the Students tab must not request staff rows');
+});

@@ -357,7 +357,29 @@ app.use(session({
 // STATIC FILES
 // ============================================================================
 
-app.use(express.static(path.join(__dirname, '../public')));
+// The admin console is unbundled, unversioned JS loaded by plain <script src>,
+// so a deploy only reaches a browser that re-fetches the file. Nothing forced
+// that: express.static's default is an ETag with no Cache-Control, which lets a
+// browser — and Cloudflare, which caches .js by default — serve the previous
+// copy for as long as it likes.
+//
+// That produced a genuinely confusing failure once: a stale admin-lanes.js
+// talking to an already-updated /api/admin/reconcile, reporting a TypeError
+// from a response shape it predated. The server was fine, the page was months
+// old, and nothing on screen said so.
+//
+// no-cache does NOT mean "do not store" — it means "revalidate before use". The
+// ETag still answers 304 on the overwhelmingly common unchanged case, so this
+// costs a conditional request per asset, not a re-download.
+//
+// Only markup and code are pinned this way. Images and fonts are content-
+// addressed by their own filenames and keep the default.
+const REVALIDATE_EXT = /\.(html|js|css)$/i;
+app.use(express.static(path.join(__dirname, '../public'), {
+  setHeaders(res, filePath) {
+    if (REVALIDATE_EXT.test(filePath)) res.setHeader('Cache-Control', 'no-cache');
+  }
+}));
 // Profile HTML files are pre-generated with CSS baked in. This middleware
 // intercepts HTML requests and injects an updated print stylesheet so print
 // fixes apply to existing profiles without regenerating them.

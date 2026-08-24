@@ -2161,9 +2161,13 @@
         container.innerHTML = students.map((s, i) => {
           const name = ((s.first_name || '') + ' ' + (s.last_name || '')).trim();
           const staff = isStaffRow(s);
-          // "you" wins over "instructor" when they are the same person, so a
-          // self-deploying instructor sees one row reading the way it always did.
-          const staffTag = s.is_self ? 'you &middot; instructor' : 'instructor';
+          // Both flags, not just is_self: an ADMIN's own row is staff but is NOT
+          // this course's instructor, and labelling it "instructor" would put two
+          // rows claiming that title above a picker whose whole point is to tell
+          // them apart. Only the caller who genuinely IS the instructor gets both.
+          const staffTag = s.is_self && s.is_course_instructor ? 'you &middot; instructor'
+            : s.is_self ? 'you'
+            : 'instructor';
           // The instructor's NAME matters on someone else's row — an admin
           // picking from a list of emails needs to know whose box this is.
           const label = staff
