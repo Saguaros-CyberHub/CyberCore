@@ -88,10 +88,21 @@ if [ "$D" -gt 0 ]; then sleep "$D"; fi
 
 cd "$LG" 2>/dev/null || { say "refused nodir ref=$REF"; exit 0; }
 
-# Count only what THIS run produced. The output is append-and-rotate, so a
-# before/after delta is the honest measure. A rotation mid-run would make it
-# negative; clamp rather than report a nonsense number.
-count_lines() { cat logs/current/*.json 2>/dev/null | wc -l | tr -d ' '; }
+# Count only what THIS run produced, and only what will actually SHIP.
+#
+# Counting every written line would report ~37,000 for a run that puts 76 events
+# in Kibana: --mitre-technique filters which lines get TAGGED, not which get
+# written, and the agent drops the untagged remainder before it leaves the box.
+# The console's number has to mean the same thing the instructor sees, or it is
+# worse than no number at all.
+#
+# Any tag here is the selected technique by construction -- the attack tree's
+# config-level mitre blocks are stripped at bake time, so nothing else can tag.
+#
+# The output is append-and-rotate, so a before/after delta is the honest
+# measure. A rotation mid-run would make it negative; clamp rather than report
+# a nonsense number.
+count_lines() { cat logs/current/*.json 2>/dev/null | grep -c '"technique":"' | tr -d ' ' || true; }
 BEFORE=$(count_lines)
 case "$BEFORE" in ''|*[!0-9]*) BEFORE=0 ;; esac
 
