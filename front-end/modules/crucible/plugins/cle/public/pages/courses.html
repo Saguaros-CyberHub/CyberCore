@@ -960,6 +960,76 @@
     </div>
   </div>
 
+  <!-- ======================================================================
+       REBUILD ONE STUDENT'S ENVIRONMENT
+       ----------------------------------------------------------------------
+       Per machine by default. The whole-environment Redeploy destroys the lane
+       and builds a new one, which costs the student every machine including the
+       ones that were fine; rebuilding DC01 alone keeps the domain they have
+       already worked in. Captured flags survive either way.
+
+       The whole-environment opt-in at the bottom is the original behaviour, and
+       the fallback for the cases the per-machine path refuses: an attached
+       environment, or one that provisions its domain across every machine at
+       once.
+       ====================================================================== -->
+  <div class="modal-overlay" id="labRebuildModal">
+    <div class="modal" style="max-width: 620px;">
+      <h2>Redeploy <span id="labRebuildWho"></span></h2>
+      <div class="modal-form">
+        <div class="info-box"><p id="labRebuildLine" style="margin:0;"></p></div>
+
+        <div class="form-group">
+          <label class="env-group-label">
+            Machines to rebuild
+            <label class="env-selectall">
+              <input type="checkbox" id="labRebuildSelectAll" onchange="toggleLabRebuildAll(this)">
+              select all
+            </label>
+          </label>
+          <div class="env-students" id="labRebuildMachines"></div>
+          <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
+            <span id="labRebuildCount" aria-live="polite"></span> &middot;
+            Unticked machines are left running and untouched.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex; align-items:flex-start; gap:0.5rem; font-weight:400;">
+            <input type="checkbox" id="labRebuildWhole" style="width:auto; margin-top:0.2rem;"
+                   onchange="onLabRebuildWholeChange(this)">
+            <span>
+              <strong>Rebuild the whole environment instead</strong>
+              <span class="deploy-env-hint" style="display:block;">
+                Destroys and recreates every machine, and the lane with them.
+              </span>
+            </span>
+          </label>
+          <div class="env-warn" id="labRebuildWholeWarn" style="display:none;">
+            <span aria-hidden="true">&#9888;</span>
+            <span>Every machine goes, including the ones that are working. The student's
+                  console address changes. Captured flags are still carried over unless you
+                  reset them below.</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:0.5rem; font-weight:400;">
+            <input type="checkbox" id="labRebuildResetFlags" style="width:auto;">
+            <span>Also reset flags (new values, clears their captures)</span>
+          </label>
+          <p class="deploy-env-hint" id="labRebuildFlagsHint" style="margin:0.2rem 0 0;"></p>
+        </div>
+
+        <div class="form-buttons">
+          <button type="button" class="btn btn-secondary" onclick="closeLabRebuildModal()">Cancel</button>
+          <button type="button" class="btn btn-danger" id="labRebuildBtn"
+                  onclick="submitLabRebuild(this)">Rebuild</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="/js/app.js"></script>
   <script src="/js/layout.js"></script>
   <script>
@@ -1628,6 +1698,23 @@
       return term.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t));
     }
 
+    /**
+     * A deployment that needs rescuing — the Environments answer to the VM tab's
+     * "broken lane".
+     *
+     * Three distinct states, all worth the same bulk Redeploy:
+     *   lane_status 'error'  — the deploy itself failed.
+     *   _failed              — a PREVIOUS redeploy failed. Persisted in
+     *                          cle_course_material.content.redeploy_errors, so it
+     *                          outlives the hour-long progress entry and a restart.
+     *   _detached            — torn down and never rebuilt. There is no deployment
+     *                          row at all; the student simply has no machines, and
+     *                          this is the only place that shows it.
+     */
+    function _labRowBroken(d) {
+      return !!d._detached || d.lane_status === 'error' || !!d._failed;
+    }
+
     /** A row the instructor may put in a bulk action. */
     function _vmSelectable(v) {
       // 'deploying' is excluded on both sides: tearing down a lane mid-clone races
@@ -2067,6 +2154,26 @@
       _syncLabBulkBar(labId);
     }
 
+    /**
+     * Additive, like the VM tab's equivalent: "I hand-picked two, now add all the
+     * broken ones" is the real flow, and wiping a hand-built selection is never
+     * what was meant.
+     *
+     * Reads _labRowsByLab rather than the DOM so it also picks up rows the search
+     * is currently hiding — the count in the bar already says how many of those
+     * there are, and "select all broken" that quietly skipped the filtered ones
+     * would be a trap.
+     */
+    function selectBrokenLabRows(btn) {
+      const labId = btn.dataset.labId;
+      (_labRowsByLab[labId] || [])
+        .filter(d => _labSelectable(d) && _labRowBroken(d))
+        .forEach(d => _labSelected.add(_labKey(labId, d.user_id)));
+      // Re-render so any newly-selected row that the search is hiding is
+      // reflected in the bar, and the visible ones get their tick.
+      renderVulnerableLabs();
+    }
+
     function clearLabSelection(labId) {
       // Drop every key for this environment from the STATE first, not just the
       // ones with a checkbox on screen: under an active search the hidden rows
@@ -2224,7 +2331,24 @@
         labs.forEach(l => {
           const inFlight = {};
           (l.in_flight || []).forEach(o => { inFlight[o.user_id] = o; });
-          const rows = (l.deployments || []).map(d => ({ ...d, _busy: !!inFlight[d.user_id] }));
+          const errs = l.redeploy_errors || {};
+          const rows = (l.deployments || []).map(d => ({
+            ...d, _busy: !!inFlight[d.user_id], _failed: !!errs[d.user_id],
+          }));
+
+          // Students whose machines were torn down and never rebuilt have no
+          // deployment row of their own. They are the MOST broken thing on the
+          // page — the student currently has nothing — so they belong in the
+          // selectable set, not just in a read-only footnote.
+          const haveRow = new Set(rows.map(r => r.user_id));
+          Object.entries(errs).forEach(([uid, err]) => {
+            if (haveRow.has(uid) || inFlight[uid]) return;
+            rows.push({
+              user_id: uid, student_email: null, lane_status: null,
+              _busy: false, _failed: true, _detached: true, _error: err,
+            });
+          });
+
           _labRowsByLab[l.lab_id] = rows;
           rows.filter(_labSelectable).forEach(d => liveKeys.add(_labKey(l.lab_id, d.user_id)));
         });
@@ -2289,17 +2413,17 @@
 
           // A search narrows every row set this card renders. Ghost and error
           // rows carry only an email or a bare user id, so they match on those.
-          // From _labRowsByLab, not l.deployments: the fetch stamped `_busy` onto
-          // those copies and _labSelectable reads it, so filtering the raw list
-          // here would count a mid-rebuild row as selectable in the bar's total.
-          const deployRows = (_labRowsByLab[l.lab_id] || []).filter(_labRowMatches);
+          // From _labRowsByLab, not l.deployments: the fetch stamped `_busy`,
+          // `_failed` and `_detached` onto those copies and both _labSelectable and
+          // _labRowBroken read them, so filtering the raw list here would miscount.
+          const labAll = (_labRowsByLab[l.lab_id] || []).filter(_labRowMatches);
+          const deployRows = labAll.filter(d => !d._detached);
           const ghostRows = ghostAll.filter(
             o => _matchesSearch([o.student_email, o.user_id], _labSearch));
-          const errorRows = Object.entries(l.redeploy_errors || {})
-            .filter(([uid]) => !shownUsers.has(uid) && !inFlightById[uid]);
+          // The detached rows now come from _labRowsByLab (built in the fetch, so
+          // they can be selected); this only still exists for the empty-card test.
 
-          const errorShown = errorRows.filter(
-            ([uid]) => _matchesSearch([uid], _labSearch));
+          const errorShown = labAll.filter(d => d._detached);
 
           // An environment with nothing matching is dropped entirely: a page of
           // empty cards is worse than a short list.
@@ -2315,6 +2439,9 @@
             const selN = deployRows.filter(
               d => _labSelected.has(_labKey(l.lab_id, d.user_id))).length;
             const selTotal = deployRows.filter(_labSelectable).length;
+            // Counted over every selectable row, detached ones included — they are
+            // the ones an instructor most wants this button for.
+            const brokenN = labAll.filter(d => _labSelectable(d) && _labRowBroken(d)).length;
             const labDis = selN ? '' : ' disabled';
             const labAttr = `data-lab-id="${escAttr(l.lab_id)}"`;
 
@@ -2324,6 +2451,9 @@
                       : 'Select students to redeploy or tear down'}
               </span>
               <span style="flex:1"></span>
+              ${brokenN ? `<button type="button" class="btn btn-sm btn-outline" ${labAttr}
+                    title="Adds every student whose deploy or redeploy failed, and everyone left with no machines, to the current selection"
+                    onclick="selectBrokenLabRows(this)">Select ${brokenN} broken</button>` : ''}
               <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
                       onclick="clearLabSelection(this.dataset.labId)"${labDis}>Clear</button>
               <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
@@ -2395,11 +2525,22 @@
 
             // Torn down but never rebuilt. Nothing else on this page would show
             // them — this is the only trace that the student is missing machines.
-            errorShown.forEach(([uid, err]) => {
-              // Torn down and never rebuilt: there is no deployment to act on in
-              // bulk, only the per-row Redeploy.
-              html += `<tr>
-                <td></td>
+            errorShown.forEach(dRow => {
+              const uid = dRow.user_id;
+              const err = dRow._error || {};
+              const eKey = _labKey(l.lab_id, uid);
+              const eSel = _labSelected.has(eKey);
+              // Selectable like any other row: this student has nothing, and
+              // rebuilding twenty of them one at a time is the problem the bulk
+              // bar exists to solve.
+              html += `<tr${eSel ? ' class="is-selected"' : ''}>
+                <td style="text-align:center;">
+                  <input type="checkbox" class="lab-select" data-lab-id="${escAttr(l.lab_id)}"
+                         data-lab-key="${escAttr(eKey)}"
+                         aria-label="Select ${escAttr(uid)}"
+                         ${eSel ? 'checked' : ''}
+                         onchange="toggleLabSelect(this)">
+                </td>
                 <td style="font-size:0.8rem;"><code>${escHtml(uid)}</code></td>
                 <td><span class="badge badge-gray">—</span></td>
                 <td colspan="4" style="color:#ef4444; font-size:0.78rem;">
@@ -4283,28 +4424,135 @@
      * default — the point is to rescue a broken box, not to reset the exercise —
      * so the reset is an explicit opt-in on the dialog.
      */
-    async function redeployStudentLab(btn) {
-      const { labId, userId, email } = btn.dataset;
-      const res0 = await Confirm.show({
-        title: 'Redeploy this student\'s environment?',
-        message: `Destroys and rebuilds ${email}'s machines for this environment. `
-               + `Flags they have already captured are kept, and their grade is untouched.`,
-        confirmText: 'Redeploy', danger: true,
-        checkbox: { label: 'Also reset flags (new values, clears their captures)', checked: false },
-      });
-      if (!res0) return;
+    let _labRebuild = null;   // { labId, userId, email, vms }
 
-      Utils.setBtnLoading(btn, true, 'Starting…');
+    /**
+     * Rebuild one student's environment.
+     *
+     * A picker rather than a plain confirm, because the lane can now stay put:
+     * with the gateway, reservations, consoles and Guacamole connections
+     * surviving, "which machines?" is a real question, and leaving one unticked
+     * leaves it running and untouched.
+     */
+    function redeployStudentLab(btn) {
+      const { labId, userId, email } = btn.dataset;
+      const row = (_labRowsByLab[labId] || []).find(d => d.user_id === userId);
+      const vms = (row && Array.isArray(row.vms)) ? row.vms : [];
+      _labRebuild = { labId, userId, email, vms };
+
+      document.getElementById('labRebuildWho').textContent = email || 'this student';
+      document.getElementById('labRebuildLine').textContent = vms.length
+        ? 'The lane stays exactly as it is \u2014 same network, same gateway, same console '
+          + 'address and the same Guacamole connection. Only the machines you tick are '
+          + 'destroyed and rebuilt, and their captured flags carry over.'
+        : 'This deployment records no machines, so only a whole-environment rebuild is '
+          + 'available.';
+
+      const list = document.getElementById('labRebuildMachines');
+      list.innerHTML = vms.length
+        ? vms.map(_labMachineRow).join('')
+        : '<p class="deploy-env-hint" style="margin:0;">No machines recorded.</p>';
+
+      const whole = document.getElementById('labRebuildWhole');
+      whole.checked = vms.length === 0;
+      document.getElementById('labRebuildResetFlags').checked = false;
+      Utils.setBtnLoading(document.getElementById('labRebuildBtn'), false);
+      onLabRebuildWholeChange(whole);
+
+      showModal('labRebuildModal');
+    }
+
+    function _labMachineRow(v) {
+      return `
+      <label style="display:flex; align-items:center; gap:0.5rem;">
+        <input type="checkbox" class="lab-rebuild-machine" value="${escAttr(v.name)}" checked
+               aria-label="Rebuild ${escAttr(v.name)}"
+               onchange="_syncLabRebuildPicker()">
+        <span style="min-width:0;">
+          <code style="font-size:0.82rem;">${escHtml(v.name)}</code>
+          ${_powerBadge(v.power_state)}
+        </span>
+      </label>`;
+    }
+
+    function closeLabRebuildModal() {
+      _labRebuild = null;
+      closeModal('labRebuildModal');
+    }
+
+    function toggleLabRebuildAll(box) {
+      document.querySelectorAll('#labRebuildMachines .lab-rebuild-machine')
+        .forEach(cb => { cb.checked = box.checked; });
+      _syncLabRebuildPicker();
+    }
+
+    function onLabRebuildWholeChange(box) {
+      const list = document.getElementById('labRebuildMachines');
+      list.style.opacity = box.checked ? '0.45' : '';
+      list.querySelectorAll('.lab-rebuild-machine').forEach(cb => { cb.disabled = box.checked; });
+      document.getElementById('labRebuildSelectAll').disabled = box.checked;
+      // .env-warn is display:flex — restoring it as 'block' stacks the icon above
+      // the text.
+      document.getElementById('labRebuildWholeWarn').style.display = box.checked ? 'flex' : 'none';
+      document.getElementById('labRebuildBtn').textContent = box.checked
+        ? 'Rebuild everything' : 'Rebuild machines';
+      // Flags behave differently on the two paths, and the difference matters:
+      // a per-machine rebuild never touches the lane, so the flag ROWS survive
+      // and only the files are re-planted.
+      document.getElementById('labRebuildFlagsHint').textContent = box.checked
+        ? 'Off: the values they have already captured are replayed onto the new machines.'
+        : 'Off: the rebuilt machines get their existing flag values planted again.';
+      _syncLabRebuildPicker();
+    }
+
+    function _syncLabRebuildPicker() {
+      const boxes = [...document.querySelectorAll('#labRebuildMachines .lab-rebuild-machine')];
+      const n = boxes.filter(b => b.checked).length;
+      const whole = document.getElementById('labRebuildWhole').checked;
+
+      const all = document.getElementById('labRebuildSelectAll');
+      all.checked = boxes.length > 0 && n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+
+      document.getElementById('labRebuildCount').textContent = whole
+        ? `Whole environment \u2014 all ${boxes.length} machine${boxes.length === 1 ? '' : 's'}`
+        : `${n} of ${boxes.length} machine${boxes.length === 1 ? '' : 's'}`;
+
+      // Nothing ticked is not a rebuild. The whole-environment path ignores the
+      // picker, so it must not be gated on it.
+      document.getElementById('labRebuildBtn').disabled = !whole && n === 0;
+    }
+
+    async function submitLabRebuild(btn) {
+      const target = _labRebuild;
+      if (!target) return;
+      const courseId = currentCourseId;
+      const { labId, userId, email } = target;
+      const whole = document.getElementById('labRebuildWhole').checked;
+      const resetFlags = document.getElementById('labRebuildResetFlags').checked;
+      const boxes = [...document.querySelectorAll('#labRebuildMachines .lab-rebuild-machine')];
+      const vmNames = boxes.filter(b => b.checked).map(b => b.value);
+
+      Utils.setBtnLoading(btn, true, 'Starting\u2026');
       try {
-        const res = await api('POST', `/courses/${currentCourseId}/labs/${labId}/students/${userId}/redeploy`,
-          { reset_flags: !!res0.checked });
+        const res = whole
+          ? await api('POST', `/courses/${courseId}/labs/${labId}/students/${userId}/redeploy`,
+              { reset_flags: resetFlags })
+          : await api('POST',
+              `/courses/${courseId}/labs/${labId}/students/${userId}/rebuild-machines`,
+              { vm_names: vmNames });
         toast(res.message || 'Rebuild started');
-        loadVulnerableLabs();
+        closeLabRebuildModal();
         pollLabProgress(labId, userId);
       } catch (e) {
-        toast('Error redeploying: ' + e.message, true);
+        // The per-machine path refuses an attached or live-GOAD environment with
+        // an actionable message, and the whole-environment fallback is right
+        // there in this dialog — so surface it and leave the modal open.
+        toast(e.message, true);
         Utils.setBtnLoading(btn, false);
-        loadVulnerableLabs();
+        return;
+      } finally {
+        if (currentCourseId === courseId) loadVulnerableLabs();
       }
     }
 

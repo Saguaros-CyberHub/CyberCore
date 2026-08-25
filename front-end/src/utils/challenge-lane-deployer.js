@@ -45,7 +45,9 @@
 
 const crypto = require('crypto');
 
-const { proxmoxAPI, waitForTask, findTemplateNode } = require('./proxmox');
+const {
+  proxmoxAPI, waitForTask, findTemplateNode, forceDestroyVM, waitForVmidsGone,
+} = require('./proxmox');
 const { cybercoreQuery } = require('./cybercore-db');
 const { query } = require('./db');
 const { guacAPI } = require('./guacamole');
@@ -1949,7 +1951,313 @@ async function deployChallengeLanesInner({
   return { provisioned, failed, progressId, lanes: created };
 }
 
+// ── in-place per-VM rebuild ──────────────────────────────────────────────────
+//
+// Destroy and re-clone SPECIFIC machines inside an existing challenge lane. The
+// lane row, vxlan_id, gateway, WAN address, DHCP reservations, consoles and
+// Guacamole connections all survive, and so do the machines not named — so a
+// student whose web01 is broken keeps the domain they have already worked on.
+//
+// The workstation equivalent is lane-deployer.rebuildLaneWorkstations, and the
+// same three properties make it safe here:
+//   - VMIDs are DERIVED (vm_offset + vxlanId), so a rebuilt VM reclaims exactly
+//     the id it had and teardown still finds it.
+//   - the console targets the GATEWAY's wan0 ip:port, never the VM, so a
+//     rebuilt machine keeps its existing Guacamole connection untouched.
+//   - cybercore_lane_flag CASCADEs off the LANE row, which is not deleted here,
+//     so a student's captured values and capture state survive; ensureLaneFlags
+//     re-plants with ON CONFLICT DO UPDATE SET flag_value = <existing>, which is
+//     what makes the carry-over automatic rather than a snapshot/replay dance.
+
+/** A failure that happened BEFORE anything was destroyed. */
+function challengePreflightError(msg) {
+  const e = new Error(msg);
+  e.phase = 'preflight';
+  e.destroyed = false;
+  return e;
+}
+
+/**
+ * Rebuild named machines in place on a challenge lane.
+ *
+ * @param {string}        a.laneId
+ * @param {string[]|null} a.vmNames  null = every spec machine on the lane
+ * @returns {Promise<{lane_id, vms:Array, untouched:string[], errors:string[]}>}
+ */
+async function rebuildLaneChallengeVms({
+  laneId, vmNames = null, progress = null, cloneSem = null, logTag = LOG,
+}) {
+  const laneRes = await cybercoreQuery(
+    `SELECT lane_id, user_id, module_key, name, status, vxlan_id,`,
+    [laneId]
+  );
+  if (!laneRes.rows.length) throw challengePreflightError('Lane not found');
+  const lane = laneRes.rows[0];
+  const cfg = lane.config || {};
+
+  // ── pre-flight ───────────────────────────────────────────────────────────
+  if (lane.status !== 'active') {
+    throw challengePreflightError(
+      `This lane is ${lane.status}, not active. Rebuilding individual machines keeps the existing lane and gateway, which only makes sense for a working one \u2014 rebuild the whole environment instead.`);
+  }
+  if (lane.vxlan_id == null) throw challengePreflightError('Lane has no VXLAN id');
+  const recorded = Array.isArray(cfg.vms) ? cfg.vms : [];
+  if (!recorded.length) {
+    throw challengePreflightError(
+      `This lane records no machines. Attached environments share the student's workstation lane and are rebuilt as a unit \u2014 use the whole-environment rebuild.`);
+  }
+  if (!cfg.challenge_key) {
+    throw challengePreflightError('This lane does not record which environment built it.');
+  }
+
+  const moduleKey = lane.module_key || 'crucible';
+  const chal = await cybercoreQuery(
+    `SELECT spec FROM ${String(moduleKey).replace(/[^a-z0-9_]/gi, '')}_challenge`,
+    [cfg.challenge_key]
+  );
+  if (!chal.rows.length) {
+    throw challengePreflightError(
+      `The environment '${cfg.challenge_key}' is no longer active, so its machines cannot be rebuilt. Re-activate it first.`);
+  }
+  const spec = parseSpec(chal.rows[0].spec);
+
+  // LIVE GOAD provisions the domain with ansible from a controller against
+  // every machine at once. Re-cloning one DC without re-running that leaves it
+  // out of the domain — running, reachable, and quietly useless. A prebaked
+  // lane has no such step (deployPrebakedGoadLane only writes reservations and
+  // bounces onto the baked IPs), so per-machine is safe there.
+  if (spec.goad?.enabled && !spec.goad?.prebaked) {
+    throw challengePreflightError(
+      `'${cfg.challenge_key}' provisions its domain across every machine at once, so a single machine cannot be rebuilt on its own without leaving it outside the domain. Rebuild the whole environment instead.`);
+  }
+
+  const specVms = resolveSpecVms(spec, cfg.challenge_key);
+  const bySpecName = new Map(specVms.map(v => [v.name || cfg.challenge_key, v]));
+  // Machines the INSTRUCTOR added at deploy time clone through a different path
+  // (cloneExtraWorkstation, with catalog-template resolvers), so they are not
+  // rebuildable here yet. They are marked on the lane record.
+  const extras = new Set(recorded.filter(v => v.source === 'instructor').map(v => v.name));
+
+  const wanted = vmNames == null
+    ? specVms.map(v => v.name || cfg.challenge_key)
+    : [...new Set(vmNames)];
+  for (const n of wanted) {
+    if (extras.has(n)) {
+      throw challengePreflightError(
+        `'${n}' was added to this environment at deploy time and cannot be rebuilt on its own yet \u2014 rebuild the whole environment.`);
+    }
+    if (!bySpecName.has(n)) {
+      throw challengePreflightError(`This environment has no machine named '${n}'`);
+    }
+  }
+  if (!wanted.length) throw challengePreflightError('No machines selected');
+
+  const userRes = await cybercoreQuery(
+    `SELECT user_id AS id, email FROM cybercore_user WHERE user_id = $1`, [lane.user_id]);
+  const user = userRes.rows[0] || { id: lane.user_id, email: cfg.user_email || null };
+
+  const targetNode = cfg.node;
+  if (!targetNode) throw challengePreflightError('Lane does not record which node it was built on');
+
+  // ── cluster snapshot ─────────────────────────────────────────────────────
+  const gatewayVmId = GATEWAY_VMID_OFFSET + lane.vxlan_id;
+  let live = [];
+  try {
+    live = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm') || [];
+  } catch (e) {
+    throw challengePreflightError(`Could not read cluster state: ${e.message}`);
+  }
+  const liveByVmid = {};
+  for (const r of live) liveByVmid[String(r.vmid)] = r;
+  const gw = liveByVmid[String(gatewayVmId)];
+  if (!gw) {
+    throw challengePreflightError(
+      `This lane's gateway (LXC ${gatewayVmId}) is not on the cluster, so there is nothing to rebuild the machines behind. Rebuild the whole environment instead.`);
+  }
+  const gatewayNode = gw.node || targetNode;
+
+  // ── networking + ctx, rebuilt the way deployLaneVms builds them ──────────
+  const subnetScheme = cfg.subnet_scheme || 'v2';
+  const isV3 = subnetScheme === 'v3';
+  const net = resolveLaneNetworking(subnetScheme, moduleKey, lane.vxlan_id,
+    lane.gateway_wan_ip ? { wanIp: lane.gateway_wan_ip } : {});
+  if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
+    applyFixedSubnet(net, isV3, spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
+  }
+  const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
+  const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
+  const goadMacs = goadDeploy.prepareGoadMacs(spec, lane.vxlan_id, goadSubnetBase);
+
+  const vnets = await resolveVnets([lane.vxlan_id], subnetScheme);
+  const vnetPair = vnets[lane.vxlan_id] || vnets[String(lane.vxlan_id)];
+  if (!vnetPair) {
+    throw challengePreflightError(
+      `No SDN VNet for VXLAN ${lane.vxlan_id} \u2014 a rebuilt machine would be cabled to nothing.`);
+  }
+  const vnetExtName = (vnetPair.ext || vnetPair).vnet;
+  const vnetIntName = isV3 ? (vnetPair.int || vnetPair).vnet : vnetExtName;
+
+  const templateNodeByVmid = await resolveTemplateNodes(specVms, spec, false);
+  const ctx = {
+    spec, subnetScheme, moduleKey, challengeKey: cfg.challenge_key,
+    description: `Rebuild on lane ${laneId}`, logTag,
+    cloneSem: cloneSem || laneDeployer.createCloneSemaphore(),
+    templateNodeByVmid,
+    _consoleOctetForVm: {},
+  };
+
+  // The console plan is recomputed from the FULL machine list, not just the
+  // rebuilt ones: a designated console machine needs its pinned MAC set on net0
+  // at clone time, and the reservation file is rendered whole-lane below.
+  const consolePlan = resolveConsolePlan({
+    specVms, attackBoxes: !!cfg.attack_box_vm_id, extraWorkstations: [],
+    override: cfg.console_vm || null,
+  });
+  const reservationOctets = {};
+  {
+    const taken = new Set([goadDeploy.INFRA_IP_OCTETS.Kali]);
+    Object.values(goadMacs || {}).forEach((g) => {
+      const last = Number(String(g.static_ip || '').split('.').pop());
+      if (Number.isFinite(last)) taken.add(last);
+    });
+    let next = CONSOLE_OCTET_MIN;
+    for (const c of consolePlan.consoles) {
+      if (c.kind === 'kali') continue;
+      const wanted2 = Number(c.vm && c.vm.ipOctet);
+      const octet = Number.isFinite(wanted2) ? wanted2 : (() => {
+        while (taken.has(next)) next += 1;
+        return next;
+      })();
+      taken.add(octet);
+      if (c.kind === 'spec') ctx._consoleOctetForVm[c.name] = octet;
+      reservationOctets[c.name] = octet;
+    }
+  }
+
+  // ── gateway FIRST, from the FULL machine list ────────────────────────────
+  // Same inversion rebuildLaneWorkstations makes: the reservations already
+  // exist and are unchanged, so writing them first is a no-op on the wire — and
+  // a gateway that refuses fails the operation while every machine still runs.
+  await writeLaneReservations({
+    gatewayVmId, node: gatewayNode, vxlanId: lane.vxlan_id, goadMacs,
+    attackBoxOctet: cfg.attack_box_vm_id ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
+    consoleOctets: reservationOctets,
+    extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
+    liveGoadController: false,
+    laneId, logTag,
+  });
+
+  await cybercoreQuery(
+    `UPDATE cybercore_lane`,
+    [laneId, JSON.stringify({
+      rebuild: {
+        at: new Date().toISOString(),
+        mode: 'in_place_vms', vms_requested: wanted, status: 'running',
+      },
+    })]
+  );
+
+  // ── rebuild, one machine at a time ───────────────────────────────────────
+  const rebuilt = [];
+  const results = [];
+  const errors = [];
+  for (const name of wanted) {
+    const vmSpec = bySpecName.get(name);
+    const vmId = (vmSpec.vm_offset || DEFAULT_VM_OFFSET) + lane.vxlan_id;
+    const vmType = vmSpec.type || 'qemu';
+    const liveVm = liveByVmid[String(vmId)];
+
+    try {
+      if (liveVm) {
+        await forceDestroyVM(vmId, vmType === 'lxc' ? 'lxc' : 'qemu', liveVm.node);
+        // Proxmox DELETE is asynchronous. Cloning into an id it is still purging
+        // either fails outright or lets the destroy land after the clone.
+        const { surviving } = await waitForVmidsGone([vmId], { timeoutMs: 120000 });
+        if (surviving.length) {
+          throw new Error(`VM ${vmId} is still on the cluster after being destroyed`);
+        }
+      }
+
+      const dvm = await cloneChallengeVm({
+        vmSpec, vxlanId: lane.vxlan_id, targetNode, laneId, user, ctx, net, goadMacs,
+        vnetExtName, vnetIntName,
+      });
+      await proxmoxAPI('POST',
+        `/api2/json/nodes/${dvm.node}/${dvm.type === 'lxc' ? 'lxc' : 'qemu'}/${dvm.vm_id}/status/start`);
+      rebuilt.push(dvm);
+      results.push({ name, vm_id: vmId, status: 'rebuilt' });
+    } catch (e) {
+      results.push({ name, vm_id: vmId, status: 'failed', error: e.message });
+      errors.push(`${name}: ${e.message}`);
+    }
+  }
+
+  // ── flags ────────────────────────────────────────────────────────────────
+  // Scoped to the machines actually rebuilt. The lane row survived, so their
+  // cybercore_lane_flag rows did too — ensureLaneFlags re-plants with
+  // ON CONFLICT DO UPDATE SET flag_value = <existing>, so a student's captured
+  // values and capture state carry over with no snapshot needed.
+  if (rebuilt.length) {
+    try {
+      await plantFlagsForLane({
+        laneId, userId: lane.user_id, vms: rebuilt, specVms, logTag,
+      });
+    } catch (e) {
+      console.warn(`${logTag} Flag re-plant after rebuild failed on lane ${laneId}: ${e.message}`);
+    }
+
+    // Vulnerability scripts are per-machine, and a fresh clone has none of them.
+    const scripts = (cfg.vuln_scripts || []).filter(
+      sc => rebuilt.some(v => v.name === sc.vm_name));
+    if (scripts.length) {
+      try {
+        await runVulnScripts({ laneId, deployedVMs: rebuilt, vulnScripts: scripts, logTag });
+      } catch (e) {
+        console.warn(`${logTag} Vuln scripts after rebuild failed: ${e.message}`);
+      }
+    }
+  }
+
+  // ── write back ───────────────────────────────────────────────────────────
+  // Splice server-side so the machines that were NOT rebuilt keep their records
+  // verbatim. status returns to ACTIVE even on partial failure: the gateway is
+  // running with untouched machines behind it, and marking the lane 'error'
+  // would release its VXLAN and WAN address while both are still in use.
+  const ok = errors.length === 0;
+  await cybercoreQuery(
+    `UPDATE cybercore_lane l`,
+    [
+      laneId,
+      JSON.stringify(rebuilt),
+      results.filter(r => r.status === 'rebuilt').map(r => r.name),
+      JSON.stringify({
+        rebuild: {
+          at: new Date().toISOString(),
+          mode: 'in_place_vms', vms_requested: wanted,
+          status: ok ? 'ok' : (rebuilt.length ? 'partial' : 'failed'),
+          error: ok ? null : errors[0],
+        },
+      }),
+    ]
+  );
+
+  if (progress?.lanes[laneId]) {
+    progress.lanes[laneId].status = ok ? 'active' : 'error';
+    progress.lanes[laneId].error = ok ? null : errors[0];
+  }
+  console.log(
+    `${logTag} Lane ${laneId} rebuilt ${rebuilt.length}/${wanted.length} machine(s): ${wanted.join(', ')}`);
+
+  return {
+    lane_id: laneId,
+    vms: results,
+    untouched: recorded.map(v => v.name).filter(n => !wanted.includes(n)),
+    errors,
+  };
+}
+
 module.exports = {
+  rebuildLaneChallengeVms,
   GATEWAY_VMID_OFFSET,
   DEFAULT_VM_OFFSET,
   ATTACK_BOX_VMID_OFFSET,
