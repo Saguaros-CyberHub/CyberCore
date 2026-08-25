@@ -136,7 +136,15 @@ function startHeartbeat(jobId) {
     if (!held) {
       console.warn(`[Reconcile] Job ${jobId} no longer owns the scan lock — halting progress writes`);
       stopHeartbeat(jobId);
+      return;
     }
+    // Touch updated_at as well. Staleness is judged from that field, but it is
+    // only written when PROGRESS moves — and a single slow step (enumerating a
+    // Ceph pool holding hundreds of guests) reports nothing for longer than
+    // STALE_AFTER_MS. Without this the job declares ITSELF aborted while it is
+    // still running, and the UI stops polling a scan that later succeeds.
+    const doc = await readJob(jobId);
+    if (doc && doc.state === 'running') await writeJob(doc);
   }, HEARTBEAT_MS);
   if (typeof timer.unref === 'function') timer.unref();
   heartbeats.set(jobId, timer);

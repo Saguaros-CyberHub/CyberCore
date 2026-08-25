@@ -28,7 +28,20 @@ const siteConfig = require('./site-config');
 const { scanClusterVolumes } = require('./storage-scan');
 const A = require('./reconcile-audit');
 
-const RECONCILE_BUDGET_MS = Number(process.env.RECONCILE_BUDGET_MS) || 45000;
+/**
+ * Wall-clock budget for one audit.
+ *
+ * This was 45s, chosen when the audit answered a request directly and had to
+ * finish inside Cloudflare's 100s origin timeout. It does not answer a request
+ * any more — POST /reconcile/run returns a job id immediately and the scan runs
+ * detached — so that ceiling stopped applying and the number was left behind as
+ * a pure handicap. On a cluster with ~500 guests in one Ceph pool, enumerating
+ * that pool alone can outlast 45s, and the audit was reporting a timeout as
+ * though it were a storage failure.
+ *
+ * Only the POLL has to be fast now, and it is: it reads a small progress doc.
+ */
+const RECONCILE_BUDGET_MS = Number(process.env.RECONCILE_BUDGET_MS) || 300000;
 const CLUSTER_CALL_TIMEOUT_MS = Number(process.env.RECONCILE_CLUSTER_CALL_TIMEOUT_MS) || 15000;
 const SCAN_CONCURRENCY = Number(process.env.RECONCILE_SCAN_CONCURRENCY) || 4;
 
@@ -165,7 +178,8 @@ async function runReconcileScan({ onPhase = () => {}, budgetMs = RECONCILE_BUDGE
       concurrency: SCAN_CONCURRENCY,
       preferredNode: findPreferredNode(),
       signal: controller.signal,
-      onProgress: (done, total) => onPhase('storage', PHASES.storage, done, total),
+      onProgress: (done, total, label) =>
+        onPhase('storage', label ? `${PHASES.storage} — ${label}` : PHASES.storage, done, total),
     }).catch(e => ({
       volumes: [], skipped: { nodes: [], storages: [] }, storages_failed: [],
       stats: {}, calls_made: 0, complete: false, nodes_total: 0, nodes_scanned: 0,

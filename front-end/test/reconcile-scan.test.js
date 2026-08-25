@@ -169,7 +169,7 @@ test('a hung storage returns partial results at the deadline', async () => {
 
   const started = Date.now();
   const r = await scanClusterVolumes({
-    proxmoxAPI: px.api, deadlineAt: started + 2500, concurrency: 4, perCallTimeoutMs: 30000,
+    proxmoxAPI: px.api, deadlineAt: started + 2500, concurrency: 4, contentTimeoutMs: 30000,
   });
   const elapsed = Date.now() - started;
 
@@ -272,13 +272,62 @@ test('storageFilter narrows the scan (used by the disk sweep)', async () => {
   assert.ok(listed[0].includes('ceph-vm'));
 });
 
-test('onProgress reports completion against the planned job count', async () => {
+test('progress names the storage being read, then counts it done', async () => {
+  // A single Ceph pool can take a minute to enumerate. Without the label the
+  // progress line sits unchanged for that whole time and reads as a hang.
   const px = fakeProxmox({ nodes: online('n1', 'n2') });
   const seen = [];
   await scanClusterVolumes({
     proxmoxAPI: px.api, deadlineAt: Date.now() + 30000,
-    onProgress: (done, total) => seen.push([done, total]),
+    onProgress: (done, total, label) => seen.push({ done, total, label }),
   });
-  assert.strictEqual(seen.length, 3, '1 shared + 2 local jobs');
-  assert.deepStrictEqual(seen[seen.length - 1], [3, 3]);
+
+  const labelled = seen.filter(e => e.label);
+  assert.ok(labelled.some(e => e.label === 'ceph-vm'), 'the shared pool is named as it is read');
+  assert.ok(labelled.some(e => e.label === 'local-lvm'));
+
+  const counted = seen.filter(e => !e.label);
+  assert.strictEqual(counted.length, 3, '1 shared + 2 local jobs completed');
+  assert.deepStrictEqual(
+    { done: counted[counted.length - 1].done, total: counted[counted.length - 1].total },
+    { done: 3, total: 3 });
+});
+
+test('shared pools are read before node-local ones', async () => {
+  // Ordering is what decides whether a budget overrun leaves the result
+  // "complete except some local disks" or "unusable".
+  const px = fakeProxmox({ nodes: online('n1', 'n2', 'n3') });
+  const order = [];
+  await scanClusterVolumes({
+    proxmoxAPI: px.api, deadlineAt: Date.now() + 30000, concurrency: 1,
+    onProgress: (done, total, label) => { if (label) order.push(label); },
+  });
+  assert.strictEqual(order[0], 'ceph-vm',
+    'the pool holding most of the cluster goes first');
+});
+
+test('a timed-out call is not retried — the second try cannot fare better', async () => {
+  const timeout = () => {
+    const e = new Error('Proxmox GET /api2/json/nodes/n2/storage timed out after 12s');
+    e.code = 'PROXMOX_TIMEOUT';
+    return e;
+  };
+  let n2Calls = 0;
+  const px = fakeProxmox({
+    nodes: online('n1', 'n2'),
+    storages: [LOCAL],
+    overrides: {
+      '/n2/storage': async (p) => {
+        if (!p.endsWith('/storage')) return [];
+        n2Calls++;
+        throw timeout();
+      },
+    },
+  });
+
+  const r = await scanClusterVolumes({ proxmoxAPI: px.api, deadlineAt: Date.now() + 30000 });
+  assert.strictEqual(n2Calls, 1,
+    'retrying a deadline burns a second full timeout and halves how many nodes ' +
+    'a fixed budget can reach');
+  assert.match(r.skipped.nodes.find(n => n.node === 'n2').reason, /timed out/);
 });

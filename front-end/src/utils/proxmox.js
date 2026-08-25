@@ -22,7 +22,11 @@ const PROXMOX_TOKEN_SECRET = process.env.PROXMOX_TOKEN_SECRET || '';
 const DEFAULT_TIMEOUT_MS = Number(process.env.PROXMOX_HTTP_TIMEOUT_MS) || 30000;
 
 function proxmoxTimeoutError(method, pathname, ms) {
-  return new Error(`Proxmox ${method} ${pathname} timed out after ${Math.round(ms / 1000)}s`);
+  const err = new Error(`Proxmox ${method} ${pathname} timed out after ${Math.round(ms / 1000)}s`);
+  // Tagged so a retrying caller can skip it. A call that ran out its deadline
+  // will run out the same deadline again; a refused one usually will not.
+  err.code = 'PROXMOX_TIMEOUT';
+  return err;
 }
 
 function proxmoxAbortError(method, pathname) {

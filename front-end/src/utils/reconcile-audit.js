@@ -131,7 +131,14 @@ function planStorageScan(nodeStorages, opts = {}) {
     }
   }
 
-  const jobList = [...jobs.values()];
+  // Shared storage first. A shared pool is usually where nearly every guest
+  // disk lives, and one read covers the whole cluster; a node-local store
+  // covers one node. If the budget runs out mid-scan, the order decides whether
+  // the result is "complete except two nodes' local disks" or "unusable".
+  const jobList = [...jobs.values()].sort((a, b) => {
+    if (a.shared !== b.shared) return a.shared ? -1 : 1;
+    return a.key.localeCompare(b.key);
+  });
 
   // Prefer the node the API URL points at: a request for /nodes/<other>/... is
   // forwarded pveproxy-to-pveproxy over the cluster link, a second internal TLS

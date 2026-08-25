@@ -327,7 +327,10 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
   const dry_run = req.body?.dry_run !== false;
   const storageFilter = req.body?.storage || null;
   const vmidPattern = req.body?.vmid_pattern ? new RegExp(req.body.vmid_pattern) : null;
-  const budgetMs = Number(process.env.RECONCILE_BUDGET_MS) || 45000;
+  // Unlike the audit, this endpoint answers the request it is on, so it stays
+  // under the tunnel's 100s origin timeout. It does NOT inherit the audit's
+  // (much larger) detached budget.
+  const budgetMs = Number(process.env.RECONCILE_SWEEP_BUDGET_MS) || 45000;
   const deleted = [];
   const errors = [];
 

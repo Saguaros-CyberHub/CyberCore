@@ -21,6 +21,18 @@ const { planStorageScan } = require('./reconcile-audit');
 /** Don't start a job that cannot plausibly finish. */
 const MIN_SLICE_MS = 1500;
 
+/**
+ * Whether a failure is worth a second attempt.
+ *
+ * A call that exhausted its deadline will exhaust the same deadline again, so
+ * retrying it buys nothing and costs another full timeout — which is how a
+ * retry meant to paper over transient forwarding errors instead halved the
+ * number of nodes a fixed budget could reach.
+ */
+function worthRetrying(err) {
+  return !(err && (err.code === 'PROXMOX_TIMEOUT' || err.code === 'PROXMOX_ABORTED'));
+}
+
 function sleep(ms) {
   return new Promise(resolve => {
     const t = setTimeout(resolve, ms);
@@ -49,7 +61,8 @@ function sleepUntil(deadlineAt) {
  * @param {Function}    a.proxmoxAPI        injected so tests need no stub
  * @param {number}      a.deadlineAt        absolute Date.now() stamp
  * @param {number}     [a.concurrency=4]
- * @param {number}     [a.perCallTimeoutMs=12000]
+ * @param {number}     [a.nodeListTimeoutMs=12000]  metadata reads
+ * @param {number}     [a.contentTimeoutMs=90000]   volume enumeration
  * @param {number}     [a.maxReaderAttempts=2]
  * @param {string}     [a.preferredNode]    node whose IP the API URL points at
  * @param {string}     [a.storageFilter]    limit to one storage id
@@ -61,7 +74,14 @@ async function scanClusterVolumes({
   proxmoxAPI,
   deadlineAt,
   concurrency = Number(process.env.RECONCILE_SCAN_CONCURRENCY) || 4,
-  perCallTimeoutMs = Number(process.env.RECONCILE_SCAN_CALL_TIMEOUT_MS) || 12000,
+  // Two calls with wildly different shapes shared one timeout, and the shorter
+  // one won. Listing a node's storages is a metadata read that returns in
+  // milliseconds. Enumerating a storage's CONTENT walks every volume in it —
+  // on a Ceph pool holding several hundred guests that legitimately runs past a
+  // minute, and capping it at the metadata timeout turned a healthy pool into a
+  // reported failure.
+  nodeListTimeoutMs = Number(process.env.RECONCILE_NODE_LIST_TIMEOUT_MS) || 12000,
+  contentTimeoutMs = Number(process.env.RECONCILE_CONTENT_TIMEOUT_MS) || 90000,
   maxReaderAttempts = 2,
   nodeListAttempts = Number(process.env.RECONCILE_NODE_LIST_ATTEMPTS) || 2,
   preferredNode = null,
@@ -100,7 +120,7 @@ async function scanClusterVolumes({
     let callsMade = 1;
     try {
       nodeList = await proxmoxAPI('GET', '/api2/json/nodes', null, {
-        timeoutMs: Math.min(perCallTimeoutMs, remaining()), signal,
+        timeoutMs: Math.min(nodeListTimeoutMs, remaining()), signal,
       });
     } catch (e) {
       return empty({ calls_made: 1, error: `Could not list cluster nodes: ${e.message}` });
@@ -132,11 +152,12 @@ async function scanClusterVolumes({
         try {
           callsMade++;
           const storages = await proxmoxAPI('GET', `/api2/json/nodes/${n.node}/storage`, null, {
-            timeoutMs: Math.min(perCallTimeoutMs, remaining()), signal,
+            timeoutMs: Math.min(nodeListTimeoutMs, remaining()), signal,
           });
           return { node: n.node, online: true, storages: storages || [], error: null, attempts: attempt };
         } catch (e) {
           lastErr = e;
+          if (!worthRetrying(e)) break;
           if (attempt < nodeListAttempts) await sleep(300 * attempt);
         }
       }
@@ -161,22 +182,24 @@ async function scanClusterVolumes({
 
     const readJob = async (job) => {
       // A shared storage can be read from any node that has it active, so a
-      // failed reader falls through to the next. Two attempts bounds one job's
-      // worst case at 2 x perCallTimeoutMs.
+      // failed reader falls through to the next, bounding one job's worst case
+      // at maxReaderAttempts x contentTimeoutMs.
       const attempts = job.shared
         ? job.readers.slice(0, maxReaderAttempts)
         : job.readers.slice(0, 1);
       let lastErr = null;
 
+      onProgress(progressDone, plan.jobs.length, job.storage);
+
       for (const node of attempts) {
-        if (remaining() <= MIN_SLICE_MS) { lastErr = new Error('deadline reached'); break; }
+        if (remaining() <= MIN_SLICE_MS) { lastErr = new Error('audit budget exhausted before this storage was read'); break; }
         try {
           contentCalls++;
           const items = await proxmoxAPI(
             'GET',
             `/api2/json/nodes/${node}/storage/${job.storage}/content?content=images`,
             null,
-            { timeoutMs: Math.min(perCallTimeoutMs, remaining()), signal }
+            { timeoutMs: Math.min(contentTimeoutMs, remaining()), signal }
           );
           for (const item of (items || [])) {
             volumes.push({
@@ -189,6 +212,9 @@ async function scanClusterVolumes({
           return true;
         } catch (e) {
           lastErr = e;
+          // Falling through to another node is for a reader that REFUSED. If
+          // this one ran out of time, the next will too.
+          if (!worthRetrying(e)) break;
         }
       }
       const reason = lastErr ? lastErr.message : 'no reader available';
@@ -203,6 +229,7 @@ async function scanClusterVolumes({
         progressDone++;
         onProgress(progressDone, plan.jobs.length, null);
       },
+
     });
 
     // Third layer of deadline enforcement: even a pathological hang inside a
