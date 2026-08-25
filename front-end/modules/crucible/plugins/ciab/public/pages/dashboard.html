@@ -252,7 +252,6 @@
         </div>
         <div class="header-right">
           <button class="header-btn" onclick="loadDashboard()" title="Refresh">🔄</button>
-          <button class="header-btn" onclick="toggleChat()" title="AI Assistant">💬</button>
         </div>
       </header>
 
@@ -382,9 +381,6 @@
               <div class="card-body">
                 <button class="btn btn-outline btn-block" style="margin-bottom: 10px;" onclick="showInterviewSimulator()">
                   🎤 Practice Interviews
-                </button>
-                <button class="btn btn-outline btn-block" style="margin-bottom: 10px;" onclick="toggleChat()">
-                  💬 Ask AI Assistant
                 </button>
                 <a href="/ciab/generator" class="btn btn-outline btn-block">
                   ⚡ Generate Profile
@@ -1199,11 +1195,6 @@
       const overlay = document.getElementById('sidebarOverlay');
       if (sidebar) sidebar.classList.remove('open');
       if (overlay) overlay.classList.remove('active');
-    }
-
-    // Chat functions now handled by global Layout
-    function toggleChat() {
-      if (typeof Layout !== 'undefined') Layout.toggleChat();
     }
 
   </script>

@@ -45,6 +45,14 @@ const CHAT_SYSTEM_PROMPT = `You are an AI assistant embedded in Clinic-in-a-Box,
 
 router.post('/chat', optionalAuth, async (req, res) => {
   try {
+    // The launcher is hidden when the assistant is off, but a hidden button does
+    // not stop a curl from spending tokens. Same switch, checked server-side.
+    // 404 rather than 403: to a caller, a deployment with the assistant off has
+    // no chat endpoint at all.
+    if (!require('../../../../../src/routes/chat-status').aiAssistantEnabled()) {
+      return res.status(404).json({ error: 'The AI assistant is not enabled on this deployment.' });
+    }
+
     const { message, sessionId, history } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
@@ -63,6 +71,28 @@ router.post('/chat', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Chat error:', error);
     res.status(500).json({ error: 'Failed to get response', details: error.message });
+  }
+});
+
+// ============================================================================
+// GET /api/my-sections — the sections THIS student is enrolled on
+// ----------------------------------------------------------------------------
+// Falls under the /api catch-all in routes/api.js, so it already carries
+// authenticateToken + requireCiabAccess. Scoped to req.user.userId and nothing
+// else: a student may see which sections they are on, never anybody else.
+//
+// Exists so the CIAB dashboard can name the class a student is in, and so the
+// "you are not enrolled" path has something concrete to say.
+// ============================================================================
+
+router.get('/my-sections', async (req, res) => {
+  try {
+    const enrollment = require('../utils/enrollment');
+    const sections = await enrollment.activeEnrollmentsFor(req.user.userId);
+    res.json({ sections });
+  } catch (error) {
+    console.error('[CIAB] my-sections:', error.message);
+    res.status(500).json({ error: 'Failed to load your sections' });
   }
 });
 

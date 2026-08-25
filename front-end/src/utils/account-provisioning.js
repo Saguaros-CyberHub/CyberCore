@@ -70,12 +70,22 @@ const VALID_ROLES = ['user', 'student', 'instructor', 'admin'];
 const PROVISIONED_VIA = [
   'self_register', 'admin_single', 'admin_batch',
   'group_deploy', 'cle_import', 'cle_cohort',
+  // Clinic-in-a-Box section rosters. Same two shapes as CLE: a CSV import
+  // and a generated cohort.
+  'ciab_import', 'ciab_cohort',
 ];
 
-// Provenance values that grant a course's instructor credential control over
-// the account. Anything else — including an account minted by a DIFFERENT
-// course — is off limits.
-const INSTRUCTOR_MANAGEABLE_VIA = ['cle_import', 'cle_cohort'];
+// Provenance values that grant an instructor credential control over the
+// account. Anything else — including an account minted by a DIFFERENT course
+// or section — is off limits.
+//
+// checkCourseProvisionedStudent() also compares provisioned_ref against the id
+// the caller passes, so a CIAB instructor gets control over exactly the
+// accounts their own section minted, with no extra authorization code.
+const INSTRUCTOR_MANAGEABLE_VIA = [
+  'cle_import', 'cle_cohort',
+  'ciab_import', 'ciab_cohort',
+];
 
 // Postgres unique_violation. Both the email index and the username constraint
 // surface as this; the `constraint` field distinguishes them.
@@ -574,7 +584,9 @@ function assertCourseProvisionedStudent(targetUser, caller, courseId, opts = {})
           target_provisioned_via: targetUser?.provisioned_via || null,
           message: err.message,
         },
-        source: 'cle',
+        // Defaults to 'cle' for the original caller; CIAB passes 'ciab' so a
+        // denial is not filed against the wrong subsystem.
+        source: opts.source || 'cle',
       });
     }
     throw err;

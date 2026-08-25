@@ -322,8 +322,40 @@ function getAllModules() {
   return loadedModules;
 }
 
+/**
+ * Per-module visibility gates, consulted by GET /api/modules.
+ *
+ * WHY A REGISTRY RATHER THAN A CHECK IN routes/modules.js
+ *   Clinic-in-a-Box is only for students an instructor enrolled, so it must not
+ *   appear in the sidebar for anyone else. Deciding that in core would mean core
+ *   importing a plugin's tables and access rules -- backwards, and it breaks the
+ *   moment the plugin is removed. A plugin registers its own predicate from its
+ *   route file instead, which the loader require()s during loadModulePlugins().
+ *
+ * WHY NOT THE MANIFEST `roles` ARRAY
+ *   That is read only by public/js/layout.js and is cosmetic -- it hides links,
+ *   it does not protect URLs -- and it cannot express "enrolled", only "is an
+ *   instructor".
+ *
+ * A gate is `async (req) => boolean`. It receives the whole request, so it can
+ * see query parameters as well as req.user (CIAB uses ?view=student to keep
+ * Student View a faithful preview). Modules with no gate are always visible.
+ */
+const accessGates = new Map();
+
+function registerAccessGate(key, fn) {
+  if (typeof fn !== 'function') throw new TypeError(`access gate for ${key} must be a function`);
+  accessGates.set(key, fn);
+}
+
+function getAccessGates() {
+  return accessGates;
+}
+
 module.exports = {
   loadAll,
+  registerAccessGate,
+  getAccessGates,
   loadModulePlugins,
   getAllSubnavs,
   getAllModules,

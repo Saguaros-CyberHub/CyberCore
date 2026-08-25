@@ -140,3 +140,72 @@ test('the baseline input keeps its labels and its events', () => {
   assert.ok(!base.includes('drop_event'), 'the baseline must not drop untagged events');
   assert.ok(!base.includes('drop_fields'), 'the baseline must keep its MITRE labels');
 });
+
+test('every cloud-init block scalar keeps its indentation', () => {
+  // `bash -n` validates the shell AROUND the heredocs and sees nothing inside
+  // them. An indentation slip in a `content: |` block therefore passes every
+  // other check in this repo and then fails at bake time as "bake did not
+  // complete" forty minutes later, with nothing pointing at the cause.
+  //
+  // That happened: a tidy-up collapsed `      ExecStart=` to ` ExecStart=`,
+  // which ends the block scalar early. cloud-init then cannot parse the
+  // user-data at all, so runcmd never runs and the image is untouched.
+  //
+  // In a YAML literal block the first content line fixes the indent; every
+  // later line must meet it, and whatever ends the block has to be structure —
+  // a list item or a key — not a stray line of the payload.
+  const lines = bake.split('\n');
+  const problems = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = /^(\s*)content: \|\s*$/.exec(lines[i]);
+    if (!open) continue;
+    const keyIndent = open[1].length;
+
+    let j = i + 1;
+    while (j < lines.length && lines[j].trim() === '') j += 1;
+    if (j >= lines.length) continue;
+
+    const bodyIndent = /^(\s*)/.exec(lines[j])[1].length;
+    if (bodyIndent <= keyIndent) {
+      problems.push(`line ${j + 1}: block body is not indented past its key`);
+      continue;
+    }
+
+    for (; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (line.trim() === '') continue;
+      const indent = /^(\s*)/.exec(line)[1].length;
+      if (indent >= bodyIndent) continue;
+      // The block ends here — so this line must be YAML: a list item, a key, a
+      // comment, or the heredoc terminator that ends the whole document. The
+      // bug this exists for, a stray ` ExecStart=...`, is none of those.
+      const structural = indent <= keyIndent
+        && (line === 'CLOUDINIT'
+          || /^\s*#/.test(line)
+          || /^\s*(- |[A-Za-z_][\w.]*:)/.test(line));
+      if (!structural) {
+        problems.push(`line ${j + 1}: "${line.trim().slice(0, 60)}" breaks out of the block `
+          + `(indent ${indent}, body is ${bodyIndent})`);
+      }
+      break;
+    }
+  }
+
+  assert.deepStrictEqual(problems, [], problems.join('\n'));
+});
+
+test('every systemd unit the bake writes is complete', () => {
+  // A truncated block scalar produces a unit file that is still syntactically
+  // fine and simply missing its ExecStart, which systemd reports only when the
+  // service is first started — on a student's lane, not during the bake.
+  const units = [...bake.matchAll(/- path: (\/etc\/systemd\/system\/[^\n]+)\n([\s\S]*?)(?=\n {2}- path: |\nCLOUDINIT)/g)];
+  assert.ok(units.length >= 4, `expected several unit files, found ${units.length}`);
+  for (const [, unitPath, body] of units) {
+    assert.ok(body.includes('[Service]') || body.includes('[Timer]'),
+      `${unitPath} has no [Service] or [Timer] section`);
+    if (body.includes('[Service]')) {
+      assert.ok(/^\s+ExecStart=/m.test(body), `${unitPath} has no ExecStart=`);
+    }
+  }
+});

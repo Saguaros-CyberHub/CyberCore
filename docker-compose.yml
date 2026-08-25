@@ -116,6 +116,9 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-4-5}
       LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-6}
+      # The bottom-right chat bubble only. Off by default; the key above still
+      # drives profile / policy / interview / vuln-app generation either way.
+      AI_ASSISTANT_ENABLED: ${AI_ASSISTANT_ENABLED:-false}
       # Internal URL lane web VMs use to PULL prebuilt vuln-app images (HTTP, no
       # TLS — busybox wget on the web template). Lane egress SNATs to the gateway
       # WAN IP, reaching this via the same path lane-bootstrap uses. Override if

@@ -61,18 +61,6 @@ router.get('/generation-status/:profileId', authenticateToken, instructorOnly, (
   }
 });
 
-// Simple test endpoint
-router.get('/test', authenticateToken, async (req, res) => {
-  try {
-    res.json({
-      success: true,
-      user: req.user,
-      message: 'Instructor routes working'
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // ─── Vuln-app cheat sheet (answer key for instructors + admins) ────────────
 // Returns the attack chain, instructor notes, seed credentials, and per-file
@@ -565,7 +553,32 @@ router.post('/assign', authenticateToken, instructorOnly, async (req, res) => {
     if (!studentId) {
       return res.status(400).json({ error: 'Student ID or email required' });
     }
-    
+
+    // An assignment is orthogonal to enrollment -- WHICH profile, due WHEN --
+    // but it is still coursework, and handing it to somebody who is not on any
+    // of your rosters is either a typo or reaching into another instructor's
+    // class. Admins are exempt: they legitimately act across sections.
+    if (req.user.role !== 'admin') {
+      const enrollment = require('../utils/enrollment');
+      const mine = await enrollment.sectionsManagedBy(req.user, { status: 'all' });
+      // Only enforced once you HAVE a section. An instructor who has not created
+      // one yet is mid-migration, not misbehaving, and blocking them would break
+      // assignment for everyone between the migration and the first section.
+      if (mine.length) {
+        const onOneOfMine = await query(
+          `SELECT 1 FROM ciab_enrollment
+            WHERE user_id = $1 AND status = 'active' AND section_id = ANY($2::uuid[]) LIMIT 1`,
+          [studentId, mine.map((m) => m.section_id)]
+        );
+        if (!onOneOfMine.rowCount) {
+          return res.status(403).json({
+            error: 'That student is not enrolled on any of your sections. Add them on the '
+                 + 'Sections tab first.',
+          });
+        }
+      }
+    }
+
     const result = await query(`
       INSERT INTO instructor_assignments (instructor_id, student_id, profile_id, due_date, notes)
       VALUES ($1, $2, $3, $4, $5)
@@ -2262,7 +2275,18 @@ router.get('/all-groups', authenticateToken, instructorOnly, async (req, res) =>
 });
 
 // POST /api/instructor/join-group — add self to a deployed group
-router.post('/join-group', authenticateToken, instructorOnly, async (req, res) => {
+// ADMIN ONLY, deliberately narrowed.
+//
+// This used to be instructorOnly, which meant ANY instructor could add
+// themselves to ANY deployed group. That is not a cosmetic membership:
+// getInstructorStudentIds() unions deployed_groups.config.instructors, and
+// GET /lanes/:id/connect gates on that union — so self-joining a stranger's
+// group was a two-request path to a Guacamole session inside another
+// instructor's student's VM.
+//
+// Sections replace groups as the ownership model, so nothing legitimate needs
+// the self-serve path any more.
+router.post('/join-group', authenticateToken, requireRole('admin'), async (req, res) => {
   try {
     const { group_id } = req.body;
     if (!group_id) return res.status(400).json({ error: 'group_id required' });

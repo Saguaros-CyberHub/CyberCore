@@ -1360,7 +1360,9 @@ function initProgress(progressId, label, total) {
     lanes: {},
     _laneTimes: [],
     _startedAtMs: Date.now(),
+    _beatAtMs: Date.now(),
   };
+  startProgressHeartbeat(progressId);
   return global._batchDeployProgress[progressId];
 }
 
@@ -1385,7 +1387,64 @@ function recordLaneDone(progress, concurrency) {
   }
 }
 
+/**
+ * Liveness for the progress registry, which doubles as this app's only mutex.
+ *
+ * assertNoConflictingLabOperation (cle/utils/vuln-lab-provision.js) refuses any
+ * operation on a lab while an entry for it is in a phase other than 'complete'.
+ * That is correct — running a teardown against a deploy that is still cloning
+ * leaves machines with nothing pointing at them — but the entry had no liveness
+ * of any kind. An operation that died between initProgress and finishProgress
+ * left the lab locked until someone restarted the process, and the UI could only
+ * say "wait for it to finish" about something that was never going to finish.
+ *
+ * A HEARTBEAT rather than an age bound, for the same reason reconcile-job.js
+ * carries one: the interesting steps are slow and silent. A single lane clone
+ * can run for minutes and a GOAD bake for over an hour with nothing touching the
+ * entry, so "started more than N minutes ago" cannot distinguish a dead
+ * operation from a healthy slow one — and getting that wrong lets a teardown run
+ * against a live deploy, which is the exact disaster the mutex exists to stop.
+ *
+ * So the owning process says "still here" every HEARTBEAT_MS, and only silence
+ * counts. STALE_AFTER_MS is many missed beats, deliberately: a false positive
+ * here is destructive, a false negative merely means waiting a little longer.
+ */
+const PROGRESS_HEARTBEAT_MS = 15000;
+const PROGRESS_STALE_AFTER_MS = Number(process.env.DEPLOY_PROGRESS_STALE_MS) || 120000;
+const _progressBeats = new Map();
+
+function startProgressHeartbeat(progressId) {
+  stopProgressHeartbeat(progressId);
+  const timer = setInterval(() => {
+    const p = (global._batchDeployProgress || {})[progressId];
+    if (!p || p.phase === 'complete') { stopProgressHeartbeat(progressId); return; }
+    p._beatAtMs = Date.now();
+  }, PROGRESS_HEARTBEAT_MS);
+  // unref so a forgotten heartbeat can never hold the process open.
+  if (typeof timer.unref === 'function') timer.unref();
+  _progressBeats.set(progressId, timer);
+}
+
+function stopProgressHeartbeat(progressId) {
+  const t = _progressBeats.get(progressId);
+  if (t) { clearInterval(t); _progressBeats.delete(progressId); }
+}
+
+/**
+ * Whether an entry belongs to an operation that is demonstrably gone.
+ *
+ * 'complete' entries are finished work, not a conflict, and are handled by the
+ * caller. Anything else is trusted until it stops beating.
+ */
+function isProgressStale(progress) {
+  if (!progress || progress.phase === 'complete') return false;
+  const last = progress._beatAtMs || progress._startedAtMs;
+  if (!last) return false;
+  return (Date.now() - last) > PROGRESS_STALE_AFTER_MS;
+}
+
 function finishProgress(progressId) {
+  stopProgressHeartbeat(progressId);
   const progress = (global._batchDeployProgress || {})[progressId];
   if (!progress) return;
   progress.phase = 'complete';
@@ -1394,7 +1453,13 @@ function finishProgress(progressId) {
   progress.eta_s = 0;
   progress.eta_at = null;
   progress.elapsed_s = Math.round((Date.now() - progress._startedAtMs) / 1000);
-  setTimeout(() => { delete global._batchDeployProgress[progressId]; }, 3600000);
+  // unref'd: this is a cache eviction, and a pending one must never be a reason
+  // the process stays alive. The whole registry is in-memory, so an exit takes
+  // the entry with it and the timer has nothing left to do. Without this, every
+  // finished deploy pins the event loop for an hour — invisible in a long-lived
+  // server, but it hangs any script or test that completes a deploy.
+  const evict = setTimeout(() => { delete global._batchDeployProgress[progressId]; }, 3600000);
+  if (typeof evict.unref === 'function') evict.unref();
 }
 
 /**
@@ -1414,7 +1479,13 @@ function listProgressIds(prefix = '') {
 function readProgress(progressId) {
   const progress = (global._batchDeployProgress || {})[progressId];
   if (!progress) return null;
-  const { _laneTimes, _startedAtMs, ...clean } = progress;
+  // Computed here, from the LIVE entry, rather than left to callers to derive
+  // from a bookkeeping field the destructure below could quietly start
+  // stripping. The mutex keys on it, so it must not be able to go missing.
+  const stale = isProgressStale(progress);
+  const { _laneTimes, _startedAtMs, _beatAtMs, ...clean } = progress;
+  clean.stale = stale;
+  clean.idle_s = Math.round((Date.now() - (_beatAtMs || _startedAtMs || Date.now())) / 1000);
   const lanes = {};
   for (const [id, lane] of Object.entries(clean.lanes || {})) {
     const { _startedAt, ...laneClean } = lane;
@@ -3725,5 +3796,7 @@ module.exports = {
   recordLaneDone,
   finishProgress,
   readProgress,
+  isProgressStale,
+  PROGRESS_STALE_AFTER_MS,
   listProgressIds,
 };

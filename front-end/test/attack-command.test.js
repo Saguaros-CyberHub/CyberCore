@@ -299,3 +299,22 @@ test('an unconfirmed staging leaves the target for the sweeper', () => {
   assert.ok(/expected_finish_at = to_timestamp\(\$3\)/.test(SRC),
     'the deadline must be set either way, or the sweeper never checks at the right moment');
 });
+
+test('the sweeper polls a target when its synchronized start fires', () => {
+  // Without this a run shorter than the liveness heartbeat is NEVER seen
+  // running. The target is polled once at dispatch, sits at 'scheduled' for the
+  // whole run, and jumps straight to 'completed' at its deadline — so the
+  // console shows a five-minute attack as 'scheduled' from start to finish, and
+  // Started stays blank because started_at is only written when the sweeper
+  // actually observes the 'running' phase.
+  const worker = require(path.join(P, 'attack-worker.js'));
+  const SRC = worker.dueTargets ? worker.dueTargets.toString() : '';
+  const src = SRC || require('fs').readFileSync(path.join(P, 'attack-worker.js'), 'utf8');
+  assert.ok(/JOIN cle_attack_run/.test(src),
+    'the claim query must reach the run to know when the start fires');
+  assert.ok(/run\.scheduled_start_at IS NOT NULL/.test(src));
+  assert.ok(/FOR UPDATE OF c SKIP LOCKED/.test(src),
+    'lock only the target rows — FOR UPDATE across the join would contend on the run');
+  assert.ok(!/INTERVAL '5 minutes'/.test(src),
+    'the heartbeat should be shorter than the shortest offered run');
+});

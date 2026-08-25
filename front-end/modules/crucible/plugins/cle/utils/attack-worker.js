@@ -80,25 +80,40 @@ let running = false;
  */
 async function dueTargets(limit) {
   const r = await query(
-    `UPDATE cle_attack_target
+    `UPDATE cle_attack_target t
         SET last_checked_at = NOW()
-      WHERE target_id IN (
-        SELECT target_id
-          FROM cle_attack_target
-         WHERE status IN ('dispatching','scheduled','running')
-           AND node IS NOT NULL AND vmid IS NOT NULL
+      WHERE t.target_id IN (
+        SELECT c.target_id
+          FROM cle_attack_target c
+          JOIN cle_attack_run run ON run.run_id = c.run_id
+         WHERE c.status IN ('dispatching','scheduled','running')
+           AND c.node IS NOT NULL AND c.vmid IS NOT NULL
            AND (
-                 (status = 'dispatching' AND dispatched_at < NOW() - INTERVAL '20 seconds')
-              OR (expected_finish_at IS NOT NULL AND NOW() >= expected_finish_at - INTERVAL '15 seconds')
-              OR (status IN ('scheduled','running')
-                  AND (last_checked_at IS NULL OR last_checked_at < NOW() - INTERVAL '5 minutes'))
+                 (c.status = 'dispatching' AND c.dispatched_at < NOW() - INTERVAL '20 seconds')
+              OR (c.expected_finish_at IS NOT NULL AND NOW() >= c.expected_finish_at - INTERVAL '15 seconds')
+              -- Catch the scheduled -> running flip just after the synchronized
+              -- start fires. Without this a run shorter than the heartbeat is
+              -- NEVER seen running: the target is polled once at dispatch, sits
+              -- at 'scheduled' for the whole run, and jumps straight to
+              -- 'completed' at its deadline. started_at is written only when
+              -- 'running' is observed, so the console also shows no start time.
+              OR (c.status = 'scheduled'
+                  AND run.scheduled_start_at IS NOT NULL
+                  AND NOW() >= run.scheduled_start_at + INTERVAL '10 seconds'
+                  AND (c.last_checked_at IS NULL
+                       OR c.last_checked_at < run.scheduled_start_at + INTERVAL '10 seconds'))
+              -- Liveness heartbeat. Two minutes rather than five so a long run
+              -- shows its event count advancing instead of looking wedged.
+              OR (c.status IN ('scheduled','running')
+                  AND (c.last_checked_at IS NULL
+                       OR c.last_checked_at < NOW() - INTERVAL '2 minutes'))
            )
-         ORDER BY last_checked_at NULLS FIRST
+         ORDER BY c.last_checked_at NULLS FIRST
          LIMIT $1
-         FOR UPDATE SKIP LOCKED
+         FOR UPDATE OF c SKIP LOCKED
       )
-      RETURNING target_id, run_id, lane_id, node, vmid, status,
-                expected_finish_at, check_failures, attempt`,
+      RETURNING t.target_id, t.run_id, t.lane_id, t.node, t.vmid, t.status,
+                t.expected_finish_at, t.check_failures, t.attempt`,
     [limit]
   );
   return r.rows;
@@ -113,6 +128,30 @@ async function dueTargets(limit) {
  * Reporting a clean finish we did not see would tell an instructor the class
  * has data that may not exist.
  */
+/**
+ * Name the thing that actually failed.
+ *
+ * This said "log-generator exited N" for every non-zero rc, which is wrong and
+ * expensively so once playbook runs exist: a chain that died in cc-emit.js
+ * reported a component that was never invoked, sending anyone debugging it to
+ * the wrong checkout. The wrapper stamps src= on the done line precisely so the
+ * console can tell them apart; older images omit it, and "the attack" is a fair
+ * description when we genuinely do not know.
+ *
+ * The exit codes are cc-emit.js's own: 2 usage, 3 unreadable playbook,
+ * 4 a playbook that cannot be planned, 1 anything else.
+ */
+function producerFailure(p) {
+  if (p.src === 'loggen') return `log-generator exited ${p.rc}`;
+  if (p.src !== 'emitter') return `the attack process exited ${p.rc}`;
+  const why = {
+    2: 'the emitter was invoked with bad arguments',
+    3: 'the emitter could not read its playbook',
+    4: 'the playbook could not be planned for the requested duration',
+  }[p.rc];
+  return why ? `${why} (cc-emit exited ${p.rc})` : `the emitter exited ${p.rc}`;
+}
+
 async function checkTarget(t) {
   let parsed = null;
   try {
@@ -221,7 +260,7 @@ async function applyPhase(t, p) {
        p.rc,
        Number.isInteger(p.lines) ? p.lines : null,
        skew, guestState,
-       p.rc === 0 ? null : (timedOut ? 'hit the hard runtime cap' : `log-generator exited ${p.rc}`)]
+       p.rc === 0 ? null : (timedOut ? 'hit the hard runtime cap' : producerFailure(p))]
     );
     return;
   }

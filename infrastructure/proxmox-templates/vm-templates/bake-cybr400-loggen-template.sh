@@ -981,12 +981,23 @@ async function main() {
     }
   }
 
-  const requested = args.duration ? parseDuration(args.duration) : Number(playbook.nominal_seconds);
+  // A bare --duration with no value means "run the playbook's own length", and
+  // that is the CHAIN case, not a mistake: resolveSelection gives chains
+  // duration:'' on purpose, because a chain runs its scripted length rather
+  // than one the instructor picks. parseArgs turns a valueless flag into the
+  // boolean true, so testing truthiness alone sends  to parseDuration and
+  // throws -- every chain run exiting 4 with lines=0.
+  const durArg = typeof args.duration === 'string' ? args.duration.trim() : '';
   let plan;
   try {
+    // parseDuration lives INSIDE the try on purpose. Outside it, a bad duration
+    // propagated to main().catch and exited 1 -- indistinguishable from any
+    // other crash, and the console reported the generic failure rather than
+    // "the playbook could not be planned".
+    const requested = durArg ? parseDuration(durArg) : Number(playbook.nominal_seconds);
     plan = planTimeline(playbook, { rng: makeRng(seed), requested });
   } catch (err) {
-    console.error(`cc-emit: ${err.message}`);
+    console.error(String(err.message).startsWith('cc-emit:') ? err.message : `cc-emit: ${err.message}`);
     process.exit(4);
   }
 
@@ -994,7 +1005,7 @@ async function main() {
     out: args.out,
     countFile: args['count-file'] || null,
   });
-  console.log(`cc-emit: wrote ${written} event(s) over ${Math.round(requested)}s `
+  console.log(`cc-emit: wrote ${written} event(s) over ${Math.round(plan.requested)}s `
     + `(rigid ${Math.round(plan.rigidTotal)}s, dwell x${plan.gapScale.toFixed(2)}, seed ${seed})`);
   process.exit(0);
 }
@@ -2326,7 +2337,7 @@ write_files:
       # Writes into the BASELINE tree on purpose. That input has no drop_event,
       # so untagged benign events ship; the attack tree drops anything without a
       # technique and would swallow this entirely.
- ExecStart=/usr/bin/node /opt/cybercore/cc-emit.js --daemon --playbook /opt/cybercore/host-baseline.json --out /opt/log-generator/logs/current/host.json
+      ExecStart=/usr/bin/node /opt/cybercore/cc-emit.js --daemon --playbook /opt/cybercore/host-baseline.json --out /opt/log-generator/logs/current/host.json
       Restart=always
       RestartSec=10
       User=root

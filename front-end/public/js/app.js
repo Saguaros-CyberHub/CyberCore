@@ -160,8 +160,12 @@ const API = {
 
   // Module discovery
   modules: {
-    async list() {
-      return API.request('/modules');
+    // asStudent forwards Student View to the server. The module list is now
+    // filtered per user -- Clinic-in-a-Box only appears for someone enrolled --
+    // so without this an instructor previewing as a student would still be
+    // served their own menu and the preview would stop being faithful.
+    async list({ asStudent = false } = {}) {
+      return API.request(asStudent ? '/modules?view=student' : '/modules');
     }
   },
 
@@ -381,6 +385,10 @@ const ViewMode = {
       if (on) localStorage.setItem(this.KEY, this.VALUE);
       else localStorage.removeItem(this.KEY);
     } catch (_) { /* private mode — the toggle simply won't stick */ }
+    // The sidebar payload is per-user AND per-view now, and _reload() below
+    // does not clear sessionStorage — so without this, toggling Student View
+    // would re-render the cached menu and appear to do nothing.
+    Auth.clearSessionCaches();
   },
 
   _reload() {
@@ -474,6 +482,26 @@ const Auth = {
     return result === true;
   },
 
+  /**
+   * Per-tab caches that are keyed to WHO IS SIGNED IN, and were never cleared.
+   *
+   *   cyberhub-modules       the sidebar payload (layout.js loadModules)
+   *   cyberhub-chat-enabled  whether the AI assistant exists here
+   *
+   * Both are sessionStorage, so they survive a logout and the next sign-in on
+   * the same tab. That was already wrong -- an instructor signing out and a
+   * student signing in got the instructor's menu from cache -- and it became
+   * load-bearing once /api/modules started filtering per user: a student who
+   * is not enrolled would keep seeing Clinic-in-a-Box until they closed the
+   * tab.
+   */
+  clearSessionCaches() {
+    try {
+      sessionStorage.removeItem('cyberhub-modules');
+      sessionStorage.removeItem('cyberhub-chat-enabled');
+    } catch (_) { /* private mode — nothing was cached anyway */ }
+  },
+
   async logout() {
     try {
       await API.auth.logout();
@@ -484,6 +512,7 @@ const Auth = {
     // Clear token from localStorage
     localStorage.removeItem('token');
     ViewMode.clear();
+    this.clearSessionCaches();
     
     this.user = null;
     this.realUser = null;

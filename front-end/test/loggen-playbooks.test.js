@@ -269,3 +269,29 @@ test('no event states the conclusion a student is meant to reach', () => {
     }
   }
 });
+
+test('a chain runs its own scripted length, not a duration the console picked', () => {
+  // resolveSelection gives chains duration:'' on purpose — the product decision
+  // is that a chain runs its scripted length. The wrapper passes that through
+  // as `--duration ''`, and parseArgs turns a valueless flag into boolean true.
+  // Testing truthiness alone therefore sent `true` to parseDuration and threw,
+  // so EVERY chain exited 4 with lines=0 while the console showed it running.
+  const emitPath = path.join(P, 'utils', 'cc-emit.js');
+  const src = fs.readFileSync(emitPath, 'utf8');
+  assert.ok(/typeof args\.duration === 'string'/.test(src),
+    'a valueless --duration must fall back to the playbook length, not be parsed');
+  assert.throws(() => emit.parseDuration(true), /unparseable/,
+    'parseDuration should still reject a non-string, so the guard above is load-bearing');
+});
+
+test('every chain playbook plans at its own nominal length', () => {
+  for (const c of catalog.CHAINS) {
+    const pb = load(`chain-${c.key}.json`);
+    const plan = emit.planTimeline(pb, {
+      rng: emit.makeRng(1), requested: Number(pb.nominal_seconds),
+    });
+    assert.ok(plan.events.length > 0, `chain ${c.key} produced no events`);
+    assert.ok(Number(pb.nominal_seconds) >= emit.minSecondsFor(pb),
+      `chain ${c.key} declares a nominal length shorter than its own bursts`);
+  }
+});

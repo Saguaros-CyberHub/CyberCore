@@ -354,7 +354,12 @@ const Layout = {
     try {
       let data = this._modules;
       if (!data) {
-        data = await API.modules.list();
+        // The server filters this list per user — Clinic-in-a-Box only appears
+        // for someone an instructor enrolled — so Student View has to travel
+        // with the request. Without it a previewing instructor keeps their own
+        // menu and the preview silently stops matching what a student sees.
+        const asStudent = typeof ViewMode !== 'undefined' && ViewMode.isActive();
+        data = await API.modules.list({ asStudent });
         this._modules = data;
         this._subnavs = data.subnavs || {};
         // Persist across full page navigations so a transient failure (e.g. an

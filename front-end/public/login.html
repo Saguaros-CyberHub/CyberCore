@@ -210,6 +210,12 @@
       }
       function finishLogin(token) {
         if (token) localStorage.setItem('token', token);
+        // The sidebar payload and the AI-assistant probe are cached per TAB and
+        // keyed to whoever was signed in. Logout clears them, but a session that
+        // simply expired never called logout — so a second person signing in on
+        // the same tab would inherit the first one's menu, including modules they
+        // are not enrolled in.
+        if (typeof Auth !== 'undefined') Auth.clearSessionCaches();
         Toast.success('Welcome!', 'Signed in successfully');
         setTimeout(() => { window.location.href = '/hub'; }, 500);
       }

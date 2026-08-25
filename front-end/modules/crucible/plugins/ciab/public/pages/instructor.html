@@ -518,13 +518,14 @@
             <p class="page-subtitle">Manage students, review submissions, and generate assessment documents.</p>
           </div>
           <div>
-            <button class="btn btn-primary" onclick="showAddStudentModal()">+ Add Student</button>
+            <button class="btn btn-primary" onclick="switchTab('sections')">+ Add Students</button>
           </div>
         </div>
 
         <!-- Tabs -->
         <div class="tabs">
           <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
+          <div class="tab" data-tab="sections" onclick="switchTab('sections')">Sections</div>
           <div class="tab" data-tab="students" onclick="switchTab('students')">Students</div>
           <div class="tab" data-tab="reviews" onclick="switchTab('reviews')">Review Queue</div>
           <div class="tab" data-tab="documents" onclick="switchTab('documents')">Documents & Answer Keys</div>
@@ -608,6 +609,68 @@
                 <p>You haven't joined any groups yet.</p>
               </div>
             </div>
+          </div>
+        </div>
+
+
+        <!-- ============================================================ -->
+        <!-- TAB: SECTIONS                                                 -->
+        <!-- ------------------------------------------------------------ -->
+        <!-- The roster surface. An ACTIVE enrollment on an ACTIVE section  -->
+        <!-- is what grants a student access to Clinic-in-a-Box, so this   -->
+        <!-- is where students are actually added. Markup only — every     -->
+        <!-- behaviour lives in /ciab/js/instructor-sections.js and        -->
+        <!-- /ciab/js/instructor-roster-import.js, loaded after the inline -->
+        <!-- block below because they depend on globals it defines.        -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-sections">
+
+          <!-- No sections yet. This is the state a brand-new instructor    -->
+          <!-- lands in, and the state everyone whose students came from a  -->
+          <!-- CIAB profile-lane deploy lands in after migration 008 — so   -->
+          <!-- it has to name the next step rather than just say "empty".   -->
+          <div id="sectionsEmpty" class="empty-state" style="display: none;">
+            <div class="icon">🎓</div>
+            <h3>No sections yet</h3>
+            <p>Create a section, then add students to it.<br>
+               Only students enrolled on a section can open Clinic-in-a-Box.</p>
+            <button class="btn btn-primary" onclick="Sections.showSectionModal()">Create your first section</button>
+          </div>
+
+          <div id="sectionsMain" style="display: none;">
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem;">
+                <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: center;">
+                  <div style="flex: 1; min-width: 260px;">
+                    <select id="sectionSelect" class="form-input" onchange="Sections.onSectionChange()"></select>
+                  </div>
+                  <button class="btn btn-primary btn-sm" onclick="Sections.showSectionModal()">＋ New Section</button>
+                  <button class="btn btn-outline btn-sm" onclick="Sections.showSectionModal(Sections.currentId)">✏️ Edit</button>
+                  <button class="btn btn-outline btn-sm" onclick="Sections.archiveSection()">🗃️ Archive</button>
+                </div>
+                <div id="sectionMeta" style="margin-top: 0.75rem; color: var(--gray-500); font-size: 0.9rem;"></div>
+              </div>
+            </div>
+
+            <!-- The three add paths, mirroring the CLE course Students tab. -->
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem; display: flex; gap: 0.5rem; flex-wrap: wrap;">
+                <button class="btn btn-primary btn-sm"  onclick="Sections.showAddStudent()">+ Add Student</button>
+                <button class="btn btn-outline btn-sm" onclick="RosterImport.showImport()">📄 Import Roster (CSV)</button>
+                <button class="btn btn-outline btn-sm" onclick="RosterImport.showCohort()">👥 Generate Cohort Accounts</button>
+                <button class="btn btn-outline btn-sm" onclick="RosterImport.showFromCle()">🎓 Import from a CLE course</button>
+                <div style="flex: 1;"></div>
+                <input type="text" id="rosterSearch" class="form-input" style="max-width: 240px;"
+                       placeholder="Search this roster…" oninput="Sections.renderRoster()">
+                <select id="rosterStatus" class="form-input" style="max-width: 150px;" onchange="Sections.loadRoster()">
+                  <option value="active">Enrolled</option>
+                  <option value="dropped">Dropped</option>
+                  <option value="all">All</option>
+                </select>
+              </div>
+            </div>
+
+            <div id="sectionRosterContent"></div>
           </div>
         </div>
 
@@ -801,37 +864,204 @@
     </main>
   </div>
 
-  <!-- Add Student Modal -->
-  <div class="modal-overlay" id="addStudentModal">
+
+  <!-- ======================================================================= -->
+  <!-- SECTION + ROSTER MODALS                                                 -->
+  <!-- ----------------------------------------------------------------------- -->
+  <!-- Ported from the CLE course Students tab so the two plugins feel the same -->
+  <!-- to an instructor. Behaviour lives in /ciab/js/instructor-sections.js and -->
+  <!-- /ciab/js/instructor-roster-import.js.                                    -->
+  <!-- ======================================================================= -->
+
+  <!-- Create / edit a section -->
+  <div class="modal-overlay" id="sectionModal">
     <div class="modal-content">
       <div class="modal-header">
-        <h3>Add Student to Roster</h3>
-        <button class="modal-close" onclick="closeModal('addStudentModal')">&times;</button>
+        <h3 id="sectionModalTitle">New Section</h3>
+        <button class="modal-close" onclick="closeModal('sectionModal')">&times;</button>
       </div>
-      <form id="addStudentForm" onsubmit="submitAddStudent(event)">
+      <form id="sectionForm" onsubmit="Sections.saveSection(event)">
         <div class="form-group">
-          <label for="studentEmail">Student Email</label>
-          <input type="email" id="studentEmail" required placeholder="student@example.edu">
+          <label for="sectionName">Section name</label>
+          <input type="text" id="sectionName" required placeholder="CYBR 480 — Fall 2026">
         </div>
         <div class="form-group">
-          <label for="assignProfile">Assign Profile (Optional)</label>
-          <select id="assignProfile">
-            <option value="">-- Select a profile --</option>
-          </select>
+          <label for="sectionCode">Code <span style="font-weight: 400; color: var(--gray-500);">(optional)</span></label>
+          <input type="text" id="sectionCode" placeholder="CYBR-480-7W1">
+          <!-- Not cosmetic: the code becomes the cohort username prefix, which
+               is why two active sections may not share one. -->
+          <small style="color: var(--gray-500);">Used to name generated cohort accounts, e.g. <code>cybr-480-7w1-student1</code>. Must be unique among active sections.</small>
         </div>
         <div class="form-group">
-          <label for="dueDate">Due Date (Optional)</label>
-          <input type="date" id="dueDate">
+          <label for="sectionTerm">Term <span style="font-weight: 400; color: var(--gray-500);">(optional)</span></label>
+          <input type="text" id="sectionTerm" placeholder="Fall 2026">
         </div>
         <div class="form-group">
-          <label for="assignNotes">Notes</label>
-          <textarea id="assignNotes" rows="3" placeholder="Any special instructions..."></textarea>
+          <label for="sectionMax">Seat limit <span style="font-weight: 400; color: var(--gray-500);">(optional)</span></label>
+          <input type="number" id="sectionMax" min="1" placeholder="No limit">
+        </div>
+        <div class="form-group">
+          <label for="sectionDescription">Notes</label>
+          <textarea id="sectionDescription" rows="2" placeholder="Anything you want to remember about this section…"></textarea>
         </div>
         <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-          <button type="button" class="btn btn-outline" onclick="closeModal('addStudentModal')">Cancel</button>
-          <button type="submit" class="btn btn-primary">Add Student</button>
+          <button type="button" class="btn btn-outline" onclick="closeModal('sectionModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="sectionSaveBtn">Save Section</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Add one existing account -->
+  <div class="modal-overlay" id="ciabAddStudentModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Add Student to Section</h3>
+        <button class="modal-close" onclick="closeModal('ciabAddStudentModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label for="ciabStudentSearch">Search</label>
+        <input type="text" id="ciabStudentSearch" placeholder="Name, username or email…" oninput="Sections.filterAvailable()">
+      </div>
+      <div class="form-group">
+        <label for="ciabAddStudentSelect">Account</label>
+        <select id="ciabAddStudentSelect" size="10" style="width: 100%;"></select>
+        <!-- This path deliberately does not mint accounts. Creating one from a
+             typo'd address is worse than saying no; Import Roster creates, and
+             it previews first. -->
+        <small style="color: var(--gray-500);">Only existing accounts appear here. To create accounts, use <strong>Import Roster (CSV)</strong> or <strong>Generate Cohort Accounts</strong>.</small>
+      </div>
+      <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModal('ciabAddStudentModal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ciabAddStudentBtn" onclick="Sections.addStudent()">Add to Section</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CSV roster import — three stages: input, preview, result. -->
+  <!-- The preview stage is the point: a request without `confirm` mutates      -->
+  <!-- nothing, so an instructor sees the seat maths and the problem rows       -->
+  <!-- before 200 accounts exist.                                              -->
+  <div class="modal-overlay" id="ciabRosterImportModal">
+    <div class="modal-content" style="max-width: 820px;">
+      <div class="modal-header">
+        <h3>Import Roster (CSV)</h3>
+        <button class="modal-close" onclick="closeModal('ciabRosterImportModal')">&times;</button>
+      </div>
+
+      <div id="ciabRosterStage-input">
+        <div class="form-group">
+          <label for="ciabRosterFile">Roster file</label>
+          <input type="file" id="ciabRosterFile" accept=".csv,.tsv,.txt" onchange="RosterImport.onFile(event)">
+          <small style="color: var(--gray-500);">A D2L or Canvas export works as-is. Comma, tab and semicolon separated files are all detected.</small>
+        </div>
+        <div class="form-group">
+          <label for="ciabRosterPaste">…or paste rows</label>
+          <textarea id="ciabRosterPaste" rows="6" placeholder="email,first_name,last_name&#10;jsmith@example.edu,Jamie,Smith"></textarea>
+        </div>
+        <div id="ciabRosterParseSummary" style="margin-bottom: 1rem;"></div>
+        <label style="display: block; margin-bottom: 1rem;">
+          <input type="checkbox" id="ciabRosterNotifyExisting" checked>
+          Email students who already have an account to tell them they were added
+        </label>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('ciabRosterImportModal')">Cancel</button>
+          <button type="button" class="btn btn-primary" id="ciabRosterPreviewBtn" onclick="RosterImport.preview()">Preview</button>
+        </div>
+      </div>
+
+      <div id="ciabRosterStage-preview" style="display: none;">
+        <div id="ciabRosterPreviewBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="RosterImport.setStage('input')">← Back</button>
+          <button type="button" class="btn btn-primary" id="ciabRosterConfirmBtn" onclick="RosterImport.confirm()">Import</button>
+        </div>
+      </div>
+
+      <div id="ciabRosterStage-result" style="display: none;">
+        <div id="ciabRosterResultBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" id="ciabRosterCsvBtn" onclick="RosterImport.downloadCredentials()" style="display: none;">⬇ Copy credentials as CSV</button>
+          <button type="button" class="btn btn-primary" onclick="RosterImport.done()">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Generate cohort accounts -->
+  <div class="modal-overlay" id="ciabCohortModal">
+    <div class="modal-content" style="max-width: 720px;">
+      <div class="modal-header">
+        <h3>Generate Cohort Accounts</h3>
+        <button class="modal-close" onclick="closeModal('ciabCohortModal')">&times;</button>
+      </div>
+
+      <div id="ciabCohortStage-input">
+        <p style="color: var(--gray-600);">Creates numbered lab accounts named from this section's code, for students who should not need a real email address. Passwords are shown <strong>once</strong>.</p>
+        <div class="form-group">
+          <label for="ciabCohortCount">How many</label>
+          <input type="number" id="ciabCohortCount" min="1" max="500" value="25">
+        </div>
+        <div class="form-group">
+          <label for="ciabCohortStartIndex">Start numbering at</label>
+          <input type="number" id="ciabCohortStartIndex" min="1" value="1">
+          <!-- Resumable on purpose: 25 made, 5 more needed should give 26–30. -->
+          <small style="color: var(--gray-500);">Names already taken are skipped, so running this again continues from the next free number.</small>
+        </div>
+        <div class="form-group">
+          <label for="ciabCohortRole">Enroll as</label>
+          <select id="ciabCohortRole">
+            <option value="student">Student</option>
+            <option value="ta">TA</option>
+            <option value="observer">Observer</option>
+          </select>
+        </div>
+        <label style="display: block; margin-bottom: 1rem;">
+          <input type="checkbox" id="ciabCohortRequireChange">
+          Make students choose their own password on first sign-in
+          <small style="display: block; color: var(--gray-500); margin-left: 1.5rem;">Leave off if you are handing out a printed sheet — otherwise your copy stops working the first time each student signs in.</small>
+        </label>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+          <button type="button" class="btn btn-outline" onclick="closeModal('ciabCohortModal')">Cancel</button>
+          <button type="button" class="btn btn-primary" id="ciabCohortPreviewBtn" onclick="RosterImport.cohortPreview()">Preview</button>
+        </div>
+      </div>
+
+      <div id="ciabCohortStage-preview" style="display: none;">
+        <div id="ciabCohortPreviewBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="RosterImport.setCohortStage('input')">← Back</button>
+          <button type="button" class="btn btn-primary" id="ciabCohortConfirmBtn" onclick="RosterImport.cohortConfirm()">Generate</button>
+        </div>
+      </div>
+
+      <div id="ciabCohortStage-result" style="display: none;">
+        <div id="ciabCohortResultBody"></div>
+        <div style="display: flex; gap: 1rem; justify-content: flex-end; margin-top: 1rem;">
+          <button type="button" class="btn btn-outline" onclick="RosterImport.downloadCohort()">⬇ Copy as CSV</button>
+          <button type="button" class="btn btn-primary" onclick="RosterImport.done()">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Pull a roster out of a CLE course -->
+  <div class="modal-overlay" id="ciabFromCleModal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3>Import from a CLE course</h3>
+        <button class="modal-close" onclick="closeModal('ciabFromCleModal')">&times;</button>
+      </div>
+      <div class="form-group">
+        <label for="ciabCleCourseSelect">Course</label>
+        <select id="ciabCleCourseSelect"></select>
+        <small style="color: var(--gray-500);">Only courses you teach are listed. Everyone actively enrolled there is enrolled here too; no new accounts are created.</small>
+      </div>
+      <div id="ciabFromCleBody"></div>
+      <div style="display: flex; gap: 1rem; justify-content: flex-end;">
+        <button type="button" class="btn btn-outline" onclick="closeModal('ciabFromCleModal')">Cancel</button>
+        <button type="button" class="btn btn-primary" id="ciabFromCleBtn" onclick="RosterImport.fromCle()">Preview</button>
+      </div>
     </div>
   </div>
 
@@ -1230,6 +1460,50 @@
     // Render students list
     let expandedStudentId = null;
 
+    /**
+     * Section membership, on the platform-wide student list.
+     *
+     * This tab lists EVERY student on the platform — that is what makes it the
+     * pool an instructor enrolls from. But an enrollment is now what grants
+     * access to Clinic-in-a-Box at all, so a row that does not say whether this
+     * student HAS one is the most important thing missing from it.
+     *
+     * Reads the sections the Sections tab already loaded rather than issuing a
+     * request per row.
+     */
+    function renderEnrollControl(studentId) {
+      if (!window.Sections || !Sections.all || !Sections.all.length) return '';
+
+      const onThisSection = (Sections.roster || [])
+        .some(r => r.user_id === studentId && r.status === 'active');
+      if (onThisSection) {
+        const s = Sections.current();
+        const label = s ? `Enrolled: ${s.code || s.name}` : 'Enrolled';
+        return `<span class="badge badge-success" style="font-size: 0.65rem;">${escapeHtml(label)}</span>`;
+      }
+
+      return `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; border: 1px solid var(--border-color); background: transparent; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); enrollInCurrentSection('${studentId}')">+ Enroll</button>`;
+    }
+
+    /** Enrol onto whichever section the Sections tab has selected. */
+    async function enrollInCurrentSection(studentId) {
+      if (!window.Sections || !Sections.currentId) {
+        Toast.warning('No section selected', 'Open the Sections tab and pick one first');
+        return switchTab('sections');
+      }
+      try {
+        await API.request(`/instructor/sections/${Sections.currentId}/students`, {
+          method: 'POST', body: { user_id: studentId },
+        });
+        const s = Sections.current();
+        Toast.success('Enrolled', `Added to ${s ? s.name : 'the section'}`);
+        await Sections.loadRoster();
+        renderStudentsList();
+      } catch (err) {
+        Toast.error('Could not enroll', err.message);
+      }
+    }
+
     function renderStudentsList() {
       const container = document.getElementById('studentsList');
       if (!container) return;
@@ -1303,6 +1577,7 @@
             ${!isMyStudent
               ? `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; background: var(--primary, #0c234b); color: white; border: none; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); claimStudent('${student.student_id}')">+ Claim</button>`
               : `<button style="font-size: 0.65rem; padding: 0.1rem 0.35rem; border: 1px solid var(--border-color); color: var(--gray-500); background: transparent; border-radius: 4px; cursor: pointer;" onclick="event.stopPropagation(); releaseStudent('${student.student_id}')">Release</button>`}
+            ${renderEnrollControl(student.student_id)}
           </div>
 
           <!-- Expandable detail panel -->
@@ -1478,7 +1753,7 @@
                 <div style="display: flex; gap: 0.4rem; align-items: center;">
                   ${l.status === 'active' ? `
                     <label style="display: flex; align-items: center; gap: 0.2rem; font-size: 0.75rem; cursor: pointer;">
-                      <input type="checkbox" ${inet ? 'checked' : ''} onchange="event.stopPropagation(); toggleLaneInternet('${l.lane_id}', this.checked)" style="width: auto;">
+                      <input type="checkbox" ${inet ? 'checked' : ''} onchange="event.stopPropagation(); toggleLaneInternet('${l.lane_id}', this.checked, this)" style="width: auto;">
                       Internet
                     </label>
                     <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="event.stopPropagation(); connectToLane('${l.lane_id}')">Connect</button>
@@ -1914,67 +2189,9 @@
     // LAB ENVIRONMENTS
     // ============================================================================
 
-    async function loadLabEnvironments() {
-      const container = document.getElementById('labEnvContent');
-      container.innerHTML = '<p style="color: var(--gray-500);">Loading lab environments...</p>';
-
-      try {
-        const lanes = await API.request('/instructor/lanes');
-
-        if (lanes.length === 0) {
-          container.innerHTML = `<div class="empty-state"><div class="icon">🖥️</div><h3>No Active Labs</h3><p>Your students don't have any deployed lab environments yet.</p></div>`;
-          return;
-        }
-
-        container.innerHTML = `
-          <table style="width: 100%; border-collapse: collapse;">
-            <thead>
-              <tr style="background: var(--gray-50); font-size: 0.8rem; text-transform: uppercase; color: var(--gray-500);">
-                <th style="text-align: left; padding: 0.6rem 0.75rem;">Student</th>
-                <th style="text-align: left; padding: 0.6rem 0.75rem;">Status</th>
-                <th style="text-align: left; padding: 0.6rem 0.75rem;">VXLAN</th>
-                <th style="text-align: left; padding: 0.6rem 0.75rem;">IPs</th>
-                <th style="text-align: left; padding: 0.6rem 0.75rem;">Internet</th>
-                <th style="text-align: left; padding: 0.6rem 0.75rem;">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${lanes.map(l => {
-                const statusColors = { active: 'var(--success)', deploying: 'var(--warning)', error: 'var(--danger)', pending: 'var(--primary-light, #1e5288)' };
-                const statusColor = statusColors[l.status] || 'var(--text-muted)';
-                const inet = l.config?.internet_enabled;
-                return `
-                  <tr style="border-bottom: 1px solid var(--gray-100);">
-                    <td style="padding: 0.6rem 0.75rem;">
-                      <strong style="font-size: 0.9rem;">${l.student_name}</strong><br>
-                      <code style="font-size: 0.75rem; color: var(--gray-500);">${l.student_email}</code>
-                    </td>
-                    <td style="padding: 0.6rem 0.75rem;">
-                      <span style="display: inline-block; padding: 0.15rem 0.5rem; border-radius: 12px; font-size: 0.75rem; font-weight: 600; color: white; background: ${statusColor};">${l.status}</span>
-                    </td>
-                    <td style="padding: 0.6rem 0.75rem; font-size: 0.85rem;">${l.vxlan_id || '—'}</td>
-                    <td style="padding: 0.6rem 0.75rem;" id="lane-ips-${l.lane_id}">
-                      <button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="fetchLaneIPs('${l.lane_id}')">Load IPs</button>
-                    </td>
-                    <td style="padding: 0.6rem 0.75rem;">
-                      ${l.status === 'active' ? `
-                        <label style="display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
-                          <input type="checkbox" ${inet ? 'checked' : ''} onchange="toggleLaneInternet('${l.lane_id}', this.checked)" style="width: auto;">
-                          <span style="font-size: 0.8rem;">${inet ? 'On' : 'Off'}</span>
-                        </label>
-                      ` : '<span style="font-size: 0.8rem; color: var(--gray-400);">—</span>'}
-                    </td>
-                    <td style="padding: 0.6rem 0.75rem;">
-                      ${l.status === 'active' ? `<button class="btn btn-sm btn-outline" style="font-size: 0.7rem; padding: 0.15rem 0.4rem;" onclick="connectToLane('${l.lane_id}')">Connect</button>` : ''}
-                    </td>
-                  </tr>`;
-              }).join('')}
-            </tbody>
-          </table>`;
-      } catch (e) {
-        container.innerHTML = `<p style="color: var(--danger);">Error: ${e.message}</p>`;
-      }
-    }
+    // loadLabEnvironments() lived here. It rendered into #labEnvContent, which
+    // this page has never contained, so every call threw. The lane list that
+    // actually works is loadStudentLabsInline(), rendered per student card.
 
     async function fetchLaneIPs(laneId) {
       const cell = document.getElementById(`lane-ips-${laneId}`);
@@ -2008,22 +2225,24 @@
       }
     }
 
-    async function toggleLaneInternet(laneId, enabled) {
+    async function toggleLaneInternet(laneId, enabled, checkbox) {
       try {
         await API.request(`/instructor/lanes/${laneId}/internet`, { method: 'PATCH', body: { enabled } });
         Toast.success('Internet ' + (enabled ? 'Enabled' : 'Disabled'), `Lane updated`);
       } catch (e) {
         Toast.error('Error', e.message);
-        loadLabEnvironments(); // Revert checkbox
+        // Put the checkbox back where it was. This used to call
+        // loadLabEnvironments(), which wrote to #labEnvContent — an element
+        // that does not exist anywhere in this page, so the revert threw
+        // "Cannot set properties of null" and the checkbox stayed wrong.
+        if (checkbox) checkbox.checked = !enabled;
       }
     }
 
+    // Was: open #addStudentModal and hope. That modal is gone, and its own
+    // comment recorded that this never did what the name says.
     function showAddStudentSearchModal() {
-      // Reuse existing modal structure
-      const modal = document.getElementById('addStudentModal');
-      if (!modal) { Toast.warning('Not Available', 'Student search not available'); return; }
-      // For now, open the add student modal
-      modal.classList.add('active');
+      switchTab('sections');
     }
 
     // ============================================================================
@@ -2149,12 +2368,15 @@
 
       // Lazy-load Dashboard groups
       if (tabName === 'dashboard') loadDashboardTab();
+      if (tabName === 'sections' && window.Sections) Sections.load();
     }
     
     // Modal functions
-    function showAddStudentModal() {
-      document.getElementById('addStudentModal').classList.add('active');
-    }
+    // showAddStudentModal() is gone. It opened a modal labelled "Add Student to
+    // Roster" whose effect was to create an instructor_assignments row, and it
+    // 404'd when no account existed — exactly the case an instructor opens it
+    // to solve. #assignProfileModal already assigns a profile properly from a
+    // roster row, and the Sections tab is what actually adds people.
     
     function closeModal(modalId) {
       document.getElementById(modalId).classList.remove('active');
@@ -2646,34 +2868,6 @@
       }
     }
 
-    // Submit add student
-    async function submitAddStudent(event) {
-      event.preventDefault();
-      
-      const email = document.getElementById('studentEmail').value;
-      const profileId = document.getElementById('assignProfile').value;
-      const dueDate = document.getElementById('dueDate').value;
-      const notes = document.getElementById('assignNotes').value;
-      
-      try {
-        // First we need to find the student by email
-        // For now, we'll just create the assignment (backend should handle finding user)
-        await API.instructor.assign({
-          student_email: email,
-          profile_id: profileId || null,
-          due_date: dueDate || null,
-          notes: notes
-        });
-        
-        Toast.success('Success', 'Student added to roster');
-        closeModal('addStudentModal');
-        await loadDashboard();
-        
-      } catch (error) {
-        console.error('Failed to add student:', error);
-        Toast.error('Error', error.message || 'Failed to add student');
-      }
-    }
     
     // Open review modal
     async function openReviewModal(progressId, partNumber) {
@@ -3954,5 +4148,13 @@
       .catch(err => Toast.error('Download Failed', err.message));
     }
   </script>
+
+  <!-- Loaded AFTER the inline block, not before: both files call into globals it
+       defines (Toast, closeModal, escapeHtml, switchTab) and would throw at load
+       time if they ran first. Same constraint CLE documents at the top of its own
+       roster-import.js. -->
+  <script src="/js/csv.js"></script>
+  <script src="/ciab/js/instructor-sections.js"></script>
+  <script src="/ciab/js/instructor-roster-import.js"></script>
 </body>
 </html>

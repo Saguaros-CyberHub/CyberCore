@@ -33,6 +33,13 @@ async function ensureScenariosSeeded() {
 const MAX_PAYLOAD_BYTES = 10 * 1024 * 1024; // chart PNGs can be heavy
 
 router.use(authenticateToken);
+// Clinic-in-a-Box is only for students an instructor enrolled. The gate lives
+// HERE rather than at the mount in routes/api.js because this router applies
+// its own authenticateToken above -- a mount-level gate would run before
+// req.user existed and 401 every request. Instructors and admins pass without
+// a query.
+const { requireCiabAccess } = require('../utils/enrollment');
+router.use(requireCiabAccess);
 
 // ============================================================================
 // HELPERS

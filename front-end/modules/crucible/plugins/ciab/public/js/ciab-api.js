@@ -80,11 +80,6 @@ API.generate = async function(config) {
   return API.request('/generate', { method: 'POST', body: config });
 };
 
-// Chat endpoint
-API.chat = async function(message, sessionId) {
-  return API.request('/chat', { method: 'POST', body: { message, sessionId } });
-};
-
 // Config endpoint
 API.getConfig = async function() {
   return API.request('/config');

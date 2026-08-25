@@ -137,6 +137,17 @@ function labOperationsInFlight(materialId) {
     // 'complete' entries linger for an hour so a late poller can still read the
     // outcome; they are finished work, not a conflict.
     if (!p || p.phase === 'complete') continue;
+    // Neither is an entry whose owner has stopped beating. Without this a deploy
+    // that died between initProgress and finishProgress locked its lab until the
+    // process restarted, and every subsequent attempt was told to "wait for it to
+    // finish" — about an operation that no longer existed.
+    if (p.stale) {
+      console.warn(
+        `[VulnLab] Progress entry ${progressId} has not beaten in ${p.idle_s}s — treating it `
+        + `as dead (phase '${p.phase}', ${p.completed}/${p.total}). Whatever owned it is gone.`
+      );
+      continue;
+    }
     const suffix = progressId.slice(groupKey.length);
     out.push({
       progressId,
@@ -145,6 +156,7 @@ function labOperationsInFlight(materialId) {
       phase_detail: p.phase_detail,
       completed: p.completed,
       total: p.total,
+      idle_s: p.idle_s,
     });
   }
   return out;
@@ -178,9 +190,16 @@ function assertNoConflictingLabOperation({ materialId, userId = null, ignoreProg
 
   const c = conflicts[0];
   const who = c.userId ? 'one student of this lab' : 'this lab';
+  // Say how long it has been quiet. "Wait for it to finish" is the right advice
+  // for a deploy mid-clone and useless advice for one that died, and the two are
+  // indistinguishable from the operator's side without this number.
+  const idle = Number.isFinite(c.idle_s) && c.idle_s > 30
+    ? ` Last progress ${c.idle_s}s ago; it is treated as abandoned after `
+      + `${Math.round(laneDeployer.PROGRESS_STALE_AFTER_MS / 1000)}s of silence.`
+    : '';
   const err = new Error(
-    `Another operation on ${who} is still running (${c.completed}/${c.total}, ${c.phase_detail || c.phase}). ` +
-    `Wait for it to finish — running both at once would leave machines behind with nothing pointing at them.`
+    `Another operation on ${who} is still running (${c.completed}/${c.total}, ${c.phase_detail || c.phase}).` +
+    `${idle} Wait for it to finish — running both at once would leave machines behind with nothing pointing at them.`
   );
   err.status = 409;
   throw err;
