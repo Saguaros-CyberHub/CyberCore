@@ -626,11 +626,30 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       // 30s, and the catch below no longer fails a target the sweeper has
       // advanced, this poll is advisory. Fail fast and let the sweeper decide.
       const status = await pollExecStatus(t.node, t.vmid, pid, 15000);
-      if (!status.exited || status.exitcode !== 0) {
+
+      // A TIMEOUT IS NOT A FAILURE, and conflating the two is what reported a
+      // live attack as failed.
+      //
+      // `exited: false` means only that we could not watch the exec finish --
+      // on this cluster usually a transient 596 on the pveproxy -> pvedaemon
+      // hop that exec-status crosses. The wrapper's state file is the authority
+      // and the sweeper reads it within 30s. If the wrapper genuinely died
+      // without writing anything, attack-worker terminalizes the target with
+      // "wrapper exited before writing any state", which is both accurate and
+      // more useful than anything guessable from here.
+      //
+      // Shortening this poll to 15s made the old behaviour strictly worse: the
+      // sweeper only claims 'dispatching' targets after 20s, so a compare-and-set
+      // guard against it could never fire and the dispatcher always won.
+      //
+      // A non-zero EXIT is different -- that is the guest telling us staging
+      // actually failed (no setsid, bad base64), and it should fail fast.
+      if (status.exited && status.exitcode !== 0) {
         throw new Error(
           `staging exited ${status.exitcode}: ${(status.stderr || status.stdout || '').slice(0, 300)}`
         );
       }
+      const staged = status.exited && status.exitcode === 0;
 
       const expectedFinish = startEpoch + (selection.durationSeconds || selection.capSeconds);
       // Only move the status if the sweeper has not already moved it further.
@@ -638,12 +657,22 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       // 'dispatching' targets after 20s -- so by the time we get here it may
       // already have read the guest's state file and set 'running'. Writing
       // 'scheduled' unconditionally would walk that backwards.
+      // expected_finish_at is set either way -- attack-worker schedules its
+      // finishing poll off it, and a target with no deadline is one the sweeper
+      // never checks at the right moment.
+      //
+      // The STATUS only advances when staging was actually confirmed. Moving an
+      // unconfirmed target to 'scheduled' would hide it from the sweeper's
+      // empty-state check, which only fires while status is 'dispatching' --
+      // so a wrapper that never started would sit at 'scheduled' forever
+      // instead of being failed with a real reason.
       await query(
         `UPDATE cle_attack_target
-            SET status = CASE WHEN status = 'dispatching' THEN 'scheduled' ELSE status END,
+            SET status = CASE WHEN status = 'dispatching' AND $4::boolean
+                              THEN 'scheduled' ELSE status END,
                 expected_finish_at = to_timestamp($3), error = NULL, updated_at = NOW()
           WHERE run_id = $1 AND lane_id = $2`,
-        [runId, t.lane_id, expectedFinish]
+        [runId, t.lane_id, expectedFinish, staged]
       );
       // Cheap on a hit, and saves the whole ladder next time.
       await attackTarget.cacheLoggenTarget(t.lane_id, {

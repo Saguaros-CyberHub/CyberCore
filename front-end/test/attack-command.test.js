@@ -268,3 +268,34 @@ test('the state line reports which producer made the events', () => {
   const old = runner.parseGuestState('STATE=done rc=0 end=123 lines=76 skew=1 fb=0 ref=abc\nALIVE=0');
   assert.strictEqual(old.src, null);
 });
+
+test('a staging poll timeout is not treated as a failure', () => {
+  // pollExecStatus returns {exited:false, exitcode:-1, stderr:'Timed out'} when
+  // it cannot watch the exec finish — on this cluster usually a transient 596
+  // on the exec-status hop. That says nothing about whether the wrapper ran.
+  //
+  // Treating it as a failure reported a live T1005 as failed while it was
+  // generating a visible spike in Kibana, and shortening the poll to 15s made
+  // it worse: the sweeper only claims 'dispatching' targets after 20s, so no
+  // compare-and-set guard against it could ever fire.
+  const SRC = runner.dispatchRun.toString();
+  assert.ok(
+    /if \(status\.exited && status\.exitcode !== 0\)/.test(SRC),
+    'only a definite non-zero EXIT may throw; a timeout must fall through'
+  );
+  assert.ok(
+    !/if \(!status\.exited \|\| status\.exitcode !== 0\)/.test(SRC),
+    'a timeout must not be conflated with a staging failure'
+  );
+});
+
+test('an unconfirmed staging leaves the target for the sweeper', () => {
+  // Advancing it to 'scheduled' would hide it from attack-worker's empty-state
+  // check, which only fires while status is 'dispatching'. A wrapper that never
+  // started would then sit at 'scheduled' forever instead of being failed with
+  // "wrapper exited before writing any state".
+  const SRC = runner.dispatchRun.toString();
+  assert.ok(/AND \$4::boolean/.test(SRC), 'status must advance only when staging was confirmed');
+  assert.ok(/expected_finish_at = to_timestamp\(\$3\)/.test(SRC),
+    'the deadline must be set either way, or the sweeper never checks at the right moment');
+});
