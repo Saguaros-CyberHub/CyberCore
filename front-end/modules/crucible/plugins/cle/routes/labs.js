@@ -28,6 +28,7 @@ const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { resolveLaneWorkstationCredential } = require('../../../../../src/utils/lane-credentials');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
+const challengeDeployer = require('../../../../../src/utils/challenge-lane-deployer');
 const { getManagedCourse } = require('../utils/course-access');
 const { resolveTargetStudents, excludeStudentsWithLab, combineExclusions, courseStaffIds } = require('../utils/students');
 const vulnLab = require('../utils/vuln-lab-provision');
@@ -1019,6 +1020,150 @@ router.post('/:labId/students/:userId/redeploy', instructorOnly, async (req, res
         courseId, course: ctx.course, labId, userId, plan, resetFlags,
         progressId: claimedId,
       });
+    } finally {
+      laneDeployer.finishProgress(claimedId);
+    }
+  })();
+});
+
+/**
+ * POST /:labId/students/:userId/rebuild-machines — rebuild SOME of one
+ * student's machines, in place.
+ *
+ * The whole-environment Redeploy destroys the lane and builds a new one, which
+ * costs the student every machine including the ones that were fine. This keeps
+ * the lane, the gateway, the DHCP reservations, the consoles and the Guacamole
+ * connections, and re-clones only the machines named — so a broken web01 does
+ * not cost a domain the student has already worked in.
+ *
+ * Their captured flags survive automatically: cybercore_lane_flag CASCADEs off
+ * the LANE row, which is not deleted here, and ensureLaneFlags re-plants with
+ * ON CONFLICT DO UPDATE SET flag_value = <existing>.
+ *
+ * Refused, with an actionable message, when the environment cannot support it:
+ * an attached environment (its unit is the module instance, not a VM) and a
+ * live-GOAD one (the domain is provisioned across every machine at once, so a
+ * lone rebuilt DC would come back outside it). Both point at the whole-
+ * environment rebuild instead.
+ *
+ * Body: { vm_names: string[] }   Responds 202.
+ */
+router.post('/:labId/students/:userId/rebuild-machines', instructorOnly, async (req, res) => {
+  const { courseId, labId, userId } = req.params;
+  let claimed = null;
+  let ctx = null;
+  try {
+    const names = req.body?.vm_names;
+    if (!Array.isArray(names) || names.length === 0) {
+      return res.status(400).json({ error: 'non-empty vm_names array required' });
+    }
+    const vmNames = [...new Set(
+      names.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()))];
+    if (!vmNames.length) {
+      return res.status(400).json({ error: 'no valid machine names in the request' });
+    }
+
+    const course = await getCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+    const lab = await getOwnedLab(labId, courseId);
+    if (!lab) return res.status(404).json({ error: 'Environment not found in this course' });
+
+    // Same staff exemption every other per-student route uses.
+    const { students, skipped } = await resolveTargetStudents(courseId, [userId], {
+      extraUserIds: courseStaffIds(course, req.user),
+    });
+    if (!students.length) {
+      return res.status(404).json({
+        error: skipped[0]?.reason
+          ? `Cannot rebuild for this student: ${skipped[0].reason}`
+          : 'Student is not actively enrolled in this course',
+      });
+    }
+    const student = students[0];
+
+    // The student's OWN lane for this environment. An attached environment has
+    // no lane of its own — it rides the student's workstation lane — so this
+    // finding nothing is itself the "attach mode" answer.
+    const laneRes = await cybercoreQuery(
+      `SELECT lane_id FROM cybercore_lane
+        WHERE user_id = $1 AND config->>'material_id' = $2
+          AND status <> 'deleted'
+        ORDER BY created_at DESC LIMIT 1`,
+      [userId, labId]
+    );
+    if (!laneRes.rows.length) {
+      return res.status(409).json({
+        error: 'This student\u2019s copy of the environment is attached to their workstation '
+             + 'lane rather than having one of its own, so its machines cannot be rebuilt '
+             + 'individually. Use the whole-environment Redeploy.',
+      });
+    }
+    const laneId = laneRes.rows[0].lane_id;
+
+    // Check and claim in ONE synchronous block — see the per-student redeploy.
+    // Student scope: another student on this lab is independent, but this
+    // student's own redeploy or teardown must not overlap.
+    vulnLab.assertNoConflictingLabOperation({ materialId: labId, userId });
+    claimed = vulnLab.progressIdForLabStudent(labId, userId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Rebuild machines \u2014 ${student.email}`, 1);
+    laneDeployer.setPhase(progress, 'preparing',
+      `Rebuilding ${vmNames.join(', ')}`);
+
+    audit.log({
+      req,
+      action: 'lane.redeployed',
+      source: 'cle',
+      target:     { type: 'material', id: labId },
+      targetUser: { id: userId, label: student.email },
+      metadata: {
+        course_id: courseId, material_id: labId, mode: 'in_place_vms',
+        vm_names: vmNames, lane_id: laneId,
+      },
+    });
+
+    res.status(202).json({
+      success: true,
+      message: `Rebuilding ${vmNames.length} machine(s) for ${student.email}`,
+      lab_id: labId, user_id: userId, lane_id: laneId, vm_names: vmNames,
+      progress_url: `/api/cle/courses/${courseId}/labs/${labId}/progress?user_id=${encodeURIComponent(userId)}`,
+    });
+
+    ctx = { laneId, vmNames, progress, email: student.email };
+  } catch (error) {
+    console.error('[CLE] Machine rebuild pre-flight error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    if (res.headersSent) return;
+    return res.status(error.status || 500).json({ error: error.message });
+  }
+
+  // ── background ───────────────────────────────────────────────────────────
+  const claimedId = claimed;
+  const { laneId, vmNames, progress, email } = ctx;
+  (async () => {
+    try {
+      const r = await challengeDeployer.rebuildLaneChallengeVms({
+        laneId, vmNames, progress,
+      });
+      if (r.errors.length) {
+        // Persisted, so it outlives the hour-long progress entry and a restart —
+        // and so the Environments table can badge the row.
+        await setRedeployError(labId, userId, r.errors[0]);
+        progress.failed++;
+      } else {
+        await setRedeployError(labId, userId, null);
+        progress.succeeded++;
+      }
+      progress.completed = 1;
+    } catch (err) {
+      // A pre-flight throw means nothing was destroyed and the student still
+      // has every machine — say so rather than reporting a half-rebuild.
+      const msg = err.destroyed === false
+        ? `${err.message} Nothing was changed.`
+        : err.message;
+      await setRedeployError(labId, userId, msg);
+      if (progress) { progress.error = msg; progress.failed++; progress.completed = 1; }
+      console.error(`[CLE] Machine rebuild failed for ${email}: ${err.message}`);
     } finally {
       laneDeployer.finishProgress(claimedId);
     }
