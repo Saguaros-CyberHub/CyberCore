@@ -140,6 +140,24 @@
       border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb;
     }
     .vm-bulkbar-count { font-size: 0.82rem; color: var(--text-secondary, #4b5563); }
+
+    /* Student search. Lives OUTSIDE the re-rendered content div, so the 8s poll
+       cannot destroy the input mid-keystroke and take the caret with it. */
+    .roster-search { position: relative; margin: 0 0 0.75rem; max-width: 22rem; }
+    .roster-search input {
+      width: 100%; padding: 0.45rem 2rem 0.45rem 0.6rem;
+      border: 1px solid #d1d5db; border-radius: 8px; font-size: 0.85rem;
+    }
+    .roster-search input:focus { outline: 2px solid var(--primary-light, #1e5288); outline-offset: -1px; }
+    .roster-search-clear {
+      position: absolute; right: 0.35rem; top: 50%; transform: translateY(-50%);
+      border: 0; background: none; cursor: pointer; font-size: 1rem; line-height: 1;
+      color: var(--text-muted, #6b7280); padding: 0.15rem 0.3rem;
+    }
+    .roster-search-clear:hover { color: #e53e3e; }
+    /* Called out rather than folded into the count: a selected row hidden by the
+       filter is still acted on, and that number must never surprise anyone. */
+    .bulk-hidden-note { color: #b7791f; font-weight: 600; }
     .vm-bulkbar .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
 
     /* ====================================================================
@@ -423,6 +441,14 @@
             <div class="info-box">
               <p>Provision workstation VMs for your students. Each student gets their own isolated VXLAN lane.</p>
             </div>
+            <div class="roster-search">
+              <input type="search" id="vmSearch" placeholder="Search students\u2026"
+                     aria-label="Search students by name, email, VM or VXLAN"
+                     oninput="onVMSearch(this.value)">
+              <button type="button" class="roster-search-clear" id="vmSearchClear"
+                      style="display:none;" aria-label="Clear search"
+                      onclick="clearVMSearch()">&times;</button>
+            </div>
             <div id="vmManagementContent"></div>
           </div>
 
@@ -430,6 +456,14 @@
           <div class="detail-tab-pane" id="vulnerable-labs-pane">
             <div class="info-box">
               <p>Deploy course environments for specific learning objectives. Students can only reach the environments assigned to them.</p>
+            </div>
+            <div class="roster-search">
+              <input type="search" id="labSearch" placeholder="Search students\u2026"
+                     aria-label="Search students by name, email or machine"
+                     oninput="onLabSearch(this.value)">
+              <button type="button" class="roster-search-clear" id="labSearchClear"
+                      style="display:none;" aria-label="Clear search"
+                      onclick="clearLabSearch()">&times;</button>
             </div>
             <div id="vulnerableLabsContent"></div>
           </div>
@@ -1577,6 +1611,22 @@
     let _vmRows = [];              // the array the CURRENT table was rendered from
     let _vmBulkBusy = false;       // a bulk request is in flight
     let _vmBusyLanes = new Set();  // aimed at, before the server admits 'deploying'
+    let _vmSearch = '';            // filters what is RENDERED, never what is selected
+
+    /**
+     * Case-insensitive AND-match of every whitespace-separated term against the
+     * row's searchable fields.
+     *
+     * AND rather than OR so "jacob wil" narrows instead of widening, and
+     * per-term so the order typed does not matter — "wil jacob" finds the same
+     * row. Fields are joined with a space, so a term never matches ACROSS two of
+     * them (an email and a VM name are not one string).
+     */
+    function _matchesSearch(parts, term) {
+      if (!term) return true;
+      const hay = parts.filter(Boolean).join(' ').toLowerCase();
+      return term.toLowerCase().split(/\s+/).filter(Boolean).every(t => hay.includes(t));
+    }
 
     /** A row the instructor may put in a bulk action. */
     function _vmSelectable(v) {
@@ -1680,18 +1730,32 @@
      */
     function _syncVMBulkBar() {
       const boxes = [...document.querySelectorAll('#vmManagementContent .vm-select:not(:disabled)')];
-      const n = boxes.filter(b => b.checked).length;
+      const visible = boxes.filter(b => b.checked).length;
       const total = boxes.length;
+
+      // A search filters what is RENDERED, never what is selected — a row the
+      // instructor deliberately ticked and then filtered out is still in the Set
+      // and _selectedVMRows() still returns it, so Delete really will destroy it.
+      // Silently dropping it would be worse (it discards a deliberate act), so
+      // the honest fix is to make the number impossible to miss.
+      const shown = new Set(boxes.map(b => b.dataset.vmSelectLane));
+      const hidden = [..._vmSelected].filter(id => !shown.has(id)).length;
+      const n = visible + hidden;
 
       const all = document.getElementById('vmSelectAll');
       if (all) {
-        all.checked = total > 0 && n === total;
-        all.indeterminate = n > 0 && n < total;
+        // Select-all is scoped to what is on screen: ticking it while a search is
+        // active must not silently reach the rows the search hid.
+        all.checked = total > 0 && visible === total;
+        all.indeterminate = visible > 0 && visible < total;
       }
       const count = document.getElementById('vmBulkCount');
       if (count) {
         count.innerHTML = n
-          ? '<strong>' + n + '</strong> of ' + total + ' lane' + (total === 1 ? '' : 's') + ' selected'
+          ? '<strong>' + n + '</strong> lane' + (n === 1 ? '' : 's') + ' selected'
+            + (hidden
+                ? ' <span class="bulk-hidden-note">(' + hidden + ' hidden by search)</span>'
+                : ' of ' + total)
           : 'Select lanes to redeploy or delete';
       }
       ['vmBulkRedeployBtn', 'vmBulkDeleteBtn', 'vmClearBtn'].forEach(id => {
@@ -1741,158 +1805,198 @@
         vms.forEach(v => { if (v.lane_status !== 'deploying') _vmBusyLanes.delete(v.lane_id); });
         _vmRows = vms;
 
-        let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Deploy Workstations</button>
-          <div id="provisionProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
+        renderVMManagement();
 
-        if (vms.length === 0) {
-          html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No workstation VMs provisioned yet.</p>';
-        } else {
-          const selCount = vms.filter(v => _vmSelected.has(v.lane_id)).length;
-          const selTotal = vms.filter(_vmSelectable).length;
-          // lane_status, NOT power_state: routes/vms.js collapses power_state to the
-          // lane status whenever the lane is not active, and _powerBadge also renders
-          // raw live Proxmox strings through the same cell. Filtering on it would be
-          // filtering on a display value.
-          const errCount = vms.filter(v => v.lane_status === 'error' && _vmSelectable(v)).length;
-          const dis = selCount ? '' : ' disabled';
-
-          html += `<div class="vm-bulkbar">
-            <span class="vm-bulkbar-count" id="vmBulkCount" aria-live="polite">
-              ${selCount ? `<strong>${selCount}</strong> of ${selTotal} lane${selTotal === 1 ? '' : 's'} selected`
-                         : 'Select lanes to redeploy or delete'}
-            </span>
-            <span style="flex:1"></span>
-            ${errCount ? `<button type="button" class="btn btn-sm btn-outline" id="vmSelectErrorsBtn"
-                title="Adds every lane whose deploy failed to the current selection"
-                onclick="selectVMErrorLanes()">Select ${errCount} broken lane${errCount === 1 ? '' : 's'}</button>` : ''}
-            <button type="button" class="btn btn-sm btn-outline" id="vmClearBtn"
-                    onclick="clearVMSelection()"${dis}>Clear</button>
-            <button type="button" class="btn btn-sm btn-outline" id="vmBulkRedeployBtn"
-                    style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
-                    onclick="bulkRedeployLanes(this)"${dis}>Redeploy</button>
-            <button type="button" class="btn btn-sm btn-outline" id="vmBulkDeleteBtn"
-                    style="color:#e53e3e;border-color:#e53e3e;"
-                    onclick="bulkDeleteLanes(this)"${dis}>Delete</button>
-          </div>`;
-
-          html += `<table class="students-table">
-            <thead><tr>
-              <th style="width:2.25rem;text-align:center;">
-                <input type="checkbox" id="vmSelectAll" onchange="toggleVMSelectAll(this)"
-                       aria-label="Select all lanes">
-              </th>
-              <th>Student</th>
-              <th>VM Name</th>
-              <th>Lane (VXLAN)</th>
-              <th>Connection</th>
-              <th>Credentials</th>
-              <th>State</th>
-              <th>Actions</th>
-            </tr></thead>
-            <tbody>`;
-
-          vms.forEach(v => {
-            const studentName = [v.first_name, v.last_name].filter(Boolean).join(' ');
-            const studentLabel = (studentName ? `${escHtml(studentName)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(v.student_email)}</span>` : escHtml(v.student_email))
-              + _ownerBadge(v);
-            const laneLabel = v.vxlan_id
-              ? `<span style="font-size:0.75rem;color:var(--text-muted);">VXLAN ${escHtml(String(v.vxlan_id))}</span>`
-              : '<span style="color:var(--text-muted);">—</span>';
-
-            // The endpoint is always the lane gateway's WAN IP. console_via says
-            // which DNAT is carrying it: 'gateway' = the per-lane rule we
-            // installed; 'gateway-baked-dnat' = ours failed, relying on the
-            // template's built-in 3389 rule (works only if the guest took .50);
-            // 'unreachable' = no rule at all for this protocol.
-            let connCell = '<span style="color:var(--text-muted);">—</span>';
-            if (v.console_endpoint) {
-              const proto = (v.console_protocol || 'rdp').toUpperCase();
-              const warn = v.console_via === 'unreachable'
-                ? ` <span title="No gateway DNAT for this port — the console will not connect" style="color:#e53e3e;">&#10007;</span>`
-                : v.console_via === 'gateway-baked-dnat'
-                ? ` <span title="Per-lane DNAT install failed; using the template's baked 3389 rule. Works only if the guest took the .50 lease." style="color:#d69e2e;">&#9888;</span>`
-                : '';
-              connCell = `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.console_endpoint)}</span>`
-                       + `<br><span style="font-size:0.7rem;color:var(--text-muted);">${escHtml(proto)}${warn}</span>`;
-            }
-
-            const credCell = v.workstation_user
-              ? `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.workstation_user)}</span>`
-                + (v.workstation_pass ? `<br><span style="font-family:monospace;font-size:0.72rem;color:var(--text-muted);">${escHtml(v.workstation_pass)}</span>` : '')
-              : '<span style="font-size:0.75rem;color:var(--text-muted);">template default</span>';
-
-            const errTitle = v.error ? ` title="${escAttr(v.error)}"` : '';
-
-            // What the machine was actually sized to, plus a marker when Proxmox
-            // refused part of the request (most often a disk target below the
-            // template's own image, which cannot be shrunk).
-            const sizeCell = v.resources
-              ? `<br><span style="font-size:0.7rem;color:var(--text-muted);" title="${escAttr((v.resource_warnings || []).join('; '))}">`
-                + `${escHtml(describeResources(v.resources))}`
-                + `${(v.resource_warnings || []).length ? ' <span style="color:#d69e2e;">&#9888;</span>' : ''}</span>`
-              : '';
-
-            const sel = _vmSelected.has(v.lane_id);
-            const selectable = _vmSelectable(v);
-            const who = [v.first_name, v.last_name].filter(Boolean).join(' ')
-              || v.student_email || 'this lane';
-            // Pre-disabled per-row buttons, _labActionCell's idiom. Dimming these
-            // at request time rather than waiting for the server to flip
-            // lane_status closes a several-second window in which Delete points at
-            // a lane that is already mid-rebuild.
-            const rowDis = selectable ? '' : ' disabled';
-            const busyTitle = selectable ? '' : ' title="This lane is being deployed or rebuilt"';
-
-            html += `<tr${sel ? ' class="is-selected"' : (selectable ? '' : ' class="is-busy"')}${errTitle} data-lane-id="${escAttr(v.lane_id)}">
-              <td style="text-align:center;">
-                <input type="checkbox" class="vm-select"
-                       data-vm-select-lane="${escAttr(v.lane_id)}"
-                       data-lane-status="${escAttr(v.lane_status || '')}"
-                       aria-label="Select ${escAttr(who)}"
-                       ${sel ? 'checked' : ''}${rowDis}${busyTitle}
-                       onchange="toggleVMSelect(this)">
-              </td>
-              <td>${studentLabel}</td>
-              <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}${sizeCell}</td>
-              <td style="font-size:0.85rem;">${laneLabel}</td>
-              <td>${connCell}</td>
-              <td>${credCell}</td>
-              <td>${_powerBadge(v.power_state)}</td>
-              <td style="display:flex;gap:0.4rem;align-items:center;">
-                ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" data-lane-id="${escAttr(v.lane_id)}" onclick="openVMConsole(this.dataset.laneId)"${rowDis}${busyTitle}>Console</button>` : ''}
-                <!-- Topology stays live while a lane rebuilds: it is read-only, and
-                     it is exactly what you want to look at mid-rebuild. -->
-                <button class="btn btn-sm btn-outline" data-lane-id="${escAttr(v.lane_id)}" data-label="${escAttr(v.vm_name || v.lane_id)}" onclick="showLaneTopology(this.dataset.laneId, this.dataset.label)">Topology</button>
-                <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" data-lane-id="${escAttr(v.lane_id)}" onclick="deleteVM(this.dataset.laneId)"${rowDis}${busyTitle}>Delete</button>
-              </td>
-            </tr>`;
-          });
-
-          html += `</tbody></table>`;
-
-          // Auto-refresh while any lane is still deploying
-          if (vms.some(v => v.lane_status === 'deploying')) {
-            _vmRefreshTimer = setTimeout(() => loadVMManagement({ polled: true }), 8000);
-          }
-        }
-
-        // Focus is the one thing a full re-render loses that the Set cannot
-        // restore, and losing it mid-keyboard-selection is how a Space lands on
-        // the wrong row.
-        const focusedLane = (document.activeElement && document.activeElement.dataset)
-          ? document.activeElement.dataset.vmSelectLane : null;
-        document.getElementById('vmManagementContent').innerHTML = html;
-        // `indeterminate` is a PROPERTY and cannot live in the HTML string, so the
-        // header tri-state has to be re-applied after EVERY render.
-        _syncVMBulkBar();
-        if (focusedLane) {
-          const back = document.querySelector(
-            '#vmManagementContent input[data-vm-select-lane="' + CSS.escape(focusedLane) + '"]');
-          if (back) back.focus();
+        // Keep refreshing while ANY lane is deploying — the unfiltered set, so a
+        // search cannot stop the table updating itself.
+        if (vms.some(v => v.lane_status === 'deploying')) {
+          _vmRefreshTimer = setTimeout(() => loadVMManagement({ polled: true }), 8000);
         }
       } catch (e) {
         document.getElementById('vmManagementContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
+    }
+
+    /**
+     * Paint the table from _vmRows, filtered by the current search.
+     *
+     * Split out of loadVMManagement so typing filters instantly instead of
+     * re-fetching on every keystroke. The fetch owns _vmRows and the poll timer;
+     * this owns the DOM.
+     */
+    function renderVMManagement() {
+      const vms = _vmRows.filter(v => _matchesSearch([
+        v.first_name, v.last_name, v.student_email, v.vm_name,
+        v.vxlan_id != null ? 'vxlan ' + v.vxlan_id : null,
+      ], _vmSearch));
+
+      let html = `<button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showProvisionVMModal()">+ Deploy Workstations</button>
+        <div id="provisionProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
+
+      if (vms.length === 0) {
+        // "Nothing matches" and "nothing deployed" are different facts, and
+        // showing the second when the first is true reads as data loss.
+        html += _vmRows.length
+          ? `<p style="color: var(--text-secondary); margin-top: 1rem;">No students match
+             &ldquo;${escHtml(_vmSearch)}&rdquo;. <a href="#" onclick="clearVMSearch();return false;">Clear the search</a>
+             to see all ${_vmRows.length} lane(s).</p>`
+          : '<p style="color: var(--text-secondary); margin-top: 1rem;">No workstation VMs provisioned yet.</p>';
+      } else {
+        const selCount = vms.filter(v => _vmSelected.has(v.lane_id)).length;
+        const selTotal = vms.filter(_vmSelectable).length;
+        // lane_status, NOT power_state: routes/vms.js collapses power_state to the
+        // lane status whenever the lane is not active, and _powerBadge also renders
+        // raw live Proxmox strings through the same cell. Filtering on it would be
+        // filtering on a display value.
+        const errCount = vms.filter(v => v.lane_status === 'error' && _vmSelectable(v)).length;
+        const dis = selCount ? '' : ' disabled';
+
+        html += `<div class="vm-bulkbar">
+          <span class="vm-bulkbar-count" id="vmBulkCount" aria-live="polite">
+            ${selCount ? `<strong>${selCount}</strong> of ${selTotal} lane${selTotal === 1 ? '' : 's'} selected`
+                       : 'Select lanes to redeploy or delete'}
+          </span>
+          <span style="flex:1"></span>
+          ${errCount ? `<button type="button" class="btn btn-sm btn-outline" id="vmSelectErrorsBtn"
+              title="Adds every lane whose deploy failed to the current selection"
+              onclick="selectVMErrorLanes()">Select ${errCount} broken lane${errCount === 1 ? '' : 's'}</button>` : ''}
+          <button type="button" class="btn btn-sm btn-outline" id="vmClearBtn"
+                  onclick="clearVMSelection()"${dis}>Clear</button>
+          <button type="button" class="btn btn-sm btn-outline" id="vmBulkRedeployBtn"
+                  style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
+                  onclick="bulkRedeployLanes(this)"${dis}>Redeploy</button>
+          <button type="button" class="btn btn-sm btn-outline" id="vmBulkDeleteBtn"
+                  style="color:#e53e3e;border-color:#e53e3e;"
+                  onclick="bulkDeleteLanes(this)"${dis}>Delete</button>
+        </div>`;
+
+        html += `<table class="students-table">
+          <thead><tr>
+            <th style="width:2.25rem;text-align:center;">
+              <input type="checkbox" id="vmSelectAll" onchange="toggleVMSelectAll(this)"
+                     aria-label="Select all lanes">
+            </th>
+            <th>Student</th>
+            <th>VM Name</th>
+            <th>Lane (VXLAN)</th>
+            <th>Connection</th>
+            <th>Credentials</th>
+            <th>State</th>
+            <th>Actions</th>
+          </tr></thead>
+          <tbody>`;
+
+        vms.forEach(v => {
+          const studentName = [v.first_name, v.last_name].filter(Boolean).join(' ');
+          const studentLabel = (studentName ? `${escHtml(studentName)}<br><span style="font-size:0.75rem;color:var(--text-muted);">${escHtml(v.student_email)}</span>` : escHtml(v.student_email))
+            + _ownerBadge(v);
+          const laneLabel = v.vxlan_id
+            ? `<span style="font-size:0.75rem;color:var(--text-muted);">VXLAN ${escHtml(String(v.vxlan_id))}</span>`
+            : '<span style="color:var(--text-muted);">—</span>';
+
+          // The endpoint is always the lane gateway's WAN IP. console_via says
+          // which DNAT is carrying it: 'gateway' = the per-lane rule we
+          // installed; 'gateway-baked-dnat' = ours failed, relying on the
+          // template's built-in 3389 rule (works only if the guest took .50);
+          // 'unreachable' = no rule at all for this protocol.
+          let connCell = '<span style="color:var(--text-muted);">—</span>';
+          if (v.console_endpoint) {
+            const proto = (v.console_protocol || 'rdp').toUpperCase();
+            const warn = v.console_via === 'unreachable'
+              ? ` <span title="No gateway DNAT for this port — the console will not connect" style="color:#e53e3e;">&#10007;</span>`
+              : v.console_via === 'gateway-baked-dnat'
+              ? ` <span title="Per-lane DNAT install failed; using the template's baked 3389 rule. Works only if the guest took the .50 lease." style="color:#d69e2e;">&#9888;</span>`
+              : '';
+            connCell = `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.console_endpoint)}</span>`
+                     + `<br><span style="font-size:0.7rem;color:var(--text-muted);">${escHtml(proto)}${warn}</span>`;
+          }
+
+          const credCell = v.workstation_user
+            ? `<span style="font-family:monospace;font-size:0.78rem;">${escHtml(v.workstation_user)}</span>`
+              + (v.workstation_pass ? `<br><span style="font-family:monospace;font-size:0.72rem;color:var(--text-muted);">${escHtml(v.workstation_pass)}</span>` : '')
+            : '<span style="font-size:0.75rem;color:var(--text-muted);">template default</span>';
+
+          const errTitle = v.error ? ` title="${escAttr(v.error)}"` : '';
+
+          // What the machine was actually sized to, plus a marker when Proxmox
+          // refused part of the request (most often a disk target below the
+          // template's own image, which cannot be shrunk).
+          const sizeCell = v.resources
+            ? `<br><span style="font-size:0.7rem;color:var(--text-muted);" title="${escAttr((v.resource_warnings || []).join('; '))}">`
+              + `${escHtml(describeResources(v.resources))}`
+              + `${(v.resource_warnings || []).length ? ' <span style="color:#d69e2e;">&#9888;</span>' : ''}</span>`
+            : '';
+
+          const sel = _vmSelected.has(v.lane_id);
+          const selectable = _vmSelectable(v);
+          const who = [v.first_name, v.last_name].filter(Boolean).join(' ')
+            || v.student_email || 'this lane';
+          // Pre-disabled per-row buttons, _labActionCell's idiom. Dimming these
+          // at request time rather than waiting for the server to flip
+          // lane_status closes a several-second window in which Delete points at
+          // a lane that is already mid-rebuild.
+          const rowDis = selectable ? '' : ' disabled';
+          const busyTitle = selectable ? '' : ' title="This lane is being deployed or rebuilt"';
+
+          html += `<tr${sel ? ' class="is-selected"' : (selectable ? '' : ' class="is-busy"')}${errTitle} data-lane-id="${escAttr(v.lane_id)}">
+            <td style="text-align:center;">
+              <input type="checkbox" class="vm-select"
+                     data-vm-select-lane="${escAttr(v.lane_id)}"
+                     data-lane-status="${escAttr(v.lane_status || '')}"
+                     aria-label="Select ${escAttr(who)}"
+                     ${sel ? 'checked' : ''}${rowDis}${busyTitle}
+                     onchange="toggleVMSelect(this)">
+            </td>
+            <td>${studentLabel}</td>
+            <td style="font-family:monospace;font-size:0.85rem;">${escHtml(v.vm_name)}${sizeCell}</td>
+            <td style="font-size:0.85rem;">${laneLabel}</td>
+            <td>${connCell}</td>
+            <td>${credCell}</td>
+            <td>${_powerBadge(v.power_state)}</td>
+            <td style="display:flex;gap:0.4rem;align-items:center;">
+              ${(v.power_state === 'running' && v.has_console) ? `<button class="btn btn-sm btn-outline" style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);" data-lane-id="${escAttr(v.lane_id)}" onclick="openVMConsole(this.dataset.laneId)"${rowDis}${busyTitle}>Console</button>` : ''}
+              <!-- Topology stays live while a lane rebuilds: it is read-only, and
+                   it is exactly what you want to look at mid-rebuild. -->
+              <button class="btn btn-sm btn-outline" data-lane-id="${escAttr(v.lane_id)}" data-label="${escAttr(v.vm_name || v.lane_id)}" onclick="showLaneTopology(this.dataset.laneId, this.dataset.label)">Topology</button>
+              <button class="btn btn-sm btn-outline" style="color:#e53e3e;border-color:#e53e3e;" data-lane-id="${escAttr(v.lane_id)}" onclick="deleteVM(this.dataset.laneId)"${rowDis}${busyTitle}>Delete</button>
+            </td>
+          </tr>`;
+        });
+
+        html += `</tbody></table>`;
+
+      }
+
+      // Focus is the one thing a full re-render loses that the Set cannot
+      // restore, and losing it mid-keyboard-selection is how a Space lands on
+      // the wrong row.
+      const focusedLane = (document.activeElement && document.activeElement.dataset)
+        ? document.activeElement.dataset.vmSelectLane : null;
+      document.getElementById('vmManagementContent').innerHTML = html;
+      // `indeterminate` is a PROPERTY and cannot live in the HTML string, so the
+      // header tri-state has to be re-applied after EVERY render.
+      _syncVMBulkBar();
+      if (focusedLane) {
+        const back = document.querySelector(
+          '#vmManagementContent input[data-vm-select-lane="' + CSS.escape(focusedLane) + '"]');
+        if (back) back.focus();
+      }
+    }
+
+    function onVMSearch(value) {
+      _vmSearch = value || '';
+      const clear = document.getElementById('vmSearchClear');
+      if (clear) clear.style.display = _vmSearch ? '' : 'none';
+      // Purely a view change: the selection is deliberate and survives it. Rows
+      // that scroll out of view stay selected, and the bulk bar says how many.
+      renderVMManagement();
+    }
+
+    function clearVMSearch() {
+      const box = document.getElementById('vmSearch');
+      if (box) box.value = '';
+      onVMSearch('');
+      if (box) box.focus();
     }
 
     let _labRefreshTimer = null;
@@ -1910,6 +2014,16 @@
     let _labSelected = new Set();
     let _labRowsByLab = {};        // labId -> the rows its table was rendered from
     let _labBulkBusy = false;
+    let _labsData = [];            // the last fetch, so a search re-renders without refetching
+    let _labSearch = '';           // filters what is RENDERED, never what is selected
+
+    /** Does this deployment row match the current Environments search? */
+    function _labRowMatches(d) {
+      return _matchesSearch([
+        d.first_name, d.last_name, d.student_email, d.user_id,
+        ...(d.vms || []).map(v => v.name),
+      ], _labSearch);
+    }
 
     const _labKey = (labId, userId) => labId + '::' + userId;
 
@@ -1954,11 +2068,17 @@
     }
 
     function clearLabSelection(labId) {
+      // Drop every key for this environment from the STATE first, not just the
+      // ones with a checkbox on screen: under an active search the hidden rows
+      // have no checkbox, and clearing only the visible ones would leave them
+      // selected — so the bar would still read "3 selected (3 hidden)" straight
+      // after Clear, and the next Tear down would take them.
+      const prefix = labId + '::';
+      [..._labSelected].forEach(k => { if (k.startsWith(prefix)) _labSelected.delete(k); });
       document.querySelectorAll(
         `#vulnerableLabsContent .lab-select[data-lab-id="${CSS.escape(labId)}"]`
       ).forEach(cb => {
         cb.checked = false;
-        _labSelected.delete(cb.dataset.labKey);
         const tr = cb.closest('tr');
         if (tr) tr.classList.remove('is-selected');
       });
@@ -1975,18 +2095,33 @@
       const sel = `[data-lab-id="${CSS.escape(labId)}"]`;
       const boxes = [...document.querySelectorAll(
         `#vulnerableLabsContent .lab-select${sel}:not(:disabled)`)];
-      const n = boxes.filter(b => b.checked).length;
+      const visible = boxes.filter(b => b.checked).length;
       const total = boxes.length;
+
+      // A search filters what is RENDERED, never what is selected. _selectedLabRows
+      // reads the unfiltered _labRowsByLab, so a row the instructor ticked and then
+      // filtered out is still acted on — which is right, it was a deliberate act —
+      // but the count has to say so or the number in the confirm will surprise.
+      const shown = new Set(boxes.map(b => b.dataset.labKey));
+      const prefix = labId + '::';
+      const hidden = [..._labSelected]
+        .filter(k => k.startsWith(prefix) && !shown.has(k)).length;
+      const n = visible + hidden;
 
       const all = document.querySelector(`#vulnerableLabsContent .lab-select-all${sel}`);
       if (all) {
-        all.checked = total > 0 && n === total;
-        all.indeterminate = n > 0 && n < total;
+        // Scoped to what is on screen: ticking select-all under an active search
+        // must not silently reach the rows the search hid.
+        all.checked = total > 0 && visible === total;
+        all.indeterminate = visible > 0 && visible < total;
       }
       const count = document.querySelector(`#vulnerableLabsContent .lab-bulk-count${sel}`);
       if (count) {
         count.innerHTML = n
-          ? '<strong>' + n + '</strong> of ' + total + ' student' + (total === 1 ? '' : 's') + ' selected'
+          ? '<strong>' + n + '</strong> student' + (n === 1 ? '' : 's') + ' selected'
+            + (hidden
+                ? ' <span class="bulk-hidden-note">(' + hidden + ' hidden by search)</span>'
+                : ' of ' + total)
           : 'Select students to redeploy or tear down';
       }
       document.querySelectorAll(`#vulnerableLabsContent .lab-bulk-btn${sel}`).forEach(b => {
@@ -2095,162 +2230,219 @@
         });
         _labSelected = new Set([..._labSelected].filter(k => liveKeys.has(k)));
 
-        let html = `
-          <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Environment</button>
-          <div id="labProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
+        _labsData = labs;
+        renderVulnerableLabs();
 
-        if (labs.length === 0) {
-          html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No environments deployed yet.</p>';
-        } else {
-          labs.forEach(l => {
-            html += `
-              <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1rem; margin-bottom: 1rem;">
-                <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:1rem;">
-                  <div>
-                    <h4 style="margin:0 0 0.25rem;">${escHtml(l.lab_name)}</h4>
-                    <div style="font-size:0.8rem; color: var(--text-secondary);">
-                      ${escHtml(l.objective || 'No objective set')}
-                    </div>
-                    <div style="font-size:0.75rem; color: var(--text-muted, #6b7280); margin-top:0.25rem;">
-                      Assigned to ${l.student_count || 0} &middot;
-                      ${l.deployed_count || 0} deployed &middot;
-                      created ${l.created_at ? new Date(l.created_at).toLocaleDateString() : 'N/A'}
-                    </div>
-                  </div>
-                  <button class="btn btn-sm btn-outline" onclick="deleteLab('${escAttr(l.lab_id)}')">Remove &amp; tear down</button>
-                </div>`;
-
-            // Students mid-rebuild have no deployment row of their own: an
-            // attach-mode redeploy never creates a lane, and between teardown and
-            // re-create there is no row at all. Without a synthetic row they would
-            // simply vanish from the table while work was still running.
-            const inFlightById = {};
-            (l.in_flight || []).forEach(o => { inFlightById[o.user_id] = o; });
-            const shownUsers = new Set((l.deployments || []).map(d => d.user_id));
-            const ghostRows = (l.in_flight || []).filter(o => !shownUsers.has(o.user_id));
-            const errorRows = Object.entries(l.redeploy_errors || {})
-              .filter(([uid]) => !shownUsers.has(uid) && !inFlightById[uid]);
-
-            if ((l.deployments || []).length === 0 && ghostRows.length === 0 && errorRows.length === 0) {
-              html += `<p style="font-size:0.8rem; color: var(--text-muted, #6b7280); margin:0.75rem 0 0;">
-                Assigned, but nothing is deployed for it yet.</p>`;
-            } else {
-              const labRows = _labRowsByLab[l.lab_id] || [];
-              const selN = labRows.filter(
-                d => _labSelected.has(_labKey(l.lab_id, d.user_id))).length;
-              const selTotal = labRows.filter(_labSelectable).length;
-              const labDis = selN ? '' : ' disabled';
-              const labAttr = `data-lab-id="${escAttr(l.lab_id)}"`;
-
-              html += `<div class="vm-bulkbar" style="margin-top:0.75rem;">
-                <span class="vm-bulkbar-count lab-bulk-count" ${labAttr} aria-live="polite">
-                  ${selN ? `<strong>${selN}</strong> of ${selTotal} student${selTotal === 1 ? '' : 's'} selected`
-                        : 'Select students to redeploy or tear down'}
-                </span>
-                <span style="flex:1"></span>
-                <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
-                        onclick="clearLabSelection(this.dataset.labId)"${labDis}>Clear</button>
-                <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
-                        style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
-                        onclick="bulkRedeployStudentLabs(this)"${labDis}>Redeploy</button>
-                <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
-                        style="color:#e53e3e;border-color:#e53e3e;"
-                        onclick="bulkRemoveStudentLabs(this)"${labDis}>Tear down</button>
-              </div>`;
-
-              html += `<table class="students-table" style="margin-top:0.5rem;">
-                <thead><tr>
-                  <th style="width:2.25rem;text-align:center;">
-                    <input type="checkbox" class="lab-select-all" ${labAttr}
-                           onchange="toggleLabSelectAll(this)" aria-label="Select all students">
-                  </th>
-                  <th>Student</th><th>Mode</th><th>Status</th><th>Machines</th><th>Student console</th><th>Flags</th><th>Actions</th>
-                </tr></thead><tbody>`;
-              (l.deployments || []).forEach(d => {
-                const vms = (d.vms || []).map(v =>
-                  `<div style="font-size:0.75rem;"><code>${escHtml(v.name)}</code> ${_powerBadge(v.power_state)}</div>`).join('');
-                const creds = d.workstation_user
-                  ? `<div style="font-size:0.72rem;"><code>${escHtml(d.workstation_user)}</code>` +
-                    (d.workstation_pass ? ` / <code>${escHtml(d.workstation_pass)}</code>` : '') + `</div>`
-                  : '';
-                const busy = inFlightById[d.user_id];
-                const failed = (l.redeploy_errors || {})[d.user_id];
-                const rowKey = _labKey(l.lab_id, d.user_id);
-                const rowSel = _labSelected.has(rowKey);
-                const rowPick = !busy && d.lane_status !== 'deploying';
-                html += `<tr${rowSel ? ' class="is-selected"' : ''}>
-                  <td style="text-align:center;">
-                    <input type="checkbox" class="lab-select" data-lab-id="${escAttr(l.lab_id)}"
-                           data-lab-key="${escAttr(rowKey)}"
-                           aria-label="Select ${escAttr(d.student_email || d.user_id)}"
-                           ${rowSel ? 'checked' : ''}${rowPick ? '' : ' disabled title="This deployment is already being worked on"'}
-                           onchange="toggleLabSelect(this)">
-                  </td>
-                  <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code>${_ownerBadge(d)}</td>
-                  <td><span class="badge badge-gray">${d.mode === 'attach' ? 'attached' : 'own lane'}</span></td>
-                  <td>${busy
-                        ? `<span style="color:#1e5288;">${escHtml(busy.phase_detail || busy.phase || 'working…')}</span>`
-                        : d.lane_status === 'error'
-                        ? `<span style="color:#ef4444;" title="${escAttr(d.error || '')}">error</span>`
-                        : escHtml(d.lane_status)}
-                      ${failed && !busy ? `<div style="color:#ef4444; font-size:0.72rem; margin-top:0.2rem;">redeploy failed — ${escHtml(failed.message || '')}</div>` : ''}</td>
-                  <td>${vms || '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
-                  <td>${d.attack_box_vm_id
-                        ? `<code style="font-size:0.75rem;">${d.attack_box_vm_id}</code> ${d.attack_box_power ? _powerBadge(d.attack_box_power) : ''}${creds}`
-                        : '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
-                  <td style="font-size:0.75rem;">${_flagSummary(d.flags)}</td>
-                  <td>${_labActionCell(l.lab_id, d.user_id, d.student_email, d.mode, !!busy || d.lane_status === 'deploying', d.lane_id)}</td>
-                </tr>`;
-              });
-
-              ghostRows.forEach(o => {
-                // No checkbox: a row that exists only because work is in flight is
-                // exactly what a bulk action must not touch. The cell is still
-                // rendered so the columns line up.
-                html += `<tr>
-                  <td></td>
-                  <td style="font-size:0.8rem;"><code>${escHtml(o.student_email || o.user_id)}</code></td>
-                  <td><span class="badge badge-gray">—</span></td>
-                  <td><span style="color:#1e5288;">${escHtml(o.phase_detail || o.phase || 'working…')}</span></td>
-                  <td colspan="3" style="color: var(--text-muted, #6b7280); font-size:0.75rem;">rebuilding…</td>
-                  <td>${_labActionCell(l.lab_id, o.user_id, o.student_email, null, true)}</td>
-                </tr>`;
-              });
-
-              // Torn down but never rebuilt. Nothing else on this page would show
-              // them — this is the only trace that the student is missing machines.
-              errorRows.forEach(([uid, err]) => {
-                // Torn down and never rebuilt: there is no deployment to act on in
-                // bulk, only the per-row Redeploy.
-                html += `<tr>
-                  <td></td>
-                  <td style="font-size:0.8rem;"><code>${escHtml(uid)}</code></td>
-                  <td><span class="badge badge-gray">—</span></td>
-                  <td colspan="4" style="color:#ef4444; font-size:0.78rem;">
-                    redeploy failed — ${escHtml(err.message || '')}${err.at ? ` <span style="color:var(--text-muted,#6b7280);">(${escHtml(String(err.at).slice(0, 19))})</span>` : ''}
-                  </td>
-                  <td>${_labActionCell(l.lab_id, uid, uid, null, false)}</td>
-                </tr>`;
-              });
-
-              html += `</tbody></table>`;
-            }
-            html += `</div>`;
-          });
-        }
-
-        document.getElementById('vulnerableLabsContent').innerHTML = html;
-        // indeterminate is a property, so every card's tri-state has to be
-        // re-applied after each render.
-        labs.forEach(l => _syncLabBulkBar(l.lab_id));
-
-        // Keep refreshing while anything is still building.
+        // Keep refreshing while ANY environment is still building — the
+        // unfiltered set, so a search cannot stop the tab updating itself.
         if (labs.some(l => l.in_progress)) {
           _labRefreshTimer = setTimeout(() => loadVulnerableLabs({ polled: true }), 8000);
         }
       } catch (e) {
         document.getElementById('vulnerableLabsContent').innerHTML = `<p style="color: #ef4444;">Error: ${escHtml(e.message)}</p>`;
       }
+    }
+
+    /**
+     * Paint the environment cards from _labsData, filtered by the current search.
+     *
+     * Split out of loadVulnerableLabs so typing filters instantly instead of
+     * re-fetching on every keystroke. The fetch owns _labsData, _labRowsByLab and
+     * the poll timer; this owns the DOM.
+     */
+    function renderVulnerableLabs() {
+      const labs = _labsData;
+      let html = `
+        <button class="btn btn-primary" style="margin-bottom: 1rem;" onclick="showDeployVulnerableModal()">+ Deploy Environment</button>
+        <div id="labProgressBanner" style="display:none; margin-bottom:1rem; padding:0.6rem 0.8rem; border-radius:8px; background:rgba(30,82,136,0.10); color:var(--primary-light, #1e5288); font-size:0.82rem;"></div>`;
+
+      let matchedLabs = 0;
+      if (labs.length === 0) {
+        html += '<p style="color: var(--text-secondary); margin-top: 1rem;">No environments deployed yet.</p>';
+      } else {
+        labs.forEach(l => {
+          html += `
+            <div style="background: var(--bg-card, white); border-radius: 12px; padding: 1rem; margin-bottom: 1rem;">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:1rem;">
+                <div>
+                  <h4 style="margin:0 0 0.25rem;">${escHtml(l.lab_name)}</h4>
+                  <div style="font-size:0.8rem; color: var(--text-secondary);">
+                    ${escHtml(l.objective || 'No objective set')}
+                  </div>
+                  <div style="font-size:0.75rem; color: var(--text-muted, #6b7280); margin-top:0.25rem;">
+                    Assigned to ${l.student_count || 0} &middot;
+                    ${l.deployed_count || 0} deployed &middot;
+                    created ${l.created_at ? new Date(l.created_at).toLocaleDateString() : 'N/A'}
+                  </div>
+                </div>
+                <button class="btn btn-sm btn-outline" onclick="deleteLab('${escAttr(l.lab_id)}')">Remove &amp; tear down</button>
+              </div>`;
+
+          // Students mid-rebuild have no deployment row of their own: an
+          // attach-mode redeploy never creates a lane, and between teardown and
+          // re-create there is no row at all. Without a synthetic row they would
+          // simply vanish from the table while work was still running.
+          const inFlightById = {};
+          (l.in_flight || []).forEach(o => { inFlightById[o.user_id] = o; });
+          const shownUsers = new Set((l.deployments || []).map(d => d.user_id));
+          const ghostAll = (l.in_flight || []).filter(o => !shownUsers.has(o.user_id));
+
+          // A search narrows every row set this card renders. Ghost and error
+          // rows carry only an email or a bare user id, so they match on those.
+          // From _labRowsByLab, not l.deployments: the fetch stamped `_busy` onto
+          // those copies and _labSelectable reads it, so filtering the raw list
+          // here would count a mid-rebuild row as selectable in the bar's total.
+          const deployRows = (_labRowsByLab[l.lab_id] || []).filter(_labRowMatches);
+          const ghostRows = ghostAll.filter(
+            o => _matchesSearch([o.student_email, o.user_id], _labSearch));
+          const errorRows = Object.entries(l.redeploy_errors || {})
+            .filter(([uid]) => !shownUsers.has(uid) && !inFlightById[uid]);
+
+          const errorShown = errorRows.filter(
+            ([uid]) => _matchesSearch([uid], _labSearch));
+
+          // An environment with nothing matching is dropped entirely: a page of
+          // empty cards is worse than a short list.
+          if (_labSearch && !deployRows.length && !ghostRows.length && !errorShown.length) return;
+          matchedLabs++;
+
+          if (deployRows.length === 0 && ghostRows.length === 0 && errorShown.length === 0) {
+            html += `<p style="font-size:0.8rem; color: var(--text-muted, #6b7280); margin:0.75rem 0 0;">
+              Assigned, but nothing is deployed for it yet.</p>`;
+          } else {
+            // Counted over the VISIBLE rows; _syncLabBulkBar re-runs after the
+            // render and adds any selected rows the search is hiding.
+            const selN = deployRows.filter(
+              d => _labSelected.has(_labKey(l.lab_id, d.user_id))).length;
+            const selTotal = deployRows.filter(_labSelectable).length;
+            const labDis = selN ? '' : ' disabled';
+            const labAttr = `data-lab-id="${escAttr(l.lab_id)}"`;
+
+            html += `<div class="vm-bulkbar" style="margin-top:0.75rem;">
+              <span class="vm-bulkbar-count lab-bulk-count" ${labAttr} aria-live="polite">
+                ${selN ? `<strong>${selN}</strong> of ${selTotal} student${selTotal === 1 ? '' : 's'} selected`
+                      : 'Select students to redeploy or tear down'}
+              </span>
+              <span style="flex:1"></span>
+              <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                      onclick="clearLabSelection(this.dataset.labId)"${labDis}>Clear</button>
+              <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                      style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
+                      onclick="bulkRedeployStudentLabs(this)"${labDis}>Redeploy</button>
+              <button type="button" class="btn btn-sm btn-outline lab-bulk-btn" ${labAttr}
+                      style="color:#e53e3e;border-color:#e53e3e;"
+                      onclick="bulkRemoveStudentLabs(this)"${labDis}>Tear down</button>
+            </div>`;
+
+            html += `<table class="students-table" style="margin-top:0.5rem;">
+              <thead><tr>
+                <th style="width:2.25rem;text-align:center;">
+                  <input type="checkbox" class="lab-select-all" ${labAttr}
+                         onchange="toggleLabSelectAll(this)" aria-label="Select all students">
+                </th>
+                <th>Student</th><th>Mode</th><th>Status</th><th>Machines</th><th>Student console</th><th>Flags</th><th>Actions</th>
+              </tr></thead><tbody>`;
+            deployRows.forEach(d => {
+              const vms = (d.vms || []).map(v =>
+                `<div style="font-size:0.75rem;"><code>${escHtml(v.name)}</code> ${_powerBadge(v.power_state)}</div>`).join('');
+              const creds = d.workstation_user
+                ? `<div style="font-size:0.72rem;"><code>${escHtml(d.workstation_user)}</code>` +
+                  (d.workstation_pass ? ` / <code>${escHtml(d.workstation_pass)}</code>` : '') + `</div>`
+                : '';
+              const busy = inFlightById[d.user_id];
+              const failed = (l.redeploy_errors || {})[d.user_id];
+              const rowKey = _labKey(l.lab_id, d.user_id);
+              const rowSel = _labSelected.has(rowKey);
+              const rowPick = !busy && d.lane_status !== 'deploying';
+              html += `<tr${rowSel ? ' class="is-selected"' : ''}>
+                <td style="text-align:center;">
+                  <input type="checkbox" class="lab-select" data-lab-id="${escAttr(l.lab_id)}"
+                         data-lab-key="${escAttr(rowKey)}"
+                         aria-label="Select ${escAttr(d.student_email || d.user_id)}"
+                         ${rowSel ? 'checked' : ''}${rowPick ? '' : ' disabled title="This deployment is already being worked on"'}
+                         onchange="toggleLabSelect(this)">
+                </td>
+                <td style="font-size:0.8rem;"><code>${escHtml(d.student_email || '')}</code>${_ownerBadge(d)}</td>
+                <td><span class="badge badge-gray">${d.mode === 'attach' ? 'attached' : 'own lane'}</span></td>
+                <td>${busy
+                      ? `<span style="color:#1e5288;">${escHtml(busy.phase_detail || busy.phase || 'working…')}</span>`
+                      : d.lane_status === 'error'
+                      ? `<span style="color:#ef4444;" title="${escAttr(d.error || '')}">error</span>`
+                      : escHtml(d.lane_status)}
+                    ${failed && !busy ? `<div style="color:#ef4444; font-size:0.72rem; margin-top:0.2rem;">redeploy failed — ${escHtml(failed.message || '')}</div>` : ''}</td>
+                <td>${vms || '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
+                <td>${d.attack_box_vm_id
+                      ? `<code style="font-size:0.75rem;">${d.attack_box_vm_id}</code> ${d.attack_box_power ? _powerBadge(d.attack_box_power) : ''}${creds}`
+                      : '<span style="color: var(--text-muted, #6b7280);">—</span>'}</td>
+                <td style="font-size:0.75rem;">${_flagSummary(d.flags)}</td>
+                <td>${_labActionCell(l.lab_id, d.user_id, d.student_email, d.mode, !!busy || d.lane_status === 'deploying', d.lane_id)}</td>
+              </tr>`;
+            });
+
+            ghostRows.forEach(o => {
+              // No checkbox: a row that exists only because work is in flight is
+              // exactly what a bulk action must not touch. The cell is still
+              // rendered so the columns line up.
+              html += `<tr>
+                <td></td>
+                <td style="font-size:0.8rem;"><code>${escHtml(o.student_email || o.user_id)}</code></td>
+                <td><span class="badge badge-gray">—</span></td>
+                <td><span style="color:#1e5288;">${escHtml(o.phase_detail || o.phase || 'working…')}</span></td>
+                <td colspan="3" style="color: var(--text-muted, #6b7280); font-size:0.75rem;">rebuilding…</td>
+                <td>${_labActionCell(l.lab_id, o.user_id, o.student_email, null, true)}</td>
+              </tr>`;
+            });
+
+            // Torn down but never rebuilt. Nothing else on this page would show
+            // them — this is the only trace that the student is missing machines.
+            errorShown.forEach(([uid, err]) => {
+              // Torn down and never rebuilt: there is no deployment to act on in
+              // bulk, only the per-row Redeploy.
+              html += `<tr>
+                <td></td>
+                <td style="font-size:0.8rem;"><code>${escHtml(uid)}</code></td>
+                <td><span class="badge badge-gray">—</span></td>
+                <td colspan="4" style="color:#ef4444; font-size:0.78rem;">
+                  redeploy failed — ${escHtml(err.message || '')}${err.at ? ` <span style="color:var(--text-muted,#6b7280);">(${escHtml(String(err.at).slice(0, 19))})</span>` : ''}
+                </td>
+                <td>${_labActionCell(l.lab_id, uid, uid, null, false)}</td>
+              </tr>`;
+            });
+
+            html += `</tbody></table>`;
+          }
+          html += `</div>`;
+        });
+      }
+
+      if (_labSearch && labs.length && matchedLabs === 0) {
+        html += `<p style="color: var(--text-secondary); margin-top: 1rem;">No students match
+          &ldquo;${escHtml(_labSearch)}&rdquo;.
+          <a href="#" onclick="clearLabSearch();return false;">Clear the search</a> to see all
+          ${labs.length} environment(s).</p>`;
+      }
+
+      document.getElementById('vulnerableLabsContent').innerHTML = html;
+      // indeterminate is a property, so every card's tri-state has to be
+      // re-applied after each render.
+      labs.forEach(l => _syncLabBulkBar(l.lab_id));
+
+    }
+
+    function onLabSearch(value) {
+      _labSearch = value || '';
+      const clear = document.getElementById('labSearchClear');
+      if (clear) clear.style.display = _labSearch ? '' : 'none';
+      // A view change only: rows the search hides stay selected, and each card's
+      // bar reports how many of its selected rows are off screen.
+      renderVulnerableLabs();
+    }
+
+    function clearLabSearch() {
+      const box = document.getElementById('labSearch');
+      if (box) box.value = '';
+      onLabSearch('');
+      if (box) box.focus();
     }
 
     // ── Capture flags ─────────────────────────────────────────────────────────
