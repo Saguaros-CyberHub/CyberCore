@@ -49,28 +49,44 @@ try {
   console.warn('[CIAB] Could not register the sidebar access gate:', err.message);
 }
 
-// Mount with auth + enrollment + schedule checking.
+// ============================================================================
+// MOUNTING
+// ----------------------------------------------------------------------------
+// THIS ROUTER IS MOUNTED AT '/' (manifest.json), NOT AT /ciab.
 //
-// IMPORTANT — ordering: any router that has unauthenticated routes (auth
-// applied internally / per-route) MUST be mounted BEFORE the `/api` catch-all
-// at line ~ below. Express matches router.use() prefixes in registration
-// order, so a request to `/api/profile-deploy/image/<token>` will be claimed
-// by the `/api` mount and rejected by its authenticateToken middleware before
-// the `/api/profile-deploy` mount ever gets a turn. The image route is
-// intentionally public (token-gated for lane VMs that have no JWT) — keep
-// these specific-prefix mounts above the catch-all.
+// That single fact governs everything below. `router.use('/api', ...)` here
+// matches EVERY /api/* request in the whole application -- core's, the CLE
+// plugin's, any plugin added later -- not just Clinic-in-a-Box's.
 //
-// ENROLLMENT — requireCiabAccess always runs BEFORE checkSchedule. Two reasons:
-// a student on no roster must be told that, not "access is only available
-// Mon–Fri 08:00–17:00"; and checkSchedule's fail-open branch for a student in
-// no group (middleware/schedule.js:31-33) is only defensible with this gate in
-// front of it, because "in no group" then means "enrolled, but no time window
-// was set" rather than "nobody has ever checked".
+// It was survivable while the catch-all's chain was authenticateToken +
+// checkSchedule + clinicApiRoutes, because all three call next() for an
+// ordinary signed-in user and the request fell through to whoever really owned
+// the path. Putting requireCiabAccess there turned it into a chain that
+// TERMINATES with a 403, and a student on no CIAB roster lost
+// GET /api/cle/my/overview -- the hub's "My Courses" panel -- along with every
+// other CLE route. Plugin load order is readdir order, so 'ciab' sorts before
+// 'cle' and wins; core escaped only because server.js registers its routes
+// before moduleLoader.loadAll(). See test/ciab-gate-scope.test.js.
+//
+// SO: the enrollment gate goes on CIAB-OWNED PREFIXES ONLY, never on the bare
+// /api mount. clinic-api.js, which IS mounted there, carries the gate per route
+// instead -- it owns five paths, and enumerating them is the price of sharing a
+// prefix with the rest of the application.
+//
+// ORDERING (unchanged): any router with unauthenticated routes MUST be mounted
+// BEFORE the /api catch-all, because Express matches router.use() prefixes in
+// registration order. `/api/profile-deploy/image/<token>` is intentionally
+// public -- token-gated for lane VMs that hold no JWT -- and would otherwise be
+// claimed by the catch-all and rejected by its authenticateToken.
+//
+// ENROLLMENT BEFORE SCHEDULE, always. A student on no roster must be told that,
+// not "access is only available Mon-Fri 08:00-17:00". It also makes
+// checkSchedule's fail-open branch for a student in no group
+// (middleware/schedule.js:31-33) defensible for the first time: "in no group"
+// now means "enrolled, but no time window was set".
+// ============================================================================
 
-// Section rosters. Above the `/api` catch-all for the same reason
-// /api/profile-deploy is: Express matches router.use() prefixes in
-// registration order. The /roster mount is a sibling of /sections rather than
-// nested inside it so its verbs never contend with the /:userId routes there.
+// Section rosters. CIAB-owned prefix, so gating here is correctly scoped.
 router.use(
   '/api/instructor/sections/:sectionId/roster',
   authenticateToken, requireCiabAccess,
@@ -80,33 +96,36 @@ router.use(
 router.use('/api/instructor/sections', authenticateToken, requireCiabAccess, sectionRoutes);
 
 router.use('/api/profiles', authenticateToken, requireCiabAccess, checkSchedule, profileRoutes);
-// Admin-only: deploy N cybercore lanes from a single CIAB profile. Auth
-// applied internally per-route. MUST be above the `/api` catch-all because
-// the lane image-pull endpoint here (`/api/profile-deploy/image/:token`) is
-// public + token-gated for lane web VMs.
-//
-// Deliberately NOT gated: that public route has no req.user for the gate to
-// read, and every other route in the file is already adminOnly — and admins
-// pass the gate regardless, so nothing is lost by leaving it off.
+
+// Admin-only, auth applied internally per route. MUST stay above the catch-all
+// because /api/profile-deploy/image/:token is public. Deliberately NOT gated:
+// that route has no req.user for the gate to read, and admins pass anyway.
 router.use('/api/profile-deploy', checkSchedule, profileDeployRoutes);
-// These three apply authenticateToken INTERNALLY (a router.use at the top of
-// each file), so a mount-level gate here would run before req.user exists and
-// 401 every request. The gate goes inside each file instead, one line after its
-// own router.use(authenticateToken).
+
+// These three apply authenticateToken INTERNALLY, so a mount-level gate would
+// run before req.user exists and 401 every request. The gate goes inside each
+// file, one line after its own router.use(authenticateToken). Their mounts are
+// CIAB-specific, so an internal router.use() is correctly scoped.
 router.use('/api/intakes', checkSchedule, intakesRoutes);
 router.use('/api/clinic-risk-assessment', checkSchedule, clinicRiskAssessmentRoutes);
 router.use('/api/cis-ram', checkSchedule, cisRamRoutes);
-// The catch-all — every path under /api/* that wasn't claimed above gets auth.
-// It also covers the five specific mounts below it: Express runs this chain
-// first and clinicApiRoutes calls next() when no route matches, so adding the
-// enrollment gate here gates /api/progress, /api/interview, /api/instructor,
-// /api/intake-form and /api/real-client/intake for free.
-router.use('/api', authenticateToken, requireCiabAccess, checkSchedule, clinicApiRoutes);
-router.use('/api/progress', authenticateToken, checkSchedule, progressRoutes);
-router.use('/api/interview', authenticateToken, checkSchedule, interviewRoutes);
+
+// The catch-all. NO requireCiabAccess and NO checkSchedule here -- both would
+// apply to the entire application. clinicApiRoutes gates its own five routes.
+// authenticateToken stays because it predates this change and every route that
+// falls through applies its own anyway.
+router.use('/api', authenticateToken, clinicApiRoutes);
+
+// CIAB-owned prefixes below the catch-all. They are reached because
+// clinicApiRoutes calls next() when none of its five routes match.
+router.use('/api/progress', authenticateToken, requireCiabAccess, checkSchedule, progressRoutes);
+router.use('/api/interview', authenticateToken, requireCiabAccess, checkSchedule, interviewRoutes);
+// NOT gated: every route inside is requireRole('instructor','admin'), which is
+// the right refusal for a student. The enrollment gate would answer "you are
+// not enrolled" to somebody whose actual problem is that they are not staff.
 router.use('/api/instructor', authenticateToken, instructorRoutes);
-router.use('/api/intake-form', authenticateToken, checkSchedule, intakeFormRoutes);
-router.use('/api/real-client/intake', authenticateToken, checkSchedule, realClientIntakeRoutes);
+router.use('/api/intake-form', authenticateToken, requireCiabAccess, checkSchedule, intakeFormRoutes);
+router.use('/api/real-client/intake', authenticateToken, requireCiabAccess, checkSchedule, realClientIntakeRoutes);
 
 // ---------------------------------------------------------------------------
 // BOOT SELF-CHECK

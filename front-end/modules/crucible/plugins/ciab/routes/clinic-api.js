@@ -8,6 +8,16 @@ const express = require('express');
 const router = express.Router();
 const { query } = require('../utils/db');
 const { authenticate, optionalAuth } = require('../../../../../src/middleware/auth');
+const { requireCiabAccess } = require('../utils/enrollment');
+const { checkSchedule } = require('../middleware/schedule');
+
+// APPLIED PER ROUTE BELOW, never through router.use().
+//
+// routes/api.js mounts this file at the bare /api, and THAT router is mounted
+// at '/' -- so a router.use() here would run for every /api/* request in the
+// entire application, including the CLE plugin's, and 403 a student whose only
+// problem is that they are not in Clinic-in-a-Box. That is the outage
+// test/ciab-gate-scope.test.js pins.
 
 // ============================================================================
 // POST /api/generate - Trigger inline profile generation
@@ -16,7 +26,7 @@ const { authenticate, optionalAuth } = require('../../../../../src/middleware/au
 // Generation now runs inline via /api/profiles/generate (which calls
 // ai/profile/index.js). This wrapper forwards for backward compatibility.
 const { generateProfile: aiGenerateProfile } = require('../ai/profile');
-router.post('/generate', authenticate, async (req, res) => {
+router.post('/generate', authenticate, requireCiabAccess, checkSchedule, async (req, res) => {
   try {
     const { userId, org_name, company_name, ...rest } = req.body || {};
     const profile = await aiGenerateProfile({
@@ -77,9 +87,10 @@ router.post('/chat', optionalAuth, async (req, res) => {
 // ============================================================================
 // GET /api/my-sections — the sections THIS student is enrolled on
 // ----------------------------------------------------------------------------
-// Falls under the /api catch-all in routes/api.js, so it already carries
-// authenticateToken + requireCiabAccess. Scoped to req.user.userId and nothing
-// else: a student may see which sections they are on, never anybody else.
+// Carries authenticateToken from the catch-all mount, and DELIBERATELY NOT the
+// enrollment gate: answering [] is more useful than 403 to somebody asking
+// which sections they are on. Scoped to req.user.userId and nothing else, so a
+// student can only ever see their own.
 //
 // Exists so the CIAB dashboard can name the class a student is in, and so the
 // "you are not enrolled" path has something concrete to say.
