@@ -292,6 +292,29 @@
     }
 
     /* ── student picker ───────────────────────────────────────────────── */
+    .env-student-filters { display: flex; gap: 0.3rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+    .env-filter-pill {
+      border: 1px solid #e5e7eb; background: var(--card-bg, white); color: #4b5563;
+      border-radius: 999px; padding: 0.2rem 0.7rem; font-size: 0.75rem; font-weight: 600;
+      cursor: pointer; transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+    .env-filter-pill:hover { background: #f3f4f6; }
+    .env-filter-pill.is-on {
+      background: var(--primary, #0c234b); border-color: var(--primary, #0c234b); color: white;
+    }
+    .env-student-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.15rem 0; }
+    /* Already provisioned. Dimmed rather than hidden by default, so the roster
+       stays a roster — the "Needs one" pill is there for when it should not. */
+    .env-student-row.is-covered { opacity: 0.55; }
+    .env-student-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .env-student-tag {
+      flex: none; padding: 0.05rem 0.45rem; border-radius: 10px;
+      font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em;
+    }
+    .env-tag-has     { background: rgba(79,145,83,0.16);  color: #2f6f33; }
+    .env-tag-ws      { background: rgba(30,82,136,0.12);  color: var(--primary-light, #1e5288); }
+    .env-tag-other   { background: #f3f4f6;               color: #6b7280; }
+    .env-tag-failed  { background: #fee2e2;               color: #991b1b; }
     .env-students {
       display: flex; flex-direction: column; gap: 0.35rem;
       max-height: 190px; overflow-y: auto;
@@ -856,11 +879,34 @@
             <label class="env-group-label">
               Deploy to
               <label class="env-selectall">
-                <input type="checkbox" id="deployEnvSelectAll" onchange="toggleEnvSelectAll(this)"> select all
+                <input type="checkbox" id="deployEnvSelectAll" onchange="toggleEnvSelectAll(this)"> select all shown
               </label>
             </label>
+
+            <div class="roster-search" style="max-width:none; margin:0 0 0.4rem;">
+              <input type="search" id="deployEnvStudentSearch"
+                     placeholder="Search students&hellip;" autocomplete="off"
+                     aria-label="Search students by name or email"
+                     oninput="onEnvStudentSearch(this.value)">
+              <button type="button" class="roster-search-clear" id="deployEnvStudentSearchClear"
+                      style="display:none;" aria-label="Clear search"
+                      onclick="clearEnvStudentSearch()">&times;</button>
+            </div>
+
+            <!-- The point of the whole row: on a 30-student roster, finding who
+                 still needs a machine by reading names is the slow part. -->
+            <div class="env-student-filters" id="deployEnvStudentFilters">
+              <button type="button" class="env-filter-pill is-on" data-filter="all"
+                      onclick="setEnvStudentFilter('all')">All</button>
+              <button type="button" class="env-filter-pill" data-filter="needs"
+                      onclick="setEnvStudentFilter('needs')">Needs one</button>
+              <button type="button" class="env-filter-pill" data-filter="has"
+                      onclick="setEnvStudentFilter('has')">Already has</button>
+            </div>
+
             <div class="env-students" id="deployEnvStudents"></div>
-            <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
+            <p class="deploy-env-hint" id="deployEnvStudentSummary" style="margin: 0.4rem 0 0;"></p>
+            <p class="deploy-env-hint" style="margin: 0.25rem 0 0;">
               Tick yourself at the top to get your own copy &mdash; it lands on your account,
               appears in your workspaces, and is not added to the gradebook.
             </p>
@@ -2974,58 +3020,6 @@
     }
 
     /**
-     * The checkbox list both deploy modals target.
-     *
-     * include_staff=1 asks the API to prepend the course's STAFF, so a copy of a
-     * workstation or an environment can be built for whoever runs the course —
-     * walking an exercise before assigning it, or demoing it in class — without
-     * anyone having to enrol in their own course. Two rows can come back and are
-     * usually one person: the caller (`is_self`) and the course's own instructor
-     * (`is_course_instructor`). The second is what lets an ADMIN deploy for an
-     * instructor whose course they are managing.
-     *
-     * Staff rows are styled apart from the roster, and the whole-class buttons
-     * (which resolve the roster server-side) never include them.
-     */
-    async function loadModalStudents(containerId) {
-      try {
-        const data = await api('GET', `/courses/${currentCourseId}/students?include_staff=1`);
-        const students = data.students || [];
-        const isStaffRow = (s) => !!(s && (s.is_self || s.is_course_instructor));
-        const container = document.getElementById(containerId);
-        container.innerHTML = students.map((s, i) => {
-          const name = ((s.first_name || '') + ' ' + (s.last_name || '')).trim();
-          const staff = isStaffRow(s);
-          // Both flags, not just is_self: an ADMIN's own row is staff but is NOT
-          // this course's instructor, and labelling it "instructor" would put two
-          // rows claiming that title above a picker whose whole point is to tell
-          // them apart. Only the caller who genuinely IS the instructor gets both.
-          const staffTag = s.is_self && s.is_course_instructor ? 'you &middot; instructor'
-            : s.is_self ? 'you'
-            : 'instructor';
-          // The instructor's NAME matters on someone else's row — an admin
-          // picking from a list of emails needs to know whose box this is.
-          const label = staff
-            ? `${escHtml(s.email)}${name && !s.is_self ? ` (${escHtml(name)})` : ''} <span class="self-target-badge">${staffTag}</span>`
-            : `${escHtml(s.email)} (${escHtml(name)})`;
-          // One divider under the whole staff block, not one per staff row.
-          const staffStyle = (staff && !isStaffRow(students[i + 1]))
-            ? ' padding-bottom:0.5rem; margin-bottom:0.25rem; border-bottom:1px dashed var(--border-color, #e5e7eb);'
-            : '';
-          return `
-          <label data-user-id="${escAttr(s.user_id)}"${s.is_self ? ' data-self="1"' : ''}${staff ? ' data-staff="1"' : ''}
-                 style="display: flex; align-items: center; gap: 0.5rem;${staffStyle}">
-            <input type="checkbox" class="modal-student-select" value="${escAttr(s.user_id)}" data-email="${escAttr(s.email)}">
-            <span class="modal-student-label">${label}</span>
-            <span class="provision-note" style="font-size: 0.78rem; color: var(--text-muted, #6b7280); font-style: italic;"></span>
-          </label>`;
-        }).join('');
-      } catch (e) {
-        toast('Error loading students: ' + e.message, true);
-      }
-    }
-
-    /**
      * The workstation-only path: the machines the instructor added, in SLOT
      * ORDER with the console machine at index 0.
      *
@@ -3044,10 +3038,7 @@
     async function provisionVMs() {
       try {
         const slots = workstationSlotOrder();
-        // Skip checkboxes that are checked-but-disabled (already-deployed students)
-        const selectedStudents = Array.from(
-          document.querySelectorAll('#deployEnvStudents .modal-student-select:checked:not(:disabled)')
-        ).map(c => c.value);
+        const selectedStudents = selectedEnvStudentIds();
 
         if (!slots.length || selectedStudents.length === 0) {
           toast('Add a workstation and select at least one student', true);
@@ -3328,6 +3319,13 @@
       _envAddons = [];
       _envKali = false;
       _envConsole = null;
+      _envSelected = new Set();
+      _envStudentFilter = 'all';
+      _envStudents = [];
+      _envLabDeployments = [];
+      const searchBox = document.getElementById('deployEnvStudentSearch');
+      if (searchBox) searchBox.value = '';
+      setEnvStudentFilter('all');
       resetDeployEnvButton();
 
       // MUST be visible before the canvas is mounted: Cytoscape measures its
@@ -3339,11 +3337,11 @@
       try {
         const [, , vmsData] = await Promise.all([
           loadEnvTemplates(),
-          loadModalStudents('deployEnvStudents'),
+          loadEnvStudents(),
           api('GET', `/courses/${currentCourseId}/vms`).catch(() => ({ vms: [] })),
         ]);
         _provisionExistingVMs = (vmsData && vmsData.vms) || [];
-        onEnvTemplateChange();
+        onEnvTemplateChange();     // renders the machine list AND the roster
       } catch (e) {
         toast('Error preparing the deploy screen: ' + e.message, true);
       }
@@ -3573,6 +3571,9 @@
       document.getElementById('deployEnvAddbar').style.display = attachMode ? 'none' : '';
 
       renderEnvTopology();
+      // What counts as "already has one" changes with the environment picked, so
+      // the roster's tags, filter and counts are all stale until this reruns.
+      renderEnvStudents();
       resetDeployEnvButton();
     }
 
@@ -3632,9 +3633,241 @@
       addon.resources[field] = n;
     }
 
+    // ── the student picker ───────────────────────────────────────────────────
+    //
+    // On a 30-student roster the slow part of a deploy is not choosing the
+    // environment, it is working out who still needs one. So each row carries
+    // what that student ALREADY has, and the list can be searched and filtered
+    // down to exactly the people with nothing.
+    //
+    // "Covered" is deliberately relative to the CURRENT selection, not absolute:
+    //   - an environment is selected -> covered means they hold THAT environment
+    //   - workstation-only           -> covered means they hold a workstation lane
+    // A student with a workstation is not covered for a CYBR 400 environment,
+    // and saying otherwise would hide exactly the people who need deploying.
+
+    let _envStudents = [];        // the roster, as returned by GET /students
+    let _envLabDeployments = [];  // [{ template_id, user_id, lane_status }]
+    let _envStudentFilter = 'all';
+    // Selections survive filtering. Re-rendering the list would otherwise drop
+    // every tick the moment the instructor typed in the search box.
+    let _envSelected = new Set();
+
+    async function loadEnvStudents() {
+      const [roster, labs] = await Promise.all([
+        api('GET', `/courses/${currentCourseId}/students?include_staff=1`),
+        api('GET', `/courses/${currentCourseId}/labs`).catch(() => ({ labs: [] })),
+      ]);
+      _envStudents = (roster && roster.students) || [];
+      // Flattened per (environment, student) so a lookup is one pass, and kept
+      // with its lane_status — a failed deploy must read as "needs one", not as
+      // covered, or the student it failed for is the one person hidden from the
+      // list.
+      _envLabDeployments = [];
+      for (const lab of (labs.labs || [])) {
+        for (const d of (lab.deployments || [])) {
+          _envLabDeployments.push({
+            template_id: lab.template_id,
+            user_id: d.user_id,
+            lane_status: d.lane_status,
+            mode: d.mode,
+          });
+        }
+      }
+    }
+
+    /**
+     * What this student already has, relative to what is currently selected.
+     * Returns { covered, tag, cls } — tag null when there is nothing to say.
+     */
+    function envStudentStatus(s) {
+      const wsOnly = isWorkstationOnly();
+      const t = selectedVulnTemplate();
+
+      const ws = _provisionExistingVMs.find(v => v.user_id === s.user_id);
+      const mine = t
+        ? _envLabDeployments.find(d => String(d.template_id) === String(t.template_id)
+                                    && d.user_id === s.user_id)
+        : null;
+      const anyEnv = _envLabDeployments.find(d => d.user_id === s.user_id);
+
+      const failed = (row) => row && row.lane_status === 'error';
+
+      if (wsOnly) {
+        if (failed(ws)) return { covered: false, tag: 'workstation failed', cls: 'env-tag-failed' };
+        if (ws) return { covered: true, tag: 'has workstation', cls: 'env-tag-has' };
+        // Holding an environment says nothing about needing a workstation, so
+        // this is a note, not a reason to hide them.
+        if (anyEnv) return { covered: false, tag: 'has an environment', cls: 'env-tag-other' };
+        return { covered: false, tag: null, cls: '' };
+      }
+
+      if (failed(mine)) return { covered: false, tag: 'failed — redeploy', cls: 'env-tag-failed' };
+      if (mine) return { covered: true, tag: 'already has this', cls: 'env-tag-has' };
+      if (ws) return { covered: false, tag: 'has workstation', cls: 'env-tag-ws' };
+      if (anyEnv) return { covered: false, tag: 'has another environment', cls: 'env-tag-other' };
+      return { covered: false, tag: null, cls: '' };
+    }
+
+    function setEnvStudentFilter(f) {
+      _envStudentFilter = f;
+      document.querySelectorAll('#deployEnvStudentFilters .env-filter-pill')
+        .forEach(b => b.classList.toggle('is-on', b.dataset.filter === f));
+      renderEnvStudents();
+    }
+
+    /**
+     * Render the roster under the current search + filter.
+     *
+     * Selection lives in _envSelected rather than in the DOM, because this
+     * re-runs on every keystroke — reading checked state off elements that are
+     * about to be replaced would lose a tick the moment someone searched.
+     */
+    function renderEnvStudents() {
+      const host = document.getElementById('deployEnvStudents');
+      if (!host) return;
+      const q = (document.getElementById('deployEnvStudentSearch')?.value || '').trim().toLowerCase();
+
+      const rows = _envStudents.map(s => {
+        const name = ((s.first_name || '') + ' ' + (s.last_name || '')).trim();
+        return { s, name, status: envStudentStatus(s) };
+      });
+
+      const visible = rows.filter(({ s, name, status }) => {
+        if (q && !(`${s.email} ${name}`.toLowerCase().includes(q))) return false;
+        if (_envStudentFilter === 'needs') return !status.covered;
+        if (_envStudentFilter === 'has') return status.covered;
+        return true;
+      });
+
+      const staffRow = (r) => !!(r && (r.s.is_self || r.s.is_course_instructor));
+
+      host.innerHTML = visible.length ? visible.map((r, i) => {
+        const { s, name, status } = r;
+        const staff = staffRow(r);
+        const staffTag = s.is_self && s.is_course_instructor ? 'you &middot; instructor'
+          : s.is_self ? 'you'
+          : 'instructor';
+        const label = staff
+          ? `${escHtml(s.email)}${name && !s.is_self ? ` (${escHtml(name)})` : ''} <span class="self-target-badge">${staffTag}</span>`
+          : `${escHtml(s.email)}${name ? ` (${escHtml(name)})` : ''}`;
+        // One divider under the whole staff block, not one per staff row.
+        const divider = (staff && !staffRow(visible[i + 1]))
+          ? ' padding-bottom:0.4rem; margin-bottom:0.2rem; border-bottom:1px dashed var(--border-color, #e5e7eb);'
+          : '';
+        const tag = status.tag
+          ? `<span class="env-student-tag ${status.cls}">${escHtml(status.tag)}</span>` : '';
+        // Checked AND disabled for someone who already holds this: the tick says
+        // "they are covered", the disable stops them being deployed to twice.
+        return `
+          <label class="env-student-row${status.covered ? ' is-covered' : ''}"
+                 data-user-id="${escAttr(s.user_id)}" style="${divider}"
+                 title="${status.covered ? 'Already deployed — nothing to do for this student' : ''}">
+            <input type="checkbox" class="modal-student-select" value="${escAttr(s.user_id)}"
+                   data-email="${escAttr(s.email)}"
+                   ${status.covered ? 'checked disabled' : (_envSelected.has(s.user_id) ? 'checked' : '')}
+                   onchange="onEnvStudentToggle(this)">
+            <span class="env-student-name">${label}</span>
+            ${tag}
+          </label>`;
+      }).join('') : `<div class="env-empty">${
+        q ? 'No one matches that search.' :
+        _envStudentFilter === 'needs' ? 'Everyone already has this — nothing to deploy.' :
+        _envStudentFilter === 'has' ? 'No one has this yet.' :
+        'No students enrolled in this course yet.'}</div>`;
+
+      // Counts describe the WHOLE roster, not the filtered view — the number an
+      // instructor wants is "how many still need one", and a count that shrank
+      // as they typed would answer a different question.
+      const needs = rows.filter(r => !r.status.covered && !staffRow(r)).length;
+      const total = rows.filter(r => !staffRow(r)).length;
+      // Selected TOTAL, not selected-and-visible. A row ticked and then filtered
+      // out is still in the Set and still gets deployed to — discarding it
+      // silently would be worse — so the count has to include it, and the note
+      // below has to say so. Same contract the VM and Environments bulk bars
+      // carry, pinned by test/roster-search.test.js.
+      const selectable = rows.filter(r => !r.status.covered && _envSelected.has(r.s.user_id));
+      const picked = selectable.length;
+      const shownIds = new Set(visible.map(r => r.s.user_id));
+      const hidden = selectable.filter(r => !shownIds.has(r.s.user_id)).length;
+
+      const summary = document.getElementById('deployEnvStudentSummary');
+      if (summary) {
+        summary.innerHTML =
+          `<strong>${needs}</strong> of ${total} student${total === 1 ? '' : 's'} still need `
+          + (isWorkstationOnly() ? 'a workstation' : 'this environment')
+          + (visible.length !== rows.length ? ` &middot; showing ${visible.length}` : '')
+          + (picked ? ` &middot; <strong>${picked}</strong> selected` : '')
+          + (hidden ? ` <span class="bulk-hidden-note">(${hidden} hidden by search)</span>` : '');
+      }
+
+      // "select all shown" must not claim everything is ticked when a filter is
+      // hiding rows that are not.
+      const box = document.getElementById('deployEnvSelectAll');
+      if (box) {
+        const onScreen = visible.filter(r => !r.status.covered);
+        box.checked = onScreen.length > 0 && onScreen.every(r => _envSelected.has(r.s.user_id));
+      }
+
+      // Keep the button's count honest as ticks change — but ONLY while it is
+      // the plain Deploy button. Between the preview and the confirm it holds a
+      // committed count and its own handler, and rewriting either there would
+      // discard the preview the instructor is reading.
+      const btn = document.getElementById('deployEnvBtn');
+      if (btn && btn.onclick === deployEnvironment) {
+        btn.textContent = picked
+          ? `Deploy to ${picked} student${picked === 1 ? '' : 's'}`
+          : 'Deploy Environment';
+      }
+    }
+
+    /**
+     * Who this deploy actually targets.
+     *
+     * Read from state, NOT from the DOM. A student who already holds the
+     * selection is rendered `checked disabled` so the row reads as "covered" —
+     * and `:checked` matches a disabled box, so a DOM query would have quietly
+     * included every already-covered student in the deploy. Filtering by
+     * coverage here also handles the case where switching environments turns a
+     * ticked student into a covered one without them touching anything.
+     *
+     * Also excludes anyone the search or a filter has scrolled out of view but
+     * who is still legitimately selected — visibility is a display concern, and
+     * a tick that survives filtering must survive it in both directions.
+     */
+    function selectedEnvStudentIds() {
+      return _envStudents
+        .filter(s => _envSelected.has(s.user_id) && !envStudentStatus(s).covered)
+        .map(s => s.user_id);
+    }
+
+    function onEnvStudentSearch(value) {
+      const clear = document.getElementById('deployEnvStudentSearchClear');
+      if (clear) clear.style.display = value ? '' : 'none';
+      renderEnvStudents();
+    }
+
+    function clearEnvStudentSearch() {
+      const box = document.getElementById('deployEnvStudentSearch');
+      if (box) box.value = '';
+      onEnvStudentSearch('');
+    }
+
+    function onEnvStudentToggle(input) {
+      if (input.checked) _envSelected.add(input.value);
+      else _envSelected.delete(input.value);
+      renderEnvStudents();
+    }
+
     function toggleEnvSelectAll(box) {
+      // Scoped to what is VISIBLE, which is the whole point of the filters:
+      // "Needs one" + select all is the one-click path to deploying the gap.
       document.querySelectorAll('#deployEnvStudents .modal-student-select:not(:disabled)')
-        .forEach(c => { c.checked = box.checked; });
+        .forEach(c => {
+          if (box.checked) _envSelected.add(c.value);
+          else _envSelected.delete(c.value);
+        });
+      renderEnvStudents();
     }
 
     // ── the live topology ────────────────────────────────────────────────────
@@ -3727,12 +3960,7 @@
     }
 
     function readDeployEnvForm() {
-      // Scoped to this modal's own container: `.modal-student-select` is shared
-      // with the other student pickers on this page, and a global query was
-      // picking those up too.
-      const studentIds = Array.from(
-        document.querySelectorAll('#deployEnvStudents .modal-student-select:checked')
-      ).map(c => c.value);
+      const studentIds = selectedEnvStudentIds();
 
       return {
         templateId: document.getElementById('deployEnvTemplate').value,
@@ -3759,7 +3987,12 @@
       const btn = document.getElementById('deployEnvBtn');
       if (!btn) return;
       btn.disabled = false;
-      btn.textContent = 'Deploy Environment';
+      // Naming the count on the button is the last place a selection that a
+      // filter is hiding can still be caught before it deploys.
+      const n = selectedEnvStudentIds().length;
+      btn.textContent = n
+        ? `Deploy to ${n} student${n === 1 ? '' : 's'}`
+        : 'Deploy Environment';
       btn.onclick = deployEnvironment;
       const preview = document.getElementById('deployEnvPreview');
       if (preview) { preview.style.display = 'none'; preview.innerHTML = ''; }

@@ -22,7 +22,11 @@ const path = require('path');
 const PAGE = path.join(
   __dirname, '..', 'modules', 'crucible', 'plugins', 'cle', 'public', 'pages', 'courses.html'
 );
-const src = fs.readFileSync(PAGE, 'utf8');
+// LF-normalised: git checks this page out as CRLF on Windows, and the
+// index/slice assertions below would stop matching without saying why.
+const CRLF = String.fromCharCode(13, 10);
+const LF = String.fromCharCode(10);
+const src = fs.readFileSync(PAGE, 'utf8').split(CRLF).join(LF);
 
 // -- the assets the live topology needs -------------------------------------
 

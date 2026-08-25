@@ -31,7 +31,11 @@ const fs = require('fs');
 const ROUTE = path.join(
   __dirname, '..', 'modules', 'crucible', 'plugins', 'cle', 'routes', 'templates.js'
 );
-const src = fs.readFileSync(ROUTE, 'utf8');
+// LF-normalised — extractFn() brace-matches on this text, and CRLF makes a
+// bare-newline slice run past the function it meant to read.
+const CRLF = String.fromCharCode(13, 10);
+const LF = String.fromCharCode(10);
+const src = fs.readFileSync(ROUTE, 'utf8').split(CRLF).join(LF);
 
 const UTILS = path.join(__dirname, '..', 'src', 'utils');
 require.cache[require.resolve(path.join(UTILS, 'site-config.js'))] = {

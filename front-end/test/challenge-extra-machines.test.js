@@ -30,6 +30,8 @@ const { test } = require('node:test');
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
+const CRLF = String.fromCharCode(13, 10);
+const LF = String.fromCharCode(10);
 
 const UTILS = path.join(__dirname, '..', 'src', 'utils');
 require.cache[require.resolve(path.join(UTILS, 'site-config.js'))] = {
@@ -46,7 +48,12 @@ require.cache[require.resolve(path.join(UTILS, 'site-config.js'))] = {
 
 const cld = require(path.join(UTILS, 'challenge-lane-deployer.js'));
 const laneDeployer = require(path.join(UTILS, 'lane-deployer.js'));
-const SRC = fs.readFileSync(path.join(UTILS, 'challenge-lane-deployer.js'), 'utf8');
+// Normalised to LF. Git checks these files out as CRLF on Windows, and every
+// assertion below that brace-matches or slices on a bare newline silently
+// stops matching -- one slice ran 75KB past the function it meant to read and
+// asserted against unrelated code. The bug reads as a source defect.
+const readSrc = (p) => fs.readFileSync(p, 'utf8').split(CRLF).join(LF);
+const SRC = readSrc(path.join(UTILS, 'challenge-lane-deployer.js'));
 
 // -- octet band --------------------------------------------------------------
 
@@ -145,9 +152,9 @@ test('two added machines cannot share one template', () => {
 });
 
 test('attach mode refuses additions instead of dropping them', () => {
-  const vlp = fs.readFileSync(path.join(
+  const vlp = readSrc(path.join(
     __dirname, '..', 'modules', 'crucible', 'plugins', 'cle', 'utils', 'vuln-lab-provision.js'
-  ), 'utf8');
+  ));
   assert.ok(/mode === 'attach' && \(\(extraWorkstations && extraWorkstations\.length\) \|\| consoleVm\)/.test(vlp),
     'attach grafts into someone else\'s lane — additions there are a different operation');
 });
