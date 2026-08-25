@@ -71,6 +71,7 @@ async function agentExec(node, vmId, command) {
  */
 async function pollExecStatus(node, vmId, pid, timeoutMs = 1800000) {
   const start = Date.now();
+  let lastError = null;
   while (Date.now() - start < timeoutMs) {
     try {
       const status = await proxmoxAPI('GET',
@@ -87,13 +88,24 @@ async function pollExecStatus(node, vmId, pid, timeoutMs = 1800000) {
         };
       }
     } catch (e) {
-      // May error while process is still running
+      // Usually just "still running". But if EVERY poll errors -- a wedged
+      // guest agent, a QGA exec-status timeout -- the caller would otherwise
+      // get a bare "Timed out" and never learn the agent was refusing the
+      // whole time. Keep the last one so the failure names itself.
+      lastError = e;
     }
 
     await new Promise(r => setTimeout(r, 3000));
   }
 
-  return { exited: false, exitcode: -1, stdout: '', stderr: 'Timed out' };
+  return {
+    exited: false,
+    exitcode: -1,
+    stdout: '',
+    stderr: lastError
+      ? `Timed out (last exec-status error: ${String(lastError.message || lastError).slice(0, 200)})`
+      : 'Timed out'
+  };
 }
 
 /**

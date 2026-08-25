@@ -525,10 +525,22 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       // targets freshly-cloned guests, while agentShellExec already retries
       // transient 596s internally. See this file's header.
       const { pid } = await agentShellExec(t.node, t.vmid, cmd);
-      // Short poll: this exec only stages the wrapper and forks it, so it
-      // returns in well under a second. A timeout here means staging failed,
-      // not that the attack is slow.
-      const status = await pollExecStatus(t.node, t.vmid, pid, 60000);
+      // Short poll, and deliberately SHORT. This exec only stages the wrapper
+      // and forks it, so a healthy guest answers in well under a second.
+      //
+      // It used to wait 60s. That is dangerous at class scale for a reason that
+      // has nothing to do with the guest: exec-status GETs cross the
+      // pveproxy -> pvedaemon hop this repo documents as a common source of
+      // transient 596s, and every one of them is swallowed by the poll loop. A
+      // lane whose polls all 596 burned the full 60s before giving up, and with
+      // 30 lanes sharing a concurrency pool that pushes later lanes past the
+      // synchronized start -- the one thing this whole feature exists to get
+      // right.
+      //
+      // Since the sweeper confirms liveness from the guest state file within
+      // 30s, and the catch below no longer fails a target the sweeper has
+      // advanced, this poll is advisory. Fail fast and let the sweeper decide.
+      const status = await pollExecStatus(t.node, t.vmid, pid, 15000);
       if (!status.exited || status.exitcode !== 0) {
         throw new Error(
           `staging exited ${status.exitcode}: ${(status.stderr || status.stdout || '').slice(0, 300)}`
@@ -536,9 +548,15 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       }
 
       const expectedFinish = startEpoch + (selection.durationSeconds || selection.capSeconds);
+      // Only move the status if the sweeper has not already moved it further.
+      // pollExecStatus above can take up to 60s, and the sweeper claims
+      // 'dispatching' targets after 20s -- so by the time we get here it may
+      // already have read the guest's state file and set 'running'. Writing
+      // 'scheduled' unconditionally would walk that backwards.
       await query(
         `UPDATE cle_attack_target
-            SET status = 'scheduled', expected_finish_at = to_timestamp($3), error = NULL, updated_at = NOW()
+            SET status = CASE WHEN status = 'dispatching' THEN 'scheduled' ELSE status END,
+                expected_finish_at = to_timestamp($3), error = NULL, updated_at = NOW()
           WHERE run_id = $1 AND lane_id = $2`,
         [runId, t.lane_id, expectedFinish]
       );
@@ -548,12 +566,33 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       });
       return { lane_id: t.lane_id, ok: true };
     } catch (err) {
-      await query(
+      // The staging exec is NOT authoritative about whether the attack is
+      // running, and treating it as such reports live attacks as failures.
+      //
+      // It watches a guest-exec that only stages the wrapper and forks it. The
+      // wrapper writing /opt/cybercore/runs/<id>/state is far stronger evidence,
+      // and the sweeper reads that every 30s. pollExecStatus waits a full 60s
+      // before giving up, so the sweeper has usually already claimed this target
+      // and advanced it -- and an unconditional UPDATE here then overwrites a
+      // RUNNING attack with 'failed'.
+      //
+      // Observed exactly that: T1005 generating a visible spike in Kibana while
+      // the console showed "staging exited -1: Timed out", with started_at and
+      // clock_skew_s already populated by the sweeper on the same row.
+      //
+      // So: only fail a target that is still sitting where dispatch left it.
+      const r = await query(
         `UPDATE cle_attack_target
             SET status = 'failed', error = $3, finished_at = NOW(), updated_at = NOW()
-          WHERE run_id = $1 AND lane_id = $2`,
+          WHERE run_id = $1 AND lane_id = $2
+            AND status = 'dispatching'`,
         [runId, t.lane_id, String(err.message || err).slice(0, 500)]
       );
+      if (!r.rowCount) {
+        // Already past 'dispatching' -- the guest answered, so the wrapper is
+        // alive and this exception was about our visibility, not the attack.
+        return { lane_id: t.lane_id, ok: true };
+      }
       return { lane_id: t.lane_id, ok: false };
     }
   }, { concurrency });

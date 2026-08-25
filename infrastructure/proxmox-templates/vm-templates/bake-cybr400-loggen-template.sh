@@ -148,6 +148,21 @@ BASELINE_FREQ_BACKUP="${BASELINE_FREQ_BACKUP:-1}"
 # mitre.technique:* becomes the answer key.
 BASELINE_STRIP_MITRE="${BASELINE_STRIP_MITRE:-0}"
 
+# And the exact inverse for the ATTACK checkout. Default ON.
+#
+# The baseline KEEPS its mitre blocks so benign traffic carries a realistic
+# false-positive floor. The attack tree must not, for a different reason: the
+# agent drops every attack event that has no technique, so any tag left in that
+# config would ship as though it were part of the instructor's run. A stock
+# attack tree would emit T1190/T1110/T1071/T1499 alongside the selected
+# technique and quietly corrupt the exercise.
+#
+# Stripped, the only tags left are the ones MitreMapper assigns at runtime,
+# which the --mitre-technique filter has already constrained to the chosen
+# technique. Confirmed on a deployed lane: 37,004 lines, exactly one distinct
+# technique present.
+ATTACK_STRIP_MITRE="${ATTACK_STRIP_MITRE:-1}"
+
 # Rotate the baseline log at this size. log-generator appends to ONE file and
 # never rotates: a deployed lane reached log.offset 2,490,538,083 -- 2.5 GB in
 # a single logs.json in about twelve hours.
@@ -325,18 +340,26 @@ cat > "$ROTATE_TMP" <<'LOGGEN_ROTATE_EOF'
 set -e
 
 DIR=/opt/log-generator/logs/current
+ATTACK_DIR=/opt/log-generator-attack/logs/current
 F="$DIR/logs.json"
 MAX="${1:-268435456}"
 GRACE_MIN=60
 
+# Reap log-generator's own rotation spam FIRST, unconditionally, and in BOTH
+# checkouts -- it is the expensive problem even when logs.json is nowhere near
+# the size cap. These are .jsonl, so the agent's *.json glob never ingested
+# them; the cost is purely the directory enumeration filebeat does on every
+# scan, and 54,609 entries was enough to stall guest-exec on an idle box.
+#
+# The attack tree matters as much as the baseline: it gains another file per
+# second for the length of every attack run and nothing else ever cleans it.
+for D in "$DIR" "$ATTACK_DIR"; do
+  [ -d "$D" ] || continue
+  find "$D" -maxdepth 1 -name 'logs_*.jsonl' -mmin +5 -delete 2>/dev/null || true
+done
+
 [ -f "$F" ] || exit 0
 SZ="$(stat -c %s "$F" 2>/dev/null || echo 0)"
-
-# Reap log-generator's own rotation spam FIRST, and unconditionally -- it is the
-# expensive problem even when logs.json is nowhere near the size cap. These are
-# .jsonl, so the agent's *.json glob never ingested them; the cost is purely the
-# directory enumeration filebeat does on every scan.
-find "$DIR" -maxdepth 1 -name 'logs_*.jsonl' -mmin +5 -delete 2>/dev/null || true
 
 if [ "$SZ" -ge "$MAX" ]; then
   mv "$F" "$DIR/logs-$(date +%s).json"
@@ -490,6 +513,33 @@ write_files:
             - ndjson:
                 target: loggen
                 add_error_key: true
+        # The attack tree ships ONLY technique-tagged events, and that single
+        # processor is what makes the whole feature work.
+        #
+        # --mitre-technique is a FILTER over generic enterprise logs, not a
+        # technique simulator: LogGeneratorManager runs every generator at its
+        # configured rate and tags the lines that map, rather than restricting
+        # what is written. Measured on a deployed lane, one T1005 run produced
+        #
+        #     37,004 lines written
+        #         76 carrying "technique":"T1005"      (0.2%)
+        #     30,571 of them from `endpoint` alone     (api.example.com)
+        #
+        # Shipping that raw is a 37k-event wall of API-gateway traffic with a
+        # 76-event needle in it -- the opposite of an attack hidden in a
+        # baseline, and nothing to do with reading files off a local disk.
+        #
+        # Lowering the attack tree's rates is the wrong fix and was my first
+        # instinct: the volume is what PRODUCES the 76 matches. At the
+        # baseline's ~1.7/sec a five-minute run would yield about one event.
+        # So generate at full rate on the guest, and drop the untagged 99.8%
+        # here, before it reaches Elasticsearch.
+        #
+        # This is sound only because the attack checkout has its config-level
+        # mitre blocks STRIPPED (see ATTACK_STRIP_MITRE). Every remaining tag
+        # comes from MitreMapper matching at runtime, so it is by construction
+        # the technique the instructor selected -- verified on the lane above,
+        # where T1005 was the only technique present in 37k lines.
         - type: filestream
           id: loggen-attack
           data_stream.dataset: loggen.events
@@ -499,6 +549,11 @@ write_files:
             - ndjson:
                 target: loggen
                 add_error_key: true
+          processors:
+            - drop_event:
+                when:
+                  not:
+                    has_fields: ['loggen.mitre.technique']
       agent.logging.level: info
 
   # Helper scripts, base64'd so no $ or backslash has to survive this heredoc.
@@ -604,6 +659,12 @@ runcmd:
   #      happening. ----
   - [ sh, -c, 'cp -a /opt/log-generator /opt/log-generator-attack' ]
 
+  # ---- The attack checkout keeps stock RATES -- no frequency pairs are passed,
+  #      and that is deliberate: the volume is what produces technique matches.
+  #      It does NOT keep log-generator's broken file rotation, and it does NOT
+  #      keep its config-level mitre blocks. See ATTACK_STRIP_MITRE. ----
+  - [ sh, -c, 'LOGGEN_STRIP_MITRE=${ATTACK_STRIP_MITRE} /opt/cybercore/loggen-tune.sh /opt/log-generator-attack/src/config/default.yaml' ]
+
   # ---- Baseline RATE and MITRE labelling. See the BASELINE_FREQ_* block at the
   #      top of this script for why every value must be <= 20; the short version
   #      is that log-generator's batch path has a Math.max(1, ...) floor that
@@ -649,7 +710,8 @@ runcmd:
   - [ sh, -c, 'grep -q "^SELINUX=${SELINUX_MODE}" /etc/selinux/config && echo "SELINUX_MODE_SET=yes" >> /etc/cybercore-bake.env || echo "SELINUX_MODE_SET=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -Eq "^    frequency: ([0-9]{3,}|[3-9][0-9]|2[1-9])" /opt/log-generator/src/config/default.yaml && echo "BASELINE_RATE_CAPPED=no" >> /etc/cybercore-bake.env || echo "BASELINE_RATE_CAPPED=yes" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -q "        mitre:" /opt/log-generator/src/config/default.yaml && echo "BASELINE_MITRE_STRIPPED=no" >> /etc/cybercore-bake.env || echo "BASELINE_MITRE_STRIPPED=yes" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, 'grep -q "        mitre:" /opt/log-generator-attack/src/config/default.yaml && echo "ATTACK_MITRE_KEPT=yes" >> /etc/cybercore-bake.env || echo "ATTACK_MITRE_KEPT=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "        mitre:" /opt/log-generator-attack/src/config/default.yaml && echo "ATTACK_MITRE_STRIPPED=no" >> /etc/cybercore-bake.env || echo "ATTACK_MITRE_STRIPPED=yes" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "drop_event" /etc/elastic-agent/elastic-agent.yml && echo "ATTACK_DROP_UNTAGGED=yes" >> /etc/cybercore-bake.env || echo "ATTACK_DROP_UNTAGGED=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -q "ndjson" /etc/elastic-agent/elastic-agent.yml && echo "NDJSON_PARSER=yes" >> /etc/cybercore-bake.env || echo "NDJSON_PARSER=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'systemctl is-enabled loggen-rotate.timer >/dev/null 2>&1 && echo "ROTATE_TIMER=yes" >> /etc/cybercore-bake.env || echo "ROTATE_TIMER=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
@@ -743,7 +805,10 @@ check BASELINE_RATE_CAPPED yes "a generator is still above frequency 20 — log-
 EXPECT_MITRE_STRIPPED=no
 [ "$BASELINE_STRIP_MITRE" = "1" ] && EXPECT_MITRE_STRIPPED=yes
 check BASELINE_MITRE_STRIPPED "$EXPECT_MITRE_STRIPPED" "the baseline's mitre labelling does not match BASELINE_STRIP_MITRE — benign filler tagged T1018/T1110/T1190 makes hunting by technique return noise forever"
-check ATTACK_MITRE_KEPT    yes "the attack checkout lost its mitre blocks — attack runs would be unlabelled and indistinguishable from filler in Kibana"
+EXPECT_ATTACK_STRIPPED=no
+[ "$ATTACK_STRIP_MITRE" = "1" ] && EXPECT_ATTACK_STRIPPED=yes
+check ATTACK_MITRE_STRIPPED "$EXPECT_ATTACK_STRIPPED" "the attack checkout still carries config-level mitre blocks — with drop_event shipping every tagged line, its stock T1190/T1110/T1499 templates would ship as though they were part of the instructor's run"
+check ATTACK_DROP_UNTAGGED yes "the agent is not dropping untagged attack events — a single run would ship ~37,000 events of generic API-gateway traffic to carry roughly 76 real ones"
 check NDJSON_PARSER        yes "the agent has no ndjson parser — every event lands in Kibana as one opaque JSON string with no filterable fields"
 check ROTATE_TIMER         yes "loggen-rotate.timer is not enabled — logs.json grows without bound (measured: 2.5 GB in twelve hours)"
 
