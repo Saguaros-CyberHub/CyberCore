@@ -286,8 +286,11 @@
 
   const api = { parseDelimited, detectDelimiter, toRosterRows, parseRoster };
 
-  // Browser
-  if (root) root.CleCsv = api;
+  // Browser. Two names on purpose: this file moved out of the CLE plugin
+  // into core so CIAB could use it without a cross-plugin <script src>,
+  // and CleCsv stays for one release so a browser left open across the
+  // deploy does not break. New callers use CsvRoster.
+  if (root) { root.CsvRoster = api; root.CleCsv = api; }
   // Node, for the tests
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : null);
