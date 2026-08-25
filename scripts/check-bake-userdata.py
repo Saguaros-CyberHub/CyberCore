@@ -103,14 +103,29 @@ decls = [(i, ln.strip()) for i, ln in enumerate(agent.split('\n'))
          if re.match(r'^\s*- drop_(event|fields):\s*$', ln)]
 events = [i for i, ln in decls if 'drop_event' in ln]
 fields = [i for i, ln in decls if 'drop_fields' in ln]
-if len(events) != 1 or len(fields) != 1:
-    print('  expected exactly one drop_event and one drop_fields processor, got %d and %d'
+# One drop_event (attack input only), and one drop_fields PER INPUT.
+#
+# The attack tree strips loggen.mitre and log.file.path; the baseline tree strips
+# log.file.path. BOTH halves are required. Stripping the path from only the attack
+# tree would leave its absence as the same oracle inverted: a NOT _exists_ query
+# on log.file.path would then select precisely the attack events, which is no
+# better than the direct match and considerably harder to notice.
+if len(events) != 1 or len(fields) != 2:
+    print('  expected one drop_event and two drop_fields processors, got %d and %d'
           % (len(events), len(fields)))
     fail = 1
-elif events[0] > fields[0]:
-    print('  drop_fields is declared BEFORE drop_event -- the filter tests a field that')
-    print('  has already been removed, so every attack event is discarded')
-    fail = 1
+else:
+    # Order still decides whether the feature works at all: drop_event tests the
+    # technique, so the drop_fields that removes it must come afterwards.
+    if not [i for i in fields if i > events[0]]:
+        print('  the attack input declares no drop_fields after drop_event -- the mitre')
+        print('  label would ship stamped on every attack event, naming the answer')
+        fail = 1
+    if 'log.file.path' not in agent:
+        print('  log.file.path is not dropped -- filestream stamps the source path on')
+        print('  every document, so the two trees give it two values and the field')
+        print('  list in Discover becomes a one-click answer key for every run')
+        fail = 1
 
 print('OK' if not fail else 'FAILED')
 sys.exit(fail)

@@ -129,7 +129,14 @@ test('the technique label is stripped from attack events, and only after the fil
   assert.ok(dropFields > -1, 'attack input must strip the technique label');
   assert.ok(dropEvent < dropFields,
     'drop_event must come BEFORE drop_fields or every attack event is discarded');
-  assert.ok(/fields: \['loggen\.mitre'\]/.test(proc));
+  // Both fields, and log.file.path is the one that matters most. filestream
+  // stamps the source path on every document, and the two trees give it exactly
+  // two values -- /opt/log-generator/... and /opt/log-generator-attack/... -- so
+  // it sat in Discover's field list as a one-click enumeration of the whole run.
+  // Easier than any oracle it was kept alongside, because it is a direct match
+  // rather than a negation.
+  assert.ok(/fields: \['loggen\.mitre', 'log\.file\.path'\]/.test(proc),
+    'the attack input must strip both the technique label and the source path');
 });
 
 test('the baseline input keeps its labels and its events', () => {
@@ -138,7 +145,13 @@ test('the baseline input keeps its labels and its events', () => {
   // or untagged benign events — the overwhelming majority — never ship at all.
   const base = bake.slice(bake.indexOf('id: loggen-baseline'), bake.indexOf('id: loggen-attack'));
   assert.ok(!base.includes('drop_event'), 'the baseline must not drop untagged events');
-  assert.ok(!base.includes('drop_fields'), 'the baseline must keep its MITRE labels');
+  assert.ok(!/fields: \[[^\]]*loggen\.mitre/.test(base), 'the baseline must keep its MITRE labels');
+  // It DOES drop log.file.path, and the pairing with the attack input is the
+  // whole point. Removing the path from only one tree replaces a direct-match
+  // oracle with an inverted one: NOT _exists_ : log.file.path would then select
+  // exactly the attack events, which is no better and much harder to spot.
+  assert.ok(/fields: \['log\.file\.path'\]/.test(base),
+    'the baseline must drop log.file.path too, or its absence identifies attacks');
 });
 
 test('every cloud-init block scalar keeps its indentation', () => {
@@ -207,5 +220,40 @@ test('every systemd unit the bake writes is complete', () => {
     if (body.includes('[Service]')) {
       assert.ok(/^\s+ExecStart=/m.test(body), `${unitPath} has no ExecStart=`);
     }
+  }
+});
+
+test('no dashboard panel can point at the attack', () => {
+  // Both dashboards have to survive a student reading them. A panel that
+  // aggregates the technique, splits on the dataset, or filters a file path
+  // hands over the finding — and the whole point of the workbench is that it
+  // looks identical on a day with no attack at all.
+  const NDJSON = path.join(ROOT, 'infrastructure', 'proxmox-templates', 'vm-templates',
+    'cybr400-kibana', 'cybr400-loggen-dashboard.ndjson');
+  const raw = nl(fs.readFileSync(NDJSON, 'utf8'));
+  for (const banned of ['mitre', 'data_stream.dataset', 'log.file.path',
+    'loggen.attack', 'loggen.baseline', 'log-generator-attack']) {
+    assert.ok(!raw.includes(banned), `a dashboard panel references "${banned}"`);
+  }
+});
+
+test('the workbench teaches the tail, not just the head', () => {
+  // The rare-terms panels are the teaching core. A beginner sorts descending
+  // and reads the top; almost everything interesting in a real hunt is at the
+  // bottom, because an intruder is by definition not the busiest thing on the
+  // network. If these silently flip back to desc the dashboard still renders
+  // and quietly stops teaching the lesson.
+  const NDJSON = path.join(ROOT, 'infrastructure', 'proxmox-templates', 'vm-templates',
+    'cybr400-kibana', 'cybr400-loggen-dashboard.ndjson');
+  const objs = nl(fs.readFileSync(NDJSON, 'utf8')).split('\n')
+    .filter(Boolean).map((l) => JSON.parse(l));
+  const rare = objs.filter((o) => o.id && /hunt-rare/.test(o.id));
+  assert.strictEqual(rare.length, 2, 'expected two rare-terms panels');
+  for (const o of rare) {
+    const cols = o.attributes.state.datasourceStates.formBased.layers.layer1.columns;
+    const terms = cols.col_terms;
+    assert.strictEqual(terms.params.orderDirection, 'asc', `${o.id} is not sorted ascending`);
+    assert.strictEqual(terms.params.otherBucket, false,
+      `${o.id} keeps an Other bucket, which swamps the rare values`);
   }
 });

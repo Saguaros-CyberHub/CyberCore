@@ -671,15 +671,28 @@ This does not create the reverse oracle. Roughly 88% of benign traffic is alread
 returns overwhelmingly ordinary events with the attack a small fraction inside — which is the shape a
 hunt should have.
 
-**The instructor's discriminator is `log.file.path`.** A playbook run writes a per-run file, so this
-returns exactly one run and nothing else:
+**There is deliberately no in-index discriminator any more.** `log.file.path` used to serve as one,
+on the reasoning that it was less discoverable than a dataset name. That reasoning does not survive
+contact with Discover: the field appears in the field list like any other, with exactly two values —
+`/opt/log-generator/...` and `/opt/log-generator-attack/...` — so one click on the second enumerated
+the instructor's entire run. It was a *direct match*, which makes it easier than the oracles it sat
+alongside, and clicking through the field list is precisely what a beginner does. It is now dropped
+from **both** inputs; dropping it from only the attack tree would have left its absence as the same
+oracle inverted.
 
-```
-log.file.path : "/opt/log-generator-attack/logs/current/attack-*.json"
+**Verify a run through the Attack Console instead.** The console reports the emitter's own event
+count per lane on the run's state line, read back over guest-exec. That path is admin-only and cannot
+leak into the student's index. On the sensor itself:
+
+```sh
+# the per-run file still exists on disk, it is just no longer labelled in Kibana
+ls -la /opt/log-generator-attack/logs/current/attack-*.json
+grep -c '"technique":"' /opt/log-generator-attack/logs/current/attack-<RUN_ID>.json
 ```
 
-Findable by a determined student, but it is not offered up the way a dataset name or a technique
-label is.
+If you need the field back temporarily to debug an ingest problem on one lane, remove
+`log.file.path` from the `drop_fields` list in `/opt/Elastic/Agent/elastic-agent.yml` on that lane
+only and restart the agent — then put it back before the next class.
 
 For a genuinely hard assignment, pick a technique that the baseline *also* emits — `T1078`, `T1098`,
 `T1110`, `T1110.001`, `T1496`, `T1499`, `T1562.001`, `T1562.004` or `T1059.003`. Those nine are in
@@ -971,9 +984,13 @@ the sensor as the **second**. First machine takes `.50` and the gateway's RDP co
    and password rotation take effect — the conditions that were killing the service. If Kibana is down
    here, read `C:\CyberCore\elk-boot.log`: it will say whether 9200 ever came up.
 7. Attack Console → fire `T1082` for 60 s and confirm the attack's documents land. Both the baseline
-   and the attack ship to the single `loggen.events` dataset on purpose (see step 4b), so verify with
-   the instructor-side discriminator rather than a dataset filter:
+   and the attack ship to the single `loggen.events` dataset on purpose (see step 4b), and
+   `log.file.path` is dropped from both inputs so it cannot be used as a filter either. Verify on the
+   sensor rather than in Kibana:
 
+   ```sh
+   grep -c '"technique":"' /opt/log-generator-attack/logs/current/*.json
    ```
-   log.file.path : "/opt/log-generator-attack/logs/current/logs.json"
-   ```
+
+   then confirm the same count appears in Kibana for the run window without needing a discriminator:
+   the count is the check.

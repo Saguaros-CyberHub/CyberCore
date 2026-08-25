@@ -563,7 +563,75 @@ function pickTemplate(rng, step) {
 }
 
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
+
+/**
+ * Sample a pool with a long tail instead of uniformly.
+ *
+ * Uniform sampling is the wrong shape for an estate. Measured on the flat
+ * version: 48 addresses each appeared 377-463 times in a day, 9 accounts each
+ * 11,458-11,848. Nothing was rare, so nothing could stand out by being rare --
+ * and "read the bottom of the distribution, not the top" is the single most
+ * useful habit a hunting exercise can build.
+ *
+ * Squaring a uniform draw concentrates it near the front of the list, so a pool
+ * is read as roughly most-common-first and the entries at the end are genuinely
+ * uncommon. Cheap, needs no per-entry weights, and the exponent is the only
+ * knob: higher means a steeper head and a longer tail.
+ */
+const SKEW_EXPONENT = 2.2;
+
+function pickSkewed(rng, arr) {
+  const i = Math.floor(arr.length * Math.pow(rng(), SKEW_EXPONENT));
+  return arr[Math.min(i, arr.length - 1)];
+}
 const randInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+
+/** FNV-1a, reused to map a value onto a pool index deterministically. */
+function poolIndexFor(str, len) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % len;
+}
+
+/**
+ * Resolve a pool reference, honouring bindings.
+ *
+ * A BOUND pool is not sampled -- it is DERIVED from another pool's value, so
+ * the same account always resolves to the same workstation address. Without
+ * this, every pool draw is independent and the estate has no people in it: one
+ * address shows thirty-five different accounts failing to log in, which is not
+ * a workstation, it is a shuffle.
+ *
+ * The cost of getting this wrong is not just realism. "Many accounts, one
+ * source" is the signature of a password spray, and on independently-sampled
+ * pools that signature fits ordinary traffic BETTER than it fits the attack --
+ * so a student who learns it would be led away from the answer every time.
+ *
+ * Derivation is by hash rather than by index so that adding an account to the
+ * middle of the pool does not reshuffle everyone else's desk.
+ */
+function samplePool(key, ctx, rng, depth) {
+  if (Object.prototype.hasOwnProperty.call(ctx.sampled, key)) return ctx.sampled[key];
+
+  const bound = ctx.bindings && ctx.bindings[key];
+  let value;
+  if (bound && (depth || 0) < 4) {
+    const pool = ctx.pools[bound.pool];
+    if (!Array.isArray(pool) || !pool.length) return null;
+    const driver = samplePool(bound.by, ctx, rng, (depth || 0) + 1);
+    if (driver == null) return null;
+    value = String(pool[poolIndexFor(`${bound.by}:${driver}`, pool.length)]);
+  } else {
+    const pool = ctx.pools[key];
+    if (!Array.isArray(pool) || !pool.length) return null;
+    value = String(ctx.skewed && ctx.skewed.has(key) ? pickSkewed(rng, pool) : pick(rng, pool));
+  }
+  ctx.sampled[key] = value;
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Duration parsing — the SAME grammar loggen-catalog.js formatDuration() emits.
@@ -630,19 +698,19 @@ function expandOnce(template, ctx, rng, seq) {
     if (key === 'pid') return String(randInt(rng, 400, 32000));
     if (key === 'seq') return String(seq);
     if (Object.prototype.hasOwnProperty.call(ctx.entities, key)) return ctx.entities[key];
-    const pool = ctx.pools[key];
-    if (Array.isArray(pool) && pool.length) {
-      if (idx != null) return String(pool[Number(idx) % pool.length]);
-      // Sampled ONCE per event, then reused. Sampling per occurrence makes an
-      // event contradict itself -- "Failed password for jsmith" carrying
-      // metadata.user=svc_backup -- so a student pivoting on the structured
-      // field gets a different answer than one reading the message. Both are
-      // wrong, and nothing about the data says which.
-      if (!Object.prototype.hasOwnProperty.call(ctx.sampled, key)) {
-        ctx.sampled[key] = String(pick(rng, pool));
-      }
-      return ctx.sampled[key];
+    // An explicit index reads the pool directly: {{users.0}} means "that one",
+    // not "one of these", so neither sampling nor binding applies.
+    const direct = ctx.pools[key];
+    if (idx != null && Array.isArray(direct) && direct.length) {
+      return String(direct[Number(idx) % direct.length]);
     }
+    // Sampled ONCE per event, then reused. Sampling per occurrence makes an
+    // event contradict itself -- "Failed password for jsmith" carrying
+    // metadata.user=svc_backup -- so a student pivoting on the structured
+    // field gets a different answer than one reading the message. Both are
+    // wrong, and nothing about the data says which.
+    const sampled = samplePool(key, ctx, rng, 0);
+    if (sampled != null) return sampled;
     // Left intact rather than "undefined". log-generator itself ships literal
     // "{clientIP}" in its metadata at this commit, and that is exactly the tell
     // we must not reproduce -- an unresolved token fails a unit test instead.
@@ -750,6 +818,10 @@ function planTimeline(playbook, opts) {
   const { starts } = layout(steps, gapScale);
   const entities = resolveEntities(playbook, rng);
   const pools = playbook.pools || {};
+  // Pools listed here are sampled with a long tail rather than uniformly.
+  const skewed = new Set(playbook.skewed || []);
+  // Derived pools: same account, same desk. See samplePool().
+  const bindings = playbook.bindings || {};
 
   const events = [];
 
@@ -777,7 +849,7 @@ function planTimeline(playbook, opts) {
       // Fresh sample cache per event: pool draws are consistent WITHIN one
       // event and vary BETWEEN them, which is what a spray from one host
       // against many accounts actually looks like.
-      const ctx = { entities, pools, sampled: {} };
+      const ctx = { entities, pools, skewed, bindings, sampled: {} };
       events.push({
         // Clamped to the requested window. Jitter on the final event of a step
         // can otherwise push it a few seconds past the deadline, and
@@ -791,7 +863,12 @@ function planTimeline(playbook, opts) {
           host: expand(src.host || 'localhost', ctx, rng, seq),
         },
         message: expand(tpl.message || step.message || '', ctx, rng, seq),
-        metadata: expandDeep(tpl.metadata || step.metadata || {}, ctx, rng, seq),
+        // Template metadata MERGES over the step's rather than replacing it, so a
+        // template only has to state what differs -- outcome=failure on the one
+        // that failed -- instead of repeating every shared field and drifting.
+        metadata: expandDeep(
+          Object.assign({}, step.metadata || {}, tpl.metadata || {}), ctx, rng, seq
+        ),
         technique,
         tactic,
         subtechnique: step.subtechnique || playbook.subtechnique || null,
@@ -1031,6 +1108,9 @@ module.exports = {
   resolveEntities,
   intensityAt,
   pickTemplate,
+  pickSkewed,
+  samplePool,
+  poolIndexFor,
   layout,
   minSecondsFor,
   expand,
@@ -1070,13 +1150,38 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "app-server-01",
       "db-01",
       "web-01",
-      "fileserv-01"
+      "fileserv-01",
+      "srv-prod-02",
+      "app-server-02",
+      "web-02",
+      "build-01",
+      "monitor-01",
+      "backup-01",
+      "db-02",
+      "cache-01",
+      "fileserv-02"
     ],
     "wspool": [
       "ws-042",
       "ws-071",
       "ws-113",
-      "ws-128"
+      "ws-128",
+      "ws-014",
+      "ws-025",
+      "ws-033",
+      "ws-058",
+      "ws-066",
+      "ws-081",
+      "ws-094",
+      "ws-107",
+      "ws-119",
+      "ws-133",
+      "ws-146",
+      "ws-152",
+      "ws-168",
+      "ws-171",
+      "ws-185",
+      "ws-196"
     ],
     "fwpool": [
       "firewall-01"
@@ -1103,10 +1208,35 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "db-01",
       "web-01",
       "fileserv-01",
+      "srv-prod-02",
+      "app-server-02",
+      "web-02",
+      "build-01",
+      "monitor-01",
+      "backup-01",
+      "db-02",
+      "cache-01",
+      "fileserv-02",
       "ws-042",
       "ws-071",
       "ws-113",
-      "ws-128"
+      "ws-128",
+      "ws-014",
+      "ws-025",
+      "ws-033",
+      "ws-058",
+      "ws-066",
+      "ws-081",
+      "ws-094",
+      "ws-107",
+      "ws-119",
+      "ws-133",
+      "ws-146",
+      "ws-152",
+      "ws-168",
+      "ws-171",
+      "ws-185",
+      "ws-196"
     ],
     "users": [
       "jsmith",
@@ -1115,9 +1245,45 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "apatel",
       "dwilson",
       "tnguyen",
+      "rbaker",
+      "lgarcia",
+      "pokafor",
+      "schen",
+      "mhaddad",
+      "jwalsh",
+      "nsingh",
+      "ecarter",
+      "bmurphy",
+      "yilmaz",
+      "dkowalski",
+      "aroy",
+      "tfischer",
+      "cnguyen",
+      "hpatel",
+      "mokonkwo",
+      "rlindqvist",
+      "kbrennan",
+      "jdelacruz",
+      "sabbas",
+      "wzhang",
+      "mtorres",
+      "ldubois",
+      "ahassan",
+      "admin",
+      "operator",
+      "helpdesk",
+      "helpdesk2",
+      "jdoe",
+      "rsmith",
+      "backupsvc",
+      "monitor01",
+      "sysadm",
+      "guest",
       "svc_backup",
       "svc_report",
-      "svc_deploy"
+      "svc_deploy",
+      "svc_scan",
+      "svc_sync"
     ],
     "cmds": [
       "ls -la",
@@ -1145,7 +1311,23 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "/home/{{users}}/.bashrc",
       "/etc/resolv.conf",
       "/srv/app/package.json",
-      "/var/lib/pgsql/data/postgresql.conf"
+      "/var/lib/pgsql/data/postgresql.conf",
+      "{{docdirs}}/{{docs}}",
+      "{{docdirs}}/{{docs}}"
+    ],
+    "docdirs": [
+      "/home/shared/finance",
+      "/home/shared/hr",
+      "/srv/contracts",
+      "/var/backups"
+    ],
+    "docs": [
+      "q3-forecast.xlsx",
+      "payroll-2026.csv",
+      "msa-signed.pdf",
+      "passwords.kdbx",
+      "board-minutes.docx",
+      "customer-export.csv"
     ],
     "pkgs": [
       "openssl",
@@ -1174,7 +1356,11 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "audit_log",
       "products",
       "customers",
-      "invoices"
+      "invoices",
+      "employees",
+      "contracts",
+      "card_tokens",
+      "payroll"
     ],
     "senders": [
       "github.com",
@@ -1187,7 +1373,8 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/128.0",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/127.0.0.0 Safari/537.36",
       "curl/8.6.0",
-      "python-requests/2.32.3"
+      "python-requests/2.32.3",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     ],
     "paths": [
       "/",
@@ -1206,11 +1393,412 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "api.github.com",
       "login.okta.com"
     ],
+    "lanips": [
+      "10.20.30.11",
+      "10.20.30.12",
+      "10.20.30.13",
+      "10.20.30.14",
+      "10.20.30.15",
+      "10.20.30.16",
+      "10.20.30.17",
+      "10.20.30.18",
+      "10.20.30.19",
+      "10.20.30.20",
+      "10.20.30.21",
+      "10.20.30.22",
+      "10.20.30.23",
+      "10.20.30.24",
+      "10.20.30.25",
+      "10.20.30.26",
+      "10.20.30.27",
+      "10.20.30.28",
+      "10.20.30.29",
+      "10.20.30.30",
+      "10.20.30.31",
+      "10.20.30.32",
+      "10.20.30.33",
+      "10.20.30.34",
+      "10.20.30.35",
+      "10.20.30.36",
+      "10.20.30.37",
+      "10.20.30.38",
+      "10.20.30.39",
+      "10.20.30.40",
+      "10.20.30.41",
+      "10.20.30.42",
+      "10.20.30.43",
+      "10.20.30.44",
+      "10.20.30.45",
+      "10.20.30.46",
+      "10.20.30.47",
+      "10.20.30.48",
+      "10.20.30.49",
+      "10.20.30.50",
+      "10.20.30.51",
+      "10.20.30.52",
+      "10.20.30.53",
+      "10.20.30.54",
+      "10.20.30.55",
+      "10.20.30.56",
+      "10.20.30.57",
+      "10.20.30.58",
+      "10.20.30.59",
+      "10.20.30.60",
+      "10.20.30.61",
+      "10.20.30.62",
+      "10.20.30.63",
+      "10.20.30.64",
+      "10.20.30.65",
+      "10.20.30.66",
+      "10.20.30.67",
+      "10.20.30.68",
+      "10.20.30.69",
+      "10.20.30.70",
+      "10.20.31.11",
+      "10.20.31.12",
+      "10.20.31.13",
+      "10.20.31.14",
+      "10.20.31.15",
+      "10.20.31.16",
+      "10.20.31.17",
+      "10.20.31.18",
+      "10.20.31.19",
+      "10.20.31.20",
+      "10.20.31.21",
+      "10.20.31.22",
+      "10.20.31.23",
+      "10.20.31.24",
+      "10.20.31.25",
+      "10.20.31.26",
+      "10.20.31.27",
+      "10.20.31.28",
+      "10.20.31.29",
+      "10.20.31.30",
+      "10.20.31.31",
+      "10.20.31.32",
+      "10.20.31.33",
+      "10.20.31.34",
+      "10.20.31.35",
+      "10.20.31.36",
+      "10.20.31.37",
+      "10.20.31.38",
+      "10.20.31.39",
+      "10.20.31.40",
+      "10.20.31.41",
+      "10.20.31.42",
+      "10.20.31.43",
+      "10.20.31.44",
+      "10.20.31.45",
+      "10.20.31.46",
+      "10.20.31.47",
+      "10.20.31.48",
+      "10.20.31.49",
+      "10.20.31.50",
+      "10.20.31.51",
+      "10.20.31.52",
+      "10.20.31.53",
+      "10.20.31.54",
+      "10.20.31.55",
+      "10.20.31.56",
+      "10.20.31.57",
+      "10.20.31.58",
+      "10.20.31.59",
+      "10.20.31.60",
+      "10.20.31.61",
+      "10.20.31.62",
+      "10.20.31.63",
+      "10.20.31.64",
+      "10.20.31.65",
+      "10.20.31.66",
+      "10.20.31.67",
+      "10.20.31.68",
+      "10.20.31.69",
+      "10.20.31.70",
+      "10.20.32.11",
+      "10.20.32.12",
+      "10.20.32.13",
+      "10.20.32.14",
+      "10.20.32.15",
+      "10.20.32.16",
+      "10.20.32.17",
+      "10.20.32.18",
+      "10.20.32.19",
+      "10.20.32.20",
+      "10.20.32.21",
+      "10.20.32.22",
+      "10.20.32.23",
+      "10.20.32.24",
+      "10.20.32.25",
+      "10.20.32.26",
+      "10.20.32.27",
+      "10.20.32.28",
+      "10.20.32.29",
+      "10.20.32.30",
+      "10.20.32.31",
+      "10.20.32.32",
+      "10.20.32.33",
+      "10.20.32.34",
+      "10.20.32.35",
+      "10.20.32.36",
+      "10.20.32.37",
+      "10.20.32.38",
+      "10.20.32.39",
+      "10.20.32.40",
+      "10.20.32.41",
+      "10.20.32.42",
+      "10.20.32.43",
+      "10.20.32.44",
+      "10.20.32.45",
+      "10.20.32.46",
+      "10.20.32.47",
+      "10.20.32.48",
+      "10.20.32.49",
+      "10.20.32.50",
+      "10.20.32.51",
+      "10.20.32.52",
+      "10.20.32.53",
+      "10.20.32.54",
+      "10.20.32.55",
+      "10.20.32.56",
+      "10.20.32.57",
+      "10.20.32.58",
+      "10.20.32.59",
+      "10.20.32.60",
+      "10.20.32.61",
+      "10.20.32.62",
+      "10.20.32.63",
+      "10.20.32.64",
+      "10.20.32.65",
+      "10.20.32.66",
+      "10.20.32.67",
+      "10.20.32.68",
+      "10.20.32.69",
+      "10.20.32.70",
+      "10.20.33.11",
+      "10.20.33.12",
+      "10.20.33.13",
+      "10.20.33.14",
+      "10.20.33.15",
+      "10.20.33.16",
+      "10.20.33.17",
+      "10.20.33.18",
+      "10.20.33.19",
+      "10.20.33.20",
+      "10.20.33.21",
+      "10.20.33.22",
+      "10.20.33.23",
+      "10.20.33.24",
+      "10.20.33.25",
+      "10.20.33.26",
+      "10.20.33.27",
+      "10.20.33.28",
+      "10.20.33.29",
+      "10.20.33.30",
+      "10.20.33.31",
+      "10.20.33.32",
+      "10.20.33.33",
+      "10.20.33.34",
+      "10.20.33.35",
+      "10.20.33.36",
+      "10.20.33.37",
+      "10.20.33.38",
+      "10.20.33.39",
+      "10.20.33.40",
+      "10.20.33.41",
+      "10.20.33.42",
+      "10.20.33.43",
+      "10.20.33.44",
+      "10.20.33.45",
+      "10.20.33.46",
+      "10.20.33.47",
+      "10.20.33.48",
+      "10.20.33.49",
+      "10.20.33.50",
+      "10.20.33.51",
+      "10.20.33.52",
+      "10.20.33.53",
+      "10.20.33.54",
+      "10.20.33.55",
+      "10.20.33.56",
+      "10.20.33.57",
+      "10.20.33.58",
+      "10.20.33.59",
+      "10.20.33.60",
+      "10.20.33.61",
+      "10.20.33.62",
+      "10.20.33.63",
+      "10.20.33.64",
+      "10.20.33.65",
+      "10.20.33.66",
+      "10.20.33.67",
+      "10.20.33.68",
+      "10.20.33.69",
+      "10.20.33.70"
+    ],
+    "dstips": [
+      "10.20.40.11",
+      "10.20.40.12",
+      "10.20.40.13",
+      "10.20.40.14",
+      "10.20.40.15",
+      "10.20.40.16",
+      "10.20.40.17",
+      "10.20.40.18",
+      "10.20.40.19",
+      "10.20.40.20",
+      "10.20.40.21",
+      "10.20.40.22",
+      "10.20.40.23",
+      "10.20.40.24",
+      "10.20.40.25",
+      "10.20.40.26",
+      "10.20.40.27",
+      "10.20.40.28",
+      "10.20.40.29",
+      "10.20.40.30",
+      "10.20.40.31",
+      "10.20.40.32",
+      "10.20.40.33",
+      "10.20.40.34",
+      "10.20.40.35",
+      "10.20.40.36",
+      "10.20.40.37",
+      "10.20.40.38",
+      "10.20.40.39",
+      "10.20.40.40",
+      "10.20.40.41",
+      "10.20.40.42",
+      "10.20.40.43",
+      "10.20.40.44",
+      "10.20.40.45",
+      "10.20.40.46",
+      "10.20.40.47",
+      "10.20.40.48",
+      "10.20.40.49",
+      "10.20.40.50",
+      "10.20.40.51",
+      "10.20.40.52",
+      "10.20.40.53",
+      "10.20.40.54",
+      "10.20.40.55",
+      "10.20.40.56",
+      "10.20.40.57",
+      "10.20.40.58",
+      "10.20.40.59",
+      "10.20.40.60",
+      "10.20.40.61",
+      "10.20.40.62",
+      "10.20.40.63",
+      "10.20.40.64",
+      "10.20.40.65",
+      "10.20.40.66",
+      "10.20.40.67",
+      "10.20.40.68",
+      "10.20.40.69",
+      "10.20.40.70"
+    ],
+    "extips": [
+      "203.0.113.20",
+      "203.0.113.21",
+      "203.0.113.22",
+      "203.0.113.23",
+      "203.0.113.24",
+      "203.0.113.25",
+      "203.0.113.26",
+      "203.0.113.27",
+      "203.0.113.28",
+      "203.0.113.29",
+      "203.0.113.30",
+      "203.0.113.31",
+      "203.0.113.32",
+      "203.0.113.33",
+      "203.0.113.34",
+      "203.0.113.35",
+      "203.0.113.36",
+      "203.0.113.37",
+      "203.0.113.38",
+      "203.0.113.39",
+      "203.0.113.40",
+      "203.0.113.41",
+      "203.0.113.42",
+      "203.0.113.43",
+      "203.0.113.44",
+      "203.0.113.45",
+      "198.51.100.20",
+      "198.51.100.21",
+      "198.51.100.22",
+      "198.51.100.23",
+      "198.51.100.24",
+      "198.51.100.25",
+      "198.51.100.26",
+      "198.51.100.27",
+      "198.51.100.28",
+      "198.51.100.29",
+      "198.51.100.30",
+      "198.51.100.31",
+      "198.51.100.32",
+      "198.51.100.33",
+      "198.51.100.34",
+      "198.51.100.35",
+      "198.51.100.36",
+      "198.51.100.37",
+      "198.51.100.38",
+      "198.51.100.39",
+      "198.51.100.40",
+      "198.51.100.41",
+      "198.51.100.42",
+      "198.51.100.43",
+      "198.51.100.44",
+      "198.51.100.45",
+      "192.0.2.20",
+      "192.0.2.21",
+      "192.0.2.22",
+      "192.0.2.23",
+      "192.0.2.24",
+      "192.0.2.25",
+      "192.0.2.26",
+      "192.0.2.27",
+      "192.0.2.28",
+      "192.0.2.29",
+      "192.0.2.30",
+      "192.0.2.31",
+      "192.0.2.32",
+      "192.0.2.33",
+      "192.0.2.34",
+      "192.0.2.35",
+      "192.0.2.36",
+      "192.0.2.37",
+      "192.0.2.38",
+      "192.0.2.39",
+      "192.0.2.40",
+      "192.0.2.41",
+      "192.0.2.42",
+      "192.0.2.43"
+    ],
     "shares": [
       "\\\\fileserv-01\\finance",
       "\\\\fileserv-01\\hr"
     ]
   },
+  "bindings": {
+    "userips": {
+      "pool": "lanips",
+      "by": "users"
+    }
+  },
+  "skewed": [
+    "users",
+    "hosts",
+    "lanips",
+    "dstips",
+    "extips",
+    "srvpool",
+    "wspool",
+    "cmds",
+    "files",
+    "paths",
+    "sites"
+  ],
   "rhythm": {
     "utc_offset": -7,
     "hourly": [
@@ -1246,7 +1834,7 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 22,
+      "count": 238,
       "level": "INFO",
       "source": {
         "type": "authentication",
@@ -1255,22 +1843,25 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "templates": [
         {
-          "message": "Accepted publickey for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+          "message": "Accepted publickey for {{users}} from {{userips}} port {{port}} ssh2",
           "level": "INFO",
           "weight": 5
         },
         {
-          "message": "Accepted password for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+          "message": "Accepted password for {{users}} from {{userips}} port {{port}} ssh2",
           "level": "INFO",
           "weight": 3
         },
         {
-          "message": "Failed password for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+          "message": "Failed password for {{users}} from {{userips}} port {{port}} ssh2",
           "level": "WARN",
-          "weight": 2
+          "weight": 2,
+          "metadata": {
+            "outcome": "failure"
+          }
         },
         {
-          "message": "Connection closed by authenticating user {{users}} 10.20.30.{{rand:2-60}} port {{port}} [preauth]",
+          "message": "Connection closed by authenticating user {{users}} {{userips}} port {{port}} [preauth]",
           "level": "INFO",
           "weight": 2
         },
@@ -1280,20 +1871,24 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "weight": 3
         },
         {
-          "message": "Disconnected from user {{users}} 10.20.30.{{rand:2-60}} port {{port}}",
+          "message": "Disconnected from user {{users}} {{userips}} port {{port}}",
           "level": "INFO",
           "weight": 3
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "logon-success",
+        "user": "{{users}}",
+        "src_ip": "{{userips}}",
+        "service": "sshd",
+        "outcome": "success"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 8,
+      "count": 87,
       "level": "INFO",
       "source": {
         "type": "authentication",
@@ -1318,14 +1913,17 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "session-opened",
+        "user": "{{users}}",
+        "service": "login",
+        "outcome": "success"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 14,
+      "count": 151,
       "level": "INFO",
       "source": {
         "type": "authentication",
@@ -1356,18 +1954,25 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "Token rejected for {{users}} reason=expired",
           "level": "WARN",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "outcome": "failure",
+            "event_action": "logon-failed"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "logon-success",
+        "user": "{{users}}",
+        "service": "auth-svc",
+        "outcome": "success"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 8,
+      "count": 87,
       "level": "INFO",
       "source": {
         "type": "authentication",
@@ -1376,7 +1981,7 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "templates": [
         {
-          "message": "Remote desktop session established user={{users}} src=10.20.30.{{rand:2-60}}",
+          "message": "Remote desktop session established user={{users}} src={{userips}}",
           "level": "INFO",
           "weight": 1
         },
@@ -1386,20 +1991,33 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "weight": 1
         },
         {
-          "message": "Remote desktop reconnected user={{users}} src=10.20.30.{{rand:2-60}}",
+          "message": "Remote desktop reconnected user={{users}} src={{userips}}",
           "level": "INFO",
           "weight": 1
+        },
+        {
+          "message": "Remote desktop session failed user={{users}} src={{userips}} reason=idle_timeout",
+          "level": "WARN",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error",
+            "outcome": "failure"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "logon-success",
+        "user": "{{users}}",
+        "src_ip": "{{userips}}",
+        "service": "rdp",
+        "outcome": "success"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 2,
+      "count": 22,
       "level": "INFO",
       "source": {
         "type": "authentication",
@@ -1414,14 +2032,17 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "account-created",
+        "user": "{{users}}",
+        "target_user": "contractor",
+        "service": "useradd"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 2,
+      "count": 22,
       "level": "INFO",
       "source": {
         "type": "authentication",
@@ -1438,17 +2059,25 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "message": "add \"{{users}}\" to group \"docker\"",
           "level": "INFO",
           "weight": 1
+        },
+        {
+          "message": "unable to remove \"{{users}}\" from group \"developers\": not a member",
+          "level": "WARN",
+          "weight": 1
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "group-modified",
+        "user": "{{users}}",
+        "target_user": "{{users}}",
+        "service": "usermod"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 40,
+      "count": 2898,
       "level": "INFO",
       "source": {
         "type": "firewall",
@@ -1457,40 +2086,46 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "templates": [
         {
-          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=443 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{lanips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=443 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
           "level": "INFO",
           "weight": 6
         },
         {
-          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=22 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{lanips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=22 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
           "level": "INFO",
           "weight": 3
         },
         {
-          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=5432 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{lanips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=5432 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
           "level": "INFO",
           "weight": 2
         },
         {
-          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=UDP SPT={{port}} DPT=53 WINDOW={{rand:501-65535}} RES=0x00 LEN=64 URGP=0",
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{lanips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=UDP SPT={{port}} DPT=53 WINDOW={{rand:501-65535}} RES=0x00 LEN=64 URGP=0",
           "level": "INFO",
           "weight": 3
         },
         {
-          "message": "DROP IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT={{rand:1-1024}} WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "message": "DROP IN=eth0 OUT=eth1 SRC={{lanips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT={{rand:1-1024}} WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
           "level": "WARN",
-          "weight": 2
+          "weight": 2,
+          "metadata": {
+            "event_action": "connection-blocked"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "connection-allowed",
+        "src_ip": "{{lanips}}",
+        "dst_ip": "{{dstips}}",
+        "protocol": "tcp"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 4,
+      "count": 290,
       "level": "INFO",
       "source": {
         "type": "firewall",
@@ -1501,12 +2136,18 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "Configuration reload requested by uid=0 pid={{pid}}",
           "level": "INFO",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "config-reload"
+          }
         },
         {
           "message": "Zone public: interface eth0 bound",
           "level": "INFO",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "zone-changed"
+          }
         },
         {
           "message": "Rule added: zone=internal source=10.20.30.0/24 service=postgresql accept",
@@ -1515,14 +2156,15 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "rule-added",
+        "service": "firewalld"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 12,
+      "count": 869,
       "level": "INFO",
       "source": {
         "type": "firewall",
@@ -1531,30 +2173,41 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "templates": [
         {
-          "message": "Flow record: {{srvpool}} -> 10.20.30.{{rand:2-60}}:443 proto=TCP bytes={{rand:2000-400000}} packets={{rand:8-900}} duration={{rand:2-300}}s flags=.AP.SF",
+          "message": "Flow record: {{srvpool}} -> {{dstips}}:443 proto=TCP bytes={{rand:2000-400000}} packets={{rand:8-900}} duration={{rand:2-300}}s flags=.AP.SF",
           "level": "INFO",
           "weight": 4
         },
         {
-          "message": "Flow record: {{wspool}} -> 10.20.30.{{rand:2-60}}:5432 proto=TCP bytes={{rand:900-90000}} packets={{rand:6-400}} duration={{rand:2-300}}s flags=.AP.SF",
+          "message": "Flow record: {{wspool}} -> {{dstips}}:5432 proto=TCP bytes={{rand:900-90000}} packets={{rand:6-400}} duration={{rand:2-300}}s flags=.AP.SF",
           "level": "INFO",
           "weight": 2
         },
         {
-          "message": "Flow record: {{srvpool}} -> 10.20.30.{{rand:2-60}}:53 proto=UDP bytes={{rand:80-900}} packets={{rand:1-6}} duration={{rand:1-3}}s flags=......",
+          "message": "Flow record: {{srvpool}} -> {{dstips}}:53 proto=UDP bytes={{rand:80-900}} packets={{rand:1-6}} duration={{rand:1-3}}s flags=......",
           "level": "INFO",
           "weight": 3
+        },
+        {
+          "message": "Flow export buffer full, {{rand:10-400}} records dropped",
+          "level": "WARN",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "flow-record",
+        "src_ip": "{{lanips}}",
+        "dst_ip": "{{dstips}}",
+        "protocol": "tcp"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 34,
+      "count": 811,
       "level": "INFO",
       "source": {
         "type": "webserver",
@@ -1563,40 +2216,57 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "templates": [
         {
-          "message": "10.20.30.{{rand:2-254}} - - \"GET {{paths}} HTTP/1.1\" 200 {{rand:800-9000}} \"-\" \"{{agents}}\"",
+          "message": "{{lanips}} - - \"GET {{paths}} HTTP/1.1\" 200 {{rand:800-9000}} \"-\" \"{{agents}}\"",
           "level": "INFO",
           "weight": 8
         },
         {
-          "message": "10.20.30.{{rand:2-254}} - - \"POST /api/v1/orders HTTP/1.1\" 201 {{rand:120-900}} \"-\" \"{{agents}}\"",
+          "message": "{{lanips}} - - \"POST /api/v1/orders HTTP/1.1\" 201 {{rand:120-900}} \"-\" \"{{agents}}\"",
           "level": "INFO",
           "weight": 3
         },
         {
-          "message": "10.20.30.{{rand:2-254}} - - \"GET {{paths}} HTTP/1.1\" 304 0 \"-\" \"{{agents}}\"",
+          "message": "{{lanips}} - - \"GET {{paths}} HTTP/1.1\" 304 0 \"-\" \"{{agents}}\"",
           "level": "INFO",
           "weight": 3
         },
         {
-          "message": "10.20.30.{{rand:2-254}} - - \"GET {{paths}} HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "message": "{{lanips}} - - \"GET {{paths}} HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"{{agents}}\"",
           "level": "WARN",
           "weight": 2
         },
         {
-          "message": "10.20.30.{{rand:2-254}} - - \"GET /api/reports HTTP/1.1\" 500 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "message": "{{lanips}} - - \"GET /api/reports HTTP/1.1\" 500 {{rand:120-600}} \"-\" \"{{agents}}\"",
           "level": "ERROR",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "error",
+            "status": "500"
+          }
+        },
+        {
+          "message": "{{lanips}} - - \"GET /api/v1/orders HTTP/1.1\" 503 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "level": "ERROR",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error",
+            "status": "503"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "http-request",
+        "src_ip": "{{lanips}}",
+        "status": "200",
+        "path": "{{paths}}",
+        "user_agent": "{{agents}}"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 20,
+      "count": 477,
       "level": "INFO",
       "source": {
         "type": "webserver",
@@ -1622,18 +2292,26 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "{{wspool}} TCP_DENIED/403 {{rand:200-900}} CONNECT {{sites}}:443 - NONE/- text/html",
           "level": "WARN",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "connection-blocked",
+            "status": "403"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "http-request",
+        "src_ip": "{{lanips}}",
+        "dst_ip": "{{dstips}}",
+        "status": "200",
+        "protocol": "tcp"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 6,
+      "count": 72,
       "level": "INFO",
       "source": {
         "type": "server",
@@ -1654,18 +2332,30 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "*{{rand:1000-99999}} client closed connection while waiting for request",
           "level": "WARN",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "rate-limit"
+          }
+        },
+        {
+          "message": "*{{rand:1000-99999}} upstream timed out (110: Connection timed out) while reading response header from upstream",
+          "level": "ERROR",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "config-reload",
+        "service": "nginx"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 16,
+      "count": 192,
       "level": "INFO",
       "source": {
         "type": "server",
@@ -1691,18 +2381,23 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "Memory usage above threshold: {{rand:82-90}}%",
           "level": "WARN",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "metric",
+        "metric": "cpu",
+        "service": "node-exporter"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 26,
+      "count": 528,
       "level": "INFO",
       "source": {
         "type": "database",
@@ -1743,18 +2438,24 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "could not receive data from client: Connection reset by peer",
           "level": "WARN",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "query",
+        "user": "{{users}}",
+        "table": "{{tbls}}",
+        "service": "postgresql"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 12,
+      "count": 28,
       "level": "INFO",
       "source": {
         "type": "email",
@@ -1775,7 +2476,11 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "Message rejected from bounce@{{senders}} reason=spf_softfail",
           "level": "WARN",
-          "weight": 2
+          "weight": 2,
+          "metadata": {
+            "outcome": "failure",
+            "event_action": "error"
+          }
         },
         {
           "message": "Greylisted sender {{senders}}, retry in 300s",
@@ -1784,14 +2489,17 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "email-delivered",
+        "user": "{{users}}",
+        "service": "postfix",
+        "outcome": "success"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 12,
+      "count": 92,
       "level": "INFO",
       "source": {
         "type": "application",
@@ -1817,18 +2525,25 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
         {
           "message": "export failed user={{users}} reason=timeout after {{rand:30-120}}s",
           "level": "WARN",
-          "weight": 1
+          "weight": 1,
+          "metadata": {
+            "outcome": "failure",
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "export",
+        "user": "{{users}}",
+        "table": "{{tbls}}",
+        "service": "reporting-api"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 10,
+      "count": 61,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1850,17 +2565,27 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "message": "pid={{pid}} user={{users}} cmd=powershell.exe -File C:\\Scripts\\Inventory.ps1",
           "level": "INFO",
           "weight": 1
+        },
+        {
+          "message": "pid={{pid}} user={{users}} cmd=cmd.exe /c net use Z: {{shares}} - exited 0x80070056",
+          "level": "WARN",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "process-start",
+        "user": "{{users}}",
+        "shell": "cmd.exe"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 8,
+      "count": 49,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1882,17 +2607,26 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "message": "DeleteValue HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\setup{{rand:10-99}}",
           "level": "INFO",
           "weight": 1
+        },
+        {
+          "message": "SetValue HKLM\\SYSTEM\\CurrentControlSet\\Services\\W32Time\\Start failed - access denied",
+          "level": "WARN",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "registry-set",
+        "user": "{{users}}"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 2,
+      "count": 12,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1904,17 +2638,25 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "message": "usermod: change user contractor{{rand:10-99}} shell to /bin/bash",
           "level": "INFO",
           "weight": 1
+        },
+        {
+          "message": "usermod: user contractor{{rand:10-99}} is currently logged in, changes deferred",
+          "level": "WARN",
+          "weight": 1
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "account-modified",
+        "user": "{{users}}",
+        "target_user": "contractor",
+        "service": "usermod"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 2,
+      "count": 12,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1926,17 +2668,409 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
           "message": "sudoers file syntax check passed (visudo -c)",
           "level": "INFO",
           "weight": 1
+        },
+        {
+          "message": "visudo: /etc/sudoers.d/90-ops busy, try again later",
+          "level": "WARN",
+          "weight": 1
         }
       ],
       "metadata": {
-        "event_action": "routine"
+        "event_action": "sudoers-changed",
+        "user": "{{users}}"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 270,
+      "count": 290,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fwpool}}"
+      },
+      "templates": [
+        {
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{srvpool}} DST={{dstips}} LEN=44 TOS=0x00 PREC=0x00 TTL=64 ID={{rand:1-65535}} PROTO=TCP SPT={{port}} DPT={{rand:1-1024}} WINDOW=1024 RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{srvpool}} DST={{dstips}} LEN=44 TOS=0x00 PREC=0x00 TTL=64 ID={{rand:1-65535}} PROTO=TCP SPT={{port}} DPT=445 WINDOW=1024 RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "connection-allowed",
+        "src_ip": "{{lanips}}",
+        "dst_ip": "{{dstips}}",
+        "protocol": "tcp",
+        "service": "monitoring"
+      },
+      "technique": "T1046",
+      "tactic": "TA0007"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 72,
+      "level": "INFO",
+      "source": {
+        "type": "webserver",
+        "name": "nginx-proxy",
+        "host": "{{webpool}}"
+      },
+      "templates": [
+        {
+          "message": "{{dstips}} - - \"GET /wp-login.php HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"Mozilla/5.0 (compatible; Nmap Scripting Engine)\"",
+          "level": "WARN",
+          "weight": 3
+        },
+        {
+          "message": "{{dstips}} - - \"GET /.env HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"python-requests/2.32.3\"",
+          "level": "WARN",
+          "weight": 3
+        },
+        {
+          "message": "{{dstips}} - - \"POST /cgi-bin/luci HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"curl/8.6.0\"",
+          "level": "WARN",
+          "weight": 2
+        },
+        {
+          "message": "{{dstips}} - - \"GET /admin/config.php HTTP/1.1\" 403 {{rand:120-600}} \"-\" \"Mozilla/5.0 (compatible; Nmap Scripting Engine)\"",
+          "level": "WARN",
+          "weight": 2
+        }
+      ],
+      "metadata": {
+        "event_action": "http-request",
+        "src_ip": "{{dstips}}",
+        "status": "404",
+        "path": "/wp-login.php",
+        "user_agent": "curl/8.6.0"
+      },
+      "technique": "T1190",
+      "tactic": "TA0001"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 54,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{srvpool}}"
+      },
+      "templates": [
+        {
+          "message": "Failed password for {{users}} from {{userips}} port {{port}} ssh2",
+          "level": "WARN",
+          "weight": 4
+        },
+        {
+          "message": "error: maximum authentication attempts exceeded for {{users}} from {{userips}} port {{port}} ssh2 [preauth]",
+          "level": "WARN",
+          "weight": 2,
+          "metadata": {
+            "event_action": "account-locked"
+          }
+        },
+        {
+          "message": "Accepted password for {{users}} from {{userips}} port {{port}} ssh2",
+          "level": "INFO",
+          "weight": 1,
+          "metadata": {
+            "outcome": "success",
+            "event_action": "logon-success"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "logon-success",
+        "user": "{{users}}",
+        "src_ip": "{{userips}}",
+        "service": "sshd",
+        "outcome": "failure"
+      },
+      "technique": "T1110",
+      "tactic": "TA0006"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 36,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{hosts}}"
+      },
+      "templates": [
+        {
+          "message": "Stopping auditd.service - log rotation",
+          "level": "WARN",
+          "weight": 2,
+          "metadata": {
+            "event_action": "audit-stopped"
+          }
+        },
+        {
+          "message": "Reloading auditd.service configuration",
+          "level": "INFO",
+          "weight": 2,
+          "metadata": {
+            "event_action": "audit"
+          }
+        },
+        {
+          "message": "Disabled unit telemetry-agent.service (masked by policy)",
+          "level": "WARN",
+          "weight": 1,
+          "metadata": {
+            "event_action": "service-disabled"
+          }
+        },
+        {
+          "message": "Stopped falcon-sensor.service - scheduled patching window",
+          "level": "WARN",
+          "weight": 1,
+          "metadata": {
+            "event_action": "service-stopped"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "service-started",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 49,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{hosts}}"
+      },
+      "templates": [
+        {
+          "message": "type=SYSCALL arch=c000003e syscall=257 success=yes exit={{rand:3-40}} comm=\"{{cmds}}\" key=\"file-write\"",
+          "level": "INFO",
+          "weight": 3,
+          "metadata": {
+            "event_action": "file-write"
+          }
+        },
+        {
+          "message": "type=SYSCALL arch=c000003e syscall=59 success=yes exit=0 ppid={{pid}} pid={{pid}} auid={{rand:1000-1010}} uid={{rand:1000-1010}} comm=\"{{cmds}}\" key=\"syscall\"",
+          "level": "INFO",
+          "weight": 3,
+          "metadata": {
+            "event_action": "syscall"
+          }
+        },
+        {
+          "message": "type=CONFIG_CHANGE op=add_rule key=\"privileged\" list=4 res=1",
+          "level": "INFO",
+          "weight": 1,
+          "metadata": {
+            "event_action": "audit"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 145,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "firewalld",
+        "host": "{{fwpool}}"
+      },
+      "templates": [
+        {
+          "message": "Rule removed: zone=public port=8080/tcp accept (change request CHG-{{rand:1000-9999}})",
+          "level": "INFO",
+          "weight": 1,
+          "metadata": {
+            "event_action": "connection-attempt"
+          }
+        },
+        {
+          "message": "Zone drop: interface eth2 bound",
+          "level": "INFO",
+          "weight": 1,
+          "metadata": {
+            "event_action": "zone-changed"
+          }
+        },
+        {
+          "message": "Rule apply deferred: zone=public service=postgresql already present",
+          "level": "WARN",
+          "weight": 1
+        },
+        {
+          "message": "Failed to apply direct rule, ipv4 filter chain missing",
+          "level": "ERROR",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "rule-added",
+        "service": "firewalld"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 620,
+      "level": "INFO",
+      "source": {
+        "type": "webserver",
+        "name": "nginx-proxy",
+        "host": "{{webpool}}"
+      },
+      "templates": [
+        {
+          "message": "{{extips}} - - \"GET / HTTP/1.1\" 200 {{rand:800-9000}} \"-\" \"{{agents}}\"",
+          "level": "INFO",
+          "weight": 6
+        },
+        {
+          "message": "{{extips}} - - \"GET {{paths}} HTTP/1.1\" 200 {{rand:800-9000}} \"-\" \"{{agents}}\"",
+          "level": "INFO",
+          "weight": 5
+        },
+        {
+          "message": "{{extips}} - - \"POST /api/v1/orders HTTP/1.1\" 201 {{rand:120-900}} \"-\" \"{{agents}}\"",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "{{extips}} - - \"GET {{paths}} HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "level": "WARN",
+          "weight": 2,
+          "metadata": {
+            "status": "404"
+          }
+        },
+        {
+          "message": "{{extips}} - - \"GET /api/reports HTTP/1.1\" 502 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "level": "ERROR",
+          "weight": 1,
+          "metadata": {
+            "event_action": "error",
+            "status": "502"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "http-request",
+        "src_ip": "{{extips}}",
+        "status": "200",
+        "path": "{{paths}}",
+        "user_agent": "{{agents}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 1449,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fwpool}}"
+      },
+      "templates": [
+        {
+          "message": "ACCEPT IN=eth1 OUT=eth0 SRC={{extips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:40-58}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=443 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 5
+        },
+        {
+          "message": "ACCEPT IN=eth1 OUT=eth0 SRC={{extips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:40-58}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=25 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "DROP IN=eth1 OUT=eth0 SRC={{extips}} DST={{dstips}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:40-58}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT={{rand:1-1024}} WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "WARN",
+          "weight": 4,
+          "metadata": {
+            "event_action": "connection-blocked"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "connection-allowed",
+        "src_ip": "{{extips}}",
+        "dst_ip": "{{dstips}}",
+        "protocol": "tcp"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 12,
+      "level": "INFO",
+      "source": {
+        "type": "email",
+        "name": "mail-gateway",
+        "host": "{{mailpool}}"
+      },
+      "templates": [
+        {
+          "message": "Message accepted for {{users}}@corp.example from noreply@{{senders}} relay={{extips}} size={{rand:2000-90000}}",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "Message rejected from unknown@{{senders}} relay={{extips}} reason=dnsbl",
+          "level": "WARN",
+          "weight": 2,
+          "metadata": {
+            "event_action": "error",
+            "outcome": "failure"
+          }
+        }
+      ],
+      "metadata": {
+        "event_action": "email-delivered",
+        "user": "{{users}}",
+        "src_ip": "{{extips}}",
+        "service": "postfix",
+        "outcome": "success"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 1639,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1945,15 +3079,16 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd={{cmds}}",
       "metadata": {
-        "event_action": "routine",
-        "user": "{{users}}"
+        "event_action": "process-start",
+        "user": "{{users}}",
+        "shell": "bash"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 120,
+      "count": 728,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1962,15 +3097,16 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "message": "type=PATH item=0 name=\"{{files}}\" inode={{rand:100000-999999}} dev=fd:00 mode=0100644 ouid={{rand:1000-1010}} ogid={{rand:1000-1010}} rdev=00:00 nametype=NORMAL auid={{rand:1000-1010}} key=\"file-read\"",
       "metadata": {
-        "event_action": "routine",
-        "user": "{{users}}"
+        "event_action": "file-read",
+        "user": "{{users}}",
+        "path": "{{files}}"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 42,
+      "count": 255,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1979,7 +3115,7 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "message": "Started {{svcs}}.service",
       "metadata": {
-        "event_action": "routine",
+        "event_action": "service-started",
         "user": "{{users}}"
       }
     },
@@ -1987,7 +3123,7 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 24,
+      "count": 146,
       "level": "INFO",
       "source": {
         "type": "host",
@@ -1996,45 +3132,9 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       },
       "message": "Upgraded: {{pkgs}}-{{rand:1-9}}.{{rand:0-30}}.el9",
       "metadata": {
-        "event_action": "routine",
+        "event_action": "process-start",
         "user": "{{users}}"
       }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 30,
-      "level": "INFO",
-      "source": {
-        "type": "host",
-        "name": "sudo",
-        "host": "{{hosts}}"
-      },
-      "message": "{{users}} : TTY=pts/{{rand:0-4}} ; PWD=/home/{{users}} ; USER=root ; COMMAND=/usr/bin/systemctl restart {{svcs}}",
-      "metadata": {
-        "event_action": "routine",
-        "user": "{{users}}"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 36,
-      "level": "WARN",
-      "source": {
-        "type": "host",
-        "name": "bash",
-        "host": "{{hosts}}"
-      },
-      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=uname -a",
-      "metadata": {
-        "event_action": "routine",
-        "user": "{{users}}"
-      },
-      "technique": "T1082",
-      "tactic": "TA0007"
     },
     {
       "overlap": true,
@@ -2044,16 +3144,15 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "level": "WARN",
       "source": {
         "type": "host",
-        "name": "systemd",
+        "name": "sudo",
         "host": "{{hosts}}"
       },
-      "message": "Stopping {{svcs}}.service - scheduled maintenance window",
+      "message": "{{users}} : user NOT in sudoers ; TTY=pts/{{rand:0-4}} ; PWD=/home/{{users}} ; USER=root ; COMMAND=/usr/bin/systemctl restart {{svcs}}",
       "metadata": {
-        "event_action": "routine",
-        "user": "{{users}}"
-      },
-      "technique": "T1562.001",
-      "tactic": "TA0005"
+        "event_action": "privilege-use",
+        "user": "{{users}}",
+        "shell": "bash"
+      }
     },
     {
       "overlap": true,
@@ -2063,13 +3162,107 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "level": "WARN",
       "source": {
         "type": "host",
+        "name": "auditd",
+        "host": "{{hosts}}"
+      },
+      "message": "type=DAEMON_ERR op=queue msg=audit backlog limit exceeded, lost={{rand:1-400}}",
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{users}}",
+        "path": "{{files}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 12,
+      "level": "ERROR",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{hosts}}"
+      },
+      "message": "type=DAEMON_ABORT op=error reason=\"audit rate limit exceeded\" res=failed",
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{users}}",
+        "path": "{{files}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 182,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "sudo",
+        "host": "{{hosts}}"
+      },
+      "message": "{{users}} : TTY=pts/{{rand:0-4}} ; PWD=/home/{{users}} ; USER=root ; COMMAND=/usr/bin/systemctl restart {{svcs}}",
+      "metadata": {
+        "event_action": "privilege-use",
+        "user": "{{users}}",
+        "shell": "bash"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 218,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=uname -a",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{users}}",
+        "shell": "bash"
+      },
+      "technique": "T1082",
+      "tactic": "TA0007"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 146,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{hosts}}"
+      },
+      "message": "Stopping {{svcs}}.service - scheduled maintenance window",
+      "metadata": {
+        "event_action": "service-started",
+        "user": "{{users}}"
+      },
+      "technique": "T1562.001",
+      "tactic": "TA0005"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 109,
+      "level": "WARN",
+      "source": {
+        "type": "host",
         "name": "bash",
         "host": "{{hosts}}"
       },
       "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=tar -czf /var/backups/nightly.tgz /srv/app",
       "metadata": {
-        "event_action": "routine",
-        "user": "{{users}}"
+        "event_action": "process-start",
+        "user": "{{users}}",
+        "shell": "bash"
       },
       "technique": "T1005",
       "tactic": "TA0009"
@@ -2198,9 +3391,12 @@ write_files:
         # attack just picks it from a dropdown. Same events, same fields, one
         # stream -- finding the attack has to be analysis, not a filter.
         #
-        # The instructor's discriminator is log.file.path, which still differs
-        # (/opt/log-generator vs /opt/log-generator-attack). Discoverable by a
-        # determined student, but it is not offered up the way a dataset name is.
+        # log.file.path used to be the instructor's discriminator, on the
+        # reasoning that it was less discoverable than a dataset dropdown. It is
+        # now dropped from both inputs: "less discoverable" is not a property a
+        # field in Discover's field list actually has, and with two values it was
+        # a one-click answer key for every run of the whole semester. Runs are
+        # verified through the Attack Console instead.
         - type: filestream
           id: loggen-baseline
           data_stream.dataset: loggen.events
@@ -2222,6 +3418,14 @@ write_files:
             - ndjson:
                 target: loggen
                 add_error_key: true
+          processors:
+            # Dropped from BOTH inputs, and the pairing is the point. Removing it
+            # from only the attack tree would replace a direct-match oracle with
+            # an inverted one -- NOT _exists_ : log.file.path would then select
+            # exactly the attack events, which is no better and harder to notice.
+            - drop_fields:
+                fields: ['log.file.path']
+                ignore_missing: true
         # The attack tree ships ONLY technique-tagged events, and that single
         # processor is what makes the whole feature work.
         #
@@ -2286,7 +3490,21 @@ write_files:
             # FILE on the guest, which still carries the tag, and a playbook run
             # reports the emitter's own count anyway.
             - drop_fields:
-                fields: ['loggen.mitre']
+                # log.file.path is added by filestream and is the LAST perfect
+                # oracle in this design. The two trees give it exactly two value
+                # families -- /opt/log-generator/... and
+                # /opt/log-generator-attack/... -- so it sits in Discover's field
+                # list with two values and a single click on the second one
+                # enumerates the instructor's entire run. That is easier than the
+                # event_action oracle it replaced, because it is a direct match
+                # rather than a negation.
+                #
+                # It was kept deliberately as the instructor's discriminator, and
+                # that trade is no longer worth it: the Attack Console already
+                # reports the emitter's own event count per run over guest-exec,
+                # which is admin-only and cannot leak into the student's index.
+                # See the runbook section on verifying a run.
+                fields: ['loggen.mitre', 'log.file.path']
                 ignore_missing: true
       agent.logging.level: info
 

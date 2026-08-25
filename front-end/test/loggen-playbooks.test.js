@@ -295,3 +295,100 @@ test('every chain playbook plans at its own nominal length', () => {
       `chain ${c.key} declares a nominal length shorter than its own bursts`);
   }
 });
+
+test('no metadata field has a vocabulary the benign floor never uses', () => {
+  // The gap that let the worst oracle through. The pair test above checks
+  // source.type/name/host; nothing checked METADATA VALUES, and the floor had
+  // shipped event_action:"routine" on all 28 of its steps while the playbooks
+  // used 33 other values and never "routine". One clause --
+  //
+  //     NOT loggen.metadata.event_action : "routine"
+  //
+  // -- returned every attack event in the index and no benign one: 100% recall,
+  // 100% precision, every technique, all semester. Every field in this metadata
+  // is mapped as an explicit keyword, so each one sits in Discover's field list
+  // with a top-values popover; a field whose values split cleanly on
+  // attack-vs-benign is not a field, it is the answer.
+  //
+  // Subset, not overlap: ONE attack-only value is a complete filter on its own.
+  const vocab = (names) => {
+    const out = new Map();
+    for (const f of names) {
+      for (const line of linesOf(planOf(f))) {
+        for (const [k, v] of Object.entries(JSON.parse(line).metadata || {})) {
+          if (typeof v !== 'string' && typeof v !== 'number') continue;
+          if (!out.has(k)) out.set(k, new Set());
+          out.get(k).add(String(v));
+        }
+      }
+    }
+    return out;
+  };
+
+  const benign = vocab(['host-baseline.json']);
+  const attack = vocab(files.filter((f) => f !== 'host-baseline.json'));
+
+  const benignAll = new Set();
+  for (const set of benign.values()) for (const v of set) benignAll.add(v);
+
+  const leaks = [];
+  for (const [key, values] of attack) {
+    const floor = benign.get(key) || new Set();
+    // Only CLOSED vocabularies can become one-click filters. Discover shows a
+    // keyword field's top values in a popover, so a field with a dozen values
+    // that split cleanly on attack-vs-benign hands the answer over; a field
+    // with thousands (addresses, file paths) shows the attacker's value as one
+    // row among thousands, which is an indicator a student has to WORK for --
+    // exactly what the exercise is meant to reward. Demanding the floor also
+    // pre-enumerate every staging path an attacker might pick would be
+    // impossible and would delete the real indicators along with the oracles.
+    if (floor.size > 50) continue;
+    // Fall back to the WHOLE benign vocabulary, not just this field's. Pools are
+    // shared, so an account that shows up benignly as metadata.user is an
+    // ordinary account whether or not one sampled day happened to name it as a
+    // target_user. What matters is whether a value exists in benign traffic at
+    // all -- that is what makes it a filter.
+    const only = [...values].filter((v) => !floor.has(v) && !benignAll.has(v));
+    if (only.length) leaks.push(`${key}: ${only.slice(0, 6).join(', ')}`);
+  }
+  assert.deepEqual(leaks, [], `attack-only metadata values are one-click answer keys:\n  ${leaks.join('\n  ')}`);
+});
+
+test('the benign floor uses every address space the attacks use', () => {
+  // The vocabulary test above deliberately skips fields with large value sets,
+  // because demanding the floor pre-enumerate every attacker address would be
+  // impossible. That exemption left a hole big enough to drive the second-worst
+  // oracle through: the floor was 300 addresses of pure RFC1918 while ten
+  // playbooks resolved their adversary into TEST-NET, so
+  //
+  //     NOT loggen.metadata.src_ip : 10.*
+  //
+  // returned 6,151 attack events and zero benign ones.
+  //
+  // Worse than the filter is the habit. A student who learns "the intruder is
+  // the unfamiliar address" has learned something that fails on every intrusion
+  // that matters, because by the time you see an adversary they are usually
+  // inside your address space using an account you issued them.
+  //
+  // So the assertion is on the SPACE, not the values: whatever /8 an attack can
+  // come from, ordinary traffic must come from it too.
+  const spaceOf = (addr) => String(addr).split('.')[0];
+  const spaces = (names) => {
+    const out = new Set();
+    for (const f of names) {
+      for (const line of linesOf(planOf(f))) {
+        const md = JSON.parse(line).metadata || {};
+        for (const key of ['src_ip', 'dst_ip']) {
+          if (md[key]) out.add(spaceOf(md[key]));
+        }
+      }
+    }
+    return out;
+  };
+
+  const benign = spaces(['host-baseline.json']);
+  const attack = spaces(files.filter((f) => f !== 'host-baseline.json'));
+  const only = [...attack].filter((s) => !benign.has(s));
+  assert.deepEqual(only, [], `attack-only address spaces ${only.join(', ')} — `
+    + `"not one of ours" is a one-click filter, and the wrong lesson`);
+});

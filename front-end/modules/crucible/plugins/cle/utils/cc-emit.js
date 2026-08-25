@@ -130,7 +130,75 @@ function pickTemplate(rng, step) {
 }
 
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
+
+/**
+ * Sample a pool with a long tail instead of uniformly.
+ *
+ * Uniform sampling is the wrong shape for an estate. Measured on the flat
+ * version: 48 addresses each appeared 377-463 times in a day, 9 accounts each
+ * 11,458-11,848. Nothing was rare, so nothing could stand out by being rare --
+ * and "read the bottom of the distribution, not the top" is the single most
+ * useful habit a hunting exercise can build.
+ *
+ * Squaring a uniform draw concentrates it near the front of the list, so a pool
+ * is read as roughly most-common-first and the entries at the end are genuinely
+ * uncommon. Cheap, needs no per-entry weights, and the exponent is the only
+ * knob: higher means a steeper head and a longer tail.
+ */
+const SKEW_EXPONENT = 2.2;
+
+function pickSkewed(rng, arr) {
+  const i = Math.floor(arr.length * Math.pow(rng(), SKEW_EXPONENT));
+  return arr[Math.min(i, arr.length - 1)];
+}
 const randInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+
+/** FNV-1a, reused to map a value onto a pool index deterministically. */
+function poolIndexFor(str, len) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i += 1) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % len;
+}
+
+/**
+ * Resolve a pool reference, honouring bindings.
+ *
+ * A BOUND pool is not sampled -- it is DERIVED from another pool's value, so
+ * the same account always resolves to the same workstation address. Without
+ * this, every pool draw is independent and the estate has no people in it: one
+ * address shows thirty-five different accounts failing to log in, which is not
+ * a workstation, it is a shuffle.
+ *
+ * The cost of getting this wrong is not just realism. "Many accounts, one
+ * source" is the signature of a password spray, and on independently-sampled
+ * pools that signature fits ordinary traffic BETTER than it fits the attack --
+ * so a student who learns it would be led away from the answer every time.
+ *
+ * Derivation is by hash rather than by index so that adding an account to the
+ * middle of the pool does not reshuffle everyone else's desk.
+ */
+function samplePool(key, ctx, rng, depth) {
+  if (Object.prototype.hasOwnProperty.call(ctx.sampled, key)) return ctx.sampled[key];
+
+  const bound = ctx.bindings && ctx.bindings[key];
+  let value;
+  if (bound && (depth || 0) < 4) {
+    const pool = ctx.pools[bound.pool];
+    if (!Array.isArray(pool) || !pool.length) return null;
+    const driver = samplePool(bound.by, ctx, rng, (depth || 0) + 1);
+    if (driver == null) return null;
+    value = String(pool[poolIndexFor(`${bound.by}:${driver}`, pool.length)]);
+  } else {
+    const pool = ctx.pools[key];
+    if (!Array.isArray(pool) || !pool.length) return null;
+    value = String(ctx.skewed && ctx.skewed.has(key) ? pickSkewed(rng, pool) : pick(rng, pool));
+  }
+  ctx.sampled[key] = value;
+  return value;
+}
 
 // ---------------------------------------------------------------------------
 // Duration parsing — the SAME grammar loggen-catalog.js formatDuration() emits.
@@ -197,19 +265,19 @@ function expandOnce(template, ctx, rng, seq) {
     if (key === 'pid') return String(randInt(rng, 400, 32000));
     if (key === 'seq') return String(seq);
     if (Object.prototype.hasOwnProperty.call(ctx.entities, key)) return ctx.entities[key];
-    const pool = ctx.pools[key];
-    if (Array.isArray(pool) && pool.length) {
-      if (idx != null) return String(pool[Number(idx) % pool.length]);
-      // Sampled ONCE per event, then reused. Sampling per occurrence makes an
-      // event contradict itself -- "Failed password for jsmith" carrying
-      // metadata.user=svc_backup -- so a student pivoting on the structured
-      // field gets a different answer than one reading the message. Both are
-      // wrong, and nothing about the data says which.
-      if (!Object.prototype.hasOwnProperty.call(ctx.sampled, key)) {
-        ctx.sampled[key] = String(pick(rng, pool));
-      }
-      return ctx.sampled[key];
+    // An explicit index reads the pool directly: {{users.0}} means "that one",
+    // not "one of these", so neither sampling nor binding applies.
+    const direct = ctx.pools[key];
+    if (idx != null && Array.isArray(direct) && direct.length) {
+      return String(direct[Number(idx) % direct.length]);
     }
+    // Sampled ONCE per event, then reused. Sampling per occurrence makes an
+    // event contradict itself -- "Failed password for jsmith" carrying
+    // metadata.user=svc_backup -- so a student pivoting on the structured
+    // field gets a different answer than one reading the message. Both are
+    // wrong, and nothing about the data says which.
+    const sampled = samplePool(key, ctx, rng, 0);
+    if (sampled != null) return sampled;
     // Left intact rather than "undefined". log-generator itself ships literal
     // "{clientIP}" in its metadata at this commit, and that is exactly the tell
     // we must not reproduce -- an unresolved token fails a unit test instead.
@@ -317,6 +385,10 @@ function planTimeline(playbook, opts) {
   const { starts } = layout(steps, gapScale);
   const entities = resolveEntities(playbook, rng);
   const pools = playbook.pools || {};
+  // Pools listed here are sampled with a long tail rather than uniformly.
+  const skewed = new Set(playbook.skewed || []);
+  // Derived pools: same account, same desk. See samplePool().
+  const bindings = playbook.bindings || {};
 
   const events = [];
 
@@ -344,7 +416,7 @@ function planTimeline(playbook, opts) {
       // Fresh sample cache per event: pool draws are consistent WITHIN one
       // event and vary BETWEEN them, which is what a spray from one host
       // against many accounts actually looks like.
-      const ctx = { entities, pools, sampled: {} };
+      const ctx = { entities, pools, skewed, bindings, sampled: {} };
       events.push({
         // Clamped to the requested window. Jitter on the final event of a step
         // can otherwise push it a few seconds past the deadline, and
@@ -358,7 +430,12 @@ function planTimeline(playbook, opts) {
           host: expand(src.host || 'localhost', ctx, rng, seq),
         },
         message: expand(tpl.message || step.message || '', ctx, rng, seq),
-        metadata: expandDeep(tpl.metadata || step.metadata || {}, ctx, rng, seq),
+        // Template metadata MERGES over the step's rather than replacing it, so a
+        // template only has to state what differs -- outcome=failure on the one
+        // that failed -- instead of repeating every shared field and drifting.
+        metadata: expandDeep(
+          Object.assign({}, step.metadata || {}, tpl.metadata || {}), ctx, rng, seq
+        ),
         technique,
         tactic,
         subtechnique: step.subtechnique || playbook.subtechnique || null,
@@ -598,6 +675,9 @@ module.exports = {
   resolveEntities,
   intensityAt,
   pickTemplate,
+  pickSkewed,
+  samplePool,
+  poolIndexFor,
   layout,
   minSecondsFor,
   expand,
