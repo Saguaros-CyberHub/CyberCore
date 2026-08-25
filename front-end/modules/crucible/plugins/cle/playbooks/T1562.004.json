@@ -1,0 +1,95 @@
+{
+  "technique": "T1562.004",
+  "tactic": "TA0005",
+  "name": "Disable or Modify System Firewall",
+  "story": "A firewall rule is quietly widened to allow inbound management.",
+  "nominal_seconds": 300,
+  "entities": {
+    "fw": "firewall-01",
+    "source_ip": {
+      "ipv4Host": "203.0.113"
+    },
+    "user": {
+      "oneOf": [
+        "svc_backup",
+        "svc_report",
+        "svc_deploy"
+      ]
+    }
+  },
+  "pools": {
+    "ports": [
+      "22",
+      "3389",
+      "5985",
+      "445"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "15s",
+      "count": 2,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "firewalld",
+        "host": "{{fw}}"
+      },
+      "message": "Configuration reload requested by uid=0 pid={{pid}}",
+      "metadata": {
+        "event_action": "config-reload",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "20s",
+      "count": 5,
+      "level": "WARN",
+      "source": {
+        "type": "firewall",
+        "name": "firewalld",
+        "host": "{{fw}}"
+      },
+      "message": "Rule added: zone=public source={{source_ip}}/32 port={{ports}} protocol=tcp accept",
+      "metadata": {
+        "event_action": "rule-added",
+        "src_ip": "{{source_ip}}",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "10s",
+      "count": 1,
+      "level": "ERROR",
+      "source": {
+        "type": "firewall",
+        "name": "firewalld",
+        "host": "{{fw}}"
+      },
+      "message": "Zone public set to target ACCEPT - default deny no longer in effect",
+      "metadata": {
+        "event_action": "policy-weakened",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "60s",
+      "count": 30,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "ACCEPT IN=eth0 SRC={{source_ip}} DST=10.20.30.{{rand:2-60}} PROTO=TCP DPT={{ports}} SYN",
+      "metadata": {
+        "event_action": "connection-allowed",
+        "src_ip": "{{source_ip}}"
+      }
+    }
+  ]
+}

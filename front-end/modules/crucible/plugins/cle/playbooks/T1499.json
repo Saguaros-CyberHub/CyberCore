@@ -1,0 +1,68 @@
+{
+  "technique": "T1499",
+  "tactic": "TA0040",
+  "name": "Endpoint Denial of Service",
+  "story": "A short, very high volume flood against one web host.",
+  "nominal_seconds": 300,
+  "entities": {
+    "target": "web-01",
+    "fw": "firewall-01"
+  },
+  "pools": {
+    "paths": [
+      "/",
+      "/login",
+      "/api/search",
+      "/api/reports",
+      "/checkout"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "60s",
+      "count": 600,
+      "level": "WARN",
+      "source": {
+        "type": "webserver",
+        "name": "nginx-proxy",
+        "host": "{{target}}"
+      },
+      "message": "10.{{rand:1-254}}.{{rand:1-254}}.{{rand:1-254}} - GET {{paths}} 503 0 \"-\" - Duration: {{rand:8000-30000}}ms",
+      "metadata": {
+        "event_action": "http-request",
+        "status": "503"
+      }
+    },
+    {
+      "gap": "5s",
+      "spread": "40s",
+      "count": 60,
+      "level": "ERROR",
+      "source": {
+        "type": "server",
+        "name": "nginx",
+        "host": "{{target}}"
+      },
+      "message": "worker_connections are not enough while connecting to upstream, {{rand:900-4000}} pending",
+      "metadata": {
+        "event_action": "resource-exhausted"
+      }
+    },
+    {
+      "gap": "5s",
+      "spread": "30s",
+      "count": 24,
+      "level": "WARN",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "DROP rate-limit exceeded IN=eth0 DST={{target}} PROTO=TCP DPT=443 count={{rand:2000-9000}}",
+      "metadata": {
+        "event_action": "rate-limited"
+      }
+    }
+  ]
+}

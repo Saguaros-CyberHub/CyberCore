@@ -1,0 +1,570 @@
+{
+  "name": "Benign host activity",
+  "story": "Ordinary process, file, package and session activity across the estate.",
+  "nominal_seconds": 300,
+  "entities": {},
+  "pools": {
+    "hosts": [
+      "srv-prod-01",
+      "app-server-01",
+      "db-01",
+      "web-01",
+      "fileserv-01",
+      "ws-042",
+      "ws-071",
+      "ws-113",
+      "ws-128"
+    ],
+    "users": [
+      "jsmith",
+      "mrodriguez",
+      "kchen",
+      "apatel",
+      "dwilson",
+      "tnguyen",
+      "svc_backup",
+      "svc_report",
+      "svc_deploy"
+    ],
+    "cmds": [
+      "ls -la",
+      "git status",
+      "npm run build",
+      "docker ps",
+      "kubectl get pods",
+      "tail -f /var/log/messages",
+      "vim notes.md",
+      "python3 report.py",
+      "psql -c \"\\dt\"",
+      "systemctl status nginx",
+      "df -h",
+      "top -b -n1"
+    ],
+    "files": [
+      "/home/{{users}}/notes.md",
+      "/var/log/messages",
+      "/etc/hosts",
+      "/srv/app/config.yaml"
+    ],
+    "pkgs": [
+      "openssl",
+      "curl",
+      "nginx",
+      "python3-pip",
+      "containerd.io"
+    ],
+    "svcs": [
+      "nginx",
+      "postgresql",
+      "containerd",
+      "chronyd",
+      "sshd"
+    ],
+    "tbls": [
+      "orders",
+      "sessions",
+      "audit_log",
+      "products"
+    ],
+    "senders": [
+      "github.com",
+      "atlassian.net",
+      "okta.com",
+      "zoom.us"
+    ]
+  },
+  "steps": [
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 90,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd={{cmds}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 40,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{hosts}}"
+      },
+      "message": "type=PATH name=\"{{files}}\" nametype=NORMAL auid={{rand:1000-1010}} key=\"file-read\"",
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 14,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{hosts}}"
+      },
+      "message": "Started {{svcs}}.service",
+      "metadata": {
+        "event_action": "service-started"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 8,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "dnf",
+        "host": "{{hosts}}"
+      },
+      "message": "Upgraded: {{pkgs}}-{{rand:1-9}}.{{rand:0-30}}.el9",
+      "metadata": {
+        "event_action": "package-upgrade"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 10,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "sudo",
+        "host": "{{hosts}}"
+      },
+      "message": "{{users}} : TTY=pts/{{rand:0-4}} ; PWD=/home/{{users}} ; USER=root ; COMMAND=/usr/bin/systemctl restart {{svcs}}",
+      "metadata": {
+        "event_action": "privilege-use",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 12,
+      "level": "WARN",
+      "technique": "T1082",
+      "tactic": "TA0007",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=uname -a",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 8,
+      "level": "WARN",
+      "technique": "T1562.001",
+      "tactic": "TA0005",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{hosts}}"
+      },
+      "message": "Stopping {{svcs}}.service - scheduled maintenance window",
+      "metadata": {
+        "event_action": "service-stopped",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 6,
+      "level": "WARN",
+      "technique": "T1005",
+      "tactic": "TA0009",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=tar -czf /var/backups/nightly.tgz /srv/app",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 6,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{hosts}}"
+      },
+      "message": "Accepted publickey for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 4,
+      "level": "WARN",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{hosts}}"
+      },
+      "message": "Failed password for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 3,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "login",
+        "host": "{{hosts}}"
+      },
+      "message": "pam_unix(login:session): session opened for user {{users}} by LOGIN(uid=0)",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 5,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "auth-svc",
+        "host": "{{hosts}}"
+      },
+      "message": "Token validated for {{users}} scope=read ttl={{rand:300-3600}}s",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 3,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "rdp",
+        "host": "{{hosts}}"
+      },
+      "message": "Remote desktop session established user={{users}} src={{hosts}}",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "useradd",
+        "host": "{{hosts}}"
+      },
+      "message": "new user: name=contractor{{rand:10-99}}, UID={{rand:2000-2400}}, GID=100",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "usermod",
+        "host": "{{hosts}}"
+      },
+      "message": "add \"{{users}}\" to group \"developers\"",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 10,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{hosts}}"
+      },
+      "message": "ACCEPT IN=eth0 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} PROTO=TCP SPT={{port}} DPT=443 SYN",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 4,
+      "level": "WARN",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{hosts}}"
+      },
+      "message": "DROP IN=eth0 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} PROTO=TCP DPT={{rand:1-1024}} SYN",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 2,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "firewalld",
+        "host": "{{hosts}}"
+      },
+      "message": "Configuration reload requested by uid=0 pid={{pid}}",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 4,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "netflow",
+        "host": "{{hosts}}"
+      },
+      "message": "Flow record: {{hosts}} -> 10.20.30.{{rand:2-60}}:443 bytes={{rand:2000-400000}} packets={{rand:8-900}}",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 8,
+      "level": "INFO",
+      "source": {
+        "type": "webserver",
+        "name": "nginx-proxy",
+        "host": "{{hosts}}"
+      },
+      "message": "10.20.30.{{rand:2-254}} - GET /api/reports 200 {{rand:800-9000}} - Duration: {{rand:12-240}}ms",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 6,
+      "level": "INFO",
+      "source": {
+        "type": "webserver",
+        "name": "squid-proxy",
+        "host": "{{hosts}}"
+      },
+      "message": "{{hosts}} TCP_MISS/200 {{rand:400-90000}} GET https://updates.example.com/manifest - DIRECT/updates.example.com text/json",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 3,
+      "level": "INFO",
+      "source": {
+        "type": "server",
+        "name": "nginx",
+        "host": "{{hosts}}"
+      },
+      "message": "signal process started, worker process {{pid}} reloaded configuration",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 6,
+      "level": "INFO",
+      "source": {
+        "type": "server",
+        "name": "node-exporter",
+        "host": "{{hosts}}"
+      },
+      "message": "CPU usage: {{rand:4-38}}% memory: {{rand:20-60}}% disk: {{rand:30-70}}%",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 8,
+      "level": "INFO",
+      "source": {
+        "type": "database",
+        "name": "postgres-primary",
+        "host": "{{hosts}}"
+      },
+      "message": "duration: {{rand:2-180}}ms  statement: SELECT id, name FROM {{tbls}} WHERE updated_at > now() - interval '1 hour'",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 5,
+      "level": "INFO",
+      "source": {
+        "type": "email",
+        "name": "mail-gateway",
+        "host": "{{hosts}}"
+      },
+      "message": "Message accepted for {{users}}@corp.example from noreply@{{senders}} size={{rand:2000-90000}}",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 4,
+      "level": "INFO",
+      "source": {
+        "type": "application",
+        "name": "reporting-api",
+        "host": "{{hosts}}"
+      },
+      "message": "export completed user={{users}} rows={{rand:20-800}} format=csv",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "usermod",
+        "host": "{{hosts}}"
+      },
+      "message": "usermod: change user contractor{{rand:10-99}} shell to /bin/bash",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "sudoers",
+        "host": "{{hosts}}"
+      },
+      "message": "sudoers file syntax check passed (visudo -c)",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 4,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "cmd",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} user={{users}} cmd=cmd.exe /c gpupdate /target:user",
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 3,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "registry",
+        "host": "{{hosts}}"
+      },
+      "message": "SetValue HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Update\\LastCheck = {{rand:100000-999999}}",
+      "metadata": {
+        "event_action": "routine"
+      }
+    }
+  ]
+}

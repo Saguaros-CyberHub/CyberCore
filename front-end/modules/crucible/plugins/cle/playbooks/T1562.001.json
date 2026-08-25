@@ -1,0 +1,103 @@
+{
+  "technique": "T1562.001",
+  "tactic": "TA0005",
+  "name": "Disable or Modify Tools",
+  "story": "Security tooling is stopped and its logs cleared.",
+  "nominal_seconds": 300,
+  "entities": {
+    "target": {
+      "oneOf": [
+        "srv-prod-01",
+        "app-server-01",
+        "db-01",
+        "web-01",
+        "fileserv-01"
+      ]
+    },
+    "user": {
+      "oneOf": [
+        "svc_backup",
+        "svc_report",
+        "svc_deploy"
+      ]
+    }
+  },
+  "pools": {
+    "tools": [
+      "auditd",
+      "falco",
+      "clamav-freshclam",
+      "elastic-agent"
+    ],
+    "logs": [
+      "audit/audit.log",
+      "secure",
+      "messages",
+      "elastic-agent/*.ndjson"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "20s",
+      "count": 4,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{target}}"
+      },
+      "message": "Stopping {{tools}}.service - initiated by uid=0 pid={{pid}}",
+      "metadata": {
+        "event_action": "service-stopped",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "15s",
+      "count": 3,
+      "level": "ERROR",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{target}}"
+      },
+      "message": "type=DAEMON_END auditd normal halt, sending auid=0 pid={{pid}} res=success",
+      "metadata": {
+        "event_action": "audit-stopped"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "20s",
+      "count": 6,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=0 cmd=rm -f /var/log/{{logs}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "10s",
+      "count": 2,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{target}}"
+      },
+      "message": "Disabled {{tools}}.service - will not start on boot",
+      "metadata": {
+        "event_action": "service-disabled"
+      }
+    }
+  ]
+}

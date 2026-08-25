@@ -1,0 +1,83 @@
+{
+  "technique": "T1082",
+  "tactic": "TA0007",
+  "name": "System Information Discovery",
+  "story": "A burst of host enumeration commands from one shell session.",
+  "nominal_seconds": 300,
+  "entities": {
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    },
+    "target": {
+      "oneOf": [
+        "srv-prod-01",
+        "app-server-01",
+        "db-01",
+        "web-01",
+        "fileserv-01",
+        "ws-042",
+        "ws-071",
+        "ws-113",
+        "ws-128"
+      ]
+    }
+  },
+  "pools": {
+    "cmds": [
+      "uname -a",
+      "hostnamectl",
+      "cat /etc/os-release",
+      "lscpu",
+      "free -h",
+      "df -h",
+      "ip addr show",
+      "systemctl list-units --type=service --state=running",
+      "cat /proc/cpuinfo",
+      "lsblk",
+      "dmidecode -s system-manufacturer",
+      "env"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "45s",
+      "count": 24,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd={{cmds}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}",
+        "shell": "bash"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "15s",
+      "count": 3,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{target}}"
+      },
+      "message": "type=SYSCALL comm=\"uname\" exe=\"/usr/bin/uname\" key=\"discovery\" auid=1000",
+      "metadata": {
+        "event_action": "audit",
+        "user": "{{user}}"
+      }
+    }
+  ]
+}

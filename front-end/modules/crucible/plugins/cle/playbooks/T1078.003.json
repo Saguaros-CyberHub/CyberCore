@@ -1,0 +1,99 @@
+{
+  "technique": "T1078.003",
+  "tactic": "TA0004",
+  "name": "Local Accounts",
+  "story": "A local service account starts behaving like a person.",
+  "nominal_seconds": 600,
+  "entities": {
+    "user": "svc_backup",
+    "target": {
+      "oneOf": [
+        "srv-prod-01",
+        "app-server-01",
+        "db-01",
+        "web-01",
+        "fileserv-01"
+      ]
+    }
+  },
+  "pools": {
+    "shells": [
+      "/bin/bash",
+      "/bin/sh"
+    ],
+    "cmds": [
+      "whoami",
+      "id",
+      "cat /etc/passwd",
+      "crontab -l",
+      "ss -tunlp",
+      "find / -perm -4000 -type f"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "20s",
+      "spread": "10s",
+      "count": 1,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "usermod",
+        "host": "{{target}}"
+      },
+      "message": "usermod: change user {{user}} shell from /usr/sbin/nologin to {{shells}}",
+      "metadata": {
+        "event_action": "account-modified",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "5s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "login",
+        "host": "{{target}}"
+      },
+      "message": "pam_unix(login:session): session opened for user {{user}} by LOGIN(uid=0)",
+      "metadata": {
+        "event_action": "session-opened",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "20s",
+      "spread": "150s",
+      "count": 26,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=0 cmd={{cmds}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "20s",
+      "spread": "20s",
+      "count": 2,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "sudo",
+        "host": "{{target}}"
+      },
+      "message": "{{user}} : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/passwd root",
+      "metadata": {
+        "event_action": "privilege-use",
+        "user": "{{user}}"
+      }
+    }
+  ]
+}

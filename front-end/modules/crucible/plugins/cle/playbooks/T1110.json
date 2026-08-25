@@ -1,0 +1,70 @@
+{
+  "technique": "T1110",
+  "tactic": "TA0006",
+  "name": "Password Spraying",
+  "story": "Two passwords tried against many accounts, slow enough to dodge lockout.",
+  "nominal_seconds": 600,
+  "entities": {
+    "source_ip": {
+      "ipv4Host": "198.51.100"
+    },
+    "target": "auth-01"
+  },
+  "pools": {
+    "users": [
+      "jsmith",
+      "mrodriguez",
+      "kchen",
+      "apatel",
+      "dwilson",
+      "tnguyen",
+      "svc_backup",
+      "svc_report",
+      "svc_deploy",
+      "admin",
+      "guest",
+      "operator",
+      "helpdesk",
+      "jdoe",
+      "rsmith"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "300s",
+      "count": 96,
+      "level": "WARN",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "Failed password for {{users}} from {{source_ip}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "logon-failed",
+        "outcome": "failure",
+        "user": "{{users}}",
+        "src_ip": "{{source_ip}}",
+        "note": "spray"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "20s",
+      "count": 4,
+      "level": "WARN",
+      "source": {
+        "type": "authentication",
+        "name": "auth-svc",
+        "host": "{{target}}"
+      },
+      "message": "Account {{users}} locked out after repeated failures from {{source_ip}}",
+      "metadata": {
+        "event_action": "account-locked",
+        "user": "{{users}}",
+        "src_ip": "{{source_ip}}"
+      }
+    }
+  ]
+}

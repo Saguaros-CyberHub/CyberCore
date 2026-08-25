@@ -64,6 +64,27 @@
     return `<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:3px;background:${colour};color:#fff;">${label}</span>`;
   }
 
+  // Replaces the yield badge rather than sitting beside it.
+  //
+  // expected_volume is documented in the catalog as "an estimate read off the
+  // matcher source, not a measurement" -- a guess at how many lines a keyword
+  // filter happens to hit. Once a playbook drives the technique that stops being
+  // a guess: the count is the sum of its steps. Showing both would put two
+  // near-inverse claims in adjacent columns ("high yield" means imprecise
+  // keywords, which is the opposite of high fidelity).
+  function yieldCell(t) {
+    if (t.fidelity !== 'high' || t.expected_events == null) return volumeBadge(t.expected_volume);
+    return `<span style="font-size:.7rem;padding:.1rem .4rem;border-radius:3px;background:#2b6cb0;color:#fff;"
+                  title="Scripted playbook — this is the exact number of events, not an estimate">
+              ${escHtml(String(t.expected_events))} events
+            </span>`;
+  }
+
+  /** Durations a selection can honestly run in. */
+  function allowedDuration(sel, seconds) {
+    return !sel || sel.min_seconds == null || seconds >= sel.min_seconds;
+  }
+
   const STATUS_COLOURS = {
     pending: '#718096', skipped: '#a0aec0', dispatching: '#3182ce',
     scheduled: '#805ad5', running: '#2b6cb0', completed: '#2f855a',
@@ -84,12 +105,17 @@
         <p><strong>How this works.</strong> Each student's Rocky sensor runs
            <code>log-generator</code>. Launching fires the same command on every lane at the
            same moment, and the events land in that student's own ELK stack.</p>
-        <p style="margin-top:.5rem;"><strong>Techniques filter, they do not attack.</strong>
-           <code>--mitre-technique</code> narrows the ordinary generated log stream to entries
-           whose text matches that technique's keywords, so yield varies a lot between them.
-           The per-lane event count after a run is the real answer to "did anything happen?".
-           Attack <em>chains</em> are scripted multi-stage campaigns and always produce a
-           coherent story.</p>
+        <p style="margin-top:.5rem;"><strong>Two kinds of technique.</strong>
+           A <span style="padding:.05rem .3rem;border-radius:3px;background:#2b6cb0;color:#fff;font-size:.72rem;">N&nbsp;events</span>
+           badge means a scripted playbook: real technique behaviour on the right log sources,
+           one coherent adversary, and exactly that many events. A
+           ${volumeBadge('medium')} badge means the older keyword filter — it narrows the
+           ordinary generated stream to entries whose text happens to match, so what you get
+           varies a lot. Attack <em>chains</em> are scripted multi-stage campaigns.</p>
+        <p style="margin-top:.5rem;"><strong>Nothing labels an event as the attack.</strong>
+           Scripted runs use the same log sources, hosts and accounts as ordinary traffic, and
+           benign traffic carries MITRE labels too. Finding the attack is analysis, not a
+           filter — which is the point.</p>
       </div>
 
       <div style="display:flex;gap:.5rem;margin:1rem 0;">
@@ -111,11 +137,19 @@
             <label style="display:block;font-size:.8rem;color:var(--text-secondary);">Duration</label>
             <select id="acDuration" ${mode === 'chain' ? 'disabled' : ''}
                     style="padding:.4rem;min-width:9rem;">
-              <option value="300">5 minutes</option>
-              <option value="900">15 minutes</option>
-              <option value="1800" selected>30 minutes</option>
-              <option value="3600">1 hour</option>
-              <option value="7200">2 hours</option>
+              ${[[300, '5 minutes'], [900, '15 minutes'], [1800, '30 minutes'],
+                 [3600, '1 hour'], [7200, '2 hours']].map(([secs, label]) => {
+                   // A playbook refuses a duration shorter than its own bursts,
+                   // and it is right to: compressing a 90-second brute force
+                   // into 20 seconds is not a faster brute force, and
+                   // truncating it loses the successful logon at the end.
+                   // Disable it here so the instructor finds out before
+                   // launching rather than lane by lane.
+                   const off = !allowedDuration(chosen, secs);
+                   const sel = secs === 1800 && !off ? 'selected' : '';
+                   return `<option value="${secs}" ${off ? 'disabled' : ''} ${sel}>`
+                        + `${label}${off ? ' — too short for this technique' : ''}</option>`;
+                 }).join('')}
             </select>
             ${mode === 'chain'
               ? `<div style="font-size:.72rem;color:var(--text-secondary);margin-top:.25rem;max-width:16rem;">
@@ -223,7 +257,7 @@
                 <td style="padding:.45rem;font-size:.78rem;">${escHtml(t.tactic_name || t.tactic)}</td>
                 <td style="padding:.45rem;font-family:monospace;font-size:.72rem;color:var(--text-secondary);">
                   ${escHtml(t.keywords.join(', '))}</td>
-                <td style="padding:.45rem;">${volumeBadge(t.expected_volume)}</td>
+                <td style="padding:.45rem;">${yieldCell(t)}</td>
               </tr>`).join('')}
           </tbody>
         </table>

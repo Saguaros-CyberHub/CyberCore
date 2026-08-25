@@ -1,0 +1,102 @@
+{
+  "technique": "T1098",
+  "tactic": "TA0003",
+  "name": "Account Manipulation",
+  "story": "A new account is created and quietly given administrative rights.",
+  "nominal_seconds": 600,
+  "entities": {
+    "target": "auth-01",
+    "actor": {
+      "oneOf": [
+        "svc_backup",
+        "svc_report",
+        "svc_deploy"
+      ]
+    },
+    "newuser": {
+      "oneOf": [
+        "sysadm",
+        "backupsvc",
+        "helpdesk2",
+        "monitor01"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "10s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "useradd",
+        "host": "{{target}}"
+      },
+      "message": "new user: name={{newuser}}, UID={{rand:1500-1999}}, GID=100, home=/home/{{newuser}}, shell=/bin/bash",
+      "metadata": {
+        "event_action": "account-created",
+        "user": "{{actor}}",
+        "target_user": "{{newuser}}"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "10s",
+      "count": 2,
+      "level": "WARN",
+      "source": {
+        "type": "authentication",
+        "name": "usermod",
+        "host": "{{target}}"
+      },
+      "message": "add \"{{newuser}}\" to group \"{{groups}}\"",
+      "metadata": {
+        "event_action": "group-modified",
+        "user": "{{actor}}",
+        "target_user": "{{newuser}}"
+      }
+    },
+    {
+      "gap": "20s",
+      "spread": "15s",
+      "count": 1,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "sudoers",
+        "host": "{{target}}"
+      },
+      "message": "sudoers file updated: {{newuser}} ALL=(ALL) NOPASSWD:ALL",
+      "metadata": {
+        "event_action": "privilege-granted",
+        "target_user": "{{newuser}}"
+      }
+    },
+    {
+      "gap": "25s",
+      "spread": "90s",
+      "count": 6,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "Accepted password for {{newuser}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "logon-success",
+        "outcome": "success",
+        "user": "{{newuser}}"
+      }
+    }
+  ],
+  "pools": {
+    "groups": [
+      "wheel",
+      "sudo",
+      "docker",
+      "adm"
+    ]
+  }
+}

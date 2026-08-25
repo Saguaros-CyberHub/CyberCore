@@ -113,6 +113,52 @@ function assertSpeed(value) {
 const WRAPPER_SH = require('fs').readFileSync(require('path').join(__dirname, 'cc-attack.sh'), 'utf8');
 const WRAPPER_B64 = Buffer.from(WRAPPER_SH, 'utf8').toString('base64');
 
+/**
+ * Playbooks, read once at require time for the same reasons as the wrapper.
+ *
+ * Keyed by technique id (`T1110.001`) and by `chain-<key>`, matching the
+ * filenames. A technique with a playbook runs the emitter; one without falls
+ * back to log-generator's keyword filter, so the two paths can coexist while
+ * playbooks are written.
+ *
+ * The ENGINE is baked into the image rather than staged like the wrapper. That
+ * is a deliberate trade: it freezes engine behaviour at the image, so an engine
+ * change needs a re-bake and a redeploy of already-built lanes, but it keeps the
+ * dispatch command near 12 KB instead of ~26 KB on a path that already throws
+ * transient 596s. Playbooks -- the half that actually changes -- still ship on
+ * every dispatch with no re-bake.
+ */
+const PLAYBOOKS = (() => {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(__dirname, '..', 'playbooks');
+  const out = new Map();
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch (e) { return out; }
+  for (const f of names) {
+    if (!f.endsWith('.json')) continue;
+    // Re-serialised rather than shipped verbatim: strips the authoring
+    // indentation, which is a third of the bytes in a file that has to survive
+    // base64 inflation into a guest-exec argument.
+    const raw = fs.readFileSync(path.join(dir, f), 'utf8');
+    out.set(f.replace(/\.json$/, ''), JSON.stringify(JSON.parse(raw)));
+  }
+  return out;
+})();
+
+/**
+ * The playbook for a resolved selection, or null when the technique has none.
+ *
+ * Tactic mode never has one: a tactic is a dozen unrelated behaviours and there
+ * is no single honest story to script for it, so it stays on the keyword filter.
+ */
+function playbookFor(selection) {
+  if (!selection) return null;
+  if (selection.mode === 'chain') return PLAYBOOKS.get(`chain-${selection.arg}`) || null;
+  if (selection.mode === 'technique') return PLAYBOOKS.get(selection.arg) || null;
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Command construction
 // ---------------------------------------------------------------------------
@@ -209,22 +255,56 @@ function buildDispatchCommand(args) {
   }
   const speed = assertSpeed(args.speed == null ? 1 : args.speed);
 
-  const argv = [runId, String(startEpoch), String(relDelay), mode, arg, duration, String(capSeconds), speed]
+  // A playbook switches the wrapper onto the emitter. The DB keeps the run's
+  // own mode ('technique'/'chain') -- migration 006's CHECK constraint does not
+  // know 'playbook' and must not be edited in place -- so the token is derived
+  // here and never persisted.
+  const playbook = args.playbookJson || null;
+  const wrapperMode = playbook ? 'playbook' : mode;
+
+  const runDir = `${GUEST_BASE}/runs/${runId}`;
+  const playbookPath = `${runDir}/playbook.json`;
+
+  const argv = [runId, String(startEpoch), String(relDelay), wrapperMode, arg, duration, String(capSeconds), speed]
     .map((a) => `'${a}'`)
     .join(' ');
 
-  return [
+  const links = [
     // Fail loudly rather than launch ungrouped. Without setsid the wrapper
     // shares OUR process group, so buildAbortCommand's `kill -TERM -$P` would
     // either miss it or signal the wrong group -- an attack nobody can stop.
     // util-linux provides setsid and is essential on Rocky; this guard exists
     // so a stripped image reports the problem instead of hiding it.
     `command -v setsid >/dev/null 2>&1 || { echo 'setsid is missing on this guest' >&2; exit 3; }`,
-    `mkdir -p ${GUEST_BASE}`,
-    `printf %s '${WRAPPER_B64}' | base64 -d > ${WRAPPER_PATH}`,
-    `chmod 700 ${WRAPPER_PATH}`,
-    `nohup setsid /bin/sh ${WRAPPER_PATH} ${argv} </dev/null >/dev/null 2>&1 &`,
-  ].join(' && ');
+    `mkdir -p ${GUEST_BASE} ${runDir}`,
+    // Staged via .tmp + mv -f, and that is NOT tidiness.
+    //
+    // `>` truncates the SAME inode, and /bin/sh does not slurp a script -- it
+    // reads in blocks and seeks back after each command. The wrapper parks
+    // mid-file for the whole run: first at the start-delay sleep, then for up to
+    // 45 minutes inside `timeout`. A second dispatch to this lane during that
+    // window rewrites the file underneath a shell that will resume at its saved
+    // byte offset in the NEW content and execute a fragment of a different line.
+    //
+    // This was harmless only while every staged copy was byte-identical. It
+    // stopped being harmless the moment cc-attack.sh changed length. rename(2)
+    // leaves the running shell on its own inode. Same idiom as say()'s state
+    // write, for the same reason.
+    `printf %s '${WRAPPER_B64}' | base64 -d > ${WRAPPER_PATH}.tmp`,
+    `chmod 700 ${WRAPPER_PATH}.tmp`,
+    `mv -f ${WRAPPER_PATH}.tmp ${WRAPPER_PATH}`,
+  ];
+
+  if (playbook) {
+    // A file, not a ninth argument: students have an SSH console on this box,
+    // and a base64 playbook in argv is the whole answer sheet in `ps auxww`.
+    const b64 = Buffer.from(playbook, 'utf8').toString('base64');
+    links.push(`printf %s '${b64}' | base64 -d > ${playbookPath}.tmp`);
+    links.push(`mv -f ${playbookPath}.tmp ${playbookPath}`);
+  }
+
+  links.push(`nohup setsid /bin/sh ${WRAPPER_PATH} ${argv} </dev/null >/dev/null 2>&1 &`);
+  return links.join(' && ');
 }
 
 /**
@@ -301,6 +381,10 @@ function parseGuestState(stdout) {
     fellBack: kv.fb === '1',
     split: kv.split == null ? null : kv.split === '1',
     ref: kv.ref || null,
+    // 'emitter' when a playbook produced the run, 'loggen' for the keyword
+    // filter. Absent on older images, which parseGuestState tolerates by
+    // design -- unknown keys are ignored rather than rejected.
+    src: kv.src || null,
     pid: num(kv.pid),
     raw: stateLine,
   };
@@ -519,6 +603,7 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
         duration: selection.duration,
         capSeconds: selection.capSeconds,
         speed: selection.speed,
+        playbookJson: playbookFor(selection),
       });
 
       // waitForAgentExecReady is deliberately skipped: it costs 5-6s per VM and
@@ -746,6 +831,8 @@ module.exports = {
   retryTargets,
   // constants
   WRAPPER_SH,
+  PLAYBOOKS,
+  playbookFor,
   GUEST_BASE,
   WRAPPER_PATH,
 };

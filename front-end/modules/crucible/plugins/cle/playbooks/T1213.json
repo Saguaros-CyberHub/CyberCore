@@ -1,0 +1,82 @@
+{
+  "technique": "T1213",
+  "tactic": "TA0009",
+  "name": "Data from Information Repositories",
+  "story": "An account with legitimate access reads far more than it ever has.",
+  "nominal_seconds": 600,
+  "entities": {
+    "db": "db-01",
+    "app": "app-server-01",
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    }
+  },
+  "pools": {
+    "tables": [
+      "customers",
+      "invoices",
+      "payroll",
+      "contracts",
+      "employees",
+      "card_tokens"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "240s",
+      "count": 120,
+      "level": "INFO",
+      "source": {
+        "type": "database",
+        "name": "postgres-primary",
+        "host": "{{db}}"
+      },
+      "message": "duration: {{rand:900-6000}}ms  statement: SELECT * FROM {{tables}} LIMIT 10000 OFFSET {{rand:0-90000}}",
+      "metadata": {
+        "event_action": "query",
+        "user": "{{user}}",
+        "table": "{{tables}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "60s",
+      "count": 14,
+      "level": "WARN",
+      "source": {
+        "type": "database",
+        "name": "postgres-primary",
+        "host": "{{db}}"
+      },
+      "message": "temporary file: path \"base/pgsql_tmp/pgsql_tmp{{pid}}\", size {{rand:40000000-900000000}}",
+      "metadata": {
+        "event_action": "query-spill",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "90s",
+      "count": 20,
+      "level": "INFO",
+      "source": {
+        "type": "application",
+        "name": "reporting-api",
+        "host": "{{app}}"
+      },
+      "message": "export completed user={{user}} rows={{rand:8000-60000}} format=csv",
+      "metadata": {
+        "event_action": "data-export",
+        "user": "{{user}}"
+      }
+    }
+  ]
+}

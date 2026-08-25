@@ -1,0 +1,75 @@
+{
+  "technique": "T1041",
+  "tactic": "TA0010",
+  "name": "Exfiltration Over C2 Channel",
+  "story": "A staged archive leaves the network over the same channel C2 uses.",
+  "nominal_seconds": 600,
+  "entities": {
+    "target": "fileserv-01",
+    "c2": {
+      "ipv4Host": "203.0.113"
+    },
+    "fw": "firewall-01",
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "10s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd=split -b 5M /tmp/.cache/a.tgz /tmp/.cache/part-",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "300s",
+      "count": 64,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "ACCEPT OUT=eth1 SRC={{target}} DST={{c2}} PROTO=TCP DPT=443 bytes={{rand:4800000-5300000}}",
+      "metadata": {
+        "event_action": "connection-allowed",
+        "dst_ip": "{{c2}}",
+        "protocol": "tcp"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "120s",
+      "count": 18,
+      "level": "WARN",
+      "source": {
+        "type": "firewall",
+        "name": "netflow",
+        "host": "{{fw}}"
+      },
+      "message": "Outbound transfer volume anomaly: {{target}} -> {{c2}} total={{rand:200000000-400000000}} bytes in 5m window",
+      "metadata": {
+        "event_action": "volume-anomaly",
+        "dst_ip": "{{c2}}"
+      }
+    }
+  ]
+}

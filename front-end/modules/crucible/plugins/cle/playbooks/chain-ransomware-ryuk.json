@@ -1,0 +1,185 @@
+{
+  "chain": "ransomware-ryuk",
+  "tactic": "TA0040",
+  "name": "Ryuk Ransomware Campaign",
+  "story": "Phish, execute, persist, blind the defences, steal creds, move, encrypt.",
+  "nominal_seconds": 1800,
+  "entities": {
+    "victim": {
+      "oneOf": [
+        "ws-042",
+        "ws-071",
+        "ws-113",
+        "ws-128"
+      ]
+    },
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    },
+    "c2": {
+      "ipv4Host": "198.51.100"
+    },
+    "fw": "firewall-01",
+    "dc": "auth-01"
+  },
+  "pools": {
+    "svcs": [
+      "auditd",
+      "clamav-freshclam",
+      "elastic-agent"
+    ],
+    "shares": [
+      "\\\\fileserv-01\\finance",
+      "\\\\fileserv-01\\hr"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "30s",
+      "count": 6,
+      "level": "WARN",
+      "technique": "T1566.001",
+      "tactic": "TA0001",
+      "source": {
+        "type": "email",
+        "name": "mail-gateway",
+        "host": "app-server-01"
+      },
+      "message": "Message accepted for {{user}}@corp.example from billing@invoice-secure.net attachment=invoice_{{rand:1000-9999}}.doc",
+      "metadata": {
+        "event_action": "email-delivered",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "90s",
+      "spread": "20s",
+      "count": 4,
+      "level": "WARN",
+      "technique": "T1059.003",
+      "tactic": "TA0002",
+      "source": {
+        "type": "host",
+        "name": "cmd",
+        "host": "{{victim}}"
+      },
+      "message": "pid={{pid}} user={{user}} cmd=cmd.exe /c powershell -enc SQBFAFgAIAAoAE4AZQB3AC0A",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "60s",
+      "spread": "15s",
+      "count": 2,
+      "level": "WARN",
+      "technique": "T1547.001",
+      "tactic": "TA0003",
+      "source": {
+        "type": "host",
+        "name": "registry",
+        "host": "{{victim}}"
+      },
+      "message": "SetValue HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\svchost = C:\\Users\\{{user}}\\AppData\\ryuk.exe",
+      "metadata": {
+        "event_action": "persistence-registry",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "60s",
+      "spread": "25s",
+      "count": 5,
+      "level": "WARN",
+      "technique": "T1562.001",
+      "tactic": "TA0005",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{victim}}"
+      },
+      "message": "Stopping {{svcs}}.service - initiated by uid=0 pid={{pid}}",
+      "metadata": {
+        "event_action": "service-stopped"
+      }
+    },
+    {
+      "gap": "60s",
+      "spread": "20s",
+      "count": 3,
+      "level": "ERROR",
+      "technique": "T1003.001",
+      "tactic": "TA0006",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{victim}}"
+      },
+      "message": "type=SYSCALL comm=\"procdump\" exe=\"/tmp/pd.exe\" key=\"cred-access\" target=lsass.exe pid={{pid}}",
+      "metadata": {
+        "event_action": "credential-access"
+      }
+    },
+    {
+      "gap": "60s",
+      "spread": "60s",
+      "count": 40,
+      "level": "INFO",
+      "technique": "T1018",
+      "tactic": "TA0007",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "ACCEPT IN=eth0 SRC={{victim}} DST=10.20.30.{{rand:1-254}} PROTO=TCP DPT=445 SYN",
+      "metadata": {
+        "event_action": "connection-attempt"
+      }
+    },
+    {
+      "gap": "60s",
+      "spread": "45s",
+      "count": 12,
+      "level": "WARN",
+      "technique": "T1021.001",
+      "tactic": "TA0008",
+      "source": {
+        "type": "authentication",
+        "name": "rdp",
+        "host": "{{dc}}"
+      },
+      "message": "Remote desktop session established user={{user}} src={{victim}} dst={{shares}}",
+      "metadata": {
+        "event_action": "lateral-movement",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "90s",
+      "spread": "120s",
+      "count": 150,
+      "level": "ERROR",
+      "technique": "T1486",
+      "tactic": "TA0040",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "fileserv-01"
+      },
+      "message": "type=PATH name=\"{{shares}}\\file{{rand:1-9999}}.RYK\" nametype=CREATE key=\"file-write\"",
+      "metadata": {
+        "event_action": "file-encrypted"
+      }
+    }
+  ]
+}

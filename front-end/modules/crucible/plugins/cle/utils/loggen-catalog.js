@@ -48,7 +48,7 @@ const LOGGEN_REF = '2db735a7a5c6fb56654187325bb36772d3c9c4d7';
  * corrected description or volume hint is a catalog change but not an image
  * change. Stored on every run so an old row still explains what it offered.
  */
-const CATALOG_VERSION = '1.0.0';
+const CATALOG_VERSION = '2.0.0';
 
 /**
  * mitreMapper.ts TACTICS, all 14. Listed in kill-chain order rather than the
@@ -293,13 +293,64 @@ function formatDuration(seconds) {
 /**
  * The whole catalog, shaped for the picker. Static — the route may cache it.
  */
+/**
+ * Playbook-derived facts, computed rather than transcribed.
+ *
+ * These deliberately do NOT live in the TECHNIQUES array. That array is a hand
+ * transcription of upstream's mitreMapper.ts and its length is asserted at 15;
+ * mixing derived data into it would make that assertion mean two things at once.
+ * More practically, hand-writing an event count next to a playbook that changes
+ * weekly guarantees the console eventually lies about how many events a
+ * technique produces.
+ *
+ *   fidelity        'high'    a playbook drives it -- real technique behaviour
+ *                   'generic' log-generator's keyword filter, whatever matches
+ *   expected_events exact count the playbook emits
+ *   min_seconds     shortest duration it can honestly run in (its rigid bursts)
+ *
+ * Read once at require time, like the wrapper and the playbooks themselves.
+ */
+const PLAYBOOK_FACTS = (() => {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(__dirname, '..', 'playbooks');
+  const out = new Map();
+  let emit;
+  let names = [];
+  try {
+    emit = require('./cc-emit');
+    names = fs.readdirSync(dir);
+  } catch (e) {
+    return out; // no playbooks on disk: every technique reports as generic
+  }
+  for (const f of names) {
+    if (!f.endsWith('.json')) continue;
+    try {
+      const pb = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+      out.set(f.replace(/\.json$/, ''), {
+        fidelity: 'high',
+        expected_events: (pb.steps || []).reduce((n, st) => n + Math.max(1, Number(st.count || 1)), 0),
+        min_seconds: emit.minSecondsFor(pb),
+        story: pb.story || null,
+      });
+    } catch (e) { /* a malformed playbook simply does not claim high fidelity */ }
+  }
+  return out;
+})();
+
+const GENERIC = { fidelity: 'generic', expected_events: null, min_seconds: null, story: null };
+
+function factsFor(key) {
+  return PLAYBOOK_FACTS.get(key) || GENERIC;
+}
+
 function catalog() {
   return {
     catalog_version: CATALOG_VERSION,
     loggen_ref: LOGGEN_REF,
     tactics: TACTICS,
-    techniques: TECHNIQUES.map((t) => ({ ...t, tactic_name: tacticNameOf(t) })),
-    chains: CHAINS,
+    techniques: TECHNIQUES.map((t) => ({ ...t, tactic_name: tacticNameOf(t), ...factsFor(t.id) })),
+    chains: CHAINS.map((c) => ({ ...c, ...factsFor(`chain-${c.key}`) })),
   };
 }
 
@@ -317,4 +368,6 @@ module.exports = {
   tacticNameOf,
   formatDuration,
   catalog,
+  factsFor,
+  PLAYBOOK_FACTS,
 };

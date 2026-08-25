@@ -1,0 +1,129 @@
+{
+  "chain": "insider-threat-data-theft",
+  "tactic": "TA0009",
+  "name": "Malicious Insider Data Theft",
+  "story": "A trusted account enumerates shares, collects, exfiltrates, then tidies up.",
+  "nominal_seconds": 1500,
+  "entities": {
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    },
+    "target": "fileserv-01",
+    "c2": {
+      "ipv4Host": "203.0.113"
+    },
+    "fw": "firewall-01"
+  },
+  "pools": {
+    "dirs": [
+      "/home/shared/finance",
+      "/home/shared/hr",
+      "/srv/contracts"
+    ],
+    "files": [
+      "q3-forecast.xlsx",
+      "payroll-2026.csv",
+      "msa-signed.pdf",
+      "customer-export.csv"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "60s",
+      "spread": "90s",
+      "count": 30,
+      "level": "INFO",
+      "technique": "T1083",
+      "tactic": "TA0007",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd=ls -R {{dirs}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "120s",
+      "spread": "120s",
+      "count": 60,
+      "level": "INFO",
+      "technique": "T1005",
+      "tactic": "TA0009",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{target}}"
+      },
+      "message": "type=PATH name=\"{{dirs}}/{{files}}\" nametype=NORMAL auid=1000 key=\"file-read\"",
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "90s",
+      "spread": "150s",
+      "count": 40,
+      "level": "INFO",
+      "technique": "T1213",
+      "tactic": "TA0009",
+      "source": {
+        "type": "database",
+        "name": "postgres-primary",
+        "host": "db-01"
+      },
+      "message": "duration: {{rand:800-5000}}ms  statement: SELECT * FROM customers LIMIT 10000 OFFSET {{rand:0-90000}}",
+      "metadata": {
+        "event_action": "query",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "120s",
+      "spread": "180s",
+      "count": 36,
+      "level": "WARN",
+      "technique": "T1020",
+      "tactic": "TA0010",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "ACCEPT OUT=eth1 SRC={{target}} DST={{c2}} PROTO=TCP DPT=443 bytes={{rand:4800000-5300000}}",
+      "metadata": {
+        "event_action": "connection-allowed",
+        "dst_ip": "{{c2}}"
+      }
+    },
+    {
+      "gap": "90s",
+      "spread": "60s",
+      "count": 10,
+      "level": "WARN",
+      "technique": "T1070.004",
+      "tactic": "TA0005",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd=shred -u /tmp/.cache/part-{{rand:1-40}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    }
+  ]
+}

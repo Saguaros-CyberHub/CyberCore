@@ -1,0 +1,106 @@
+{
+  "technique": "T1005",
+  "tactic": "TA0009",
+  "name": "Data from Local System",
+  "story": "Local files are enumerated, read and staged into a single archive.",
+  "nominal_seconds": 300,
+  "entities": {
+    "target": "fileserv-01",
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    },
+    "stage": "/tmp/.cache"
+  },
+  "pools": {
+    "dirs": [
+      "/home/shared/finance",
+      "/home/shared/hr",
+      "/srv/contracts",
+      "/var/backups"
+    ],
+    "files": [
+      "q3-forecast.xlsx",
+      "payroll-2026.csv",
+      "msa-signed.pdf",
+      "passwords.kdbx",
+      "board-minutes.docx",
+      "customer-export.csv"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "20s",
+      "spread": "20s",
+      "count": 6,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd=find {{dirs}} -type f -size +100k",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "60s",
+      "count": 48,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{target}}"
+      },
+      "message": "type=PATH name=\"{{dirs}}/{{files}}\" nametype=NORMAL auid=1000 key=\"file-read\"",
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{user}}",
+        "path": "{{dirs}}/{{files}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "15s",
+      "count": 1,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd=tar -czf {{stage}}/a.tgz {{dirs}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}",
+        "staged": "{{stage}}/a.tgz"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "20s",
+      "count": 4,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{target}}"
+      },
+      "message": "type=PATH name=\"{{stage}}/a.tgz\" nametype=CREATE auid=1000 key=\"file-write\" size={{rand:40000000-320000000}}",
+      "metadata": {
+        "event_action": "file-write",
+        "user": "{{user}}",
+        "path": "{{stage}}/a.tgz"
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "technique": "T1071.001",
+  "tactic": "TA0011",
+  "name": "Web Protocols (C2 beacon)",
+  "story": "A host checks in with the same external server on a fixed interval.",
+  "nominal_seconds": 900,
+  "entities": {
+    "target": {
+      "oneOf": [
+        "ws-042",
+        "ws-071",
+        "ws-113",
+        "ws-128"
+      ]
+    },
+    "c2": {
+      "ipv4Host": "198.51.100"
+    },
+    "fw": "firewall-01"
+  },
+  "pools": {
+    "agents": [
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    ],
+    "paths": [
+      "/api/v1/health",
+      "/pixel.gif",
+      "/updates/check"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "20s",
+      "spread": "600s",
+      "count": 120,
+      "level": "INFO",
+      "source": {
+        "type": "webserver",
+        "name": "squid-proxy",
+        "host": "{{fw}}"
+      },
+      "message": "{{target}} TCP_MISS/200 {{rand:280-340}} GET https://{{c2}}{{paths}} - DIRECT/{{c2}} application/octet-stream",
+      "metadata": {
+        "event_action": "http-request",
+        "dst_ip": "{{c2}}",
+        "user_agent": "{{agents}}"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "200s",
+      "count": 6,
+      "level": "WARN",
+      "source": {
+        "type": "firewall",
+        "name": "netflow",
+        "host": "{{fw}}"
+      },
+      "message": "Periodic outbound connection detected: {{target}} -> {{c2}}:443 interval~{{rand:58-62}}s jitter<5%",
+      "metadata": {
+        "event_action": "beacon-suspected",
+        "dst_ip": "{{c2}}"
+      }
+    }
+  ]
+}

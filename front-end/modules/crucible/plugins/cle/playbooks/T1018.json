@@ -1,0 +1,57 @@
+{
+  "technique": "T1018",
+  "tactic": "TA0007",
+  "name": "Remote System Discovery",
+  "story": "An internal host sweeps the subnet looking for neighbours.",
+  "nominal_seconds": 300,
+  "entities": {
+    "source_ip": {
+      "ipv4Host": "10.20.30"
+    },
+    "fw": "firewall-01"
+  },
+  "pools": {
+    "dst": [],
+    "ports": [
+      "22",
+      "445",
+      "3389",
+      "5985"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "20s",
+      "spread": "60s",
+      "count": 254,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{source_ip}} DST=10.20.30.{{rand:1-254}} PROTO=TCP SPT={{port}} DPT={{ports}} SYN",
+      "metadata": {
+        "event_action": "connection-attempt",
+        "src_ip": "{{source_ip}}",
+        "protocol": "tcp"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "20s",
+      "count": 12,
+      "level": "WARN",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "DROP IN=eth0 SRC={{source_ip}} DST=10.20.30.{{rand:1-254}} PROTO=TCP SPT={{port}} DPT=445 SYN",
+      "metadata": {
+        "event_action": "connection-blocked",
+        "src_ip": "{{source_ip}}"
+      }
+    }
+  ]
+}

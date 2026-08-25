@@ -57,8 +57,33 @@ REF=$(grep -o '"ref"[^,}]*' "$MANIFEST" 2>/dev/null | head -1 | cut -d: -f2 | tr
 SPLIT=1
 if [ ! -f "$LG/package.json" ]; then LG="$LG_BASE"; SPLIT=0; fi
 
-if [ ! -f "$LG/package.json" ]; then say "refused notinstalled ref=$REF"; exit 0; fi
-command -v npm >/dev/null 2>&1 || { say "refused nonpm ref=$REF"; exit 0; }
+# Where the server stages a playbook for techniques that have one, and the
+# emitter that runs it.
+#
+# The playbook is a FILE in the run directory, deliberately not a ninth
+# argument. Students have a Guacamole SSH console on this box (the catalog row
+# sets console_protocol=ssh), and a base64 playbook in argv is the entire answer
+# sheet -- every step, every count, every timing -- readable with a plain
+# `ps auxww` before the attack has even started.
+PLAYBOOK="$RD/playbook.json"
+EMITTER="$BASE/cc-emit.js"
+
+if [ "$MODE" = "playbook" ]; then
+  # Fail closed, and loudly. Quietly falling back to the keyword filter would
+  # mean the console promised a high-fidelity run of a few hundred events and
+  # the lane produced 76 of generic API-gateway traffic instead -- which reads
+  # as one flaky machine rather than as a bug, and is the worst of both.
+  [ -f "$PLAYBOOK" ] || { say "refused noplaybook ref=$REF"; exit 0; }
+  [ -f "$EMITTER" ] || { say "refused noemitter ref=$REF"; exit 0; }
+  command -v node >/dev/null 2>&1 || { say "refused nonode ref=$REF"; exit 0; }
+else
+  # log-generator and npm matter ONLY to the legacy filter path. Gating a
+  # playbook run on them would hold the emitter hostage to a checkout it never
+  # touches -- and attack-worker reacts to `notinstalled` by invalidating the
+  # sensor-resolution cache, which would be an actively wrong repair here.
+  if [ ! -f "$LG/package.json" ]; then say "refused notinstalled ref=$REF"; exit 0; fi
+  command -v npm >/dev/null 2>&1 || { say "refused nonpm ref=$REF"; exit 0; }
+fi
 
 FREE=$(df -Pk "$LG" 2>/dev/null | awk 'NR==2{print $4}')
 case "$FREE" in ''|*[!0-9]*) FREE=0 ;; esac
@@ -121,6 +146,22 @@ export ENABLE_MONITORING
 # The `--` after the npm script name is required: it forwards the flags to
 # ts-node src/cli.ts rather than letting npm eat them.
 case "$MODE" in
+  playbook)
+    # Per-run output file. It matches the agent's *.json glob, cannot collide
+    # with a second run on this lane -- which migration 006 explicitly allows,
+    # excluding only 'dispatching' from the mutex -- and makes the run's own
+    # events trivially separable for the instructor via log.file.path.
+    #
+    # The emitter self-terminates at --duration. `timeout` stays as a backstop
+    # only: if it were the mechanism, every clean run would exit 124 and the
+    # whole class would show "hit the hard runtime cap".
+    timeout -k 30 "${CAP}s" node "$EMITTER" \
+      --playbook "$PLAYBOOK" \
+      --duration "$DUR" \
+      --run-id "$RUN_ID" \
+      --count-file "$RD/count" \
+      --out "$LG/logs/current/attack-$RUN_ID.json" > "$RUNLOG" 2>&1
+    ;;
   technique)
     timeout -k 30 "${CAP}s" npm run generate -- --mitre-technique "$ARG" --duration "$DUR" > "$RUNLOG" 2>&1
     ;;
@@ -141,7 +182,23 @@ case "$AFTER" in ''|*[!0-9]*) AFTER=0 ;; esac
 LINES=$((AFTER - BEFORE))
 if [ "$LINES" -lt 0 ]; then LINES=0; fi
 
-say "done rc=$RC end=$(date +%s) lines=$LINES skew=$SKEW fb=$FB ref=$REF"
+# The emitter counts its own output, and its number is the better one: the
+# before/after delta above is computed across logs/current/*.json, so a SECOND
+# run overlapping on this lane inflates both. Migration 006 allows exactly that
+# ("Two RUNNING attacks are a legitimate thing to want"), so the delta is only
+# reliable when this run is the only writer.
+#
+# src= tells the console which number it is looking at. parseGuestState ignores
+# unknown keys by design, so an older server reading a newer image still parses.
+SRC=loggen
+if [ "$MODE" = "playbook" ]; then
+  SRC=emitter
+  EMITTED=$(cat "$RD/count" 2>/dev/null)
+  case "$EMITTED" in ''|*[!0-9]*) EMITTED='' ;; esac
+  [ -n "$EMITTED" ] && LINES="$EMITTED"
+fi
+
+say "done rc=$RC end=$(date +%s) lines=$LINES src=$SRC skew=$SKEW fb=$FB ref=$REF"
 
 # ELK ingestion never deletes what it reads, so without this the attack tree
 # grows without bound across a semester.

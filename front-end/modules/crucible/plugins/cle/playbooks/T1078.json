@@ -1,0 +1,83 @@
+{
+  "technique": "T1078",
+  "tactic": "TA0001",
+  "name": "Valid Accounts",
+  "story": "A working credential used from an address the account has never used.",
+  "nominal_seconds": 600,
+  "entities": {
+    "source_ip": {
+      "ipv4Host": "192.0.2"
+    },
+    "user": {
+      "oneOf": [
+        "svc_backup",
+        "svc_report",
+        "svc_deploy"
+      ]
+    },
+    "target": "auth-01"
+  },
+  "pools": {
+    "hosts": [
+      "srv-prod-01",
+      "app-server-01",
+      "db-01",
+      "web-01",
+      "fileserv-01"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "20s",
+      "spread": "5s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "Accepted publickey for {{user}} from {{source_ip}} port {{port}} ssh2: RSA SHA256:{{rand:100000-999999}}",
+      "metadata": {
+        "event_action": "logon-success",
+        "outcome": "success",
+        "user": "{{user}}",
+        "src_ip": "{{source_ip}}"
+      }
+    },
+    {
+      "gap": "30s",
+      "spread": "180s",
+      "count": 22,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{hosts}}"
+      },
+      "message": "Accepted publickey for {{user}} from {{source_ip}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "logon-success",
+        "outcome": "success",
+        "user": "{{user}}",
+        "src_ip": "{{source_ip}}"
+      }
+    },
+    {
+      "gap": "20s",
+      "spread": "60s",
+      "count": 8,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "sudo",
+        "host": "{{hosts}}"
+      },
+      "message": "{{user}} : TTY=pts/1 ; PWD=/home/{{user}} ; USER=root ; COMMAND=/usr/bin/id",
+      "metadata": {
+        "event_action": "privilege-use",
+        "user": "{{user}}"
+      }
+    }
+  ]
+}

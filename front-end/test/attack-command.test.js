@@ -171,3 +171,100 @@ test('lead time scales with the class but stays bounded', () => {
   assert.strictEqual(runner.leadSecondsFor(25), 50);
   assert.ok(runner.leadSecondsFor(1000) <= 180, 'lead must not grow without bound');
 });
+
+// ---------------------------------------------------------------------------
+// Playbook dispatch. Everything below guards a silent failure.
+// ---------------------------------------------------------------------------
+
+const PB_ARGS = {
+  runId: '11111111-2222-3333-4444-555555555555',
+  startEpoch: 1800000000,
+  relDelaySeconds: 30,
+  mode: 'technique',
+  arg: 'T1110.001',
+  duration: '5m',
+  capSeconds: 480,
+  speed: '1.00',
+};
+
+test('a technique with a playbook switches the wrapper onto the emitter', () => {
+  const cmd = runner.buildDispatchCommand({
+    ...PB_ARGS,
+    playbookJson: runner.playbookFor({ mode: 'technique', arg: 'T1110.001' }),
+  });
+  assert.ok(/'playbook' 'T1110\.001'/.test(cmd), 'wrapper mode token should be playbook');
+});
+
+test('a technique without a playbook still falls back to the keyword filter', () => {
+  const cmd = runner.buildDispatchCommand({ ...PB_ARGS, playbookJson: null });
+  assert.ok(/'technique' 'T1110\.001'/.test(cmd));
+  assert.ok(!/playbook\.json/.test(cmd), 'no playbook should be staged when there is none');
+});
+
+test('a tactic never gets a playbook', () => {
+  // A tactic is a dozen unrelated behaviours; there is no single honest story to
+  // script for one, so it stays on log-generator.
+  assert.strictEqual(runner.playbookFor({ mode: 'tactic', arg: 'TA0006' }), null);
+});
+
+test('the playbook is staged as a FILE, never as an argument', () => {
+  // Students have a Guacamole SSH console on the sensor. A base64 playbook in
+  // argv is every step, count and timing of the attack, readable with a plain
+  // `ps auxww` before it starts.
+  const json = runner.playbookFor({ mode: 'technique', arg: 'T1110.001' });
+  const cmd = runner.buildDispatchCommand({ ...PB_ARGS, playbookJson: json });
+  const b64 = Buffer.from(json, 'utf8').toString('base64');
+  assert.ok(cmd.includes(`> /opt/cybercore/runs/${PB_ARGS.runId}/playbook.json.tmp`));
+  const argvStart = cmd.indexOf('nohup setsid');
+  assert.ok(cmd.indexOf(b64) < argvStart, 'the playbook must be written before the launch link');
+  assert.ok(!cmd.slice(argvStart).includes(b64), 'the playbook must not appear in argv');
+});
+
+test('the wrapper is staged atomically, never truncated in place', () => {
+  // `>` truncates the SAME inode, and /bin/sh re-reads a script as it executes.
+  // The wrapper parks mid-file for the whole run, so a second dispatch to the
+  // lane would rewrite the file underneath a shell that resumes at its saved
+  // byte offset in different content. rename(2) gives it its own inode.
+  const cmd = runner.buildDispatchCommand({ ...PB_ARGS, playbookJson: null });
+  assert.ok(/base64 -d > \/opt\/cybercore\/cc-attack\.sh\.tmp/.test(cmd));
+  assert.ok(/mv -f \/opt\/cybercore\/cc-attack\.sh\.tmp \/opt\/cybercore\/cc-attack\.sh/.test(cmd));
+  assert.ok(
+    !/base64 -d > \/opt\/cybercore\/cc-attack\.sh(?!\.tmp)/.test(cmd),
+    'must not redirect straight onto the path a running shell is reading'
+  );
+});
+
+test('the playbook round-trips through base64 byte for byte', () => {
+  const json = runner.playbookFor({ mode: 'technique', arg: 'T1005' });
+  const cmd = runner.buildDispatchCommand({ ...PB_ARGS, arg: 'T1005', playbookJson: json });
+  const m = /printf %s '([A-Za-z0-9+/=]+)' \| base64 -d > [^ ]*playbook\.json\.tmp/.exec(cmd);
+  assert.ok(m, 'playbook staging link not found');
+  assert.strictEqual(Buffer.from(m[1], 'base64').toString('utf8'), json);
+});
+
+test('every playbook fits the dispatch command inside the guest-exec budget', () => {
+  // Measured cap for a Proxmox base64 payload is 61,440. Blowing it would be
+  // discovered at class time, on the largest chain, across thirty lanes.
+  for (const [key, json] of runner.PLAYBOOKS) {
+    if (key === 'host-baseline') continue;
+    const chain = key.startsWith('chain-');
+    const cmd = runner.buildDispatchCommand({
+      ...PB_ARGS,
+      mode: chain ? 'chain' : 'technique',
+      arg: chain ? key.slice(6) : key,
+      duration: chain ? '' : '30m',
+      capSeconds: 10800,
+      playbookJson: json,
+    });
+    assert.ok(cmd.length < 45000, `${key} produces a ${cmd.length}-char dispatch command`);
+  }
+});
+
+test('the state line reports which producer made the events', () => {
+  const p = runner.parseGuestState('STATE=done rc=0 end=123 lines=245 src=emitter skew=1 fb=0 ref=abc\nALIVE=0');
+  assert.strictEqual(p.src, 'emitter');
+  assert.strictEqual(p.lines, 245);
+  // Older images omit src entirely; that must parse, not throw.
+  const old = runner.parseGuestState('STATE=done rc=0 end=123 lines=76 skew=1 fb=0 ref=abc\nALIVE=0');
+  assert.strictEqual(old.src, null);
+});

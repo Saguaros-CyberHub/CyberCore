@@ -1,0 +1,234 @@
+{
+  "chain": "apt29-cozy-bear",
+  "tactic": "TA0011",
+  "name": "APT29 Cozy Bear Campaign",
+  "story": "Patient and credential-led: phish, inject, beacon quietly, take LSASS, collect, exfiltrate, tidy up.",
+  "nominal_seconds": 2700,
+  "entities": {
+    "victim": {
+      "oneOf": [
+        "ws-042",
+        "ws-071",
+        "ws-113",
+        "ws-128"
+      ]
+    },
+    "user": {
+      "oneOf": [
+        "jsmith",
+        "mrodriguez",
+        "kchen",
+        "apatel",
+        "dwilson",
+        "tnguyen"
+      ]
+    },
+    "c2": {
+      "ipv4Host": "192.0.2"
+    },
+    "fw": "firewall-01",
+    "filesrv": "fileserv-01"
+  },
+  "pools": {
+    "paths": [
+      "/api/v1/health",
+      "/updates/check"
+    ],
+    "dirs": [
+      "/home/shared/finance",
+      "/srv/contracts"
+    ],
+    "files": [
+      "msa-signed.pdf",
+      "board-minutes.docx",
+      "q3-forecast.xlsx"
+    ],
+    "cmds": [
+      "hostnamectl",
+      "ip addr show",
+      "net group /domain",
+      "whoami /priv",
+      "systeminfo"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "40s",
+      "count": 4,
+      "level": "WARN",
+      "technique": "T1566.001",
+      "tactic": "TA0001",
+      "source": {
+        "type": "email",
+        "name": "mail-gateway",
+        "host": "app-server-01"
+      },
+      "message": "Message accepted for {{user}}@corp.example from hr-notice@secure-docs.net attachment=Q3_Review_{{rand:1000-9999}}.docm",
+      "metadata": {
+        "event_action": "email-delivered",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "120s",
+      "spread": "60s",
+      "count": 6,
+      "level": "WARN",
+      "technique": "T1059.001",
+      "tactic": "TA0002",
+      "source": {
+        "type": "host",
+        "name": "cmd",
+        "host": "{{victim}}"
+      },
+      "message": "pid={{pid}} user={{user}} cmd=powershell.exe -NoP -W Hidden -Enc SQBFAFgAKABOAGUAdwAtAE8AYgBq",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "90s",
+      "spread": "30s",
+      "count": 2,
+      "level": "WARN",
+      "technique": "T1547.001",
+      "tactic": "TA0003",
+      "source": {
+        "type": "host",
+        "name": "registry",
+        "host": "{{victim}}"
+      },
+      "message": "SetValue HKCUSoftwareMicrosoftWindowsCurrentVersionRunOneDriveSync = C:Users{{user}}AppDataRoamingodsync.exe",
+      "metadata": {
+        "event_action": "persistence-registry",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "120s",
+      "spread": "40s",
+      "count": 3,
+      "level": "ERROR",
+      "technique": "T1055",
+      "tactic": "TA0005",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{victim}}"
+      },
+      "message": "type=SYSCALL comm=\"odsync.exe\" syscall=ptrace target=explorer.exe pid={{pid}} key=\"proc-inject\"",
+      "metadata": {
+        "event_action": "process-injection"
+      }
+    },
+    {
+      "gap": "180s",
+      "spread": "420s",
+      "count": 70,
+      "level": "INFO",
+      "technique": "T1071.001",
+      "tactic": "TA0011",
+      "source": {
+        "type": "webserver",
+        "name": "squid-proxy",
+        "host": "{{fw}}"
+      },
+      "message": "{{victim}} TCP_MISS/200 {{rand:280-340}} GET https://{{c2}}{{paths}} - DIRECT/{{c2}} application/octet-stream",
+      "metadata": {
+        "event_action": "http-request",
+        "dst_ip": "{{c2}}"
+      }
+    },
+    {
+      "gap": "150s",
+      "spread": "90s",
+      "count": 22,
+      "level": "INFO",
+      "technique": "T1082",
+      "tactic": "TA0007",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{victim}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd={{cmds}}",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "150s",
+      "spread": "30s",
+      "count": 3,
+      "level": "ERROR",
+      "technique": "T1003.001",
+      "tactic": "TA0006",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{victim}}"
+      },
+      "message": "type=SYSCALL comm=\"odsync.exe\" exe=\"/proc/self/exe\" key=\"cred-access\" target=lsass.exe pid={{pid}}",
+      "metadata": {
+        "event_action": "credential-access"
+      }
+    },
+    {
+      "gap": "150s",
+      "spread": "120s",
+      "count": 44,
+      "level": "INFO",
+      "technique": "T1005",
+      "tactic": "TA0009",
+      "source": {
+        "type": "host",
+        "name": "auditd",
+        "host": "{{filesrv}}"
+      },
+      "message": "type=PATH name=\"{{dirs}}/{{files}}\" nametype=NORMAL auid=1000 key=\"file-read\"",
+      "metadata": {
+        "event_action": "file-read",
+        "user": "{{user}}"
+      }
+    },
+    {
+      "gap": "180s",
+      "spread": "180s",
+      "count": 26,
+      "level": "WARN",
+      "technique": "T1041",
+      "tactic": "TA0010",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fw}}"
+      },
+      "message": "ACCEPT OUT=eth1 SRC={{victim}} DST={{c2}} PROTO=TCP DPT=443 bytes={{rand:900000-1400000}}",
+      "metadata": {
+        "event_action": "connection-allowed",
+        "dst_ip": "{{c2}}"
+      }
+    },
+    {
+      "gap": "120s",
+      "spread": "60s",
+      "count": 10,
+      "level": "WARN",
+      "technique": "T1070.004",
+      "tactic": "TA0005",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{victim}}"
+      },
+      "message": "pid={{pid}} uid=1000 user={{user}} cmd=rm -f /tmp/.odsync/stage-{{rand:1-40}}.bin",
+      "metadata": {
+        "event_action": "process-start",
+        "user": "{{user}}"
+      }
+    }
+  ]
+}

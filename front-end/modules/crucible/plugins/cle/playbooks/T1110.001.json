@@ -1,0 +1,94 @@
+{
+  "technique": "T1110.001",
+  "tactic": "TA0006",
+  "name": "Password Guessing",
+  "story": "One external host guesses passwords against SSH, then gets in.",
+  "nominal_seconds": 300,
+  "entities": {
+    "source_ip": {
+      "ipv4Host": "203.0.113"
+    },
+    "target": "auth-01"
+  },
+  "pools": {
+    "users": [
+      "jsmith",
+      "mrodriguez",
+      "admin",
+      "svc_backup",
+      "kchen"
+    ]
+  },
+  "steps": [
+    {
+      "gap": "30s",
+      "spread": "90s",
+      "count": 240,
+      "level": "WARN",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "Failed password for {{users}} from {{source_ip}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "logon-failed",
+        "outcome": "failure",
+        "user": "{{users}}",
+        "src_ip": "{{source_ip}}",
+        "service": "sshd"
+      }
+    },
+    {
+      "gap": "5s",
+      "spread": "10s",
+      "count": 3,
+      "level": "WARN",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "error: maximum authentication attempts exceeded for {{users}} from {{source_ip}} port {{port}} ssh2 [preauth]",
+      "metadata": {
+        "event_action": "logon-failed",
+        "outcome": "failure",
+        "src_ip": "{{source_ip}}"
+      }
+    },
+    {
+      "gap": "20s",
+      "spread": "0s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "Accepted password for {{users.0}} from {{source_ip}} port {{port}} ssh2",
+      "metadata": {
+        "event_action": "logon-success",
+        "outcome": "success",
+        "user": "{{users.0}}",
+        "src_ip": "{{source_ip}}"
+      }
+    },
+    {
+      "gap": "5s",
+      "spread": "0s",
+      "count": 1,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{target}}"
+      },
+      "message": "pam_unix(sshd:session): session opened for user {{users.0}} by (uid=0)",
+      "metadata": {
+        "event_action": "session-opened",
+        "user": "{{users.0}}"
+      }
+    }
+  ]
+}
