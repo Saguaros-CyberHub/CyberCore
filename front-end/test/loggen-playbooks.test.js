@@ -249,3 +249,23 @@ test('a pool still varies between events, or a spray is one account repeated', (
   }
   assert.ok(users.size >= 3, `expected several accounts sprayed, got ${[...users]}`);
 });
+
+test('no event states the conclusion a student is meant to reach', () => {
+  // The signal has to be in the SHAPE of the data, not in a sentence naming it.
+  // A netflow record does not say "anomaly" — it reports bytes and timestamps,
+  // and the analyst notices. A line reading "Periodic outbound connection
+  // detected ... jitter<5%" hands over the finding and turns a hunt into
+  // reading. Real auditd rule keys name what the rule watches, not the verdict
+  // the analyst is supposed to draw from it.
+  const VERDICT = /(suspect|anomal|beacon|inject(ion|ed)|credential-access|persistence|lateral-movement|weaken|encrypted|exfiltrat|malicious|compromis|intrusion|spray|staged|proc-inject|cred-access|hijack|\bdetected\b)/i;
+  for (const f of files) {
+    for (const ev of planOf(f).events) {
+      assert.ok(!VERDICT.test(ev.message),
+        `${f} states its own conclusion: ${ev.message.slice(0, 110)}`);
+      for (const [k, v] of Object.entries(ev.metadata || {})) {
+        assert.ok(!VERDICT.test(String(v)),
+          `${f} metadata ${k}=${v} states the conclusion`);
+      }
+    }
+  }
+});

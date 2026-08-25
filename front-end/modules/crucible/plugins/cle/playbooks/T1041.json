@@ -45,10 +45,10 @@
       "level": "INFO",
       "source": {
         "type": "firewall",
-        "name": "iptables",
+        "name": "netflow",
         "host": "{{fw}}"
       },
-      "message": "ACCEPT OUT=eth1 SRC={{target}} DST={{c2}} PROTO=TCP DPT=443 bytes={{rand:4800000-5300000}}",
+      "message": "Flow record: {{target}} -> {{c2}}:443 proto=TCP bytes={{rand:4800000-5300000}} packets={{rand:3400-3900}} duration={{rand:2-300}}s flags=.AP.SF",
       "metadata": {
         "event_action": "connection-allowed",
         "dst_ip": "{{c2}}",
@@ -65,9 +65,9 @@
         "name": "netflow",
         "host": "{{fw}}"
       },
-      "message": "Outbound transfer volume anomaly: {{target}} -> {{c2}} total={{rand:200000000-400000000}} bytes in 5m window",
+      "message": "Flow record: {{target}} -> {{c2}}:443 proto=TCP bytes={{rand:200000000-400000000}} packets={{rand:140000-280000}} duration={{rand:2-300}}s flags=.AP.SF",
       "metadata": {
-        "event_action": "volume-anomaly",
+        "event_action": "flow-record",
         "dst_ip": "{{c2}}"
       }
     }

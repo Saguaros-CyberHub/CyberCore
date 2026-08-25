@@ -1844,6 +1844,13 @@ async function deployChallengeLanesInner({
   }
   if (unusedWan.length) await laneWan.releaseLaneWanIps(unusedWan);
 
+  // Hand every id in this batch back to allocateVxlanIds' in-process reservation
+  // set. The rows that inserted are now visible to its committed-rows query, and
+  // the ones that failed were never taken — so holding either would only shrink
+  // the pool. Unconditional and outside the loop so a throw above cannot park a
+  // whole block for the reservation TTL.
+  laneDeployer.releaseVxlanReservations(vxlans);
+
   // VMIDs for the added machines: one scan for the whole batch, before any
   // clone. They CANNOT be derived from vxlan_id the way spec machines are —
   // vm_offset is the environment author's namespace and findVmOffsetCollision

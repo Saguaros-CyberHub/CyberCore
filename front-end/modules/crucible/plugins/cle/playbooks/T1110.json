@@ -45,8 +45,7 @@
         "event_action": "logon-failed",
         "outcome": "failure",
         "user": "{{users}}",
-        "src_ip": "{{source_ip}}",
-        "note": "spray"
+        "src_ip": "{{source_ip}}"
       }
     },
     {

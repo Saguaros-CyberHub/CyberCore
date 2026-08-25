@@ -58,7 +58,7 @@
       },
       "message": "temporary file: path \"base/pgsql_tmp/pgsql_tmp{{pid}}\", size {{rand:40000000-900000000}}",
       "metadata": {
-        "event_action": "query-spill",
+        "event_action": "query",
         "user": "{{user}}"
       }
     },
@@ -74,7 +74,7 @@
       },
       "message": "export completed user={{user}} rows={{rand:8000-60000}} format=csv",
       "metadata": {
-        "event_action": "data-export",
+        "event_action": "export",
         "user": "{{user}}"
       }
     }

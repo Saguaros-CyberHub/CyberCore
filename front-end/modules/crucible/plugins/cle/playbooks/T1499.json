@@ -15,6 +15,11 @@
       "/api/search",
       "/api/reports",
       "/checkout"
+    ],
+    "agents": [
+      "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/128.0",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/127.0.0.0 Safari/537.36",
+      "curl/8.6.0"
     ]
   },
   "steps": [
@@ -28,7 +33,7 @@
         "name": "nginx-proxy",
         "host": "{{target}}"
       },
-      "message": "10.{{rand:1-254}}.{{rand:1-254}}.{{rand:1-254}} - GET {{paths}} 503 0 \"-\" - Duration: {{rand:8000-30000}}ms",
+      "message": "10.{{rand:1-254}}.{{rand:1-254}}.{{rand:1-254}} - - \"GET {{paths}} HTTP/1.1\" 503 0 \"-\" \"{{agents}}\"",
       "metadata": {
         "event_action": "http-request",
         "status": "503"
@@ -46,7 +51,7 @@
       },
       "message": "worker_connections are not enough while connecting to upstream, {{rand:900-4000}} pending",
       "metadata": {
-        "event_action": "resource-exhausted"
+        "event_action": "error"
       }
     },
     {
@@ -59,9 +64,9 @@
         "name": "iptables",
         "host": "{{fw}}"
       },
-      "message": "DROP rate-limit exceeded IN=eth0 DST={{target}} PROTO=TCP DPT=443 count={{rand:2000-9000}}",
+      "message": "DROP IN=eth0 OUT=eth1 SRC=10.{{rand:1-254}}.{{rand:1-254}}.{{rand:1-254}} DST={{target}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=443 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
       "metadata": {
-        "event_action": "rate-limited"
+        "event_action": "rate-limit"
       }
     }
   ]

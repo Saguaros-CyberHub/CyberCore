@@ -91,7 +91,7 @@
       },
       "message": "SetValue HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\svchost = C:\\Users\\{{user}}\\AppData\\ryuk.exe",
       "metadata": {
-        "event_action": "persistence-registry",
+        "event_action": "registry-set",
         "user": "{{user}}"
       }
     },
@@ -124,9 +124,9 @@
         "name": "auditd",
         "host": "{{victim}}"
       },
-      "message": "type=SYSCALL comm=\"procdump\" exe=\"/tmp/pd.exe\" key=\"cred-access\" target=lsass.exe pid={{pid}}",
+      "message": "type=SYSCALL arch=c000003e syscall=101 success=yes exit=0 ppid={{pid}} pid={{pid}} auid=1000 uid=0 gid=1000 euid=0 comm=\"procdump\" exe=\"/tmp/pd.exe\" key=\"syscall\"",
       "metadata": {
-        "event_action": "credential-access"
+        "event_action": "syscall"
       }
     },
     {
@@ -141,7 +141,7 @@
         "name": "iptables",
         "host": "{{fw}}"
       },
-      "message": "ACCEPT IN=eth0 SRC={{victim}} DST=10.20.30.{{rand:1-254}} PROTO=TCP DPT=445 SYN",
+      "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{victim}} DST=10.20.30.{{rand:1-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=445 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
       "metadata": {
         "event_action": "connection-attempt"
       }
@@ -160,7 +160,7 @@
       },
       "message": "Remote desktop session established user={{user}} src={{victim}} dst={{shares}}",
       "metadata": {
-        "event_action": "lateral-movement",
+        "event_action": "session-opened",
         "user": "{{user}}"
       }
     },
@@ -178,7 +178,7 @@
       },
       "message": "type=PATH name=\"{{shares}}\\file{{rand:1-9999}}.RYK\" nametype=CREATE key=\"file-write\"",
       "metadata": {
-        "event_action": "file-encrypted"
+        "event_action": "file-write"
       }
     }
   ]

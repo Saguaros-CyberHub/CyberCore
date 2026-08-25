@@ -104,22 +104,21 @@ function updateTiming(progress, concurrency) {
 }
 
 // ─── VXLAN allocation ──────────────────────────────────────────────────────
+/**
+ * Delegates to the core allocator.
+ *
+ * This was a byte-for-byte copy of the query in src/utils/lane-deployer.js, and
+ * a copy is not harmless here: that allocator carries an in-process reservation
+ * set covering the window between handing an id out and the lane row appearing
+ * in the table. A second implementation reading committed rows directly does not
+ * see those reservations, so a CIAB deploy running alongside a CLE one could be
+ * handed an id the other had already taken — and the second INSERT dies on
+ * ux_cybercore_lane_vxlan_active.
+ *
+ * The caller must still release what it does not use; see releaseVxlanReservations.
+ */
 async function allocateVxlanIds(vxlanBlock, count) {
-  const result = await cybercoreQuery(
-    `WITH used AS (
-       SELECT DISTINCT vxlan_id FROM cybercore_lane
-       WHERE vxlan_id IS NOT NULL
-         AND vxlan_id BETWEEN $1 AND $2
-         AND ${claimsSql()}
-     )
-     SELECT gs AS vxlan_id
-     FROM generate_series($1::int, $2::int) AS gs
-     LEFT JOIN used u ON u.vxlan_id = gs
-     WHERE u.vxlan_id IS NULL
-     ORDER BY gs LIMIT $3`,
-    [vxlanBlock.start, vxlanBlock.end, count]
-  );
-  return result.rows.map(r => r.vxlan_id);
+  return laneDeployer.allocateVxlanIds(vxlanBlock, count);
 }
 
 // ─── Per-profile crucible_challenge reservation ────────────────────────────

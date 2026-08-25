@@ -22,7 +22,20 @@ const BAKE = path.join(ROOT, 'infrastructure', 'proxmox-templates', 'vm-template
   'bake-cybr400-loggen-template.sh');
 const CLE = path.join(__dirname, '..', 'modules', 'crucible', 'plugins', 'cle');
 
-const bake = fs.readFileSync(BAKE, 'utf8');
+// Normalised, because this comparison is about CONTENT.
+//
+// The repo has no .gitattributes and core.autocrlf is on, so every .sh in a
+// Windows working tree is checked out CRLF while sync-bake-payloads.py writes
+// LF. Comparing raw bytes would fail on which machine ran the test rather than
+// on whether the payloads actually match.
+//
+// Worth knowing separately: a CRLF shell script does not run on a Linux node.
+// The kernel reads the shebang up to the newline, so the interpreter it looks
+// for carries a trailing carriage return and it reports a bad interpreter.
+// That only bites if a bake script is copied FROM a Windows checkout rather
+// than pulled on the node; `*.sh text eol=lf` in .gitattributes settles it.
+const nl = (t) => t.split('\r\n').join('\n');
+const bake = nl(fs.readFileSync(BAKE, 'utf8'));
 
 function embedded(terminator) {
   const re = new RegExp(`<<'${terminator}'\\n([\\s\\S]*?)\\n${terminator}\\n`);
@@ -102,4 +115,28 @@ test('the bake and the catalog pin the same log-generator commit', () => {
   const { LOGGEN_REF } = require(path.join(CLE, 'utils', 'loggen-catalog.js'));
   assert.strictEqual(inBake[1], LOGGEN_REF,
     'bake-cybr400-loggen-template.sh and loggen-catalog.js pin different commits');
+});
+
+test('the technique label is stripped from attack events, and only after the filter', () => {
+  // Filebeat runs processors in declaration order. drop_event tests
+  // loggen.mitre.technique to decide what ships; drop_fields then removes it.
+  // Reverse them and every attack event is discarded, because the field the
+  // filter tests no longer exists — a total, silent outage of the feature.
+  const proc = bake.slice(bake.indexOf('id: loggen-attack'));
+  const dropEvent = proc.indexOf('- drop_event:');
+  const dropFields = proc.indexOf('- drop_fields:');
+  assert.ok(dropEvent > -1, 'attack input must drop untagged events');
+  assert.ok(dropFields > -1, 'attack input must strip the technique label');
+  assert.ok(dropEvent < dropFields,
+    'drop_event must come BEFORE drop_fields or every attack event is discarded');
+  assert.ok(/fields: \['loggen\.mitre'\]/.test(proc));
+});
+
+test('the baseline input keeps its labels and its events', () => {
+  // Benign traffic must stay tagged: it is the false-positive floor that keeps
+  // mitre.technique:* from being an answer key. And it must have no drop_event,
+  // or untagged benign events — the overwhelming majority — never ship at all.
+  const base = bake.slice(bake.indexOf('id: loggen-baseline'), bake.indexOf('id: loggen-attack'));
+  assert.ok(!base.includes('drop_event'), 'the baseline must not drop untagged events');
+  assert.ok(!base.includes('drop_fields'), 'the baseline must keep its MITRE labels');
 });

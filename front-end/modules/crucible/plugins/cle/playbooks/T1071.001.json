@@ -56,9 +56,9 @@
         "name": "netflow",
         "host": "{{fw}}"
       },
-      "message": "Periodic outbound connection detected: {{target}} -> {{c2}}:443 interval~{{rand:58-62}}s jitter<5%",
+      "message": "Flow record: {{target}} -> {{c2}}:443 proto=TCP bytes={{rand:280-340}} packets={{rand:4-8}} duration={{rand:2-300}}s flags=.AP.SF",
       "metadata": {
-        "event_action": "beacon-suspected",
+        "event_action": "flow-record",
         "dst_ip": "{{c2}}"
       }
     }

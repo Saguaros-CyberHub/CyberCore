@@ -61,7 +61,7 @@
         "name": "auditd",
         "host": "{{target}}"
       },
-      "message": "type=PATH name=\"{{dirs}}/{{files}}\" nametype=NORMAL auid=1000 key=\"file-read\"",
+      "message": "type=PATH item=0 name=\"{{dirs}}/{{files}}\" inode={{rand:100000-999999}} dev=fd:00 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL auid=1000 key=\"file-read\"",
       "metadata": {
         "event_action": "file-read",
         "user": "{{user}}",
@@ -82,7 +82,7 @@
       "metadata": {
         "event_action": "process-start",
         "user": "{{user}}",
-        "staged": "{{stage}}/a.tgz"
+        "path": "{{stage}}/a.tgz"
       }
     },
     {
@@ -95,7 +95,7 @@
         "name": "auditd",
         "host": "{{target}}"
       },
-      "message": "type=PATH name=\"{{stage}}/a.tgz\" nametype=CREATE auid=1000 key=\"file-write\" size={{rand:40000000-320000000}}",
+      "message": "type=PATH item=0 name=\"{{stage}}/a.tgz\" inode={{rand:100000-999999}} dev=fd:00 mode=0100600 ouid=1000 ogid=1000 rdev=00:00 nametype=CREATE auid=1000 key=\"file-write\"",
       "metadata": {
         "event_action": "file-write",
         "user": "{{user}}",

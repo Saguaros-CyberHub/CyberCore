@@ -68,6 +68,67 @@ function seedFrom(str) {
   return h >>> 0;
 }
 
+/**
+ * Business rhythm.
+ *
+ * A dead-flat 24/7 histogram is the single most obvious synthetic tell there is
+ * -- more obvious than volume, more obvious than field values. Real enterprise
+ * telemetry has a shape: it climbs from about 07:00, peaks mid-morning, dips at
+ * lunch, tails off after 18:00, and drops to a floor of batch jobs and
+ * monitoring overnight. Weekends run at a fraction of a weekday.
+ *
+ * It also carries pedagogy that nothing else does. "Unusual hour" is a real
+ * signal an analyst uses constantly, and it only exists if the ordinary hours
+ * look ordinary. On a flat baseline, 03:00 means nothing.
+ *
+ * Applied to the benign daemon only. An instructor fires an attack whenever
+ * they fire it; if that happens to be against the overnight floor it stands out
+ * more, which is exactly true of real intrusions.
+ */
+function intensityAt(rhythm, date) {
+  if (!rhythm) return 1;
+  const offset = Number(rhythm.utc_offset || 0);
+  const local = new Date(date.getTime() + offset * 3600 * 1000);
+  const hour = local.getUTCHours();
+  const day = local.getUTCDay(); // 0 Sun .. 6 Sat
+
+  const curve = Array.isArray(rhythm.hourly) && rhythm.hourly.length === 24 ? rhythm.hourly : null;
+  let factor = curve ? Number(curve[hour]) : 1;
+  if (!Number.isFinite(factor) || factor < 0) factor = 1;
+
+  if ((day === 0 || day === 6) && rhythm.weekend != null) {
+    const w = Number(rhythm.weekend);
+    if (Number.isFinite(w) && w >= 0) factor *= w;
+  }
+  return factor;
+}
+
+/**
+ * One of a step's message templates, weighted.
+ *
+ * Without this a step emits one sentence over and over, and a benign stream
+ * built from 25 such steps reads as 25 sentences on a loop — which is its own
+ * kind of obviously-synthetic, just a different kind from a flat histogram.
+ * Real sources say several things: nginx serves 200s and 404s and the odd 500,
+ * sshd accepts keys and passwords and rejects some, postgres runs queries and
+ * checkpoints and autovacuums.
+ *
+ * A template may override level and metadata as well as the message, because a
+ * 500 is not an INFO and a failed logon is not a success.
+ */
+function pickTemplate(rng, step) {
+  const t = step.templates;
+  if (!Array.isArray(t) || !t.length) return step;
+  let total = 0;
+  for (const x of t) total += Number(x.weight) || 1;
+  let r = rng() * total;
+  for (const x of t) {
+    r -= Number(x.weight) || 1;
+    if (r <= 0) return x;
+  }
+  return t[t.length - 1];
+}
+
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 const randInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
 
@@ -263,7 +324,11 @@ function planTimeline(playbook, opts) {
     const step = steps[si];
     const spread = parseDuration(step.spread || '0s');
     const start = starts[si];
-    const count = Math.max(1, Number(step.count || 1));
+    // Intensity scales the COUNT, not the timing: a quiet hour means fewer
+    // people doing things, not the same people doing them slower.
+    const intensity = opts.intensity == null ? 1 : opts.intensity;
+    const count = Math.round(Math.max(1, Number(step.count || 1)) * intensity);
+    if (count < 1) continue; // an hour too quiet for this activity at all
     const technique = step.technique || playbook.technique || null;
     const tactic = step.tactic || playbook.tactic || null;
 
@@ -275,6 +340,7 @@ function planTimeline(playbook, opts) {
       const jitter = spread > 0 ? (rng() - 0.5) * slot : 0;
       const seq = i + 1;
       const src = step.source || {};
+      const tpl = pickTemplate(rng, step);
       // Fresh sample cache per event: pool draws are consistent WITHIN one
       // event and vary BETWEEN them, which is what a spray from one host
       // against many accounts actually looks like.
@@ -285,14 +351,14 @@ function planTimeline(playbook, opts) {
         // attack-worker schedules its finishing poll off expected_finish_at --
         // an event landing after that is one the run gets no credit for.
         offset: Math.min(requested, Math.max(0, start + frac * spread + jitter)),
-        level: step.level || 'INFO',
+        level: tpl.level || step.level || 'INFO',
         source: {
           type: expand(src.type || 'server', ctx, rng, seq),
           name: expand(src.name || 'unknown', ctx, rng, seq),
           host: expand(src.host || 'localhost', ctx, rng, seq),
         },
-        message: expand(step.message || '', ctx, rng, seq),
-        metadata: expandDeep(step.metadata || {}, ctx, rng, seq),
+        message: expand(tpl.message || step.message || '', ctx, rng, seq),
+        metadata: expandDeep(tpl.metadata || step.metadata || {}, ctx, rng, seq),
         technique,
         tactic,
         subtechnique: step.subtechnique || playbook.subtechnique || null,
@@ -470,7 +536,13 @@ async function main() {
     let s = seed;
     for (;;) {
       rotateIfLarge(args.out, maxBytes, Date.now());
-      const plan = planTimeline(playbook, { rng: makeRng(s), requested: playbook.nominal_seconds });
+      // Recomputed every cycle so the curve moves through the day on its own.
+      const intensity = intensityAt(playbook.rhythm, new Date());
+      const plan = planTimeline(playbook, {
+        rng: makeRng(s),
+        requested: playbook.nominal_seconds,
+        intensity,
+      });
       await emit(plan, { out: args.out });
       s = (s + 0x9e3779b9) >>> 0;
     }
@@ -513,6 +585,8 @@ module.exports = {
   seedFrom,
   parseDuration,
   resolveEntities,
+  intensityAt,
+  pickTemplate,
   layout,
   minSecondsFor,
   expand,

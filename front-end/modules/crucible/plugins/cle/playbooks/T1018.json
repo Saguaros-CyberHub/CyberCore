@@ -30,7 +30,7 @@
         "name": "iptables",
         "host": "{{fw}}"
       },
-      "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{source_ip}} DST=10.20.30.{{rand:1-254}} PROTO=TCP SPT={{port}} DPT={{ports}} SYN",
+      "message": "ACCEPT IN=eth0 OUT=eth1 SRC={{source_ip}} DST=10.20.30.{{rand:1-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT={{ports}} WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
       "metadata": {
         "event_action": "connection-attempt",
         "src_ip": "{{source_ip}}",
@@ -47,7 +47,7 @@
         "name": "iptables",
         "host": "{{fw}}"
       },
-      "message": "DROP IN=eth0 SRC={{source_ip}} DST=10.20.30.{{rand:1-254}} PROTO=TCP SPT={{port}} DPT=445 SYN",
+      "message": "DROP IN=eth0 OUT=eth1 SRC={{source_ip}} DST=10.20.30.{{rand:1-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=445 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
       "metadata": {
         "event_action": "connection-blocked",
         "src_ip": "{{source_ip}}"

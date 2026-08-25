@@ -73,7 +73,7 @@
         "name": "auditd",
         "host": "{{target}}"
       },
-      "message": "type=SYSCALL comm=\"uname\" exe=\"/usr/bin/uname\" key=\"discovery\" auid=1000",
+      "message": "type=SYSCALL arch=c000003e syscall=63 success=yes exit=0 ppid={{pid}} pid={{pid}} auid=1000 uid=1000 gid=1000 euid=1000 comm=\"uname\" exe=\"/usr/bin/uname\" key=\"syscall\"",
       "metadata": {
         "event_action": "audit",
         "user": "{{user}}"

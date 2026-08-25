@@ -102,7 +102,7 @@
       },
       "message": "SetValue HKCUSoftwareMicrosoftWindowsCurrentVersionRunOneDriveSync = C:Users{{user}}AppDataRoamingodsync.exe",
       "metadata": {
-        "event_action": "persistence-registry",
+        "event_action": "registry-set",
         "user": "{{user}}"
       }
     },
@@ -118,9 +118,9 @@
         "name": "auditd",
         "host": "{{victim}}"
       },
-      "message": "type=SYSCALL comm=\"odsync.exe\" syscall=ptrace target=explorer.exe pid={{pid}} key=\"proc-inject\"",
+      "message": "type=SYSCALL arch=c000003e syscall=101 success=yes exit=0 ppid={{pid}} pid={{pid}} auid=1000 uid=1000 gid=1000 euid=1000 comm=\"odsync\" exe=\"/home/{{user}}/.cache/odsync\" key=\"syscall\"",
       "metadata": {
-        "event_action": "process-injection"
+        "event_action": "syscall"
       }
     },
     {
@@ -171,9 +171,9 @@
         "name": "auditd",
         "host": "{{victim}}"
       },
-      "message": "type=SYSCALL comm=\"odsync.exe\" exe=\"/proc/self/exe\" key=\"cred-access\" target=lsass.exe pid={{pid}}",
+      "message": "type=SYSCALL arch=c000003e syscall=101 success=yes exit=0 ppid={{pid}} pid={{pid}} auid=1000 uid=0 gid=1000 euid=0 comm=\"odsync\" exe=\"/home/{{user}}/.cache/odsync\" key=\"syscall\"",
       "metadata": {
-        "event_action": "credential-access"
+        "event_action": "syscall"
       }
     },
     {
@@ -188,7 +188,7 @@
         "name": "auditd",
         "host": "{{filesrv}}"
       },
-      "message": "type=PATH name=\"{{dirs}}/{{files}}\" nametype=NORMAL auid=1000 key=\"file-read\"",
+      "message": "type=PATH item=0 name=\"{{dirs}}/{{files}}\" inode={{rand:100000-999999}} dev=fd:00 mode=0100644 ouid=1000 ogid=1000 rdev=00:00 nametype=NORMAL auid=1000 key=\"file-read\"",
       "metadata": {
         "event_action": "file-read",
         "user": "{{user}}"
@@ -203,10 +203,10 @@
       "tactic": "TA0010",
       "source": {
         "type": "firewall",
-        "name": "iptables",
+        "name": "netflow",
         "host": "{{fw}}"
       },
-      "message": "ACCEPT OUT=eth1 SRC={{victim}} DST={{c2}} PROTO=TCP DPT=443 bytes={{rand:900000-1400000}}",
+      "message": "Flow record: {{victim}} -> {{c2}}:443 proto=TCP bytes={{rand:900000-1400000}} packets={{rand:700-1100}} duration={{rand:2-300}}s flags=.AP.SF",
       "metadata": {
         "event_action": "connection-allowed",
         "dst_ip": "{{c2}}"

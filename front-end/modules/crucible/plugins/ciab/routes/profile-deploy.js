@@ -24,6 +24,7 @@ const { pool, query } = require('../utils/db');
 const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { claimsSql } = require('../../../../../src/utils/lane-claims');
+const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const laneWan = require('../../../../../src/utils/lane-wan-allocator');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
@@ -436,6 +437,10 @@ async function runProfileDeploy(opts) {
     laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId, studentUsername: student.email.split('@')[0] });
   }
 
+  // The rows exist, so the allocator's committed-rows query sees these ids now.
+  // Holding the in-process reservation past this point only shrinks the pool.
+  laneDeployer.releaseVxlanReservations(vxlanIds);
+
   // Extract the company's public domain from the profile JSON so the
   // orchestrator can inject it into Kali's /etc/hosts pointing at web-01.
   const profileDomain = profile.json_data?.student_view?.raw?.threats?.organization?.domain_public
@@ -786,6 +791,10 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       );
       laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId, studentUsername: email.split('@')[0] });
     }
+
+    // See the note at the other allocation site: the rows are committed, so the
+    // allocator can see these ids without the in-process reservation.
+    laneDeployer.releaseVxlanReservations(vxlanIds);
 
     // Bump group num_lanes + flip status back to deploying
     await query(

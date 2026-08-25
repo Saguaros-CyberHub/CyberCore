@@ -61,7 +61,7 @@
       },
       "message": "Started {{procs}}.service - system maintenance helper",
       "metadata": {
-        "event_action": "service-installed"
+        "event_action": "service-started"
       }
     },
     {
@@ -76,7 +76,7 @@
       },
       "message": "High CPU usage: {{rand:88-99}}% sustained, top process {{procs}} pid={{pid}}",
       "metadata": {
-        "event_action": "resource-alert",
+        "event_action": "metric",
         "metric": "cpu"
       }
     },
@@ -87,10 +87,10 @@
       "level": "INFO",
       "source": {
         "type": "firewall",
-        "name": "iptables",
+        "name": "netflow",
         "host": "firewall-01"
       },
-      "message": "ACCEPT OUT=eth1 SRC={{target}} DST={{pool_ip}} PROTO=TCP DPT=3333 bytes={{rand:2000-9000}}",
+      "message": "Flow record: {{target}} -> {{pool_ip}}:3333 proto=TCP bytes={{rand:2000-9000}} packets={{rand:12-60}} duration={{rand:2-300}}s flags=.AP.SF",
       "metadata": {
         "event_action": "connection-allowed",
         "protocol": "tcp"

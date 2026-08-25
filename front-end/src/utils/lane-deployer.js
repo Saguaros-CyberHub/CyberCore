@@ -283,22 +283,99 @@ async function getVmIp(node, vmid, providerType, retries = 12, delayMs = 10000) 
  * Allocate up to `count` free VXLAN ids within a reserved block. Dedupes against
  * every live cybercore_lane so retries and partial deploys don't collide.
  */
+/**
+ * Ids handed out but not yet written to cybercore_lane, with the time they were.
+ *
+ * THIS IS THE FIX FOR A REAL COLLISION, not a defensive nicety.
+ *
+ * The query below reads committed rows. A caller does not become visible to it
+ * until its INSERT lands, and deployChallengeLanes allocates at the TOP of the
+ * batch and inserts each row much later — after resolveVnets and the WAN
+ * allocation. Everything in that window is invisible.
+ *
+ * That window is not narrow, and the lab mutex deliberately leaves it open:
+ * assertNoConflictingLabOperation (cle/utils/vuln-lab-provision.js) scopes its
+ * claim per STUDENT precisely so one student's redeploy does not block another's
+ * — and both redeploys draw from the same challenge's VXLAN block. Each asks for
+ * one id, so each runs `ORDER BY gs LIMIT 1` and gets the same LOWEST free id.
+ * The second INSERT then dies on ux_cybercore_lane_vxlan_active, which surfaces
+ * as "Failed to create lane record for <student>" with the deploy half-built.
+ *
+ * Same shape, same fix as _reservedWanIps in utils/lane-wan-allocator.js, which
+ * already carried it for gateway addresses.
+ *
+ * In-process only, like every other mutex here — see the note in
+ * cle/utils/vuln-lab-provision.js on this app assuming exactly one Node process.
+ * A second replica would need an advisory lock; the unique index is what stops
+ * that case becoming a silent double-allocation rather than a loud failure.
+ */
+const RESERVED_VXLAN_TTL_MS = 10 * 60 * 1000;
+const _reservedVxlans = new Map();
+
+/**
+ * Serialize the whole allocate body — read, then reserve — so two callers cannot
+ * both read before either reserves.
+ *
+ * Chained with .then(fn, fn), NOT .then(fn): the latter leaves a rejected
+ * promise at the head of the chain and every later caller in the process
+ * inherits the rejection. Same reasoning as serialize() in lane-wan-allocator.js.
+ */
+let _vxlanMutex = Promise.resolve();
+function serializeVxlan(fn) {
+  const next = _vxlanMutex.then(fn, fn);
+  _vxlanMutex = next.catch(() => {});
+  return next;
+}
+
+/**
+ * Drop reservations old enough that their deploy is certainly finished or dead.
+ *
+ * The TTL is the backstop, not the mechanism: a deploy that inserts its rows
+ * releases them explicitly, and a deploy that dies mid-flight leaves ids parked
+ * for at most this long. Erring long is deliberate — a prematurely released id
+ * is exactly the collision this exists to prevent, while a briefly withheld one
+ * only costs capacity.
+ */
+function sweepVxlanReservations() {
+  const cutoff = Date.now() - RESERVED_VXLAN_TTL_MS;
+  for (const [id, at] of _reservedVxlans) if (at < cutoff) _reservedVxlans.delete(id);
+}
+
+/**
+ * Release ids back to the pool once their rows exist (or their deploy failed).
+ *
+ * Safe to call with ids this process never reserved, and safe to call twice.
+ */
+function releaseVxlanReservations(ids) {
+  for (const id of (Array.isArray(ids) ? ids : [ids])) _reservedVxlans.delete(Number(id));
+}
+
 async function allocateVxlanIds(block, count) {
-  const res = await cybercoreQuery(
-    `WITH used AS (
-       SELECT DISTINCT vxlan_id FROM cybercore_lane
-        WHERE vxlan_id IS NOT NULL
-          AND vxlan_id BETWEEN $1 AND $2
-          AND ${claimsSql()}
-     )
-     SELECT gs AS vxlan_id
-       FROM generate_series($1::int, $2::int) gs
-       LEFT JOIN used u ON u.vxlan_id = gs
-      WHERE u.vxlan_id IS NULL
-      ORDER BY gs LIMIT $3`,
-    [block.start, block.end, count]
-  );
-  return res.rows.map(r => r.vxlan_id);
+  return serializeVxlan(async () => {
+    sweepVxlanReservations();
+    const reserved = [..._reservedVxlans.keys()];
+
+    const res = await cybercoreQuery(
+      `WITH used AS (
+         SELECT DISTINCT vxlan_id FROM cybercore_lane
+          WHERE vxlan_id IS NOT NULL
+            AND vxlan_id BETWEEN $1 AND $2
+            AND ${claimsSql()}
+       )
+       SELECT gs AS vxlan_id
+         FROM generate_series($1::int, $2::int) gs
+         LEFT JOIN used u ON u.vxlan_id = gs
+        WHERE u.vxlan_id IS NULL
+          AND NOT (gs = ANY($4::int[]))
+        ORDER BY gs LIMIT $3`,
+      [block.start, block.end, count, reserved]
+    );
+
+    const ids = res.rows.map(r => r.vxlan_id);
+    const now = Date.now();
+    for (const id of ids) _reservedVxlans.set(id, now);
+    return ids;
+  });
 }
 
 /** Map vnets (from /cluster/sdn/vnets) by tag, for vxlan → vnet lookup. */
@@ -3574,6 +3651,7 @@ module.exports = {
   CONSOLE_PROTOCOLS,
   RESOURCE_LIMITS,
   allocateVxlanIds,
+  releaseVxlanReservations,
   octetForSlot,
   consoleForSlot,
   resolveConsole,

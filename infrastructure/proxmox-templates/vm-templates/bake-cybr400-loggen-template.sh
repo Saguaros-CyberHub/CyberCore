@@ -172,6 +172,29 @@ BASELINE_ROTATE_BYTES="${BASELINE_ROTATE_BYTES:-268435456}"
 # arrives buried in ordinary traffic, not that the disk fills by Friday.
 BASELINE_ARGS="${BASELINE_ARGS:---duration 24h}"
 
+# Whether log-generator drives the benign baseline. Default OFF: cc-hostbase
+# does, and log-generator is left installed only as a fallback.
+#
+# It was retired for four reasons, in order of how much they cost:
+#
+#  1. It never substitutes its metadata placeholders. Every event it emits ships
+#     literal "clientIP":"{clientIP}", "method":"{method}" into Kibana --
+#     obviously synthetic to anyone who opens an event, AND a discriminator,
+#     since emitter events have clean metadata. Same class of leak as a dataset
+#     name, sitting in the benign half where it is hardest to notice.
+#  2. It is flat 24/7 and cannot be made otherwise without retuning and
+#     restarting it hourly -- and a restart that does not first rename
+#     logs.json risks filestream re-reading from offset 0.
+#  3. Every workaround in this script exists to manage it: the frequency<=20
+#     batch cliff, 54,609 .jsonl files stalling guest-exec, rotation: false,
+#     the rename-and-restart dance.
+#  4. cc-emit.js now covers all twelve of its source types with several message
+#     templates each, so benign and hostile traffic come from ONE engine and are
+#     identical in shape by construction rather than by hand-maintained parity.
+#
+# Set to 1 to put it back; the unit and both checkouts stay on the image.
+LOGGEN_BASELINE_ENABLED="${LOGGEN_BASELINE_ENABLED:-0}"
+
 # ---------- 0. Sanity ----------
 if qm status $VMID >/dev/null 2>&1; then
   echo "ERROR: VM $VMID already exists. Destroy first: qm destroy $VMID --purge" >&2
@@ -363,7 +386,10 @@ SZ="$(stat -c %s "$F" 2>/dev/null || echo 0)"
 
 if [ "$SZ" -ge "$MAX" ]; then
   mv "$F" "$DIR/logs-$(date +%s).json"
-  systemctl restart loggen-baseline
+  # Only if it is actually running. `systemctl restart` STARTS a stopped
+  # unit, so an unguarded call here would silently resurrect the baseline
+  # on every rotation after it was retired.
+  systemctl is-active --quiet loggen-baseline && systemctl restart loggen-baseline
   find "$DIR" -maxdepth 1 -name 'logs-*.json' -mmin "+$GRACE_MIN" -delete 2>/dev/null || true
 fi
 
@@ -473,6 +499,67 @@ function seedFrom(str) {
     h = Math.imul(h, 0x01000193);
   }
   return h >>> 0;
+}
+
+/**
+ * Business rhythm.
+ *
+ * A dead-flat 24/7 histogram is the single most obvious synthetic tell there is
+ * -- more obvious than volume, more obvious than field values. Real enterprise
+ * telemetry has a shape: it climbs from about 07:00, peaks mid-morning, dips at
+ * lunch, tails off after 18:00, and drops to a floor of batch jobs and
+ * monitoring overnight. Weekends run at a fraction of a weekday.
+ *
+ * It also carries pedagogy that nothing else does. "Unusual hour" is a real
+ * signal an analyst uses constantly, and it only exists if the ordinary hours
+ * look ordinary. On a flat baseline, 03:00 means nothing.
+ *
+ * Applied to the benign daemon only. An instructor fires an attack whenever
+ * they fire it; if that happens to be against the overnight floor it stands out
+ * more, which is exactly true of real intrusions.
+ */
+function intensityAt(rhythm, date) {
+  if (!rhythm) return 1;
+  const offset = Number(rhythm.utc_offset || 0);
+  const local = new Date(date.getTime() + offset * 3600 * 1000);
+  const hour = local.getUTCHours();
+  const day = local.getUTCDay(); // 0 Sun .. 6 Sat
+
+  const curve = Array.isArray(rhythm.hourly) && rhythm.hourly.length === 24 ? rhythm.hourly : null;
+  let factor = curve ? Number(curve[hour]) : 1;
+  if (!Number.isFinite(factor) || factor < 0) factor = 1;
+
+  if ((day === 0 || day === 6) && rhythm.weekend != null) {
+    const w = Number(rhythm.weekend);
+    if (Number.isFinite(w) && w >= 0) factor *= w;
+  }
+  return factor;
+}
+
+/**
+ * One of a step's message templates, weighted.
+ *
+ * Without this a step emits one sentence over and over, and a benign stream
+ * built from 25 such steps reads as 25 sentences on a loop — which is its own
+ * kind of obviously-synthetic, just a different kind from a flat histogram.
+ * Real sources say several things: nginx serves 200s and 404s and the odd 500,
+ * sshd accepts keys and passwords and rejects some, postgres runs queries and
+ * checkpoints and autovacuums.
+ *
+ * A template may override level and metadata as well as the message, because a
+ * 500 is not an INFO and a failed logon is not a success.
+ */
+function pickTemplate(rng, step) {
+  const t = step.templates;
+  if (!Array.isArray(t) || !t.length) return step;
+  let total = 0;
+  for (const x of t) total += Number(x.weight) || 1;
+  let r = rng() * total;
+  for (const x of t) {
+    r -= Number(x.weight) || 1;
+    if (r <= 0) return x;
+  }
+  return t[t.length - 1];
 }
 
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
@@ -670,7 +757,11 @@ function planTimeline(playbook, opts) {
     const step = steps[si];
     const spread = parseDuration(step.spread || '0s');
     const start = starts[si];
-    const count = Math.max(1, Number(step.count || 1));
+    // Intensity scales the COUNT, not the timing: a quiet hour means fewer
+    // people doing things, not the same people doing them slower.
+    const intensity = opts.intensity == null ? 1 : opts.intensity;
+    const count = Math.round(Math.max(1, Number(step.count || 1)) * intensity);
+    if (count < 1) continue; // an hour too quiet for this activity at all
     const technique = step.technique || playbook.technique || null;
     const tactic = step.tactic || playbook.tactic || null;
 
@@ -682,6 +773,7 @@ function planTimeline(playbook, opts) {
       const jitter = spread > 0 ? (rng() - 0.5) * slot : 0;
       const seq = i + 1;
       const src = step.source || {};
+      const tpl = pickTemplate(rng, step);
       // Fresh sample cache per event: pool draws are consistent WITHIN one
       // event and vary BETWEEN them, which is what a spray from one host
       // against many accounts actually looks like.
@@ -692,14 +784,14 @@ function planTimeline(playbook, opts) {
         // attack-worker schedules its finishing poll off expected_finish_at --
         // an event landing after that is one the run gets no credit for.
         offset: Math.min(requested, Math.max(0, start + frac * spread + jitter)),
-        level: step.level || 'INFO',
+        level: tpl.level || step.level || 'INFO',
         source: {
           type: expand(src.type || 'server', ctx, rng, seq),
           name: expand(src.name || 'unknown', ctx, rng, seq),
           host: expand(src.host || 'localhost', ctx, rng, seq),
         },
-        message: expand(step.message || '', ctx, rng, seq),
-        metadata: expandDeep(step.metadata || {}, ctx, rng, seq),
+        message: expand(tpl.message || step.message || '', ctx, rng, seq),
+        metadata: expandDeep(tpl.metadata || step.metadata || {}, ctx, rng, seq),
         technique,
         tactic,
         subtechnique: step.subtechnique || playbook.subtechnique || null,
@@ -877,7 +969,13 @@ async function main() {
     let s = seed;
     for (;;) {
       rotateIfLarge(args.out, maxBytes, Date.now());
-      const plan = planTimeline(playbook, { rng: makeRng(s), requested: playbook.nominal_seconds });
+      // Recomputed every cycle so the curve moves through the day on its own.
+      const intensity = intensityAt(playbook.rhythm, new Date());
+      const plan = planTimeline(playbook, {
+        rng: makeRng(s),
+        requested: playbook.nominal_seconds,
+        intensity,
+      });
       await emit(plan, { out: args.out });
       s = (s + 0x9e3779b9) >>> 0;
     }
@@ -920,6 +1018,8 @@ module.exports = {
   seedFrom,
   parseDuration,
   resolveEntities,
+  intensityAt,
+  pickTemplate,
   layout,
   minSecondsFor,
   expand,
@@ -949,11 +1049,43 @@ rm -f "$EMIT_TMP"
 HOST_PB_TMP="$(mktemp)"
 cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
 {
-  "name": "Benign host activity",
-  "story": "Ordinary process, file, package and session activity across the estate.",
+  "name": "Benign activity",
+  "story": "An ordinary working week across the estate: sessions, queries, requests, packages, jobs.",
   "nominal_seconds": 300,
   "entities": {},
   "pools": {
+    "srvpool": [
+      "srv-prod-01",
+      "app-server-01",
+      "db-01",
+      "web-01",
+      "fileserv-01"
+    ],
+    "wspool": [
+      "ws-042",
+      "ws-071",
+      "ws-113",
+      "ws-128"
+    ],
+    "fwpool": [
+      "firewall-01"
+    ],
+    "dbpool": [
+      "db-01"
+    ],
+    "webpool": [
+      "web-01",
+      "app-server-01"
+    ],
+    "authpool": [
+      "auth-01"
+    ],
+    "mailpool": [
+      "app-server-01"
+    ],
+    "apppool": [
+      "app-server-01"
+    ],
     "hosts": [
       "srv-prod-01",
       "app-server-01",
@@ -985,77 +1117,197 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "tail -f /var/log/messages",
       "vim notes.md",
       "python3 report.py",
-      "psql -c \"\\dt\"",
       "systemctl status nginx",
       "df -h",
-      "top -b -n1"
+      "top -b -n1",
+      "grep -r TODO src/",
+      "make test",
+      "ssh app-server-01",
+      "scp report.csv backup:/srv/",
+      "htop"
     ],
     "files": [
       "/home/{{users}}/notes.md",
       "/var/log/messages",
       "/etc/hosts",
-      "/srv/app/config.yaml"
+      "/srv/app/config.yaml",
+      "/home/{{users}}/.bashrc",
+      "/etc/resolv.conf",
+      "/srv/app/package.json",
+      "/var/lib/pgsql/data/postgresql.conf"
     ],
     "pkgs": [
       "openssl",
       "curl",
       "nginx",
       "python3-pip",
-      "containerd.io"
+      "containerd.io",
+      "kernel",
+      "git",
+      "sudo",
+      "systemd",
+      "glibc"
     ],
     "svcs": [
       "nginx",
       "postgresql",
       "containerd",
       "chronyd",
-      "sshd"
+      "sshd",
+      "crond",
+      "firewalld"
     ],
     "tbls": [
       "orders",
       "sessions",
       "audit_log",
-      "products"
+      "products",
+      "customers",
+      "invoices"
     ],
     "senders": [
       "github.com",
       "atlassian.net",
       "okta.com",
-      "zoom.us"
+      "zoom.us",
+      "docusign.net"
+    ],
+    "agents": [
+      "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/128.0",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/127.0.0.0 Safari/537.36",
+      "curl/8.6.0",
+      "python-requests/2.32.3"
+    ],
+    "paths": [
+      "/",
+      "/login",
+      "/dashboard",
+      "/api/reports",
+      "/api/search",
+      "/static/app.js",
+      "/favicon.ico",
+      "/api/v1/orders"
+    ],
+    "sites": [
+      "updates.example.com",
+      "registry.npmjs.org",
+      "download.rockylinux.org",
+      "api.github.com",
+      "login.okta.com"
+    ],
+    "shares": [
+      "\\\\fileserv-01\\finance",
+      "\\\\fileserv-01\\hr"
     ]
+  },
+  "rhythm": {
+    "utc_offset": -7,
+    "hourly": [
+      0.14,
+      0.11,
+      0.1,
+      0.1,
+      0.12,
+      0.2,
+      0.45,
+      0.8,
+      1,
+      1.05,
+      1,
+      0.85,
+      0.7,
+      0.95,
+      1.05,
+      1,
+      0.85,
+      0.6,
+      0.42,
+      0.32,
+      0.26,
+      0.22,
+      0.18,
+      0.15
+    ],
+    "weekend": 0.22
   },
   "steps": [
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 90,
+      "count": 22,
       "level": "INFO",
       "source": {
-        "type": "host",
-        "name": "bash",
-        "host": "{{hosts}}"
+        "type": "authentication",
+        "name": "sshd",
+        "host": "{{srvpool}}"
       },
-      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd={{cmds}}",
+      "templates": [
+        {
+          "message": "Accepted publickey for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+          "level": "INFO",
+          "weight": 5
+        },
+        {
+          "message": "Accepted password for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "Failed password for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
+          "level": "WARN",
+          "weight": 2
+        },
+        {
+          "message": "Connection closed by authenticating user {{users}} 10.20.30.{{rand:2-60}} port {{port}} [preauth]",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "pam_unix(sshd:session): session opened for user {{users}} by (uid=0)",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "Disconnected from user {{users}} 10.20.30.{{rand:2-60}} port {{port}}",
+          "level": "INFO",
+          "weight": 3
+        }
+      ],
       "metadata": {
-        "event_action": "process-start",
-        "user": "{{users}}"
+        "event_action": "routine"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 40,
+      "count": 8,
       "level": "INFO",
       "source": {
-        "type": "host",
-        "name": "auditd",
-        "host": "{{hosts}}"
+        "type": "authentication",
+        "name": "login",
+        "host": "{{srvpool}}"
       },
-      "message": "type=PATH name=\"{{files}}\" nametype=NORMAL auid={{rand:1000-1010}} key=\"file-read\"",
+      "templates": [
+        {
+          "message": "pam_unix(login:session): session opened for user {{users}} by LOGIN(uid=0)",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "pam_unix(login:session): session closed for user {{users}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "LOGIN ON tty{{rand:1-4}} BY {{users}}",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
       "metadata": {
-        "event_action": "file-read",
-        "user": "{{users}}"
+        "event_action": "routine"
       }
     },
     {
@@ -1065,165 +1317,37 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "count": 14,
       "level": "INFO",
       "source": {
-        "type": "host",
-        "name": "systemd",
-        "host": "{{hosts}}"
-      },
-      "message": "Started {{svcs}}.service",
-      "metadata": {
-        "event_action": "service-started"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 8,
-      "level": "INFO",
-      "source": {
-        "type": "host",
-        "name": "dnf",
-        "host": "{{hosts}}"
-      },
-      "message": "Upgraded: {{pkgs}}-{{rand:1-9}}.{{rand:0-30}}.el9",
-      "metadata": {
-        "event_action": "package-upgrade"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 10,
-      "level": "INFO",
-      "source": {
-        "type": "host",
-        "name": "sudo",
-        "host": "{{hosts}}"
-      },
-      "message": "{{users}} : TTY=pts/{{rand:0-4}} ; PWD=/home/{{users}} ; USER=root ; COMMAND=/usr/bin/systemctl restart {{svcs}}",
-      "metadata": {
-        "event_action": "privilege-use",
-        "user": "{{users}}"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 12,
-      "level": "WARN",
-      "technique": "T1082",
-      "tactic": "TA0007",
-      "source": {
-        "type": "host",
-        "name": "bash",
-        "host": "{{hosts}}"
-      },
-      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=uname -a",
-      "metadata": {
-        "event_action": "process-start",
-        "user": "{{users}}"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 8,
-      "level": "WARN",
-      "technique": "T1562.001",
-      "tactic": "TA0005",
-      "source": {
-        "type": "host",
-        "name": "systemd",
-        "host": "{{hosts}}"
-      },
-      "message": "Stopping {{svcs}}.service - scheduled maintenance window",
-      "metadata": {
-        "event_action": "service-stopped",
-        "user": "{{users}}"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 6,
-      "level": "WARN",
-      "technique": "T1005",
-      "tactic": "TA0009",
-      "source": {
-        "type": "host",
-        "name": "bash",
-        "host": "{{hosts}}"
-      },
-      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=tar -czf /var/backups/nightly.tgz /srv/app",
-      "metadata": {
-        "event_action": "process-start",
-        "user": "{{users}}"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 6,
-      "level": "INFO",
-      "source": {
-        "type": "authentication",
-        "name": "sshd",
-        "host": "{{hosts}}"
-      },
-      "message": "Accepted publickey for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 4,
-      "level": "WARN",
-      "source": {
-        "type": "authentication",
-        "name": "sshd",
-        "host": "{{hosts}}"
-      },
-      "message": "Failed password for {{users}} from 10.20.30.{{rand:2-60}} port {{port}} ssh2",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 3,
-      "level": "INFO",
-      "source": {
-        "type": "authentication",
-        "name": "login",
-        "host": "{{hosts}}"
-      },
-      "message": "pam_unix(login:session): session opened for user {{users}} by LOGIN(uid=0)",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 5,
-      "level": "INFO",
-      "source": {
         "type": "authentication",
         "name": "auth-svc",
-        "host": "{{hosts}}"
+        "host": "{{authpool}}"
       },
-      "message": "Token validated for {{users}} scope=read ttl={{rand:300-3600}}s",
+      "templates": [
+        {
+          "message": "Token validated for {{users}} scope=read ttl={{rand:300-3600}}s",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "Token issued for {{users}} client_id=svc-{{rand:1000-9999}} scope=read,write",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "Token refreshed for {{users}} ttl={{rand:300-3600}}s",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "MFA challenge passed for {{users}} method=totp",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "Token rejected for {{users}} reason=expired",
+          "level": "WARN",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1232,78 +1356,30 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 3,
+      "count": 8,
       "level": "INFO",
       "source": {
         "type": "authentication",
         "name": "rdp",
-        "host": "{{hosts}}"
+        "host": "{{wspool}}"
       },
-      "message": "Remote desktop session established user={{users}} src={{hosts}}",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 1,
-      "level": "INFO",
-      "source": {
-        "type": "authentication",
-        "name": "useradd",
-        "host": "{{hosts}}"
-      },
-      "message": "new user: name=contractor{{rand:10-99}}, UID={{rand:2000-2400}}, GID=100",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 1,
-      "level": "INFO",
-      "source": {
-        "type": "authentication",
-        "name": "usermod",
-        "host": "{{hosts}}"
-      },
-      "message": "add \"{{users}}\" to group \"developers\"",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 10,
-      "level": "INFO",
-      "source": {
-        "type": "firewall",
-        "name": "iptables",
-        "host": "{{hosts}}"
-      },
-      "message": "ACCEPT IN=eth0 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} PROTO=TCP SPT={{port}} DPT=443 SYN",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 4,
-      "level": "WARN",
-      "source": {
-        "type": "firewall",
-        "name": "iptables",
-        "host": "{{hosts}}"
-      },
-      "message": "DROP IN=eth0 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} PROTO=TCP DPT={{rand:1-1024}} SYN",
+      "templates": [
+        {
+          "message": "Remote desktop session established user={{users}} src=10.20.30.{{rand:2-60}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "Remote desktop session disconnected user={{users}} duration={{rand:120-9000}}s",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "Remote desktop reconnected user={{users}} src=10.20.30.{{rand:2-60}}",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1315,11 +1391,86 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "count": 2,
       "level": "INFO",
       "source": {
-        "type": "firewall",
-        "name": "firewalld",
-        "host": "{{hosts}}"
+        "type": "authentication",
+        "name": "useradd",
+        "host": "{{authpool}}"
       },
-      "message": "Configuration reload requested by uid=0 pid={{pid}}",
+      "templates": [
+        {
+          "message": "new user: name=contractor{{rand:10-99}}, UID={{rand:2000-2400}}, GID=100, home=/home/contractor{{rand:10-99}}, shell=/bin/bash",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 2,
+      "level": "INFO",
+      "source": {
+        "type": "authentication",
+        "name": "usermod",
+        "host": "{{authpool}}"
+      },
+      "templates": [
+        {
+          "message": "add \"{{users}}\" to group \"developers\"",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "add \"{{users}}\" to group \"docker\"",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 40,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "iptables",
+        "host": "{{fwpool}}"
+      },
+      "templates": [
+        {
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=443 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 6
+        },
+        {
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=22 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT=5432 WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "ACCEPT IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=UDP SPT={{port}} DPT=53 WINDOW={{rand:501-65535}} RES=0x00 LEN=64 URGP=0",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "DROP IN=eth0 OUT=eth1 SRC=10.20.30.{{rand:2-254}} DST=10.20.30.{{rand:2-254}} LEN={{rand:44-1500}} TOS=0x00 PREC=0x00 TTL={{rand:52-64}} ID={{rand:1-65535}} DF PROTO=TCP SPT={{port}} DPT={{rand:1-1024}} WINDOW={{rand:501-65535}} RES=0x00 SYN URGP=0",
+          "level": "WARN",
+          "weight": 2
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1329,13 +1480,61 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "gap": "1s",
       "spread": "280s",
       "count": 4,
+      "level": "INFO",
+      "source": {
+        "type": "firewall",
+        "name": "firewalld",
+        "host": "{{fwpool}}"
+      },
+      "templates": [
+        {
+          "message": "Configuration reload requested by uid=0 pid={{pid}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "Zone public: interface eth0 bound",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "Rule added: zone=internal source=10.20.30.0/24 service=postgresql accept",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 12,
       "level": "INFO",
       "source": {
         "type": "firewall",
         "name": "netflow",
-        "host": "{{hosts}}"
+        "host": "{{fwpool}}"
       },
-      "message": "Flow record: {{hosts}} -> 10.20.30.{{rand:2-60}}:443 bytes={{rand:2000-400000}} packets={{rand:8-900}}",
+      "templates": [
+        {
+          "message": "Flow record: {{srvpool}} -> 10.20.30.{{rand:2-60}}:443 proto=TCP bytes={{rand:2000-400000}} packets={{rand:8-900}} duration={{rand:2-300}}s flags=.AP.SF",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "Flow record: {{wspool}} -> 10.20.30.{{rand:2-60}}:5432 proto=TCP bytes={{rand:900-90000}} packets={{rand:6-400}} duration={{rand:2-300}}s flags=.AP.SF",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "Flow record: {{srvpool}} -> 10.20.30.{{rand:2-60}}:53 proto=UDP bytes={{rand:80-900}} packets={{rand:1-6}} duration={{rand:1-3}}s flags=......",
+          "level": "INFO",
+          "weight": 3
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1344,14 +1543,40 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 8,
+      "count": 34,
       "level": "INFO",
       "source": {
         "type": "webserver",
         "name": "nginx-proxy",
-        "host": "{{hosts}}"
+        "host": "{{webpool}}"
       },
-      "message": "10.20.30.{{rand:2-254}} - GET /api/reports 200 {{rand:800-9000}} - Duration: {{rand:12-240}}ms",
+      "templates": [
+        {
+          "message": "10.20.30.{{rand:2-254}} - - \"GET {{paths}} HTTP/1.1\" 200 {{rand:800-9000}} \"-\" \"{{agents}}\"",
+          "level": "INFO",
+          "weight": 8
+        },
+        {
+          "message": "10.20.30.{{rand:2-254}} - - \"POST /api/v1/orders HTTP/1.1\" 201 {{rand:120-900}} \"-\" \"{{agents}}\"",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "10.20.30.{{rand:2-254}} - - \"GET {{paths}} HTTP/1.1\" 304 0 \"-\" \"{{agents}}\"",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "10.20.30.{{rand:2-254}} - - \"GET {{paths}} HTTP/1.1\" 404 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "level": "WARN",
+          "weight": 2
+        },
+        {
+          "message": "10.20.30.{{rand:2-254}} - - \"GET /api/reports HTTP/1.1\" 500 {{rand:120-600}} \"-\" \"{{agents}}\"",
+          "level": "ERROR",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1360,30 +1585,35 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 6,
+      "count": 20,
       "level": "INFO",
       "source": {
         "type": "webserver",
         "name": "squid-proxy",
-        "host": "{{hosts}}"
+        "host": "{{fwpool}}"
       },
-      "message": "{{hosts}} TCP_MISS/200 {{rand:400-90000}} GET https://updates.example.com/manifest - DIRECT/updates.example.com text/json",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 3,
-      "level": "INFO",
-      "source": {
-        "type": "server",
-        "name": "nginx",
-        "host": "{{hosts}}"
-      },
-      "message": "signal process started, worker process {{pid}} reloaded configuration",
+      "templates": [
+        {
+          "message": "{{wspool}} TCP_MISS/200 {{rand:400-90000}} GET https://{{sites}}/index - DIRECT/{{sites}} text/html",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "{{wspool}} TCP_HIT/200 {{rand:400-40000}} GET https://{{sites}}/static/app.js - NONE/- application/javascript",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "{{wspool}} TCP_MISS/204 0 POST https://{{sites}}/api/telemetry - DIRECT/{{sites}} -",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "{{wspool}} TCP_DENIED/403 {{rand:200-900}} CONNECT {{sites}}:443 - NONE/- text/html",
+          "level": "WARN",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1396,10 +1626,221 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "level": "INFO",
       "source": {
         "type": "server",
-        "name": "node-exporter",
-        "host": "{{hosts}}"
+        "name": "nginx",
+        "host": "{{webpool}}"
       },
-      "message": "CPU usage: {{rand:4-38}}% memory: {{rand:20-60}}% disk: {{rand:30-70}}%",
+      "templates": [
+        {
+          "message": "signal process started, worker process {{pid}} reloaded configuration",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "using inherited sockets from {{rand:3-9}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "*{{rand:1000-99999}} client closed connection while waiting for request",
+          "level": "WARN",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 16,
+      "level": "INFO",
+      "source": {
+        "type": "server",
+        "name": "node-exporter",
+        "host": "{{srvpool}}"
+      },
+      "templates": [
+        {
+          "message": "CPU usage: {{rand:4-38}}% memory: {{rand:20-60}}% disk: {{rand:30-70}}%",
+          "level": "INFO",
+          "weight": 6
+        },
+        {
+          "message": "Load average: 0.{{rand:10-90}} 0.{{rand:10-90}} 0.{{rand:10-90}} procs={{rand:80-400}}",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "Filesystem /dev/mapper/rl-root at {{rand:40-72}}% of {{rand:40-200}}G",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "Memory usage above threshold: {{rand:82-90}}%",
+          "level": "WARN",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 26,
+      "level": "INFO",
+      "source": {
+        "type": "database",
+        "name": "postgres-primary",
+        "host": "{{dbpool}}"
+      },
+      "templates": [
+        {
+          "message": "duration: {{rand:2-180}}ms  statement: SELECT id, name FROM {{tbls}} WHERE updated_at > now() - interval '1 hour'",
+          "level": "INFO",
+          "weight": 6
+        },
+        {
+          "message": "duration: {{rand:2-90}}ms  statement: INSERT INTO {{tbls}} (id, payload) VALUES ($1, $2)",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "duration: {{rand:2-240}}ms  statement: UPDATE {{tbls}} SET updated_at = now() WHERE id = $1",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "checkpoint starting: time",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "checkpoint complete: wrote {{rand:200-9000}} buffers ({{rand:1-9}}.{{rand:0-9}}%); sync={{rand:0-2}}.{{rand:100-999}} s",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "automatic vacuum of table \"public.{{tbls}}\": index scans: 1",
+          "level": "INFO",
+          "weight": 2
+        },
+        {
+          "message": "could not receive data from client: Connection reset by peer",
+          "level": "WARN",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 12,
+      "level": "INFO",
+      "source": {
+        "type": "email",
+        "name": "mail-gateway",
+        "host": "{{mailpool}}"
+      },
+      "templates": [
+        {
+          "message": "Message accepted for {{users}}@corp.example from noreply@{{senders}} size={{rand:2000-90000}}",
+          "level": "INFO",
+          "weight": 5
+        },
+        {
+          "message": "Message delivered to {{users}}@corp.example queue={{rand:100000-999999}} delay={{rand:1-40}}s",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "Message rejected from bounce@{{senders}} reason=spf_softfail",
+          "level": "WARN",
+          "weight": 2
+        },
+        {
+          "message": "Greylisted sender {{senders}}, retry in 300s",
+          "level": "INFO",
+          "weight": 2
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 12,
+      "level": "INFO",
+      "source": {
+        "type": "application",
+        "name": "reporting-api",
+        "host": "{{apppool}}"
+      },
+      "templates": [
+        {
+          "message": "export completed user={{users}} rows={{rand:20-800}} format=csv",
+          "level": "INFO",
+          "weight": 4
+        },
+        {
+          "message": "report scheduled user={{users}} cron=0 6 * * 1 name=weekly-{{tbls}}",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "cache warm for {{tbls}} in {{rand:40-900}}ms",
+          "level": "INFO",
+          "weight": 3
+        },
+        {
+          "message": "export failed user={{users}} reason=timeout after {{rand:30-120}}s",
+          "level": "WARN",
+          "weight": 1
+        }
+      ],
+      "metadata": {
+        "event_action": "routine"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 10,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "cmd",
+        "host": "{{wspool}}"
+      },
+      "templates": [
+        {
+          "message": "pid={{pid}} user={{users}} cmd=cmd.exe /c gpupdate /target:user",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "pid={{pid}} user={{users}} cmd=cmd.exe /c net use Z: {{shares}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "pid={{pid}} user={{users}} cmd=powershell.exe -File C:\\Scripts\\Inventory.ps1",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1411,11 +1852,27 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "count": 8,
       "level": "INFO",
       "source": {
-        "type": "database",
-        "name": "postgres-primary",
-        "host": "{{hosts}}"
+        "type": "host",
+        "name": "registry",
+        "host": "{{wspool}}"
       },
-      "message": "duration: {{rand:2-180}}ms  statement: SELECT id, name FROM {{tbls}} WHERE updated_at > now() - interval '1 hour'",
+      "templates": [
+        {
+          "message": "SetValue HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Update\\LastCheck = {{rand:100000-999999}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "SetValue HKCU\\Software\\Microsoft\\Office\\16.0\\Common\\LastUsed = {{rand:100000-999999}}",
+          "level": "INFO",
+          "weight": 1
+        },
+        {
+          "message": "DeleteValue HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\RunOnce\\setup{{rand:10-99}}",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1424,46 +1881,20 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 5,
-      "level": "INFO",
-      "source": {
-        "type": "email",
-        "name": "mail-gateway",
-        "host": "{{hosts}}"
-      },
-      "message": "Message accepted for {{users}}@corp.example from noreply@{{senders}} size={{rand:2000-90000}}",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 4,
-      "level": "INFO",
-      "source": {
-        "type": "application",
-        "name": "reporting-api",
-        "host": "{{hosts}}"
-      },
-      "message": "export completed user={{users}} rows={{rand:20-800}} format=csv",
-      "metadata": {
-        "event_action": "routine"
-      }
-    },
-    {
-      "overlap": true,
-      "gap": "1s",
-      "spread": "280s",
-      "count": 1,
+      "count": 2,
       "level": "INFO",
       "source": {
         "type": "host",
         "name": "usermod",
-        "host": "{{hosts}}"
+        "host": "{{srvpool}}"
       },
-      "message": "usermod: change user contractor{{rand:10-99}} shell to /bin/bash",
+      "templates": [
+        {
+          "message": "usermod: change user contractor{{rand:10-99}} shell to /bin/bash",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1472,14 +1903,20 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 1,
+      "count": 2,
       "level": "INFO",
       "source": {
         "type": "host",
         "name": "sudoers",
-        "host": "{{hosts}}"
+        "host": "{{srvpool}}"
       },
-      "message": "sudoers file syntax check passed (visudo -c)",
+      "templates": [
+        {
+          "message": "sudoers file syntax check passed (visudo -c)",
+          "level": "INFO",
+          "weight": 1
+        }
+      ],
       "metadata": {
         "event_action": "routine"
       }
@@ -1488,33 +1925,143 @@ cat > "$HOST_PB_TMP" <<'HOST_PB_EOF'
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 4,
+      "count": 270,
       "level": "INFO",
       "source": {
         "type": "host",
-        "name": "cmd",
+        "name": "bash",
         "host": "{{hosts}}"
       },
-      "message": "pid={{pid}} user={{users}} cmd=cmd.exe /c gpupdate /target:user",
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd={{cmds}}",
       "metadata": {
-        "event_action": "routine"
+        "event_action": "routine",
+        "user": "{{users}}"
       }
     },
     {
       "overlap": true,
       "gap": "1s",
       "spread": "280s",
-      "count": 3,
+      "count": 120,
       "level": "INFO",
       "source": {
         "type": "host",
-        "name": "registry",
+        "name": "auditd",
         "host": "{{hosts}}"
       },
-      "message": "SetValue HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Update\\LastCheck = {{rand:100000-999999}}",
+      "message": "type=PATH item=0 name=\"{{files}}\" inode={{rand:100000-999999}} dev=fd:00 mode=0100644 ouid={{rand:1000-1010}} ogid={{rand:1000-1010}} rdev=00:00 nametype=NORMAL auid={{rand:1000-1010}} key=\"file-read\"",
       "metadata": {
-        "event_action": "routine"
+        "event_action": "routine",
+        "user": "{{users}}"
       }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 42,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{hosts}}"
+      },
+      "message": "Started {{svcs}}.service",
+      "metadata": {
+        "event_action": "routine",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 24,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "dnf",
+        "host": "{{hosts}}"
+      },
+      "message": "Upgraded: {{pkgs}}-{{rand:1-9}}.{{rand:0-30}}.el9",
+      "metadata": {
+        "event_action": "routine",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 30,
+      "level": "INFO",
+      "source": {
+        "type": "host",
+        "name": "sudo",
+        "host": "{{hosts}}"
+      },
+      "message": "{{users}} : TTY=pts/{{rand:0-4}} ; PWD=/home/{{users}} ; USER=root ; COMMAND=/usr/bin/systemctl restart {{svcs}}",
+      "metadata": {
+        "event_action": "routine",
+        "user": "{{users}}"
+      }
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 36,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=uname -a",
+      "metadata": {
+        "event_action": "routine",
+        "user": "{{users}}"
+      },
+      "technique": "T1082",
+      "tactic": "TA0007"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 24,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "systemd",
+        "host": "{{hosts}}"
+      },
+      "message": "Stopping {{svcs}}.service - scheduled maintenance window",
+      "metadata": {
+        "event_action": "routine",
+        "user": "{{users}}"
+      },
+      "technique": "T1562.001",
+      "tactic": "TA0005"
+    },
+    {
+      "overlap": true,
+      "gap": "1s",
+      "spread": "280s",
+      "count": 18,
+      "level": "WARN",
+      "source": {
+        "type": "host",
+        "name": "bash",
+        "host": "{{hosts}}"
+      },
+      "message": "pid={{pid}} uid={{rand:1000-1010}} user={{users}} cmd=tar -czf /var/backups/nightly.tgz /srv/app",
+      "metadata": {
+        "event_action": "routine",
+        "user": "{{users}}"
+      },
+      "technique": "T1005",
+      "tactic": "TA0009"
     }
   ]
 }
@@ -1701,10 +2248,35 @@ write_files:
                 target: loggen
                 add_error_key: true
           processors:
+            # ORDER IS THE MECHANISM. Filebeat runs processors in declaration
+            # order, so drop_event still sees the technique and uses it to
+            # decide what ships -- then drop_fields removes it before the event
+            # reaches Elasticsearch. Swap these two and every attack event is
+            # discarded, because the field the filter tests no longer exists.
             - drop_event:
                 when:
                   not:
                     has_fields: ['loggen.mitre.technique']
+            # The label is the answer. An event that arrives stamped
+            # "technique: T1005" has told the student what it is before they
+            # have looked at it, and a run is then one filter away from being
+            # fully enumerated.
+            #
+            # Removing it does NOT create the reverse oracle. Roughly 88% of
+            # benign traffic is already untagged (log-generator labels ~15% of
+            # its output, the host baseline ~10%), so `NOT loggen.mitre.technique:*`
+            # returns overwhelmingly ordinary events with the attack a small
+            # fraction inside it -- which is exactly the shape a hunt should have.
+            #
+            # The instructor's discriminator is unchanged and unaffected:
+            #   log.file.path : "/opt/log-generator-attack/logs/current/attack-*.json"
+            #
+            # The wrapper's count is also unaffected: count_lines() greps the
+            # FILE on the guest, which still carries the tag, and a playbook run
+            # reports the emitter's own count anyway.
+            - drop_fields:
+                fields: ['loggen.mitre']
+                ignore_missing: true
       agent.logging.level: info
 
   # Helper scripts, base64'd so no $ or backslash has to survive this heredoc.
@@ -1889,7 +2461,7 @@ runcmd:
   # ---- Services ----
   - [ systemctl, enable, qemu-guest-agent ]
   - [ systemctl, restart, qemu-guest-agent ]
-  - [ systemctl, enable, loggen-baseline ]
+  - [ sh, -c, 'if [ "${LOGGEN_BASELINE_ENABLED}" = "1" ]; then systemctl enable loggen-baseline; else systemctl disable loggen-baseline 2>/dev/null || true; fi' ]
   - [ systemctl, enable, loggen-rotate.timer ]
   - [ systemctl, enable, cc-hostbase ]
   - [ systemctl, daemon-reload ]
@@ -1910,6 +2482,7 @@ runcmd:
   - [ sh, -c, 'grep -q "        mitre:" /opt/log-generator/src/config/default.yaml && echo "BASELINE_MITRE_STRIPPED=no" >> /etc/cybercore-bake.env || echo "BASELINE_MITRE_STRIPPED=yes" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -q "        mitre:" /opt/log-generator-attack/src/config/default.yaml && echo "ATTACK_MITRE_STRIPPED=no" >> /etc/cybercore-bake.env || echo "ATTACK_MITRE_STRIPPED=yes" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -q "drop_event" /etc/elastic-agent/elastic-agent.yml && echo "ATTACK_DROP_UNTAGGED=yes" >> /etc/cybercore-bake.env || echo "ATTACK_DROP_UNTAGGED=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "drop_fields" /etc/elastic-agent/elastic-agent.yml && echo "ATTACK_STRIP_TAG=yes" >> /etc/cybercore-bake.env || echo "ATTACK_STRIP_TAG=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -q "ndjson" /etc/elastic-agent/elastic-agent.yml && echo "NDJSON_PARSER=yes" >> /etc/cybercore-bake.env || echo "NDJSON_PARSER=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'systemctl is-enabled loggen-rotate.timer >/dev/null 2>&1 && echo "ROTATE_TIMER=yes" >> /etc/cybercore-bake.env || echo "ROTATE_TIMER=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'test -s /opt/cybercore/cc-emit.js && echo "CC_EMIT=yes" >> /etc/cybercore-bake.env || echo "CC_EMIT=no" >> /etc/cybercore-bake.env' ]
@@ -1998,7 +2571,9 @@ check GUEST_AGENT_UNBLOCKED yes "guest-exec is still blacklisted in /etc/sysconf
 check LOGGEN_PRIMARY       yes "/opt/log-generator is missing — the baseline service has nothing to run"
 check LOGGEN_ATTACK        yes "/opt/log-generator-attack is missing — attacks would share the baseline's output file and lose events"
 check TS_NODE              yes "ts-node is absent — npm ci ran with --omit=dev, and every CLI invocation will fail"
-check BASELINE_ENABLED     yes "loggen-baseline is not enabled — lanes would boot silent, with no noise to hide an attack in"
+EXPECT_LOGGEN_BASELINE=no
+[ "$LOGGEN_BASELINE_ENABLED" = "1" ] && EXPECT_LOGGEN_BASELINE=yes
+check BASELINE_ENABLED "$EXPECT_LOGGEN_BASELINE" "log-generator's baseline service does not match LOGGEN_BASELINE_ENABLED — with it OFF, cc-hostbase is the only benign traffic; with it ON, every benign event also carries literal {clientIP} placeholder metadata that emitter events do not"
 check ELASTIC_AGENT        yes "elastic-agent is not enabled — events would land on disk and never reach Kibana"
 check BINS_CHECKED         yes "binary check did not run"
 check SELINUX_MODE_SET     yes "SELinux is still enforcing — guest-exec runs confined in virt_qemu_ga_t and CANNOT stage or fork the attack wrapper, so every dispatch fails silently"
@@ -2011,6 +2586,7 @@ EXPECT_ATTACK_STRIPPED=no
 [ "$ATTACK_STRIP_MITRE" = "1" ] && EXPECT_ATTACK_STRIPPED=yes
 check ATTACK_MITRE_STRIPPED "$EXPECT_ATTACK_STRIPPED" "the attack checkout still carries config-level mitre blocks — with drop_event shipping every tagged line, its stock T1190/T1110/T1499 templates would ship as though they were part of the instructor's run"
 check ATTACK_DROP_UNTAGGED yes "the agent is not dropping untagged attack events — a single run would ship ~37,000 events of generic API-gateway traffic to carry roughly 76 real ones"
+check ATTACK_STRIP_TAG     yes "the agent is not stripping loggen.mitre from attack events — every event would arrive stamped with the technique, and the run is then one filter away from being fully enumerated"
 check NDJSON_PARSER        yes "the agent has no ndjson parser — every event lands in Kibana as one opaque JSON string with no filterable fields"
 check ROTATE_TIMER         yes "loggen-rotate.timer is not enabled — logs.json grows without bound (measured: 2.5 GB in twelve hours)"
 check CC_EMIT              yes "the attack emitter is missing — every playbook-backed technique refuses with 'noemitter' and the console falls back to nothing"
