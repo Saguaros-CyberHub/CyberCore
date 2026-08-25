@@ -1754,7 +1754,7 @@ write_files:
       # Writes into the BASELINE tree on purpose. That input has no drop_event,
       # so untagged benign events ship; the attack tree drops anything without a
       # technique and would swallow this entirely.
-      ExecStart=/usr/bin/node /opt/cybercore/cc-emit.js --daemon         --playbook /opt/cybercore/host-baseline.json         --out /opt/log-generator/logs/current/host.json
+ ExecStart=/usr/bin/node /opt/cybercore/cc-emit.js --daemon --playbook /opt/cybercore/host-baseline.json --out /opt/log-generator/logs/current/host.json
       Restart=always
       RestartSec=10
       User=root
