@@ -23,6 +23,7 @@ const fs = require('fs');
 const { pool, query } = require('../utils/db');
 const { authenticateToken, requireRole } = require('../../../../../src/middleware/auth');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { claimsSql } = require('../../../../../src/utils/lane-claims');
 const laneWan = require('../../../../../src/utils/lane-wan-allocator');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
@@ -247,7 +248,7 @@ async function runProfileDeploy(opts) {
   if (reservation.was_existing) {
     const liveLanesRes = await cybercoreQuery(
       `SELECT COUNT(*)::int AS n FROM cybercore_lane
-        WHERE vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error','deleted')`,
+        WHERE vxlan_id BETWEEN $1 AND $2 AND ${claimsSql()}`,
       [reservation.vxlan_block.start, reservation.vxlan_block.end]
     );
     const liveCount = liveLanesRes.rows[0]?.n || 0;
@@ -644,7 +645,7 @@ router.get('/profiles/:profileId/reservation', authenticateToken, adminOnly, asy
       `SELECT COUNT(DISTINCT vxlan_id) AS used
          FROM cybercore_lane
         WHERE vxlan_id BETWEEN $1 AND $2
-          AND status NOT IN ('error','deleted')`,
+          AND ${claimsSql()}`,
       [ch.vxlan_block.start, ch.vxlan_block.end]
     );
     const used = parseInt(usedRes.rows[0].used, 10) || 0;
@@ -1087,15 +1088,31 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     // Populated by the cybercore_user DELETE further down — the only point at
     // which these auto-provisioned accounts still have names.
     let deletedStudents = [];
+    let lanesKeptForRetry = 0;
     for (const job of jobsRes.rows) {
       const result = await teardownLane({ laneId: job.lane_id, vmIds: job.vm_ids || [] });
       if (result.errors && result.errors.length > 0) errors.push(...result.errors);
+      if (result.keptForRetry) lanesKeptForRetry += 1;
     }
 
     // ── Delete the auto-provisioned students + their Guacamole artifacts ──
+    //
+    // Gated on every lane having actually gone. cybercore_lane.user_id is
+    // ON DELETE CASCADE (config/postgres/001_init_db.sql), so deleting these
+    // accounts would erase the very rows teardownLane just kept on purpose —
+    // with no Proxmox interaction at all, orphaning every survivor permanently
+    // and releasing its vxlan_id for the next deploy to collide with.
     const studentIds = [...studentUsers.keys()];
     const studentEmails = [...studentUsers.values()];
-    if (studentIds.length > 0) {
+    if (lanesKeptForRetry > 0) {
+      const msg =
+        `${lanesKeptForRetry} lane(s) kept because machines survived the teardown — ` +
+        `the auto-provisioned student accounts were NOT deleted, because removing them ` +
+        `would cascade those rows away and orphan the survivors. Re-run once cleared.`;
+      console.warn(`[CIAB Teardown] ${msg}`);
+      errors.push(msg);
+    }
+    if (lanesKeptForRetry === 0 && studentIds.length > 0) {
       // cybercore_allocation has CHECK (user_id IS NOT NULL OR group_key IS NOT NULL)
       // and its user FK is ON DELETE SET NULL — deleting a user with allocations
       // would violate the check and roll the user delete back. Purge first
@@ -1151,8 +1168,13 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     // path lives in profiles.js's DELETE /api/profiles/:id handler, which
     // calls deleteProfileChallenge() from utils/lane-deploy.js.
 
-    await query(`UPDATE ciab_profile_lane_groups SET status='deleted', updated_at=NOW() WHERE id=$1`,
-                [req.params.groupId]);
+    // 'deleted' only when the cluster is actually clear. Tombstoning a group whose
+    // machines are still running hides the survivors behind a row that reads as
+    // finished — the same mistake the lane teardowns made, one level up.
+    await query(
+      `UPDATE ciab_profile_lane_groups SET status=$2, updated_at=NOW() WHERE id=$1`,
+      [req.params.groupId, lanesKeptForRetry > 0 ? 'error' : 'deleted']
+    );
 
     audit.batch({
       req,
@@ -1167,10 +1189,13 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
       })),
     });
 
-    res.json({
-      success: true,
+    // 207 when machines survived: the lane rows, the student accounts and the
+    // group row have all deliberately been kept so a retry can still find them.
+    res.status(lanesKeptForRetry === 0 ? 200 : 207).json({
+      success: lanesKeptForRetry === 0,
       group_id: req.params.groupId,
-      students_deleted: studentIds.length,
+      students_deleted: deletedStudents.length,
+      lanes_kept_for_retry: lanesKeptForRetry,
       errors: errors.length ? errors : undefined
     });
   } catch (err) {

@@ -11,7 +11,6 @@ const router = express.Router();
 const { v4: uuidv4 } = require('uuid');
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { proxmoxAPI } = require('../../utils/proxmox');
-const { getClusterNodes } = require('../../utils/site-config');
 const { cybercoreQuery } = require('../../utils/cybercore-db');
 const { query } = require('../../utils/db');
 const { guacAPI, getGuacToken, GUAC_URL, GUAC_DS } = require('../../utils/guacamole');
@@ -21,8 +20,10 @@ const audit = require('../../utils/audit');
 const accountProvisioning = require('../../utils/account-provisioning');
 const { runBatch } = require('../../utils/batch-deployer');
 const { allocateVxlanIds } = require('../../utils/lane-deployer');
+// teardownLanes is reached through the namespace rather than destructured with
+// allocateVxlanIds above so the delegation is obvious at every call site.
+const laneDeployer = require('../../utils/lane-deployer');
 const { deployChallengeLanes, parseSpec, readProgress } = require('../../utils/challenge-lane-deployer');
-const tailscale = require('../../utils/tailscale');
 const { ATTACK_BOX_VMID_OFFSET } = require('../../utils/lane-networking');
 
 const adminOnly = requireRole('admin');
@@ -343,225 +344,67 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     let deletedUsers = [];
     const students = config.students || [];
 
-    const allVmsToDestroy = [];
-    const laneIds = [];
-    const vmNodeMap = {};
-
-    const [clusterResources, nodeList] = await Promise.all([
-      proxmoxAPI('GET', '/api2/json/cluster/resources').catch(() => []),
-      proxmoxAPI('GET', '/api2/json/nodes').catch(() => [])
-    ]);
-    const allNodeNames = nodeList.map(n => n.node);
-    if (allNodeNames.length === 0) allNodeNames.push(...getClusterNodes());
-
-    for (const r of clusterResources) {
-      if (r.type === 'qemu' || r.type === 'lxc') {
-        vmNodeMap[r.vmid] = r.node;
-      }
-    }
-
+    // Every lane owned by a student in this group.
+    //
+    // This route used to carry a near-verbatim copy of teardownLanes' phases 2-6
+    // wrapped around its own, weaker enumeration: it never read
+    // cfg.workstations[], so every allocated slot-1+ machine leaked; it had no
+    // contested-VXLAN check and no ownership check, so it could destroy a live
+    // lane's machines; and it deleted the lane rows from inside a Promise.all with
+    // no gate at all, which orphaned any VM that refused to die AND released its
+    // vxlan_id for the next deploy to collide with.
     const studentLaneResults = await Promise.all(
       students.map(student =>
         cybercoreQuery(
-          `SELECT lane_id, vxlan_id, status, config FROM cybercore_lane WHERE user_id = $1`,
+          `SELECT lane_id FROM cybercore_lane WHERE user_id = $1`,
           [student.id]
-        ).then(r => r.rows).catch(() => [])
+        ).then(r => r.rows).catch(e => {
+          // A lookup that fails silently is a lane this teardown will not touch,
+          // so say so rather than under-reporting a clean run.
+          errors.push(`Lane lookup for ${student.email || student.id}: ${e.message}`);
+          return [];
+        })
       )
     );
+    const laneIds = [...new Set(studentLaneResults.flat().map(l => l.lane_id))];
 
-    let groupChallengeSpec = null;
-    const groupChallengeKey = config.challenge_key;
-    const groupModule = config.module;
-    if (groupChallengeKey && groupModule) {
-      try {
-        const specResult = await cybercoreQuery(
-          `SELECT spec FROM ${String(groupModule).replace(/[^a-z0-9_]/gi, '')}_challenge WHERE challenge_key = $1 AND status = 'active'`,
-          [groupChallengeKey]
-        );
-        if (specResult.rows.length > 0) {
-          groupChallengeSpec = typeof specResult.rows[0].spec === 'string'
-            ? JSON.parse(specResult.rows[0].spec) : specResult.rows[0].spec;
-        }
-      } catch (_) {}
-    }
+    console.log(`[Group Teardown] ${group.group_name}: tearing down ${laneIds.length} lane(s)`);
 
-    for (const lanes of studentLaneResults) {
-      for (const lane of lanes) {
-        laneIds.push(lane.lane_id);
-        const vxlanId = lane.vxlan_id;
-        if (!vxlanId || lane.status === 'deleted') continue;
-
-        const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
-
-        if (Array.isArray(laneConfig.vms) && laneConfig.vms.length > 0) {
-          for (const vm of laneConfig.vms) {
-            allVmsToDestroy.push({ vmid: vm.vm_id, type: vm.type || 'qemu', label: vm.name || `VM-${vm.vm_id}`, laneId: lane.lane_id });
-          }
-        } else if (groupChallengeSpec && Array.isArray(groupChallengeSpec.vms) && groupChallengeSpec.vms.length > 0) {
-          for (const vmSpec of groupChallengeSpec.vms) {
-            const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
-            allVmsToDestroy.push({ vmid: vmId, type: vmSpec.type || 'qemu', label: vmSpec.name || `VM-${vmId}`, laneId: lane.lane_id });
-          }
-        } else {
-          const challengeVmId = laneConfig.challenge_vm_id || (600000 + vxlanId);
-          allVmsToDestroy.push({ vmid: challengeVmId, type: 'qemu', label: 'challenge', laneId: lane.lane_id });
-        }
-
-        const gatewayVmId = laneConfig.gateway_vm_id || (100000 + vxlanId);
-        allVmsToDestroy.push({ vmid: gatewayVmId, type: 'lxc', label: 'gateway', laneId: lane.lane_id });
-
-        const attackBoxVmId = laneConfig.attack_box_vm_id || (ATTACK_BOX_VMID_OFFSET + vxlanId);
-        allVmsToDestroy.push({ vmid: attackBoxVmId, type: 'qemu', label: 'attack-box', laneId: lane.lane_id });
-
-        const goadControllerVmId = 200000 + vxlanId;
-        allVmsToDestroy.push({ vmid: goadControllerVmId, type: 'qemu', label: 'goad-controller', laneId: lane.lane_id });
-      }
-    }
-
-    console.log(`[Group Teardown] ${group.group_name}: ${allVmsToDestroy.length} VMs to destroy across ${laneIds.length} lanes`);
-
-    const existingVms = allVmsToDestroy.filter(vm => vmNodeMap[vm.vmid]);
-    const missingVms = allVmsToDestroy.length - existingVms.length;
-    if (missingVms > 0) {
-      console.log(`[Group Teardown] ${missingVms} VMs not found in cluster (already deleted or never created)`);
-    }
-
-    // Phase 2: Unprotect + force-stop all VMs in parallel
-    console.log(`[Group Teardown] Phase 2: Unprotecting and force-stopping ${existingVms.length} VMs...`);
-    await Promise.all(existingVms.map(async (vm) => {
-      const node = vmNodeMap[vm.vmid];
-      try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
-      try { await proxmoxAPI('PUT', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/config`, { lock: '' }); } catch (_) {}
-    }));
-
-    const stopTasks = [];
-    await Promise.all(existingVms.map(async (vm) => {
-      const node = vmNodeMap[vm.vmid];
-      try {
-        const stopBody = vm.type === 'qemu' ? { timeout: 0 } : {};
-        const upid = await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`, stopBody);
-        if (upid) stopTasks.push({ node, upid, type: vm.type, vmid: vm.vmid });
-      } catch (e) {
-        console.warn(`[Group Teardown] Stop failed for ${vm.type} ${vm.vmid} on ${node}: ${e.message}`);
-      }
-    }));
-
-    console.log(`[Group Teardown] Waiting for ${stopTasks.length} stop tasks to complete...`);
-    const stopDeadline = Date.now() + 30000;
-    let pendingStops = [...stopTasks];
-    while (pendingStops.length > 0 && Date.now() < stopDeadline) {
-      await new Promise(r => setTimeout(r, 3000));
-      const stillPending = [];
-      for (const task of pendingStops) {
-        try {
-          const status = await proxmoxAPI('GET', `/api2/json/nodes/${task.node}/tasks/${encodeURIComponent(task.upid)}/status`);
-          if (status.status !== 'stopped') stillPending.push(task);
-        } catch (_) {}
-      }
-      pendingStops = stillPending;
-    }
-    if (pendingStops.length > 0) {
-      console.warn(`[Group Teardown] ${pendingStops.length} stop tasks still pending after 30s, proceeding with delete...`);
-    }
-
-    // Phase 3: Delete all VMs in parallel
-    const buildDeleteUrl = (node, type, vmid) => type === 'lxc'
-      ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
-      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1&skiplock=1`;
-
-    console.log(`[Group Teardown] Phase 3: Deleting ${existingVms.length} VMs...`);
-    const { errors: destroyErrors } = await runBatch(existingVms, async (vm) => {
-      const knownNode = vmNodeMap[vm.vmid];
-      const nodesToTry = knownNode ? [knownNode, ...allNodeNames.filter(n => n !== knownNode)] : allNodeNames;
-
-      for (const node of nodesToTry) {
-        try {
-          try {
-            await proxmoxAPI('DELETE', buildDeleteUrl(node, vm.type, vm.vmid));
-          } catch (_) {
-            const fallback = vm.type === 'lxc'
-              ? `/api2/json/nodes/${node}/lxc/${vm.vmid}?purge=1&force=1`
-              : `/api2/json/nodes/${node}/qemu/${vm.vmid}?purge=1`;
-            await proxmoxAPI('DELETE', fallback);
-          }
-          console.log(`[Group Teardown] Destroyed ${vm.type} ${vm.vmid} (${vm.label}) on ${node}`);
-          return;
-        } catch (e) {
-          if (/unable to find configuration file/i.test(e.message) || /does not exist/i.test(e.message)) {
-            console.log(`[Group Teardown] ${vm.type} ${vm.vmid} already gone on ${node}`);
-            return;
-          }
-          if (node === nodesToTry[nodesToTry.length - 1]) {
-            throw new Error(`${vm.type} ${vm.vmid} (${vm.label}): failed on all nodes — ${e.message}`);
-          }
-        }
-      }
-    }, { concurrency: 15 });
-
-    for (const err of destroyErrors) {
-      errors.push(err.error);
-    }
-
-    // Phase 4: Verify and retry orphans
-    let orphanedCount = 0;
-    const allTargetVmIds = allVmsToDestroy.map(v => v.vmid);
-
-    for (let round = 1; round <= 3; round++) {
-      try {
-        const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
-        const stillAlive = resources.filter(r => (r.type === 'qemu' || r.type === 'lxc') && allTargetVmIds.includes(r.vmid));
-        if (stillAlive.length === 0) {
-          console.log(`[Group Teardown] All VMs confirmed destroyed${round > 1 ? ` (after ${round - 1} retry rounds)` : ''}`);
-          break;
-        }
-
-        orphanedCount = stillAlive.length;
-        console.warn(`[Group Teardown] Round ${round}: ${stillAlive.length} VMs still exist — retrying...`);
-
-        await Promise.all(stillAlive.map(async (vm) => {
-          try {
-            try { await proxmoxAPI('PUT', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/config`, { protection: 0 }); } catch (_) {}
-            const stopBody = vm.type === 'qemu' ? { timeout: 0 } : {};
-            try { await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/${vm.type}/${vm.vmid}/status/stop`, stopBody); } catch (_) {}
-          } catch (_) {}
-        }));
-
-        await new Promise(r => setTimeout(r, 8000));
-
-        await Promise.all(stillAlive.map(async (vm) => {
-          try {
-            try {
-              await proxmoxAPI('DELETE', buildDeleteUrl(vm.node, vm.type, vm.vmid));
-            } catch (_) {
-              const fallback = vm.type === 'lxc'
-                ? `/api2/json/nodes/${vm.node}/lxc/${vm.vmid}?purge=1&force=1`
-                : `/api2/json/nodes/${vm.node}/qemu/${vm.vmid}?purge=1`;
-              await proxmoxAPI('DELETE', fallback);
-            }
-            console.log(`[Group Teardown] Retry round ${round}: destroyed ${vm.type} ${vm.vmid} on ${vm.node}`);
-          } catch (e) {
-            if (/unable to find configuration file/i.test(e.message)) {
-              console.log(`[Group Teardown] Retry round ${round}: ${vm.type} ${vm.vmid} already gone`);
-              return;
-            }
-            if (round === 3) errors.push(`Orphaned VM ${vm.vmid} on ${vm.node}: ${e.message}`);
-          }
-        }));
-      } catch (e) {
-        console.error(`[Group Teardown] Verify round ${round} failed: ${e.message}`);
-        break;
-      }
-    }
+    // The ONE canonical teardown: enumerate (including cfg.workstations[]),
+    // contested-VXLAN skip, ownership check, unprotect/stop/purge, three orphan
+    // retry rounds, disk sweep, workspace rows, Guacamole connections, Tailscale
+    // devices, bootstrap tokens — and the lane rows deleted ONLY when nothing
+    // survived.
+    const EMPTY_TEARDOWN = {
+      lanes_deleted: 0, lanes_kept_for_retry: 0, vms_destroyed: 0, orphan_disks_swept: 0,
+      errors: [], warnings: [], survivors: [], ownership_skipped: [], contested: [],
+    };
+    const teardown = laneIds.length > 0
+      ? await laneDeployer.teardownLanes(laneIds, { purgeJanitors: true })
+      : EMPTY_TEARDOWN;
+    errors.push(...teardown.errors);
 
     // Phase 5: Cleanup DB and Guac in parallel
     const allUserIds = allUsers.map(u => u.id);
     const allUserEmails = allUsers.map(u => u.email);
 
-    const torndownVxlanIds = [];
-    for (const lanes of studentLaneResults) {
-      for (const ln of lanes) {
-        if (ln.vxlan_id && ln.status !== 'deleted') torndownVxlanIds.push(ln.vxlan_id);
-      }
+    // Deleting a user CASCADES to cybercore_lane (001_init_db.sql:201), which would
+    // erase exactly the rows teardownLanes just kept on purpose — with zero Proxmox
+    // interaction, orphaning every survivor permanently and releasing its vxlan_id.
+    // So the accounts only go once the machines are verifiably gone.
+    //
+    // KEYS ON lanes_kept_for_retry, never errors.length: teardownLanes returns
+    // errors: [...errors, ...warnings], so a Guacamole 403 — which leaves nothing
+    // running anywhere — would otherwise strand a whole class's accounts.
+    const canDeleteUsers = (teardown.lanes_kept_for_retry || 0) === 0;
+    if (!canDeleteUsers) {
+      const msg =
+        `${teardown.lanes_kept_for_retry} lane record(s) were kept because machines survived ` +
+        `the teardown — the student accounts were NOT deleted, because removing them would ` +
+        `cascade those rows away and orphan the survivors. Re-run this teardown once the ` +
+        `cause is cleared.`;
+      console.warn(`[Group Teardown] ${msg}`);
+      errors.push(msg);
     }
 
     // cybercore_allocation has CHECK (user_id IS NOT NULL OR group_key IS NOT NULL)
@@ -570,7 +413,7 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
     // group_key, which violates the check and rolls back the user delete.
     // Purge each user's allocations FIRST (before the user delete in the
     // Promise.all below) so the user delete has nothing left to SET NULL on.
-    if (allUserIds.length > 0) {
+    if (canDeleteUsers && allUserIds.length > 0) {
       try {
         const ar = await cybercoreQuery(
           `DELETE FROM cybercore_allocation WHERE user_id = ANY($1::uuid[])`,
@@ -583,22 +426,17 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       }
     }
 
+    // The cybercore_lane rows and their cybercore_resource rows are gone already
+    // if teardownLanes was satisfied, and deliberately still there if it was not.
+    // This route must not delete either: the row is the only handle on a survivor's
+    // derived VMIDs, and removing it frees the vxlan_id for a colliding redeploy.
+    //
+    // The (metadata->>'lane_id')::uuid cast that used to live here was a latent
+    // bug too — Postgres does not guarantee AND-evaluation order, so it threw for
+    // every lane as soon as ANY resource row in the table held a non-uuid there.
+    // teardownLanes compares as TEXT.
     await Promise.all([
-      laneIds.length > 0
-        ? cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id = ANY($1)`, [laneIds]).catch(e => errors.push(`Lane cleanup: ${e.message}`))
-        : Promise.resolve(),
-
-      // Drop the cybercore_resource rows we created for each lane VM during
-      // deploy (see "Lane VM registration" in deploy path). The vm_instance
-      // and allocation rows cascade. Skip if no lane IDs to delete.
-      laneIds.length > 0
-        ? cybercoreQuery(
-            `DELETE FROM cybercore_resource WHERE (metadata->>'lane_id')::uuid = ANY($1::uuid[])`,
-            [laneIds]
-          ).catch(e => errors.push(`Lane VM resource cleanup: ${e.message}`))
-        : Promise.resolve(),
-
-      allUserIds.length > 0
+      canDeleteUsers && allUserIds.length > 0
         ? cybercoreQuery(
             `DELETE FROM cybercore_user WHERE user_id = ANY($1::uuid[]) OR username = ANY($2)
              RETURNING user_id, email, role`,
@@ -636,76 +474,11 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       config.guac_group?.identifier
         ? guacAPI('DELETE', `/connectionGroups/${config.guac_group.identifier}`).catch(e => errors.push(`Guac group delete: ${e.message}`))
         : Promise.resolve(),
-
-      ...torndownVxlanIds.map(vxId =>
-        tailscale.deleteLaneDevices({ vxlanId: vxId }).catch(() => {})
-      )
     ]);
 
-    // Phase 6: Sweep orphaned disks
-    const destroyedVmIdSet = new Set(allVmsToDestroy.map(v => v.vmid));
-    let orphanDisksSwept = 0;
-    const orphanDiskErrors = [];
-    const sweptVolids = new Set();
-
-    try {
-      const orphanDisks = [];
-      const discoveries = await Promise.all(allNodeNames.map(async (node) => {
-        const found = [];
-        let nodeStorages;
-        try {
-          nodeStorages = await proxmoxAPI('GET', `/api2/json/nodes/${node}/storage`);
-        } catch (_) { return found; }
-
-        for (const s of nodeStorages || []) {
-          if (s.content && !s.content.includes('images')) continue;
-          let contents;
-          try {
-            contents = await proxmoxAPI('GET',
-              `/api2/json/nodes/${node}/storage/${s.storage}/content?content=images`);
-          } catch (_) { continue; }
-
-          for (const item of contents || []) {
-            const match = item.volid?.match(/vm-(\d+)-(disk|cloudinit)/);
-            if (!match) continue;
-            const vmid = parseInt(match[1]);
-            if (!destroyedVmIdSet.has(vmid)) continue;
-            found.push({ node, storage: s.storage, volid: item.volid, kind: match[2] });
-          }
-        }
-        return found;
-      }));
-      for (const arr of discoveries) orphanDisks.push(...arr);
-
-      for (const d of orphanDisks) {
-        if (sweptVolids.has(d.volid)) continue;
-        sweptVolids.add(d.volid);
-
-        let deleted = false;
-        let lastErr = null;
-        for (let attempt = 1; attempt <= 3 && !deleted; attempt++) {
-          try {
-            await proxmoxAPI('DELETE',
-              `/api2/json/nodes/${d.node}/storage/${d.storage}/content/${encodeURIComponent(d.volid)}`);
-            console.log(`[Group Teardown] Swept orphaned ${d.kind || 'disk'}: ${d.volid} on ${d.node}/${d.storage}`);
-            orphanDisksSwept++;
-            deleted = true;
-          } catch (e) {
-            lastErr = e;
-            if (attempt < 3) await new Promise(r => setTimeout(r, 1500 * attempt));
-          }
-        }
-        if (!deleted && lastErr) {
-          orphanDiskErrors.push(`${d.volid}: ${lastErr.message}`);
-        }
-      }
-    } catch (e) {
-      console.error(`[Group Teardown] Orphan disk sweep failed: ${e.message}`);
-      orphanDiskErrors.push(`Sweep error: ${e.message}`);
-    }
-
-    if (orphanDisksSwept > 0) console.log(`[Group Teardown] Swept ${orphanDisksSwept} orphaned disk images`);
-    if (orphanDiskErrors.length > 0) errors.push(...orphanDiskErrors.map(e => `Disk sweep: ${e}`));
+    // The orphaned-disk sweep that used to live here was a second copy of
+    // teardownLanes' phase 6, walking every node's storage over again. It runs
+    // inside the teardown now, scoped to the VMIDs that teardown actually owned.
 
     await query(`DELETE FROM deployed_groups WHERE id = $1`, [req.params.id]);
 
@@ -721,20 +494,32 @@ router.delete('/groups/:id', authenticateToken, adminOnly, async (req, res) => {
       })),
     });
 
+    const kept = teardown.lanes_kept_for_retry || 0;
+
     logActivity(req, 'delete_group', 'group', req.params.id, {
-      group_name: group.group_name, users_deleted: allUsers.length, lanes_deleted: laneIds.length,
-      vms_destroyed: allVmsToDestroy.length, orphaned_vms_found: orphanedCount,
-      orphan_disks_swept: orphanDisksSwept, errors: errors.length
+      group_name: group.group_name,
+      users_deleted: deletedUsers.length,
+      lanes_deleted: teardown.lanes_deleted,
+      lanes_kept_for_retry: kept,
+      vms_destroyed: teardown.vms_destroyed,
+      orphan_disks_swept: teardown.orphan_disks_swept,
+      errors: errors.length,
     });
 
-    res.json({
-      success: true,
-      users_deleted: allUsers.length,
-      lanes_deleted: laneIds.length,
-      vms_destroyed: allVmsToDestroy.length,
-      orphaned_vms_retried: orphanedCount,
-      orphan_disks_swept: orphanDisksSwept,
-      errors: errors.length > 0 ? errors : undefined
+    // 207, not 200, when machines survived. The old handler answered
+    // success: true unconditionally — including the case where it had just
+    // deleted every lane row out from under a VM it could not destroy.
+    res.status(kept === 0 ? 200 : 207).json({
+      success: kept === 0,
+      users_deleted: deletedUsers.length,
+      lanes_deleted: teardown.lanes_deleted,
+      lanes_kept_for_retry: kept,
+      vms_destroyed: teardown.vms_destroyed,
+      orphan_disks_swept: teardown.orphan_disks_swept,
+      survivors: teardown.survivors,
+      ownership_skipped: teardown.ownership_skipped,
+      contested: teardown.contested,
+      errors: errors.length > 0 ? errors : undefined,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });

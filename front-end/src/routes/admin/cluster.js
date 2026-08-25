@@ -19,7 +19,11 @@ const audit = require('../../utils/audit');
 const reconcileJob = require('../../utils/reconcile-job');
 const { runReconcileScan, RANGES } = require('../../utils/reconcile-scan');
 const { scanClusterVolumes } = require('../../utils/storage-scan');
-const { parseVolid, inCyberhubRange, vmidRole, computeExpectedPeers } = require('../../utils/reconcile-audit');
+const {
+  parseVolid, inCyberhubRange, vmidRole, computeExpectedPeers, buildLaneVmIndex,
+} = require('../../utils/reconcile-audit');
+const guards = require('../../utils/reconcile-guards');
+const { claimsSql } = require('../../utils/lane-claims');
 const { ZONE_RE } = require('../../utils/lab-network-provision');
 const { getPhysicalClusterIps } = require('../../utils/site-config');
 const { waitForGuestAgent } = require('../../utils/script-executor');
@@ -192,48 +196,101 @@ router.get('/reconcile/status/:job_id', authenticateToken, adminOnly, async (req
   }
 });
 
+// Every field the client sends here is a HINT. The vmid is re-checked against
+// the CyberHub ranges and against a freshly rebuilt set of claimed lane VMIDs,
+// and the node is re-derived from /cluster/resources — because this endpoint
+// used to purge whatever it was given, and the audit that populated the button
+// listed live lanes' slot-1+ workstations as orphans.
 router.post('/reconcile/destroy-vm', authenticateToken, adminOnly, async (req, res) => {
-  const { vmid, node, type } = req.body;
-  if (!vmid || !node) return res.status(400).json({ error: 'vmid and node required' });
+  const vmid = Number(req.body?.vmid);
+  if (!Number.isFinite(vmid)) return res.status(400).json({ error: 'vmid required' });
   try {
+    await guards.requireFreshAudit(req.body?.audit_job_id);
+    const [cluster, claimed] = await Promise.all([
+      guards.readTrustedClusterView(),
+      guards.readClaimedVmIds(),
+    ]);
+    const target = guards.assertDestroyableVm({
+      vmid, cluster, claimed, inRange: (id) => inCyberhubRange(id, RANGES),
+    });
+
+    const base = `/api2/json/nodes/${target.node}/${target.type}/${vmid}`;
     try {
-      const stopPath = type === 'lxc'
-        ? `/api2/json/nodes/${node}/lxc/${vmid}/status/stop`
-        : `/api2/json/nodes/${node}/qemu/${vmid}/status/stop`;
-      await proxmoxAPI('POST', stopPath);
+      await proxmoxAPI('POST', `${base}/status/stop`);
       await new Promise(r => setTimeout(r, 3000));
     } catch (e) { /* may already be stopped */ }
     try {
-      const cfgPath = type === 'lxc'
-        ? `/api2/json/nodes/${node}/lxc/${vmid}/config`
-        : `/api2/json/nodes/${node}/qemu/${vmid}/config`;
-      await proxmoxAPI('PUT', cfgPath, { protection: 0 });
+      await proxmoxAPI('PUT', `${base}/config`, { protection: 0 });
     } catch (e) { /* may not have protection set */ }
-    const delPath = type === 'lxc'
-      ? `/api2/json/nodes/${node}/lxc/${vmid}?purge=1&force=1`
-      : `/api2/json/nodes/${node}/qemu/${vmid}?purge=1`;
+    const delPath = target.type === 'lxc'
+      ? `${base}?purge=1&force=1`
+      : `${base}?purge=1`;
     await proxmoxAPI('DELETE', delPath);
-    console.log(`[Reconcile] Destroyed orphaned VM ${vmid} on ${node}`);
-    logActivity(req, 'destroy_orphan_vm', 'vm', vmid, { vmid, node, type });
-    res.json({ ok: true, vmid, node });
+    console.log(`[Reconcile] Destroyed orphaned VM ${vmid} (${target.name || '?'}) on ${target.node}`);
+    logActivity(req, 'destroy_orphan_vm', 'vm', vmid, {
+      vmid, node: target.node, type: target.type, name: target.name,
+    });
+    res.json({ ok: true, vmid, node: target.node, type: target.type });
   } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
     console.error(`[Reconcile] Failed to destroy VM ${vmid}: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
 });
 
+// Tombstoning a lane RELEASES its vxlan_id and gateway WAN address for reuse
+// (utils/lane-claims.js), so it is only safe once nothing of the lane is left.
+// This used to take the client's lane_id on trust and write the row — driven by
+// a table that can be a day old, and by a staleness rule that fires whenever the
+// WORKLOAD VMs are gone even if the gateway is still up.
 router.post('/reconcile/mark-deleted', authenticateToken, adminOnly, async (req, res) => {
   const { lane_id } = req.body;
   if (!lane_id) return res.status(400).json({ error: 'lane_id required' });
   try {
+    await guards.requireFreshAudit(req.body?.audit_job_id);
+    const cluster = await guards.readTrustedClusterView();
+
+    const laneRes = await cybercoreQuery(
+      `SELECT lane_id, vxlan_id, name, status, config FROM cybercore_lane WHERE lane_id = $1`,
+      [lane_id]
+    );
+    if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+    const lane = laneRes.rows[0];
+
+    // Re-derived server-side, and against EVERY recorded VMID rather than just
+    // the workload set: a surviving gateway is disqualifying here even though it
+    // does not stop computeStaleLanes from flagging the lane. Freeing the VXLAN
+    // while that container is still answering ARP is how two lanes end up on one
+    // L2 segment.
+    const index = buildLaneVmIndex([lane], {
+      includeWorkstations: true,
+      includeNullVxlan: true,
+    });
+    const alive = [...(index.expectedByLane.get(lane.lane_id) || [])]
+      .filter(id => cluster.liveVmIds.has(id));
+
+    if (alive.length > 0) {
+      return res.status(409).json({
+        error:
+          `Lane "${lane.name || lane_id}" still has ${alive.length} machine(s) on the cluster `
+          + `(${alive.join(', ')}). Marking it deleted would release VXLAN ${lane.vxlan_id} `
+          + 'while they are still running. Purge the lane instead.',
+        alive_vmids: alive,
+        lane_id,
+      });
+    }
+
     await cybercoreQuery(
       `UPDATE cybercore_lane SET status = 'deleted', updated_at = NOW() WHERE lane_id = $1`,
       [lane_id]
     );
-    console.log(`[Reconcile] Marked lane ${lane_id} as deleted (stale — no Proxmox VMs)`);
-    logActivity(req, 'lane_mark_deleted', 'lane', lane_id, { lane_id, reason: 'stale — no Proxmox VMs' });
+    console.log(`[Reconcile] Marked lane ${lane_id} as deleted (verified: no VMs on the cluster)`);
+    logActivity(req, 'lane_mark_deleted', 'lane', lane_id, {
+      lane_id, vxlan_id: lane.vxlan_id, reason: 'verified stale — no Proxmox VMs',
+    });
     res.json({ ok: true, lane_id });
   } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
     res.status(500).json({ error: error.message });
   }
 });
@@ -241,6 +298,32 @@ router.post('/reconcile/mark-deleted', authenticateToken, adminOnly, async (req,
 router.post('/reconcile/destroy-disk', authenticateToken, adminOnly, async (req, res) => {
   const { node, storage, volid } = req.body;
   if (!node || !storage || !volid) return res.status(400).json({ error: 'node, storage, and volid required' });
+
+  // Had NO validation at all: any volid the client sent was deleted. The bulk
+  // sweep below has always re-derived its target list server-side; the
+  // single-disk button never did.
+  try {
+    const parsed = parseVolid(volid);
+    if (!parsed) {
+      return res.status(400).json({ error: `Cannot read an owning VMID out of '${volid}' — refusing to delete it.` });
+    }
+    if (!inCyberhubRange(parsed.vmid, RANGES)) {
+      return res.status(400).json({
+        error: `Disk ${volid} belongs to VMID ${parsed.vmid}, outside every CyberHub-owned range — refusing to delete it.`,
+      });
+    }
+    await guards.requireFreshAudit(req.body?.audit_job_id);
+    const cluster = await guards.readTrustedClusterView();
+    if (cluster.liveVmIds.has(parsed.vmid)) {
+      return res.status(409).json({
+        error: `VMID ${parsed.vmid} is running on the cluster — ${volid} is its live disk, not an orphan. Re-run the audit.`,
+      });
+    }
+  } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
+    return res.status(500).json({ error: error.message });
+  }
+
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -262,11 +345,44 @@ router.post('/reconcile/destroy-guac-connection', authenticateToken, adminOnly, 
   const { id, name } = req.body;
   if (!id) return res.status(400).json({ error: 'id required' });
   try {
+    await guards.requireFreshAudit(req.body?.audit_job_id);
+
+    // Deleting a console a live lane still owns takes a student's only way in,
+    // and the audit identifies CyberHub connections partly by NAME PATTERN
+    // (computeOrphanedGuacConnections), which a renamed cohort can match by
+    // accident. Re-check the id against what claiming lanes actually record.
+    const held = await cybercoreQuery(
+      `SELECT l.lane_id, l.name, l.status
+         FROM cybercore_lane l
+        WHERE ${claimsSql('l')}
+          AND (
+            l.config->>'guac_connection_id' = $1
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements(
+                         COALESCE(l.config->'workstations', '[]'::jsonb)) w
+                        WHERE w->>'guac_connection_id' = $1)
+            OR EXISTS (SELECT 1 FROM jsonb_array_elements(
+                         COALESCE(l.config->'consoles', '[]'::jsonb)) c
+                        WHERE c->>'guac_connection_id' = $1)
+          )
+        LIMIT 1`,
+      [String(id)]
+    );
+    if (held.rows.length > 0) {
+      const l = held.rows[0];
+      return res.status(409).json({
+        error:
+          `Guacamole connection ${id} is the console for lane "${l.name || l.lane_id}" `
+          + `(status ${l.status}), which still holds it. Re-run the audit.`,
+        lane_id: l.lane_id,
+      });
+    }
+
     await guacAPI('DELETE', `/connections/${encodeURIComponent(id)}`);
     console.log(`[Reconcile] Destroyed orphaned Guac connection ${id} (${name || '?'})`);
     logActivity(req, 'destroy_orphan_guac_connection', 'guacamole', null, { id, name });
     res.json({ ok: true, id });
   } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
     console.error(`[Reconcile] Failed to destroy Guac connection ${id}: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
@@ -278,8 +394,32 @@ router.post('/reconcile/destroy-zone', authenticateToken, adminOnly, async (req,
   // Validated before it reaches a Proxmox URL. Same guard the create path uses.
   if (!ZONE_RE.test(zone)) return res.status(400).json({ error: 'zone must be 1-8 alphanumeric characters starting with a letter' });
   try {
+    await guards.requireFreshAudit(req.body?.audit_job_id);
     const vnets = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets');
     const zoneVnets = (Array.isArray(vnets) ? vnets : []).filter(v => v.zone === zone);
+
+    // The most destructive endpoint in this file — it removes EVERY VNet in the
+    // zone — and it had no lane check whatsoever. A VNet tag is a lane's
+    // vxlan_id, so a zone still carrying a claiming lane's tag is a zone whose
+    // deletion cuts that lane's network out from under it.
+    const zoneTags = zoneVnets.map(v => Number(v.tag)).filter(Number.isFinite);
+    if (zoneTags.length > 0) {
+      const held = await cybercoreQuery(
+        `SELECT lane_id, name, vxlan_id, status FROM cybercore_lane
+          WHERE vxlan_id = ANY($1::int[]) AND ${claimsSql()}`,
+        [zoneTags]
+      );
+      if (held.rows.length > 0) {
+        return res.status(409).json({
+          error:
+            `Zone '${zone}' still carries the VNet(s) for ${held.rows.length} live lane(s) `
+            + `(vxlan ${held.rows.map(r => r.vxlan_id).join(', ')}). Deleting it would leave them `
+            + 'with no network. Tear those lanes down first.',
+          lanes: held.rows,
+        });
+      }
+    }
+
     for (const vnet of zoneVnets) {
       console.log(`[Reconcile] Deleting VNet '${vnet.vnet}' in zone '${zone}'`);
       await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet.vnet}`);
@@ -291,6 +431,7 @@ router.post('/reconcile/destroy-zone', authenticateToken, adminOnly, async (req,
     logActivity(req, 'destroy_orphan_zone', 'network', zone, { zone, vnets_removed: zoneVnets.length });
     res.json({ ok: true, zone, vnets_removed: zoneVnets.length });
   } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
     console.error(`[Reconcile] Failed to destroy zone ${zone}: ${error.message}`);
     res.status(500).json({ error: error.message });
   }
@@ -301,12 +442,35 @@ router.post('/reconcile/destroy-vnet', authenticateToken, adminOnly, async (req,
   if (!vnet) return res.status(400).json({ error: 'vnet required' });
   if (!/^[a-z][a-z0-9]{0,9}$/.test(vnet)) return res.status(400).json({ error: 'malformed vnet name' });
   try {
+    await guards.requireFreshAudit(req.body?.audit_job_id);
+
+    // Same check as destroy-zone, one VNet wide: the tag IS a lane's vxlan_id.
+    const all = await proxmoxAPI('GET', '/api2/json/cluster/sdn/vnets').catch(() => []);
+    const target = (Array.isArray(all) ? all : []).find(v => v.vnet === vnet);
+    const tag = target ? Number(target.tag) : NaN;
+    if (Number.isFinite(tag)) {
+      const held = await cybercoreQuery(
+        `SELECT lane_id, name, vxlan_id, status FROM cybercore_lane
+          WHERE vxlan_id = $1 AND ${claimsSql()}`,
+        [tag]
+      );
+      if (held.rows.length > 0) {
+        return res.status(409).json({
+          error:
+            `VNet '${vnet}' carries tag ${tag}, which lane "${held.rows[0].name || held.rows[0].lane_id}" `
+            + `(status ${held.rows[0].status}) still holds. Deleting it would cut that lane off the network.`,
+          lanes: held.rows,
+        });
+      }
+    }
+
     await proxmoxAPI('DELETE', `/api2/json/cluster/sdn/vnets/${vnet}`);
     try { await proxmoxAPI('PUT', '/api2/json/cluster/sdn'); } catch (e) { /* best effort */ }
     console.log(`[Reconcile] Deleted orphaned VNet '${vnet}'`);
     logActivity(req, 'destroy_orphan_vnet', 'network', vnet, { vnet });
     res.json({ ok: true, vnet });
   } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
     res.status(500).json({ error: error.message });
   }
 });
@@ -335,6 +499,9 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
   const errors = [];
 
   try {
+    // Everything else here is already re-derived server-side; this only stops a
+    // day-old page from starting a bulk delete without the operator re-scanning.
+    await guards.requireFreshAudit(req.body?.audit_job_id);
     const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources', null, { timeoutMs: 15000 });
     const liveVmIds = new Set();
     for (const r of resources || []) {
@@ -428,6 +595,7 @@ router.post('/sweep-orphaned-disks', authenticateToken, adminOnly, async (req, r
       errors: errors.length > 0 ? errors : undefined
     });
   } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
     res.status(500).json({ error: error.message });
   }
 });

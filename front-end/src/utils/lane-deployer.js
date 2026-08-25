@@ -64,6 +64,7 @@ const { generatePassword } = require('./password-generator');
 const { macForOctet, INFRA_IP_OCTETS } = require('./goad-deploy');
 const nodeSsh = require('./node-ssh');
 const tailscale = require('./tailscale');
+const { claimsSql } = require('./lane-claims');
 
 const GATEWAY_VMID_OFFSET = 100000;     // gateway LXC = 100000 + vxlanId (matches groups.js)
 const WORKSTATION_VMID_OFFSET = 600000; // slot-0 workstation = 600000 + vxlanId
@@ -288,7 +289,7 @@ async function allocateVxlanIds(block, count) {
        SELECT DISTINCT vxlan_id FROM cybercore_lane
         WHERE vxlan_id IS NOT NULL
           AND vxlan_id BETWEEN $1 AND $2
-          AND status NOT IN ('error', 'deleted')
+          AND ${claimsSql()}
      )
      SELECT gs AS vxlan_id
        FROM generate_series($1::int, $2::int) gs
@@ -2255,9 +2256,30 @@ async function batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem,
  * @param {Array<string>} laneIds
  * @param {object} [opts]
  * @param {number} [opts.concurrency=15]
+ * @param {Array<number|object>} [opts.extraVmIds] VMIDs the caller knows about that
+ *        the lane config never recorded. Only the CIAB profile path needs it: its ids
+ *        live in ciab_profile_lane_jobs.vm_ids, written as the deploy progressed, so a
+ *        lane whose config write never landed still has them there. They go through the
+ *        SAME contested-VXLAN skip and ownership check as everything enumerated below.
+ * @param {boolean} [opts.purgeJanitors] Also remove the bookkeeping rows nothing else
+ *        in the codebase ever removes: lane_bootstrap_tokens, whose PRIMARY KEY is
+ *        vxlan_id, so a recycled id collides with the stale row on the next INSERT
+ *        (see storeLaneBootstrap in utils/tailscale.js). A WARNING, never an error --
+ *        it holds nothing on the cluster, so it must not decide whether a lane row
+ *        survives.
+ *
+ *        Deliberately does NOT delete the Guacamole user: ensureGuacUser keys on the
+ *        person's email (utils/guac-credentials.js) and one account is shared by every
+ *        lane and course they own, so removing it here would lock them out of all the
+ *        others. There is no per-lane connection GROUP to delete either -- groups are
+ *        per-class, created once in routes/admin/groups.js.
  * @returns {Promise<{lanes_deleted:number, vms_destroyed:number, orphan_disks_swept:number, errors:Array<string>}>}
  */
-async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
+async function teardownLanes(laneIds, {
+  concurrency = 15,
+  extraVmIds = [],
+  purgeJanitors = false,
+} = {}) {
   const errors = [];
   const warnings = [];
   if (!Array.isArray(laneIds) || laneIds.length === 0) {
@@ -2297,7 +2319,7 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
         `SELECT DISTINCT vxlan_id FROM cybercore_lane
           WHERE vxlan_id = ANY($1::int[])
             AND NOT (lane_id = ANY($2::uuid[]))
-            AND status NOT IN ('error', 'deleted')`,
+            AND ${claimsSql()}`,
         [vxlans, laneIds]
       ).catch((e) => {
         errors.push(`VXLAN ownership check: ${e.message}`);
@@ -2414,6 +2436,37 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
 
     const gwVmid = cfg.gateway_vmid || cfg.gateway_vm_id || (lane.vxlan_id ? GATEWAY_VMID_OFFSET + lane.vxlan_id : null);
     if (gwVmid) vmsToDestroy.push({ vmid: gwVmid, type: 'lxc', label: 'gateway' });
+  }
+
+  // Caller-supplied VMIDs the lane config never recorded -- the CIAB profile
+  // path's ciab_profile_lane_jobs.vm_ids.
+  //
+  // Dropped WHOLESALE when any row in this batch is contested. They arrive as bare
+  // ids with no lane attached, so there is no way to tell which row they belong to,
+  // and the contested rule is "destroy nothing" rather than "destroy what we can
+  // guess". Guessing here would purge the live lane that recycled the VXLAN, which
+  // is the exact failure the contested check exists to prevent.
+  if (extraVmIds.length > 0) {
+    if (contested.size > 0) {
+      console.warn(
+        `${LOG} Ignoring ${extraVmIds.length} caller-supplied VMID(s) — a lane in this ` +
+        `batch shares its VXLAN with a live lane, so nothing is destroyed for it.`
+      );
+    } else {
+      for (const raw of extraVmIds) {
+        const entry = (raw && typeof raw === 'object') ? raw : { vmid: raw };
+        const vmid = Number(entry.vmid);
+        if (!Number.isFinite(vmid)) continue;
+        vmsToDestroy.push({
+          vmid,
+          // Same range rule the CIAB path applied inline: the gateway band is the
+          // only LXC one.
+          type: entry.type || ((vmid >= 100000 && vmid < 200000) ? 'lxc' : 'qemu'),
+          label: entry.label || `recorded-vmid-${vmid}`,
+          expectName: entry.expectName || null,
+        });
+      }
+    }
   }
 
   // A lane can list the same VMID twice (e.g. a config rewritten mid-deploy).
@@ -2560,11 +2613,23 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
   const allTargetVmIds = vmsToDestroy
     .map(v => v.vmid)
     .filter(id => !ownershipSkipped.has(id));
+  // What is still on the cluster when the rounds give up. `errors` says a teardown
+  // failed; this says WHICH machines are still running, which is the thing an
+  // operator actually needs and the thing every caller had to guess at before.
+  // Best effort by construction: it is the set observed at the start of the last
+  // round attempted, so round 3's own delete may have cleared some of it. `errors`
+  // remains the authority on whether the row is kept.
+  let survivors = [];
+  const vmLabels = new Map(vmsToDestroy.map(v => [v.vmid, v.label]));
   for (let round = 1; round <= 3; round++) {
     try {
       const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources');
       const stillAlive = (resources || []).filter(r =>
         (r.type === 'qemu' || r.type === 'lxc') && allTargetVmIds.includes(r.vmid));
+      survivors = stillAlive.map(vm => ({
+        vmid: vm.vmid, node: vm.node, type: vm.type,
+        name: vm.name || null, label: vmLabels.get(vm.vmid) || null,
+      }));
       if (stillAlive.length === 0) break;
 
       console.warn(`${LOG} Teardown round ${round}: ${stillAlive.length} VMs still exist — retrying`);
@@ -2625,6 +2690,19 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     runBatch(vxlanIds, async (vxlanId) => {
       await tailscale.deleteLaneDevices({ vxlanId }).catch(() => {});
     }, { concurrency: EXTERNAL_CLEANUP_CONCURRENCY }),
+
+    // The bootstrap token. Nothing else in the codebase deletes one -- 017's header
+    // says "easy to add a periodic janitor later" and none was ever added. The PK is
+    // vxlan_id, so the row outlives its lane and the next lane to be handed that id
+    // hits the ON CONFLICT path in storeLaneBootstrap instead of a clean insert.
+    //
+    // A warning, not an error: it is a row in a table, not a machine on a node.
+    (purgeJanitors && vxlanIds.length > 0)
+      ? cybercoreQuery(
+          `DELETE FROM lane_bootstrap_tokens WHERE vxlan_id = ANY($1::int[])`,
+          [vxlanIds]
+        ).catch(e => warnings.push(`Bootstrap token cleanup: ${e.message}`))
+      : Promise.resolve(),
   ]);
 
   // Phase 6: sweep orphaned disks the delete left behind.
@@ -2730,6 +2808,14 @@ async function teardownLanes(laneIds, { concurrency = 15 } = {}) {
     orphan_disks_swept: orphanDisksSwept,
     errors: [...errors, ...warnings],
     warnings,
+    // Still running when the retry rounds gave up.
+    survivors,
+    // NOT a failure: VMIDs whose live name did not match what the lane recorded,
+    // so another lane owns them now. Reported so "why is that VM still there"
+    // has an answer that is not "the teardown is broken".
+    ownership_skipped: [...ownershipSkipped],
+    // VXLANs held by a live lane, for which this teardown destroyed nothing.
+    contested: [...contested],
   };
 }
 

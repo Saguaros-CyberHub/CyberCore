@@ -29,6 +29,8 @@ const { selectBestNode } = require('../../../../../src/utils/node-selector');
 const { runBatch, createCloneSemaphore, distributeAcrossNodes } = require('../../../../../src/utils/batch-deployer');
 const { guacAPI } = require('../../../../../src/utils/guacamole');
 const { sanitizeZoneAbbrev } = require('../../../../../src/utils/lab-network-provision');
+const { claimsSql } = require('../../../../../src/utils/lane-claims');
+const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const { ensureVulnImage } = require('./vuln-app-builder');
 
 const {
@@ -108,7 +110,7 @@ async function allocateVxlanIds(vxlanBlock, count) {
        SELECT DISTINCT vxlan_id FROM cybercore_lane
        WHERE vxlan_id IS NOT NULL
          AND vxlan_id BETWEEN $1 AND $2
-         AND status NOT IN ('error','deleted')
+         AND ${claimsSql()}
      )
      SELECT gs AS vxlan_id
      FROM generate_series($1::int, $2::int) AS gs
@@ -166,7 +168,7 @@ async function getOrCreateProfileChallenge({ profileId, requestedMax, companyNam
         && block.start != null && block.end != null) {
       const usedRes = await cybercoreQuery(
         `SELECT COUNT(*)::int AS n FROM cybercore_lane
-          WHERE vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error','deleted')`,
+          WHERE vxlan_id BETWEEN $1 AND $2 AND ${claimsSql()}`,
         [block.start, block.end]
       );
       if ((usedRes.rows[0]?.n || 0) === 0) {
@@ -1894,47 +1896,46 @@ async function deployProfileLanesBatch({
 }
 
 // ─── Teardown a single lane (used by group DELETE + per-lane retry cleanup) ──
+/**
+ * Delegates to the ONE canonical teardown in src/utils/lane-deployer.js.
+ *
+ * What this used to do, and why none of it survived:
+ *   - ignored forceDestroyVM's return value entirely, so a VM that refused to
+ *     die never reached `errors` and the caller reported a clean teardown
+ *   - deleted the cybercore_lane row unconditionally AND swallowed the delete's
+ *     own failure with .catch(() => {}) — orphaning any survivor permanently and
+ *     releasing its vxlan_id for the next deploy to clone a gateway on top of
+ *   - had no contested-VXLAN check, so a recycled id meant it destroyed the LIVE
+ *     lane's machines
+ *   - no Guacamole cleanup, no Tailscale cleanup, no disk sweep, no retry rounds
+ *
+ * vm_ids from ciab_profile_lane_jobs are still honoured: they are passed as
+ * extraVmIds, because a lane whose config write never landed has them recorded
+ * nowhere else. They go through the same contested and ownership checks.
+ *
+ * @param {{laneId: string, vmIds?: Array<number>}} a
+ * @returns {Promise<{errors: Array<string>, keptForRetry: boolean, result: object}>}
+ */
 async function teardownLane({ laneId, vmIds }) {
-  const errors = [];
+  const result = await laneDeployer.teardownLanes([laneId], {
+    extraVmIds: Array.isArray(vmIds) ? vmIds : [],
+    purgeJanitors: true,
+  });
 
-  // Look up where VMs live (best effort)
-  let nodeMap = {};
-  try {
-    const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
-    for (const r of resources) {
-      if (vmIds && vmIds.includes(r.vmid)) nodeMap[r.vmid] = r.node;
-    }
-  } catch (e) {
-    errors.push(`cluster/resources lookup failed: ${e.message}`);
+  // The job row is this plugin's own bookkeeping, in its own pool, so it is
+  // cleaned here rather than inside teardownLanes. Only once the lane row is
+  // actually gone: while the lane is kept for retry, vm_ids is the record of
+  // what is still out there.
+  if ((result.lanes_kept_for_retry || 0) === 0) {
+    await query(`DELETE FROM ciab_profile_lane_jobs WHERE lane_id = $1`, [laneId])
+      .catch(e => result.errors.push(`Profile lane job cleanup: ${e.message}`));
   }
 
-  for (const vmid of (vmIds || [])) {
-    // Try LXC first if vmid is in the gateway range (100000-199999), else qemu
-    const type = (vmid >= 100000 && vmid < 200000) ? 'lxc' : 'qemu';
-    try {
-      await forceDestroyVM(vmid, type, nodeMap[vmid]);
-    } catch (e) {
-      errors.push(`destroy ${type} ${vmid}: ${e.message}`);
-    }
-  }
-
-  // Clean up cybercore resource/vm_instance/allocation records for this lane's Kali VM
-  try {
-    const rRes = await cybercoreQuery(
-      `SELECT resource_id FROM cybercore_resource WHERE metadata->>'lane_id' = $1`,
-      [laneId]
-    );
-    for (const row of rRes.rows) {
-      await cybercoreQuery(`DELETE FROM cybercore_allocation WHERE resource_id = $1`, [row.resource_id]);
-      await cybercoreQuery(`DELETE FROM cybercore_vm_instance WHERE resource_id = $1`, [row.resource_id]);
-      await cybercoreQuery(`DELETE FROM cybercore_resource WHERE resource_id = $1`, [row.resource_id]);
-    }
-  } catch (e) {
-    errors.push(`cybercore resource cleanup: ${e.message}`);
-  }
-
-  await cybercoreQuery(`DELETE FROM cybercore_lane WHERE lane_id=$1`, [laneId]).catch(() => {});
-  return { errors };
+  return {
+    errors: result.errors,
+    keptForRetry: (result.lanes_kept_for_retry || 0) > 0,
+    result,
+  };
 }
 
 module.exports = {

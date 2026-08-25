@@ -32,6 +32,7 @@
 
 const { query } = require('./db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
+const { claimsSql } = require('../../../../../src/utils/lane-claims');
 
 /**
  * Resolve the students to act on.
@@ -194,7 +195,7 @@ function excludeStudentsWithCourseLane(courseId) {
         WHERE user_id = ANY($1::uuid[])
           AND config->>'course_id' = $2
           AND config->>'material_id' IS NULL
-          AND status NOT IN ('deleted', 'error')`,
+          AND ${claimsSql()}`,
       [candidates, courseId]
     );
     return new Map(existing.rows.map(r => [r.user_id, 'already has a workstation']));

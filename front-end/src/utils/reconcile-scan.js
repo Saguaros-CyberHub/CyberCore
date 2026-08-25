@@ -27,6 +27,7 @@ const attachedModules = require('./attached-modules');
 const siteConfig = require('./site-config');
 const { scanClusterVolumes } = require('./storage-scan');
 const A = require('./reconcile-audit');
+const { CLAIMING_STATUS_SET } = require('./lane-claims');
 
 /**
  * Wall-clock budget for one audit.
@@ -197,9 +198,16 @@ async function runReconcileScan({ onPhase = () => {}, budgetMs = RECONCILE_BUDGE
       settle(proxmoxAPI('GET', '/api2/json/cluster/sdn/zones', null, callOpts)),
       settle(proxmoxAPI('GET', '/api2/json/cluster/status', null, callOpts)),
       settle(proxmoxAPI('GET', '/api2/json/cluster/sdn/zones?pending=1', null, callOpts)),
+      // 'error' rows are LOADED on purpose, and their VMIDs are then excluded
+      // from expectedVmIds by claimingStatuses below. Both halves are needed:
+      // loading them is what lets classifyLaneDrift report a released lane whose
+      // machines are still running, and excluding their ids is what stops those
+      // machines from counting as accounted-for. Dropping them from the query
+      // instead would hide the row; keeping their ids expected is what hid the
+      // machines before.
       cybercoreQuery(
         `SELECT lane_id, vxlan_id, name, status, config, created_at
-           FROM cybercore_lane WHERE status NOT IN ('deleted')
+           FROM cybercore_lane WHERE status <> 'deleted'
           ORDER BY created_at DESC`),
       query(`SELECT id, group_name, config, created_at FROM deployed_groups ORDER BY created_at DESC`),
       cybercoreQuery(`SELECT challenge_key, name, spec FROM crucible_challenge`),
@@ -228,14 +236,24 @@ async function runReconcileScan({ onPhase = () => {}, budgetMs = RECONCILE_BUDGE
       if (zoneName) dbZoneNames.add(zoneName);
     }
 
-    const laneIndex = A.buildLaneVmIndex(dbLanes);
+    const laneIndex = A.buildLaneVmIndex(dbLanes, {
+      // Slot-1+ workstation VMIDs are allocated, not derived, so without this a
+      // LIVE lane's machines were listed as orphans with a Destroy button.
+      includeWorkstations: true,
+      // A lane that failed before VXLAN assignment was invisible in both
+      // directions: not expected, and never stale.
+      includeNullVxlan: true,
+      claimingStatuses: CLAIMING_STATUS_SET,
+    });
     const { vxlanZones, orphanedZones, orphanedVNets } =
       A.computeSdnOrphans({ pxZonesAll, pxVNets, dbZoneNames });
 
     const pxCyberhubVMs = pxVMs.filter(vm => A.inCyberhubRange(vm.vmid, RANGES));
     const pxVmIdSet = new Set(pxCyberhubVMs.map(vm => vm.vmid));
     const orphanedOnProxmox = A.computeOrphanedVMs(pxVMs, laneIndex.expectedVmIds, RANGES);
-    const staleInDB = A.computeStaleLanes(dbLanes, laneIndex, pxVmIdSet);
+    const staleInDB = A.computeStaleLanes(dbLanes, laneIndex, pxVmIdSet, {
+      includeNullVxlan: true,
+    });
 
     // ---- node drift --------------------------------------------------------
     // config/site.json is gitignored and bind-mounted from the host, so it can
@@ -303,6 +321,23 @@ async function runReconcileScan({ onPhase = () => {}, budgetMs = RECONCILE_BUDGE
       trusted: !!(clusterStatusR.ok && nodesTotal > 0 && nodesOnline === nodesTotal && pxVMs.length > 0),
     };
 
+    // Per-lane drift. Deliberately computed HERE rather than beside staleInDB:
+    // it needs clusterView.trusted, and on a degraded view it must report
+    // 'unknown' instead of a table of false positives with Purge buttons on it.
+    const laneDrift = A.classifyLaneDrift({
+      dbLanes,
+      laneIndex,
+      pxVmIdSet: new Set(pxVMs.map(v => v.vmid)),
+      // Tags come from the SDN read already in flight above — no extra call. A
+      // failed SDN read yields an empty list, which would report every lane's
+      // network as missing, so pass null and skip the check instead.
+      pxVNetTags: (vnetsR.ok && pxVNets.length > 0)
+        ? new Set(pxVNets.map(v => Number(v.tag)).filter(Number.isFinite))
+        : null,
+      claimingStatuses: CLAIMING_STATUS_SET,
+      trusted: clusterView.trusted,
+    });
+
     // A cluster view that returned nothing is the catastrophic case: every disk
     // on shared storage would classify as an orphan, with a Delete button.
     // Refuse to build that table rather than render it behind a warning.
@@ -362,12 +397,18 @@ async function runReconcileScan({ onPhase = () => {}, budgetMs = RECONCILE_BUDGE
         nodes_offline: clusterNodes.offline.length,
         zones_peer_drift: zonePeerDrift.length,
         node_drift_issues: clusterNodes.issue_count + zonePeerDrift.length,
+        // lane drift
+        lanes_released_but_alive: laneDrift.filter(d => d.drift === 'released_but_alive').length,
+        lanes_partial: laneDrift.filter(d => d.drift === 'partial').length,
+        lanes_infra_missing: laneDrift.filter(d => d.drift === 'infra_missing').length,
+        lanes_needing_purge: laneDrift.filter(d => d.purgeable).length,
         // scan health
         disk_scan_complete: diskScan.complete,
         disk_scan_trusted: diskScan.trusted,
       },
       orphaned_on_proxmox: orphanedOnProxmox,
       stale_in_db: staleInDB,
+      lane_drift: laneDrift,
       orphaned_zones: orphanedZones,
       orphaned_vnets: orphanedVNets,
       orphaned_disks: diskResult.disks,

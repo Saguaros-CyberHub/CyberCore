@@ -35,6 +35,13 @@ const {
 } = require('../../utils/lane-networking');
 const { buildLaneTopology } = require('../../utils/lane-topology');
 const laneWan = require('../../utils/lane-wan-allocator');
+const { claimsSql } = require('../../utils/lane-claims');
+const guards = require('../../utils/reconcile-guards');
+const { buildLaneVmIndex } = require('../../utils/reconcile-audit');
+// The single canonical lane teardown. Required lazily-safe at module scope: this
+// route file is loaded by routes/admin.js, which lane-deployer.js does not import,
+// so there is no cycle.
+const laneDeployer = require('../../utils/lane-deployer');
 
 const adminOnly = requireRole('admin');
 
@@ -142,7 +149,8 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
         SELECT DISTINCT vxlan_id FROM cybercore_lane
         WHERE vxlan_id IS NOT NULL
           AND vxlan_id BETWEEN $1 AND $2
-          AND status NOT IN ('error')
+          -- Was NOT IN ('error') — see utils/lane-claims.js.
+          AND ${claimsSql()}
       )
       SELECT gs AS vxlan_id
       FROM generate_series($1::int, $2::int) AS gs
@@ -486,122 +494,45 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
       return res.status(400).json({ error: 'Lane already deleted' });
     }
 
-    const vxlanId = lane.vxlan_id;
-    const laneConfig = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+    // Delegates to the ONE hardened teardown. This route used to carry its own
+    // copy: it never read cfg.workstations[], so every allocated slot-1+ machine
+    // leaked; it had no ownership check, no orphan retry rounds and no disk sweep;
+    // and it deleted the lane row unconditionally, which orphaned any VM that
+    // refused to die AND released its vxlan_id for the next deploy to collide with.
+    //
+    // It also derived VMIDs from a null vxlan_id — 600000 + null is 600000 — and
+    // handed those to forceDestroyVM, which then scanned every node in the cluster
+    // for them.
+    const result = await laneDeployer.teardownLanes([lane.lane_id], {
+      purgeJanitors: true,
+    });
 
-    const vmIdsToDestroy = [];
+    logActivity(req, 'delete_lane', 'lane', lane.lane_id, {
+      vxlan_id: lane.vxlan_id,
+      vms_destroyed: result.vms_destroyed,
+      lanes_deleted: result.lanes_deleted,
+      kept_for_retry: result.lanes_kept_for_retry,
+      errors: result.errors.length,
+    });
 
-    if (Array.isArray(laneConfig.vms) && laneConfig.vms.length > 0) {
-      for (const vm of laneConfig.vms) {
-        vmIdsToDestroy.push({ vmid: vm.vm_id, type: vm.type || 'qemu', label: vm.name || `VM-${vm.vm_id}` });
-      }
-    } else {
-      const challengeVmId = laneConfig.challenge_vm_id || (600000 + vxlanId);
-      vmIdsToDestroy.push({ vmid: challengeVmId, type: 'qemu', label: 'challenge' });
-    }
-
-    const gatewayVmId = laneConfig.gateway_vm_id || (100000 + vxlanId);
-    vmIdsToDestroy.push({ vmid: gatewayVmId, type: 'lxc', label: 'gateway' });
-
-    const attackBoxVmId = laneConfig.attack_box_vm_id || (ATTACK_BOX_VMID_OFFSET + vxlanId);
-    vmIdsToDestroy.push({ vmid: attackBoxVmId, type: 'qemu', label: 'attack-box' });
-
-    const goadControllerVmId = 200000 + vxlanId;
-    vmIdsToDestroy.push({ vmid: goadControllerVmId, type: 'qemu', label: 'goad-controller' });
-
-    if (Array.isArray(laneConfig.attached_modules)) {
-      for (const mod of laneConfig.attached_modules) {
-        for (const vm of (mod.vms || [])) {
-          vmIdsToDestroy.push({
-            vmid: vm.vm_id,
-            type: vm.type || 'qemu',
-            label: `attached:${mod.challenge_key}:${vm.name}`
-          });
-        }
-      }
-    }
-
-    const errors = [];
-    const vmNodes = {};
-    const allVmIds = vmIdsToDestroy.map(v => v.vmid);
-    try {
-      const resources = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
-      for (const r of resources) {
-        if (allVmIds.includes(r.vmid)) {
-          vmNodes[r.vmid] = r.node;
-        }
-      }
-    } catch (e) {
-      errors.push(`Could not query cluster resources: ${e.message}`);
-    }
-
-    for (const vm of vmIdsToDestroy) {
-      const destroyed = await forceDestroyVM(vm.vmid, vm.type, vmNodes[vm.vmid]);
-      if (!destroyed && vmNodes[vm.vmid]) {
-        errors.push(`${vm.label} (${vm.type} ${vm.vmid}): could not be destroyed`);
-      }
-    }
-
-    await tailscale.deleteLaneDevices({ vxlanId }).catch(() => {});
-
-    // Remove the lane's "My Workspaces" records. Deploy registers each lane VM
-    // in cybercore_resource (+ vm_instance + allocation, which cascade on the
-    // resource delete). Deleting a lane individually from the Active Lanes tab
-    // used to skip this — unlike the group "Tear Down" — leaving orphaned
-    // lane_vm resources that kept showing as ghost cards with dead consoles.
-    // Grab the Guac connection IDs first so we can delete those too.
-    let laneGuacConnIds = [];
-    try {
-      const cr = await cybercoreQuery(
-        `SELECT vi.metadata->>'guac_connection_id' AS cid
-           FROM cybercore_vm_instance vi
-           JOIN cybercore_resource r ON r.resource_id = vi.resource_id
-          WHERE r.metadata->>'vm_category' = 'lane_vm'
-            AND r.metadata->>'lane_id' = $1
-            AND vi.metadata->>'guac_connection_id' IS NOT NULL`,
-        [lane.lane_id]
-      );
-      laneGuacConnIds = cr.rows.map(x => x.cid).filter(Boolean);
-    } catch (e) {
-      errors.push(`Workspace console lookup: ${e.message}`);
-    }
-
-    await cybercoreQuery(
-      `DELETE FROM cybercore_resource
-        WHERE metadata->>'vm_category' = 'lane_vm'
-          AND metadata->>'lane_id' = $1`,
-      [lane.lane_id]
-    ).catch(e => errors.push(`Workspace resource cleanup: ${e.message}`));
-
-    // Fan these out instead of awaiting them one at a time. Each DELETE is a
-    // call to Guacamole BY NAME, so a resolver or upstream stall costs the full
-    // per-call timeout — serialised, one dead connection held the entire rest of
-    // the teardown (the cybercore_lane DELETE below, and the response) behind it.
-    // allSettled keeps per-connection failures non-fatal exactly as the old
-    // .catch(() => {}) did: a connection that will not delete is an orphaned row
-    // in Guacamole's own database and holds nothing on the cluster. Chunked
-    // rather than all at once so a lane with many consoles cannot open an
-    // unbounded number of sockets against a single Guacamole instance.
-    const GUAC_DELETE_CONCURRENCY = 8;
-    for (let i = 0; i < laneGuacConnIds.length; i += GUAC_DELETE_CONCURRENCY) {
-      await Promise.allSettled(
-        laneGuacConnIds.slice(i, i + GUAC_DELETE_CONCURRENCY).map(cid =>
-          guacAPI('DELETE', `/connections/${encodeURIComponent(cid)}`))
-      );
-    }
-
-    await cybercoreQuery(
-      `DELETE FROM cybercore_lane WHERE lane_id = $1`,
-      [lane.lane_id]
-    );
-
-    logActivity(req, 'delete_lane', 'lane', lane.lane_id, { vxlan_id: vxlanId, errors: errors.length });
-
-    res.json({
-      success: true,
+    // KEYS ON lanes_kept_for_retry, never errors.length — teardownLanes returns
+    // errors: [...errors, ...warnings], and a Guacamole 403 (which leaves nothing
+    // running anywhere) lands in that array. The old route answered success:true
+    // even when a VM had refused to die.
+    const kept = result.lanes_kept_for_retry || 0;
+    res.status(kept === 0 ? 200 : 207).json({
+      success: kept === 0,
       lane_id: lane.lane_id,
-      vxlan_id: vxlanId,
-      errors: errors.length > 0 ? errors : undefined
+      vxlan_id: lane.vxlan_id,
+      vms_destroyed: result.vms_destroyed,
+      orphan_disks_swept: result.orphan_disks_swept,
+      // The row is kept as 'error' so the survivors stay reachable for a retry;
+      // it still holds its vxlan_id, so nothing can be deployed on top of them.
+      lane_kept_for_retry: kept > 0,
+      survivors: result.survivors,
+      ownership_skipped: result.ownership_skipped,
+      contested: result.contested,
+      errors: result.errors.length > 0 ? result.errors : undefined,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -612,6 +543,139 @@ router.delete('/lanes/:id', authenticateToken, adminOnly, async (req, res) => {
 // ============================================================================
 // ATTACHED MODULES
 // ============================================================================
+
+// ============================================================================
+// PURGE A LANE
+// ============================================================================
+// The one-click repair for a lane the audit reports as drifted: released but
+// still running, half torn down, or a tombstone whose machines never went.
+//
+// DELETE /lanes/:id refuses those cases by design — it 400s on an already
+// 'deleted' row, and a lane whose teardown failed comes back as 'error' with no
+// obvious next step. That gap is the reported symptom: a lane row that is stuck,
+// with machines still on Proxmox and no button that does anything about it.
+//
+// Not a sixth teardown. It re-verifies, then calls the same teardownLanes()
+// everything else does, so the contested-VXLAN skip, the ownership check, the
+// retry rounds, the disk sweep and the row-delete gate all apply unchanged.
+// ============================================================================
+
+router.post('/lanes/:id/purge', authenticateToken, adminOnly, async (req, res) => {
+  const laneId = req.params.id;
+  const { confirm_vxlan, audit_job_id, dry_run, force } = req.body || {};
+
+  try {
+    await guards.requireFreshAudit(audit_job_id);
+    const cluster = await guards.readTrustedClusterView();
+
+    const laneRes = await cybercoreQuery(
+      `SELECT lane_id, user_id, vxlan_id, name, status, config, created_at
+         FROM cybercore_lane WHERE lane_id = $1`,
+      [laneId]
+    );
+    if (laneRes.rows.length === 0) return res.status(404).json({ error: 'Lane not found' });
+    const lane = laneRes.rows[0];
+
+    // A lane being built right now is not drift. Deploys are fire-and-forget
+    // async work inside this process with their progress in an in-memory global,
+    // and that registry is the only mutex this application has.
+    if (lane.status === 'deploying' && force !== true) {
+      const inFlight = laneDeployer.listProgressIds()
+        .some(id => JSON.stringify(laneDeployer.readProgress(id) || {}).includes(laneId));
+      return res.status(409).json({
+        error: inFlight
+          ? 'A deploy is running for this lane right now — purging would race it. Wait for it to finish.'
+          : 'This lane is marked deploying. If the deploy really is dead, retry with force.',
+        deploy_in_flight: inFlight,
+        needs_force: true,
+      });
+    }
+
+    // A typed confirmation token, the same shape fix-zone-peers uses for its
+    // peer set: the operator has to name the VXLAN they think they are freeing.
+    // Both null counts as a match, for a lane that never got one.
+    const claimed = lane.vxlan_id == null ? null : Number(lane.vxlan_id);
+    const offered = confirm_vxlan == null ? null : Number(confirm_vxlan);
+    if (claimed !== offered) {
+      return res.status(409).json({
+        error: `VXLAN confirmation does not match: this lane holds ${claimed === null ? 'no VXLAN' : claimed}.`,
+        expected_vxlan: claimed,
+      });
+    }
+
+    // Whether another live lane has already recycled this row's VXLAN. If so
+    // teardownLanes will destroy NOTHING and remove the record only — which is
+    // correct, and the operator has to be told, because "purge" that destroys no
+    // machines otherwise reads as a failure.
+    let contested = [];
+    if (lane.vxlan_id != null) {
+      const others = await cybercoreQuery(
+        `SELECT lane_id, name, status FROM cybercore_lane
+          WHERE vxlan_id = $1 AND lane_id <> $2 AND ${claimsSql()}`,
+        [lane.vxlan_id, laneId]
+      );
+      contested = others.rows;
+    }
+
+    // Everything this lane recorded, and whether each is actually out there.
+    const index = buildLaneVmIndex([lane], {
+      includeWorkstations: true,
+      includeNullVxlan: true,
+    });
+    const targets = (index.expectedByLane.get(laneId) || []).map(vmid => ({
+      vmid,
+      live: cluster.liveVmIds.has(vmid),
+      node: cluster.vmNodeMap.get(vmid) || null,
+      name: cluster.vmNameMap.get(vmid) || null,
+    }));
+
+    if (dry_run === true) {
+      return res.json({
+        dry_run: true,
+        lane_id: laneId,
+        lane_name: lane.name,
+        vxlan_id: lane.vxlan_id,
+        status: lane.status,
+        targets,
+        live_count: targets.filter(t => t.live).length,
+        contested,
+        // The record goes either way; only the machines are conditional.
+        will_destroy_vms: contested.length === 0,
+      });
+    }
+
+    const result = await laneDeployer.teardownLanes([laneId], { purgeJanitors: true });
+    const kept = result.lanes_kept_for_retry || 0;
+
+    logActivity(req, 'purge_lane', 'lane', laneId, {
+      vxlan_id: lane.vxlan_id,
+      prior_status: lane.status,
+      vms_destroyed: result.vms_destroyed,
+      orphan_disks_swept: result.orphan_disks_swept,
+      kept_for_retry: kept,
+      contested: contested.length,
+      errors: result.errors.length,
+    });
+
+    res.status(kept === 0 ? 200 : 207).json({
+      purged: kept === 0,
+      lane_id: laneId,
+      vxlan_id: lane.vxlan_id,
+      vms_destroyed: result.vms_destroyed,
+      orphan_disks_swept: result.orphan_disks_swept,
+      lane_kept_for_retry: kept > 0,
+      survivors: result.survivors,
+      ownership_skipped: result.ownership_skipped,
+      contested: result.contested,
+      errors: result.errors.length > 0 ? result.errors : undefined,
+    });
+  } catch (error) {
+    if (guards.handleGuardError(error, res)) return;
+    console.error(`[Purge] Lane ${laneId}: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 router.get('/lanes/:laneId/modules', authenticateToken, adminOnly, async (req, res) => {
   try {
@@ -790,6 +854,58 @@ router.delete('/lanes/:laneId/modules/:moduleInstanceId', authenticateToken, adm
       proxmoxAPI,
       forceDestroyVM
     });
+
+    // Strip the instance from config ONLY when its machines are verifiably gone.
+    //
+    // config.attached_modules[] is the sole record of an instance's VMIDs — they
+    // are 800000 + slot*10000 + vxlan, but nothing else stores which slots are in
+    // use. Removing the entry while a VM survived loses the handle on it for good:
+    // the reconcile audit is then the only thing that can find it, and only because
+    // it recomputes the whole 8xxxxx band.
+    //
+    // On failure the instance stays recorded with a detach_errors key, mirroring
+    // the teardown_errors that teardownLanes writes, so a retry can find the VMs.
+    if (errors.length > 0) {
+      await cybercoreQuery(
+        `UPDATE cybercore_lane
+            SET config = jsonb_set(
+                  config,
+                  '{attached_modules}',
+                  COALESCE((
+                    SELECT jsonb_agg(
+                             CASE WHEN m->>'module_instance_id' = $2
+                                  THEN m || $3::jsonb
+                                  ELSE m END)
+                      FROM jsonb_array_elements(config->'attached_modules') m
+                  ), '[]'::jsonb)),
+                updated_at = NOW()
+          WHERE lane_id = $1`,
+        [laneId, moduleInstanceId, JSON.stringify({ detach_errors: errors.slice(0, 20) })]
+      ).catch(e => errors.push(`Could not record detach errors: ${e.message}`));
+
+      console.warn(
+        `[Detach] Lane ${laneId} module ${moduleInstanceId}: ${errors.length} error(s) — ` +
+        `keeping the instance in config so its surviving VMs stay reachable for a retry.`
+      );
+
+      logActivity(req, 'detach_module', 'lane', laneId, {
+        module_instance_id: moduleInstanceId,
+        challenge_key: instance.challenge_key,
+        destroyed_count: destroyed.length,
+        error_count: errors.length,
+        kept_for_retry: true,
+      });
+
+      return res.status(207).json({
+        success: false,
+        lane_id: laneId,
+        module_instance_id: moduleInstanceId,
+        challenge_key: instance.challenge_key,
+        destroyed,
+        kept_for_retry: true,
+        errors,
+      });
+    }
 
     // One pinned client for the whole transaction — see the attach handler above
     // for why routing these four statements through the pool a statement at a

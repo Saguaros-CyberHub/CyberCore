@@ -37,6 +37,7 @@ const { cybercoreQuery } = require('./cybercore-db');
 const nodeSsh = require('./node-ssh');
 const { getV2LabNetwork, getClusterNodes } = require('./site-config');
 const { ipToInt } = require('./ipv4');
+const { claimsSql } = require('./lane-claims');
 
 const LOG = '[WanAlloc]';
 
@@ -318,7 +319,7 @@ async function candidateQuery(net, firstOffset, lastOffset, limit, withOptional,
       SELECT DISTINCT gateway_wan_ip AS ip
         FROM cybercore_lane
        WHERE gateway_wan_ip IS NOT NULL
-         AND status NOT IN ('error', 'deleted')
+         AND ${claimsSql()}
     ),
     last_use AS (
       ${withOptional
@@ -363,7 +364,7 @@ async function poolCensus() {
   const res = await cybercoreQuery(`
     SELECT
       (SELECT COUNT(*)::int FROM cybercore_lane
-        WHERE gateway_wan_ip IS NOT NULL AND status NOT IN ('error','deleted')) AS live_lanes,
+        WHERE gateway_wan_ip IS NOT NULL AND ${claimsSql()}) AS live_lanes,
       (SELECT COUNT(*)::int FROM lane_bootstrap_tokens
         WHERE consumed_at IS NULL AND expires_at > NOW())                        AS in_flight
   `).catch(() => ({ rows: [{ live_lanes: null, in_flight: null }] }));
@@ -595,7 +596,7 @@ async function findWanIpConflicts() {
       FROM cybercore_lane l
       LEFT JOIN cybercore_user u ON u.user_id = l.user_id
      WHERE l.gateway_wan_ip IS NOT NULL
-       AND l.status NOT IN ('error', 'deleted')
+       AND ${claimsSql('l')}
      GROUP BY l.gateway_wan_ip
     HAVING COUNT(*) > 1
      ORDER BY COUNT(*) DESC, l.gateway_wan_ip

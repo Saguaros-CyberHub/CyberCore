@@ -11,6 +11,7 @@ const crypto = require('crypto');
 const express = require('express');
 const fs = require('fs');
 const pathModule = require('path');
+const { claimsSql } = require('../../utils/lane-claims');
 const router = express.Router();
 const { authenticateToken, requireRole } = require('../../middleware/auth');
 const { query } = require('../../utils/db');
@@ -127,7 +128,9 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     const vxlanResult = await cybercoreQuery(
       `WITH used AS (
         SELECT DISTINCT vxlan_id FROM cybercore_lane
-        WHERE vxlan_id IS NOT NULL AND vxlan_id BETWEEN $1 AND $2 AND status NOT IN ('error')
+        -- Was NOT IN ('error'), which counted a 'deleted' lane as still holding
+        -- its id and shrank the reported pool. See utils/lane-claims.js.
+        WHERE vxlan_id IS NOT NULL AND vxlan_id BETWEEN $1 AND $2 AND ${claimsSql()}
       )
       SELECT gs AS vxlan_id FROM generate_series($1::int, $2::int) AS gs
       LEFT JOIN used u ON u.vxlan_id = gs

@@ -426,3 +426,125 @@ test('every gateway status the tunnel can emit has a readable message', async ()
     assert.ok(err.message.includes(String(status)), `${status} is not named in its message`);
   }
 });
+
+// ============================================================================
+// LANE DRIFT TABLE + PURGE
+// ============================================================================
+// The drift table is what makes the leak visible: `released_but_alive` names a
+// lane whose record has already given its VXLAN back to the pool while its
+// machines keep running, which is the state nothing in the UI could show before.
+
+const DRIFT = [
+  { lane_id: 'dead-1', name: 'old-lane', vxlan_id: 77, status: 'error',
+    expected_count: 2, present_count: 1, present_vmids: [100077], missing_vmids: [600077],
+    drift: 'released_but_alive', purgeable: true, claims_infra: false,
+    reason: 'Status error released this lane VXLAN for reuse, but 1 machine is still running.' },
+  { lane_id: 'half-2', name: 'partly-gone', vxlan_id: 88, status: 'active',
+    expected_count: 3, present_count: 2, present_vmids: [100088, 600088], missing_vmids: [700088],
+    drift: 'partial', purgeable: true, claims_infra: true,
+    reason: '1 of 3 machines are missing.' },
+  { lane_id: 'nonet-3', name: 'no-network', vxlan_id: 99, status: 'active',
+    expected_count: 2, present_count: 2, present_vmids: [100099, 600099], missing_vmids: [],
+    drift: 'infra_missing', purgeable: false, claims_infra: true,
+    reason: 'No SDN VNet carries tag 99.' },
+];
+
+const withDrift = (extra = {}) => {
+  const r = clone(RESULT);
+  r.lane_drift = clone(DRIFT);
+  r.job_id = 'rc_test_abcd1234';
+  Object.assign(r.summary, {
+    lanes_released_but_alive: 1, lanes_partial: 1, lanes_infra_missing: 1, lanes_needing_purge: 2,
+  });
+  return Object.assign(r, extra);
+};
+
+test('the drift table renders a Purge button only for purgeable rows', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(withDrift(), { age_seconds: 4 });
+  const html = el('reconcileResults').innerHTML;
+
+  assert.ok(html.includes('Lanes Needing Attention'), 'the drift section must render');
+  assert.ok(html.includes("purgeLane('dead-1'"), 'released_but_alive must offer Purge');
+  assert.ok(html.includes("purgeLane('half-2'"), 'partial must offer Purge');
+  assert.ok(!html.includes("purgeLane('nonet-3'"),
+    'infra_missing must NOT offer Purge — the machines are fine, the network is not');
+});
+
+test('the drift table names the danger rather than just labelling it', () => {
+  const { context, el } = makeContext();
+  context.renderReconcileResult(withDrift(), { age_seconds: 4 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(html.includes('Released but alive'), 'the severe verdict needs a plain-language label');
+  assert.ok(/1\/2 up/.test(html), 'the machine count must be visible per row');
+  assert.ok(html.includes('collide'), 'the header must say why released_but_alive matters');
+});
+
+test('a degraded scan disables every Purge button', () => {
+  // Exactly the rule Sweep All already follows. A quorum-less cluster drops
+  // every guest out of /cluster/resources, so every lane looks gone — each with
+  // a destructive button beside it.
+  const { context, el } = makeContext();
+  const r = withDrift();
+  r.disk_scan = { complete: false, trusted: false, warnings: ['degraded'] };
+  context.renderReconcileResult(r, { age_seconds: 4 });
+  const html = el('reconcileResults').innerHTML;
+  assert.ok(!html.includes('purgeLane('), 'no purge may be offered on an untrusted scan');
+});
+
+test('an absent lane_drift key renders nothing rather than throwing', () => {
+  // The audit payload is a contract the UI renders directly, and an older cached
+  // result predates this field entirely.
+  const { context, el } = makeContext();
+  context.renderReconcileResult(clone(RESULT), { age_seconds: 4 });
+  assert.ok(!el('reconcileResults').innerHTML.includes('Lanes Needing Attention'));
+});
+
+test('the rendered audit job id is captured for the repair calls', () => {
+  // Every destructive call sends this so the server can 409 a stale render
+  // rather than acting on a table that may be a day old.
+  //
+  // Asserted against the source, not the sandbox: `_rec` is a top-level `const`,
+  // and vm.runInContext puts only `var`s and function declarations on the
+  // context object, so there is nothing to read back at runtime.
+  const start = LANES_SRC.indexOf('function renderReconcileResult(');
+  assert.notStrictEqual(start, -1);
+  const head = LANES_SRC.slice(start, start + 900);
+  assert.match(head, /_rec\.resultJobId = r\.job_id \|\| null;/,
+    'renderReconcileResult must stamp the job id of the result it is drawing');
+});
+
+test('every destructive client call carries audit_job_id', () => {
+  // Source-level: the calls are inside async handlers that need a live server to
+  // exercise, but the omission is silent — the server simply never checks.
+  for (const hook of [
+    "'/reconcile/destroy-vm'",
+    "'/reconcile/destroy-zone'",
+    "'/reconcile/destroy-vnet'",
+    "'/reconcile/destroy-disk'",
+    "'/reconcile/destroy-guac-connection'",
+    "'/reconcile/mark-deleted'",
+    "'/sweep-orphaned-disks'",
+  ]) {
+    const at = LANES_SRC.indexOf(hook);
+    assert.notStrictEqual(at, -1, `missing call site for ${hook}`);
+    const call = LANES_SRC.slice(at, LANES_SRC.indexOf(')', at + hook.length) + 1);
+    assert.ok(call.includes('audit_job_id'),
+      `${hook} must send audit_job_id — without it the server cannot detect a stale page: ${call}`);
+  }
+});
+
+test('purgeLane dry-runs before it destroys', () => {
+  // A lane's VMIDs are mostly DERIVED from vxlan_id, so "purge lane 42" can mean
+  // a different set of machines than the operator expects. Confirming against
+  // the real target list beats confirming against a lane name.
+  const start = LANES_SRC.indexOf('async function purgeLane(');
+  assert.notStrictEqual(start, -1, 'purgeLane must exist');
+  const fn = LANES_SRC.slice(start, start + 3000);
+  const dry = fn.indexOf('dry_run: true');
+  const confirm = fn.indexOf('Confirm.show');
+  assert.ok(dry !== -1 && confirm !== -1 && dry < confirm,
+    'the dry run must happen before the confirmation dialog');
+  assert.ok(fn.includes('confirm_vxlan'), 'the VXLAN must be confirmed back to the server');
+  assert.ok(fn.includes('contested'), 'a recycled VXLAN must be surfaced to the operator');
+});

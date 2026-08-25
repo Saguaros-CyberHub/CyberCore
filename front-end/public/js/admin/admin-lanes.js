@@ -85,7 +85,14 @@ async function loadLanes() {
 
 const RECONCILE_POLL_MS = 1500;
 const RECONCILE_MAX_MISSES = 12;   // ~18s of consecutive poll failures
-const _rec = { jobId: null, pollTimer: null, ageTimer: null, polling: false, misses: 0, notFound: 0 };
+// resultJobId identifies the audit currently ON SCREEN, and rides along with
+// every destructive call. The server 409s a token it no longer recognises, so a
+// tab left open overnight cannot drive a destroy off a day-old table — the
+// result cache lives for 24h and is re-rendered on every tab activate.
+const _rec = {
+  jobId: null, pollTimer: null, ageTimer: null, polling: false,
+  misses: 0, notFound: 0, resultJobId: null,
+};
 
 const RECONCILE_PHASES = {
   cluster: 'Reading cluster inventory and database',
@@ -289,6 +296,9 @@ function renderReconcileError(msg, aborted) {
 function renderReconcileResult(r, meta) {
     const m = meta || {};
     const s = r.summary;
+    // Stamped here, not at fetch time: this is the result the operator is
+    // actually looking at, and it is what every repair button is checked against.
+    _rec.resultJobId = r.job_id || null;
     const hasIssues = s.orphaned_on_proxmox > 0 || s.stale_in_db > 0 || s.orphaned_zones > 0 || s.orphaned_vnets > 0 || (s.orphaned_disks || 0) > 0 || (s.orphaned_guac_connections || 0) > 0 || (s.node_drift_issues || 0) > 0;
     const statusColor = hasIssues ? '#e53e3e' : '#38a169';
     const statusLabel = hasIssues ? 'Issues Found' : 'In Sync';
@@ -307,6 +317,38 @@ function renderReconcileResult(r, meta) {
           <td>VXLAN ${vm.vxlan_inferred}</td>
           <td><button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;" onclick="destroyOrphanVM(${vm.vmid}, '${vm.node}', '${vm.type}', this)">Destroy</button></td>
         </tr>`).join('');
+    }
+
+    // Lane drift. Colour tracks severity, not novelty: released_but_alive is the
+    // one that can take a live lane down with it.
+    const DRIFT_LABEL = {
+      released_but_alive: { text: 'Released but alive', color: '#e53e3e' },
+      partial:            { text: 'Partly torn down',   color: '#d69e2e' },
+      infra_missing:      { text: 'No network',         color: '#d69e2e' },
+      stale:              { text: 'Stale',              color: '#718096' },
+      unknown:            { text: 'Unknown',            color: '#718096' },
+    };
+    let driftRows = '';
+    if (Array.isArray(r.lane_drift) && r.lane_drift.length) {
+      driftRows = r.lane_drift.map(d => {
+        const lbl = DRIFT_LABEL[d.drift] || { text: d.drift, color: '#718096' };
+        // A degraded cluster view makes every lane look gone, so it offers no
+        // button at all — same rule the disk sweep follows via scanTrusted.
+        const action = (d.purgeable && scanTrusted)
+          ? `<button class="btn btn-sm" style="font-size:0.7rem; padding:0.15rem 0.4rem; border:1px solid #e53e3e; color:#e53e3e; background:transparent;"
+               onclick="purgeLane('${escHtml(d.lane_id)}', '${escHtml(d.name || d.lane_id)}', ${d.vxlan_id == null ? 'null' : d.vxlan_id}, this)">Purge</button>`
+          : `<span style="color:var(--gray-500); font-size:0.7rem;">${d.drift === 'unknown' ? 'Re-scan needed' : '—'}</span>`;
+        return `
+        <tr>
+          <td style="font-family:monospace; font-size:0.72rem;">${escHtml(d.name || d.lane_id)}</td>
+          <td>${d.vxlan_id == null ? '—' : d.vxlan_id}</td>
+          <td>${escHtml(d.status || '')}</td>
+          <td style="color:${lbl.color}; font-weight:600;">${lbl.text}</td>
+          <td>${d.present_count}/${d.expected_count} up</td>
+          <td style="font-size:0.72rem; color:var(--gray-600);">${escHtml(d.reason || '')}</td>
+          <td>${action}</td>
+        </tr>`;
+      }).join('');
     }
 
     let staleRows = '';
@@ -526,6 +568,18 @@ function renderReconcileResult(r, meta) {
             <thead><tr><th>Lane ID</th><th>Name</th><th>VXLAN</th><th>Status</th><th>Created</th><th>Action</th></tr></thead>
             <tbody>${staleRows}</tbody>
           </table>` : ''}
+        ${driftRows ? `
+          <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#e53e3e;">Lanes Needing Attention</h4>
+          <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">
+            Lanes whose database record and actual machines disagree. <strong>Released but alive</strong> is the
+            dangerous one: the record has already given its VXLAN back to the pool while its machines are still
+            running, so the next deploy can be handed the same VXLAN and collide with them on the wire.
+            Purge destroys everything the lane owns and removes the record — re-verified server-side first.
+          </p>
+          <table class="admin-table" style="font-size:0.8rem;">
+            <thead><tr><th>Lane</th><th>VXLAN</th><th>Status</th><th>Drift</th><th>Machines</th><th>Why</th><th>Action</th></tr></thead>
+            <tbody>${driftRows}</tbody>
+          </table>` : ''}
         ${showCoverage ? `
           <h4 style="font-size:0.9rem; margin:1rem 0 0.5rem; color:#d69e2e;">Disk Scan Coverage</h4>
           <p style="font-size:0.75rem; color:var(--gray-500); margin-bottom:0.5rem;">
@@ -660,7 +714,7 @@ async function destroyOrphanVM(vmid, node, type, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    await api('POST', '/reconcile/destroy-vm', { vmid, node, type });
+    await api('POST', '/reconcile/destroy-vm', { vmid, node, type, audit_job_id: _rec.resultJobId });
     btn.textContent = 'Destroyed';
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
@@ -676,7 +730,7 @@ async function destroyOrphanZone(zone, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    const result = await api('POST', '/reconcile/destroy-zone', { zone });
+    const result = await api('POST', '/reconcile/destroy-zone', { zone, audit_job_id: _rec.resultJobId });
     btn.textContent = 'Destroyed (' + result.vnets_removed + ' VNets)';
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
@@ -692,7 +746,7 @@ async function destroyOrphanVNet(vnet, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    await api('POST', '/reconcile/destroy-vnet', { vnet });
+    await api('POST', '/reconcile/destroy-vnet', { vnet, audit_job_id: _rec.resultJobId });
     btn.textContent = 'Deleted';
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
@@ -708,7 +762,7 @@ async function destroyOrphanDisk(node, storage, volid, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    await api('POST', '/reconcile/destroy-disk', { node, storage, volid });
+    await api('POST', '/reconcile/destroy-disk', { node, storage, volid, audit_job_id: _rec.resultJobId });
     btn.textContent = 'Deleted';
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
@@ -725,7 +779,7 @@ async function destroyOrphanGuacConn(id, name, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    await api('POST', '/reconcile/destroy-guac-connection', { id, name });
+    await api('POST', '/reconcile/destroy-guac-connection', { id, name, audit_job_id: _rec.resultJobId });
     btn.textContent = 'Deleted';
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
@@ -751,7 +805,7 @@ async function sweepAllOrphanGuacConns(btn) {
     const name = b.dataset.connName;
     if (!id) continue;
     try {
-      await api('POST', '/reconcile/destroy-guac-connection', { id, name });
+      await api('POST', '/reconcile/destroy-guac-connection', { id, name, audit_job_id: _rec.resultJobId });
       b.textContent = 'Deleted';
       b.style.color = '#38a169';
       b.style.borderColor = '#38a169';
@@ -785,7 +839,7 @@ async function sweepAllOrphanDisks(btn) {
     // No vmid_pattern: the server filters by the CyberHub ranges it just
     // audited with. The old '^[167][0-9]{5}$' silently excluded goad_controller
     // (2xxxxx) and attached_module (8xxxxx) disks listed in the table above.
-    const result = await api('POST', '/sweep-orphaned-disks', { dry_run: false }, { timeoutMs: 120000 });
+    const result = await api('POST', '/sweep-orphaned-disks', { dry_run: false, audit_job_id: _rec.resultJobId }, { timeoutMs: 120000 });
     btn.textContent = `Swept ${result.orphans_deleted}/${result.orphans_found} (${result.reclaimed_size_gb} GB)`;
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
@@ -803,16 +857,102 @@ async function markLaneDeleted(laneId, btn) {
   btn.disabled = true;
   btn.textContent = '...';
   try {
-    await api('POST', '/reconcile/mark-deleted', { lane_id: laneId });
+    await api('POST', '/reconcile/mark-deleted', { lane_id: laneId, audit_job_id: _rec.resultJobId });
     btn.textContent = 'Cleaned';
     btn.style.color = '#38a169';
     btn.style.borderColor = '#38a169';
     loadLanes();
   } catch (e) {
-    Toast.error('Failed', e.message);
+    // The server refuses to free a VXLAN whose machines are still up, and says
+    // which ones. That is a routing decision, not a failure — send them to Purge.
+    if (e.data && Array.isArray(e.data.alive_vmids)) {
+      Toast.error('Machines still running', `${e.message} Use Purge instead.`);
+    } else if (e.data && e.data.stale) {
+      Toast.error('Audit out of date', e.message);
+      runReconcile();
+    } else {
+      Toast.error('Failed', e.message);
+    }
     btn.disabled = false;
     btn.textContent = 'Mark Deleted';
   }
+}
+
+/**
+ * Purge a lane: destroy every machine, disk and console it owns, then remove
+ * the record — but only once the server has re-verified all of it.
+ *
+ * Two round trips, always. The first is a dry run whose only job is to put the
+ * real target list in front of the operator: a lane's VMIDs are mostly DERIVED
+ * from its vxlan_id, so "purge lane 42" can mean a different set of machines
+ * than they expect, and a contested VXLAN means it will destroy nothing at all.
+ * Confirming against a list beats confirming against a lane name.
+ */
+async function purgeLane(laneId, laneName, vxlanId, btn) {
+  const original = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '...'; }
+
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = original || 'Purge'; } };
+  const fail = (e) => {
+    if (e.data && e.data.stale) { Toast.error('Audit out of date', e.message); runReconcile(); }
+    else if (e.data && e.data.needs_force) Toast.error('Lane is deploying', e.message);
+    else Toast.error('Purge failed', e.message);
+    restore();
+  };
+
+  let plan;
+  try {
+    plan = await api('POST', `/lanes/${encodeURIComponent(laneId)}/purge`,
+      { dry_run: true, confirm_vxlan: vxlanId, audit_job_id: _rec.resultJobId });
+  } catch (e) { return fail(e); }
+
+  const live = (plan.targets || []).filter(t => t.live);
+  const machineList = live.length
+    ? live.map(t => `${t.vmid}${t.name ? ` (${t.name})` : ''} on ${t.node}`).join('\n')
+    : '(none are running)';
+
+  // A contested VXLAN means a LIVE lane has already recycled this id, so the
+  // teardown will remove the record and destroy nothing. Saying so up front is
+  // the difference between "it worked" and "it did nothing and I don't know why".
+  const contestedNote = (plan.contested && plan.contested.length)
+    ? `\n\nWARNING: VXLAN ${plan.vxlan_id} has already been taken by a live lane `
+      + `(${plan.contested.map(c => c.name || c.lane_id).join(', ')}). `
+      + `No machines will be destroyed — only this stale record is removed.`
+    : '';
+
+  const ok = await Confirm.show({
+    title: `Purge lane ${laneName}`,
+    message:
+      `This destroys every machine, disk and console the lane owns and removes its record. `
+      + `It cannot be undone.\n\nVXLAN: ${plan.vxlan_id == null ? 'none' : plan.vxlan_id}`
+      + `\nStatus: ${plan.status}\n\nMachines still running (${live.length}):\n${machineList}`
+      + contestedNote,
+    confirmText: 'Purge lane',
+    danger: true,
+  });
+  if (!ok) return restore();
+
+  if (btn) btn.textContent = 'Purging...';
+  try {
+    const result = await api('POST', `/lanes/${encodeURIComponent(laneId)}/purge`,
+      { confirm_vxlan: vxlanId, audit_job_id: _rec.resultJobId });
+
+    if (result.purged) {
+      Toast.success('Lane purged',
+        `${result.vms_destroyed} machine(s) destroyed, ${result.orphan_disks_swept} disk(s) swept. `
+        + `VXLAN ${result.vxlan_id == null ? '(none)' : result.vxlan_id} released.`);
+      if (btn) { btn.textContent = 'Purged'; btn.style.color = '#38a169'; btn.style.borderColor = '#38a169'; }
+    } else {
+      // 207. The record was kept ON PURPOSE so the survivors stay reachable and
+      // the VXLAN stays out of the pool — name them rather than saying "failed".
+      const names = (result.survivors || []).map(s => `${s.vmid} on ${s.node}`).join(', ');
+      Toast.warning('Purge incomplete',
+        `The lane record was kept so these machines stay reachable: ${names || 'see errors'}. `
+        + `Its VXLAN is still reserved. Fix the cause and purge again.`);
+      restore();
+    }
+    loadLanes();
+  } catch (e) { fail(e); }
 }
 
 // ============================================================================

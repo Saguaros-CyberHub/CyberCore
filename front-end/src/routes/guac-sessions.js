@@ -17,6 +17,7 @@
 const express = require('express');
 const router = express.Router();
 const { cybercoreQuery } = require('../utils/cybercore-db');
+const { claimsSql } = require('../utils/lane-claims');
 const { authenticateToken } = require('../middleware/auth');
 const { guacAPI, guacFetchText, mintGuacToken, GUAC_DS, GUAC_URL } = require('../utils/guacamole');
 const { proxmoxAPI } = require('../utils/proxmox');
@@ -267,7 +268,7 @@ const LIVE_LANE_FILTER = `(
   OR EXISTS (
     SELECT 1 FROM cybercore_lane l
     WHERE l.lane_id::text = r.metadata->>'lane_id'
-      AND l.status NOT IN ('deleted', 'error')
+      AND ${claimsSql('l')}
   )
 )`;
 

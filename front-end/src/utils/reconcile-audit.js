@@ -255,28 +255,66 @@ function classifyOrphanDisks(volumes, { liveVmIds, ranges }) {
  *                       VXLAN. Reusing expectedVmIds here would silently stop
  *                       flagging exactly that case.
  */
-function buildLaneVmIndex(dbLanes) {
+/**
+ * @param {Array<object>} dbLanes
+ * @param {object} [opts]  EVERY option defaults OFF, and that is deliberate.
+ *   Called with no options this function is byte-identical to the original
+ *   inline implementation, which is what lets the GOLDEN test in
+ *   test/reconcile-audit.test.js keep pinning it against drift. The audit passes
+ *   the options explicitly (utils/reconcile-scan.js) so each change of behaviour
+ *   is visible at the call site rather than smuggled into a default.
+ * @param {boolean} [opts.includeWorkstations]  Count cfg.workstations[].vmid.
+ * @param {boolean} [opts.includeNullVxlan]     Do not skip lanes with no vxlan_id.
+ * @param {Set<string>} [opts.claimingStatuses] Statuses that still CLAIM their VMs.
+ */
+function buildLaneVmIndex(dbLanes, opts = {}) {
+  const includeWorkstations = opts.includeWorkstations === true;
+  const includeNullVxlan = opts.includeNullVxlan === true;
+  const claimingStatuses = opts.claimingStatuses || null;
+
   const expectedVmIds = new Set();
   const laneVmMap = {};
   const workloadVmIdsByLane = new Map();
+  // VMIDs recorded by a lane that no longer claims them ('error'/'deleted' both
+  // release the vxlan_id for reuse). They are NOT in expectedVmIds, so they
+  // surface as orphans — which is the entire point: today an 'error' row hides
+  // its still-running machines from the audit while its id is already back in
+  // the allocation pool.
+  const releasedVmIds = new Map();
+  const expectedByLane = new Map();
 
   for (const lane of dbLanes) {
     const vxlan = lane.vxlan_id;
-    if (!vxlan) continue;
+    if (!vxlan && !includeNullVxlan) continue;
     const cfg = lane.config || {};
+    // A lane with no vxlan_id can still have recorded VMIDs, but NONE of them can
+    // be derived: 600000 + null is 600000, which is a real id belonging to
+    // whichever lane holds vxlan 0. Deriving from null is how the old admin
+    // delete route ended up scanning every node for VMID 100000.
+    const derive = (base) => (vxlan ? base + vxlan : null);
 
     const workload = [];
-    if (Array.isArray(cfg.vms)) {
+    if (Array.isArray(cfg.vms) && cfg.vms.length > 0) {
       cfg.vms.forEach(vm => { if (vm.vm_id) workload.push(vm.vm_id); });
-    } else {
-      workload.push(cfg.challenge_vm_id || (600000 + vxlan));
+    } else if (includeWorkstations && Array.isArray(cfg.workstations) && cfg.workstations.length > 0) {
+      // Slots 1+ hold ALLOCATED vmids that cannot be re-derived from vxlan_id.
+      // Omitting them did not just hide machines — it reported a LIVE lane's
+      // slot-1+ workstations as orphans, with a Destroy button beside each one.
+      // Same precedence teardownLanes uses: cfg.vms wins, workstations is the else.
+      cfg.workstations.forEach(ws => { if (ws && ws.vmid) workload.push(ws.vmid); });
+    } else if (!Array.isArray(cfg.vms)) {
+      // Preserves the original branch exactly, including its quirk: an EMPTY
+      // cfg.vms array means "this lane records no workload", not "derive one".
+      const challenge = cfg.challenge_vm_id || derive(600000);
+      if (challenge) workload.push(challenge);
     }
     workloadVmIdsByLane.set(lane.lane_id, workload);
 
     const vmIds = [...workload];
-    vmIds.push(cfg.gateway_vm_id || (100000 + vxlan));
+    const gateway = cfg.gateway_vm_id || derive(100000);
+    if (gateway) vmIds.push(gateway);
     if (cfg.attack_box_vm_id) vmIds.push(cfg.attack_box_vm_id);
-    else if (cfg.attack_box) vmIds.push(700000 + vxlan);
+    else if (cfg.attack_box) { const ab = derive(700000); if (ab) vmIds.push(ab); }
 
     if (Array.isArray(cfg.attached_modules)) {
       for (const mod of cfg.attached_modules) {
@@ -286,20 +324,44 @@ function buildLaneVmIndex(dbLanes) {
       }
     }
 
+    expectedByLane.set(lane.lane_id, vmIds);
+
+    const claims = !claimingStatuses || claimingStatuses.has(lane.status);
     vmIds.forEach(id => {
-      expectedVmIds.add(id);
-      laneVmMap[id] = { lane_id: lane.lane_id, name: lane.name, vxlan_id: vxlan, status: lane.status };
+      if (claims) {
+        expectedVmIds.add(id);
+      } else if (!releasedVmIds.has(id)) {
+        releasedVmIds.set(id, { lane_id: lane.lane_id, name: lane.name, vxlan_id: vxlan, status: lane.status });
+      }
+      // A claiming lane always wins the attribution. Two rows can legitimately
+      // carry one vmid — a released one and the live lane that recycled its
+      // vxlan — and naming the dead one would be actively misleading.
+      if (claims || !laneVmMap[id]) {
+        laneVmMap[id] = {
+          lane_id: lane.lane_id, name: lane.name, vxlan_id: vxlan,
+          status: lane.status, released: !claims,
+        };
+      }
     });
   }
 
-  return { expectedVmIds, laneVmMap, workloadVmIdsByLane };
+  return { expectedVmIds, laneVmMap, workloadVmIdsByLane, releasedVmIds, expectedByLane };
 }
 
-/** Lanes whose every workload VM is gone from Proxmox. */
-function computeStaleLanes(dbLanes, laneIndex, pxVmIdSet) {
+/**
+ * Lanes whose every workload VM is gone from Proxmox.
+ * @param {object} [opts]
+ * @param {boolean} [opts.includeNullVxlan] Also consider lanes with no vxlan_id.
+ *   Off by default so the GOLDEN test keeps pinning the original behaviour; a lane
+ *   that failed before VXLAN assignment is otherwise invisible in BOTH directions
+ *   (buildLaneVmIndex skipped it too), which is how a half-built lane becomes
+ *   permanently unreportable.
+ */
+function computeStaleLanes(dbLanes, laneIndex, pxVmIdSet, opts = {}) {
+  const includeNullVxlan = opts.includeNullVxlan === true;
   return dbLanes
     .filter(lane => {
-      if (!lane.vxlan_id) return false;
+      if (!lane.vxlan_id && !includeNullVxlan) return false;
       const vmIds = laneIndex.workloadVmIdsByLane.get(lane.lane_id) || [];
       return vmIds.length > 0 && vmIds.every(id => !pxVmIdSet.has(id));
     })
@@ -310,6 +372,114 @@ function computeStaleLanes(dbLanes, laneIndex, pxVmIdSet) {
       status: lane.status,
       created_at: lane.created_at
     }));
+}
+
+/**
+ * Per-lane drift, in the directions computeStaleLanes cannot express.
+ *
+ * computeStaleLanes answers exactly one question — "are ALL of this lane's
+ * workload VMs gone?" — and a lane only qualifies while it still CLAIMS them.
+ * Three real states fall through that filter, and all three are the states
+ * operators actually hit:
+ *
+ *   released_but_alive  the row released its vxlan_id (status 'error' or
+ *                       'deleted') while its machines kept running. The audit
+ *                       could not see them, because until now every non-'deleted'
+ *                       lane's VMIDs counted as "expected". Meanwhile the id is
+ *                       back in allocateVxlanIds' pool, so the next deploy clones
+ *                       a gateway on top of the survivor. This is the finding
+ *                       that makes the existing leak visible.
+ *   partial             SOME workload VMs gone, some alive. Reported as healthy
+ *                       today, because "all gone" is false.
+ *   infra_missing       the DB says active but the lane's VNet is not on the
+ *                       cluster, so the machines are cabled to nothing.
+ *
+ * PURE. Every input is passed in; see this file's header for why it may not import.
+ *
+ * @param {object}   a
+ * @param {Array}    a.dbLanes
+ * @param {object}   a.laneIndex          from buildLaneVmIndex
+ * @param {Set}      a.pxVmIdSet          every live VMID on the cluster
+ * @param {Set}      [a.pxVNetTags]       live SDN VNet tags, as numbers
+ * @param {Set}      [a.claimingStatuses] statuses that still hold their resources
+ * @param {boolean}  a.trusted            cluster view is complete
+ */
+function classifyLaneDrift({
+  dbLanes, laneIndex, pxVmIdSet, pxVNetTags, claimingStatuses, trusted,
+}) {
+  const vnetTags = pxVNetTags || null;
+  const out = [];
+
+  for (const lane of dbLanes) {
+    const expected = laneIndex.expectedByLane
+      ? (laneIndex.expectedByLane.get(lane.lane_id) || [])
+      : [];
+    if (expected.length === 0) continue;
+
+    const present = expected.filter(id => pxVmIdSet.has(id));
+    const missing = expected.filter(id => !pxVmIdSet.has(id));
+    const claims = !claimingStatuses || claimingStatuses.has(lane.status);
+
+    const row = {
+      lane_id: lane.lane_id,
+      name: lane.name,
+      vxlan_id: lane.vxlan_id,
+      status: lane.status,
+      created_at: lane.created_at,
+      expected_count: expected.length,
+      present_count: present.length,
+      present_vmids: present,
+      missing_vmids: missing,
+      claims_infra: claims,
+    };
+
+    // A degraded cluster view drops live guests out of /cluster/resources while
+    // their disks stay fully visible, so EVERY lane would classify as gone. Say
+    // "unknown" rather than render a table of false positives with buttons on it
+    // — the same reasoning summarizeScan applies to the disk findings.
+    if (!trusted) {
+      if (present.length < expected.length) {
+        out.push({ ...row, drift: 'unknown', purgeable: false,
+          reason: 'Cluster view is degraded — cannot tell whether these machines are really gone.' });
+      }
+      continue;
+    }
+
+    if (!claims) {
+      // Only interesting when something is STILL RUNNING. A released row with
+      // nothing left is just a tombstone.
+      if (present.length > 0) {
+        out.push({ ...row, drift: 'released_but_alive', purgeable: true,
+          reason: `Status '${lane.status}' released this lane's VXLAN for reuse, but ${present.length} ` +
+                  `of its ${expected.length} machine(s) are still running. A new lane can be given ` +
+                  `the same VXLAN and collide with them.` });
+      }
+      continue;
+    }
+
+    if (present.length === 0) {
+      out.push({ ...row, drift: 'stale', purgeable: true,
+        reason: 'No machine belonging to this lane is on the cluster.' });
+      continue;
+    }
+
+    if (present.length < expected.length) {
+      out.push({ ...row, drift: 'partial', purgeable: true,
+        reason: `${missing.length} of ${expected.length} machine(s) are missing — this lane was ` +
+                `torn down or rebuilt part-way and never finished.` });
+      continue;
+    }
+
+    // Everything present, but cabled to nothing. resolveVnets throws on this at
+    // rebuild time; nothing reports it while the lane merely sits there.
+    if (vnetTags && lane.vxlan_id && !vnetTags.has(lane.vxlan_id)) {
+      out.push({ ...row, drift: 'infra_missing', purgeable: false,
+        reason: `Every machine is running but no SDN VNet carries tag ${lane.vxlan_id} — ` +
+                `this lane has no network.` });
+    }
+  }
+
+  return out;
 }
 
 function computeOrphanedVMs(pxVMs, expectedVmIds, ranges) {
@@ -610,6 +780,7 @@ module.exports = {
   classifyOrphanDisks,
   buildLaneVmIndex,
   computeStaleLanes,
+  classifyLaneDrift,
   computeOrphanedVMs,
   computeSdnOrphans,
   computeExpectedPeers,

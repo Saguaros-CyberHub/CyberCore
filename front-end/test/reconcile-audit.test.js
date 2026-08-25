@@ -488,3 +488,176 @@ test('the audit budget leaves real margin under the 100s tunnel limit', () => {
     `budget ${budget}ms + Guac ${guacWorstCase}ms must stay well under Cloudflare's ` +
     `100s origin timeout, which returns an HTML page the admin UI cannot parse`);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LANE DRIFT — the states computeStaleLanes structurally cannot express
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Everything below is OPT-IN behaviour. Called with no options,
+// buildLaneVmIndex and computeStaleLanes still match the original inline
+// implementation byte for byte, which is what keeps the GOLDEN case above
+// meaningful. The audit passes the options explicitly (utils/reconcile-scan.js)
+// so each change is visible at the call site rather than hidden in a default.
+
+const CLAIMING = new Set(['pending', 'deploying', 'active', 'suspended']);
+
+/** A live workstation lane with an ALLOCATED slot-1 machine. */
+const WS_LANE = {
+  lane_id: 'ws', name: 'sec310-jsmith', vxlan_id: 42, status: 'active',
+  config: {
+    workstations: [
+      { slot: 0, vmid: 600042, hostname: 'ws-0' },
+      { slot: 1, vmid: 604999, hostname: 'ws-1' },   // allocated, NOT derived
+    ],
+  },
+};
+
+/** A lane whose teardown failed: the status released the id, machines survived. */
+const RELEASED_LANE = {
+  lane_id: 'dead', name: 'old-lane', vxlan_id: 77, status: 'error',
+  config: { challenge_vm_id: 600077, gateway_vm_id: 100077 },
+};
+
+/** Failed before VXLAN assignment; only explicitly recorded ids exist. */
+const NO_VXLAN_LANE = {
+  lane_id: 'nv', name: 'half-built', vxlan_id: null, status: 'deploying',
+  config: { vms: [{ vm_id: 655001 }] },
+};
+
+test('slot-1+ workstations count as expected — they are ALLOCATED, not derived', () => {
+  // The bug this pins: cfg.workstations[] was never read, so a LIVE student's
+  // second machine appeared under "Orphaned VMs" with a Destroy button. Its id
+  // cannot be re-derived from vxlan_id, so config is the only record of it.
+  const legacy = A.buildLaneVmIndex([WS_LANE]);
+  assert.ok(!legacy.expectedVmIds.has(604999),
+    'legacy behaviour must be preserved while the option is off');
+
+  const fixed = A.buildLaneVmIndex([WS_LANE], { includeWorkstations: true });
+  assert.ok(fixed.expectedVmIds.has(604999), 'slot 1 must be accounted for');
+  assert.ok(fixed.expectedVmIds.has(600042), 'slot 0 too');
+
+  // And they are WORKLOAD, not infrastructure: a lane whose only survivor is
+  // slot 1 is partly torn down, not stale.
+  assert.deepStrictEqual(fixed.workloadVmIdsByLane.get('ws'), [600042, 604999]);
+});
+
+test('a released lane stops claiming its VMs, so survivors surface as orphans', () => {
+  // THE core bug. 'error' releases the vxlan_id back into allocateVxlanIds'
+  // pool, but the audit loaded every non-deleted row and counted its VMIDs as
+  // expected — so the machines were invisible at the exact moment their id was
+  // being handed to someone else.
+  const legacy = A.buildLaneVmIndex([RELEASED_LANE]);
+  assert.ok(legacy.expectedVmIds.has(100077),
+    'legacy: the released gateway counted as expected, which is what hid it');
+
+  const fixed = A.buildLaneVmIndex([RELEASED_LANE], { claimingStatuses: CLAIMING });
+  assert.ok(!fixed.expectedVmIds.has(100077), 'a released lane must claim nothing');
+  assert.ok(fixed.releasedVmIds.has(100077), 'but it must still be attributable');
+  assert.strictEqual(fixed.releasedVmIds.get(100077).lane_id, 'dead');
+  assert.strictEqual(fixed.laneVmMap[100077].released, true);
+});
+
+test('a claiming lane wins attribution over a released one on the same VMID', () => {
+  // Two rows can legitimately carry one derived VMID: a dead lane and the live
+  // lane that recycled its VXLAN. Naming the dead one would be actively wrong.
+  const recycled = {
+    lane_id: 'live', name: 'new-lane', vxlan_id: 77, status: 'active',
+    config: { challenge_vm_id: 600077, gateway_vm_id: 100077 },
+  };
+  const idx = A.buildLaneVmIndex([RELEASED_LANE, recycled], { claimingStatuses: CLAIMING });
+  assert.strictEqual(idx.laneVmMap[100077].lane_id, 'live');
+  assert.strictEqual(idx.laneVmMap[100077].released, false);
+});
+
+test('a lane with no vxlan_id contributes recorded ids but NEVER derived ones', () => {
+  // 600000 + null is 600000 — a real id belonging to whichever lane holds
+  // vxlan 0. Deriving from null is how the old admin delete route came to scan
+  // every node in the cluster for VMID 100000.
+  const legacy = A.buildLaneVmIndex([NO_VXLAN_LANE]);
+  assert.strictEqual(legacy.expectedVmIds.size, 0, 'legacy skipped the lane entirely');
+
+  const fixed = A.buildLaneVmIndex([NO_VXLAN_LANE], { includeNullVxlan: true });
+  assert.ok(fixed.expectedVmIds.has(655001), 'the recorded id is counted');
+  for (const derived of [600000, 100000, 200000, 700000]) {
+    assert.ok(!fixed.expectedVmIds.has(derived), `must not derive ${derived} from a null vxlan`);
+  }
+});
+
+test('computeStaleLanes can see null-vxlan lanes when asked', () => {
+  const idx = A.buildLaneVmIndex([NO_VXLAN_LANE], { includeNullVxlan: true });
+  assert.deepStrictEqual(
+    A.computeStaleLanes([NO_VXLAN_LANE], idx, new Set()).map(l => l.lane_id), [],
+    'legacy: invisible in both directions');
+  assert.deepStrictEqual(
+    A.computeStaleLanes([NO_VXLAN_LANE], idx, new Set(), { includeNullVxlan: true })
+      .map(l => l.lane_id), ['nv']);
+});
+
+// ── classifyLaneDrift ───────────────────────────────────────────────────────
+
+const drift = (lanes, liveIds, opts = {}) => A.classifyLaneDrift({
+  dbLanes: lanes,
+  laneIndex: A.buildLaneVmIndex(lanes, {
+    includeWorkstations: true, includeNullVxlan: true, claimingStatuses: CLAIMING,
+  }),
+  pxVmIdSet: new Set(liveIds),
+  pxVNetTags: opts.vnetTags === undefined ? new Set(lanes.map(l => l.vxlan_id)) : opts.vnetTags,
+  claimingStatuses: CLAIMING,
+  trusted: opts.trusted !== false,
+});
+
+test('released_but_alive fires only when something is still running', () => {
+  const alive = drift([RELEASED_LANE], [100077]);
+  assert.strictEqual(alive.length, 1);
+  assert.strictEqual(alive[0].drift, 'released_but_alive');
+  assert.strictEqual(alive[0].purgeable, true);
+  assert.match(alive[0].reason, /still running/);
+
+  // A released row with nothing left is just a tombstone — not a finding.
+  assert.deepStrictEqual(drift([RELEASED_LANE], []), []);
+});
+
+test('partial catches the half-torn-down lane computeStaleLanes calls healthy', () => {
+  // slot 0 gone, slot 1 and the gateway alive. "All workload VMs gone" is false,
+  // so computeStaleLanes reports nothing and the lane reads as fine.
+  const idx = A.buildLaneVmIndex([WS_LANE], { includeWorkstations: true });
+  assert.deepStrictEqual(A.computeStaleLanes([WS_LANE], idx, new Set([604999, 100042])), []);
+
+  const d = drift([WS_LANE], [604999, 100042]);
+  assert.strictEqual(d.length, 1);
+  assert.strictEqual(d[0].drift, 'partial');
+  assert.deepStrictEqual(d[0].missing_vmids, [600042]);
+  assert.strictEqual(d[0].present_count, 2);
+  assert.strictEqual(d[0].expected_count, 3);
+});
+
+test('infra_missing catches a fully-up lane whose VNet is gone', () => {
+  const d = drift([WS_LANE], [600042, 604999, 100042], { vnetTags: new Set([999]) });
+  assert.strictEqual(d.length, 1);
+  assert.strictEqual(d[0].drift, 'infra_missing');
+  // No purge offered: the machines are fine, the network is what needs fixing.
+  assert.strictEqual(d[0].purgeable, false);
+});
+
+test('an unreadable SDN list does not report every lane as networkless', () => {
+  // A failed SDN read yields an empty tag list, which would flag every lane.
+  // reconcile-scan passes null in that case; classify must skip the check.
+  const d = drift([WS_LANE], [600042, 604999, 100042], { vnetTags: null });
+  assert.deepStrictEqual(d, []);
+});
+
+test('a fully in-sync lane produces no finding at all', () => {
+  assert.deepStrictEqual(drift([WS_LANE], [600042, 604999, 100042]), []);
+});
+
+test('a degraded cluster view reports unknown and offers no button', () => {
+  // The catastrophic case: pmxcfs loses quorum, every guest drops out of
+  // /cluster/resources, and every lane would otherwise classify as gone — each
+  // with a Purge button beside it.
+  const d = drift([WS_LANE, RELEASED_LANE], [], { trusted: false });
+  assert.strictEqual(d.length, 2);
+  for (const row of d) {
+    assert.strictEqual(row.drift, 'unknown');
+    assert.strictEqual(row.purgeable, false);
+  }
+});

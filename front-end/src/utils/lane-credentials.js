@@ -32,6 +32,7 @@
  */
 
 const { cybercoreQuery } = require('./cybercore-db');
+const { claimsSql } = require('./lane-claims');
 
 const LOG = '[LaneCreds]';
 
@@ -151,7 +152,7 @@ async function getLaneWorkstationCredentialForVm(vmInstanceId, { userId, isAdmin
       AND EXISTS (
         SELECT 1 FROM cybercore_lane l
          WHERE l.lane_id::text = r.metadata->>'lane_id'
-           AND l.status NOT IN ('deleted', 'error'))`;
+           AND ${claimsSql('l')})`;
 
   // Two branches rather than one query with an OR: the non-admin form has to
   // JOIN the allocation so that "not yours" and "does not exist" come back

@@ -20,6 +20,7 @@ const { cybercoreQuery } = require('./cybercore-db');
 const { proxmoxAPI } = require('./proxmox');
 const { computeExpectedPeers, normalizePeers } = require('./reconcile-audit');
 const { getPhysicalClusterIps } = require('./site-config');
+const { claimsSql } = require('./lane-claims');
 
 // A v3 lane's internal VNet uses tag = (vxlanId + this offset). MUST match
 // V3_INTERNAL_TAG_OFFSET in utils/lane-networking.js.
@@ -73,11 +74,18 @@ async function allocateVxlanBlock(numLanes) {
   return { start, end: start + n - 1 };
 }
 
-/** Count lanes currently holding a vxlan in [start,end] (active or deploying). */
+/**
+ * Count lanes currently holding a vxlan in [start,end].
+ *
+ * Was status IN ('active','deploying'), which missed 'pending' and 'suspended'.
+ * Not cosmetic: this count is how teardownLabNetwork and getOrCreateProfileChallenge
+ * decide a reservation is empty, so the undercount let a block that suspended lanes
+ * were sitting in be deleted and re-carved underneath them.
+ */
 async function countActiveLanesInBlock({ start, end }) {
   const res = await cybercoreQuery(
     `SELECT COUNT(*)::int AS cnt FROM cybercore_lane
-      WHERE vxlan_id BETWEEN $1 AND $2 AND status IN ('active', 'deploying')`,
+      WHERE vxlan_id BETWEEN $1 AND $2 AND ${claimsSql()}`,
     [start, end]
   );
   return res.rows[0]?.cnt || 0;
