@@ -1719,21 +1719,39 @@ async function deployChallengeLanesInner({
   //    to its pre-created VNet(s).
   const vxlans = await laneDeployer.allocateVxlanIds(vxlanBlock, users.length);
   if (vxlans.length < users.length) {
+    // Give back whatever WAS free before bailing. Without this a deploy that
+    // asks for more lanes than the block holds parks the remainder for the
+    // reservation TTL, so a retry with a smaller selection sees zero free.
+    laneDeployer.releaseVxlanReservations(vxlans);
     laneDeployer.finishProgress(progressId);
     throw new Error(
       `Not enough VXLAN capacity for '${challengeKey}': ${vxlans.length} free id(s) for ` +
       `${users.length} user(s) (range ${vxlanBlock.start}-${vxlanBlock.end}).`
     );
   }
-  const { resolved: vnetsByVxlan, missing } = await resolveVnets(vxlans, subnetScheme);
+  // The two calls between the VXLAN allocation and the lane INSERTs that can
+  // throw: a missing VNet and an exhausted WAN pool, both of which happen in
+  // practice. Neither has created anything yet, so the ids are still free — but
+  // without this they would sit reserved until the TTL expires, and the operator
+  // retrying immediately would be told the block is full.
+  let vnetsByVxlan;
+  let missing;
+  let wanIps;
+  try {
+    ({ resolved: vnetsByVxlan, missing } = await resolveVnets(vxlans, subnetScheme));
 
-  // WAN transit addresses for the batch, before any Proxmox work. Same pool the
-  // workstation lanes draw from — one shared VLAN, one allocator — so an
-  // exhausted pool fails here rather than producing lanes that silently share a
-  // gateway address and a Guacamole console host.
-  const wanIps = (subnetScheme === 'v2' || subnetScheme === 'v3')
-    ? await laneWan.allocateLaneWanIps(users.length, { logTag })
-    : null;
+    // WAN transit addresses for the batch, before any Proxmox work. Same pool the
+    // workstation lanes draw from — one shared VLAN, one allocator — so an
+    // exhausted pool fails here rather than producing lanes that silently share a
+    // gateway address and a Guacamole console host.
+    wanIps = (subnetScheme === 'v2' || subnetScheme === 'v3')
+      ? await laneWan.allocateLaneWanIps(users.length, { logTag })
+      : null;
+  } catch (err) {
+    laneDeployer.releaseVxlanReservations(vxlans);
+    laneDeployer.finishProgress(progressId);
+    throw err;
+  }
   const unusedWan = [];
 
   // 2. Spread the lanes across the cluster.

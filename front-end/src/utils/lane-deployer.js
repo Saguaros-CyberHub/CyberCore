@@ -350,7 +350,27 @@ function releaseVxlanReservations(ids) {
   for (const id of (Array.isArray(ids) ? ids : [ids])) _reservedVxlans.delete(Number(id));
 }
 
-async function allocateVxlanIds(block, count) {
+/**
+ * @param {{start:number,end:number}} block
+ * @param {number} count
+ * @param {object}  [opts]
+ * @param {boolean} [opts.reserve=true]  Claim the returned ids.
+ *
+ *   Pass FALSE for a read-only capacity probe. Two callers only look — the CLE
+ *   preflight (countFreeLanes in cle/utils/vuln-lab-provision.js, which asks for
+ *   the whole block just to count it) and the group-deploy check in
+ *   routes/admin/groups.js. Reserving on their behalf makes checking capacity
+ *   CONSUME it: the probe parks every free id for the reservation TTL, and the
+ *   deploy that follows a moment later finds nothing left and reports the block
+ *   as full.
+ *
+ *   A probe still EXCLUDES ids other callers have reserved — one being held for
+ *   an in-flight deploy is genuinely not available — so the count is honest in
+ *   the direction that matters. It is a snapshot either way, exactly as it was
+ *   before reservations existed.
+ */
+async function allocateVxlanIds(block, count, opts = {}) {
+  const reserve = opts.reserve !== false;
   return serializeVxlan(async () => {
     sweepVxlanReservations();
     const reserved = [..._reservedVxlans.keys()];
@@ -372,8 +392,10 @@ async function allocateVxlanIds(block, count) {
     );
 
     const ids = res.rows.map(r => r.vxlan_id);
-    const now = Date.now();
-    for (const id of ids) _reservedVxlans.set(id, now);
+    if (reserve) {
+      const now = Date.now();
+      for (const id of ids) _reservedVxlans.set(id, now);
+    }
     return ids;
   });
 }
@@ -2063,6 +2085,10 @@ async function deployLanes({
   // Allocate VXLAN ids from the reserved block; map each to its pre-created VNet.
   const vxlans = await allocateVxlanIds(vxlanBlock, users.length);
   if (vxlans.length < users.length) {
+    // Hand back whatever was free before bailing, or a deploy that overshoots
+    // the block parks the remainder for the reservation TTL and a smaller retry
+    // finds nothing.
+    releaseVxlanReservations(vxlans);
     // Same reasoning as the WAN-pool failure below: this caller is
     // fire-and-forget, so an unfinished progress entry leaves the poller
     // watching a deploy that never starts.
@@ -2183,6 +2209,7 @@ async function deployLanes({
   if (unusedWan.length) await laneWan.releaseLaneWanIps(unusedWan);
   if (!jobs.length) {
     if (progress) { progress.failed = failed.length; progress.completed = failed.length; }
+    releaseVxlanReservations(vxlans);
     finishProgress(progressId);
     return { provisioned: [], failed, progressId };
   }
@@ -2190,12 +2217,20 @@ async function deployLanes({
   const cloneSem = createCloneSemaphore();
   jobs.forEach(j => { j.cloneSem = cloneSem; });
 
-  const result = jobs.length > 3
-    ? await batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem, progress })
-    : await sequentialDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, progress });
+  try {
+    const result = jobs.length > 3
+      ? await batchDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, cloneSem, progress })
+      : await sequentialDeploy(jobs, failed, { gwOriginNode, gwOriginVmid, progress });
 
-  finishProgress(progressId);
-  return { ...result, progressId };
+    finishProgress(progressId);
+    return { ...result, progressId };
+  } finally {
+    // Both paths insert their lane rows first, so by here the allocator's
+    // committed-rows query can see every id that was actually used, and an id
+    // whose lane never inserted is genuinely free again. In a finally because a
+    // throw from either path would otherwise park the whole batch for the TTL.
+    releaseVxlanReservations(vxlans);
+  }
 }
 
 /** ≤3: one lane at a time, gateway cloned from its origin node. */

@@ -115,7 +115,9 @@ router.post('/deploy-group', authenticateToken, adminOnly, async (req, res) => {
       // Same allocator the deploy itself uses, so the check and the deploy can't
       // disagree about what "free" means (it excludes error AND deleted lanes,
       // matching the ux_cybercore_lane_vxlan_active partial unique index).
-      const free = await allocateVxlanIds(vxlanBlock, numStud);
+      // reserve: false — a check, not a claim. The deploy below allocates for
+      // real; reserving here would hand it an already-empty block.
+      const free = await allocateVxlanIds(vxlanBlock, numStud, { reserve: false });
       if (free.length < numStud) {
         return res.status(400).json({
           error: `Not enough VXLAN capacity. Need ${numStud} lanes but only ${free.length} available (range ${vxlanBlock.start}-${vxlanBlock.end}).`,

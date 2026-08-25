@@ -301,7 +301,10 @@ function describeChallenge(challenge) {
 async function countFreeLanes(block) {
   if (!block?.start || !block?.end) return 0;
   const size = block.end - block.start + 1;
-  const free = await laneDeployer.allocateVxlanIds(block, size);
+  // reserve: false — this is a COUNT, not a claim. It asks for the whole block,
+  // so reserving would park every free id for the reservation TTL and the deploy
+  // that follows would find the block empty and refuse with "0 free lane(s)".
+  const free = await laneDeployer.allocateVxlanIds(block, size, { reserve: false });
   return free.length;
 }
 

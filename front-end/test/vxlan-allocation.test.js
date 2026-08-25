@@ -193,3 +193,105 @@ test('the reservation set never hides an id the DB already rules out', async () 
   assert.deepStrictEqual(ids, [10003, 10004]);
   assert.ok(queryCount > 0, 'the DB must still be consulted, not just the Map');
 });
+
+// ── probes must not consume capacity ────────────────────────────────────────
+//
+// THE REGRESSION THIS PINS (observed in production, caused by the fix above):
+//
+//   Error deploying environments: 'Cyber Warfare CYBR480' has 0 free lane(s)
+//   in its VXLAN block but 1 student(s) were selected.
+//
+// countFreeLanes (cle/utils/vuln-lab-provision.js) counts capacity by calling
+// allocateVxlanIds for the WHOLE block and taking .length. Once allocation
+// started reserving, merely opening the deploy dialog parked every free id for
+// the reservation TTL — so the check that was supposed to report capacity was
+// the thing destroying it, and the block read as full until the TTL expired.
+//
+// routes/admin/groups.js does the same thing for the group deploy preflight.
+
+test('a probe reports capacity without consuming it', async () => {
+  reset();
+  const probe = await laneDeployer.allocateVxlanIds(BLOCK, 10, { reserve: false });
+  assert.strictEqual(probe.length, 10, 'the probe must see the whole free block');
+
+  // Reading capacity twice must give the same answer — it did not, before.
+  const again = await laneDeployer.allocateVxlanIds(BLOCK, 10, { reserve: false });
+  assert.deepStrictEqual(again, probe, 'a second probe must agree with the first');
+
+  // And the deploy that follows must still find the block free.
+  const real = await laneDeployer.allocateVxlanIds(BLOCK, 3);
+  assert.deepStrictEqual(real, [10000, 10001, 10002]);
+});
+
+test('a probe still excludes ids another deploy is holding', async () => {
+  reset();
+  // Honest in the direction that matters: an id reserved for an in-flight
+  // deploy is genuinely unavailable, so counting it as free would over-report.
+  const held = await laneDeployer.allocateVxlanIds(BLOCK, 4);
+  assert.strictEqual(held.length, 4);
+
+  const probe = await laneDeployer.allocateVxlanIds(BLOCK, 10, { reserve: false });
+  assert.strictEqual(probe.length, 6, 'the four in flight must not be counted free');
+  assert.strictEqual(probe.filter(id => held.includes(id)).length, 0);
+});
+
+test('reserve defaults to true, so a claim is never silently a probe', async () => {
+  reset();
+  const first = await laneDeployer.allocateVxlanIds(BLOCK, 1);
+  const second = await laneDeployer.allocateVxlanIds(BLOCK, 1, {});
+  assert.notStrictEqual(first[0], second[0],
+    'omitting the option must still reserve — the default protects every '
+    + 'existing caller that was written before this option existed');
+});
+
+// ── capacity shortfall must not park the block ──────────────────────────────
+
+test('asking for more than the block holds leaves nothing reserved', async () => {
+  reset();
+  // deployChallengeLanes and deployLanes both throw a capacity error here. Both
+  // release first: without that, one oversized request parks every free id and
+  // an immediate retry with a smaller selection is told the block is full.
+  const short = await laneDeployer.allocateVxlanIds(BLOCK, 25);
+  assert.strictEqual(short.length, 10, 'only the block is available');
+  laneDeployer.releaseVxlanReservations(short);
+
+  // Probe the WHOLE block, the way countFreeLanes does — the limit caps the
+  // result, so asking for fewer would prove nothing about what is free.
+  const retry = await laneDeployer.allocateVxlanIds(BLOCK, 10, { reserve: false });
+  assert.strictEqual(retry.length, 10, 'a retry must see the full block again');
+});
+
+// ── the call sites ──────────────────────────────────────────────────────────
+
+test('every read-only caller passes reserve:false', () => {
+  // Source-level: the failure is silent and only shows up as a phantom "block
+  // full" the next time someone deploys, which is a long way from the cause.
+  const fs = require('fs');
+  const ROOT = path.join(__dirname, '..');
+  const PROBES = [
+    ['modules/crucible/plugins/cle/utils/vuln-lab-provision.js', 'countFreeLanes'],
+    ['src/routes/admin/groups.js', 'const free = await allocateVxlanIds'],
+  ];
+  for (const [rel, anchor] of PROBES) {
+    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    const at = src.indexOf(anchor);
+    assert.notStrictEqual(at, -1, `${rel}: anchor "${anchor}" not found`);
+    const window = src.slice(at, at + 600);
+    assert.match(window, /reserve:\s*false/,
+      `${rel} calls allocateVxlanIds to COUNT, so it must pass reserve:false — `
+      + 'otherwise checking capacity consumes it');
+  }
+});
+
+test('both capacity-error paths release before throwing', () => {
+  const fs = require('fs');
+  const ROOT = path.join(__dirname, '..');
+  for (const rel of ['src/utils/lane-deployer.js', 'src/utils/challenge-lane-deployer.js']) {
+    const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+    const at = src.indexOf('if (vxlans.length < users.length) {');
+    assert.notStrictEqual(at, -1, `${rel}: capacity guard not found`);
+    const block = src.slice(at, at + 900);
+    assert.match(block, /releaseVxlanReservations\(vxlans\)/,
+      `${rel} must hand the ids back before raising a capacity error`);
+  }
+});
