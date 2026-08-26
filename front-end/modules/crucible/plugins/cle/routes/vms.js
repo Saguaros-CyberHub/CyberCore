@@ -24,7 +24,11 @@ const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { resolveLaneWorkstationCredential } = require('../../../../../src/utils/lane-credentials');
 const { mintGuacToken, GUAC_URL, GUAC_DS } = require('../../../../../src/utils/guacamole');
-const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
+const {
+  buildDeployPreview, buildResizePreview,
+} = require('../../../../../src/middleware/deployment-guards');
+const vmResize = require('../../../../../src/utils/vm-resize');
+const { runBatch } = require('../../../../../src/utils/batch-deployer');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const { normalizeResourceSpec, WORKSTATION_MAX_SLOTS } = laneDeployer;
 const { buildLaneTopology } = require('../../../../../src/utils/lane-topology');
@@ -39,6 +43,22 @@ const {
 } = require('../utils/students');
 
 const instructorOnly = requireRole('instructor', 'admin');
+
+/**
+ * Re-sizing a deployed machine is ADMIN-ONLY, unlike every other route in this
+ * file.
+ *
+ * The gate is about the cluster, not the course. Raising RAM on a cohort
+ * commits shared node memory that other courses are drawing from, and an
+ * instructor can see neither those other courses nor the node headroom the
+ * change consumes — so the decision is a platform one. It also power-cycles
+ * machines students may be sitting in front of.
+ *
+ * This is IN ADDITION TO getManagedCourse, never instead of it: requireRole
+ * denials are recorded by auditDenial (middleware/auth.js), and the course
+ * scope check still has to run so an admin cannot resize a lane by id alone.
+ */
+const adminOnly = requireRole('admin');
 
 // Columns every provision path needs. os_family drives the NIC model (stock
 // Windows images have no virtio-net driver, so a virtio NIC never DHCPs) and
@@ -368,6 +388,160 @@ function redeployEligibility(lane, fullLane) {
     return { ok: false, reason: 'lane records no machines \u2014 use a whole-lane rebuild' };
   }
   return { ok: true };
+}
+
+/**
+ * A resize may aim at far more machines than a teardown, because it destroys
+ * nothing. MAX_BULK_LANES is 50 because 50 lanes is ~150 VMs handed to
+ * teardownLanes in one call; a resize clones nothing, writes no disks and
+ * touches one config key per machine, so the same ceiling would leave a
+ * 60-student course unable to use the feature at all. Still a hard 400 and
+ * never a silent truncation, for the same reason parseLaneIds is: an admin who
+ * selected 300 machines and saw 200 resized has no way to know which 100 were
+ * skipped.
+ */
+const MAX_RESIZE_TARGETS = 200;
+
+/**
+ * Validate the sizing half of a resize request.
+ *
+ * DISK IS REFUSED HERE, LOUDLY. Silently dropping it would be the worst of the
+ * options: an admin who typed a new disk size, saw the machines reboot and saw
+ * the row still say 128 GB would reasonably conclude the whole feature is
+ * broken. Proxmox cannot shrink a volume at all, and growing one moves the
+ * block device without moving the filesystem inside it — there is no
+ * growpart/Resize-Partition step anywhere in this app, because every existing
+ * resize happens before a guest's first boot where cloud-init does that work.
+ *
+ * @throws {Error & {status:400}}
+ */
+function parseResizeSpec(body) {
+  const raw = (body || {}).resources;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    const e = new Error('resources must be an object with cores and/or memory_mb');
+    e.status = 400; throw e;
+  }
+  if (raw.disk_gb !== undefined && raw.disk_gb !== null && raw.disk_gb !== '') {
+    const e = new Error(
+      'Disk size cannot be changed on a machine that is already deployed. Proxmox cannot ' +
+      'shrink a disk, and growing one enlarges the virtual disk without enlarging the ' +
+      'filesystem inside it, so the student would see no extra space. Rebuild the machine ' +
+      'to change its disk.');
+    e.status = 400; throw e;
+  }
+  // Through the shared validator so the bounds live in exactly one place.
+  const { resources, errors } = normalizeResourceSpec({
+    cores: raw.cores, memory_mb: raw.memory_mb,
+  });
+  if (errors.length) { const e = new Error(errors.join('; ')); e.status = 400; throw e; }
+  if (!resources) {
+    const e = new Error('supply a new core count, a new memory size, or both');
+    e.status = 400; throw e;
+  }
+  return resources;
+}
+
+/**
+ * Turn a scope request into the concrete (lane, slot) machines to act on.
+ *
+ * `lanes` MUST already be the output of findCourseWorkstationLanes — that read
+ * carries the `material_id IS NULL` predicate that keeps every bulk path off
+ * vulnerable-lab lanes. Nothing here re-derives it, and nothing here trusts a
+ * client-supplied lane id: for the 'course' and 'template' scopes the caller
+ * never names lanes at all.
+ *
+ * DELIBERATELY UNLIKE parseRedeployRequest, which refuses `slots` unless
+ * exactly one lane is selected. That restriction exists because a mis-aimed
+ * rebuild DESTROYS a machine, so a slot number that means different things on
+ * different lanes is a data-loss bug. A resize destroys nothing, and
+ * "give every student's slot-1 sensor more RAM" is the main thing anyone wants
+ * from it — so slots apply across the whole selection, and a lane that has no
+ * such slot is SKIPPED rather than failing the batch.
+ *
+ * @returns {{targets: Array, skipped: Array}}
+ */
+function resolveResizeTargets(body, lanes) {
+  const b = body || {};
+  const scope = b.scope || 'lanes';
+  const skipped = [];
+
+  let wantSlots = null;
+  if (b.slots !== undefined && b.slots !== null) {
+    if (!Array.isArray(b.slots) || b.slots.length === 0) {
+      const e = new Error('slots must be a non-empty array of slot numbers');
+      e.status = 400; throw e;
+    }
+    const out = new Set();
+    for (const raw of b.slots) {
+      // Number() alone is not a validator: Number(null), Number('') and
+      // Number([]) are all 0 — a slot that exists on every lane — so a
+      // malformed body would silently target slot 0, the student's console.
+      const n = typeof raw === 'number' ? raw
+        : (typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN);
+      if (!Number.isInteger(n) || n < 0 || n >= WORKSTATION_MAX_SLOTS) {
+        const e = new Error(`'${raw}' is not a slot number`); e.status = 400; throw e;
+      }
+      out.add(n);
+    }
+    wantSlots = [...out].sort((a, b2) => a - b2);
+  }
+
+  const wantTemplate = scope === 'template' ? String(b.template_id || '') : null;
+  if (scope === 'template' && !wantTemplate) {
+    const e = new Error('template_id is required for a template-scoped resize');
+    e.status = 400; throw e;
+  }
+
+  const targets = [];
+  for (const lane of lanes) {
+    if (lane.status !== 'active') {
+      skipped.push({
+        lane_id: lane.lane_id,
+        reason: lane.status === 'deploying'
+          ? 'a deploy or rebuild is already running on this lane'
+          : `lane is in an ${lane.status} state`,
+      });
+      continue;
+    }
+    const records = laneDeployer.laneWorkstationRecords(lane);
+    if (!records.length) {
+      skipped.push({ lane_id: lane.lane_id, reason: 'lane records no machines' });
+      continue;
+    }
+    let picked = records;
+    if (wantSlots) picked = picked.filter(r => wantSlots.includes(r.slot));
+    if (wantTemplate) picked = picked.filter(r => String(r.template_id || '') === wantTemplate);
+    if (!picked.length) {
+      skipped.push({
+        lane_id: lane.lane_id,
+        reason: wantTemplate ? 'no machine on this lane came from that template'
+                             : 'this lane has none of the selected slots',
+      });
+      continue;
+    }
+    for (const r of picked) {
+      if (r.vmid == null) continue;
+      targets.push({
+        lane_id: lane.lane_id,
+        lane_name: lane.name,
+        student_email: lane.student_email,
+        user_id: lane.user_id,
+        slot: r.slot,
+        vmid: Number(r.vmid),
+        provider_type: r.provider_type || null,
+        template_id: r.template_id || null,
+        hostname: r.hostname || null,
+        recorded_resources: r.resources || null,
+      });
+    }
+  }
+
+  if (targets.length > MAX_RESIZE_TARGETS) {
+    const e = new Error(
+      `select at most ${MAX_RESIZE_TARGETS} machines at a time (got ${targets.length})`);
+    e.status = 400; throw e;
+  }
+  return { targets, skipped };
 }
 
 /**
@@ -1218,6 +1392,462 @@ router.get('/redeploy-progress', instructorOnly, async (req, res) => {
     }
     const progress = laneProvision.getRebuildProgress(courseId, laneId);
     if (!progress) return res.status(404).json({ error: 'No active rebuild for this course' });
+    res.json(progress);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /resize — Change CPU and RAM on machines that are ALREADY DEPLOYED,
+ * without destroying what is on them.
+ *
+ * The counterpart to /redeploy, and the opposite trade. A redeploy replaces the
+ * machine: it can change anything, and everything the student did is gone. A
+ * resize stops the machine, edits two numbers in its Proxmox config and starts
+ * it again: the disk is never touched, so files, installed software and
+ * configuration all survive. Between "the class is under-sized" and "wipe
+ * everyone's work", this is the missing third option.
+ *
+ * ADMIN-ONLY — see the adminOnly docblock at the top of this file.
+ *
+ * Body:
+ *   {
+ *     scope: 'lanes' | 'course' | 'template',   // default 'lanes'
+ *     lane_ids: [...],        // scope=lanes
+ *     template_id: '...',     // scope=template
+ *     slots: [1],             // optional machine subset, ANY number of lanes
+ *     resources: { cores?, memory_mb? },
+ *     confirm: true           // omit for a capacity preview
+ *   }
+ *
+ * TWO-STEP, like /provision-all. Without `confirm` this returns a 200 preview:
+ * the machines it resolved to and what the change would do to each node's
+ * memory. Raising RAM across a cohort is the one way this feature can hurt a
+ * cluster, and it commits memory that courses the caller cannot see are also
+ * drawing on — so the number gets shown before it gets spent, not after.
+ */
+router.post('/resize', adminOnly, async (req, res) => {
+  let claimed = null;
+  try {
+    const { courseId } = req.params;
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const resources = parseResizeSpec(req.body);
+    const scope = (req.body || {}).scope || 'lanes';
+
+    // Lane resolution. For 'lanes' the ids are validated and capped first; for
+    // the other two scopes the client never names lanes at all and the server
+    // enumerates them, which is what makes "every VM from this template"
+    // impossible to point at another course's machines.
+    let found;
+    let skipped = [];
+    if (scope === 'lanes') {
+      const parsed = parseLaneIds(req.body);
+      skipped = parsed.skipped;
+      found = await laneProvision.findCourseWorkstationLanes(courseId, parsed.ids);
+      const foundIds = new Set(found.map(l => l.lane_id));
+      for (const id of parsed.ids) {
+        if (!foundIds.has(id)) skipped.push({ lane_id: id, reason: 'not in this course' });
+      }
+    } else if (scope === 'course' || scope === 'template') {
+      found = await laneProvision.findCourseWorkstationLanes(courseId);
+    } else {
+      const e = new Error(`unknown scope '${scope}'`); e.status = 400; throw e;
+    }
+
+    if (!found.length) {
+      return res.status(404).json({
+        error: scope === 'lanes'
+          ? 'None of the selected lanes are in this course'
+          : 'This course has no workstation lanes',
+        skipped,
+      });
+    }
+
+    const resolved = resolveResizeTargets(req.body, found);
+    const targets = resolved.targets;
+    skipped = skipped.concat(resolved.skipped);
+
+    if (!targets.length) {
+      const e = new Error(found.length === 1
+        ? `This lane has no machine that can be resized: ${(skipped[skipped.length - 1] || {}).reason || 'none matched'}.`
+        : 'None of the selected machines can be resized.');
+      e.status = 409; throw e;
+    }
+
+    // Live cluster read, ONCE for the batch. Two things come out of it that the
+    // lane row cannot supply: the node a VM is on RIGHT NOW (a migrated machine's
+    // recorded node is stale, and every call against the wrong host fails), and
+    // whether it is running (which decides both the capacity maths and whether
+    // it gets powered back on afterwards).
+    const byVmid = {};
+    try {
+      const cluster = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=vm');
+      for (const r of (cluster || [])) byVmid[String(r.vmid)] = r;
+    } catch (e) {
+      const err = new Error(
+        `Could not read the cluster to see where these machines are (${e.message}). ` +
+        `Nothing was changed.`);
+      err.status = 503; throw err;
+    }
+
+    const live = [];
+    for (const t of targets) {
+      const l = byVmid[String(t.vmid)];
+      if (!l) {
+        skipped.push({
+          lane_id: t.lane_id,
+          reason: `slot ${t.slot} (vmid ${t.vmid}) is not in the cluster`,
+        });
+        continue;
+      }
+      live.push({
+        ...t,
+        node: l.node,
+        running: l.status === 'running',
+        current: { cores: Number(l.maxcpu) || null, memory_mb: Math.round((Number(l.maxmem) || 0) / 1048576) || null },
+      });
+    }
+    if (!live.length) {
+      const e = new Error('None of the selected machines exist in the cluster.');
+      e.status = 409; throw e;
+    }
+
+    const preview = await buildResizePreview({ targets: live, resources, proxmoxAPI });
+
+    // ── step one: preview ────────────────────────────────────────────────────
+    if (req.body.confirm !== true) {
+      return res.json({
+        success: true,
+        preview: true,
+        ...preview,
+        machines: live.map(t => ({
+          lane_id: t.lane_id, slot: t.slot, vmid: t.vmid, node: t.node,
+          hostname: t.hostname, student_email: t.student_email,
+          running: t.running, current: t.current,
+        })),
+        ...(skipped.length ? { skipped } : {}),
+      });
+    }
+
+    if (!preview.canProceed) {
+      const e = new Error(preview.errors[0]); e.status = 409; throw e;
+    }
+
+    // ── step two: apply ──────────────────────────────────────────────────────
+    const laneIds = [...new Set(live.map(t => t.lane_id))];
+    const single = laneIds.length === 1 ? laneIds[0] : null;
+
+    // Check and claim in ONE synchronous block, every await already done — the
+    // progress registry is the only mutex this app has, and a check, an await
+    // and then a claim leaves the double-click window wide open.
+    laneProvision.assertNoConflictingWorkstationOperation({ courseId, laneId: single });
+    claimed = single
+      ? laneProvision.progressIdForLane(courseId, single)
+      : laneProvision.progressIdForCourseResize(courseId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Resize — ${course.course_name}`, live.length);
+    laneDeployer.setPhase(progress, 'preparing', `Resizing ${live.length} machine(s)`);
+    // Seeded so the client renders the whole batch from its first poll rather
+    // than watching machines appear one at a time.
+    for (const t of live) {
+      progress.lanes[`${t.lane_id}:${t.slot}`] = {
+        user: t.student_email, vxlan: null, node: t.node,
+        status: 'pending', workstations: 1, slots: [t.slot], error: null,
+      };
+    }
+
+    const progressUrl =
+      `/api/cle/courses/${courseId}/vms/resize-progress${single ? `?lane_id=${single}` : ''}`;
+
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'lane.resized_bulk',
+      targetAction: 'lane.resized',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      metadata: {
+        course_id: courseId,
+        scope,
+        machine_count: live.length,
+        lane_count: laneIds.length,
+        to: resources,
+        // No endpoint_changed key, unlike the redeploy audit: a resize changes
+        // no address, port or Guacamole connection, so nothing an instructor
+        // has already handed out stops working.
+        ...(req.body.slots ? { slots: req.body.slots } : {}),
+        ...(scope === 'template' ? { template_id: req.body.template_id } : {}),
+      },
+      targets: live.map(t => ({
+        id: t.user_id, label: t.student_email,
+        metadata: {
+          course_id: courseId, lane_id: t.lane_id, slot: t.slot, vmid: t.vmid,
+          node: t.node, from: t.current, to: resources,
+        },
+      })),
+    });
+
+    res.status(202).json({
+      success: true,
+      message: `Resizing ${live.length} machine(s) on ${laneIds.length} lane(s)`,
+      count: live.length,
+      lanes: laneIds,
+      progress_id: claimed,
+      progress_url: progressUrl,
+      ...(skipped.length ? { skipped } : {}),
+    });
+
+    // Frozen before the IIFE: re-deriving any of this inside the background
+    // block would read post-stop state.
+    const claimedId = claimed;
+    claimed = null;   // ownership handed to the background block
+    const ctx = Object.freeze({ courseId, live, resources, progress });
+
+    (async () => {
+      try {
+        await runResizeBatch(ctx);
+      } catch (e) {
+        console.error('[CLE] Resize batch failed:', e.message);
+        if (ctx.progress) ctx.progress.error = e.message;
+      } finally {
+        laneDeployer.finishProgress(claimedId);
+      }
+    })();
+  } catch (error) {
+    console.error('[CLE] Resize error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    // Only the 202 itself can throw with headers already sent, and replying
+    // twice throws again out of an async handler Express 4 does not catch.
+    if (res.headersSent) return;
+    res.status(error.status || 500).json({ error: error.message });
+  }
+});
+
+/**
+ * Run the resize across the batch, then write the outcome back to each lane.
+ *
+ * Bounded concurrency rather than the sequential loop runInPlaceRebuild uses:
+ * a rebuild is disk-bound and its semaphore exists to stop 24 clones flattening
+ * a node, whereas a resize does no disk I/O at all and is almost entirely spent
+ * waiting for guests to shut down and boot. Serially, a 30-machine class would
+ * take three quarters of an hour.
+ */
+async function runResizeBatch(ctx) {
+  const { live, resources, progress } = ctx;
+  laneDeployer.setPhase(progress, 'resizing', `Resizing machines: 0/${live.length} complete`);
+
+  // Grouped so each lane's config is written ONCE, with every slot that
+  // changed on it. One write per machine would have several concurrent workers
+  // splicing the same lane row.
+  const byLane = new Map();
+  let done = 0;
+
+  await runBatch(
+    live,
+    async (t) => {
+      const key = `${t.lane_id}:${t.slot}`;
+      const setStatus = (st, err) => {
+        if (progress.lanes[key]) {
+          progress.lanes[key].status = st;
+          if (err !== undefined) progress.lanes[key].error = err;
+        }
+      };
+      setStatus('running');
+
+      const result = await vmResize.resizeOneVm({
+        node: t.node,
+        vmid: t.vmid,
+        providerType: t.provider_type,
+        resources,
+        label: `${t.hostname || t.lane_name || t.lane_id} slot ${t.slot}`,
+        onPhase: (phase) => setStatus(phase),
+        // Durable intent, written BEFORE the guest is stopped. If this process
+        // dies between the stop and the start, recoverInterruptedResizes() in
+        // server.js finds this marker at boot and powers the machine back on.
+        onIntent: async ({ was_running }) => {
+          await markResizeInFlight(t, was_running);
+        },
+        // Cleared only when the machine ended in the power state it should be
+        // in. Left in place otherwise, so recoverInterruptedResizes() picks it
+        // up at the next boot and tries the start again — the marker is the
+        // only durable record that a running machine was taken down.
+        onSettled: async ({ settled }) => {
+          if (settled) await clearResizeInFlight(t.lane_id);
+        },
+      });
+
+      if (!byLane.has(t.lane_id)) byLane.set(t.lane_id, []);
+      byLane.get(t.lane_id).push({ target: t, result });
+
+      if (result.status === 'failed') { progress.failed++; setStatus('error', result.error); }
+      else { progress.succeeded++; setStatus('done', null); }
+      return result;
+    },
+    {
+      concurrency: vmResize.RESIZE_CONCURRENCY,
+      onProgress: () => {
+        progress.completed = ++done;
+        laneDeployer.setPhase(progress, 'resizing',
+          `Resizing machines: ${done}/${live.length} complete`);
+      },
+    }
+  );
+
+  laneDeployer.setPhase(progress, 'recording', 'Recording the new sizing');
+  for (const [laneId, entries] of byLane) {
+    try {
+      await recordLaneResize(laneId, entries);
+    } catch (e) {
+      console.error(`[CLE] Could not record the resize on lane ${laneId}: ${e.message}`);
+    }
+  }
+}
+
+/**
+ * Write the "this machine is down for a resize" marker.
+ *
+ * Deliberately does NOT set lane status to 'deploying'. The lane is genuinely
+ * active — its gateway is up and its other machines are untouched — and
+ * recoverStrandedLanes() sweeps every 'deploying' row without a config.rebuild
+ * key to 'error' on boot, which would condemn a healthy lane on every restart.
+ * In-flight state is held by the progress-registry mutex instead; this marker
+ * exists only so power can be restored.
+ */
+async function markResizeInFlight(t, wasRunning) {
+  await cybercoreQuery(
+    `UPDATE cybercore_lane
+        SET config = jsonb_set(
+                       COALESCE(config, '{}'::jsonb), '{resize}',
+                       COALESCE(config->'resize', '{}'::jsonb) || $2::jsonb),
+            updated_at = NOW()
+      WHERE lane_id = $1`,
+    [t.lane_id, JSON.stringify({
+      status: 'running',
+      at: new Date().toISOString(),
+      in_flight: {
+        slot: t.slot, vmid: t.vmid, node: t.node,
+        provider_type: t.provider_type, was_running: !!wasRunning,
+      },
+    })]
+  ).catch(e => console.warn(`[CLE] resize marker write failed for ${t.lane_id}: ${e.message}`));
+}
+
+async function clearResizeInFlight(laneId) {
+  await cybercoreQuery(
+    `UPDATE cybercore_lane
+        SET config = jsonb_set(
+                       COALESCE(config, '{}'::jsonb), '{resize}',
+                       COALESCE(config->'resize', '{}'::jsonb) - 'in_flight'),
+            updated_at = NOW()
+      WHERE lane_id = $1`,
+    [laneId]
+  ).catch(() => {});
+}
+
+/**
+ * Persist the achieved sizing onto the lane's slot records.
+ *
+ * This is what makes the change stick beyond the running VM. The VM Management
+ * table renders config.workstations[].resources, and — more importantly —
+ * rebuildLaneWorkstations replays it as "the sizing that was ACHIEVED, not the
+ * request". Skip this write and the numbers in the UI stay stale AND the next
+ * rebuild silently reverts the machine to its old size.
+ *
+ * Goes through spliceLaneWorkstations so untouched slots stay byte-identical,
+ * and through flatResourceMirrorPatch so the flat slot-0 mirror is written only
+ * when slot 0 was actually one of the machines resized.
+ */
+async function recordLaneResize(laneId, entries) {
+  const lane = (await cybercoreQuery(
+    `SELECT lane_id, name, vxlan_id, config FROM cybercore_lane WHERE lane_id = $1`, [laneId]
+  )).rows[0];
+  if (!lane) return;
+
+  const existing = laneDeployer.laneWorkstationRecords(lane);
+  const bySlot = new Map(existing.map(r => [r.slot, r]));
+
+  const records = [];
+  const touchedKeys = [];
+  const slotsPatch = {};
+
+  for (const { target, result } of entries) {
+    const base = bySlot.get(target.slot);
+    if (!base) continue;
+    touchedKeys.push(String(target.slot));
+
+    const record = { ...base };
+    if (result.status === 'resized' || result.status === 'unchanged') {
+      record.resources = {
+        ...(base.resources || {}),
+        ...(result.after.cores ? { cores: result.after.cores } : {}),
+        ...(result.after.memory_mb ? { memory_mb: result.after.memory_mb } : {}),
+      };
+      record.resource_warnings = result.warnings.length ? result.warnings : null;
+      record.resized_at = new Date().toISOString();
+    } else {
+      // The recorded sizing is left ALONE on failure — it still describes the
+      // machine, which was not changed.
+      record.resource_warnings = [result.error].concat(result.warnings).filter(Boolean);
+    }
+    records.push(record);
+
+    slotsPatch[String(target.slot)] = {
+      status: result.status,
+      at: new Date().toISOString(),
+      from: result.before || null,
+      to: (result.status === 'failed') ? null : (result.after || null),
+      power_restored: result.power_restored,
+      forced: result.forced,
+      ...(result.error ? { message: String(result.error).slice(0, 500) } : {}),
+    };
+  }
+  if (!records.length) return;
+
+  const failedCount = entries.filter(e => e.result.status === 'failed').length;
+  const firstError = (entries.find(e => e.result.error) || { result: {} }).result.error || null;
+  const resizePatch = {
+    resize: {
+      at: new Date().toISOString(),
+      status: failedCount === 0 ? 'ok'
+        : (failedCount < entries.length ? 'partial' : 'failed'),
+      error: firstError,
+      slots: slotsPatch,
+    },
+  };
+
+  await laneDeployer.spliceLaneWorkstations(
+    laneId,
+    records,
+    touchedKeys,
+    { ...laneDeployer.flatResourceMirrorPatch(records), ...resizePatch }
+    // No status argument: the lane was active throughout and stays active.
+  );
+}
+
+/**
+ * GET /resize-progress — Live progress for a resize.
+ *
+ * Its own endpoint and its own registry key rather than sharing
+ * /redeploy-progress. The client stops polling the moment it reads
+ * phase === 'complete', so multiplexing the two would let a finishing rebuild
+ * tear down the resize banner — the same reason /redeploy-progress is separate
+ * from /provision-progress.
+ */
+router.get('/resize-progress', adminOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const course = await getManagedCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+
+    const laneId = req.query.lane_id ? String(req.query.lane_id) : null;
+    // Validated before it becomes part of a registry key.
+    if (laneId && !LANE_ID_RE.test(laneId)) {
+      return res.status(400).json({ error: 'lane_id is not a lane id' });
+    }
+    const progress = laneProvision.getResizeProgress(courseId, laneId);
+    if (!progress) return res.status(404).json({ error: 'No active resize for this course' });
     res.json(progress);
   } catch (error) {
     res.status(500).json({ error: error.message });

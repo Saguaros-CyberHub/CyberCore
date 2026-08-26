@@ -50,6 +50,26 @@ function progressIdForCourseRebuild(courseId) {
 }
 
 /**
+ * Progress key for a course-scope RESIZE.
+ *
+ * Separate from the destructive key on purpose, and the reason is the poller
+ * rather than the mutex. Both keys resolve to scope 'course' below, so a resize
+ * and a bulk delete still refuse to run together — but the client stops polling
+ * a progress URL the moment it reads phase === 'complete', so sharing one key
+ * would let a finishing rebuild kill the resize banner and vice versa. That is
+ * the same reason /redeploy-progress is not multiplexed onto
+ * /provision-progress.
+ *
+ * IF YOU ADD ANOTHER KEY IN THIS FAMILY, ADD ITS ARM TO courseOperationsInFlight
+ * BELOW. That function skips any suffix it does not recognise, so a new key
+ * without a matching arm is not a new scope — it is an operation the mutex
+ * cannot see at all.
+ */
+function progressIdForCourseResize(courseId) {
+  return `${progressIdForCourse(courseId)}-resize`;
+}
+
+/**
  * Progress key for an operation on ONE lane, so two instructors fixing two
  * students do not block each other — and, more importantly, do not share an
  * entry. initProgress replaces the entry wholesale, so a shared key means the
@@ -91,6 +111,10 @@ function courseOperationsInFlight(courseId) {
     let laneId = null;
     if (suffix === '') scope = 'provision';
     else if (suffix === '-rebuild') scope = 'course';
+    // Course-scope like the rebuild: a resize stops and restarts machines, and
+    // a bulk delete or provision running underneath it would be enumerating or
+    // creating the very lanes it is power-cycling.
+    else if (suffix === '-resize') scope = 'course';
     else if (suffix.startsWith('-lane-')) { scope = 'lane'; laneId = suffix.slice('-lane-'.length); }
     // Anything else shares our prefix without belonging to this family. A
     // fixed-length UUID cannot prefix another, so this is unreachable today —
@@ -278,6 +302,19 @@ function getRebuildProgress(courseId, laneId = null) {
 }
 
 /**
+ * Live progress for a resize, or null once it has aged out.
+ *
+ * A single-lane resize claims the SAME per-lane key a single-lane rebuild does,
+ * so the two conflict on one lane while leaving other lanes free — which is the
+ * behaviour we want. Only the course-scope key differs.
+ */
+function getResizeProgress(courseId, laneId = null) {
+  return laneDeployer.readProgress(
+    laneId ? progressIdForLane(courseId, laneId) : progressIdForCourseResize(courseId)
+  );
+}
+
+/**
  * Every WORKSTATION lane of a course, or just the named ones.
  *
  * The single scoped read behind the VM Management tab: the list, the bulk
@@ -348,10 +385,12 @@ module.exports = {
   resolveCourseLab,
   progressIdForCourse,
   progressIdForCourseRebuild,
+  progressIdForCourseResize,
   progressIdForLane,
   courseOperationsInFlight,
   assertNoConflictingWorkstationOperation,
   getRebuildProgress,
+  getResizeProgress,
   findCourseWorkstationLanes,
   provisionLanes,
   getProvisionProgress,

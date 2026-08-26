@@ -51,6 +51,7 @@ const { cybercoreQuery } = require('./cybercore-db');
 const {
   proxmoxAPI, waitForTask, findTemplateNode, forceDestroyVM, waitForVmidsGone,
 } = require('./proxmox');
+const { vmApiBase } = require('./vm-paths');
 const { selectBestNode } = require('./node-selector');
 const { runBatch, distributeAcrossNodes, createCloneSemaphore } = require('./batch-deployer');
 const {
@@ -153,9 +154,8 @@ const EXTERNAL_CLEANUP_CONCURRENCY = 5;
 
 // ── generic helpers ──────────────────────────────────────────────────────────
 
-function vmApiBase(node, vmid, providerType) {
-  return `/api2/json/nodes/${node}/${providerType === 'lxc' ? 'lxc' : 'qemu'}/${vmid}`;
-}
+// vmApiBase now lives in ./vm-paths — this file and routes/workstations.js each
+// carried a byte-identical copy, and the resize engine would have made three.
 
 // ── workstation slots ────────────────────────────────────────────────────────
 
@@ -3093,6 +3093,85 @@ function flatMirrorPatch(deployed) {
 }
 
 /**
+ * The flat slot-0 mirror for a SIZING-only change.
+ *
+ * flatMirrorPatch above is the wrong tool for a resize and using it would be a
+ * bug, not an inefficiency: it also mirrors ip, console_*, guac_connection_id
+ * and the workstation credentials, which a resize never touches and must not
+ * overwrite. This is the same slot-0-only rule applied to the two keys that DO
+ * change — nothing else.
+ *
+ * Pure, and unit-tested for the "only when slot 0 was actually touched" rule
+ * that flatMirrorPatch's docblock exists to protect.
+ */
+function flatResourceMirrorPatch(touched) {
+  const zero = (touched || []).find(d => d && d.slot === 0) || null;
+  if (!zero) return {};
+  const patch = {};
+  if (zero.resources) patch.resources = zero.resources;
+  if (zero.resource_warnings) patch.resource_warnings = zero.resource_warnings;
+  return patch;
+}
+
+/**
+ * Splice a set of slot records into cybercore_lane.config.workstations[],
+ * leaving every untouched slot byte-identical, and merge `extraPatch` on top.
+ *
+ * DONE IN SQL, not by read-modify-write in JS, and that is the whole point.
+ * patchLaneConfig's `config || $2::jsonb` merge replaces a nested value
+ * wholesale, so writing back an array assembled in Node would clobber any slot
+ * a concurrent operation had just updated. Reading the array, editing it and
+ * writing it back has the same race with a wider window.
+ *
+ * Extracted from rebuildLaneWorkstations, which has always done it this way and
+ * was the only caller until the resize path needed the identical operation.
+ * Two hand-written copies of this query is how the two would drift.
+ *
+ * @param {string}   laneId
+ * @param {Array}    records      full slot records to write, in any order
+ * @param {string[]} touchedSlots slot numbers as STRINGS — the keys `records`
+ *                                replaces. Passed separately rather than derived
+ *                                so a record whose slot failed to rebuild still
+ *                                displaces the stale one it came from.
+ * @param {object}   [extraPatch] shallow-merged onto config after the splice
+ * @param {string}   [status]     lane status to set; omit to leave it alone.
+ *                                Whitelisted rather than parameterised because
+ *                                a bound parameter cannot be omitted from a SET
+ *                                clause, and "leave it alone" is a real case —
+ *                                a resize must NOT park the row at 'deploying'.
+ */
+const SPLICE_STATUSES = new Set(['active', 'deploying', 'error']);
+
+async function spliceLaneWorkstations(laneId, records, touchedSlots, extraPatch = {}, status = null) {
+  if (status !== null && !SPLICE_STATUSES.has(status)) {
+    throw new Error(`spliceLaneWorkstations: refusing unknown lane status '${status}'`);
+  }
+  await cybercoreQuery(
+    `UPDATE cybercore_lane l
+        SET config = jsonb_set(
+                       COALESCE(l.config, '{}'::jsonb),
+                       '{workstations}',
+                       COALESCE((
+                         SELECT jsonb_agg(ws ORDER BY (ws->>'slot')::int)
+                           FROM (
+                             SELECT p AS ws FROM jsonb_array_elements($2::jsonb) AS p
+                             UNION ALL
+                             SELECT e AS ws
+                               FROM jsonb_array_elements(
+                                      COALESCE(l.config->'workstations', '[]'::jsonb)) AS e
+                              WHERE (e->>'slot') IS NULL
+                                 OR NOT ((e->>'slot') = ANY($3::text[]))
+                           ) u
+                       ), '[]'::jsonb)
+                     ) || $4::jsonb,
+            ${status ? `status = '${status}',` : ''}
+            updated_at = NOW()
+      WHERE lane_id = $1`,
+    [laneId, JSON.stringify(records), touchedSlots, JSON.stringify(extraPatch)]
+  );
+}
+
+/**
  * Delete every disk volume belonging to one VMID on one node.
  *
  * teardownLanes sweeps orphaned disks because `purge=1` does not always take
@@ -3688,33 +3767,14 @@ async function rebuildLaneWorkstations({
     },
   };
 
-  await cybercoreQuery(
-    `UPDATE cybercore_lane l
-        SET config = jsonb_set(
-                       COALESCE(l.config, '{}'::jsonb),
-                       '{workstations}',
-                       COALESCE((
-                         SELECT jsonb_agg(ws ORDER BY (ws->>'slot')::int)
-                           FROM (
-                             SELECT p AS ws FROM jsonb_array_elements($2::jsonb) AS p
-                             UNION ALL
-                             SELECT e AS ws
-                               FROM jsonb_array_elements(
-                                      COALESCE(l.config->'workstations', '[]'::jsonb)) AS e
-                              WHERE (e->>'slot') IS NULL
-                                 OR NOT ((e->>'slot') = ANY($3::text[]))
-                           ) u
-                       ), '[]'::jsonb)
-                     ) || $4::jsonb,
-            status = 'active',
-            updated_at = NOW()
-      WHERE lane_id = $1`,
-    [
-      laneId,
-      JSON.stringify(deployed),
-      rebuiltKeys,
-      JSON.stringify({ ...flatMirrorPatch(deployed), ...rebuildPatch }),
-    ]
+  // Through the shared splice: the resize path performs the identical
+  // operation, and two copies of that query would drift.
+  await spliceLaneWorkstations(
+    laneId,
+    deployed,
+    rebuiltKeys,
+    { ...flatMirrorPatch(deployed), ...rebuildPatch },
+    'active'
   );
 
   if (progress && progress.lanes[laneId]) {
@@ -3748,6 +3808,8 @@ module.exports = {
   createCloneSemaphore,
   laneWorkstationRecords,
   flatMirrorPatch,
+  flatResourceMirrorPatch,
+  spliceLaneWorkstations,
   holdWorkstationVmids,
   GATEWAY_VMID_OFFSET,
   WORKSTATION_VMID_OFFSET,

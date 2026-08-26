@@ -1007,6 +1007,87 @@
   </div>
 
   <!-- ======================================================================
+       RESIZE MACHINES (CPU + RAM)
+       ----------------------------------------------------------------------
+       The non-destructive sibling of vmRedeployModal, and the difference is the
+       whole point of the feature. A redeploy replaces the machine: it can
+       change anything, and everything the student did is gone. A resize stops
+       the machine, edits two numbers in its Proxmox config and starts it again
+       — the disk is never touched, so files, installed software and settings
+       all survive.
+
+       So this dialog is styled as an ordinary action, not a destructive one:
+       no red button, no danger colouring. The one thing it costs is a reboot,
+       and the copy says so rather than burying it.
+
+       DISK IS ABSENT FROM THIS FORM ON PURPOSE. Proxmox cannot shrink a volume,
+       and growing one enlarges the virtual disk without enlarging the
+       filesystem inside it — the student would see no extra space. Offering a
+       greyed-out field with a note beats leaving a gap someone reads as an
+       oversight.
+
+       ADMIN-ONLY. The button that opens this is hidden for instructors, and
+       the route behind it is requireRole('admin'): raising RAM across a cohort
+       spends shared node memory that other courses are drawing on, which is a
+       platform decision rather than a course one.
+       ====================================================================== -->
+  <div class="modal-overlay" id="vmResizeModal">
+    <div class="modal" style="max-width: 640px;">
+      <h2>Resize <span id="vmResizeWho"></span></h2>
+      <div class="modal-form">
+
+        <div class="info-box">
+          <p style="margin:0;">
+            <strong>Nothing on these machines is lost.</strong> Only the CPU and memory settings
+            change; the disk is not touched, so files, installed software and configuration all
+            survive. Each machine restarts to pick up the new size &mdash; about a minute or two
+            &mdash; and its address, port and console link stay exactly the same.
+          </p>
+        </div>
+
+        <div class="form-group" id="vmResizeMachinesGroup">
+          <label class="env-group-label">
+            Machines to resize
+            <label class="env-selectall">
+              <input type="checkbox" id="vmResizeSelectAll" onchange="toggleVMResizeSelectAll(this)">
+              select all
+            </label>
+          </label>
+          <div class="env-students" id="vmResizeMachines"></div>
+          <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
+            <span id="vmResizeCount" aria-live="polite"></span> &middot;
+            Unticked machines are left running and untouched.
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label class="env-group-label">New size</label>
+          <div class="env-machine-res" id="vmResizeFields"></div>
+          <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
+            Leave a field blank to keep what the machine already has.
+            <strong>Disk size cannot be changed after deployment</strong> &mdash; Proxmox cannot
+            shrink a disk, and growing one would not grow the filesystem inside it. Rebuild a
+            machine to change its disk.
+          </p>
+        </div>
+
+        <div class="env-warn" id="vmResizeRunningWarn" style="display:none;">
+          <span aria-hidden="true">&#9888;</span>
+          <span id="vmResizeRunningText"></span>
+        </div>
+
+        <div id="vmResizePreview"></div>
+
+        <div class="form-buttons">
+          <button type="button" class="btn btn-secondary" onclick="closeVMResizeModal()">Cancel</button>
+          <button type="button" class="btn btn-primary" id="vmResizeBtn"
+                  onclick="submitVMResize(this)">Check capacity</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
        REBUILD ONE STUDENT'S ENVIRONMENT
        ----------------------------------------------------------------------
        Per machine by default. The whole-environment Redeploy destroys the lane
@@ -1762,6 +1843,21 @@
     }
 
     /** A row the instructor may put in a bulk action. */
+    /**
+     * May the current user resize machines?
+     *
+     * Admin only, unlike everything else on this tab. Raising RAM across a
+     * cohort spends shared node memory that courses this user cannot see are
+     * also drawing on, so it is a platform decision rather than a course one.
+     *
+     * Hiding the control is a COURTESY, not the gate — POST /vms/resize is
+     * requireRole('admin') server-side. This only spares an instructor a button
+     * that would 403.
+     */
+    function _canResize() {
+      return !!(window.Auth && Auth.user && Auth.user.role === 'admin');
+    }
+
     function _vmSelectable(v) {
       // 'deploying' is excluded on both sides: tearing down a lane mid-clone races
       // the deployer, and rebuilding one that is already being built is nonsense.
@@ -1889,9 +1985,12 @@
             + (hidden
                 ? ' <span class="bulk-hidden-note">(' + hidden + ' hidden by search)</span>'
                 : ' of ' + total)
-          : 'Select lanes to redeploy or delete';
+          : (_canResize() ? 'Select lanes to resize, redeploy or delete'
+                            : 'Select lanes to redeploy or delete');
       }
-      ['vmBulkRedeployBtn', 'vmBulkDeleteBtn', 'vmClearBtn'].forEach(id => {
+      // vmBulkResizeBtn is absent for a non-admin — getElementById returns null
+      // and the guard below already handles that, so no separate branch.
+      ['vmBulkResizeBtn', 'vmBulkRedeployBtn', 'vmBulkDeleteBtn', 'vmClearBtn'].forEach(id => {
         const b = document.getElementById(id);
         // _vmBulkBusy outranks the count: a re-render mid-flight must not
         // re-enable a button the in-flight operation has taken.
@@ -1995,6 +2094,9 @@
               onclick="selectVMErrorLanes()">Select ${errCount} broken lane${errCount === 1 ? '' : 's'}</button>` : ''}
           <button type="button" class="btn btn-sm btn-outline" id="vmClearBtn"
                   onclick="clearVMSelection()"${dis}>Clear</button>
+          ${_canResize() ? `<button type="button" class="btn btn-sm btn-outline" id="vmBulkResizeBtn"
+                  title="Change CPU and memory without losing anything on the machines"
+                  onclick="bulkResizeLanes(this)"${dis}>Resize</button>` : ''}
           <button type="button" class="btn btn-sm btn-outline" id="vmBulkRedeployBtn"
                   style="color:var(--primary-light, #1e5288);border-color:var(--primary-light, #1e5288);"
                   onclick="bulkRedeployLanes(this)"${dis}>Redeploy</button>
@@ -4347,6 +4449,356 @@
         // btn is detached by the time a later call would run.
         Utils.setBtnLoading(btn, false);
         if (currentCourseId === courseId) { clearVMSelection(); loadVMManagement(); }
+      }
+    }
+
+    // ── resize (CPU + RAM, non-destructive) ──────────────────────────────────
+    //
+    // The whole feature exists because the only other way to change a deployed
+    // machine's size is Redeploy, which destroys everything the student has
+    // done. So the two paths deliberately look different: this one is a plain
+    // primary button with no danger colouring, and every string below leads
+    // with what is KEPT rather than what is lost.
+
+    /** Rows the resize modal was opened for; null when it is closed. */
+    let _vmResizeRows = null;
+    /** The machines actually resolved from those rows, flattened. */
+    let _vmResizeMachines = [];
+    /** The sizing the admin has typed, in Proxmox units (cores, MiB). */
+    let _vmResizeSpec = { cores: null, memory_mb: null };
+
+    async function bulkResizeLanes(btn) {
+      if (_vmBulkBusy) return;
+      if (!_canResize()) return;                 // belt; the button is hidden
+      const rows = _selectedVMRows();
+      if (!rows.length) return;
+      showVMResizeModal(rows);
+    }
+
+    /**
+     * One machine row in the resize picker.
+     *
+     * Shows what it has NOW, because "8 cores / 16 GB" is meaningless without
+     * the number it is replacing — and a machine already at the target size is
+     * the case the server skips without rebooting, which is worth being able to
+     * see before submitting.
+     */
+    function _vmResizeMachineRow(m) {
+      const cur = m.resources ? describeResources(m.resources) : 'template default';
+      const who = m._student || '';
+      return `
+      <label style="display:flex; align-items:flex-start; gap:0.5rem;">
+        <input type="checkbox" class="vm-resize-machine" value="${escAttr(m._key)}" checked
+               aria-label="Resize ${escAttr(m.hostname || ('slot ' + m.slot))}"
+               onchange="_syncVMResizePicker()">
+        <span style="min-width:0;">
+          <span style="font-family:monospace; font-size:0.82rem;">${escHtml(m.hostname || '—')}</span>
+          <span class="env-chip" style="margin-left:0.35rem;">slot ${escHtml(String(m.slot))}</span>
+          ${m.slot === 0 ? '<span class="env-chip env-chip-console">student console</span>' : ''}
+          ${_powerBadge(m.power_state)}
+          <span style="display:block; font-size:0.72rem; color:var(--text-muted, #6b7280);">
+            ${escHtml([who, m.template_name, 'now: ' + cur].filter(Boolean).join(' · '))}
+          </span>
+        </span>
+      </label>`;
+    }
+
+    /**
+     * The Cores and Memory inputs, from the SAME metadata the deploy modal uses.
+     *
+     * RESOURCE_FIELDS already carries the unit conversion (memory_mb renders as
+     * GB via scale 1/1024), and _provisionLimits is refreshed from the server's
+     * own RESOURCE_LIMITS — so re-declaring either here would be a second set of
+     * bounds to drift out of step with lane-deployer's.
+     *
+     * disk_gb is deliberately not in the list. See the modal's hint text.
+     */
+    function _renderVMResizeFields() {
+      const el = document.getElementById('vmResizeFields');
+      el.innerHTML = ['cores', 'memory_mb'].map(field => {
+        const meta = RESOURCE_FIELDS[field];
+        const raw = _vmResizeSpec[field];
+        const shown = raw == null ? '' : String(Math.round(raw * meta.scale * 100) / 100);
+        const lim = _provisionLimits[field] || {};
+        return `<label>${escHtml(meta.label)}${escHtml(meta.unit)}
+          <input type="number" value="${escAttr(shown)}" placeholder="unchanged"
+                 min="${escAttr(String(Math.round((lim.min || 0) * meta.scale * 100) / 100))}"
+                 max="${escAttr(String(Math.round((lim.max || 0) * meta.scale * 100) / 100))}"
+                 onchange="setVMResizeField('${field}', this.value)">
+        </label>`;
+      }).join('') + '<label style="opacity:0.5;">Disk GB'
+        + '<input type="number" value="" placeholder="unchanged" disabled'
+        + ' title="Disk size cannot be changed after deployment"></label>';
+    }
+
+    /** Store one field in Proxmox units, or null when the admin clears it. */
+    function setVMResizeField(field, value) {
+      const meta = RESOURCE_FIELDS[field];
+      const raw = String(value == null ? '' : value).trim();
+      if (raw === '') { _vmResizeSpec[field] = null; _resetVMResizeButton(); return; }
+      const n = Number(raw);
+      if (!Number.isFinite(n)) { _vmResizeSpec[field] = null; _resetVMResizeButton(); return; }
+      // Back to the stored unit — the input shows GB, the API takes MiB.
+      _vmResizeSpec[field] = Math.round(n / meta.scale);
+      // Any edit invalidates a capacity preview that is already on screen.
+      _resetVMResizeButton();
+    }
+
+    /**
+     * Open the resize dialog for the selected rows.
+     *
+     * Machines come off the rows the table was already rendered from, so there
+     * is no second fetch, no spinner, and no window in which the dialog
+     * describes lanes other than the ones that were ticked — the same discipline
+     * showVMRedeployModal follows.
+     */
+    function showVMResizeModal(rows) {
+      // Reset BEFORE showing, every time. A dialog that keeps the previous
+      // open's state is the classic way one acts on something nobody picked.
+      _vmResizeRows = rows;
+      _vmResizeSpec = { cores: null, memory_mb: null };
+      _vmResizeMachines = [];
+
+      for (const row of rows) {
+        for (const m of (Array.isArray(row.machines) ? row.machines : [])) {
+          if (m.vmid == null) continue;
+          _vmResizeMachines.push({
+            ...m,
+            _key: `${row.lane_id}:${m.slot}`,
+            _laneId: row.lane_id,
+            _student: [row.first_name, row.last_name].filter(Boolean).join(' ') || row.student_email,
+          });
+        }
+      }
+
+      document.getElementById('vmResizeWho').textContent = rows.length === 1
+        ? ([rows[0].first_name, rows[0].last_name].filter(Boolean).join(' ')
+            || rows[0].student_email || 'this lane')
+        : `${rows.length} lanes`;
+
+      const list = document.getElementById('vmResizeMachines');
+      list.innerHTML = _vmResizeMachines.length
+        ? _vmResizeMachines.map(_vmResizeMachineRow).join('')
+        : '<p class="deploy-env-hint" style="margin:0;">These lanes record no machines.</p>';
+
+      // Pre-fill from the current sizing when every selected machine agrees on
+      // it. Filling from a disagreeing set would silently propose one machine's
+      // size for all of them.
+      const sizes = _vmResizeMachines.map(m => (m.resources || {}));
+      for (const field of ['cores', 'memory_mb']) {
+        const vals = [...new Set(sizes.map(r => r[field]).filter(v => v != null))];
+        _vmResizeSpec[field] = vals.length === 1 ? vals[0] : null;
+      }
+      _renderVMResizeFields();
+      document.getElementById('vmResizePreview').innerHTML = '';
+      _resetVMResizeButton();
+      _syncVMResizePicker();
+      showModal('vmResizeModal');
+    }
+
+    function closeVMResizeModal() {
+      _vmResizeRows = null;
+      _vmResizeMachines = [];
+      closeModal('vmResizeModal');
+    }
+
+    function toggleVMResizeSelectAll(box) {
+      document.querySelectorAll('#vmResizeMachines .vm-resize-machine')
+        .forEach(cb => { cb.checked = box.checked; });
+      _syncVMResizePicker();
+    }
+
+    function _selectedVMResizeMachines() {
+      const keys = new Set([...document.querySelectorAll('#vmResizeMachines .vm-resize-machine')]
+        .filter(b => b.checked).map(b => b.value));
+      return _vmResizeMachines.filter(m => keys.has(m._key));
+    }
+
+    function _syncVMResizePicker() {
+      const boxes = [...document.querySelectorAll('#vmResizeMachines .vm-resize-machine')];
+      const n = boxes.filter(b => b.checked).length;
+
+      const all = document.getElementById('vmResizeSelectAll');
+      all.checked = boxes.length > 0 && n === boxes.length;
+      all.indeterminate = n > 0 && n < boxes.length;
+
+      document.getElementById('vmResizeCount').textContent =
+        `${n} of ${boxes.length} machine${boxes.length === 1 ? '' : 's'}`;
+
+      // How many are live right now, so the reboot cost is stated in terms of
+      // students who will actually notice it.
+      const running = _selectedVMResizeMachines().filter(m => m.power_state === 'running').length;
+      const warn = document.getElementById('vmResizeRunningWarn');
+      const text = document.getElementById('vmResizeRunningText');
+      if (running > 0) {
+        text.textContent =
+          `${running} of these machines ${running === 1 ? 'is' : 'are'} running now and will restart. `
+          + `Anyone connected is disconnected and can reconnect with the same details once it is back. `
+          + `Work already saved to disk is kept; anything unsaved in an open application may not be.`;
+        warn.style.display = 'flex';
+      } else {
+        warn.style.display = 'none';
+      }
+
+      // Nothing ticked, or nothing to change, is not a resize.
+      const hasSpec = _vmResizeSpec.cores != null || _vmResizeSpec.memory_mb != null;
+      document.getElementById('vmResizeBtn').disabled = n === 0 || !hasSpec;
+    }
+
+    /** Back to the "not yet previewed" state. Any edit must land here. */
+    function _resetVMResizeButton() {
+      const btn = document.getElementById('vmResizeBtn');
+      if (!btn) return;
+      Utils.setBtnLoading(btn, false);
+      btn.textContent = 'Check capacity';
+      btn.onclick = () => submitVMResize(btn);
+      const pv = document.getElementById('vmResizePreview');
+      if (pv) pv.innerHTML = '';
+      // Re-evaluate the disabled state against the edit that just happened.
+      if (_vmResizeRows) _syncVMResizePicker();
+    }
+
+    /** The request body both the preview and the apply call send. */
+    function _vmResizeBody(confirm) {
+      const machines = _selectedVMResizeMachines();
+      const laneIds = [...new Set(machines.map(m => m._laneId))];
+      const slots = [...new Set(machines.map(m => m.slot))].sort((a, b) => a - b);
+      // Slots are omitted when every machine on every selected lane is ticked,
+      // so "all" is the wire default and the common case sends the smaller body.
+      const allTicked = machines.length === _vmResizeMachines.length;
+      const body = { lane_ids: laneIds, resources: {} };
+      if (_vmResizeSpec.cores != null) body.resources.cores = _vmResizeSpec.cores;
+      if (_vmResizeSpec.memory_mb != null) body.resources.memory_mb = _vmResizeSpec.memory_mb;
+      if (!allTicked) body.slots = slots;
+      if (confirm) body.confirm = true;
+      return body;
+    }
+
+    /**
+     * Step one: ask the server what this would cost, and show it.
+     *
+     * Two-step rather than one confirm dialog because the number that matters —
+     * what each NODE's memory would become — is not something the admin can work
+     * out from the form. Raising RAM across a cohort spends headroom that other
+     * courses are drawing on, and that gets shown before it is spent.
+     */
+    async function submitVMResize(btn) {
+      if (!_vmResizeRows || _vmBulkBusy) return;
+      const courseId = currentCourseId;
+      Utils.setBtnLoading(btn, true, 'Checking…');
+      try {
+        const res = await api('POST', `/courses/${courseId}/vms/resize`, _vmResizeBody(false));
+        _renderVMResizePreview(res);
+        Utils.setBtnLoading(btn, false);
+        if (res.canProceed) {
+          const n = (res.machines || []).length;
+          btn.textContent = `Resize ${n} machine${n === 1 ? '' : 's'}`;
+          btn.onclick = () => _applyVMResize(btn);
+        } else {
+          btn.textContent = 'Check capacity';
+          btn.disabled = true;
+        }
+      } catch (e) {
+        Utils.setBtnLoading(btn, false);
+        toast('Could not check capacity: ' + e.message, true);
+      }
+    }
+
+    /** The capacity card. Per-node, because that is where the limit bites. */
+    function _renderVMResizePreview(res) {
+      const el = document.getElementById('vmResizePreview');
+      const s = res.summary || {};
+      const nodes = (res.nodes || []).map(n => `
+        <div style="display:flex;gap:0.5rem;font-size:0.75rem;padding:0.15rem 0;">
+          <span style="font-family:monospace;min-width:5rem;">${escHtml(n.node)}</span>
+          <span style="color:${n.over ? '#e53e3e' : 'var(--text-muted,#6b7280)'};">
+            ${escHtml(String(n.mem_pct))}% &rarr; <strong>${escHtml(String(n.projected_pct))}%</strong> memory
+            (${n.delta_gb >= 0 ? '+' : ''}${escHtml(String(n.delta_gb))} GB, ${escHtml(String(n.machines))} machine${n.machines === 1 ? '' : 's'})
+          </span>
+        </div>`).join('');
+
+      el.innerHTML = `
+        <div class="info-box" style="margin-top:0.6rem;">
+          <p style="margin:0 0 0.35rem;font-size:0.8rem;">
+            <strong>${escHtml(String(s.machines || 0))}</strong> machine${s.machines === 1 ? '' : 's'}
+            &mdash; ${escHtml(String(s.running || 0))} running, ${escHtml(String(s.stopped || 0))} stopped.
+            ${s.stopped ? 'Stopped machines are re-sized in place and left switched off.' : ''}
+          </p>
+          ${nodes || '<p style="margin:0;font-size:0.75rem;color:var(--text-muted,#6b7280);">No node memory change (nothing running, or memory unchanged).</p>'}
+          ${(res.errors || []).map(e => `<p style="margin:0.35rem 0 0;color:#e53e3e;font-size:0.78rem;">${escHtml(e)}</p>`).join('')}
+          ${(res.warnings || []).map(w => `<p style="margin:0.35rem 0 0;color:#d69e2e;font-size:0.78rem;">${escHtml(w)}</p>`).join('')}
+          ${(res.skipped || []).length ? `<p style="margin:0.35rem 0 0;font-size:0.75rem;color:var(--text-muted,#6b7280);">${escHtml(String(res.skipped.length))} lane(s) skipped: ${escHtml(res.skipped.map(k => k.reason).filter((v, i, a) => a.indexOf(v) === i).join('; '))}</p>` : ''}
+        </div>`;
+    }
+
+    /** Step two: apply. */
+    async function _applyVMResize(btn) {
+      if (!_vmResizeRows || _vmBulkBusy) return;
+      const courseId = currentCourseId;
+      const body = _vmResizeBody(true);
+      _vmBulkBusy = true;
+      Utils.setBtnLoading(btn, true, 'Starting…');
+      try {
+        const res = await api('POST', `/courses/${courseId}/vms/resize`, body);
+        // Dim the per-row buttons NOW rather than waiting for the server, the
+        // same reason bulkRedeployLanes does: on a 24-lane job that gap is
+        // several seconds of live buttons pointing at machines mid-reboot.
+        (res.lanes || body.lane_ids).forEach(id => _vmBusyLanes.add(id));
+        toast(res.message || 'Resize started');
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.lane_id}: ${sk.reason}`, true));
+        closeVMResizeModal();
+        if (res.progress_url) pollResizeProgress(res.progress_url);
+      } catch (e) {
+        toast('Error resizing: ' + e.message, true);
+      } finally {
+        _vmBulkBusy = false;
+        Utils.setBtnLoading(btn, false);   // BEFORE the reload detaches btn
+        if (currentCourseId === courseId) { clearVMSelection(); loadVMManagement(); }
+      }
+    }
+
+    let _vmResizeProgressTimer = null;
+
+    /**
+     * Poll a resize, into the SAME banner the deploy and rebuild use.
+     *
+     * A THIRD timer, separate from pollProvisionProgress and
+     * pollRebuildProgress, because all three read different registry keys and
+     * each stops on phase === 'complete' — multiplexing one poller would let
+     * whichever finishes first hide another's banner.
+     *
+     * Recursive setTimeout rather than setInterval, and the banner element is
+     * re-read on EVERY tick, because #provisionProgressBanner lives inside
+     * #vmManagementContent — which loadVMManagement() replaces wholesale on its
+     * own 8s poll. A reference captured once goes stale the first time the table
+     * refreshes, and the progress display silently stops updating.
+     */
+    async function pollResizeProgress(url) {
+      clearTimeout(_vmResizeProgressTimer);
+      const banner = document.getElementById('provisionProgressBanner');
+      if (!banner) return;
+      try {
+        const p = await api('GET', url.replace(/^\/api\/cle/, ''));
+        banner.style.display = 'block';
+        const eta = p.eta_s ? ` &middot; ~${Math.ceil(p.eta_s / 60)} min left` : '';
+        banner.innerHTML =
+          `<strong>${escHtml(p.error || p.phase_detail || p.phase || 'Resizing')}</strong> &mdash; `
+          + `${p.completed}/${p.total} complete (${p.succeeded} ok, ${p.failed} failed)${eta}`;
+        if (p.phase !== 'complete') {
+          _vmResizeProgressTimer = setTimeout(() => pollResizeProgress(url), 5000);
+        } else {
+          toast(p.failed
+            ? `Resize finished with ${p.failed} failure(s) — check those machines' sizes`
+            : 'Resize complete');
+          setTimeout(() => { banner.style.display = 'none'; }, 8000);
+          loadVMManagement();
+        }
+      } catch (e) {
+        // A 404 means the entry aged out or the resize never started; the table
+        // below is the durable record either way.
+        banner.style.display = 'none';
+        loadVMManagement();
       }
     }
 

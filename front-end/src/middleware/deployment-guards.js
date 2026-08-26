@@ -35,6 +35,9 @@ async function getClusterHealth(proxmoxAPI) {
         node: r.node,
         status: r.status,
         cpu_pct: Math.round((r.cpu || 0) * 100),
+        // Physical cores. Carried so buildResizePreview can say when a
+        // requested core count exceeds what the node actually has.
+        maxcpu: Number(r.maxcpu) || 0,
         mem_pct: Math.round(((r.mem || 0) / (r.maxmem || 1)) * 100),
         mem_used_gb: Math.round((r.mem || 0) / 1073741824 * 10) / 10,
         mem_total_gb: Math.round((r.maxmem || 0) / 1073741824 * 10) / 10,
@@ -184,10 +187,155 @@ async function buildDeployPreview(opts) {
   };
 }
 
+/**
+ * Project each node's memory use if a set of machines were re-sized.
+ *
+ * PURE, so the arithmetic can be tested without a cluster — and it is worth
+ * testing, because getting it wrong in either direction is bad in a way nobody
+ * notices until class starts. Too lax and a bulk resize overcommits a node and
+ * the guests start swapping or fail to boot; too strict and a legitimate
+ * downsize gets refused.
+ *
+ * Three rules that are easy to get wrong:
+ *
+ *  1. THE DELTA IS WHAT MATTERS, NOT THE NEW SIZE. Node memory is already
+ *     accounted for at the machine's CURRENT size; only the difference lands on
+ *     the node. Summing the requested sizes would refuse a class that is
+ *     already running.
+ *
+ *  2. STOPPED MACHINES CONTRIBUTE ZERO. A stopped VM consumes no host memory,
+ *     and a resize deliberately leaves it stopped — so re-sizing a powered-off
+ *     machine from 4 GB to 64 GB changes nothing on the node today. Counting it
+ *     would block a whole batch on machines that are not running.
+ *
+ *  3. A DECREASE NEVER BLOCKS. Freeing memory cannot make a node unhealthier,
+ *     even when it is already over the threshold — refusing "make these
+ *     smaller" because the node is full is precisely backwards.
+ *
+ * @param {Array}  nodes    getClusterHealth().nodes
+ * @param {Array}  targets  [{ node, running, current: { memory_mb } }]
+ * @param {object} resources { memory_mb?, cores? } — the requested sizing
+ * @returns {Array} one row per AFFECTED node
+ */
+function projectNodeMemory(nodes, targets, resources) {
+  const want = Number(resources && resources.memory_mb) || null;
+  const byNode = new Map();
+
+  for (const t of (targets || [])) {
+    if (!t || !t.node) continue;
+    // Rule 2.
+    if (!t.running) continue;
+    const cur = Number(t.current && t.current.memory_mb) || 0;
+    if (!want || !cur) continue;
+    const delta = want - cur;
+    const acc = byNode.get(t.node) || { delta_mb: 0, count: 0 };
+    acc.delta_mb += delta;
+    acc.count += 1;
+    byNode.set(t.node, acc);
+  }
+
+  const out = [];
+  for (const n of (nodes || [])) {
+    const acc = byNode.get(n.node);
+    if (!acc) continue;
+    const total_gb = Number(n.mem_total_gb) || 0;
+    const used_gb = Number(n.mem_used_gb) || 0;
+    const delta_gb = acc.delta_mb / 1024;
+    const projected_gb = used_gb + delta_gb;
+    out.push({
+      node: n.node,
+      machines: acc.count,
+      mem_pct: n.mem_pct,
+      mem_used_gb: used_gb,
+      mem_total_gb: total_gb,
+      delta_gb: Math.round(delta_gb * 10) / 10,
+      projected_gb: Math.round(projected_gb * 10) / 10,
+      projected_pct: total_gb > 0 ? Math.round((projected_gb / total_gb) * 100) : 0,
+      // Rule 3: only an increase can be over-threshold.
+      over: delta_gb > 0 && total_gb > 0
+        && (projected_gb / total_gb) * 100 > MAX_NODE_MEMORY_PCT,
+    });
+  }
+  return out;
+}
+
+/**
+ * Pre-flight a resize. Blocks only on projected node memory; everything else is
+ * a warning, because overcommitting CPU is legal and sometimes intended.
+ *
+ * Deliberately NOT reusing buildDeployPreview: that one counts VMs and only
+ * blocks when EVERY node is over threshold, which is right for a deploy that
+ * can be placed anywhere and wrong here — a resize cannot choose its node, so
+ * one full node is a hard stop for the machines that live on it.
+ *
+ * @param {object}   a
+ * @param {Array}    a.targets   [{ node, vmid, label, running, current, maxcpu? }]
+ * @param {object}   a.resources { cores?, memory_mb? }
+ * @param {Function} a.proxmoxAPI
+ */
+async function buildResizePreview({ targets, resources, proxmoxAPI }) {
+  const health = await getClusterHealth(proxmoxAPI);
+  const nodeRows = projectNodeMemory(health.nodes, targets, resources);
+
+  const errors = [];
+  const warnings = [];
+
+  for (const r of nodeRows) {
+    if (r.over) {
+      errors.push(
+        `Node ${r.node} would be at ${r.projected_pct}% memory after this change ` +
+        `(${r.projected_gb} of ${r.mem_total_gb} GB, threshold ${MAX_NODE_MEMORY_PCT}%). ` +
+        `${r.machines} of the selected machines live on it.`);
+    } else if (r.delta_gb > 0 && r.projected_pct >= MAX_NODE_MEMORY_PCT - 10) {
+      warnings.push(`Node ${r.node} will be at ${r.projected_pct}% memory after this change.`);
+    }
+  }
+
+  // CPU overcommit is allowed by Proxmox and is a normal thing to do in a lab,
+  // so this is information rather than a gate.
+  const wantCores = Number(resources && resources.cores) || null;
+  if (wantCores) {
+    const byNode = new Map((health.nodes || []).map(n => [n.node, n]));
+    const busted = [...new Set((targets || [])
+      .map(t => t && t.node)
+      .filter(nm => {
+        const n = byNode.get(nm);
+        return n && Number(n.maxcpu) > 0 && wantCores > Number(n.maxcpu);
+      }))];
+    for (const nm of busted) {
+      warnings.push(
+        `${wantCores} cores is more than node ${nm} physically has ` +
+        `(${byNode.get(nm).maxcpu}). Proxmox allows this, but the guest will contend for CPU.`);
+    }
+  }
+
+  // Boots, but thrashes. Worth saying before an instructor does it to 30 machines.
+  const wantMem = Number(resources && resources.memory_mb) || null;
+  if (wantMem && wantMem < 2048) {
+    warnings.push(`${wantMem} MB is below what a Windows desktop needs to run comfortably.`);
+  }
+
+  const running = (targets || []).filter(t => t && t.running).length;
+  return {
+    canProceed: errors.length === 0,
+    summary: {
+      machines: (targets || []).length,
+      running,
+      stopped: (targets || []).length - running,
+      requested: resources,
+    },
+    nodes: nodeRows,
+    warnings: warnings.concat(health.warnings || []),
+    errors
+  };
+}
+
 module.exports = {
   getClusterHealth,
   getDeployingCount,
   buildDeployPreview,
+  buildResizePreview,
+  projectNodeMemory,
   MAX_NODE_MEMORY_PCT,
   MAX_NODE_STORAGE_PCT,
   MAX_CONCURRENT_DEPLOYS

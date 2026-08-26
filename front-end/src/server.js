@@ -724,6 +724,84 @@ async function recoverStrandedLanes() {
   }
 }
 
+/**
+ * Power back on any machine a resize took down and never got to restart.
+ *
+ * A resize is stop -> reconfigure -> start, and the start lives in this
+ * process. A restart in the middle leaves a student's machine powered off with
+ * nothing anywhere that knows to turn it back on — the single worst outcome
+ * this feature can produce, and the reason vm-resize.js writes its intent to
+ * the lane row BEFORE it stops anything.
+ *
+ * KEYED ON config, NOT ON STATUS, and that is deliberate. A resize must never
+ * park the lane at 'deploying': the lane genuinely is active (its gateway is
+ * up, its other machines untouched), and recoverStrandedLanes above sweeps
+ * every 'deploying' row without a config.rebuild key straight to 'error' —
+ * so borrowing that marker would condemn a perfectly healthy lane on every
+ * restart. In-flight state is held by the progress-registry mutex instead.
+ *
+ * Only machines whose marker says was_running are started. One that was already
+ * stopped when the resize began stays stopped, exactly as it would have.
+ */
+async function recoverInterruptedResizes() {
+  try {
+    const { cybercoreQuery } = require('./utils/cybercore-db');
+    const { proxmoxAPI, getPowerState } = require('./utils/proxmox');
+    const { vmApiBase } = require('./utils/vm-paths');
+
+    const stranded = await cybercoreQuery(`
+      SELECT lane_id, name, config->'resize'->'in_flight' AS marker
+        FROM cybercore_lane
+       WHERE config->'resize'->'in_flight' IS NOT NULL
+         AND status <> 'deleted'
+    `);
+    if (stranded.rowCount === 0) return;
+
+    // Two ways a marker survives: the process died mid-resize, or the resize
+    // finished but could not switch the machine back on. Both want the same
+    // remedy, so neither is singled out in the message.
+    console.warn(`⚠️  ${stranded.rowCount} lane(s) have a machine left down by a resize — restoring power.`);
+
+    for (const row of stranded.rows) {
+      const m = row.marker || {};
+      const started = [];
+      try {
+        if (m.was_running && m.node && m.vmid) {
+          const state = await getPowerState(m.node, m.vmid, m.provider_type).catch(() => 'unknown');
+          if (state !== 'running') {
+            await proxmoxAPI('POST', `${vmApiBase(m.node, m.vmid, m.provider_type)}/status/start`);
+            started.push(m.vmid);
+          }
+        }
+        // The marker is cleared either way. Leaving it would make every
+        // subsequent boot retry a start that already happened.
+        await cybercoreQuery(`
+          UPDATE cybercore_lane
+             SET config = jsonb_set(
+                            config,
+                            '{resize}',
+                            (COALESCE(config->'resize', '{}'::jsonb) - 'in_flight')
+                              || jsonb_build_object(
+                                   'status', 'interrupted',
+                                   'error', 'A resize did not finish cleanly and the machine was left '
+                                         || 'switched off. It has been powered back on; its size may '
+                                         || 'not have changed.',
+                                   'at', to_jsonb(NOW()))),
+                 updated_at = NOW()
+           WHERE lane_id = $1
+        `, [row.lane_id]);
+        if (started.length) {
+          console.warn(`    ${row.name || row.lane_id}: started vmid ${started.join(', ')}`);
+        }
+      } catch (e) {
+        console.warn(`    ${row.name || row.lane_id}: could not restore power — ${e.message}`);
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️  Could not recover interrupted resizes:', err.message);
+  }
+}
+
 async function syncVmTemplateNodes() {
   try {
     const { cybercoreQuery } = require('./utils/cybercore-db');
@@ -788,6 +866,10 @@ async function start() {
     // Nothing can be deploying yet — anything that says it is was abandoned by
     // a previous process and is holding a VXLAN it will never use.
     await recoverStrandedLanes();
+    // After the lane sweep: that one decides lane STATUS, this one only
+    // restores VM POWER, and a lane it just marked 'error' can still be
+    // holding a machine this needs to switch back on.
+    await recoverInterruptedResizes();
 
     // Read-only: says which lanes are double-booked on one gateway address.
     // Runs after recoverStrandedLanes so lanes it just released to 'error' are

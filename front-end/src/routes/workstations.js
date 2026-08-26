@@ -12,6 +12,7 @@ const router = express.Router();
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI, waitForTask, findTemplateNode } = require('../utils/proxmox');
+const { vmApiBase } = require('../utils/vm-paths');
 const { selectBestNode } = require('../utils/node-selector');
 const { guacAPI, ensureGuacAccount } = require('../utils/guacamole');
 const { getDefaultTemplateNode } = require('../utils/site-config');
@@ -40,15 +41,9 @@ function sanitizeVmName(s) {
     .substring(0, 63);
 }
 
-/**
- * Returns the Proxmox API base path for a VM or container.
- * provider_type 'lxc' → /api2/json/nodes/{node}/lxc/{vmid}
- * anything else (or null/undefined) → /api2/json/nodes/{node}/qemu/{vmid}
- */
-function vmApiBase(node, vmid, providerType) {
-  const kind = providerType === 'lxc' ? 'lxc' : 'qemu';
-  return `/api2/json/nodes/${node}/${kind}/${vmid}`;
-}
+// vmApiBase is imported from utils/vm-paths above. It used to be defined here as
+// well as in lane-deployer.js; one definition means the qemu/lxc decision cannot
+// drift between the two.
 
 /**
  * Verify caller can access this workstation VM; returns the vm row or throws.

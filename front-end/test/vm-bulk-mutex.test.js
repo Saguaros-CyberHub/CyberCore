@@ -70,6 +70,7 @@ const laneProvision = require(path.join(CLE, 'utils', 'lane-provision.js'));
 const {
   progressIdForCourse,
   progressIdForCourseRebuild,
+  progressIdForCourseResize,
   progressIdForLane,
   courseOperationsInFlight,
   assertNoConflictingWorkstationOperation,
@@ -136,6 +137,52 @@ test('scope and laneId are recovered by slicing the key', () => {
   assert.strictEqual(byScope.provision.laneId, null);
   assert.strictEqual(byScope.course.laneId, null);
   assert.strictEqual(byScope.lane.laneId, LANE_A);
+});
+
+test('the resize key resolves to a scope, so the mutex can actually see it', () => {
+  // THE REGRESSION THIS FILE EXISTS FOR, for the resize feature.
+  //
+  // courseOperationsInFlight derives scope by slicing the key and `continue`s
+  // past any suffix it does not recognise. A new key without a matching arm in
+  // that parser is not a new scope — it is an operation the mutex cannot see AT
+  // ALL, so a resize and a bulk delete would happily run against the same
+  // course at the same time, one power-cycling machines the other is deleting.
+  //
+  // Asserting the arm exists is the only way to catch that: everything else
+  // about a resize would keep working.
+  given({ [progressIdForCourseResize(COURSE)]: {} });
+  const ops = courseOperationsInFlight(COURSE);
+  assert.strictEqual(ops.length, 1, 'the resize key was skipped by the scope parser');
+  assert.strictEqual(ops[0].scope, 'course');
+  assert.strictEqual(ops[0].laneId, null);
+});
+
+test('the resize key shares the course prefix and is distinct from the rebuild key', () => {
+  const base = progressIdForCourse(COURSE);
+  assert.ok(progressIdForCourseResize(COURSE).startsWith(base));
+  // Distinct because the CLIENT stops polling on phase === 'complete': sharing
+  // one key would let a finishing rebuild tear down the resize banner.
+  assert.notStrictEqual(progressIdForCourseResize(COURSE), progressIdForCourseRebuild(COURSE));
+});
+
+test('an in-flight resize blocks a bulk delete on the same course', () => {
+  given({ [progressIdForCourseResize(COURSE)]: {} });
+  assert.ok(conflictOf({ courseId: COURSE }), 'a bulk delete ran underneath a live resize');
+  assert.strictEqual(conflictOf({ courseId: COURSE }).status, 409);
+});
+
+test('an in-flight resize blocks a single-lane rebuild on the same course', () => {
+  given({ [progressIdForCourseResize(COURSE)]: {} });
+  assert.ok(conflictOf({ courseId: COURSE, laneId: LANE_A }));
+});
+
+test('a single-lane resize and a single-lane rebuild share one key, so they block each other', () => {
+  // Deliberate: both claim progressIdForLane. Two operations power-cycling and
+  // re-cloning the same machine must not interleave, while a different lane
+  // stays free.
+  given({ [progressIdForLane(COURSE, LANE_A)]: {} });
+  assert.ok(conflictOf({ courseId: COURSE, laneId: LANE_A }));
+  assert.strictEqual(conflictOf({ courseId: COURSE, laneId: LANE_B }), null);
 });
 
 // ── conflict matrix ─────────────────────────────────────────────────────────

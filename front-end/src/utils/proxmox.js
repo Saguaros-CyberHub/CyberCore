@@ -6,6 +6,8 @@
  */
 
 const { getClusterNodes } = require('./site-config');
+// Pure path builder, deliberately in its own module — see vm-paths.js for why.
+const { vmApiBase } = require('./vm-paths');
 
 const PROXMOX_URL = process.env.PROXMOX_API_URL || 'https://100.100.10.10:8006';
 const PROXMOX_TOKEN_ID = process.env.PROXMOX_TOKEN_ID || 'root@pam!clinic-app-token';
@@ -268,6 +270,69 @@ async function waitForVmidsGone(vmids, { timeoutMs = 120000, intervalMs = 5000 }
 
   return { surviving: surviving.map(v => Number(v)) };
 }
+/**
+ * Current power state of one VM, normalized to 'running' | 'stopped' | <raw>.
+ *
+ * Reads the VM's own status endpoint rather than /cluster/resources: a caller
+ * polling one machine through a power transition needs the authoritative
+ * per-VM view, and the cluster summary can lag a stop by a poll interval.
+ */
+async function getPowerState(node, vmid, providerType) {
+  const st = await proxmoxAPI('GET', `${vmApiBase(node, vmid, providerType)}/status/current`);
+  return (st && st.status) || 'unknown';
+}
+
+/**
+ * Block until a VM reaches `want`, or throw.
+ *
+ * The app had no such waiter before this: waitForTask follows a UPID,
+ * waitForVmidsGone follows a VMID's absence, and waitForTemplateUnlock follows
+ * a lock field, but nothing followed power. Every existing power call either
+ * fires and forgets (routes/workstations.js:799 writes the DB state
+ * optimistically and never awaits the UPID) or sleeps a fixed 4s. Neither is
+ * good enough for stop -> reconfigure -> start, where applying the config
+ * before the guest has actually stopped writes into Proxmox's [PENDING]
+ * section instead of the live config and the resize silently does nothing.
+ *
+ * A TRANSPORT ERROR IS NOT A FAILURE. A node under load, a pveproxy restart or
+ * a brief 596 during a shutdown all surface here as a rejected request, and
+ * treating those as "the guest is stuck" would abort a resize that was going
+ * perfectly. Errors are swallowed and the poll continues until the deadline —
+ * the same discipline waitForVmidsGone applies for the same reason.
+ *
+ * @param {string} want  'running' | 'stopped'
+ * @throws {Error & {code:'POWER_STATE_TIMEOUT', lastState:string}}
+ */
+async function waitForPowerState(node, vmid, providerType, want, opts = {}) {
+  const { timeoutMs = 180000, intervalMs = 3000, signal = null } = opts;
+  const deadline = Date.now() + timeoutMs;
+  let last = 'unknown';
+
+  while (Date.now() < deadline) {
+    if (signal && signal.aborted) {
+      throw Object.assign(new Error(`Aborted while waiting for VM ${vmid} to be ${want}`),
+        { code: 'PROXMOX_ABORTED' });
+    }
+    try {
+      last = await getPowerState(node, vmid, providerType);
+      if (last === want) return last;
+    } catch (e) {
+      // Deliberately swallowed — see the docblock. Not logged either: a 3s
+      // poll over a 180s window would produce 60 lines per unreachable VM, and
+      // the reason survives anyway in the timeout error's `lastState`.
+      last = `unreadable (${e.message})`;
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+
+  const err = new Error(
+    `VM ${vmid} did not reach '${want}' within ${Math.round(timeoutMs / 1000)}s (last seen: ${last})`);
+  err.code = 'POWER_STATE_TIMEOUT';
+  err.lastState = last;
+  throw err;
+}
+
 module.exports = {
   proxmoxAPI, waitForTask, forceDestroyVM, findTemplateNode, waitForVmidsGone, PROXMOX_URL,
+  vmApiBase, getPowerState, waitForPowerState,
 };
