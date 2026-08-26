@@ -406,7 +406,215 @@ function broadcast(opts = {}) {
   };
 }
 
-const TEMPLATES = { activation, passwordReset, courseAdded, credentialsIssued, testMessage, broadcast };
+// ============================================================================
+// SUPPORT TICKETS
+// ============================================================================
+
+/**
+ * Deep link to one ticket.
+ *
+ * ONE link shape for every role, on purpose. The ticket widget is injected on
+ * every page that has a sidebar, so /hub?ticket=<id> opens the thread for a
+ * student, an instructor and an admin alike — and an admin who wants the full
+ * queue with filters goes to the Admin page anyway. A per-role URL here would
+ * mean the template had to know the recipient's role, which is exactly the kind
+ * of coupling that stops a template being a pure function of its input.
+ *
+ * Returns null when MAIL_PUBLIC_URL is unset, and every caller renders no button
+ * at all in that case rather than emitting a link to nowhere.
+ */
+function ticketUrl(publicUrl, ticketId) {
+  const base = String(publicUrl || '').replace(/\/+$/, '');
+  if (!base || !ticketId) return null;
+  return `${base}/hub?ticket=${encodeURIComponent(String(ticketId))}`;
+}
+
+/** "[#42] " or "" — the mail-client threading anchor, when we have a number. */
+function ticketRef(ticketNumber) {
+  return ticketNumber == null || ticketNumber === '' ? '' : `[#${ticketNumber}] `;
+}
+
+/**
+ * A student has filed a ticket. Goes To: every active admin, Cc: the course
+ * instructor, Reply-To: the student.
+ *
+ * The Reply-To is the useful part and also the sharp one: hitting Reply reaches
+ * the student directly and is NOT recorded on the ticket. That is stated
+ * explicitly in both parts rather than left to be discovered, because the
+ * failure mode — staff answering by email while the ticket sits at Open forever
+ * and a second admin duplicates the work — is otherwise silent.
+ */
+function ticketSubmitted(opts = {}) {
+  const {
+    siteName = 'CyberHub', publicUrl, ticketNumber, ticketId,
+    subject, bodyText, courseName, courseCode, machineLabel,
+    requesterName, requesterEmail,
+  } = opts;
+
+  const who = String(requesterName || requesterEmail || 'A user').trim();
+  const course = (courseName || courseCode) ? courseLabel(courseName, courseCode) : null;
+  const url = ticketUrl(publicUrl, ticketId);
+  const replyNote = requesterEmail
+    ? `Replying to this email goes directly to ${who} <${requesterEmail}> and will NOT be recorded on the ticket. Use the link above to answer on the ticket.`
+    : 'Replying to this email will NOT be recorded on the ticket. Use the link above to answer on the ticket.';
+
+  const facts = [];
+  if (course) facts.push(['Course', course]);
+  if (machineLabel) facts.push(['Machine', machineLabel]);
+  facts.push(['From', requesterEmail ? `${who} <${requesterEmail}>` : who]);
+
+  const text = [
+    `${who} submitted a support ticket.`,
+    '',
+    ...facts.map(([k, v]) => `${k}: ${v}`),
+    '',
+    String(subject || '').trim(),
+    '',
+    String(bodyText || '').trim(),
+    '',
+    ...(url ? [`Open the ticket: ${url}`, ''] : []),
+    replyNote,
+    '',
+    `— ${siteName}`,
+  ].join('\n');
+
+  const factRows = facts.map(([k, v]) =>
+    `<tr><td style="padding:2px 12px 2px 0;color:#8a90a0;">${esc(k)}</td><td style="padding:2px 0;">${esc(v)}</td></tr>`
+  ).join('');
+
+  const html = shell(siteName, [
+    `<p style="margin:0 0 16px;">${esc(who)} submitted a support ticket.</p>`,
+    `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px;font-size:14px;color:#5a6072;">${factRows}</table>`,
+    `<p style="margin:0 0 8px;font-weight:600;">${esc(String(subject || '').trim())}</p>`,
+    paragraphize(bodyText),
+    url ? button(url, 'Open the ticket') : '',
+    `<p style="margin:16px 0 0;font-size:13px;color:#8a90a0;">${esc(replyNote)}</p>`,
+  ].filter(Boolean).join('\n'));
+
+  return {
+    // The outbox stores subjects in PLAINTEXT — only bodies are pgp_sym_encrypt'd
+    // (029_email_outbox.sql) — and relays log them. These are the student's own
+    // words, so the route caps the length and the form says not to put private
+    // detail here.
+    subject: `${ticketRef(ticketNumber)}${String(subject || 'Support request').trim()}`,
+    text,
+    html,
+  };
+}
+
+/**
+ * Staff moved a ticket. Goes To: the student.
+ *
+ * "Pending" gets its own sentence because it is the one status that asks the
+ * recipient to DO something, and a bare "your ticket is now Pending" reads like
+ * a queue position rather than a question. That sentence is the whole reason the
+ * state exists.
+ *
+ * Takes LABELS, not raw statuses: this module has no imports by design, so the
+ * caller does the utils/ticket-status.js lookup and hands the display string in.
+ */
+function ticketStatusChanged(opts = {}) {
+  const {
+    siteName = 'CyberHub', publicUrl, ticketNumber, ticketId,
+    subject, firstName, fromStatusLabel, toStatusLabel, actorName, note,
+  } = opts;
+
+  const to = String(toStatusLabel || '').trim() || 'updated';
+  const from = String(fromStatusLabel || '').trim();
+  const by = String(actorName || '').trim();
+  const url = ticketUrl(publicUrl, ticketId);
+
+  const moved = from
+    ? `Your support ticket moved from ${from} to ${to}${by ? ` (by ${by})` : ''}.`
+    : `Your support ticket is now ${to}${by ? ` (by ${by})` : ''}.`;
+
+  const waiting = to.toLowerCase() === 'pending'
+    ? 'That means we are waiting on you — please reply on the ticket so we can carry on.'
+    : null;
+
+  const text = [
+    greeting(firstName),
+    '',
+    moved,
+    ...(waiting ? ['', waiting] : []),
+    '',
+    String(subject || '').trim(),
+    ...(note ? ['', String(note).trim()] : []),
+    ...(url ? ['', `View the ticket: ${url}`] : []),
+    '',
+    `— ${siteName}`,
+  ].join('\n');
+
+  const html = shell(siteName, [
+    `<p style="margin:0 0 16px;">${esc(greeting(firstName))}</p>`,
+    `<p style="margin:0 0 16px;">${esc(moved)}</p>`,
+    waiting ? `<p style="margin:0 0 16px;"><strong>${esc(waiting)}</strong></p>` : '',
+    `<p style="margin:0 0 16px;color:#5a6072;">${esc(String(subject || '').trim())}</p>`,
+    note ? paragraphize(note) : '',
+    url ? button(url, 'View the ticket') : '',
+  ].filter(Boolean).join('\n'));
+
+  return {
+    subject: `${ticketRef(ticketNumber)}${String(subject || 'Your support ticket').trim()} — ${to}`,
+    text,
+    html,
+  };
+}
+
+/**
+ * Somebody answered on the ticket.
+ *
+ * Used in BOTH directions — staff replying to the student, and the student
+ * answering back to the admins — which is why the lead line names the ticket
+ * rather than saying "your support ticket". A student's answer arriving at four
+ * admins as "Sam replied to your support ticket" reads as though each of them
+ * had filed it.
+ *
+ * The subject is deliberately IDENTICAL to ticketSubmitted's, with no status
+ * suffix, so a mail client threads the reply under the original conversation
+ * rather than starting a second one.
+ */
+function ticketReplied(opts = {}) {
+  const {
+    siteName = 'CyberHub', publicUrl, ticketNumber, ticketId,
+    subject, firstName, authorName, bodyText,
+  } = opts;
+
+  const by = String(authorName || '').trim() || 'Support';
+  const url = ticketUrl(publicUrl, ticketId);
+  const on = ticketNumber == null || ticketNumber === ''
+    ? 'a support ticket' : `support ticket #${ticketNumber}`;
+
+  const text = [
+    greeting(firstName),
+    '',
+    `${by} replied to ${on}:`,
+    '',
+    String(bodyText || '').trim(),
+    ...(url ? ['', `Reply on the ticket: ${url}`] : []),
+    '',
+    `— ${siteName}`,
+  ].join('\n');
+
+  const html = shell(siteName, [
+    `<p style="margin:0 0 16px;">${esc(greeting(firstName))}</p>`,
+    `<p style="margin:0 0 16px;">${esc(by)} replied to ${esc(on)}:</p>`,
+    paragraphize(bodyText),
+    url ? button(url, 'Reply on the ticket') : '',
+    `<p style="margin:16px 0 0;font-size:13px;color:#8a90a0;">${esc(String(subject || '').trim())}</p>`,
+  ].filter(Boolean).join('\n'));
+
+  return {
+    subject: `${ticketRef(ticketNumber)}${String(subject || 'Your support ticket').trim()}`,
+    text,
+    html,
+  };
+}
+
+const TEMPLATES = {
+  activation, passwordReset, courseAdded, credentialsIssued, testMessage, broadcast,
+  ticketSubmitted, ticketStatusChanged, ticketReplied,
+};
 
 module.exports = {
   ...TEMPLATES,
@@ -417,4 +625,6 @@ module.exports = {
   // would drift from what recipients actually get.
   shell, button,
   applyMergeFields, hasMergeFields, paragraphize, MERGE_KEYS,
+  // The ticket deep-link, exported so the routes and the widget agree on one shape.
+  ticketUrl, ticketRef,
 };

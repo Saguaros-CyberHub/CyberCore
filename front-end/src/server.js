@@ -112,6 +112,7 @@ const guacSessionRoutes = require('./routes/guac-sessions');
 const workstationRoutes = require('./routes/workstations');
 const flagRoutes = require('./routes/flags');
 const chatStatusRoutes = require('./routes/chat-status');
+const ticketRoutes = require('./routes/tickets');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -449,6 +450,11 @@ app.use('/api/modules', moduleRoutes);
 app.use('/api/dashboard', guacSessionRoutes);
 app.use('/api/workstations', workstationRoutes);
 app.use('/api/flags', flagRoutes);
+// Support tickets. MUST be registered here, in the core block, and not later:
+// the CIAB plugin mounts at '/' with an /api catch-all that matches every
+// /api/* request in the application (ciab/routes/api.js, test/ciab-gate-scope.test.js),
+// and core routes survive only by being registered before moduleLoader.loadAll().
+app.use('/api/tickets', ticketRoutes);
 
 // Reports whether an LLM is configured, so the global chat widget can hide its
 // launcher instead of offering a button that always fails. Must stay in core:
@@ -858,6 +864,12 @@ async function start() {
     // The unified audit trail (migrations/032_audit_log.sql). Non-fatal: a DDL
     // permission problem must degrade to "no audit log", not "no server".
     await require('./utils/audit').ensureAuditLog();
+
+    // Support tickets (migrations/034_support_tickets.sql). AFTER the mailer,
+    // because ensureEmailOutbox() adds the cc_address/reply_to columns a ticket
+    // notification needs to copy the course instructor. Non-fatal on the same
+    // terms as the audit log: no ticket system beats no server.
+    await require('./utils/tickets').ensureTicketTables();
 
     // Drains queued mail in the background. No-ops when mail isn't configured,
     // so an offline deployment doesn't spin a pointless timer.

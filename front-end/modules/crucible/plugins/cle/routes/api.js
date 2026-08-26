@@ -25,6 +25,26 @@ const myCoursesRoutes = require('./my-courses');
 const courseRosterRoutes = require('./course-roster');
 const { requireCourseFeature } = require('../utils/course-features');
 
+// The support ticket form has to offer a student the courses they are enrolled
+// in, but tickets live in cybercore_db and courses live in cle_db — there is no
+// join to make. Core therefore states the QUESTION and this plugin registers the
+// ANSWER, the same inversion CIAB uses for its sidebar access gate a few lines
+// down from here in ciab/routes/api.js.
+//
+// Registered from a route file rather than from the loader because that is what
+// the loader require()s AFTER provisionDatabase() has injected this plugin's
+// pool; a require at loader time would install a provider whose every call
+// throws 'CLE database pool not initialized'.
+//
+// Non-fatal: core degrades to an empty course list, so a failure here costs the
+// ticket form its dropdown, not the ability to file a ticket.
+try {
+  require('../../../../../src/utils/course-directory')
+    .registerCourseDirectory(require('../utils/course-directory-provider'));
+} catch (err) {
+  console.warn('[CLE] Could not register the course directory:', err.message);
+}
+
 // Student-facing: enrolled courses + their capture-flag boards. No role gate —
 // every route inside scopes to req.user.userId and checks enrollment itself.
 router.use('/api/cle/my', authenticateToken, myCoursesRoutes);

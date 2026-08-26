@@ -55,6 +55,11 @@ const CATEGORY_BY_PREFIX = {
   access:        'access',
   flag:          'access',
   content:       'content',
+  // A support ticket is user-authored content with a workflow. It gets an
+  // EXISTING category rather than a new one because `category` carries a CHECK
+  // constraint (see ensureAuditLog below), and adding a value would mean
+  // dropping and re-adding that constraint on a live table from boot DDL.
+  ticket:        'content',
   script:        'content',
   template:      'content',
   config:        'config',

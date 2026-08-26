@@ -136,6 +136,19 @@ const Layout = {
   },
 
   // Generate the skeleton sidebar (header + footer, nav populated async)
+  //
+  // MUST STAY A PURE STRING BUILDER. test/view-mode-nav.test.js evaluates this
+  // in a stub context whose document.getElementById returns null and which has
+  // no network, so a DOM read or a fetch here breaks the suite that guards
+  // Student View. Anything stateful belongs in ensureTicketWidget() or
+  // ticket-widget.js.
+  //
+  // The support-ticket control is a <button>, deliberately, and its label is
+  // chosen with care: that same test asserts a student's footer contains no
+  // href="/admin", that a previewing admin's contains no >Admin<, and that a
+  // student's contains none of the Student-View strings. Do not describe any of
+  // those constraints in an HTML comment inside the template below -- the
+  // comment ships in the returned markup and trips the assertions itself.
   getSidebarHTML() {
     const user = Auth.getUser();
     const initials = user?.firstName && user?.lastName
@@ -161,6 +174,11 @@ const Layout = {
       </nav>
 
       <div class="sidebar-footer">
+        <button type="button" class="ticket-btn" onclick="Layout.openTicketModal()"
+                title="Report a problem to the admins">
+          <span class="ticket-icon">&#128172;</span>
+          <span>Submit a Ticket</span>
+        </button>
         ${user?.role === 'admin' ? `
         <a href="/admin" class="admin-link-btn" title="Admin Dashboard">
           <span class="admin-link-icon">&#9881;</span>
@@ -345,8 +363,60 @@ const Layout = {
     sidebar.innerHTML = this.getSidebarHTML();
     this.updateThemeButton();
 
+    // The footer's Submit a Ticket button needs its widget present to do
+    // anything. Loaded here rather than with a <script> tag on all 21 pages
+    // that draw a sidebar.
+    this.ensureTicketWidget();
+
     // Fetch modules and populate nav
     this.loadModules();
+  },
+
+  // ── Support tickets ─────────────────────────────────────────────────────
+  //
+  // The widget itself lives in public/js/ticket-widget.js, NOT in this file.
+  // layout.js is evaluated inside stub VM contexts by two test suites, and
+  // adding fetch-driven modal code here is how those sandboxes start needing a
+  // new stub every time the widget changes.
+  //
+  // Injected once per page, from injectSidebar(), which runs at least twice —
+  // DOMContentLoaded and again on `authReady`. The id guard is the same idiom
+  // injectGlobalChat() uses a few hundred lines down.
+
+  ensureTicketWidget() {
+    if (typeof document === 'undefined' || !document.head) return;
+    if (window.TicketWidget || document.getElementById('ticketWidgetScript')) return;
+    const s = document.createElement('script');
+    s.id = 'ticketWidgetScript';
+    s.src = '/js/ticket-widget.js';
+    s.defer = true;
+    document.head.appendChild(s);
+  },
+
+  /**
+   * Open the ticket modal, loading the widget first if the script has not
+   * arrived yet.
+   *
+   * The button is drawn by the sidebar skeleton, which paints long before a
+   * deferred script finishes, so a student who clicks immediately must not get
+   * a dead control. One retry beat is enough — the file is a few KB from the
+   * same origin — and the fallback tells them something rather than nothing.
+   */
+  openTicketModal() {
+    if (window.TicketWidget) return window.TicketWidget.open();
+    this.ensureTicketWidget();
+    const start = Date.now();
+    const poll = setInterval(() => {
+      if (window.TicketWidget) {
+        clearInterval(poll);
+        window.TicketWidget.open();
+      } else if (Date.now() - start > 5000) {
+        clearInterval(poll);
+        if (typeof Toast !== 'undefined') {
+          Toast.error('Support', 'The ticket form could not load. Please reload the page.');
+        }
+      }
+    }, 100);
   },
 
   // Fetch modules from API and populate sidebar nav

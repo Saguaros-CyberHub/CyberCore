@@ -245,6 +245,40 @@
   font-size: 0.875rem;
 }
 
+/* ── Support ticket entry point ──────────────────────────────────────────────
+   Same box model as .admin-link-btn so the footer reads as one control group,
+   but tinted with the Arizona blue rather than the admin link's amber — the two
+   sit next to each other for admins and must not compete. */
+.ticket-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  background: rgba(129, 211, 235, 0.10);
+  border: 1px solid rgba(129, 211, 235, 0.25);
+  border-radius: var(--border-radius);
+  color: #81d3eb;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+.ticket-btn:hover {
+  background: rgba(129, 211, 235, 0.20);
+  border-color: rgba(129, 211, 235, 0.40);
+  color: #a8e2f2;
+}
+.ticket-icon { font-size: 1rem; line-height: 1; }
+
+/* THE CHAT LAUNCHER IS z-index 9999 (see getChatStyles in layout.js) AND THE
+   SHARED .modal-overlay IS 1000 (main.css), so a stock modal renders UNDERNEATH
+   the floating chat button. This is not cosmetic: the button sits bottom-right,
+   directly over the modal's Submit control. */
+.ticket-modal-overlay { z-index: 10000; }
+
 /* Theme toggle row */
 .admin-link-btn {
   display: flex;
@@ -365,6 +399,17 @@
 [data-theme="dark"] .logout-btn:hover {
   color: var(--danger);
   background: rgba(239, 64, 86, 0.12);
+}
+
+[data-theme="dark"] .ticket-btn {
+  background: rgba(129, 211, 235, 0.08);
+  border-color: rgba(129, 211, 235, 0.20);
+  color: #81d3eb;
+}
+[data-theme="dark"] .ticket-btn:hover {
+  background: rgba(129, 211, 235, 0.16);
+  border-color: rgba(129, 211, 235, 0.35);
+  color: #c6ecf7;
 }
 
 [data-theme="dark"] .theme-toggle-btn {

@@ -398,6 +398,7 @@
           <!-- Lazy, like Topology: nothing on this tab is worth fetching until
                somebody opens it. -->
           <button class="tab-btn" onclick="switchTab('broadcast', this); broadcastTabActivate()">Broadcast</button>
+          <button class="tab-btn" onclick="switchTab('tickets', this); ticketsTabActivate()">Support Tickets</button>
           <button class="tab-btn" onclick="switchTab('settings', this)">Settings</button>
         </div>
 
@@ -1230,6 +1231,36 @@
         </div>
 
         <!-- TAB: Settings -->
+        <!-- Support tickets. Calls /api/tickets, NOT /api/admin/* — there is one
+             ticket router and it scopes by role internally, so an admin simply
+             gets the unscoped result. -->
+        <div class="tab-content" id="tab-tickets">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Support Tickets</span>
+              <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
+                <select id="tkFilterStatus" class="form-select" style="width:auto"
+                        onchange="ticketsLoad()">
+                  <option value="open,in_progress,pending">Needs attention</option>
+                  <option value="">All</option>
+                  <option value="open">Open</option>
+                  <option value="in_progress">In Progress</option>
+                  <option value="pending">Pending</option>
+                  <option value="resolved">Resolved</option>
+                  <option value="closed">Closed</option>
+                </select>
+                <input id="tkFilterQ" class="form-input" style="width:auto"
+                       placeholder="Search subject or email" onkeydown="if(event.key==='Enter')ticketsLoad()">
+                <button class="btn btn-secondary btn-sm" onclick="ticketsLoad()">Refresh</button>
+              </div>
+            </div>
+            <div class="card-body">
+              <div id="tkCounts" style="margin-bottom:1rem;display:flex;gap:.5rem;flex-wrap:wrap;"></div>
+              <div id="tkTable"><p style="color:var(--text-muted)">Loading…</p></div>
+            </div>
+          </div>
+        </div>
+
         <div class="tab-content" id="tab-settings">
           <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; align-items: start;">
             <!-- Website Customization -->
@@ -2062,6 +2093,7 @@ msmith@arizona.edu, Mark, Smith"
        helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml. -->
   <script src="/js/admin/admin-topology.js"></script>
   <script src="/js/admin/admin-broadcast.js"></script>
+  <script src="/js/admin/admin-tickets.js"></script>
   <script src="/js/admin/admin-init.js"></script>
 </body>
 </html>

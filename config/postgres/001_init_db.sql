@@ -377,3 +377,100 @@ INSERT INTO cybercore_template_catalog (os_family, os_name, os_version, template
   ('linux',          'Metasploitable 2',    NULL,   1600, '{}',                              'Metasploitable-2-Template — admin-select only', 'os_template')
 ON CONFLICT DO NOTHING;
 UPDATE cybercore_template_catalog SET preferred = false WHERE template_vmid = 1600;
+
+-- ============================================================================
+-- SUPPORT TICKETS
+-- ============================================================================
+-- Students file these from the sidebar on any page; every active admin is
+-- emailed with the course instructor Cc'd. Kept in cybercore_db rather than
+-- cle_db because every hot join here is a core table and support history must
+-- outlive the CLE plugin being disabled.
+--
+-- THIS FILE ONLY RUNS ON A FRESH DOCKER VOLUME. Existing deployments get these
+-- tables from ensureTicketTables() in front-end/src/utils/tickets.js at boot.
+-- Keep the status CHECK byte-identical across both, and across
+-- front-end/migrations/034_support_tickets.sql —
+-- front-end/test/ticket-schema.test.js asserts it.
+-- ============================================================================
+
+-- ── tickets ─────────────────────────────────────────────────────────────────
+-- Course and machine are SNAPSHOTS, not references. cle_course lives in cle_db
+-- so there is no foreign key to be had, and there is deliberately none to
+-- cybercore_lane either: an FK would either block teardownLanes() or, with
+-- ON DELETE CASCADE, delete support history when a lane is recycled.
+CREATE TABLE IF NOT EXISTS cybercore_ticket (
+  ticket_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_number       BIGINT GENERATED ALWAYS AS IDENTITY,
+
+  requester_user_id   UUID REFERENCES cybercore_user(user_id) ON DELETE SET NULL,
+  requester_email     TEXT NOT NULL,
+  requester_name      TEXT,
+
+  subject             TEXT NOT NULL,
+  body                TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('open','in_progress','pending','resolved','closed')),
+
+  course_id           UUID,
+  course_name         TEXT,
+  course_code         TEXT,
+  instructor_user_id  UUID,
+  instructor_email    TEXT,
+
+  lane_id             UUID,
+  machine_key         TEXT,
+  machine_label       TEXT,
+  machine_vmid        INTEGER,
+
+  first_response_at   TIMESTAMPTZ,
+  resolved_at         TIMESTAMPTZ,
+  closed_at           TIMESTAMPTZ,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ── thread ──────────────────────────────────────────────────────────────────
+-- One table for status changes, staff replies, internal notes and student
+-- comments, so a detail view is one ordered query. `visibility` is a separate
+-- axis from `kind` on purpose: a new kind must decide its visibility, and the
+-- student-facing filter is one predicate rather than a list of kinds to
+-- remember.
+CREATE TABLE IF NOT EXISTS cybercore_ticket_event (
+  event_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id       UUID NOT NULL REFERENCES cybercore_ticket(ticket_id) ON DELETE CASCADE,
+
+  kind            TEXT NOT NULL CHECK (kind IN ('created','reply','note','comment','status')),
+  visibility      TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public','internal')),
+
+  author_user_id  UUID REFERENCES cybercore_user(user_id) ON DELETE SET NULL,
+  author_email    TEXT,
+  author_name     TEXT,
+  author_role     TEXT,
+
+  body            TEXT,
+  from_status     TEXT,
+  to_status       TEXT,
+
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_ticket_number
+  ON cybercore_ticket (ticket_number);
+CREATE INDEX IF NOT EXISTS idx_ticket_requester
+  ON cybercore_ticket (requester_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ticket_instructor
+  ON cybercore_ticket (instructor_user_id, created_at DESC)
+  WHERE instructor_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ticket_course
+  ON cybercore_ticket (course_id, created_at DESC)
+  WHERE course_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_ticket_status
+  ON cybercore_ticket (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ticket_active
+  ON cybercore_ticket (created_at DESC)
+  WHERE status IN ('open','in_progress','pending');
+CREATE INDEX IF NOT EXISTS idx_ticket_event_ticket
+  ON cybercore_ticket_event (ticket_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_ticket_event_public
+  ON cybercore_ticket_event (ticket_id, created_at)
+  WHERE visibility = 'public';

@@ -272,6 +272,7 @@
   color: var(--primary-light) !important;
   border-color: rgba(92, 159, 230, 0.2) !important;
 }
+[data-theme="dark"] .badge-muted { background: rgba(148,163,184,0.18); color: #cbd5e1; }
 
 /* ── Buttons ── */
 [data-theme="dark"] .btn-primary,
@@ -1004,6 +1005,14 @@ select.form-select {
 .badge-warning { background: #fef3c7; color: #92400e; }
 .badge-danger { background: #fee2e2; color: #991b1b; }
 .badge-info { background: #e0f2fe; color: #0369a1; }
+
+/* Muted, for a state that ENDED rather than one that failed. Used by the
+   support-ticket Closed chip: .badge-danger there reads as "something went
+   wrong", when closing a ticket is the successful end of one. */
+.badge-muted {
+  background: var(--gray-200, #e5e7eb);
+  color: var(--gray-700, #374151);
+}
 .badge-purple { background: rgba(171, 5, 32, 0.1); color: var(--accent-red-dark, #8b0015); }
 
 .badge-smb { background: #dce6f2; color: var(--primary); }

@@ -194,3 +194,190 @@ test('publicUrl: strips trailing slashes so activation links do not double up', 
     assert.strictEqual(mailer.publicUrl(), '');
   });
 });
+
+// ── resolveAddresses: multi-recipient, Cc and Reply-To ──────────────────────
+//
+// Support tickets are the first messages this platform sends to more than one
+// person. Five existing callers pass a single string and MUST be unaffected —
+// that is what the first test here pins, and it is the reason resolveAddresses
+// exists as a separate pure function rather than as logic inside enqueue().
+
+test('a single string recipient behaves exactly as it did before lists existed', () => {
+  // THE backward-compatibility pin. Activation links, password resets, roster
+  // invitations, credential handouts and broadcasts all take this path.
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses('ada@example.edu');
+    assert.strictEqual(out.toAddress, 'ada@example.edu');
+    assert.strictEqual(out.ccAddress, null);
+    assert.strictEqual(out.replyToAddress, null);
+    assert.deepStrictEqual(out.toList, ['ada@example.edu']);
+    assert.deepStrictEqual(out.dropped, []);
+  });
+});
+
+test('a string and a one-element array agree', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const a = mailer.resolveAddresses('Ada@Example.edu');
+    const b = mailer.resolveAddresses(['Ada@Example.edu']);
+    assert.deepStrictEqual(a, b);
+    // Case is PRESERVED, not lowercased: the local part of an address is
+    // case-sensitive per RFC 5321, whatever most providers do in practice.
+    assert.strictEqual(a.toAddress, 'Ada@Example.edu');
+  });
+});
+
+test('surrounding whitespace and empty entries are cleaned up', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(['  ada@example.edu  ', '', null, undefined]);
+    assert.strictEqual(out.toAddress, 'ada@example.edu');
+    assert.deepStrictEqual(out.dropped, []);
+  });
+});
+
+test('several recipients are comma-joined in order, which is what nodemailer takes', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(['a@example.edu', 'b@example.edu', 'c@example.edu']);
+    assert.strictEqual(out.toAddress, 'a@example.edu, b@example.edu, c@example.edu');
+    assert.strictEqual(out.toList.length, 3);
+  });
+});
+
+test('one blocked address is dropped and the rest still go out', () => {
+  // The realistic ticket case: an admin roster where one account was created
+  // with a @clinic.local synthetic address. That must not silence the ticket.
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(['a@example.edu', 'ghost@clinic.local', 'b@example.edu']);
+    assert.strictEqual(out.toAddress, 'a@example.edu, b@example.edu');
+    assert.strictEqual(out.dropped.length, 1);
+    assert.strictEqual(out.dropped[0].address, 'ghost@clinic.local');
+    assert.strictEqual(out.dropped[0].field, 'to');
+    assert.match(out.dropped[0].reason, /reserved domain/);
+  });
+});
+
+test('when every recipient is blocked, toAddress is null but the attempt is remembered', () => {
+  // toAttempted is what keeps a suppressed row able to NAME the address it
+  // could not reach — statusForImport reports per-recipient outcomes keyed on
+  // to_address, and an anonymous failure is one an instructor cannot act on.
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(['ghost@clinic.local', 'other@test']);
+    assert.strictEqual(out.toAddress, null);
+    assert.deepStrictEqual(out.toList, []);
+    assert.deepStrictEqual(out.toAttempted, ['ghost@clinic.local', 'other@test']);
+    assert.strictEqual(out.dropped.length, 2);
+  });
+});
+
+test('an empty or absent recipient produces the same reason it always did', () => {
+  // broadcast-audience.js promises its preview reasons are byte-identical to
+  // last_error, so this string is part of a contract.
+  withEnv(NO_ALLOWLIST, () => {
+    for (const empty of ['', '   ', null, undefined, []]) {
+      const out = mailer.resolveAddresses(empty);
+      assert.strictEqual(out.toAddress, null);
+      assert.deepStrictEqual(out.toAttempted, []);
+    }
+    assert.strictEqual(mailer.checkRecipient('').reason, 'not a deliverable address');
+  });
+});
+
+test('Cc is carried alongside To', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(['a@example.edu', 'b@example.edu'], 'teach@example.edu');
+    assert.strictEqual(out.toAddress, 'a@example.edu, b@example.edu');
+    assert.strictEqual(out.ccAddress, 'teach@example.edu');
+  });
+});
+
+test('an address in both To and Cc is delivered once, from To', () => {
+  // The instructor IS an admin on many small deployments. Without this they
+  // receive two copies of every ticket, and Reply-All fans out further.
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(
+      ['admin@example.edu', 'teach@example.edu'], 'teach@example.edu');
+    assert.strictEqual(out.toAddress, 'admin@example.edu, teach@example.edu');
+    assert.strictEqual(out.ccAddress, null);
+  });
+});
+
+test('the To/Cc overlap check is case-insensitive', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses('Teach@Example.edu', 'teach@example.EDU');
+    assert.strictEqual(out.ccAddress, null);
+  });
+});
+
+test('a repeated recipient is judged once and delivered once', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses(['a@example.edu', 'a@example.edu', 'A@example.edu']);
+    assert.strictEqual(out.toAddress, 'a@example.edu');
+    // And a repeated BAD address is reported once, not three times.
+    const bad = mailer.resolveAddresses(['x@clinic.local', 'x@clinic.local']);
+    assert.strictEqual(bad.dropped.length, 1);
+  });
+});
+
+test('a blocked Cc is dropped without suppressing the message', () => {
+  // An instructor on a synthetic @cohort.invalid address must not stop the
+  // admins being told about a broken machine.
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses('admin@example.edu', 'ghost@clinic.local');
+    assert.strictEqual(out.toAddress, 'admin@example.edu');
+    assert.strictEqual(out.ccAddress, null);
+    assert.strictEqual(out.dropped.length, 1);
+    assert.strictEqual(out.dropped[0].field, 'cc');
+  });
+});
+
+test('Reply-To is validated, and a bad one is dropped rather than fatal', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    const good = mailer.resolveAddresses('admin@example.edu', null, 'stud@example.edu');
+    assert.strictEqual(good.replyToAddress, 'stud@example.edu');
+    assert.deepStrictEqual(good.dropped, []);
+
+    // A student on a cohort-generated address: the ticket still reaches the
+    // admins, it just cannot be replied to directly.
+    const bad = mailer.resolveAddresses('admin@example.edu', null, 'pat@cohort.invalid');
+    assert.strictEqual(bad.toAddress, 'admin@example.edu');
+    assert.strictEqual(bad.replyToAddress, null);
+    assert.strictEqual(bad.dropped[0].field, 'replyTo');
+  });
+});
+
+test('Reply-To does not consume the address for To or Cc', () => {
+  // Reply-To is a header, not a recipient — the student is not a To recipient
+  // of their own ticket notification, and must not be excluded from a later
+  // reply either.
+  withEnv(NO_ALLOWLIST, () => {
+    const out = mailer.resolveAddresses('stud@example.edu', null, 'stud@example.edu');
+    assert.strictEqual(out.toAddress, 'stud@example.edu');
+    assert.strictEqual(out.replyToAddress, 'stud@example.edu');
+  });
+});
+
+test('the recipient allowlist applies to every field', () => {
+  withEnv({ MAIL_ALLOWED_RECIPIENT_DOMAINS: 'example.edu', CLE_COHORT_EMAIL_DOMAIN: undefined }, () => {
+    const out = mailer.resolveAddresses(
+      ['ok@example.edu', 'no@elsewhere.org'], 'also-no@elsewhere.org', 'nope@elsewhere.org');
+    assert.strictEqual(out.toAddress, 'ok@example.edu');
+    assert.strictEqual(out.ccAddress, null);
+    assert.strictEqual(out.replyToAddress, null);
+    assert.deepStrictEqual(out.dropped.map(d => d.field).sort(), ['cc', 'replyTo', 'to']);
+  });
+});
+
+test('a subdomain of an allowed domain is still allowed, in every field', () => {
+  withEnv({ MAIL_ALLOWED_RECIPIENT_DOMAINS: 'example.edu', CLE_COHORT_EMAIL_DOMAIN: undefined }, () => {
+    const out = mailer.resolveAddresses('a@mail.example.edu', 'b@cs.example.edu');
+    assert.strictEqual(out.toAddress, 'a@mail.example.edu');
+    assert.strictEqual(out.ccAddress, 'b@cs.example.edu');
+  });
+});
+
+test('resolveAddresses never throws on hostile input', () => {
+  withEnv(NO_ALLOWLIST, () => {
+    for (const junk of [{}, 42, [[]], [{}], [Symbol.iterator ? 'a@b.co' : 'x']]) {
+      assert.doesNotThrow(() => mailer.resolveAddresses(junk, junk, junk));
+    }
+  });
+});

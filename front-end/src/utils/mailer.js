@@ -184,6 +184,95 @@ function checkRecipient(address) {
 }
 
 /**
+ * Turn caller-supplied recipients into the exact strings a row and a send need.
+ *
+ * WHY THIS EXISTS
+ * Support tickets are the first message this platform sends to MORE THAN ONE
+ * person: To: every active admin, Cc: the course instructor, Reply-To: the
+ * student who filed it. Everything before them was a single address.
+ *
+ * BACKWARD COMPATIBILITY IS THE WHOLE DESIGN CONSTRAINT. Five callers pass
+ * `to: <string>` and nothing else — activation links, password resets, roster
+ * invitations, credential handouts, broadcasts. For those,
+ * resolveAddresses('a@b.c') must produce exactly what
+ * `String(msg.to || '').trim()` produced, and the suppression reason must be
+ * byte-identical to what checkRecipient() returned, because
+ * utils/broadcast-audience.js promises its preview reasons match last_error.
+ * test/mailer-policy.test.js pins both.
+ *
+ * nodemailer accepts a comma-joined string for `to` and `cc`, so a list needs
+ * no schema change beyond one nullable column.
+ *
+ * @param {string|string[]} to
+ * @param {string|string[]} [cc]
+ * @param {string} [replyTo]
+ * @returns {{
+ *   toList: string[], ccList: string[], toAttempted: string[],
+ *   toAddress: ?string, ccAddress: ?string, replyToAddress: ?string,
+ *   dropped: Array<{address: string, field: string, reason: string}>
+ * }}
+ */
+function resolveAddresses(to, cc, replyTo) {
+  const dropped = [];
+  // Every distinct address is judged ONCE. Without this a duplicate that fails
+  // policy would be reported twice, and a duplicate that passes would be
+  // delivered twice.
+  const seen = new Set();
+
+  const normalize = v => (Array.isArray(v) ? v : (v == null ? [] : [v]))
+    .map(a => String(a == null ? '' : a).trim())
+    .filter(Boolean);
+
+  const admit = (list, field) => {
+    const kept = [];
+    for (const addr of list) {
+      const key = addr.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const verdict = checkRecipient(addr);
+      if (!verdict.ok) {
+        dropped.push({ address: addr, field, reason: verdict.reason });
+        continue;
+      }
+      kept.push(addr);
+    }
+    return kept;
+  };
+
+  const toAttempted = normalize(to);
+  const toList = admit(toAttempted, 'to');
+  // Cc is admitted second so an address appearing in BOTH lands in To only —
+  // nobody should receive two copies of one message.
+  const ccList = admit(normalize(cc), 'cc');
+
+  // A Reply-To that fails policy is DROPPED, never fatal. It is a courtesy
+  // header: refusing to send a ticket notification because the student's own
+  // address is on an unusual domain would be absurd, and MAIL_REPLY_TO is
+  // still there as the fallback.
+  let replyToAddress = null;
+  const reply = normalize(replyTo)[0] || null;
+  if (reply) {
+    const verdict = checkRecipient(reply);
+    if (verdict.ok) replyToAddress = reply;
+    else dropped.push({ address: reply, field: 'replyTo', reason: verdict.reason });
+  }
+
+  return {
+    toList,
+    ccList,
+    // Kept so a suppressed row can still NAME the address it could not reach.
+    // statusForImport() reports per-recipient outcomes keyed on to_address, and
+    // blanking it would turn "ada@x.invalid — reserved domain" into an
+    // anonymous failure the instructor cannot act on.
+    toAttempted,
+    toAddress: toList.length ? toList.join(', ') : null,
+    ccAddress: ccList.length ? ccList.join(', ') : null,
+    replyToAddress,
+    dropped,
+  };
+}
+
+/**
  * Why NOTHING can be queued right now, or null when the server is able to send.
  *
  * Exists so a caller can ask the question ahead of time and get back the exact
@@ -207,6 +296,51 @@ function globalSuppression() {
 // ============================================================================
 
 /**
+ * Does this database have the Cc columns yet?
+ *
+ * WHY A PROBE RATHER THAN JUST WRITING THE COLUMNS
+ * ensureEmailOutbox() adds cc_address and reply_to with ADD COLUMN IF NOT
+ * EXISTS at boot, and that will normally have run. Normally is not good enough
+ * here. If the ALTER fails for ANY reason — the app role lacks ALTER, a
+ * rollback pairs an old ensureEmailOutbox() with this code, someone restores a
+ * snapshot — then an unconditional 15-column INSERT references a column that is
+ * not there and EVERY email on the platform dies: activation links, password
+ * resets, roster invitations, broadcasts. Worse, enqueue()'s catch block turns
+ * that into a `suppressed` row, so the platform reports it has handled mail it
+ * never queued. This file's header documents surviving exactly that class of
+ * failure once already.
+ *
+ * The probe turns "all mail dies silently" into "tickets have no Cc". Cached,
+ * so it costs one query per process.
+ */
+let _ccColumns = null;
+async function ccColumnsPresent() {
+  if (_ccColumns !== null) return _ccColumns;
+  try {
+    const r = await cybercoreQuery(
+      `SELECT count(*)::int AS n
+         FROM information_schema.columns
+        WHERE table_name = 'cybercore_email_outbox'
+          AND column_name IN ('cc_address', 'reply_to')`
+    );
+    _ccColumns = r.rows[0] && r.rows[0].n === 2;
+    if (!_ccColumns) {
+      console.warn('[mailer] cc_address/reply_to are missing from cybercore_email_outbox — '
+        + 'sending without Cc or per-message Reply-To. Run migrations/034_support_tickets.sql.');
+    }
+  } catch (err) {
+    console.warn('[mailer] Could not probe for the Cc columns:', err.message);
+    _ccColumns = false;
+  }
+  return _ccColumns;
+}
+
+/** Test seam: forget the probe result so a migration mid-process is picked up. */
+function resetCcColumnProbe() {
+  _ccColumns = null;
+}
+
+/**
  * Queue one message.
  *
  * Never throws for a policy reason — a suppressed recipient still gets a row,
@@ -217,28 +351,45 @@ function globalSuppression() {
  * @returns {Promise<{email_id: ?string, status: 'queued'|'suppressed', reason?: string}>}
  */
 async function enqueue(msg = {}) {
-  const to = String(msg.to || '').trim();
   const key = mailKey();
+  const {
+    toList, toAttempted, toAddress, ccAddress, replyToAddress, dropped,
+  } = resolveAddresses(msg.to, msg.cc, msg.replyTo);
 
   let status = 'queued';
   let reason = null;
 
-  const recipient = checkRecipient(to);
   // A suppressed row is deliberately still written in both cases. An offline or
   // LAN-only deployment is a real way to run this platform, and the import (or
   // broadcast) report should say "email is not configured here" rather than
   // implying the mail was sent. And refusing to store a body we cannot encrypt
   // is the whole point of the key check.
   const blocked = globalSuppression();
-  if (!recipient.ok) {
+  if (toList.length === 0) {
     status = 'suppressed';
-    reason = recipient.reason;
+    // The exact string checkRecipient() produced, so a single-recipient caller
+    // gets byte-identically what it got before this function grew a list —
+    // broadcast-audience.js promises its preview reasons match last_error.
+    const first = dropped.find(d => d.field === 'to');
+    reason = first ? first.reason : 'not a deliverable address';
   } else if (blocked) {
     status = 'suppressed';
     reason = blocked;
   }
 
+  // Never null: to_address is NOT NULL, and a suppressed row must still NAME
+  // the address it could not reach or the import report becomes anonymous.
+  const storedTo = toAddress || toAttempted.join(', ');
   const storeBody = status === 'queued';
+  const hasCc = await ccColumnsPresent();
+
+  // Dropped Cc/Reply-To addresses are recorded rather than surfaced as an
+  // error: the message itself is fine, and the ticket route wants to be able to
+  // say "your instructor could not be copied, and here is why".
+  const context = { ...(msg.context || {}) };
+  if (dropped.some(d => d.field !== 'to')) {
+    context.cc_dropped = dropped.filter(d => d.field !== 'to');
+  }
 
   try {
     // Every parameter this statement encrypts is cast explicitly, and the cast
@@ -252,29 +403,68 @@ async function enqueue(msg = {}) {
     // by luck of first appearing inside pgp_sym_encrypt(), which types its
     // argument. The catch below turned that into a "suppressed" row rather than a
     // throw, so the platform reported it had handled mail it had never queued.
-    const result = await cybercoreQuery(
-      `INSERT INTO cybercore_email_outbox
-         (to_address, to_user_id, template_key, subject,
-          body_text_cipher, body_html_cipher,
-          status, max_attempts, last_error, context, requested_by)
-       VALUES ($1, $2, $3, $4,
-               CASE WHEN $5::boolean THEN pgp_sym_encrypt($6::text, $7::text) END,
-               CASE WHEN $5::boolean AND $8::text IS NOT NULL THEN pgp_sym_encrypt($8::text, $7::text) END,
-               $9, $10, $11, $12::jsonb, $13)
-       RETURNING email_id, status`,
-      [
-        to, msg.toUserId || null, msg.templateKey || 'unknown', msg.subject || '(no subject)',
-        storeBody, msg.text || '', key || '', msg.html || null,
-        status, DEFAULT_MAX_ATTEMPTS, reason,
-        JSON.stringify(msg.context || {}), msg.requestedBy || null,
-      ]
-    );
-    return { email_id: result.rows[0].email_id, status, ...(reason ? { reason } : {}) };
+    //
+    // $1..$13 ARE FROZEN, AND THE ORDER OF THE TWO STATEMENTS BELOW MATTERS.
+    // test/sql-param-typing.test.js pins the $8 cast by slicing this file
+    // between the first outbox INSERT and the first RETURNING clause, so the
+    // Cc-capable statement has to be the one it finds — hence Cc first, legacy
+    // second. (Do not name those two marker phrases in a comment above them
+    // either: the slice would start here instead of at the SQL.) Renumbering to
+    // make room for cc/reply_to would defeat the very check that exists because
+    // a numbering mistake here once broke every send in production, so new
+    // parameters are APPENDED as $14/$15.
+    const result = hasCc
+      ? await cybercoreQuery(
+        `INSERT INTO cybercore_email_outbox
+           (to_address, to_user_id, template_key, subject,
+            body_text_cipher, body_html_cipher,
+            status, max_attempts, last_error, context, requested_by,
+            cc_address, reply_to)
+         VALUES ($1, $2, $3, $4,
+                 CASE WHEN $5::boolean THEN pgp_sym_encrypt($6::text, $7::text) END,
+                 CASE WHEN $5::boolean AND $8::text IS NOT NULL THEN pgp_sym_encrypt($8::text, $7::text) END,
+                 $9, $10, $11, $12::jsonb, $13,
+                 $14::text, $15::text)
+         RETURNING email_id, status`,
+        [
+          storedTo, msg.toUserId || null, msg.templateKey || 'unknown', msg.subject || '(no subject)',
+          storeBody, msg.text || '', key || '', msg.html || null,
+          status, DEFAULT_MAX_ATTEMPTS, reason,
+          JSON.stringify(context), msg.requestedBy || null,
+          ccAddress, replyToAddress,
+        ]
+      )
+      // Legacy fallback, kept verbatim. Reached only when the ALTER has not run;
+      // Cc and Reply-To are silently unavailable, which is the whole point of
+      // degrading here rather than failing every send.
+      : await cybercoreQuery(
+        `INSERT INTO cybercore_email_outbox
+           (to_address, to_user_id, template_key, subject,
+            body_text_cipher, body_html_cipher,
+            status, max_attempts, last_error, context, requested_by)
+         VALUES ($1, $2, $3, $4,
+                 CASE WHEN $5::boolean THEN pgp_sym_encrypt($6::text, $7::text) END,
+                 CASE WHEN $5::boolean AND $8::text IS NOT NULL THEN pgp_sym_encrypt($8::text, $7::text) END,
+                 $9, $10, $11, $12::jsonb, $13)
+         RETURNING email_id, status`,
+        [
+          storedTo, msg.toUserId || null, msg.templateKey || 'unknown', msg.subject || '(no subject)',
+          storeBody, msg.text || '', key || '', msg.html || null,
+          status, DEFAULT_MAX_ATTEMPTS, reason,
+          JSON.stringify(context), msg.requestedBy || null,
+        ]
+      );
+    return {
+      email_id: result.rows[0].email_id,
+      status,
+      ...(reason ? { reason } : {}),
+      ...(context.cc_dropped ? { cc_dropped: context.cc_dropped } : {}),
+    };
   } catch (err) {
     // A queue failure must not take down the import that triggered it — the
     // accounts were already created, and losing the notification is far less
     // bad than losing the transaction.
-    console.error('[mailer] Could not queue message to', to, '-', err.message);
+    console.error('[mailer] Could not queue message to', storedTo, '-', err.message);
     return { email_id: null, status: 'suppressed', reason: `could not be queued: ${err.message}` };
   }
 }
@@ -324,6 +514,11 @@ async function drainOutbox(opts = {}) {
 
   if (!mailEnabled() || !key) return summary;
 
+  // Same gate as enqueue(): selecting a column that is not there would fail the
+  // claim UPDATE and stall the WHOLE queue, not just the ticket messages.
+  const hasCc = await ccColumnsPresent();
+  const ccColumns = hasCc ? ', cc_address, reply_to' : '';
+
   const claimed = await cybercoreQuery(
     `UPDATE cybercore_email_outbox
         SET status = 'sending', attempts = attempts + 1, updated_at = now()
@@ -334,7 +529,7 @@ async function drainOutbox(opts = {}) {
          LIMIT $1
          FOR UPDATE SKIP LOCKED
       )
-      RETURNING email_id, to_address, subject, attempts, max_attempts,
+      RETURNING email_id, to_address, subject, attempts, max_attempts${ccColumns},
                 pgp_sym_decrypt(body_text_cipher, $2)::text AS body_text,
                 CASE WHEN body_html_cipher IS NOT NULL
                      THEN pgp_sym_decrypt(body_html_cipher, $2)::text END AS body_html`,
@@ -344,10 +539,16 @@ async function drainOutbox(opts = {}) {
   for (const row of claimed.rows) {
     summary.attempted++;
     try {
+      // The row's own Reply-To wins over the server default, which is what
+      // makes "hit Reply and reach the student who filed this" work. With
+      // neither set the spread is byte-identical to what it was before Cc
+      // existed.
+      const replyTo = row.reply_to || process.env.MAIL_REPLY_TO;
       const info = await transport().sendMail({
         from: process.env.MAIL_FROM || 'no-reply@localhost',
-        ...(process.env.MAIL_REPLY_TO ? { replyTo: process.env.MAIL_REPLY_TO } : {}),
+        ...(replyTo ? { replyTo } : {}),
         to: row.to_address,
+        ...(row.cc_address ? { cc: row.cc_address } : {}),
         subject: row.subject,
         text: row.body_text,
         ...(row.body_html ? { html: row.body_html } : {}),
@@ -449,10 +650,16 @@ async function sendNow(to, message = {}) {
   if (!recipient.ok) return { ok: false, error: `Refusing to send: ${recipient.reason}` };
 
   try {
+    // cc/replyTo are accepted here for parity with the queue path, so a
+    // diagnostic send exercises the same headers a real one will. Nothing in
+    // the ticket system calls this — see the docblock above.
+    const cc = message.cc ? resolveAddresses(null, message.cc).ccAddress : null;
+    const replyTo = message.replyTo || process.env.MAIL_REPLY_TO;
     const info = await transport().sendMail({
       from: process.env.MAIL_FROM || 'no-reply@localhost',
-      ...(process.env.MAIL_REPLY_TO ? { replyTo: process.env.MAIL_REPLY_TO } : {}),
+      ...(replyTo ? { replyTo } : {}),
       to,
+      ...(cc ? { cc } : {}),
       subject: message.subject,
       text: message.text,
       ...(message.html ? { html: message.html } : {}),
@@ -512,6 +719,27 @@ async function statusForCampaign(campaignId) {
       WHERE context->>'campaign_id' = $1
       ORDER BY to_address`,
     [String(campaignId)]
+  );
+  return result.rows;
+}
+
+/**
+ * Per-message delivery state for one ticket: the submission notification, every
+ * status change, every reply.
+ *
+ * Same shape and the same never-return-a-body guarantee as the import and
+ * campaign reports. Backed by idx_email_outbox_ticket, so this stays an index
+ * scan rather than a jsonb sweep of the whole outbox.
+ */
+async function statusForTicket(ticketId) {
+  const cc = (await ccColumnsPresent()) ? 'cc_address' : 'NULL::text AS cc_address';
+  const result = await cybercoreQuery(
+    `SELECT email_id, to_address, ${cc}, template_key, status, attempts,
+            last_error, sent_at, created_at
+       FROM cybercore_email_outbox
+      WHERE context->>'ticket_id' = $1
+      ORDER BY created_at`,
+    [String(ticketId)]
   );
   return result.rows;
 }
@@ -610,6 +838,25 @@ async function ensureEmailOutbox() {
       CREATE INDEX IF NOT EXISTS idx_email_outbox_campaign
         ON cybercore_email_outbox ((context->>'campaign_id'))
     `);
+    // Support tickets are the first messages here with more than one recipient:
+    // To: every active admin, Cc: the course instructor, Reply-To: the student.
+    // Both columns are nullable with no default, so this is a metadata-only
+    // change — safe on a live table with no rewrite. Keep in sync with
+    // front-end/migrations/034_support_tickets.sql.
+    //
+    // enqueue() and drainOutbox() BOTH probe for these rather than assuming
+    // them (see ccColumnsPresent). If this ALTER fails, mail keeps flowing
+    // without a Cc instead of every send dying.
+    await cybercoreQuery(`ALTER TABLE cybercore_email_outbox ADD COLUMN IF NOT EXISTS cc_address TEXT`);
+    await cybercoreQuery(`ALTER TABLE cybercore_email_outbox ADD COLUMN IF NOT EXISTS reply_to   TEXT`);
+    await cybercoreQuery(`
+      CREATE INDEX IF NOT EXISTS idx_email_outbox_ticket
+        ON cybercore_email_outbox ((context->>'ticket_id'))
+    `);
+    // The probe is cached per process, and on a cold boot it may well have run
+    // and cached `false` before the ALTER above. Clear it so the very first
+    // message after boot can carry a Cc.
+    resetCcColumnProbe();
     console.log('✅ Email outbox ensured');
   } catch (err) {
     console.warn('⚠️  Could not ensure email outbox:', err.message);
@@ -620,11 +867,12 @@ module.exports = {
   mailEnabled, mailKey, publicUrl, siteName,
   transport, resetTransport,
   isInternalHost, tlsRejectUnauthorized,
-  checkRecipient, allowedDomains, globalSuppression,
+  checkRecipient, allowedDomains, globalSuppression, resolveAddresses,
+  ccColumnsPresent, resetCcColumnProbe,
   enqueue, enqueueMany,
   drainOutbox, requeueStalledSends, pruneOutbox,
   sendNow, sendTest,
-  statusForImport, statusForCampaign, recentCampaigns, queueBacklog,
+  statusForImport, statusForCampaign, statusForTicket, recentCampaigns, queueBacklog,
   ensureEmailOutbox,
   UNDELIVERABLE_TLDS,
 };
