@@ -1855,7 +1855,13 @@
      * that would 403.
      */
     function _canResize() {
-      return !!(window.Auth && Auth.user && Auth.user.role === 'admin');
+      // BARE `Auth`, never `window.Auth`. app.js declares it as a top-level
+      // `const` in a classic script, which lands in the global LEXICAL scope
+      // and is therefore reachable by name from here — but is NOT a property of
+      // `window`. `window.Auth` is undefined, so a gate written that way is
+      // false for everyone, including admins, and the control simply never
+      // appears with nothing in the console to say why.
+      return typeof Auth !== 'undefined' && !!Auth.user && Auth.user.role === 'admin';
     }
 
     function _vmSelectable(v) {

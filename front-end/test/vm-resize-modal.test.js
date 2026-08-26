@@ -79,6 +79,23 @@ test('the resize button is rendered only for an admin', () => {
     'the resize button is not behind _canResize()');
 });
 
+test('_canResize reads the bare Auth binding, not window.Auth', () => {
+  // THE BUG THAT HID THE BUTTON. app.js declares `const Auth = {...}` at the top
+  // level of a classic script. Per spec, top-level let/const/class go into the
+  // global DECLARATIVE environment record, not onto the global object — only
+  // `var` and function declarations become properties of `window`. So `Auth`
+  // resolves by name from this page and `window.Auth` is undefined, and a gate
+  // written `window.Auth && Auth.user && ...` is false for everyone including
+  // admins. The control then never renders, with nothing in the console.
+  // Comments stripped first: the fix documents the trap by naming it, so a raw
+  // substring check would match the warning rather than the code.
+  const body = fnBody('_canResize').replace(/\/\/[^\n]*/g, '');
+  assert.ok(!/window\.Auth/.test(body),
+    'window.Auth is always undefined — this gate would hide the button from admins');
+  assert.match(body, /typeof Auth !== 'undefined'/,
+    'guard the bare binding with typeof, so the page cannot throw if app.js is absent');
+});
+
 test('_canResize tests for the admin role specifically', () => {
   const body = fnBody('_canResize');
   assert.match(body, /Auth\.user\.role === 'admin'/,
