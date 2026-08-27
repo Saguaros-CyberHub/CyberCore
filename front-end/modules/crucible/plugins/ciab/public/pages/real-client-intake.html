@@ -99,6 +99,19 @@
   .validation-panel ul { margin: 6px 0 0 18px; padding: 0; }
   footer { color: var(--muted); font-size: 11px; text-align: center; padding: 24px 20px; }
   .hidden { display: none !important; }
+
+  /* Print / Save-as-PDF: drop the interactive chrome, keep the form + answers. */
+  @media print {
+    .bar .btn, .bar .mode-tag, .bar .status-bar, .bar .spacer,
+    #file-input, .validation-panel, .help-pop { display: none !important; }
+    .bar { position: static !important; box-shadow: none !important; border: 0 !important; }
+    body { background: #fff !important; }
+    /* Show every character in the fields (textareas are pre-expanded by JS). */
+    textarea { overflow: visible !important; resize: none; }
+    input, textarea, select { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    /* Try not to split a labeled field across pages. */
+    label, .field, .form-row, fieldset { break-inside: avoid; }
+  }
 </style>
 </head>
 <body>
@@ -367,6 +380,7 @@
   <button class="btn" id="btn-import">📂 Import JSON/HTML</button>
   <button class="btn" id="btn-download-json">⬇️ Download JSON</button>
   <button class="btn" id="btn-download-html">⬇️ Download filled form (HTML)</button>
+  <button class="btn" id="btn-save-pdf">🖨️ Save as PDF</button>
   <button class="btn primary hidden" id="btn-upload">☁️ Save to server</button>
   <button class="btn danger" id="btn-clear">🗑 Clear</button>
   <input type="file" id="file-input" accept=".json,.html,application/json,text/html" class="hidden" />
@@ -1095,6 +1109,20 @@
     doc.querySelectorAll('.help-pop').forEach(n => n.remove());
     const html = '<!DOCTYPE html>\n' + doc.outerHTML;
     download(safeFilename(state.cover_name) + '.html', html, 'text/html');
+  });
+  document.getElementById('btn-save-pdf').addEventListener('click', () => {
+    // Save-as-PDF via the browser's print dialog — captures everything currently
+    // entered on the form. Textareas would otherwise clip to their visible box,
+    // so expand each to its full content height first, then restore afterward.
+    const areas = Array.from(document.querySelectorAll('textarea'));
+    const prevHeights = areas.map(t => t.style.height);
+    areas.forEach(t => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; });
+    const restore = () => {
+      areas.forEach((t, i) => { t.style.height = prevHeights[i]; });
+      window.removeEventListener('afterprint', restore);
+    };
+    window.addEventListener('afterprint', restore);
+    window.print();
   });
 
   // --- Import ---
