@@ -342,6 +342,108 @@ const Confirm = {
 };
 
 /**
+ * Modal controller for the shared .modal-overlay pattern.
+ * Usage: Modal.open('assignProfileModal') / Modal.close('assignProfileModal').
+ *
+ * Legacy pages still open overlays with classList.add('active') directly, so
+ * the document-level Esc / backdrop-click / focus-trap handlers below derive
+ * everything from DOM state, never from internal bookkeeping. Opener-focus
+ * restore is the one thing only Modal.open() can provide. A modal that must
+ * not be dismissed mid-flow (multi-step import wizards) opts out with the
+ * data-modal-static attribute.
+ */
+const Modal = {
+  // Who had focus before open() — restored on close(). WeakMap keyed by the
+  // overlay element, so a removed overlay cannot leak its opener.
+  _openers: new WeakMap(),
+
+  // Visible, tabbable descendants of `scope`, in DOM order.
+  _focusables(scope) {
+    const sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    return [...scope.querySelectorAll(sel)].filter(el => el.offsetParent !== null);
+  },
+
+  open(id) {
+    const overlay = document.getElementById(id);
+    if (!overlay) return;
+    this._openers.set(overlay, document.activeElement);
+    overlay.classList.add('active');
+    overlay.removeAttribute('aria-hidden');
+    document.body.style.overflow = 'hidden';
+    // Focus the first control inside the dialog box; fall back to the overlay.
+    const box = overlay.querySelector('.modal, .modal-content') || overlay;
+    const first = this._focusables(box)[0] || overlay;
+    if (first.focus) first.focus();
+  },
+
+  // Accepts an id or the overlay element itself (the document handlers below
+  // already hold the element).
+  close(id) {
+    const overlay = typeof id === 'string' ? document.getElementById(id) : id;
+    if (!overlay) return;
+    overlay.classList.remove('active');
+    // No aria-hidden stamp here: without .active the overlay is display:none,
+    // which already removes it from the accessibility tree — and legacy pages
+    // reopen via classList.add('active') alone, so a stamped attribute would
+    // never be cleared and the reopened modal would be invisible to AT.
+    const opener = this._openers.get(overlay);
+    this._openers.delete(overlay);
+    if (opener && opener.focus) opener.focus();
+    // Modals can stack (e.g. a Confirm above a form modal) — release the body
+    // scroll lock only once no active overlay remains anywhere in the DOM.
+    if (!document.querySelector('.modal-overlay.active')) {
+      document.body.style.overflow = '';
+    }
+  }
+};
+
+// Installed unconditionally at load, NOT lazily from open(): overlays opened
+// by legacy classList code must get Esc/backdrop/trap behavior too.
+document.addEventListener('keydown', e => {
+  const actives = [...document.querySelectorAll('.modal-overlay.active')];
+  if (!actives.length) return;
+  if (e.key === 'Escape') {
+    // Esc acts on the TOPMOST overlay only. If that one is static, nothing
+    // happens — reaching through it to close a dialog underneath would
+    // dismiss something the user cannot even see.
+    const top = actives[actives.length - 1];
+    if (!top.hasAttribute('data-modal-static')) Modal.close(top);
+  } else if (e.key === 'Tab') {
+    // Cycle focus within the topmost overlay instead of tabbing behind it.
+    const top = actives[actives.length - 1];
+    const items = Modal._focusables(top);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    const outside = !top.contains(document.activeElement);
+    if (e.shiftKey && (document.activeElement === first || outside)) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (document.activeElement === last || outside)) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+});
+
+// Backdrop close pairs mousedown with click: a text-selection drag that
+// starts inside the dialog and releases over the backdrop fires click on the
+// overlay (common-ancestor rule) and must NOT dismiss the modal.
+document.addEventListener('mousedown', e => {
+  Modal._downTarget = e.target;
+});
+
+document.addEventListener('click', e => {
+  // Backdrop click: the overlay ITSELF is the target, not a child of it.
+  const t = e.target;
+  if (t instanceof Element && t.classList.contains('modal-overlay') &&
+      t.classList.contains('active') && !t.hasAttribute('data-modal-static') &&
+      Modal._downTarget === t) {
+    Modal.close(t);
+  }
+});
+
+/**
  * Student View — an instructor-facing PRESENTATION mode.
  *
  * Its only job is to make the interface look the way a student's does, so a
@@ -651,6 +753,9 @@ const Utils = {
   setBtnLoading(btn, loading, busyText) {
     if (!btn) return;
     if (loading) {
+      // Already loading: re-capturing now would save the spinner markup as
+      // restoreHtml, and every later restore would bring the spinner back.
+      if (btn.classList.contains('btn-loading')) return;
       btn.dataset.restoreHtml = btn.innerHTML;
       btn.disabled = true;
       btn.classList.add('btn-loading');

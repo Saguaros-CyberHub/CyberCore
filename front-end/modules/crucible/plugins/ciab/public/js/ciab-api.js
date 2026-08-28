@@ -125,8 +125,9 @@ API.interview = {
 
 // Instructor functions
 API.instructor = {
-  async dashboard() {
-    return API.request('/instructor/dashboard');
+  async dashboard(scope) {
+    const q = scope ? '?section=' + encodeURIComponent(scope) : '';
+    return API.request('/instructor/dashboard' + q);
   },
   async review(progressId, data) {
     return API.request(`/instructor/review/${progressId}`, { method: 'POST', body: data });

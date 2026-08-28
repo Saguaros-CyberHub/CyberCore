@@ -122,9 +122,61 @@ router.get('/vuln-cheat-sheet/:profileId', authenticateToken, instructorOnly, as
 router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => {
   try {
     const instructorId = req.user.userId;
-    
+
     let students = [];
     let pendingSubmissions = [];
+
+    // ── Section scoping (?section=mine|all|<uuid>) ─────────────────────────
+    // Sections/enrollments live in clinic_db, users in cybercore_db, so the
+    // scope is resolved to a Set of user ids here and applied as a JS-side
+    // filter on the cybercore user rows below. Absent or 'all' → unscoped
+    // (today's behavior exactly).
+    const sectionParam = req.query.section;
+    let managedSections = [];
+    try {
+      const enrollment = require('../utils/enrollment');
+      managedSections = await enrollment.sectionsManagedBy(req.user, { status: 'all' });
+    } catch (sectionsError) {
+      console.error('Error fetching managed sections:', sectionsError.message);
+    }
+
+    let scopeApplied = 'all';
+    let targetSectionIds = null; // null → no scoping
+    if (sectionParam === 'mine') {
+      // 'mine' with zero managed sections falls back to 'all' (migration
+      // grace) — scope_applied tells the client which one actually happened.
+      if (managedSections.length > 0) {
+        targetSectionIds = managedSections.map(s => s.section_id);
+        scopeApplied = 'mine';
+      }
+    } else if (sectionParam && sectionParam !== 'all') {
+      // A specific section UUID. Admins may target any section; everyone else
+      // only one they manage.
+      if (req.user.role !== 'admin'
+          && !managedSections.some(s => String(s.section_id) === String(sectionParam))) {
+        return res.status(403).json({ error: 'Not one of your sections' });
+      }
+      targetSectionIds = [sectionParam];
+      scopeApplied = sectionParam;
+    }
+
+    // Resolve the scope to a Set of user-id strings (clinic_db). Fails CLOSED
+    // to an empty set: a broken enrollment lookup must not widen a scoped view
+    // back to every student on the platform.
+    let scopedUserIds = null; // Set<string> when scoping is active, else null
+    if (targetSectionIds) {
+      try {
+        const scopedResult = await query(
+          `SELECT DISTINCT user_id FROM ciab_enrollment
+            WHERE status = 'active' AND section_id = ANY($1::uuid[])`,
+          [targetSectionIds]
+        );
+        scopedUserIds = new Set(scopedResult.rows.map(r => String(r.user_id)));
+      } catch (scopeError) {
+        console.error('Error resolving section scope:', scopeError.message);
+        scopedUserIds = new Set();
+      }
+    }
 
     // Get ALL students from cybercore_db (users live in cybercore_user, not in clinic_db)
     try {
@@ -142,7 +194,12 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
         WHERE role = 'student' OR role IS NULL
         ORDER BY last_name ASC NULLS LAST, first_name ASC NULLS LAST, email ASC
       `);
-      const userRows = usersResult.rows;
+      // Scoped views only keep students actively enrolled on a target section
+      // — filtered BEFORE studentIds is derived so every nested batch query
+      // below (profiles, assignments, watchers, counts) shrinks with it.
+      const userRows = scopedUserIds
+        ? usersResult.rows.filter(u => scopedUserIds.has(String(u.student_id)))
+        : usersResult.rows;
 
       // Build a lookup map of all users (so we can resolve instructor names for assignments/watching)
       const allUsersResult = await cybercoreQuery(`
@@ -156,6 +213,7 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
       const assignmentsByStudent = {};
       const watchingByStudent = {};
       const reviewCountsByUser = {};
+      const sectionsByStudent = {};
 
       if (studentIds.length > 0) {
         const placeholders = studentIds.map((_, i) => `$${i + 1}`).join(',');
@@ -223,6 +281,29 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
         progressResult.rows.forEach(r => {
           reviewCountsByUser[r.user_id] = r;
         });
+
+        // Fetch active section enrollments per student (clinic_db). Own
+        // try/catch: a missing enrollment schema must not take the whole
+        // students list down with it.
+        try {
+          const studentSectionsResult = await query(
+            `SELECT e.user_id, s.section_id, s.name, s.code
+             FROM ciab_enrollment e
+             JOIN ciab_section s ON s.section_id = e.section_id
+             WHERE e.status = 'active' AND e.user_id::text IN (${placeholders})`,
+            studentIds
+          );
+          studentSectionsResult.rows.forEach(r => {
+            if (!sectionsByStudent[r.user_id]) sectionsByStudent[r.user_id] = [];
+            sectionsByStudent[r.user_id].push({
+              section_id: r.section_id,
+              name: r.name,
+              code: r.code
+            });
+          });
+        } catch (studentSectionsError) {
+          console.error('Error fetching student sections:', studentSectionsError.message);
+        }
       }
 
       // Merge everything per student
@@ -231,6 +312,7 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
         generated_profiles: profilesByUser[u.student_id] || null,
         assignments: assignmentsByStudent[u.student_id] || null,
         watching_instructors: watchingByStudent[u.student_id] || null,
+        sections: sectionsByStudent[u.student_id] || [],
         pending_reviews: reviewCountsByUser[u.student_id]?.pending_reviews || 0,
         completed_reviews: reviewCountsByUser[u.student_id]?.completed_reviews || 0,
         parts_started: reviewCountsByUser[u.student_id]?.parts_started || 0
@@ -300,15 +382,20 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
           ap.content,
           ap.created_at,
           ap.updated_at,
+          COALESCE(ap.submitted_at, ap.updated_at) AS submitted_at,
+          ap.reviewed_at,
           p.company_name AS profile_name
         FROM assessment_progress ap
         LEFT JOIN profiles p ON ap.profile_id = p.id
         WHERE ap.status = 'submitted'
-        ORDER BY ap.updated_at DESC
+        ORDER BY COALESCE(ap.submitted_at, ap.updated_at) ASC
         LIMIT 50
       `);
 
-      pendingSubmissions = pendingResult.rows;
+      // Under a section scope, only keep submissions from scoped students.
+      pendingSubmissions = scopedUserIds
+        ? pendingResult.rows.filter(p => scopedUserIds.has(String(p.user_id)))
+        : pendingResult.rows;
 
       // Enrich with student email/name from cybercore_db
       const userIds = [...new Set(pendingSubmissions.map(p => p.user_id).filter(Boolean))];
@@ -334,12 +421,63 @@ router.get('/dashboard', authenticateToken, instructorOnly, async (req, res) => 
     } catch (pendingError) {
       console.error('Error fetching pending submissions:', pendingError.message);
     }
-    
+
+    // True pending count — pending_submissions above is capped at LIMIT 50,
+    // so its length undercounts once a backlog builds.
+    let pendingTotal = 0;
+    try {
+      if (scopedUserIds) {
+        const scopedIds = [...scopedUserIds];
+        if (scopedIds.length > 0) {
+          const scopedPlaceholders = scopedIds.map((_, i) => `$${i + 1}`).join(',');
+          const totalResult = await query(
+            `SELECT COUNT(*)::int AS n FROM assessment_progress
+             WHERE status = 'submitted' AND user_id::text IN (${scopedPlaceholders})`,
+            scopedIds
+          );
+          pendingTotal = totalResult.rows[0]?.n || 0;
+        }
+      } else {
+        const totalResult = await query(
+          `SELECT COUNT(*)::int AS n FROM assessment_progress WHERE status = 'submitted'`
+        );
+        pendingTotal = totalResult.rows[0]?.n || 0;
+      }
+    } catch (totalError) {
+      console.error('Error counting pending submissions:', totalError.message);
+    }
+
+    // Real "Documents Generated" count — generated_documents rows attached to
+    // the caller's own profiles (the stat the UI previously faked client-side).
+    let documentsGenerated = 0;
+    try {
+      const docsResult = await query(
+        `SELECT COUNT(*)::int AS n
+         FROM generated_documents gd
+         JOIN profiles p ON gd.profile_id = p.id
+         WHERE p.user_id::text = $1`,
+        [instructorId]
+      );
+      documentsGenerated = docsResult.rows[0]?.n || 0;
+    } catch (docsError) {
+      console.error('Error counting generated documents:', docsError.message);
+    }
+
     res.json({
       success: true,
       dashboard: {
         total_students: students.length,
         pending_reviews: pendingSubmissions.length,
+        pending_total: pendingTotal,
+        documents_generated: documentsGenerated,
+        scope_applied: scopeApplied,
+        sections: managedSections.map(s => ({
+          section_id: s.section_id,
+          name: s.name,
+          code: s.code,
+          term: s.term,
+          status: s.status
+        })),
         students: students,
         pending_submissions: pendingSubmissions
       }
@@ -456,27 +594,35 @@ router.post('/review/:progressId', authenticateToken, instructorOnly, async (req
     const instructorId = req.user.userId;
     const { progressId } = req.params;
     const { feedback, score, rubric_scores, status } = req.body;
-    
-    // Check if assessment_progress table exists
-    const tableCheck = await query(`
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_name = 'assessment_progress'
-      )
-    `);
-    
-    if (!tableCheck.rows[0]?.exists) {
-      return res.status(400).json({ error: 'Assessment progress table not found. Please run database migrations.' });
-    }
-    
+
     // Check if the progress record exists
     const progressCheck = await query('SELECT * FROM assessment_progress WHERE id = $1', [progressId]);
-    
+
     if (progressCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Submission not found' });
     }
-    
+
+    // Grading is coursework ownership, same rule as /assign below: admins act
+    // across sections; an instructor with no sections yet is mid-migration and
+    // passes; otherwise the submission's student must be actively enrolled on
+    // one of the caller's sections.
+    if (req.user.role !== 'admin') {
+      const enrollment = require('../utils/enrollment');
+      const mine = await enrollment.sectionsManagedBy(req.user, { status: 'all' });
+      if (mine.length) {
+        const onOneOfMine = await query(
+          `SELECT 1 FROM ciab_enrollment
+            WHERE user_id = $1 AND status = 'active' AND section_id = ANY($2::uuid[]) LIMIT 1`,
+          [progressCheck.rows[0].user_id, mine.map((m) => m.section_id)]
+        );
+        if (!onOneOfMine.rowCount) {
+          return res.status(403).json({
+            error: 'That student is not enrolled on any of your sections.',
+          });
+        }
+      }
+    }
+
     // Update the progress record with review
     const result = await query(`
       UPDATE assessment_progress
@@ -2132,8 +2278,8 @@ router.post('/students/watch', authenticateToken, instructorOnly, async (req, re
     // Add to instructor_working_sets (may need to handle schema differences)
     try {
       await query(
-        `INSERT INTO instructor_working_sets (instructor_id, student_id, created_at)
-         VALUES ($1, $2, NOW())
+        `INSERT INTO instructor_working_sets (instructor_id, student_id)
+         VALUES ($1, $2)
          ON CONFLICT DO NOTHING`,
         [req.user.userId, student_id]
       );
@@ -2221,7 +2367,12 @@ router.patch('/lanes/:id/internet', authenticateToken, instructorOnly, async (re
 
 
 // ============================================================================
-// ACCOUNT SCHEDULE MANAGEMENT (Instructor can manage their own group)
+// WORKING SET (claim / release)
+// ----------------------------------------------------------------------------
+// The group self-serve and group-schedule routes that used to live here are
+// gone with the My Groups card — sections are the ownership model (008).
+// getInstructorGroups stays: getInstructorStudentIds() and lane-access gating
+// still union deployed_groups.config.instructors through it.
 // ============================================================================
 
 /**
@@ -2237,95 +2388,6 @@ async function getInstructorGroups(userId) {
   });
 }
 
-// GET /api/instructor/my-groups — list groups this instructor belongs to
-router.get('/my-groups', authenticateToken, instructorOnly, async (req, res) => {
-  try {
-    const groups = await getInstructorGroups(req.user.userId);
-    res.json(groups.map(g => ({
-      id: g.id,
-      group_name: g.group_name,
-      students: (typeof g.config === 'string' ? JSON.parse(g.config) : g.config).students?.length || 0
-    })));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// GET /api/instructor/all-groups — list all deployed groups (for join)
-router.get('/all-groups', authenticateToken, instructorOnly, async (req, res) => {
-  try {
-    const result = await query(`SELECT id, group_name, config, created_at FROM deployed_groups ORDER BY created_at DESC`);
-    const myGroups = await getInstructorGroups(req.user.userId);
-    const myGroupIds = new Set(myGroups.map(g => g.id));
-
-    res.json(result.rows.map(g => {
-      const cfg = typeof g.config === 'string' ? JSON.parse(g.config) : g.config;
-      return {
-        id: g.id,
-        group_name: g.group_name,
-        instructors: (cfg.instructors || []).length,
-        students: (cfg.students || []).length,
-        is_member: myGroupIds.has(g.id),
-        created_at: g.created_at
-      };
-    }));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST /api/instructor/join-group — add self to a deployed group
-// ADMIN ONLY, deliberately narrowed.
-//
-// This used to be instructorOnly, which meant ANY instructor could add
-// themselves to ANY deployed group. That is not a cosmetic membership:
-// getInstructorStudentIds() unions deployed_groups.config.instructors, and
-// GET /lanes/:id/connect gates on that union — so self-joining a stranger's
-// group was a two-request path to a Guacamole session inside another
-// instructor's student's VM.
-//
-// Sections replace groups as the ownership model, so nothing legitimate needs
-// the self-serve path any more.
-router.post('/join-group', authenticateToken, requireRole('admin'), async (req, res) => {
-  try {
-    const { group_id } = req.body;
-    if (!group_id) return res.status(400).json({ error: 'group_id required' });
-
-    const result = await query(`SELECT * FROM deployed_groups WHERE id = $1`, [group_id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
-
-    const group = result.rows[0];
-    const config = typeof group.config === 'string' ? JSON.parse(group.config) : group.config;
-
-    // Check if already a member
-    if ((config.instructors || []).some(i => i.id === req.user.userId)) {
-      return res.status(400).json({ error: 'Already a member of this group' });
-    }
-
-    // Get instructor's user info (cybercore_user)
-    const userResult = await cybercoreQuery(`SELECT user_id AS id, email, first_name, last_name FROM cybercore_user WHERE user_id = $1`, [req.user.userId]);
-    if (userResult.rows.length === 0) return res.status(404).json({ error: 'User not found' });
-    const user = userResult.rows[0];
-
-    // Add instructor to the group config
-    config.instructors = config.instructors || [];
-    config.instructors.push({
-      id: user.id,
-      email: user.email,
-      name: `${user.first_name} ${user.last_name}`
-    });
-
-    await query(
-      `UPDATE deployed_groups SET config = $1 WHERE id = $2`,
-      [JSON.stringify(config), group_id]
-    );
-
-    res.json({ success: true, group_name: group.group_name });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // POST /api/instructor/claim-student — add a student to instructor's working set
 router.post('/claim-student', authenticateToken, instructorOnly, async (req, res) => {
   try {
@@ -2338,8 +2400,8 @@ router.post('/claim-student', authenticateToken, instructorOnly, async (req, res
 
     // Add to working sets
     await query(
-      `INSERT INTO instructor_working_sets (instructor_id, student_id, created_at)
-       VALUES ($1, $2, NOW())
+      `INSERT INTO instructor_working_sets (instructor_id, student_id)
+       VALUES ($1, $2)
        ON CONFLICT DO NOTHING`,
       [req.user.userId, student_id]
     );
@@ -2362,172 +2424,5 @@ router.delete('/release-student/:studentId', authenticateToken, instructorOnly, 
     res.status(500).json({ error: error.message });
   }
 });
-
-// GET /api/instructor/groups/:id/schedule — get schedule for instructor's group
-router.get('/groups/:id/schedule', authenticateToken, instructorOnly, async (req, res) => {
-  try {
-    // Verify instructor belongs to this group
-    const groups = await getInstructorGroups(req.user.userId);
-    if (!groups.some(g => g.id === req.params.id)) {
-      return res.status(403).json({ error: 'You are not an instructor for this group' });
-    }
-
-    const result = await query(
-      `SELECT * FROM account_schedules WHERE group_id = $1`,
-      [req.params.id]
-    );
-    if (result.rows.length === 0) {
-      return res.json({ group_id: req.params.id, schedule: null });
-    }
-    res.json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// PUT /api/instructor/groups/:id/schedule — set class time window
-router.put('/groups/:id/schedule', authenticateToken, instructorOnly, async (req, res) => {
-  try {
-    const groups = await getInstructorGroups(req.user.userId);
-    if (!groups.some(g => g.id === req.params.id)) {
-      return res.status(403).json({ error: 'You are not an instructor for this group' });
-    }
-
-    const { active_days, active_start, active_end, timezone } = req.body;
-
-    if (!Array.isArray(active_days) || active_days.some(d => d < 0 || d > 6)) {
-      return res.status(400).json({ error: 'active_days must be array of 0-6 (Sun-Sat)' });
-    }
-    if (!active_start || !active_end) {
-      return res.status(400).json({ error: 'active_start and active_end required (HH:MM format)' });
-    }
-
-    const result = await query(
-      `INSERT INTO account_schedules (group_id, active_days, active_start, active_end, timezone)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (group_id) DO UPDATE SET
-         active_days = EXCLUDED.active_days,
-         active_start = EXCLUDED.active_start,
-         active_end = EXCLUDED.active_end,
-         timezone = COALESCE(EXCLUDED.timezone, account_schedules.timezone),
-         updated_at = NOW()
-       RETURNING *`,
-      [req.params.id, active_days, active_start, active_end, timezone || 'America/Chicago']
-    );
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// PATCH /api/instructor/groups/:id/schedule/override — force accounts active/inactive
-router.patch('/groups/:id/schedule/override', authenticateToken, instructorOnly, async (req, res) => {
-  try {
-    const groups = await getInstructorGroups(req.user.userId);
-    if (!groups.some(g => g.id === req.params.id)) {
-      return res.status(403).json({ error: 'You are not an instructor for this group' });
-    }
-
-    const { override_active } = req.body;
-    if (override_active !== true && override_active !== false && override_active !== null) {
-      return res.status(400).json({ error: 'override_active must be true, false, or null' });
-    }
-
-    const result = await query(
-      `UPDATE account_schedules
-       SET override_active = $1,
-           override_by = $2,
-           override_at = NOW(),
-           updated_at = NOW()
-       WHERE group_id = $3
-       RETURNING *`,
-      [override_active, req.user.userId, req.params.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'No schedule found for this group. Create one first.' });
-    }
-
-    // Sync Guacamole accounts: disable when forced off, enable when forced on
-    // Stop or start VMs for all student lanes
-    if (override_active === true || override_active === false) {
-      const group = groups.find(g => g.id === req.params.id);
-      const cfg = typeof group.config === 'string' ? JSON.parse(group.config) : group.config;
-      const students = cfg.students || [];
-
-      for (const student of students) {
-        try {
-          const lanesResult = await cybercoreQuery(
-            `SELECT lane_id, vxlan_id, config, status FROM cybercore_lane
-             WHERE user_id = $1 AND status IN ('active', 'suspended')`,
-            [student.id]
-          );
-
-          for (const lane of lanesResult.rows) {
-            const lc = typeof lane.config === 'string' ? JSON.parse(lane.config) : (lane.config || {});
-            const node = lc.node;
-            if (!node) continue;
-
-            // Collect all VM IDs
-            const vms = [];
-            if (Array.isArray(lc.vms)) {
-              for (const vm of lc.vms) vms.push({ vmid: vm.vm_id, type: vm.type || 'qemu' });
-            } else if (lc.challenge_vm_id) {
-              vms.push({ vmid: lc.challenge_vm_id, type: 'qemu' });
-            }
-            const gwId = lc.gateway_vm_id || lc.lane_gateway_vm_id;
-            if (gwId) vms.push({ vmid: gwId, type: 'lxc' });
-            if (lc.attack_box_vm_id) vms.push({ vmid: lc.attack_box_vm_id, type: 'qemu' });
-
-            if (!override_active) {
-              // Stop all VMs, mark lane suspended
-              for (const vm of vms) {
-                try { await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/stop`); } catch (_) {}
-              }
-              await cybercoreQuery(`UPDATE cybercore_lane SET status = 'suspended', updated_at = NOW() WHERE lane_id = $1`, [lane.lane_id]);
-            } else {
-              // Start gateway first, then others
-              const gw = vms.find(v => v.type === 'lxc');
-              const others = vms.filter(v => v !== gw);
-              if (gw) {
-                try { await proxmoxAPI('POST', `/api2/json/nodes/${node}/${gw.type}/${gw.vmid}/status/start`); } catch (_) {}
-                await new Promise(r => setTimeout(r, 3000));
-              }
-              for (const vm of others) {
-                try { await proxmoxAPI('POST', `/api2/json/nodes/${node}/${vm.type}/${vm.vmid}/status/start`); } catch (_) {}
-              }
-              await cybercoreQuery(`UPDATE cybercore_lane SET status = 'active', updated_at = NOW() WHERE lane_id = $1`, [lane.lane_id]);
-            }
-          }
-        } catch (_) {}
-      }
-
-      // Kill Guacamole sessions if disabling
-      if (!override_active) {
-        try {
-          const studentEmails = students.map(s => s.email);
-          const activeSessions = await guacAPI('GET', '/activeConnections');
-          const toKill = Object.entries(activeSessions || {})
-            .filter(([, s]) => studentEmails.includes(s.username))
-            .map(([id]) => ({ op: 'remove', path: `/${id}` }));
-          if (toKill.length > 0) {
-            const token = await getGuacToken();
-            await fetch(`${GUAC_URL}/api/session/data/${GUAC_DS}/activeConnections?token=${token}`, {
-              method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(toKill)
-            });
-          }
-        } catch (_) {}
-      }
-    }
-
-    res.json(result.rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 
 module.exports = router;

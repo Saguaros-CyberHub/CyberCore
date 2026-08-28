@@ -1,0 +1,513 @@
+/**
+ * instructor.css — Instructor Dashboard page styles.
+ * ============================================================================
+ * Everything page-specific lives here; shared components (.card, .btn, .badge,
+ * .tabs, .empty-state, .data-table, .filter-pill, .status-pill, .modal-*) come
+ * from /css/main.css and /css/layout.css. Rules use the semantic tokens
+ * (--bg-card, --text-primary, --border-color, …) exclusively, so the dark
+ * theme needs no per-rule compensation — the block at the bottom only deepens
+ * shadows. Follow the hub.html discipline: if a rule needs a literal color,
+ * it is probably reinventing a token.
+ */
+
+/* ── Tab panels ─────────────────────────────────────────────────────────── */
+/* The kit styles the tab STRIP; panel visibility is page wiring. */
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Overview: hero ─────────────────────────────────────────────────────── */
+/* The progress.html hero idiom: brand gradient, stats inline. Text on the
+   gradient is always white in both themes, so those colors are literal on
+   purpose. */
+.instr-hero {
+  background: linear-gradient(135deg, var(--primary-dark), var(--primary), var(--primary-light));
+  border-radius: 16px;
+  padding: 1.75rem 2rem;
+  color: #fff;
+  margin-bottom: 1.5rem;
+}
+
+.instr-hero-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-bottom: 1.25rem;
+}
+
+.instr-hero-greeting {
+  font-size: 1.35rem;
+  font-weight: 700;
+  margin: 0;
+}
+
+.instr-hero-scope {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 999px;
+  padding: 0.3rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.instr-hero-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1rem;
+}
+
+.instr-hero-stat {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+}
+
+.instr-hero-stat-value {
+  font-size: 1.9rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.instr-hero-stat-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.85;
+  margin-top: 0.2rem;
+}
+
+/* Skeleton value inside the hero: the kit .skeleton shimmer reads poorly on
+   the gradient, so the hero gets its own translucent pulse. */
+.instr-hero-skel {
+  display: inline-block;
+  width: 3.5rem;
+  height: 1.9rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.22);
+  animation: instrHeroPulse 1.4s ease-in-out infinite;
+}
+
+@keyframes instrHeroPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* ── Overview: action items ─────────────────────────────────────────────── */
+.action-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  background: var(--bg-card-hover);
+  border-left: 4px solid var(--primary);
+}
+
+.action-item.warn { border-left-color: var(--warning); }
+
+.action-item strong {
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.action-item-detail {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}
+
+.action-item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+/* ── Review cards (Review Queue + Recent Submissions) ───────────────────── */
+.review-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-left: 4px solid var(--warning);
+  border-radius: 0 10px 10px 0;
+  padding: 1rem 1.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.review-card.compact { padding: 0.75rem 1rem; border-left-width: 3px; }
+
+.review-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+
+.review-card-student {
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+}
+
+.review-card-chips {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 0.6rem;
+}
+
+.review-card-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.age-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* A submission waiting more than a week is a problem, not a queue item. */
+.age-chip.overdue { color: var(--danger); }
+
+.review-group { margin-bottom: 1.25rem; }
+
+.review-group-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 0.5rem;
+}
+
+/* ── Students tab ───────────────────────────────────────────────────────── */
+.student-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 1.1rem 1.25rem;
+  margin-bottom: 0.75rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.student-card:hover { box-shadow: var(--shadow-sm); }
+
+.student-card.expanded {
+  border-color: var(--primary);
+  box-shadow: var(--shadow-md);
+}
+
+.student-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  cursor: pointer;
+}
+
+.student-id h4 {
+  margin: 0 0 0.2rem;
+  font-size: 1.05rem;
+  color: var(--text-primary);
+}
+
+.student-id p {
+  margin: 0;
+  font-size: 0.83rem;
+  color: var(--text-muted);
+}
+
+.student-badges {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 0.6rem;
+}
+
+.student-metrics {
+  display: flex;
+  gap: 1.25rem;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.student-metric { text-align: center; min-width: 3.2rem; }
+
+.student-metric-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.student-metric-value.attention { color: var(--warning); }
+
+.student-metric-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.student-chevron {
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+  font-size: 0.8rem;
+  align-self: center;
+}
+
+.student-card.expanded .student-chevron { transform: rotate(180deg); }
+
+/* Detail panel renders lazily into its own host — expanding one card never
+   repaints its siblings. */
+.student-detail {
+  border-top: 1px solid var(--border-color);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.detail-subtabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.detail-subtab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.detail-subtab:hover { color: var(--text-secondary); }
+
+.detail-subtab.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
+.chunk-more { text-align: center; padding: 0.75rem 0 1.25rem; }
+
+/* ── Documents tab ──────────────────────────────────────────────────────── */
+.doc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.doc-card {
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+}
+
+.doc-card-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  margin-bottom: 0.3rem;
+}
+
+.doc-card-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-bottom: 0.5rem;
+}
+
+.cost-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-color);
+}
+
+/* ── Skeleton rows (list loading states; kit .skeleton supplies shimmer) ── */
+.skel-row { height: 4.5rem; margin-bottom: 0.75rem; }
+.skel-line { height: 1rem; margin-bottom: 0.5rem; }
+
+/* ── Modals ─────────────────────────────────────────────────────────────── */
+/* The preserved Sections/roster modals use .modal-content (not the kit's
+   .modal) and bare <input>/<select>/<textarea> inside .form-group — these
+   ports keep that markup styled now that the old inline blocks are gone.
+   Values re-tokened, geometry unchanged. */
+.modal-content {
+  background: var(--bg-card);
+  border-radius: 12px;
+  padding: 2rem;
+  width: 100%;
+  max-width: 500px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: var(--shadow-lg);
+}
+
+.modal-content .modal-header {
+  margin-bottom: 1.5rem;
+  padding: 0 0 1rem;
+}
+
+.modal-content .modal-header h3 { margin: 0; }
+
+.form-group label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  color: var(--text-secondary);
+}
+
+.form-group input,
+.form-group select,
+.form-group textarea {
+  width: 100%;
+  padding: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 0.95rem;
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.form-group input:focus,
+.form-group select:focus,
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(30, 82, 136, 0.12);
+}
+
+/* ── Review modal rubric ────────────────────────────────────────────────── */
+.rubric-section {
+  background: var(--bg-card-hover);
+  border-radius: 8px;
+  padding: 1rem;
+  margin-bottom: 1rem;
+}
+
+.rubric-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.rubric-item:last-child { border-bottom: none; }
+.rubric-item label { flex: 1; margin: 0; font-weight: 400; }
+.rubric-item input { width: 60px; text-align: center; }
+
+.rubric-item .max-points {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-left: 0.5rem;
+}
+
+.rubric-total {
+  display: flex;
+  justify-content: flex-end;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  padding-top: 0.5rem;
+}
+
+.rubric-total strong { font-size: 1.1rem; color: var(--text-primary); }
+
+/* ── Vuln-app cheat sheet (ported; already token-based) ─────────────────── */
+.vcs-section { margin-bottom: 2rem; }
+.vcs-section h4 { color: var(--text-primary); border-bottom: 2px solid var(--danger); padding-bottom: 0.4rem; margin: 0 0 0.75rem 0; font-size: 1.05rem; }
+.vcs-meta { background: var(--gray-50); border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem; font-size: 0.9rem; }
+.vcs-meta strong { color: var(--text-primary); }
+.vcs-stage { background: var(--bg-card); border: 1px solid var(--border-color); border-left: 4px solid var(--danger); border-radius: 6px; padding: 1rem; margin-bottom: 0.75rem; }
+.vcs-stage-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+.vcs-stage-num { background: var(--danger); color: #fff; width: 28px; height: 28px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.85rem; }
+.vcs-vuln-type { font-weight: 600; color: var(--text-primary); }
+.vcs-field { margin: 0.4rem 0; font-size: 0.9rem; line-height: 1.5; }
+.vcs-field-label { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.5px; display: inline-block; min-width: 100px; }
+.vcs-flag { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.4); padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.85rem; color: #744210; }
+.vcs-creds-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
+.vcs-creds-table th { background: var(--text-primary); color: var(--bg-card); padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+.vcs-creds-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-color); }
+.vcs-creds-table code { font-family: ui-monospace, 'SF Mono', Consolas, monospace; background: var(--gray-100); padding: 0.1rem 0.3rem; border-radius: 3px; }
+.vcs-files-table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9rem; }
+.vcs-files-table th { background: var(--text-primary); color: var(--bg-card); padding: 0.5rem 0.75rem; text-align: left; font-weight: 600; }
+.vcs-files-table td { padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border-color); vertical-align: top; }
+.vcs-role-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 10px; font-size: 0.75rem; font-weight: 600; }
+.vcs-role-primary { background: rgba(239, 68, 68, 0.15); color: var(--danger); }
+.vcs-role-pivot { background: rgba(245, 158, 11, 0.15); color: #b7791f; }
+.vcs-role-noise { background: var(--gray-200); color: var(--gray-600); }
+.vcs-callout { background: rgba(49, 130, 206, 0.12); border-left: 4px solid var(--info); padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-size: 0.9rem; }
+[data-theme="dark"] .vcs-flag { color: var(--warning); }
+[data-theme="dark"] .vcs-role-pivot { color: var(--warning); }
+
+@media print {
+  body * { visibility: hidden; }
+  #vulnCheatSheetModal, #vulnCheatSheetModal * { visibility: visible; }
+  #vulnCheatSheetModal { position: absolute; left: 0; top: 0; width: 100%; }
+  .modal-close, .modal-header button { display: none !important; }
+  .vcs-stage { page-break-inside: avoid; }
+}
+
+/* ── Answer-key modal (ported; already token-based) ─────────────────────── */
+.ak-part-item { padding: 10px 16px; cursor: pointer; border-left: 3px solid transparent; transition: all 0.15s; font-size: 0.9em; }
+.ak-part-item:hover { background: var(--gray-50); }
+.ak-part-item.active { background: rgba(49, 130, 206, 0.12); border-left-color: var(--primary); font-weight: 600; }
+.ak-part-item .part-num { color: var(--text-muted); font-size: 0.8em; }
+.ak-option-block { margin-bottom: 2rem; }
+.ak-option-block h4 { color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-bottom: 12px; }
+.ak-deliverable { background: var(--gray-50); border: 1px solid var(--border-color); border-radius: 8px; padding: 1rem; margin-bottom: 0.75rem; }
+.ak-deliverable-label { font-size: 0.95em; color: var(--text-primary); margin-bottom: 8px; font-weight: 700; }
+.ak-deliverable-content { line-height: 1.6; }
+.ak-deliverable-content p { margin-bottom: 8px; }
+.ak-deliverable-content table, .ak-md-table { width: 100%; border-collapse: collapse; margin: 8px 0; font-size: 0.88em; }
+.ak-md-table th { background: var(--gray-100); font-weight: 700; text-align: left; padding: 7px 10px; border: 1px solid var(--border-color); }
+.ak-md-table td { padding: 6px 10px; border: 1px solid var(--border-color); vertical-align: top; }
+.ak-md-table tr:nth-child(even) td { background: var(--gray-50); }
+.ak-deliverable-content th { background: var(--text-primary); color: var(--bg-card); padding: 6px 10px; text-align: left; }
+.ak-deliverable-content td { padding: 6px 10px; border-bottom: 1px solid var(--border-color); }
+.ak-deliverable-content ul, .ak-deliverable-content ol { margin: 6px 0 6px 20px; }
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .instr-hero { padding: 1.25rem; }
+  .instr-hero-stats { grid-template-columns: 1fr 1fr; }
+  .student-head { flex-wrap: wrap; }
+  .student-metrics { width: 100%; justify-content: flex-start; }
+  .tabs { flex-wrap: wrap; }
+}
+
+/* ── Dark theme ─────────────────────────────────────────────────────────── */
+/* Tokens carry the palette; only shadow depth differs in the dark. */
+[data-theme="dark"] .student-card:hover { box-shadow: var(--shadow-md); }
+[data-theme="dark"] .instr-hero { box-shadow: var(--glow-primary, none); }

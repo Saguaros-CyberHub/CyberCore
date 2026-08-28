@@ -1421,3 +1421,235 @@ button:focus-visible,
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
+
+/* ============================================================================
+   SHARED COMPONENTS (promoted from page CSS)
+   ============================================================================
+   Classes that pages and widgets already emit but that only ever had
+   page-local (or dark-only — see ~L382 and ~L531) styling. Semantic tokens
+   only, so the Midnight Wildcat block above restyles them for free; the
+   existing dark-only .tabs/.tab-btn/.empty-state overrides intentionally
+   still layer on top of these light bases. */
+
+/* ── Tab strip ──
+   Both spellings styled identically: the instructor page uses .tabs .tab,
+   ticket-widget.js emits .tab-btn. Active tab underlines into the strip's
+   border via the -2px pull-up. */
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 2px solid var(--border-color);
+  margin-bottom: 1.5rem;
+}
+
+.tabs .tab,
+.tab-btn {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  cursor: pointer;
+  padding: 0.75rem 1.25rem;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  transition: var(--transition);
+}
+
+.tabs .tab:hover,
+.tab-btn:hover {
+  color: var(--text-secondary);
+}
+
+.tabs .tab.active,
+.tab-btn.active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  font-weight: 600;
+}
+
+/* ── Empty states ── */
+.empty-state {
+  text-align: center;
+  padding: 3rem 1rem;
+  color: var(--text-muted);
+}
+
+.empty-state .icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.empty-state h3 {
+  color: var(--text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.empty-state p {
+  margin-bottom: 1.5rem;
+}
+
+/* Card-flavoured variant — the hub.html .hub-empty idiom: dashed frame so an
+   empty region still reads as a deliberate placeholder, not a rendering gap. */
+.empty-state-card {
+  background: var(--bg-card);
+  border: 2px dashed var(--border-color);
+  border-radius: 12px;
+}
+
+/* ── Data table (denser than .table; the Sections roster uses it) ── */
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.data-table thead th {
+  background: var(--bg-card-hover);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.6rem 0.75rem;
+  text-align: left;
+  border-bottom: 2px solid var(--border-color);
+}
+
+.data-table td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.data-table tbody tr:hover {
+  background: var(--bg-card-hover);
+}
+
+/* ── Info box (roster-import guidance, queue-cap notices, …) ── */
+.info-box {
+  background: var(--bg-card-hover);
+  border: 1px solid var(--border-color);
+  border-left: 3px solid var(--primary);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.info-box-title {
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 0.25rem;
+}
+
+/* ── Badge colors used-but-undefined until now ── */
+.badge-blue { background: rgba(92, 159, 230, 0.15); color: var(--primary); }
+
+/* -secondary is the legacy spelling some pages emit; keep it an exact alias. */
+.badge-gray,
+.badge-secondary {
+  background: var(--bg-card-hover);
+  color: var(--text-muted);
+  border: 1px solid var(--border-color);
+}
+
+/* ── Filter pills (lifted from clinic-risk-assessment.html) ── */
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.filter-pill:hover {
+  border-color: var(--primary);
+  color: var(--text-primary);
+}
+
+.filter-pill.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.filter-pill:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+/* Count bubble inside a pill or tab. The base is NEUTRAL — it inherits its
+   text color — because pages already pair it with their own pill styling
+   (clinic-risk-assessment). Contexts that want a filled bubble opt in below. */
+.pill-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.2rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: rgba(148, 163, 184, 0.18);
+  color: inherit;
+}
+
+/* In a tab strip the bubble is an attention count — filled with the brand. */
+.tabs .tab .pill-count,
+.tab-btn .pill-count {
+  background: var(--primary);
+  color: #fff;
+}
+
+/* On an active (primary-filled) pill the bubble goes translucent white so it
+   stays readable against its own background color. */
+.filter-pill.active .pill-count {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* ── Status pill (submission lifecycle) ──
+   rgba-over-token backgrounds read on both themes without dark overrides. */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.status-pill.not-started { background: var(--bg-card-hover); color: var(--text-muted); }
+.status-pill.in-progress { background: rgba(92, 159, 230, 0.15); color: var(--primary); }
+.status-pill.submitted { background: rgba(245, 158, 11, 0.15); color: var(--warning); }
+.status-pill.reviewed { background: rgba(112, 184, 101, 0.15); color: var(--success); }
+.status-pill.revision-requested { background: rgba(239, 64, 86, 0.15); color: var(--danger); }
+
+/* ── Toolbar row ──
+   Deliberately NOT named .toolbar: clinic-risk-report.html and
+   real-client-intake-synthesize.html define page-local .toolbar with
+   print-bar semantics, and a shared .toolbar would leak under theirs. */
+.toolbar-row {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
