@@ -721,6 +721,11 @@ module.exports = {
   // usernames
   deriveUsername, allocateUsername,
   // lookup
+  // USER_COLUMNS is exported so a caller loading several accounts by id gets
+  // exactly the columns the authorization helpers below were written against.
+  // Hand-listing them at the call site is how one quietly goes missing and
+  // canManageAccount() starts answering from an undefined field.
+  USER_COLUMNS,
   findUserByEmail, findUsersByEmails, findUserById,
   // repair
   backfillMissingName,

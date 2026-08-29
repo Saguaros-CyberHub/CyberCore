@@ -341,6 +341,19 @@ if (!global._aiProfileProgressGC) {
   global._aiProfileProgressGC.unref?.();
 }
 
+/** {min,max} from either a range object or a pair of scalars. */
+function toRange(rangeLike, min, max) {
+  if (rangeLike && typeof rangeLike === 'object' && ('min' in rangeLike || 'max' in rangeLike)) {
+    return rangeLike;
+  }
+  if (min != null || max != null) {
+    const lo = Number(min ?? max);
+    const hi = Number(max ?? min);
+    if (Number.isFinite(lo) && Number.isFinite(hi)) return { min: lo, max: hi };
+  }
+  return undefined;
+}
+
 async function callInlineGenerateProfile({
   userId,
   client_type = 'SMB',
@@ -356,7 +369,31 @@ async function callInlineGenerateProfile({
   company_name,
   domain,
   hq_city,
-  progress_id          // optional — when provided, server pushes step updates under this key
+  progress_id,         // optional — when provided, server pushes step updates under this key
+
+  // ── Everything below used to be silently dropped ─────────────────────────
+  // buildConfig() has always accepted these; this function simply never
+  // destructured them, and nothing built custom_config, so they never arrived.
+  // Effect: every profile got exactly 25 firewall rules and exactly 5
+  // stakeholders, and custom_seed never landed — so no profile was
+  // reproducible from its seed.
+  //
+  // Two callers with two vocabularies: admin-profile-lanes.js already sends
+  // the canonical names; generator.html sends its own. Accept both.
+  framework,
+  stakeholder_count,
+  stakeholders,                                  // generator.html
+  endpoint_count,
+  endpoint_range,
+  endpoints,                                     // generator.html
+  firewall_rules_range,
+  min_firewall_rules, max_firewall_rules,        // generator.html
+  weakness_range,
+  min_weaknesses, max_weaknesses,                // generator.html
+  cooperation,
+  scaffolding,
+  est_hours,
+  custom_seed
 } = {}) {
   const validClientTypes = ['SMB', 'NonProfit', 'Utility_IT_OT', 'K12', 'Library'];
   const validDifficulties = ['beginner', 'intermediate', 'advanced'];
@@ -377,6 +414,20 @@ async function callInlineGenerateProfile({
     llmModel, temperature, custom_config,
     company_name: org_name || company_name || undefined,
     domain, hq_city,
+
+    // Normalized to the names buildConfig() expects, accepting either
+    // caller's vocabulary. `undefined` still means "let the sizing profile
+    // decide", so omitting a field is not the same as pinning it.
+    framework,
+    stakeholder_count: toRange(stakeholders, null, null) || stakeholder_count,
+    endpoint_count,
+    endpoint_range: toRange(endpoints, null, null) || endpoint_range,
+    firewall_rules_range: firewall_rules_range
+      || toRange(null, min_firewall_rules, max_firewall_rules),
+    weakness_range: weakness_range
+      || toRange(null, min_weaknesses, max_weaknesses),
+    cooperation, scaffolding, est_hours, custom_seed,
+
     onProgress: progress_id
       ? (ev) => setProgress(progress_id, { step: ev.step, percent: ev.percent, message: ev.message, run_id: ev.run_id })
       : undefined
@@ -463,7 +514,10 @@ router.post('/upload', authenticateToken, adminOnly, express.json({ limit: '20mb
     `, [
       req.user.userId,
       quick.company_name || orgInfo.company_name || meta.cover_name || 'Uploaded Profile',
-      'SMB',
+      // Was hardcoded 'SMB', so an uploaded K12 or Utility profile was stored
+      // as an SMB and every size/sector-aware consumer read it as one.
+      (['SMB', 'NonProfit', 'Utility_IT_OT', 'K12', 'Library']
+        .includes(meta.client_type) ? meta.client_type : 'SMB'),
       orgInfo.industry || quick.industry || null,
       meta.difficulty || 'intermediate',
       relPath,
@@ -495,6 +549,7 @@ router.post('/generate-and-deploy', authenticateToken, adminOnly, async (req, re
       subnet_scheme,
       asset_selection,
       vuln_app,
+      engagement_type,
       ...generateParams
     } = req.body || {};
 
@@ -514,7 +569,8 @@ router.post('/generate-and-deploy', authenticateToken, adminOnly, async (req, re
       attackBoxes: attack_boxes !== false,
       subnetScheme: subnet_scheme || 'v2',
       assetSelection: asset_selection,
-      vulnAppOpts: vuln_app || {}
+      vulnAppOpts: vuln_app || {},
+      engagementType: engagement_type
     });
 
     res.status(202).json({
@@ -1086,11 +1142,14 @@ router.delete('/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const userId = req.user.userId;
 
-    // Free the per-profile crucible_challenge reservation in cybercore_db
-    // BEFORE deleting the profile row (so we still have the pointer). Safe
-    // if the profile never had one — deleteProfileChallenge is a no-op then.
+    // Free the profile's crucible_challenge reservations in cybercore_db BEFORE
+    // deleting the profile row (so we still have the pointer). Safe if the
+    // profile never had one — deleteProfileChallenge is a no-op then. With no
+    // engagementType it releases EVERY engagement's reservation, which is what
+    // deleting the client means; releasing only one would strand the rest of the
+    // VXLAN blocks and their VNets forever.
     try {
-      const { deleteProfileChallenge } = require('../utils/lane-deploy');
+      const { deleteProfileChallenge } = require('../utils/lane-reservation');
       const role = req.user.role;
       // Verify ownership/admin first so we don't free someone else's reservation
       const owned = await pool.query(

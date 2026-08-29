@@ -20,8 +20,23 @@
       
       <div class="auth-body">
         <div id="errorAlert" class="alert alert-danger" style="display: none;"></div>
-        
-        <form id="registerForm">
+
+        <!-- Shown when ALLOW_SELF_REGISTRATION is off, which is the default.
+             The form is hidden rather than the page removed, so the flag can be
+             flipped back without a deploy — and so anyone following an old
+             bookmark lands on an explanation instead of a form that 403s. -->
+        <div id="registrationClosed" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Accounts on this site are created by your instructor, not by signing up.
+          </p>
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            If you already have an account and never received — or have lost — your
+            setup email, you can send yourself a new link from the sign-in page.
+          </p>
+          <a href="/login" class="btn btn-primary btn-block btn-lg">Go to sign in</a>
+        </div>
+
+        <form id="registerForm" style="display: none;">
           <div class="form-row">
             <div class="form-group">
               <label class="form-label" for="firstName">First Name</label>
@@ -93,9 +108,28 @@
               document.head.appendChild(link);
             }
           }
+          showRegistrationState(config.self_registration_enabled === true);
+          return;
         }
+        // Non-OK response: fall through to the closed state below.
+        showRegistrationState(false);
       } catch (e) {
         console.warn('[Register] Could not load site config:', e.message);
+        // Fail closed. The API is the authority and would refuse the POST anyway;
+        // showing the form here would only produce a filled-in 403.
+        showRegistrationState(false);
+      }
+    }
+
+    /** Exactly one of the form and the explanation is ever visible. */
+    function showRegistrationState(enabled) {
+      document.getElementById('registerForm').style.display = enabled ? '' : 'none';
+      document.getElementById('registrationClosed').style.display = enabled ? 'none' : '';
+      const footer = document.querySelector('.auth-footer');
+      if (footer) footer.style.display = enabled ? '' : 'none';
+      if (!enabled) {
+        const h = document.querySelector('.auth-header h1');
+        if (h) h.textContent = 'Registration Closed';
       }
     }
 

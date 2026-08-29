@@ -603,10 +603,11 @@ async function smokeTestImage(imageTag, { logTag = '[CIAB VulnBuild]' } = {}) {
  */
 async function ensureVulnImage(vulnAppInstall, { logTag = '[CIAB VulnBuild]' } = {}) {
   if (!vulnAppInstall || vulnAppInstall.mode !== 'docker') return vulnAppInstall;
-  // Don't retry a build we already know will fail with the same source. Set
-  // by the prebuild path's catch (lane-deploy.js:1556) when smoke fails, so
-  // the per-lane retry safety net at lane-deploy.js:1179 skips a second
-  // doomed build attempt.
+  // Don't retry a build we already know will fail with the same source. Set by
+  // the prebuild path's catch when the smoke test fails, so the per-lane retry
+  // skips a second doomed build attempt. Both callers are in
+  // ./lane-provision.js (provisionProfileLanes and retryProfileLane); they used
+  // to live in lane-deploy.js, which A7 deleted.
   if (vulnAppInstall._smokeFailed) {
     console.warn(`${logTag} skipping rebuild — earlier smoke test failed (source unchanged)`);
     return vulnAppInstall;

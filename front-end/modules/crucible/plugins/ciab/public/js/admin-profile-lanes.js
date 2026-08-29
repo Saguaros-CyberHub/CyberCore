@@ -303,10 +303,15 @@ async function loadReservationStatus(profileId) {
     } else {
       const maxStudInput = document.getElementById('dep-max-students');
       maxStudInput.disabled = false;
+      // The allocator packs each new block immediately above the highest one
+      // already reserved (src/utils/lab-network-provision.js allocateVxlanBlock).
+      // It does not search for gaps — saying so was true of a CIAB-private
+      // allocator that no longer exists.
       const win = r.search_window || { min: 10100, max: 65535 };
       el.innerHTML = `<div class="status-banner info">
         🆕 No reservation yet — first deploy will carve a <strong id="rsv-preview-max">${maxStudInput.value}</strong>-slot VXLAN block
-        out of the first free gap in <code>${win.min}-${win.max}</code> (same mechanism as challenge templates).
+        above the highest block already reserved, up to a ceiling of <code>${win.max}</code>
+        (same mechanism as challenge templates).
         Max students locks at that value once set.
       </div>`;
     }

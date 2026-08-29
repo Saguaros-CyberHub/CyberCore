@@ -45,7 +45,32 @@
           </form>
 
           <div class="auth-footer">
-            <p>Don't have an account? <a href="/register">Create one</a></p>
+            <p><a href="#" id="forgotLink">Didn't get your setup email, or forgot your password?</a></p>
+            <p id="registerPrompt" style="display: none;">Don't have an account? <a href="/register">Create one</a></p>
+          </div>
+        </div>
+
+        <!-- Self-service: send me a new setup / reset link.
+             No new page — this is the same step pattern the MFA and password
+             screens already use. -->
+        <div id="forgotStep" style="display: none;">
+          <p style="color: var(--text-secondary, #555); margin-bottom: 1rem;">
+            Enter your email address and we'll send you a link to set your password.
+            It works whether you're setting one up for the first time or replacing
+            one you've forgotten.
+          </p>
+          <form id="forgotForm">
+            <div class="form-group">
+              <label class="form-label" for="forgotEmail">Email</label>
+              <input type="email" class="form-input" id="forgotEmail" placeholder="you@example.com"
+                     autocomplete="username" inputmode="email" autofocus>
+              <div class="form-error" id="forgotEmailError"></div>
+            </div>
+            <button type="submit" class="btn btn-primary btn-block btn-lg" id="forgotSubmitBtn">Send me a link</button>
+          </form>
+          <div id="forgotSent" class="alert alert-success" style="display: none; margin-top: 1rem;"></div>
+          <div class="auth-footer">
+            <p><a href="#" id="forgotBackLink">← Back to sign in</a></p>
           </div>
         </div>
 
@@ -153,6 +178,14 @@
               document.head.appendChild(link);
             }
           }
+          // Accounts come from a roster, so don't offer a route the API refuses.
+          // Starts hidden in the markup and is revealed only on an explicit true:
+          // if this fetch fails the prompt stays hidden, which is the harmless
+          // way to be wrong. The authoritative check is in POST /auth/register.
+          if (config.self_registration_enabled) {
+            const el = document.getElementById('registerPrompt');
+            if (el) el.style.display = '';
+          }
         }
       } catch (e) {
         console.warn('[Login] Could not load site config:', e.message);
@@ -186,7 +219,7 @@
       }
       function clearError() { errorAlert.style.display = 'none'; }
       function showStep(id) {
-        ['loginStep', 'mfaStep', 'enrollStep', 'pwChangeStep', 'recoveryStep'].forEach(s => {
+        ['loginStep', 'mfaStep', 'enrollStep', 'pwChangeStep', 'recoveryStep', 'forgotStep'].forEach(s => {
           document.getElementById(s).style.display = s === id ? '' : 'none';
         });
       }
@@ -301,6 +334,61 @@
         mfaToken = null;
         clearError();
         showStep('loginStep');
+      });
+
+      // ── Self-service: send me a setup / reset link ────────────────────────
+      // The server's answer is deliberately the same whether or not the address
+      // has an account, so there is nothing here to branch on. Rendering it
+      // verbatim is what keeps this page from becoming the oracle the endpoint
+      // refuses to be — do not add a "no such account" branch.
+      document.getElementById('forgotLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        clearError();
+        document.getElementById('forgotSent').style.display = 'none';
+        document.getElementById('forgotForm').style.display = '';
+        document.getElementById('forgotEmailError').textContent = '';
+        // Carry over whatever they already typed; it is usually the address.
+        const typed = document.getElementById('email').value.trim();
+        if (typed.includes('@')) document.getElementById('forgotEmail').value = typed;
+        showStep('forgotStep');
+        document.getElementById('forgotEmail').focus();
+      });
+
+      document.getElementById('forgotBackLink').addEventListener('click', (e) => {
+        e.preventDefault();
+        clearError();
+        showStep('loginStep');
+      });
+
+      document.getElementById('forgotForm').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        clearError();
+        const emailErr = document.getElementById('forgotEmailError');
+        emailErr.textContent = '';
+
+        const email = document.getElementById('forgotEmail').value.trim();
+        if (!Validator.required(email)) {
+          emailErr.textContent = 'Email is required';
+          return;
+        }
+
+        const btn = document.getElementById('forgotSubmitBtn');
+        btn.disabled = true; btn.textContent = 'Sending...';
+        try {
+          const result = await API.auth.requestPasswordLink(email);
+          const sent = document.getElementById('forgotSent');
+          sent.textContent = result.message
+            || 'If that address has an account, a link is on its way.';
+          sent.style.display = '';
+          // Hide the form so a second submit does not look like the first failed.
+          document.getElementById('forgotForm').style.display = 'none';
+        } catch (error) {
+          // Reaches here only for a transport failure or the rate limit — the
+          // endpoint itself answers 200 on every path.
+          showError(error.message || 'Could not send the link. Please try again shortly.');
+        } finally {
+          btn.disabled = false; btn.textContent = 'Send me a link';
+        }
       });
 
       // ── Step 2b: forced enrollment ────────────────────────────────────────

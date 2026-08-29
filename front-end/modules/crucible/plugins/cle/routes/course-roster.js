@@ -48,6 +48,12 @@ const COURSE_COLUMNS = 'course_id, course_name, code, max_students, provision_st
 const TEMP_PASSWORD_TTL_HOURS = Number(process.env.TEMP_PASSWORD_TTL_HOURS) > 0
   ? Number(process.env.TEMP_PASSWORD_TTL_HOURS) : 72;
 
+// Tighter than roster.MAX_ROWS (500). That cap governs account CREATION from a
+// file the instructor assembled deliberately; this one governs outbound mail from
+// a single click, so it should not inherit the larger number by default. 200
+// clears any real section.
+const MAX_BULK_RESEND = 200;
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -850,16 +856,25 @@ router.post('/students/:studentId/activation/resend', instructorOnly, async (req
     const target = await loadManageableStudent(req, res, course);
     if (!target) return;
 
-    if (!mailer.mailEnabled()) {
+    // Parity with the CIAB sibling (section-roster.js). Re-inviting someone who
+    // already has a working password is not harmful, but it is never what the
+    // caller meant, and the resulting mail tells a student with a live account to
+    // "finish setting up". A reset is the thing that exists for that.
+    if (target.activated_at) {
       return res.status(409).json({
-        error: 'Email is not configured on this server, so an invitation cannot be sent. Use "Regenerate password" to hand out a credential directly.',
+        error: 'That account has already been activated. Send a password reset instead.',
       });
     }
 
-    const recipient = mailer.checkRecipient(target.email);
-    if (!recipient.ok) {
+    // canInvite() rather than mailEnabled() alone: it also requires mailKey(),
+    // without which enqueue() accepts the row and then suppresses it for having
+    // no key to encrypt the body with — reported as success to the instructor.
+    if (!canInvite(target.email)) {
+      const recipient = mailer.checkRecipient(target.email);
       return res.status(409).json({
-        error: `Cannot email ${target.email}: ${recipient.reason}.`,
+        error: recipient.ok
+          ? 'Email is not configured on this server, so an invitation cannot be sent. Use "Regenerate password" to hand out a credential directly.'
+          : `Cannot email ${target.email}: ${recipient.reason}.`,
       });
     }
 
@@ -889,6 +904,114 @@ router.post('/students/:studentId/activation/resend', instructorOnly, async (req
   } catch (error) {
     if (error.status) return res.status(error.status).json({ error: error.message });
     console.error('[CLE] Activation resend error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * POST /students/activation/resend-all — re-invite everyone still un-activated.
+ *
+ * One request, not one per student, and deliberately so. The roster limiter caps
+ * an instructor at 20 requests per 15 minutes (server.js), which a client-side
+ * loop over a 40-person class would blow through halfway — leaving some students
+ * invited, some not, and no way to tell which from the browser. The cap exists to
+ * stop the platform being driven as a bulk sender; batching inside one authorized
+ * request respects that while still finishing the job.
+ *
+ * Every skip is reported rather than swallowed. "12 queued, 2 skipped" is
+ * actionable; a bare success over a partial run is what sends an instructor back
+ * to emailing an administrator.
+ */
+router.post('/students/activation/resend-all', instructorOnly, async (req, res) => {
+  try {
+    const course = await loadCourse(req, res);
+    if (!course) return;
+
+    // Learner enrollments only. The same rule GET /students/credentials applies,
+    // and for the same reason: being the course roster is not authority over a
+    // staff account that merely sits in on it.
+    const enrolled = await query(
+      `SELECT user_id FROM cle_course_enrollment
+        WHERE course_id = $1 AND status = 'active'
+          AND enrollment_role IN ('student','guest')`,
+      [course.course_id]
+    );
+    const userIds = enrolled.rows.map(r => r.user_id);
+    if (userIds.length === 0) {
+      return res.json({ queued: 0, skipped: [], total: 0, capped: false });
+    }
+
+    // last_auth_at is not in USER_COLUMNS (it is not a guard column), but the
+    // filter below needs it.
+    const users = await cybercoreQuery(
+      `SELECT ${prov.USER_COLUMNS}, last_auth_at FROM cybercore_user WHERE user_id = ANY($1)`,
+      [userIds]
+    );
+
+    // Only accounts nobody has ever signed in to.
+    //
+    // Both signals, not activated_at alone. activated_at is written only by
+    // completePasswordChange, which a cohort student handed a printed password
+    // never reaches — so filtering on it would mail a fresh "finish setting up"
+    // invitation to an entire section that had been working all week, and revoke
+    // nothing they were using but confuse all of them.
+    const pending = users.rows.filter(u => !u.activated_at && !u.last_auth_at);
+
+    const skipped = [];
+    const targets = [];
+    for (const u of pending) {
+      // canManageAccount, not assertCourseProvisionedStudent directly: it returns
+      // a boolean and passes { audit: false }, so a sweep does not write one
+      // denial row per staff account that happens to be enrolled.
+      if (!prov.canManageAccount(u, req.user, course.course_id)) {
+        skipped.push({ email: u.email, reason: 'not an account this course provisioned' });
+        continue;
+      }
+      if (!mailer.canSendTo(u.email)) {
+        // The cohort case: synthetic @cohort.invalid addresses exist precisely so
+        // that nothing tries to mail them.
+        const recipient = mailer.checkRecipient(u.email);
+        skipped.push({ email: u.email, reason: recipient.ok ? 'email is not configured' : recipient.reason });
+        continue;
+      }
+      targets.push(u);
+    }
+
+    if (!mailer.mailEnabled() || !mailer.mailKey()) {
+      return res.status(409).json({
+        error: 'Email is not configured on this server, so invitations cannot be sent. '
+             + 'Use "New password" to hand out credentials directly.',
+      });
+    }
+
+    // Reported, never silently trimmed: a truncated run that claims success is
+    // how an instructor concludes the feature works and then hears from the
+    // students it skipped.
+    const capped = targets.length > MAX_BULK_RESEND;
+    const batch = capped ? targets.slice(0, MAX_BULK_RESEND) : targets;
+
+    const ctx = await mailContext(req.user.userId);
+    let queued = 0;
+    for (const u of batch) {
+      // Sequential, not Promise.all: each call mints a token and enqueues a row,
+      // and the point of the outbox is that delivery is already asynchronous.
+      // Fanning out here would only add database contention.
+      const result = await inviteNewAccount(u, { course, ctx, actorId: req.user.userId });
+      if (result.status === 'queued') queued += 1;
+      else skipped.push({ email: u.email, reason: result.reason || 'could not be queued' });
+    }
+
+    roster.logRosterActivity({
+      actorId: req.user.userId,
+      courseId: course.course_id,
+      action: 'activation_resend_bulk',
+      detail: { queued, skipped: skipped.length, total: pending.length, capped },
+    });
+
+    res.json({ queued, skipped, total: pending.length, capped, cap: MAX_BULK_RESEND });
+  } catch (error) {
+    if (error.status) return res.status(error.status).json({ error: error.message });
+    console.error('[CLE] Bulk activation resend error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });

@@ -34,11 +34,14 @@ const {
   buildFlavorBundle
 } = require('./prompts');
 const { buildPrefilledIntake, buildIntakeV11Payload } = require('../../utils/profile-to-intake');
+const { hashInt } = require('./hash');
+const { computeOrgSizing } = require('./org-sizing');
 const {
   validateOrg,
   validateIt,
   validateNetwork,
-  validateThreat
+  validateThreat,
+  validateSizing
 } = require('./validators');
 const { renderProfileHtml } = require('./render');
 const { reconcileWorkstations } = require('./reconcile-workstations');
@@ -119,25 +122,57 @@ function buildConfig({
     ? empSource
     : { min: empSource, max: empSource };
 
-  // Stakeholder count: range or single
-  const stakSource = stakeholder_count ?? custom_config?.stakeholder_count ?? 5;
-  const stakRange = (typeof stakSource === 'object' && stakSource !== null && 'min' in stakSource)
-    ? stakSource
-    : { min: stakSource, max: stakSource };
+  // Stakeholder count: range or single. When the caller doesn't specify, the
+  // count is sized to the org further down rather than pinned at 5 — a
+  // 12-person non-profit does not have the same leadership bench as a
+  // 400-staff district, and both used to get exactly five.
+  const stakSourceRaw = stakeholder_count ?? custom_config?.stakeholder_count ?? null;
 
-  // Endpoint range default ~1.2x avg employees if not specified
-  const avgEmp = Math.floor((empRange.min + empRange.max) / 2);
-  const endpointRangeFinal = endpoint_range
-    || custom_config?.endpoint_range
-    || { min: Math.max(5, Math.floor(avgEmp * 0.8)), max: Math.max(20, Math.floor(avgEmp * 1.5)) };
-  const endpointCountFinal = endpoint_count
-    || custom_config?.endpoint_count
-    || Math.floor((endpointRangeFinal.min + endpointRangeFinal.max) / 2);
-
-  // RunId — honor custom seed if user supplied one
+  // RunId — honor custom seed if user supplied one.
+  // Must be computed BEFORE the headcount draw: everything downstream is
+  // hashed off it, including the headcount itself.
   const seedToken = custom_seed
     ? `RUN_${String(custom_seed).replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(0, 24)}`
     : `RUN_${Date.now().toString(36).toUpperCase()}_${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+  // ── Ordering fix ────────────────────────────────────────────────────────
+  // Draw the ACTUAL headcount first, then size everything off it.
+  //
+  // This used to run the other way around: endpoints were derived from the
+  // MIDPOINT of the employee band at seed-build time, while the headcount was
+  // drawn at random from inside that band later. With the UI's default band
+  // of [25,200] that produced a constant 128 endpoints for every profile
+  // regardless of headcount — 5.1x per employee at the low end. The server
+  // roster was sized off one number and the endpoint fleet off another.
+  const employeeCount = pickEmployeeCount(
+    { run_id: seedToken, employees: empRange },
+    client_type || 'SMB'
+  );
+
+  const sizing = computeOrgSizing({
+    clientType: client_type || 'SMB',
+    industry: chosenIndustry,
+    employeeCount,
+    delivery,
+    maturity,
+    runId: seedToken
+  });
+
+  // Endpoints now come from the sizing profile's per-sector ratio. An admin
+  // override still wins.
+  const sizedEndpoints = sizing.endpoints.workstations;
+  const endpointRangeFinal = endpoint_range
+    || custom_config?.endpoint_range
+    || { min: Math.max(2, Math.round(sizedEndpoints * 0.9)), max: Math.max(4, Math.round(sizedEndpoints * 1.15)) };
+  const endpointCountFinal = endpoint_count
+    || custom_config?.endpoint_count
+    || sizedEndpoints;
+
+  // Stakeholder range, now that sizing exists.
+  const stakSource = stakSourceRaw ?? sizing.stakeholder_count;
+  const stakRange = (typeof stakSource === 'object' && stakSource !== null && 'min' in stakSource)
+    ? stakSource
+    : { min: stakSource, max: stakSource };
 
   // Compliance list — if admin picked a specific framework, prepend it; else use industry defaults
   const complianceList = framework && framework !== 'None'
@@ -145,7 +180,10 @@ function buildConfig({
     : (framework === 'None' ? [] : tmpl.compliance);
 
   // Public IP from RFC 5737 documentation range — never a real address
-  const publicIp = `203.0.113.${10 + Math.floor(Math.random() * 240)}`;
+  // Hashed off run_id, not Math.random() — this was the other half of the
+  // determinism gap (with pickEmployeeCount) that made a profile impossible
+  // to regenerate from its seed.
+  const publicIp = `203.0.113.${hashInt(seedToken, 'publicip', 10, 249)}`;
 
   // Organization overrides — admin can set company name / domain / hq city explicitly
   const orgOverrides = {
@@ -183,6 +221,11 @@ function buildConfig({
         criticalSystems: tmpl.criticalSystems
       },
       employees: empRange,
+      // The drawn headcount and the sizing profile derived from it. Every
+      // consumer reads these instead of re-deriving its own view of how big
+      // this company is.
+      employee_count: employeeCount,
+      sizing,
       endpoint_count: endpointCountFinal,
       endpoint_range: endpointRangeFinal,
       stakeholder_count: stakRange.max,                   // upper-bound used by prompts; range used by validators
@@ -193,7 +236,13 @@ function buildConfig({
       scaffolding: scaffolding || null,
       est_hours: est_hours || null,
       public_ip: publicIp,
-      firewall_rules_range: firewall_rules_range || custom_config?.firewall_rules_range || { min: 8, max: 20 },
+      // Sized to the org when the caller doesn't specify. The generator UI's
+      // rule-count field never reached this function, so the effective value
+      // was always the hard cap of 25 — for a 10-person non-profit and a
+      // 400-staff district alike.
+      firewall_rules_range: firewall_rules_range
+        || custom_config?.firewall_rules_range
+        || { min: Math.max(5, Math.round(sizing.firewall_rule_target * 0.7)), max: sizing.firewall_rule_target },
       weakness_range: weakness_range || custom_config?.weakness_range || defaultWeakRange,
       difficulty_settings: {
         stakeholder_cooperation: cooperation || defaultCoop,
@@ -329,7 +378,13 @@ async function generateProfile(args) {
   if (!user_id) throw new Error('generateProfile: user_id required');
 
   const { config, seed } = buildConfig(rest);
-  const employeeCount = pickEmployeeCount(seed);
+  // buildConfig already drew this and sized the whole profile off it. Calling
+  // pickEmployeeCount() again here would be harmless now that it is
+  // deterministic, but reading the seed makes the single-source-of-truth
+  // explicit — the headcount the endpoints were sized from IS the headcount
+  // the branches are told about.
+  const employeeCount = seed.employee_count ?? pickEmployeeCount(seed, config.clientType);
+  const sizing = seed.sizing;
   const labelBase = `profile:${seed.run_id.slice(-6)}`;
 
   const reportStep = (step, percent, message) => {
@@ -378,8 +433,20 @@ async function generateProfile(args) {
   const orgV = validateOrg(orgPayload, { employeeCount });
   const itV  = validateIt(itPayload);
   const netV = validateNetwork(netPayload);
-  for (const w of [...orgV.warnings, ...itV.warnings, ...netV.warnings]) {
+
+  // Plausibility pass across the IT + network branches together. Runs after
+  // the structural validators so it operates on cleaned payloads, and before
+  // the threat branch so a trimmed server never becomes an attack-path target.
+  const sizeV = validateSizing(
+    { organization: orgV.payload?.organization, it_environment: itV.payload?.it_environment, network: netV.payload?.network },
+    { sizing, employeeCount }
+  );
+
+  for (const w of [...orgV.warnings, ...itV.warnings, ...netV.warnings, ...sizeV.warnings]) {
     console.warn(`⚠️  [ai/profile] ${w}`);
+  }
+  if (sizeV.review.length > 0) {
+    console.warn(`⚠️  [ai/profile] ${sizeV.review.length} plausibility issue(s) — profile marked needs_review`);
   }
 
   // Stage 2: D (threats) — depends on network output

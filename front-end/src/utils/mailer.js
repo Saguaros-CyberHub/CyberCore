@@ -863,8 +863,25 @@ async function ensureEmailOutbox() {
   }
 }
 
+/**
+ * Can this platform, right now, actually deliver to this address?
+ *
+ * The three conditions that make an enqueue() pointless, in one call: mail is
+ * off, there is no key to encrypt the body with (enqueue would accept the row and
+ * then suppress it), or the policy blocks the recipient — which is how synthetic
+ * @cohort.invalid addresses stay unmailed.
+ *
+ * Composes the existing predicates rather than restating them. The recipient
+ * rules are configurable (CLE_COHORT_EMAIL_DOMAIN, MAIL_ALLOWED_RECIPIENT_DOMAINS)
+ * and their reason strings are pinned by test/mailer-policy.test.js, so a second
+ * copy of that logic anywhere would drift.
+ */
+function canSendTo(address) {
+  return mailEnabled() && !!mailKey() && checkRecipient(address).ok;
+}
+
 module.exports = {
-  mailEnabled, mailKey, publicUrl, siteName,
+  mailEnabled, mailKey, publicUrl, siteName, canSendTo,
   transport, resetTransport,
   isInternalHost, tlsRejectUnauthorized,
   checkRecipient, allowedDomains, globalSuppression, resolveAddresses,

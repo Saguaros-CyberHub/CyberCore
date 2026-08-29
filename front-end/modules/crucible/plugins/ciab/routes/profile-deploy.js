@@ -7,8 +7,10 @@
  *   (b) profile_id from a previously uploaded JSON  → /api/profiles/upload
  *   (c) one-step generate + deploy                  → /api/profiles/generate-and-deploy
  *
- * Lane deployment uses the Proxmox API directly via lane-deploy.js;
- * profile/policy/scan generation happens elsewhere in CIAB.
+ * Lane deployment goes through ../utils/lane-provision.js, a thin wrapper over
+ * the shared spec deployer (src/utils/challenge-lane-deployer.js). This file
+ * owns intake, validation and bookkeeping only — it clones nothing. The VXLAN
+ * reservation lives in ../utils/lane-reservation.js.
  *
  * Default subnet_scheme = 'v2' (subnet-agnostic 10.x.x.x lanes) — matches
  * where CIAB servers live today. v3 is honored if the admin explicitly picks
@@ -25,7 +27,6 @@ const { authenticateToken, requireRole } = require('../../../../../src/middlewar
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const { claimsSql } = require('../../../../../src/utils/lane-claims');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
-const laneWan = require('../../../../../src/utils/lane-wan-allocator');
 const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
 const { buildDeployPreview } = require('../../../../../src/middleware/deployment-guards');
 const audit = require('../../../../../src/utils/audit');
@@ -34,29 +35,26 @@ const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
 const { getOrGenerateVulnApp } = require('../utils/vuln-app-generator');
 const { resolveImageFile } = require('../utils/vuln-app-builder');
 const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator');
-// The single place local accounts are minted, shared with the core admin
-// routes and the CLE roster import. provisionOrRotateAccount preserves this
-// path's create-or-rotate semantics (see the call sites below).
-const accountProvisioning = require('../../../../../src/utils/account-provisioning');
+// Student accounts for profile lanes. Extracted in Track A3 — the identical
+// loop existed at both call sites below and had already begun to drift. It
+// still mints through src/utils/account-provisioning, so the create-or-rotate
+// semantics this path depends on are unchanged; see profile-students.js.
+const { provisionLaneStudents, slugForGroup } = require('../utils/profile-students');
+const laneProvision = require('../utils/lane-provision');
+
 const { guacAPI } = require('../../../../../src/utils/guacamole');
 const {
-  deployProfileLanesBatch,
-  deployOneLaneFromSpec,
   teardownLane,
-  allocateVxlanIds,
   getOrCreateProfileChallenge,
   deleteProfileChallenge,
   findProfileChallenge,
-  resolveVnets,
-  ensureSdnZoneAndVnets,
-  getProgress,
+  getProfileChallengeById,
+  listProfileChallenges,
+  DEFAULT_ENGAGEMENT_TYPE,
+  sanitizeEngagementType,
   VXLAN_SEARCH_MIN,
   VXLAN_SEARCH_MAX
-} = require('../utils/lane-deploy');
-const {
-  resolveGatewayVmid,
-  forceDestroyVM
-} = require('../utils/lane-networking');
+} = require('../utils/lane-reservation');
 
 const adminOnly = requireRole('admin');
 
@@ -102,7 +100,7 @@ async function loadProfileForDeploy(profileId) {
 }
 
 // (createEphemeralChallenge removed — challenges are now per-profile, managed
-//  by getOrCreateProfileChallenge() in utils/lane-deploy.js)
+//  by getOrCreateProfileChallenge() in utils/lane-reservation.js)
 
 /**
  * Build the default asset_selection from a list of assets: tick role==='server'.
@@ -114,6 +112,35 @@ function defaultAssetSelection(assets) {
     os: a.os,
     included: String(a.role || '').toLowerCase() === 'server'
   }));
+}
+
+/**
+ * Merge a freshly synthesized spec onto a reservation, for the UPDATE that
+ * replaces crucible_challenge.spec wholesale.
+ *
+ * vxlan_block and zone are RESERVATION-owned, not synthesizer-owned:
+ * reserveLabNetwork writes both, and teardownLabNetwork reads spec.zone.abbrev to
+ * decide which Proxmox SDN zone to remove. profile-to-spec emits neither, so
+ * spreading rawSpec alone blanks the abbrev out on the first deploy of every
+ * reservation — after which teardownSdnForBlock's `if (zone)` guard skips zone
+ * deletion in silence and the zone can never be found again.
+ *
+ * src/routes/lab-templates.js:355-363 defends the same invariant on the admin
+ * edit path, by name: PROTECTED_SPEC_KEYS = ['vxlan_block','zone','cle','course_id'].
+ * This is that rule, on the deploy path.
+ *
+ * Pure and exported so ciab-reservation.test.js can assert the behaviour rather
+ * than grep the source for the word "zone" — the comment above would satisfy
+ * a source-text check while the code did the wrong thing.
+ */
+function adoptedSpec(rawSpec, reservation) {
+  const zone = (reservation && reservation.spec && reservation.spec.zone)
+    || (reservation && reservation.zone_abbrev ? { abbrev: reservation.zone_abbrev } : null);
+  return {
+    ...rawSpec,
+    vxlan_block: reservation ? reservation.vxlan_block : undefined,
+    ...(zone ? { zone } : {})
+  };
 }
 
 // ─── Core: runProfileDeploy — invoked by /deploy AND generate-and-deploy ──
@@ -130,6 +157,11 @@ function defaultAssetSelection(assets) {
  * @param {string} [opts.subnetScheme='v2']
  * @param {Array}  [opts.assetSelection]   if omitted → default-server-only
  * @param {object} [opts.vulnAppOpts]      { enabled, delivery_mode, use_dedicated_vm, llm_model }
+ * @param {string} [opts.engagementType]   which engagement against this client
+ *   these lanes are for. Reservations are keyed on (profile, engagement), so an
+ *   external and an internal engagement against one company get separate VXLAN
+ *   blocks instead of aliasing onto each other. Track B turns this into a row in
+ *   ciab_engagement; until then it is a free slug defaulting to 'default'.
  * @returns {Promise<{group_id, profile_id, lanes:[...], service_gaps, template_misses}>}
  */
 async function runProfileDeploy(opts) {
@@ -137,8 +169,10 @@ async function runProfileDeploy(opts) {
     profileId, userId, numLanes,
     maxStudents,                                           // ← NEW: total reservation size; defaults to numLanes
     groupName, attackBoxes = true, subnetScheme = 'v2',
-    assetSelection: providedSelection, vulnAppOpts = {}
+    assetSelection: providedSelection, vulnAppOpts = {},
+    engagementType
   } = opts;
+  const engagement = sanitizeEngagementType(engagementType);
 
   if (!profileId) throw Object.assign(new Error('profile_id required'), { statusCode: 400 });
   if (!Number.isFinite(numLanes) || numLanes < 1 || numLanes > 100) {
@@ -203,6 +237,7 @@ async function runProfileDeploy(opts) {
 
   const reservationPromise = getOrCreateProfileChallenge({
     profileId,
+    engagementType: engagement,
     requestedMax: effectiveMaxStudents,
     companyName: profile.company_name,
     spec: {},                            // synthesized spec filled in below
@@ -272,7 +307,7 @@ async function runProfileDeploy(opts) {
   }
 
   if (shouldAdoptFreshSpec) {
-    spec = { ...rawSpec, vxlan_block: reservation.vxlan_block };
+    spec = adoptedSpec(rawSpec, reservation);
     await cybercoreQuery(
       `UPDATE crucible_challenge SET spec = $1::jsonb WHERE challenge_id = $2`,
       [JSON.stringify(spec), reservation.challenge_id]
@@ -287,17 +322,11 @@ async function runProfileDeploy(opts) {
     );
   }
 
-  // 7. Allocate `numLanes` unused IDs from the reservation
-  const vxlanIds = await allocateVxlanIds(reservation.vxlan_block, numLanes);
-  if (vxlanIds.length < numLanes) {
-    const usedCount = reservation.max_students - vxlanIds.length;
-    throw Object.assign(
-      new Error(`Only ${vxlanIds.length}/${numLanes} VXLAN IDs free in profile's reservation ` +
-                `(${reservation.vxlan_block.start}-${reservation.vxlan_block.end}, ${usedCount}/${reservation.max_students} already in use). ` +
-                `Tear down some lanes or pick a smaller num_lanes.`),
-      { statusCode: 409 }
-    );
-  }
+  // NOTE: there is deliberately no VXLAN allocation here. deployChallengeLanes
+  // allocates from the challenge's own vxlan_block and releases what it does not
+  // use. Allocating here as well would hand the same ids out twice — the
+  // in-process reservation set is per-caller, so the deployer's allocator cannot
+  // see ours, and the second INSERT dies on ux_cybercore_lane_vxlan_active.
 
   // 8. Insert group row
   const finalGroupName = groupName || `${profile.company_name || 'profile'}-${new Date().toISOString().slice(0, 10)}`;
@@ -305,8 +334,8 @@ async function runProfileDeploy(opts) {
     `INSERT INTO ciab_profile_lane_groups
        (profile_id, group_name, created_by, num_lanes,
         asset_selection, service_gaps, template_misses, profile_snapshot, subnet_scheme,
-        attack_boxes, vuln_app_id, ephemeral_challenge_id, status)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11, $12, 'deploying')
+        attack_boxes, vuln_app_id, ephemeral_challenge_id, engagement_type, status)
+     VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11, $12, $13, 'deploying')
      RETURNING id`,
     [
       profileId, finalGroupName, userId, numLanes,
@@ -316,7 +345,11 @@ async function runProfileDeploy(opts) {
       JSON.stringify(assets),
       subnetScheme, attackBoxes,
       vulnApp ? vulnApp.id : null,
-      reservation.challenge_id    // group points at the profile's challenge for backward compat
+      // The group's pointer at its reservation. Add-lanes and retry resolve the
+      // reservation through THIS id rather than re-deriving a key — one profile
+      // can now own several, so re-deriving would be a guess.
+      reservation.challenge_id,
+      engagement
     ]
   );
   const groupId = groupInsert.rows[0].id;
@@ -324,165 +357,72 @@ async function runProfileDeploy(opts) {
   const challengeKey = reservation.challenge_key;
 
   // 8b. Auto-create student accounts (one per lane) + Guac users so each lane
-  // appears in its owner's "My Workspaces" page. Mirrors the pattern from
-  // /api/admin/deploy-group (src/routes/admin/groups.js:180-203). Pre-existing
-  // students with the same username get their password rotated via ON CONFLICT,
-  // so repeat deploys with the same group_name are safe — students keep their
-  // identity, instructors get fresh credentials to hand out.
-  const groupSlug = finalGroupName.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const credentials = [];
-  const students = [];
-  for (let i = 1; i <= numLanes; i++) {
-    const email = `${groupSlug}-student${i}@clinic.local`;
-
-    // Create-or-rotate, via the shared minting path (see
-    // src/utils/account-provisioning.js). Re-deploys of the same group rotate
-    // the password but keep the same user_id, so prior workspaces and Guacamole
-    // permissions stay associated — the same semantics the ON CONFLICT upsert
-    // this replaced provided.
-    const outcome = await accountProvisioning.provisionOrRotateAccount({
-      email,
-      username: email,
-      firstName: 'Student',
-      lastName: String(i),
-      organization: finalGroupName,
-      role: 'student',
-      emailVerified: true,
-      mustChangePassword: false,
-      // `userId` is the acting admin, passed in by the route (runProfileDeploy
-      // has no req of its own).
-      provenance: { by: userId || null, via: 'group_deploy', ref: String(groupId) },
-    });
-    const password = outcome.password;
-
-    const effectiveId = outcome.user.user_id;
-    students.push({ id: effectiveId, email, name: `Student ${i}`, index: i });
-    credentials.push({ email, password, role: 'student' });
-
-    // Best-effort Guac account — if Guac is down the deploy still completes
-    // and the admin can create it manually later.
-    try {
-      await guacAPI('POST', '/users', {
-        username: email,
-        password,
-        attributes: { disabled: null, timezone: 'America/Phoenix' }
-      });
-    } catch (_) {
-      // Guac may already have this user from a previous deploy; PUT to refresh password.
-      try {
-        await guacAPI('PUT', `/users/${encodeURIComponent(email)}`, {
-          username: email,
-          password,
-          attributes: { disabled: null, timezone: 'America/Phoenix' }
-        });
-      } catch (_) {}
-    }
-  }
-  console.log(`[CIAB ProfileDeploy] Group ${finalGroupName}: provisioned ${students.length} student account(s) (1 per lane)`);
-
-  // 9. Create cybercore_lane + ciab_profile_lane_jobs rows for each lane
-  const laneAllocations = [];
-  for (let i = 0; i < vxlanIds.length; i++) {
-    const vxlanId = vxlanIds[i];
-    const student = students[i];
-    // Naming: matches the existing AZCYBR lane convention so My Workspaces
-    // shows readable titles like `kali-cochise-student1-710265`. The trailing
-    // VMID is the Kali VM ID (attack box offset + vxlan), making each lane
-    // uniquely identifiable at a glance.
-    const ATTACK_BOX_VMID_OFFSET = 700000;
-    const kaliVmid = ATTACK_BOX_VMID_OFFSET + vxlanId;
-    const laneName = `kali-${groupSlug}-student${student.index}-${kaliVmid}`;
-    // cybercore_lane.user_id MUST be the student's ID so the lane appears in
-    // that student's My Workspaces (the page filters by user_id). Previously
-    // we set this to the admin's userId, which is why Cochise lanes never
-    // appeared in any student's workspaces.
-    // Gateway WAN transit address: allocated and ARP-verified, never derived.
-    // CIAB draws from the same shared VLAN as every other lane, so it must go
-    // through the same allocator or it will hand out addresses another module's
-    // lanes are already answering for.
-    const laneWanIp = (await laneWan.allocateLaneWanIps(1))[0].address;
-
-    const laneInsert = await cybercoreQuery(
-      `INSERT INTO cybercore_lane
-         (user_id, vxlan_id, name, status, config, module_key, challenge_id, gateway_wan_ip, created_at, updated_at)
-       VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, $6::inet, NOW(), NOW())
-       RETURNING lane_id`,
-      [
-        student.id, vxlanId, laneName,
-        JSON.stringify({
-          challenge_id: challengeId,
-          challenge_key: challengeKey,
-          profile_lane_group: true,
-          group_id: groupId,
-          student_email: student.email,
-          student_index: student.index,
-          gateway_wan_ip: laneWanIp
-        }),
-        challengeId,
-        laneWanIp
-      ]
-    );
-    const laneId = laneInsert.rows[0].lane_id;
-    await laneWan.recordLaneWanLease({ address: laneWanIp, laneId, vxlanId });
-
-    const jobInsert = await query(
-      `INSERT INTO ciab_profile_lane_jobs
-         (group_id, lane_id, vxlan_id, lane_index, status)
-       VALUES ($1, $2, $3, $4, 'pending')
-       RETURNING id`,
-      [groupId, laneId, vxlanId, i + 1]
-    );
-    // studentUsername drives Proxmox VM names (`{vm}-{username}`, `kali-{username}`)
-    // so profile-deploy lanes read the same as group-deploy lanes in the cluster.
-    laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId, studentUsername: student.email.split('@')[0] });
-  }
-
-  // The rows exist, so the allocator's committed-rows query sees these ids now.
-  // Holding the in-process reservation past this point only shrinks the pool.
-  laneDeployer.releaseVxlanReservations(vxlanIds);
-
-  // Extract the company's public domain from the profile JSON so the
-  // orchestrator can inject it into Kali's /etc/hosts pointing at web-01.
-  const profileDomain = profile.json_data?.student_view?.raw?.threats?.organization?.domain_public
-    || profile.json_data?.student_view?.quick?.domain_public
-    || null;
-
-  // 10. Kick off background deploy (don't await)
-  setImmediate(() => {
-    deployProfileLanesBatch({
-      groupId,
-      groupName: finalGroupName,
-      spec,
-      laneAllocations,
-      subnetScheme,
-      module: 'ciab',
-      attackBoxes,
-      vulnAppInstall: spec.vuln_app_install,
-      domain: profileDomain,
-      challengeKey
-    }).catch(err => {
-      console.error(`[CIAB ProfileDeploy] Batch ${groupId} crashed:`, err);
-      query(`UPDATE ciab_profile_lane_groups SET status='error', updated_at=NOW() WHERE id=$1`, [groupId])
-        .catch(() => {});
-    });
+  // appears in its owner's "My Workspaces" page: that page filters on
+  // cybercore_lane.user_id, so a lane owned by the deploying admin shows up in
+  // nobody's workspace list.
+  //
+  // Shared with the add-lanes route below — see utils/profile-students.js for
+  // why this is create-or-rotate rather than an insert, and why the slug has to
+  // have exactly one owner.
+  const { groupSlug, students, credentials } = await provisionLaneStudents({
+    groupName: finalGroupName,
+    groupId,
+    indices: Array.from({ length: numLanes }, (_, i) => i + 1),
+    // `userId` is the acting admin, passed in by the route — runProfileDeploy
+    // has no req of its own.
+    actingUserId: userId,
   });
 
-  return {
-    group_id: groupId,
-    profile_id: profileId,
-    num_lanes: numLanes,
-    subnet_scheme: subnetScheme,
-    lanes: laneAllocations,
-    service_gaps,
-    template_misses,
-    vuln_app_id: vulnApp ? vulnApp.id : null,
-    // One-time display in the admin deploy UI — the instructor hands these to
-    // students. Passwords are NOT stored in plaintext anywhere (hashes go to
-    // cybercore_user); this is the only point in the lifetime the cleartext
-    // password is visible. The admin UI surfaces a "save these now" warning.
-    credentials,
-    students: students.map(s => ({ email: s.email, name: s.name, index: s.index }))
-  };
+  // ── Hand over to the shared deployer ─────────────────────────────────────
+  // VXLAN allocation, gateway WAN addresses, cybercore_lane rows, the clone
+  // sequence, Guacamole, DHCP reservations — deployChallengeLanes does all of
+  // it. CIAB doing any of it a second time is what W1-W7 were, so this function
+  // stops as soon as the students exist.
+  {
+    const spawnedAt = new Date().toISOString();
+    setImmediate(() => {
+      laneProvision.provisionProfileLanes({
+        groupId,
+        groupName: finalGroupName,
+        groupSlug,
+        challenge: {
+          challenge_id: reservation.challenge_id,
+          challenge_key: reservation.challenge_key,
+          name: finalGroupName,
+          spec,
+          subnet_scheme: subnetScheme,
+        },
+        students,
+        attackBoxes,
+        vulnAppInstall: spec.vuln_app_install,
+      }).catch(err => {
+        console.error(`[CIAB ProfileDeploy] V2 batch ${groupId} crashed:`, err);
+        query(`UPDATE ciab_profile_lane_groups SET status='error', updated_at=NOW() WHERE id=$1`, [groupId])
+          .catch(() => {});
+      });
+    });
+
+    return {
+      group_id: groupId,
+      profile_id: profileId,
+      num_lanes: numLanes,
+      subnet_scheme: subnetScheme,
+      deploy_path: 'v2',
+      // Deliberately empty: under V2 the lane rows do not exist yet — the shared
+      // deployer creates them as it goes. The admin UI follows the deploy through
+      // GET /groups/:groupId/progress, which reads the shared registry, and the
+      // per-lane rows appear in ciab_profile_lane_jobs as each lane lands.
+      lanes: [],
+      progress_id: laneProvision.progressIdForGroup(groupId),
+      started_at: spawnedAt,
+      service_gaps,
+      template_misses,
+      vuln_app_id: vulnApp ? vulnApp.id : null,
+      credentials,
+      students: students.map(s => ({ email: s.email, name: s.name, index: s.index })),
+    };
+  }
+
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -590,7 +530,8 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
       attack_boxes,
       subnet_scheme,
       asset_selection,
-      vuln_app
+      vuln_app,
+      engagement_type
     } = req.body;
 
     const result = await runProfileDeploy({
@@ -602,7 +543,8 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
       attackBoxes: attack_boxes !== false,
       subnetScheme: subnet_scheme || 'v2',
       assetSelection: asset_selection,
-      vulnAppOpts: vuln_app || {}
+      vulnAppOpts: vuln_app || {},
+      engagementType: engagement_type
     });
     audit.log({
       req,
@@ -636,12 +578,31 @@ router.get('/profiles/:profileId/reservation', authenticateToken, adminOnly, asy
     if (pr.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
     const p = pr.rows[0];
 
-    const ch = await findProfileChallenge(p.id);
+    // One profile can hold a reservation per engagement. Absent a query param
+    // this reports the default engagement's, which is also the one a
+    // pre-engagement reservation is adopted into.
+    const engagement = sanitizeEngagementType(req.query.engagement_type);
+    const ch = await findProfileChallenge(p.id, engagement);
+    // Split on the exact prefix, not on '-': an engagement slug may itself
+    // contain hyphens (sanitizeEngagementType permits them), so indexing into
+    // challenge_key.split('-') would truncate 'external-blackbox' to 'external'.
+    const keyPrefix = `ciab-profile-${String(p.id).slice(0, 8)}-`;
+    const allReservations = (await listProfileChallenges(p.id)).map(row => ({
+      challenge_id: row.challenge_id,
+      challenge_key: row.challenge_key,
+      // null marks a not-yet-adopted pre-engagement row; it belongs to the
+      // default engagement and is renamed on its next deploy.
+      engagement_type: row.challenge_key.startsWith(keyPrefix)
+        ? row.challenge_key.slice(keyPrefix.length)
+        : null,
+    }));
     if (!ch) {
       return res.json({
         reserved: false,
         profile_id: p.id,
         company_name: p.company_name,
+        engagement_type: engagement,
+        engagements: allReservations,
         search_window: { min: VXLAN_SEARCH_MIN, max: VXLAN_SEARCH_MAX }
       });
     }
@@ -660,6 +621,14 @@ router.get('/profiles/:profileId/reservation', authenticateToken, adminOnly, asy
       company_name: p.company_name,
       challenge_id: ch.challenge_id,
       challenge_key: ch.challenge_key,
+      engagement_type: engagement,
+      // Every reservation this profile holds, not just the one asked about. A
+      // profile can now own one per engagement, and nothing else on the CIAB
+      // surface can see them — without this an engagement other than the default
+      // is invisible, and its VXLAN block and pre-created VNets look like a leak.
+      // Releasing one individually is still only possible by deleting the profile;
+      // a per-engagement teardown belongs with the Environments tab.
+      engagements: allReservations,
       max_students: ch.max_students,
       vxlan_range_start: ch.vxlan_block.start,
       vxlan_range_end: ch.vxlan_block.end,
@@ -683,172 +652,80 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       return res.status(400).json({ error: 'count must be 1..50' });
     }
 
-    // Load the group + its profile + the ephemeral challenge's spec (so we
-    // can re-run the same deploy pipeline with the same VM specs).
     const grpRes = await query(`SELECT * FROM ciab_profile_lane_groups WHERE id=$1`, [groupId]);
     if (grpRes.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
     const group = grpRes.rows[0];
     if (group.status === 'deleted') return res.status(409).json({ error: 'Group is deleted' });
 
-    // Look up the profile's persistent challenge (the reservation)
-    const profRes = await query(`SELECT id, company_name FROM profiles WHERE id = $1`, [group.profile_id]);
-    if (profRes.rows.length === 0) return res.status(409).json({ error: 'Source profile missing' });
-    const prof = profRes.rows[0];
-
-    const reservation = await findProfileChallenge(prof.id);
+    // Through the group's own pointer, NOT by re-deriving a key from the
+    // profile: reservations are keyed on (profile, engagement) now, and this
+    // group's lanes belong to exactly one of them.
+    const reservation = await getProfileChallengeById(group.ephemeral_challenge_id);
     if (!reservation) {
-      return res.status(409).json({ error: 'Profile has no reservation — tear down everything and re-deploy' });
-    }
-    const spec = reservation.spec;
-    const vxlanBlock = reservation.vxlan_block;
-
-    // Allocate `count` unused IDs from the profile's reservation
-    const vxlanIds = await allocateVxlanIds(vxlanBlock, count);
-    if (vxlanIds.length < count) {
-      return res.status(409).json({
-        error: `Only ${vxlanIds.length}/${count} VXLAN IDs free in profile's reservation ` +
-               `(${reservation.max_students} total, ${reservation.max_students - vxlanIds.length} already in use). ` +
-               `Tear down some lanes first or request fewer.`
-      });
+      return res.status(409).json({ error: 'Group has no reservation — tear down everything and re-deploy' });
     }
 
-    // Create cybercore_lane + ciab_profile_lane_jobs rows for the new lanes.
-    // Continue the lane_index sequence from the existing max.
-    const idxRes = await query(`SELECT COALESCE(MAX(lane_index), 0) AS m FROM ciab_profile_lane_jobs WHERE group_id=$1`, [groupId]);
-    const startIndex = parseInt(idxRes.rows[0].m, 10);
-
-    const baseGroupName = group.group_name;
-    const challengeKey = `ciab-profile-${group.profile_id.slice(0,8)}`;
-    // Provision one student per added lane — same pattern as the initial
-    // deploy in runProfileDeploy, continuing the studentN numbering from the
-    // lane_index sequence. Without this, added lanes belonged to the admin
-    // and never showed up in any student's My Workspaces.
-    const groupSlug = baseGroupName.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const credentials = [];
-    const laneAllocations = [];
-    for (let i = 0; i < vxlanIds.length; i++) {
-      const vxlanId = vxlanIds[i];
-      const laneIndex = startIndex + i + 1;
-
-      const email = `${groupSlug}-student${laneIndex}@clinic.local`;
-
-      // Create-or-rotate through the shared minting path, same as the initial
-      // deploy above: adding lanes to an existing group must keep each
-      // student's user_id (their prior workspaces hang off it) while handing
-      // the admin a credential sheet that actually works.
-      const outcome = await accountProvisioning.provisionOrRotateAccount({
-        email,
-        username: email,
-        firstName: 'Student',
-        lastName: String(laneIndex),
-        organization: baseGroupName,
-        role: 'student',
-        emailVerified: true,
-        mustChangePassword: false,
-        provenance: { by: req.user?.userId || null, via: 'group_deploy', ref: String(groupId) },
-      });
-      const password = outcome.password;
-
-      const effectiveId = outcome.user.user_id;
-      credentials.push({ email, password, role: 'student' });
-      try {
-        await guacAPI('POST', '/users', { username: email, password, attributes: { disabled: null, timezone: 'America/Phoenix' } });
-      } catch (_) {
-        try {
-          await guacAPI('PUT', `/users/${encodeURIComponent(email)}`, { username: email, password, attributes: { disabled: null, timezone: 'America/Phoenix' } });
-        } catch (_) {}
-      }
-
-      const kaliVmid = 700000 + vxlanId;
-      const laneName = `kali-${groupSlug}-student${laneIndex}-${kaliVmid}`;
-      // See note in runProfileDeploy — lane_group_id FKs to crucible_lane_group,
-      // which CIAB does not populate. Group linkage lives in config.group_id.
-      // Same shared VLAN, same allocator — see the note on the first INSERT.
-      const laneWanIp = (await laneWan.allocateLaneWanIps(1))[0].address;
-      const laneInsert = await cybercoreQuery(
-        `INSERT INTO cybercore_lane
-           (user_id, vxlan_id, name, status, config, module_key, challenge_id, gateway_wan_ip, created_at, updated_at)
-         VALUES ($1, $2, $3, 'deploying', $4::jsonb, 'crucible', $5, $6::inet, NOW(), NOW())
-         RETURNING lane_id`,
-        [
-          effectiveId, vxlanId, laneName,
-          JSON.stringify({
-            challenge_id: reservation.challenge_id, challenge_key: challengeKey,
-            profile_lane_group: true, group_id: groupId,
-            student_email: email, student_index: laneIndex,
-            gateway_wan_ip: laneWanIp
-          }),
-          reservation.challenge_id,
-          laneWanIp
-        ]
-      );
-      const laneId = laneInsert.rows[0].lane_id;
-      await laneWan.recordLaneWanLease({ address: laneWanIp, laneId, vxlanId });
-      const jobInsert = await query(
-        `INSERT INTO ciab_profile_lane_jobs (group_id, lane_id, vxlan_id, lane_index, status)
-         VALUES ($1, $2, $3, $4, 'pending') RETURNING id`,
-        [groupId, laneId, vxlanId, laneIndex]
-      );
-      laneAllocations.push({ laneId, jobId: jobInsert.rows[0].id, vxlanId, studentUsername: email.split('@')[0] });
-    }
-
-    // See the note at the other allocation site: the rows are committed, so the
-    // allocator can see these ids without the in-process reservation.
-    laneDeployer.releaseVxlanReservations(vxlanIds);
-
-    // Bump group num_lanes + flip status back to deploying
-    await query(
-      `UPDATE ciab_profile_lane_groups SET num_lanes = num_lanes + $2, status='deploying', updated_at=NOW() WHERE id=$1`,
-      [groupId, vxlanIds.length]
+    // Continue the lane_index sequence. The index is the student's identity
+    // within the group (`<slug>-studentN@clinic.local`), so restarting it would
+    // hand a new lane to an existing student and rotate their password.
+    const idxRes = await query(
+      `SELECT COALESCE(MAX(lane_index), 0) AS m FROM ciab_profile_lane_jobs WHERE group_id=$1`,
+      [groupId]
     );
+    const startIndex = parseInt(idxRes.rows[0].m, 10);
+    const indices = Array.from({ length: count }, (_, i) => startIndex + i + 1);
+
+    const { groupSlug, students, credentials } = await provisionLaneStudents({
+      groupName: group.group_name,
+      groupId,
+      indices,
+      actingUserId: req.user.userId,
+    });
 
     audit.log({
       req,
       action: 'profile_lane.lanes_added',
       source: 'ciab',
-      target: { type: 'group', id: groupId, label: group.group_name },
-      metadata: {
-        added: laneAllocations.length,
-        vxlan_ids: laneAllocations.map(a => a.vxlanId),
-        total_lanes_now: parseInt(group.num_lanes, 10) + laneAllocations.length,
-      },
+      target: { type: 'group', id: groupId },
+      metadata: { count, first_index: indices[0], last_index: indices[indices.length - 1] },
     });
 
     res.status(202).json({
       success: true,
       group_id: groupId,
-      added: laneAllocations.length,
-      new_lanes: laneAllocations,
-      total_lanes_now: parseInt(group.num_lanes, 10) + laneAllocations.length,
-      reservation: { max_students: reservation.max_students, start: vxlanBlock.start, end: vxlanBlock.end },
-      // One-time display, same as the initial deploy — cleartext passwords
-      // exist only in this response.
-      credentials
+      added: count,
+      lane_indices: indices,
+      progress_id: laneProvision.progressIdForGroup(groupId),
+      // One-time display, exactly as the first deploy does it: the cleartext
+      // password exists nowhere else after this response.
+      credentials,
+      students: students.map(s => ({ email: s.email, name: s.name, index: s.index })),
     });
 
-    // Pull domain from the group's frozen snapshot for the /etc/hosts injection
-    const snapshotAssets = Array.isArray(group.profile_snapshot) ? group.profile_snapshot : [];
-    const addLanesDomain = snapshotAssets.find(a => a.domain_public)?.domain_public || null;
-
-    // Background: run the same deploy pipeline as the initial batch.
+    // Background. Same wrapper as the first deploy — add-lanes was a second,
+    // drifting copy of that pipeline before A7, and the group's VXLAN block,
+    // spec and reservation are identical either way.
     setImmediate(() => {
-      deployProfileLanesBatch({
+      laneProvision.provisionProfileLanes({
         groupId,
         groupName: group.group_name,
-        spec,
-        laneAllocations,
-        subnetScheme: group.subnet_scheme,
-        module: 'crucible',
+        groupSlug,
+        challenge: {
+          challenge_id: reservation.challenge_id,
+          challenge_key: reservation.challenge_key,
+          name: group.group_name,
+          spec: reservation.spec,
+          subnet_scheme: group.subnet_scheme,
+        },
+        students,
         attackBoxes: group.attack_boxes,
-        vulnAppInstall: spec.vuln_app_install || null,
-        domain: addLanesDomain,
-        challengeKey: reservation.challenge_key
+        vulnAppInstall: (reservation.spec && reservation.spec.vuln_app_install) || null,
       }).catch(err => {
-        console.error(`[CIAB AddLanes] group ${groupId} add-lanes batch crashed: ${err.message}`);
+        console.error(`[CIAB AddLanes] group ${groupId} add-lanes crashed: ${err.message}`);
       });
     });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message });
+    res.status(err.status || err.statusCode || 500).json({ error: err.message });
   }
 });
 
@@ -898,8 +775,11 @@ router.get('/groups/:groupId', authenticateToken, adminOnly, async (req, res) =>
 
 // GET /api/profile-deploy/groups/:groupId/progress — UI polling endpoint
 router.get('/groups/:groupId/progress', authenticateToken, adminOnly, async (req, res) => {
-  const live = getProgress(req.params.groupId);
-  if (live) return res.json(live);
+  // The SHARED progress registry — the one with a heartbeat and staleness
+  // fields, and the one that doubles as this app's only mutex. CIAB's private
+  // registry had neither and was deleted with the fourth copy in A7.
+  const shared = laneProvision.readGroupProgress(req.params.groupId);
+  if (shared) return res.json({ group_id: req.params.groupId, ...shared });
 
   // No in-process progress (server restart or already-finalized) — fall back to DB
   try {
@@ -943,96 +823,68 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
     if (jobRes.rows.length === 0) return res.status(404).json({ error: 'Lane job not found' });
     const job = jobRes.rows[0];
 
-    // Re-fetch ephemeral challenge spec + key (key needed for SDN zone naming)
-    const challengeRes = await cybercoreQuery(
-      `SELECT spec, challenge_key FROM crucible_challenge WHERE challenge_id=$1`,
-      [group.ephemeral_challenge_id]
+    const reservation = await getProfileChallengeById(group.ephemeral_challenge_id);
+    if (!reservation) {
+      return res.status(409).json({ error: 'Reservation missing — cannot retry' });
+    }
+
+    // The student who owns the failed lane, read from the lane row rather than
+    // re-derived from the group slug. Re-deploying a group rotates the student's
+    // password but keeps the user id, so the lane is the only record of WHICH
+    // account this particular lane belongs to.
+    const ownerRes = await cybercoreQuery(
+      `SELECT l.user_id, u.email
+         FROM cybercore_lane l
+         LEFT JOIN cybercore_user u ON u.user_id = l.user_id
+        WHERE l.lane_id = $1`,
+      [laneId]
     );
-    if (challengeRes.rows.length === 0) {
-      return res.status(409).json({ error: 'Ephemeral challenge missing — cannot retry' });
+    const owner = ownerRes.rows[0];
+    if (!owner || !owner.user_id || !owner.email) {
+      return res.status(409).json({
+        error: 'That lane has no owning student account, so a retry would deploy it to nobody.'
+      });
     }
-    const spec = typeof challengeRes.rows[0].spec === 'string'
-      ? JSON.parse(challengeRes.rows[0].spec)
-      : challengeRes.rows[0].spec;
-    const challengeKey = challengeRes.rows[0].challenge_key;
-
-    // Destroy any partial VMs from the failed attempt
-    if (Array.isArray(job.vm_ids) && job.vm_ids.length > 0) {
-      for (const vmid of job.vm_ids) {
-        const type = (vmid >= 100000 && vmid < 200000) ? 'lxc' : 'qemu';
-        await forceDestroyVM(vmid, type, job.target_node).catch(() => {});
-      }
-    }
-
-    // Make sure SDN zone+VNets exist (idempotent) — covers the case where the
-    // initial batch never got past provisioning. Then look up the VNet objects.
-    await ensureSdnZoneAndVnets({
-      vxlanIds: [job.vxlan_id],
-      subnetScheme: group.subnet_scheme,
-      challengeKey,
-      logTag: `CIAB Retry ${group.group_name}`
-    });
-    const { vnet, vnetInt } = await resolveVnets(job.vxlan_id, group.subnet_scheme);
-    const gatewayVmId = 100000 + job.vxlan_id;
-
-    // Reset job + lane status, then run a single-lane deploy
-    await query(`UPDATE ciab_profile_lane_jobs SET status='pending', error_msg=NULL, started_at=NULL, finished_at=NULL WHERE id=$1`, [job.id]);
-    await cybercoreQuery(`UPDATE cybercore_lane SET status='deploying', updated_at=NOW() WHERE lane_id=$1`, [laneId]);
 
     audit.log({
       req,
       action: 'profile_lane.retried',
       source: 'ciab',
       target: { type: 'lane', id: laneId },
-      metadata: { group_id: req.params.groupId, job_id: job.id },
+      metadata: { group_id: groupId, job_id: job.id },
     });
     res.status(202).json({ success: true, message: 'Retry started', lane_id: laneId, job_id: job.id });
 
-    // Re-extract the company domain from the group's frozen profile snapshot
-    // so the retried lane gets the same Kali /etc/hosts injection.
-    const snapshotAssets = Array.isArray(group.profile_snapshot) ? group.profile_snapshot : [];
-    const retryDomain = snapshotAssets.find(a => a.domain_public)?.domain_public
-      || group.profile_snapshot?.domain_public
-      || null;
-
-    // Recover the lane's student username so retried VMs keep the
-    // `{vm}-{student-username}` naming from the original deploy.
-    let retryStudentUsername = null;
-    try {
-      const laneRow = await cybercoreQuery(`SELECT config FROM cybercore_lane WHERE lane_id=$1`, [laneId]);
-      const laneCfg = typeof laneRow.rows[0]?.config === 'string'
-        ? JSON.parse(laneRow.rows[0].config || '{}') : (laneRow.rows[0]?.config || {});
-      if (laneCfg.student_email) retryStudentUsername = String(laneCfg.student_email).split('@')[0];
-    } catch (_) {}
-
-    // Background: re-run that single lane
-    const { createCloneSemaphore } = require('../../../../../src/utils/batch-deployer');
+    // Background. The lane is destroyed and rebuilt, so it comes back under a
+    // NEW lane_id — the job mirror re-keys on (group_id, lane_index).
     setImmediate(() => {
-      deployOneLaneFromSpec({
-        laneId,
-        jobId: job.id,
-        spec,
-        vxlanId: job.vxlan_id,
-        vnet, vnetInt,
-        gatewayVmId,
-        targetNode: job.target_node || 'cyberhub-node-5',
-        templateNode: spec.template_node || 'cyberhub-node-5',
+      laneProvision.retryProfileLane({
         groupId,
         groupName: group.group_name,
-        vulnAppInstall: spec.vuln_app_install || null,
+        groupSlug: slugForGroup(group.group_name),
+        challenge: {
+          challenge_id: reservation.challenge_id,
+          challenge_key: reservation.challenge_key,
+          name: group.group_name,
+          spec: reservation.spec,
+          subnet_scheme: group.subnet_scheme,
+        },
+        laneId,
+        user: { id: owner.user_id, email: owner.email },
+        laneIndex: job.lane_index,
         attackBoxes: group.attack_boxes,
-        subnetScheme: group.subnet_scheme,
-        module: 'ciab',
-        domain: retryDomain,
-        cloneSem: createCloneSemaphore(),
-        progress: null,
-        studentUsername: retryStudentUsername
+        vulnAppInstall: (reservation.spec && reservation.spec.vuln_app_install) || null,
+        // Machines whose lane-config write never landed are recorded nowhere
+        // else. They go through teardownLanes' contested and ownership checks.
+        extraVmIds: Array.isArray(job.vm_ids) ? job.vm_ids : [],
       }).catch(err => {
         console.error(`[CIAB ProfileDeploy] Retry of lane ${laneId} failed: ${err.message}`);
+        query(`UPDATE ciab_profile_lane_jobs SET status='error', error_msg=$2 WHERE id=$1`,
+              [job.id, err.message]).catch(() => {});
       });
     });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message });
+    res.status(err.status || err.statusCode || 500).json({ error: err.message });
   }
 });
 
@@ -1045,6 +897,13 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     );
     if (groupRes.rows.length === 0) return res.status(404).json({ error: 'Group not found' });
     const group = groupRes.rows[0];
+
+    // Refuse to tear down a group that is still deploying. The first thing a
+    // teardown does is snapshot the lane rows, and a deploy in flight is still
+    // creating them — so the lanes that appear after the snapshot are destroyed
+    // by nothing and belong to no one. 409 rather than queueing: there is no job
+    // queue, and the admin can simply wait.
+    laneProvision.assertNoConflictingProfileOperation({ groupId: req.params.groupId });
 
     const jobsRes = await query(
       `SELECT lane_id, vxlan_id, vm_ids FROM ciab_profile_lane_jobs WHERE group_id=$1`,
@@ -1156,7 +1015,7 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     }
 
     // Guacamole Kali console connections are named "<group> - lane<vxlan> - Kali"
-    // (see lane-deploy.js). Delete every connection carrying this group's prefix.
+    // (see lane-provision.js). Delete every connection carrying this group's prefix.
     try {
       const conns = await guacAPI('GET', '/connections');
       const prefix = `${group.group_name} - lane`;
@@ -1175,7 +1034,7 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
     // so other groups from the same profile may still reference it. The
     // challenge is only deleted when the profile itself is deleted — that
     // path lives in profiles.js's DELETE /api/profiles/:id handler, which
-    // calls deleteProfileChallenge() from utils/lane-deploy.js.
+    // calls deleteProfileChallenge() from utils/lane-reservation.js.
 
     // 'deleted' only when the cluster is actually clear. Tombstoning a group whose
     // machines are still running hides the survivors behind a row that reads as
@@ -1208,11 +1067,15 @@ router.delete('/groups/:groupId', authenticateToken, adminOnly, async (req, res)
       errors: errors.length ? errors : undefined
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // assertNoConflictingProfileOperation throws a 409. Flattening it to 500
+    // would tell the admin the teardown broke, when in fact it was correctly
+    // refused and retrying in a minute is the answer.
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
 module.exports = router;
 module.exports.runProfileDeploy = runProfileDeploy;
+module.exports.adoptedSpec = adoptedSpec;
 module.exports.loadProfileForDeploy = loadProfileForDeploy;
 module.exports.defaultAssetSelection = defaultAssetSelection;

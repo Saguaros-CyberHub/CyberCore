@@ -14,9 +14,22 @@ const { resolveCourseStaffTargets } = require('../utils/students');
 const guacCreds = require('../../../../../src/utils/guac-credentials');
 const prov = require('../../../../../src/utils/account-provisioning');
 const activation = require('../../../../../src/utils/activation');
+const mailer = require('../../../../../src/utils/mailer');
+const { canSendTo } = mailer;
 const audit = require('../../../../../src/utils/audit');
 
 const instructorOnly = requireRole('instructor', 'admin');
+
+/**
+ * The state machine lives in src/utils/activation.js (deriveInviteStatus) so the
+ * roster and its tests share one definition. The reason it exists:
+ * pendingActivationFor only reports LIVE tokens, so an invitation that timed out
+ * stopped setting activation_pending and became indistinguishable from a student
+ * who had been signing in for weeks. The roster gated both the "invited" badge
+ * and the Resend button on that one boolean, so exactly the students who needed a
+ * new link were the ones an instructor could neither see nor help — which is what
+ * drove them to ask an administrator to re-send by hand.
+ */
 
 /**
  * GET / — List students in a course
@@ -79,13 +92,15 @@ router.get('/', instructorOnly, async (req, res) => {
     let userMap = {};
     const laneCounts = {}; // user_id → count
     let pendingActivation = {};
+    let inviteStates = {};
     if (userIds.length > 0) {
       // role/auth_provider/mfa/provenance are selected so the per-row
       // credential controls can be decided SERVER-SIDE. The UI must never infer
       // them, or it would offer buttons the API refuses.
       const usersResult = await cybercoreQuery(`
         SELECT user_id, email, username, first_name, last_name, role,
-               auth_provider, mfa_enabled, provisioned_via, provisioned_ref, activated_at
+               auth_provider, mfa_enabled, provisioned_via, provisioned_ref, activated_at,
+               last_auth_at
         FROM cybercore_user
         WHERE user_id = ANY($1)
       `, [userIds]);
@@ -94,8 +109,12 @@ router.get('/', instructorOnly, async (req, res) => {
       });
 
       // "Invited but hasn't set a password yet" — otherwise an instructor has
-      // no way to tell that apart from "invitation never arrived".
+      // no way to tell that apart from "invitation never arrived". Keep the
+      // EXPIRY, not just a boolean: an instructor needs to see when a live invite
+      // lapses, and inviteState() below needs to tell "still waiting" apart from
+      // "the window closed" — see the comment there.
       pendingActivation = await activation.pendingActivationFor(userIds).catch(() => ({}));
+      inviteStates = await activation.invitationStateFor(userIds).catch(() => ({}));
 
       const lc = await cybercoreQuery(`
         SELECT user_id, COUNT(*)::int AS vm_count
@@ -109,6 +128,18 @@ router.get('/', instructorOnly, async (req, res) => {
     // Step 3: Merge user data with enrollments
     const students = enrollmentsResult.rows.map(e => {
       const u = userMap[e.user_id];
+      const canRegen = u ? prov.canManageAccount(u, req.user, courseId) : false;
+      const invite = inviteStates[e.user_id] || null;
+      const status = activation.deriveInviteStatus({
+        activatedAt: u?.activated_at,
+        lastAuthAt: u?.last_auth_at,
+        invite,
+      });
+      // Can the resend endpoint actually accept this row? Mirrors that route's
+      // own preconditions, so the button is never offered where the API 409s.
+      // Deliverability is part of it: with mail off, or for a synthetic cohort
+      // address, there is no invitation to send.
+      const emailable = u ? canSendTo(u.email) : false;
       return {
         user_id: e.user_id,
         email: u?.email || 'unknown',
@@ -124,9 +155,16 @@ router.get('/', instructorOnly, async (req, res) => {
         // computed here rather than in the browser, and can_regenerate is the
         // exact same predicate the credential routes enforce.
         elevated: u ? prov.isElevatedAccount(u) : false,
-        can_regenerate: u ? prov.canManageAccount(u, req.user, courseId) : false,
+        can_regenerate: canRegen,
         activation_pending: !!pendingActivation[e.user_id],
         activated: !!u?.activated_at,
+        // NULL for a student who has never signed in. The UI renders this
+        // timestamp directly and never infers it from invite_state.
+        last_auth_at: u?.last_auth_at || null,
+        invite_state: status,
+        invite_expires_at: invite?.liveExpiresAt || null,
+        invite_expired_at: invite?.expiredAt || null,
+        can_resend: !!(canRegen && status !== 'active' && emailable),
       };
     });
 
@@ -154,12 +192,24 @@ router.get('/', instructorOnly, async (req, res) => {
         can_regenerate: false,
         activation_pending: false,
         activated: true,
+        // Staff are 'active' by the same fiat as `activated: true` above — these
+        // rows are appended for the deploy modals, not enrolled, so there is no
+        // invitation behind them to be pending or lapsed.
+        last_auth_at: u?.last_auth_at || null,
+        invite_state: 'staff',
+        invite_expires_at: null,
+        invite_expired_at: null,
+        can_resend: false,
         is_self: staffRow.is_self,
         is_course_instructor: staffRow.is_course_instructor,
       });
     }
 
-    res.json({ students });
+    // With mail off, every resend button correctly disappears — so say why once,
+    // above the table, rather than leaving an instructor to conclude the feature
+    // broke. The UI has no other way to tell "nobody needs an invite" apart from
+    // "invitations cannot be sent at all".
+    res.json({ students, email_enabled: mailer.mailEnabled() && !!mailer.mailKey() });
   } catch (error) {
     console.error('[CLE] Get students error:', error.message);
     res.status(500).json({ error: error.message });

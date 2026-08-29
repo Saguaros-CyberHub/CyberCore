@@ -272,6 +272,26 @@ const initialPasswordLimiter = rateLimit({
 });
 app.use('/api/auth/password/initial', initialPasswordLimiter);
 
+// Asking for a link is unauthenticated and sends mail, which makes it the one
+// endpoint an outsider can aim at a stranger's inbox. Keyed on the email first,
+// exactly like authLimiter above and for the same reason — a whole class behind
+// one campus NAT address must not share a bucket — with the IP as the fallback
+// when no address was supplied.
+//
+// Tighter than login's five: a person needing a link clicks once, maybe twice.
+// The endpoint answers identically whether or not the account exists, so the
+// limit is about not being usable as a mailer, not about guessing.
+const passwordRequestLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  keyGenerator: (req) => {
+    const email = (req.body?.email || '').toLowerCase().trim();
+    return email ? `pwreq:email:${email}` : `pwreq:ip:${ipKey(req)}`;
+  },
+  message: { error: 'Too many requests. Please wait a few minutes and try again.' }
+});
+app.use('/api/auth/password/request', authBodyParser, passwordRequestLimiter);
+
 // Activation carries no identity until the token is redeemed, so this one can
 // only be keyed on the client. It is the brute-force surface for a 32-byte
 // random token — practically unguessable, but an open write endpoint should
@@ -299,6 +319,25 @@ const rosterImportLimiter = rateLimit({
   },
   message: { error: 'Too many roster operations. Please wait a few minutes and try again.' }
 });
+// Mounted BEFORE the general roster bucket so the tighter cap cannot be bypassed
+// by ordering. Both apply, which is intended: that one bounds CALLS, this one
+// bounds RUNS. One call here can queue a whole section's invitations, so twenty
+// of them inside the shared bucket would be thousands of messages from a single
+// instructor — precisely the "driven as a bulk sender" outcome that bucket exists
+// to prevent. Three runs an hour clears any real class and nothing more.
+const bulkResendLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  keyGenerator: (req) => {
+    const payload = peekJwt(req);
+    return payload?.sub ? `bulkinvite:user:${payload.sub}` : `bulkinvite:ip:${ipKey(req)}`;
+  },
+  message: {
+    error: 'Too many bulk invitations. Please wait an hour, or resend to individual students.'
+  }
+});
+app.use(/^\/api\/cle\/courses\/[^/]+\/roster\/students\/activation\//, bulkResendLimiter);
+
 app.use(/^\/api\/cle\/courses\/[^/]+\/roster\//, rosterImportLimiter);
 
 const webhookLimiter = rateLimit({

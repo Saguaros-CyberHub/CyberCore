@@ -39,7 +39,11 @@
  *   - Pre-baked GOAD members get their cloud-init drive stripped, or
  *     cloudbase-init renames the host and breaks its AD secure channel.
  *   - Flags are planted LAST, after vuln scripts and GOAD, so nothing clobbers
- *     the files.
+ *     the files. The `postDeploy` hook therefore runs BEFORE them, not after.
+ *   - `pinAllVms` addressing is recorded on the lane config and REPLAYED on
+ *     rebuild, never re-derived: the reservations file is rendered whole-lane,
+ *     so a rebuild that recomputed it would move machines off the addresses the
+ *     lane's own generated paper names.
  * ============================================================================
  */
 
@@ -72,6 +76,7 @@ const {
   configureLaneTailscale,
   formatLaneGatewayNet0,
   resolveVmNics,
+  resolveVmSegments,
   resolveSegmentBridges,
   DEFAULT_VM_OFFSET,
 } = require('./lane-networking');
@@ -125,6 +130,15 @@ function resolveSpecVms(spec, challengeKey) {
 // pool's live leases.
 const CONSOLE_OCTET_MIN = 60;
 const CONSOLE_OCTET_MAX = 79;
+
+// Ordinary (non-console) spec machines under `pinAllVms`, from the next stretch
+// up. Deliberately disjoint from the console band so a machine's address does
+// not move when it is later designated the console — .60-.79 stays "machines the
+// student opens", .80-.99 stays "machines the student attacks", and .100+ is
+// still attached-modules'. 20 addresses is the hard ceiling one lane can pin;
+// past that the caller gets a named error rather than a silent random lease.
+const SPEC_OCTET_MIN = 80;
+const SPEC_OCTET_MAX = 99;
 
 /**
  * Decide which machines on a lane get a Guacamole console, and which one the
@@ -230,6 +244,172 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
 }
 
 /** The Kali login for a user: their email local-part, plus a password. */
+/**
+ * Fixed lane addresses (and stable DNS names) for the machines the student
+ * ATTACKS, not just the ones they open a console onto.
+ *
+ * Off unless the caller passes `pinAllVms`, so every pre-existing deploy writes
+ * exactly the reservations it wrote before. A hand-authored CLE challenge does
+ * not need this — its author already knows the lab's shape. A PROFILE-DERIVED
+ * lane does: the generated paper (scan report, asset register, network diagram)
+ * names an address, and a machine on an ordinary DHCP pool lease lands
+ * somewhere else. That divergence is invisible until a student runs nmap and
+ * the exercise stops making sense.
+ *
+ * Pure over its inputs, like resolveConsolePlan, so the band arithmetic and the
+ * skip rules below are testable without standing up a deploy.
+ *
+ * Three classes are deliberately NOT pinned:
+ *   GOAD hosts   prepareGoadMacs already gave them a static IP and a MAC, and
+ *                their reservation is written from goadMacs.
+ *   consoles     already allocated by the caller; re-pinning double-claims the
+ *                address, and dnsmasq refuses to start when two dhcp-host lines
+ *                claim one — which takes DHCP down for the WHOLE lane.
+ *   dual-homed   resolveVmNics builds those NICs inline and ignores the MAC
+ *                entirely, so a pin would write a reservation nothing ever
+ *                requests. v3 pins them to .240 by design.
+ *
+ * DNS records are emitted for pinned AND console machines (an alias has to
+ * resolve to an address, and only those have one that is knowable at deploy
+ * time), and are independent of `pinAllVms` — a spec that declares
+ * `dns_aliases` on its console machine gets them either way. Inert for every
+ * existing challenge: `dns_aliases` today exists only on catalog TEMPLATE rows,
+ * which the workstation path reads; no challenge spec carries one.
+ *
+ * @param {object} a
+ * @param {Array}  a.specVms             resolveSpecVms output
+ * @param {object} [a.goadMacs]          prepareGoadMacs output, keyed by VM name
+ * @param {object} [a.consoleOctetForVm] spec-VM name -> already-allocated console octet
+ * @param {Array}  [a.reserved]          octets already claimed on this lane
+ * @param {boolean}[a.pinAllVms]
+ * @returns {{ pinnedHosts: Array<{name,octet,subnetBase}>, dnsRecords: Array<{alias,ip}> }}
+ * @throws when an explicit ipOctet collides, the band is full, or two machines
+ *   claim one alias — each of which produces a lane that looks deployed and is
+ *   silently wrong.
+ */
+function resolveSpecAddressing({
+  specVms = [], goadMacs = {}, consoleOctetForVm = {}, reserved = [],
+  subnetScheme, laneSubnetBase, goadSubnetBase, pinAllVms = false,
+}) {
+  const isV3 = subnetScheme === 'v3';
+  const taken = new Set(reserved);
+  const pinnedHosts = [];
+
+  if (pinAllVms) {
+    // Everything that survives the skip rules, in spec order. Order is part of
+    // the output contract: the auto-assigned octets must not move because an
+    // unrelated machine was added earlier in the list.
+    const eligible = [];
+    for (const vmSpec of specVms) {
+      const name = vmSpec.name;
+      if (!name) continue;
+      if (goadMacs[name]) continue;
+      if (consoleOctetForVm[name] != null) continue;
+      if ((vmSpec.type || 'qemu') === 'lxc') continue;   // net1; the template owns net0
+
+      const segs = resolveVmSegments(vmSpec, { subnetScheme, isGoadVm: false });
+      if (segs.length > 1) continue;
+
+      eligible.push({
+        name, vmSpec,
+        subnetBase: (isV3 && segs[0] === 'int') ? goadSubnetBase : laneSubnetBase,
+      });
+    }
+
+    // PASS 1 — claim every EXPLICIT ipOctet before handing out a single
+    // automatic one.
+    //
+    // One pass with a single moving cursor is not enough, and the bug it causes
+    // is nasty: with seven machines where only the last declares ipOctet: 85,
+    // the first six would take .80-.85 and the seventh would then be told its
+    // own requested address "is already taken on this lane" — naming a conflict
+    // the author cannot see anywhere in their spec, and which they could only
+    // work around by reordering the array. An explicit octet is the author's
+    // contract with the generated paper, so it wins outright over an address
+    // this function invented.
+    const explicitOctet = new Map();
+    for (const e of eligible) {
+      if (e.vmSpec.ipOctet === undefined || e.vmSpec.ipOctet === null) continue;
+      const wanted = Number(e.vmSpec.ipOctet);
+      // Range-checked, not merely finite. Number() maps null->0, '' ->0 and
+      // true->1, and Number.isFinite accepts 0, negatives, 300 and 80.5 — every
+      // one of which reaches macForOctet(octet & 0xFF) and produces a
+      // reservation for an address that is not the one requested, or claims the
+      // gateway's own .1.
+      if (!Number.isInteger(wanted) || wanted < 2 || wanted > 254) {
+        throw new Error(
+          `Machine '${e.name}' requested IP octet .${e.vmSpec.ipOctet}, which is not a usable ` +
+          `host address — it must be a whole number between 2 and 254 (.1 is the lane gateway).`
+        );
+      }
+      if (taken.has(wanted)) {
+        throw new Error(
+          `Machine '${e.name}' requested IP octet .${wanted}, which is already taken on this lane`
+        );
+      }
+      taken.add(wanted);
+      explicitOctet.set(e.name, wanted);
+    }
+
+    // PASS 2 — fill the rest from the band, skipping everything now claimed.
+    let next = SPEC_OCTET_MIN;
+    for (const e of eligible) {
+      let octet = explicitOctet.get(e.name);
+      if (octet === undefined) {
+        while (taken.has(next)) next += 1;
+        if (next > SPEC_OCTET_MAX) {
+          throw new Error(
+            `Too many pinned machines on one lane — the .${SPEC_OCTET_MIN}-.${SPEC_OCTET_MAX} band is ` +
+            `full (${SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1} maximum). Reduce the environment's asset count.`
+          );
+        }
+        octet = next;
+        taken.add(octet);
+      }
+      pinnedHosts.push({ name: e.name, octet, subnetBase: e.subnetBase });
+    }
+  }
+
+  // Validation goes through lane-deployer.resolveDnsAliases rather than a second
+  // regex here: one malformed label stops dnsmasq starting, which takes DHCP
+  // down for every machine in the lane. That function already drops invalid
+  // entries with a warning, and reusing it is what keeps the two deploy paths
+  // from disagreeing about what a valid alias is.
+  const ipFor = {};
+  for (const h of pinnedHosts) ipFor[h.name] = `${h.subnetBase}.${h.octet}`;
+  // Consoles always draw the external base, matching writeLaneReservations'
+  // console loop — the two must agree or the record points off-subnet.
+  for (const [name, octet] of Object.entries(consoleOctetForVm)) {
+    ipFor[name] = `${laneSubnetBase}.${octet}`;
+  }
+
+  const dnsRecords = [];
+  const claimedBy = {};
+  for (const vmSpec of specVms) {
+    const ip = ipFor[vmSpec.name];
+    if (!ip) continue;
+    const aliases = laneDeployer.resolveDnsAliases({
+      metadata: { dns_aliases: vmSpec.dns_aliases },
+      template_key: vmSpec.name,
+    });
+    for (const alias of aliases) {
+      // Two machines claiming one alias is a spec bug: dnsmasq would answer with
+      // whichever host-record it happened to read first, so name both rather
+      // than publishing a coin flip.
+      if (claimedBy[alias]) {
+        throw new Error(
+          `dns_alias '${alias}' is claimed by two machines on this lane ` +
+          `('${claimedBy[alias]}' and '${vmSpec.name}')`
+        );
+      }
+      claimedBy[alias] = vmSpec.name;
+      dnsRecords.push({ alias, ip });
+    }
+  }
+
+  return { pinnedHosts, dnsRecords };
+}
+
 function resolveAttackBoxCredentials(user) {
   const username = String(user.email || 'student').split('@')[0]
     .replace(/[^a-z0-9_-]/gi, '-')
@@ -526,12 +706,19 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
   // the console used to be Kali-only. Same macForOctet() cloneAttackBox uses, so
   // the reservation and the NIC cannot disagree.
   const consoleOctet = (ctx._consoleOctetForVm || {})[vmName];
+  // A pinned NON-console machine takes the identical treatment: same
+  // macForOctet(), so its reservation and its NIC cannot disagree. Only one of
+  // the two maps ever holds a given name — resolveSpecAddressing skips anything
+  // already designated a console.
+  const pinnedOctet = consoleOctet != null
+    ? consoleOctet
+    : (ctx._pinnedOctetForVm || {})[vmName];
   const { nets, dualHomed } = resolveVmNics(vmSpec, {
     subnetScheme,
     bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
     goadMac: goadVm?.mac,
     pinnedMac: goadVm?.mac
-      || (consoleOctet != null ? goadDeploy.macForOctet(consoleOctet, vxlanId) : null),
+      || (pinnedOctet != null ? goadDeploy.macForOctet(pinnedOctet, vxlanId) : null),
     goadVm,
     isGoadVm,
   });
@@ -802,6 +989,7 @@ async function cloneAttackBox({ attackBoxVmId, vxlanId, targetNode, laneId, user
  */
 async function writeLaneReservations({
   gatewayVmId, node, vxlanId, goadMacs, attackBoxOctet, consoleOctets,
+  pinnedHosts = [], dnsRecords = [],
   extSubnetBase, intSubnetBase, liveGoadController, laneId, logTag,
 }) {
   const lines = [
@@ -836,6 +1024,34 @@ async function writeLaneReservations({
     lines.push(`dhcp-host=${info.mac},${info.static_ip},${vmName}`);
   }
 
+  // Ordinary spec machines, when the caller asked for the whole lane to be
+  // pinned (`pinAllVms`). Empty for every pre-existing caller, so this loop adds
+  // nothing to a CLE or admin-group deploy's file.
+  //
+  // Each entry brings its OWN subnetBase rather than reusing extSubnetBase like
+  // the console loop above: on a v3 lane a spec VM may sit on the internal
+  // segment, and a reservation written against the external base would hand it
+  // an address on a subnet its NIC is not attached to — dnsmasq would offer a
+  // lease the guest cannot use, which looks exactly like "DHCP is broken".
+  for (const h of pinnedHosts) {
+    const label = String(h.name || '').toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+    if (!label) continue;
+    lines.push(`dhcp-host=${goadDeploy.macForOctet(h.octet, vxlanId)},${h.subnetBase}.${h.octet},${label}`);
+  }
+
+  // Stable in-lane DNS names. Same host-record form the workstation path emits
+  // (lane-deployer.hostRecordLine is the one owner of it), landing in THIS
+  // file because dnsmasq reads every *.conf in the directory and a second file
+  // claiming one address stops it starting.
+  //
+  // reservationIp() only parses `dhcp-host=` lines, so these are correctly
+  // excluded from collision-neutralisation — a host-record cannot collide with
+  // a reservation the way two dhcp-host lines can.
+  if (dnsRecords.length) {
+    lines.push('# Stable per-role names (spec.vms[].dns_aliases).');
+    for (const r of dnsRecords) lines.push(laneDeployer.hostRecordLine(r.alias, r.ip));
+  }
+
   if (lines.length === 3) return;  // header only — nothing to reserve
 
   // installLaneReservations, NOT a bare push+restart. Our Kali line claims the
@@ -852,7 +1068,11 @@ async function writeLaneReservations({
       path: '/etc/dnsmasq.d/lane-reservations.conf',
       lines, logTag,
     });
-    console.log(`${logTag} Lane ${laneId}: ${lines.length - 3} DHCP reservation(s) written`);
+    const nReservations = lines.filter(l => l.startsWith('dhcp-host=')).length;
+    console.log(
+      `${logTag} Lane ${laneId}: ${nReservations} DHCP reservation(s) written` +
+      (dnsRecords.length ? ` + ${dnsRecords.length} DNS host-record(s)` : '')
+    );
   } catch (err) {
     // A dead DHCP server is not survivable — every guest on this lane would sit
     // without an address. Anything else (no SSH channel, for instance) leaves the
@@ -1155,8 +1375,12 @@ async function deployLaneVms(job, ctx) {
   // actor on a challenge lane touches. An explicit spec.vms[].ipOctet wins — the
   // same key attached-modules and the GOAD lab definitions already honour.
   const consoleOctets = {};
+  // Hoisted so resolveSpecAddressing below draws from the SAME claimed set. Two
+  // independent allocators would happily hand one address to a console and to a
+  // pinned machine, and dnsmasq refuses to start when two dhcp-host lines claim
+  // one — which takes DHCP down for the whole lane.
+  const taken = new Set([goadDeploy.INFRA_IP_OCTETS.Kali]);
   {
-    const taken = new Set([goadDeploy.INFRA_IP_OCTETS.Kali]);
     Object.values(goadMacs || {}).forEach((g) => {
       const last = Number(String(g.static_ip || '').split('.').pop());
       if (Number.isFinite(last)) taken.add(last);
@@ -1199,6 +1423,37 @@ async function deployLaneVms(job, ctx) {
       reservationOctets[c.name] = consoleOctets[c.ref];
     }
   }
+
+  // Fixed addresses + stable DNS names for the rest of the environment's
+  // machines. No-ops unless the caller asked for them (see resolveSpecAddressing).
+  const { pinnedHosts, dnsRecords } = resolveSpecAddressing({
+    specVms, goadMacs, consoleOctetForVm: ctx._consoleOctetForVm,
+    // `taken` already carries every console octet — the loop above adds each as
+    // it assigns it — plus Kali's and every GOAD static.
+    //
+    // The two infrastructure octets are added HERE rather than being in `taken`,
+    // because the console allocator above predates them and changing what it
+    // sees would alter existing lanes. Both are addresses writeLaneReservations
+    // can actually emit or the gateway already owns:
+    //   .1  the lane gateway itself — never leasable to a guest
+    //   .5  the GOAD controller, whose dhcp-host line is written from
+    //       liveGoadController and so is NOT in goadMacs. On a v1/v2 lane
+    //       intSubnetBase === extSubnetBase, so a spec VM pinned to .5 would
+    //       emit a second dhcp-host for the same address and dnsmasq would
+    //       refuse to start — taking DHCP down for the whole lane.
+    reserved: [
+      ...taken,
+      goadDeploy.INFRA_IP_OCTETS.gateway,
+      goadDeploy.INFRA_IP_OCTETS.controller,
+    ],
+    subnetScheme, laneSubnetBase, goadSubnetBase, pinAllVms: !!ctx.pinAllVms,
+  });
+  // Read by cloneChallengeVm for the pinned MAC. Kept SEPARATE from
+  // _consoleOctetForVm so the dual-homed console guard there keeps its exact
+  // meaning — a pinned machine that happens to be dual-homed is skipped above,
+  // not rejected.
+  ctx._pinnedOctetForVm = {};
+  for (const h of pinnedHosts) ctx._pinnedOctetForVm[h.name] = h.octet;
 
   if (progress) {
     progress.lanes[laneId] = {
@@ -1252,7 +1507,7 @@ async function deployLaneVms(job, ctx) {
   await writeLaneReservations({
     gatewayVmId, node: targetNode, vxlanId, goadMacs,
     attackBoxOctet: attackBoxVmId ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
-    consoleOctets: reservationOctets,
+    consoleOctets: reservationOctets, pinnedHosts, dnsRecords,
     extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
     liveGoadController: !!(spec.goad?.enabled && !spec.goad?.prebaked),
     laneId, logTag,
@@ -1438,6 +1693,41 @@ async function deployLaneVms(job, ctx) {
     }
   }
 
+  // 5b. Caller-supplied provisioning, for work this module has no business
+  //     knowing about — CiAB's generated vuln-app install and its per-lane fact
+  //     file are the first two. The alternative to a hook here is a fifth copy
+  //     of the deploy sequence, which is the exact failure this file's header
+  //     documents.
+  //
+  //     Placed after vuln scripts and BEFORE flags, so the invariant in step 6
+  //     still holds: flags are planted LAST and nothing can clobber the files. A
+  //     hook that ran after them would be free to recreate a user profile on top
+  //     of a planted user.txt.
+  //
+  //     Best-effort, like vuln scripts and GOAD above: the lane's machines exist
+  //     and are reachable even when the hook fails, and failing the deploy here
+  //     would destroy work already done. The error is RECORDED on the lane
+  //     config rather than only logged, so it reaches the instructor instead of
+  //     presenting as "the exercise content just isn't there".
+  let postDeployError = null;
+  if (typeof ctx.postDeploy === 'function') {
+    setStatus('post_deploy');
+    try {
+      await ctx.postDeploy({
+        laneId, user, vxlanId, spec, subnetScheme,
+        node: targetNode, gatewayVmId, gatewayTransitIp,
+        deployedVMs, net, laneSubnetBase, goadSubnetBase,
+        // Where each pinned machine actually lives, so a hook can seed a guest
+        // with the same addresses the lane's DNS and DHCP publish.
+        pinnedHosts, dnsRecords,
+        logTag,
+      });
+    } catch (hookErr) {
+      postDeployError = hookErr.message;
+      console.error(`${logTag} postDeploy hook failed for ${user.email}: ${hookErr.message}`);
+    }
+  }
+
   // 6. Plant HTB-style user/root capture flags. Runs LAST, after vuln scripts and
   //    after GOAD provisioning, so a script that recreates a user profile or a
   //    GOAD heal that reboots a DC can't clobber the files. Because deployedVMs
@@ -1537,6 +1827,15 @@ async function deployLaneVms(job, ctx) {
       // be repurposed for this.
       console_vm_name:    primaryConsole.name,
     } : {}),
+    // The lane's fixed addressing, so a REBUILD can replay it verbatim instead
+    // of re-deriving it. Re-running the allocator would be wrong, not merely
+    // wasteful: if the spec changed between deploy and rebuild, a machine would
+    // silently move to a different address than the one the student's generated
+    // paper names. Absent entirely on a lane that pinned nothing, which is every
+    // lane that predates pinAllVms.
+    ...(postDeployError ? { post_deploy_error: postDeployError } : {}),
+    ...(pinnedHosts.length ? { pinned_hosts: pinnedHosts } : {}),
+    ...(dnsRecords.length  ? { dns_records: dnsRecords }   : {}),
     // Every console on the lane, primary first. teardownLanes reads Guacamole
     // ids from here — without it each secondary console leaks one connection per
     // student on every teardown.
@@ -1585,6 +1884,14 @@ async function deployLaneVms(job, ctx) {
  * @param {object}   a.challenge         { challenge_id, challenge_key, name, spec, subnet_scheme }
  * @param {string}   [a.moduleKey]       defaults to challenge.module_key or 'crucible'
  * @param {boolean}  [a.attackBoxes]     deploy a Kali attack box per lane
+ * @param {boolean}  [a.pinAllVms]       give every non-console, non-GOAD, single-homed
+ *   spec VM a fixed lane address via a MAC-keyed DHCP reservation, so the lane
+ *   matches whatever paper describes it. Off by default — see resolveSpecAddressing.
+ * @param {Function} [a.postDeploy]      async hook run per lane after vuln scripts
+ *   and before flag planting. Receives { laneId, user, vxlanId, spec, subnetScheme,
+ *   node, gatewayVmId, gatewayTransitIp, deployedVMs, net, laneSubnetBase,
+ *   goadSubnetBase, pinnedHosts, dnsRecords, logTag }. Best-effort: a throw is
+ *   recorded as config.post_deploy_error and does not fail the lane.
  * @param {Array}    [a.vulnScripts]     [{ vm_name, script_slug }]
  * @param {object}   [a.laneConfig]      merged into every lane's config JSONB
  * @param {string}   [a.namePrefix]      lane name = `${namePrefix}-${vxlanId}`; when
@@ -1659,6 +1966,10 @@ async function deployChallengeLanesInner({
   // override (so Kali wins when it is present) and no extras.
   consoleVm = null,
   extraWorkstations = [],
+  // Additive capabilities, both off by default so every existing caller deploys
+  // byte-identically. See resolveSpecAddressing and the step-5b hook.
+  pinAllVms = false,
+  postDeploy = null,
   vulnScripts = null,
   laneConfig = {},
   namePrefix = null,
@@ -1893,6 +2204,7 @@ async function deployChallengeLanesInner({
   const ctx = {
     spec, subnetScheme, moduleKey: resolvedModule, challengeKey,
     attackBoxes, consoleVm, extraWorkstations, extraSpecs,
+    pinAllVms, postDeploy,
     vulnScripts, laneConfig, guacParent, instructorEmails,
     description, progress, logTag, cloneSem, templateNodeByVmid,
   };
@@ -2159,6 +2471,22 @@ async function rebuildLaneChallengeVms({
     }
   }
 
+  // Replayed from the lane's own config, NOT re-derived. Two reasons, and both
+  // produce a lane that looks fine and is wrong:
+  //   - the reservations file is rendered WHOLE-LANE below, so omitting these
+  //     would delete every pinned machine's reservation and every host-record —
+  //     the rest of the lane would fall to pool leases on its next reboot and
+  //     `elk` would stop resolving, with nothing logged.
+  //   - a rebuilt machine must keep the address the student's generated paper
+  //     already names. Re-running the allocator against a since-edited spec
+  //     could hand it a different one.
+  const pinnedHosts = Array.isArray(cfg.pinned_hosts) ? cfg.pinned_hosts : [];
+  const dnsRecords  = Array.isArray(cfg.dns_records)  ? cfg.dns_records  : [];
+  // Without this the re-cloned VM gets a random MAC, never matches the
+  // reservation being rewritten above, and lands on a pool lease.
+  ctx._pinnedOctetForVm = {};
+  for (const h of pinnedHosts) ctx._pinnedOctetForVm[h.name] = h.octet;
+
   // ── gateway FIRST, from the FULL machine list ────────────────────────────
   // Same inversion rebuildLaneWorkstations makes: the reservations already
   // exist and are unchanged, so writing them first is a no-op on the wire — and
@@ -2166,7 +2494,7 @@ async function rebuildLaneChallengeVms({
   await writeLaneReservations({
     gatewayVmId, node: gatewayNode, vxlanId: lane.vxlan_id, goadMacs,
     attackBoxOctet: cfg.attack_box_vm_id ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
-    consoleOctets: reservationOctets,
+    consoleOctets: reservationOctets, pinnedHosts, dnsRecords,
     extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
     liveGoadController: false,
     laneId, logTag,
@@ -2290,8 +2618,11 @@ module.exports = {
   parseSpec,
   resolveSpecVms,
   resolveConsolePlan,
+  resolveSpecAddressing,
   CONSOLE_OCTET_MIN,
   CONSOLE_OCTET_MAX,
+  SPEC_OCTET_MIN,
+  SPEC_OCTET_MAX,
   findVmOffsetCollision,
   findGoadHostMismatch,
   resolveAttackBoxCredentials,

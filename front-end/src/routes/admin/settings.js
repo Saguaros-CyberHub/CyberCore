@@ -205,7 +205,12 @@ router.get('/site-config', async (req, res) => {
       site_name: 'CyberHub',
       site_logo_url: null,
       site_favicon_url: null,
-      site_description: null
+      site_description: null,
+      // Lets the sign-in and registration pages stop offering something the API
+      // will refuse. Read from env, not the settings table: it gates a route, and
+      // a route's availability should not depend on a row anyone with the admin
+      // console can edit. Authoritative check stays in POST /api/auth/register.
+      self_registration_enabled: process.env.ALLOW_SELF_REGISTRATION === 'true'
     };
 
     try {

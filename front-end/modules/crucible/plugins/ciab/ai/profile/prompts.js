@@ -13,6 +13,13 @@
  * downstream, so the rest of the pipeline (combine, store) doesn't change.
  */
 
+const { hashStr, hashLogInt, hashInt } = require('./hash');
+const {
+  computeOrgSizing,
+  normalizeDelivery,
+  SECTOR_EMPLOYEE_BANDS
+} = require('./org-sizing');
+
 // ─── Shared boilerplate ───────────────────────────────────────────────────
 
 const SYS_HEADER = `You generate FICTIONAL training profiles for the Clinic-in-a-Box university course. Return ONLY strict JSON. No markdown. No extra text. No code fences.
@@ -64,12 +71,8 @@ const NAMING_SEEDS = [
   'Hansa', 'Guild', 'Compact', 'Chartered', 'Trust', 'Bureau'
 ];
 
-function hashStr(s, salt = '') {
-  const x = String(s || '') + '|' + salt;
-  let h = 0;
-  for (let i = 0; i < x.length; i++) h = ((h * 31) + x.charCodeAt(i)) >>> 0;
-  return h;
-}
+// hashStr now lives in ./hash.js (required at the top of this file) so that
+// org-sizing.js can hash without requiring prompts.js — that would be a cycle.
 
 function pickNamingSeed(runId) {
   return NAMING_SEEDS[hashStr(runId, 'seed') % NAMING_SEEDS.length];
@@ -306,27 +309,44 @@ function buildServerRoster(runId, opts = {}) {
   const renderer = HOSTNAME_RENDERERS[hostnameTheme] || HOSTNAME_RENDERERS['numbered classic (dc-01, fs-01, app-erp-01, sql-01)'];
   const ctx = { ...CODENAME_POOLS, site: ['sea','dal','nyc','hou','chi','phx','atl','den'][h('site') % 8], dept: 'corp' };
 
+  // The canonical sizing profile decides identity and server caps. Callers
+  // that already computed it pass it in; everyone else gets it computed here
+  // so this function keeps its old single-argument-ish contract.
+  const sizing = opts.sizing || computeOrgSizing({
+    clientType, industry: opts.industry, employeeCount, delivery, maturity, runId
+  });
+
   // Delivery posture drives how much lives on-prem vs in the cloud.
-  const deliv = String(delivery).toLowerCase();
-  const cloudFirst = deliv.startsWith('cloud');
-  const onPremHeavy = deliv.startsWith('on'); // 'On-Prem'
+  // normalizeDelivery() replaces the old startsWith() matching, which silently
+  // failed on 'Mostly Cloud' and treated it as Hybrid.
+  const deliveryClass = sizing.delivery_class;
+  const cloudFirst = deliveryClass === 'cloud';
+  const onPremHeavy = deliveryClass === 'onprem';
+
+  // Identity comes from sizing, not from per-branch magic numbers. This is
+  // what makes "a small non-profit has no DC" and "nobody gets two DCs below
+  // ~60-80 users" true in EVERY sector branch rather than only the SMB one.
+  const sizingHasDomain = sizing.identity.has_domain;
+  const sizingMaxDcs = sizing.identity.max_dcs;
   // Deterministic yes/no for the "it depends" calls (does this small shop keep
   // a NAS? does this district still run an on-prem SIS?). Hashed → reproducible.
   const coin = (salt, pct) => (h('coin:' + salt) % 100) < pct;
   // Count real servers added so far (a NAS doesn't justify a backup server).
   const realServers = () => roles.filter(r => r.prefix !== 'nas').length;
 
-  const roles = [];
+  let roles = [];
 
   if (clientType === 'Library') {
     // Staff-light, but a distinctive stack. Small branches are often run out of
     // city/county IT (no own DC) and use a consortium-hosted Koha + standalone
     // Deep Freeze; mid/large systems self-host. Public computers are NEVER
     // domain-joined regardless.
-    const hasStaffDomain = !cloudFirst && employeeCount >= 18;
+    const hasStaffDomain = sizingHasDomain;
     if (hasStaffDomain) {
       roles.push({ prefix: 'dc', role_label: 'Domain Controller',           function: 'Staff Active Directory, DNS and DHCP — STAFF network only (public computers are not domain-joined)', windows: true });
-      if (employeeCount >= 45) {
+      // Was `employeeCount >= 45`, which gave 77% of library profiles two
+      // domain controllers at a median of 82 staff. Now the shared 60-80 gate.
+      if (sizingMaxDcs >= 2) {
         roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary staff AD DC for a multi-branch system', windows: true });
       }
       roles.push({ prefix: 'fs', role_label: 'Staff File Server',           function: 'Staff shares: collection-development spreadsheets, programming flyers, HR/payroll documents', windows: true });
@@ -352,31 +372,48 @@ function buildServerRoster(runId, opts = {}) {
     // environment. These are the CORPORATE IT servers only — the OT assets
     // (SCADA master, historian, HMIs, PLCs/RTUs) are added by the network
     // branch's OT section so they land on segregated OT subnets, not here.
-    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for the corporate IT network (separate from the OT/SCADA domain)', windows: true });
-    if (employeeCount >= 120) {
-      roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover', windows: true });
+    // These pushes used to be unconditional — no size floor and no delivery
+    // check at all — so an 8-person water utility got DC + FS + CIS + SQL +
+    // backup, and a cloud-first utility still got a full on-prem AD stack
+    // (measured: 100% DC, 85% two DCs, even with delivery=Cloud).
+    if (sizingHasDomain) {
+      roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for the corporate IT network (separate from the OT/SCADA domain)', windows: true });
+      if (sizingMaxDcs >= 2) {
+        roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover', windows: true });
+      }
+      roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Corporate file share for engineering drawings, AWWA/compliance docs and staff files', windows: true });
     }
-    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Corporate file share for engineering drawings, AWWA/compliance docs and staff files', windows: true });
-    roles.push({ prefix: 'cis', role_label: 'CIS / Billing Application Server', function: 'Customer Information System and utility billing application (meter-to-cash)', windows: true });
-    roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the CIS/billing and work-order systems', windows: true });
+    // The CIS/billing stack is the utility's revenue system and survives even
+    // a thin IT footprint — but a very small district buys it hosted.
+    if (employeeCount >= 25 || onPremHeavy) {
+      roles.push({ prefix: 'cis', role_label: 'CIS / Billing Application Server', function: 'Customer Information System and utility billing application (meter-to-cash)', windows: true });
+      roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the CIS/billing and work-order systems', windows: true });
+    }
     if (employeeCount >= 60) {
       roles.push({ prefix: 'gis', role_label: 'GIS Server', function: 'Esri ArcGIS server for the distribution-network / asset map and outage data', windows: true });
     }
     if (employeeCount >= 100) {
       roles.push({ prefix: 'rds', role_label: 'Remote Desktop / Jump Host', function: 'RDS gateway for on-call engineers reaching the IT network remotely (often the only documented path toward OT)', windows: true });
     }
-    roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication for corporate IT (OT backups are frequently absent — a realistic gap)', windows: false });
+    if (realServers() >= 2) {
+      roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication for corporate IT (OT backups are frequently absent — a realistic gap)', windows: false });
+    }
 
   } else if (clientType === 'K12') {
     // School districts run AD + file servers even when small; the SIS/LMS are
     // increasingly cloud (PowerSchool SaaS, Google Classroom) but the district
     // still runs local infra at the central office / data closet per building.
-    roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for staff and student accounts (often synced to Google Workspace / Entra)', windows: true });
-    if (employeeCount >= 200) {
-      roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover across school sites', windows: true });
+    // Gated on sizing for the same reason as the utility branch above: these
+    // were unconditional, so a Google-Workspace district with delivery=Cloud
+    // still came back with an on-prem domain 100% of the time.
+    if (sizingHasDomain) {
+      roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS for staff and student accounts (often synced to Google Workspace / Entra)', windows: true });
+      if (sizingMaxDcs >= 2) {
+        roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover across school sites', windows: true });
+      }
+      roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Staff and teacher file shares and home directories', windows: true });
     }
-    roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Staff and teacher file shares and home directories', windows: true });
-    if (!cloudFirst && coin('sis', 50)) {
+    if (!cloudFirst && sizingHasDomain && coin('sis', 50)) {
       // Some districts still self-host the SIS (Infinite Campus on-prem,
       // older PowerSchool installs); most have moved to SaaS.
       roles.push({ prefix: 'sis', role_label: 'SIS Application Server', function: 'On-prem student information system (Infinite Campus / legacy PowerSchool) application server', windows: true });
@@ -385,7 +422,9 @@ function buildServerRoster(runId, opts = {}) {
     if (employeeCount >= 150) {
       roles.push({ prefix: 'print', role_label: 'Print / Deployment Server', function: 'Print services plus SCCM/MDT or PaperCut and imaging for staff Windows machines', windows: true });
     }
-    roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Backup target for student records and staff shares with offsite replication', windows: false });
+    if (realServers() >= 2) {
+      roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Backup target for student records and staff shares with offsite replication', windows: false });
+    }
 
   } else {
     // SMB / Non-Profit / general. Non-profits lean hard on donated/discounted
@@ -393,21 +432,24 @@ function buildServerRoster(runId, opts = {}) {
     // cloud-first orgs may have NO servers at all — just workstations, a
     // firewall/router and maybe a NAS.
     const npLean = clientType === 'NonProfit';
-    const dcMin = onPremHeavy ? 12 : (npLean ? 35 : 22);
-    const hasDomain = !cloudFirst && employeeCount >= dcMin;
+    // Identity now comes from the sizing profile. Previously an On-Prem pick
+    // dropped the threshold to a flat 12 for EVERY sector, which defeated the
+    // non-profit floor entirely (97% of on-prem NPOs got a DC); and the
+    // second DC fired at 120, which made two DCs a coin flip for SMB (46%).
+    const hasDomain = sizingHasDomain;
     if (hasDomain) {
       roles.push({ prefix: 'dc', role_label: 'Domain Controller', function: 'Primary Active Directory domain controller and DNS server', windows: true });
-      if (employeeCount >= 120) {
+      if (sizingMaxDcs >= 2) {
         roles.push({ prefix: 'dc', role_label: 'Secondary Domain Controller', function: 'Secondary AD DC for failover and load balancing', windows: true });
       }
       if (onPremHeavy || employeeCount >= 30) {
         roles.push({ prefix: 'fs', role_label: 'File Server', function: 'Primary file share for all departments including project files', windows: true });
       }
-      if (!npLean && employeeCount >= 70 && (onPremHeavy || coin('lob', 50))) {
+      if (!npLean && sizing.servers.allow_app_sql && (onPremHeavy || coin('lob', 50))) {
         roles.push({ prefix: 'app', role_label: 'Application Server', function: 'Hosts the on-prem line-of-business / practice-management application', windows: true });
         roles.push({ prefix: 'sql', role_label: 'Database Server', function: 'SQL Server backing the line-of-business application', windows: true });
       }
-      if (employeeCount >= 100) {
+      if (sizing.servers.allow_rds) {
         roles.push({ prefix: 'rds', role_label: 'Remote Desktop Gateway', function: 'RDS gateway for after-hours and remote staff access', windows: true });
       }
     }
@@ -420,6 +462,40 @@ function buildServerRoster(runId, opts = {}) {
       roles.push({ prefix: 'bak', role_label: 'Backup Server', function: 'Local backup target with offsite replication', windows: false });
     }
   }
+
+  // ── Structural caps ─────────────────────────────────────────────────────
+  // Belt-and-braces over the per-branch gates above: whatever any branch
+  // decided, the roster may never exceed the sizing profile. This is the
+  // invariant that makes "a small business does not get multiple domain
+  // controllers or multiple file servers" true by construction rather than
+  // by every branch remembering to check.
+  const capped = [];
+  let dcSeen = 0, fsSeen = 0;
+  for (const r of roles) {
+    if (r.prefix === 'dc') {
+      if (dcSeen >= sizingMaxDcs) continue;
+      dcSeen++;
+    }
+    if (r.prefix === 'fs') {
+      if (fsSeen >= sizing.servers.max_file_servers) continue;
+      fsSeen++;
+    }
+    capped.push(r);
+  }
+  // Trim from the tail if the total still exceeds what an org this size would
+  // run. Roles are pushed roughly most- to least-essential, so the tail is the
+  // right end to drop from. A NAS is storage, not a server, and a DC is never
+  // trimmed — losing it would contradict identity decided above.
+  const countsAsServer = (r) => r.prefix !== 'nas';
+  while (capped.filter(countsAsServer).length > sizing.servers.max_total) {
+    let idx = -1;
+    for (let i = capped.length - 1; i >= 0; i--) {
+      if (capped[i].prefix !== 'nas' && capped[i].prefix !== 'dc') { idx = i; break; }
+    }
+    if (idx < 0) break;
+    capped.splice(idx, 1);
+  }
+  roles = capped;
 
   // Number duplicates per prefix
   const prefixCount = {};
@@ -476,13 +552,43 @@ function buildFlavorBundle(runId, stakeholderCount = 5) {
   };
 }
 
-function pickEmployeeCount(seed) {
-  const e = seed.employees;
-  if (typeof e === 'object' && e) {
-    const min = e.min ?? 25, max = e.max ?? 200;
-    return Math.floor(Math.random() * (max - min + 1)) + min;
+/**
+ * Draw the organization's headcount.
+ *
+ * Two fixes over the previous implementation:
+ *
+ *  1. DETERMINISM. This was the last Math.random() in the seed path, so the
+ *     same run_id produced a different company every time and no profile
+ *     could be regenerated for paper-vs-lane comparison. Now hashed off
+ *     run_id like every other dimension.
+ *
+ *  2. LOG-UNIFORM, not uniform. A uniform draw over a wide band puts the
+ *     median at the band midpoint — for the SMB default [25,200] that is 112
+ *     employees, a mid-market company. This course is about small orgs, and
+ *     real org-size distributions are log-skewed. Log-uniform over the same
+ *     band lands the median near 70 and makes genuinely small orgs common.
+ *
+ * When no band is supplied the sector's own band is used, rather than the
+ * old hardcoded 50 that made every client type the same size.
+ */
+function pickEmployeeCount(seed, clientType) {
+  const e = seed?.employees;
+  const runId = seed?.run_id || 'RUN_DEFAULT';
+
+  if (typeof e === 'number' && e > 0) return Math.round(e);
+
+  let min, max;
+  if (typeof e === 'object' && e && ('min' in e || 'max' in e)) {
+    min = Number(e.min); max = Number(e.max);
+  } else {
+    const band = SECTOR_EMPLOYEE_BANDS[clientType] || SECTOR_EMPLOYEE_BANDS.SMB;
+    min = band.min; max = band.max;
   }
-  return e || 50;
+  if (!Number.isFinite(min) || min < 1) min = 1;
+  if (!Number.isFinite(max) || max < min) max = min;
+  if (min === max) return Math.round(min);
+
+  return hashLogInt(runId, 'employees', min, max);
 }
 
 // ─── A: Organization profile ──────────────────────────────────────────────

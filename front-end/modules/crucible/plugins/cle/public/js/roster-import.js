@@ -18,7 +18,8 @@
  */
 
 /* global api, escHtml, escAttr, toast, showModal, closeModal, copyText,
-          currentCourseId, currentCourseData, loadStudents, CleCsv */
+          currentCourseId, currentCourseData, loadStudents, CleCsv,
+          Confirm, Utils */
 
 (function () {
   'use strict';
@@ -627,13 +628,65 @@
     }
   }
 
-  /** Reissue an invitation link, invalidating any earlier one. */
-  async function resendStudentActivation(studentId) {
+  /**
+   * Reissue an invitation link, invalidating any earlier one.
+   *
+   * The button is disabled in flight on purpose: issueActivationToken revokes
+   * before it mints, so a double-click kills the link the first click just sent.
+   */
+  async function resendStudentActivation(studentId, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
     try {
       const result = await api('POST', `/courses/${currentCourseId}/roster/students/${studentId}/activation/resend`, {});
       toast(result.note || 'Invitation sent');
+      // Refresh, as regenerateStudentPassword already does. Without it the row
+      // keeps showing "invite expired" beside a link that is now live again,
+      // which reads as the button having failed.
+      if (typeof loadStudents === 'function') await loadStudents();
     } catch (err) {
       toast(err.message || 'Could not send the invitation', true);
+      // Only restore on failure — success re-renders the whole table.
+      if (btn) { btn.disabled = false; btn.textContent = '✉️ Resend invite'; }
+    }
+  }
+
+  /**
+   * Re-invite every un-activated student in one request.
+   *
+   * One call rather than a loop over the roster: the server caps an instructor at
+   * 20 roster requests per 15 minutes, so a client-side loop over a full class
+   * would half-succeed and leave nobody able to say which half.
+   */
+  async function resendAllActivations(btn) {
+    const ok = await Confirm.show({
+      title: 'Resend invitations?',
+      message: 'Everyone in this course who has not set a password yet gets a fresh '
+             + 'link. Any earlier link for those students stops working. Students who '
+             + 'have already signed in are not emailed.',
+      confirmText: 'Send invitations',
+    });
+    if (!ok) return;
+
+    if (btn) Utils.setBtnLoading(btn, true, 'Sending…');
+    try {
+      const r = await api('POST', `/courses/${currentCourseId}/roster/students/activation/resend-all`, {});
+
+      // Report the skips. A bare "done" over a partial run is what sends an
+      // instructor back to emailing an administrator.
+      let msg = `${r.queued} invitation${r.queued === 1 ? '' : 's'} queued`;
+      if (r.skipped && r.skipped.length) msg += ` · ${r.skipped.length} skipped`;
+      if (r.capped) msg += ` · capped at ${r.cap} per run, click again for the rest`;
+      toast(msg, r.queued === 0 && r.total > 0);
+
+      if (r.skipped && r.skipped.length) {
+        console.warn('[CLE] Invitations skipped:',
+          r.skipped.map(s => `${s.email}: ${s.reason}`).join('\n'));
+      }
+      if (typeof loadStudents === 'function') loadStudents();
+    } catch (err) {
+      toast(err.message || 'Could not send the invitations', true);
+    } finally {
+      if (btn) Utils.setBtnLoading(btn, false);
     }
   }
 
@@ -643,6 +696,7 @@
 
   window.regenerateStudentPassword = regenerateStudentPassword;
   window.resendStudentActivation = resendStudentActivation;
+  window.resendAllActivations = resendAllActivations;
 
   window.showCohortModal = showCohortModal;
   window.previewCohort = previewCohort;

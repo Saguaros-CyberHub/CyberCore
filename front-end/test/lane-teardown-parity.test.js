@@ -42,7 +42,11 @@ const DEPLOYER = 'src/utils/lane-deployer.js';
 const ROUTES = [
   'src/routes/admin/lanes.js',
   'src/routes/admin/groups.js',
-  'modules/crucible/plugins/ciab/utils/lane-deploy.js',
+  // A7 split CIAB's fourth copy in two: the reservation (and this teardown) into
+  // lane-reservation.js, the deploy into lane-provision.js. Both are listed so a
+  // DELETE reintroduced in either is caught.
+  'modules/crucible/plugins/ciab/utils/lane-reservation.js',
+  'modules/crucible/plugins/ciab/utils/lane-provision.js',
   'modules/crucible/plugins/ciab/routes/profile-deploy.js',
 ];
 
@@ -100,7 +104,7 @@ test('every lane teardown route delegates to teardownLanes', () => {
   for (const rel of ['src/routes/admin/lanes.js', 'src/routes/admin/groups.js']) {
     assert.match(read(rel), /teardownLanes\(/, `${rel} must delegate`);
   }
-  assert.match(read('modules/crucible/plugins/ciab/utils/lane-deploy.js'),
+  assert.match(read('modules/crucible/plugins/ciab/utils/lane-reservation.js'),
     /laneDeployer\.teardownLanes\(/, 'the CIAB path must delegate too');
 });
 
@@ -109,7 +113,7 @@ test('the CIAB path passes its job-table VMIDs through as extraVmIds', () => {
   // whose config write never landed has its machines recorded nowhere else.
   // They must still go through the contested and ownership checks, which is why
   // they are handed to teardownLanes rather than destroyed directly.
-  const src = read('modules/crucible/plugins/ciab/utils/lane-deploy.js');
+  const src = read('modules/crucible/plugins/ciab/utils/lane-reservation.js');
   const start = src.indexOf('async function teardownLane(');
   assert.notStrictEqual(start, -1);
   const fn = src.slice(start, start + 1600);

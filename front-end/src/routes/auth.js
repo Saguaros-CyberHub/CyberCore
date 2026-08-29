@@ -19,8 +19,70 @@ const mfa = require('../utils/mfa');
 const accountProvisioning = require('../utils/account-provisioning');
 const activation = require('../utils/activation');
 const audit = require('../utils/audit');
+const mailer = require('../utils/mailer');
+const templates = require('../utils/email-templates');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
+
+/**
+ * Self-service account creation, off unless explicitly enabled.
+ *
+ * Accounts on this platform come from a roster: an instructor imports a class and
+ * every student is invited by email. An open /register alongside that is a way for
+ * anyone on the internet to obtain a login to a cyber range, and it creates
+ * accounts with no provenance — `provisioned_via` is NULL, so no instructor can
+ * manage them and they belong to no course.
+ *
+ * Note what this does NOT block. A student who was invited at any point still has
+ * an account, and POST /password/request will still mail them a fresh link, so
+ * turning registration off costs nothing in recoverability. It only stops new
+ * accounts appearing from outside the roster.
+ *
+ * Opt back in with ALLOW_SELF_REGISTRATION=true.
+ */
+const SELF_REGISTRATION_ENABLED = process.env.ALLOW_SELF_REGISTRATION === 'true';
+
+/**
+ * Which of the two links a self-service request should send.
+ *
+ * 'activate' ONLY for an account somebody else created that has never had a
+ * session. All three conditions are needed, because activated_at alone is not
+ * "they have never used this":
+ *
+ *   - a self-registered user chose their own password at signup, and
+ *   - a cohort student is handed one on a printed sheet with
+ *     must_change_password false,
+ *
+ * and neither path reaches completePasswordChange, the only writer of
+ * activated_at. Both therefore have a working login and a NULL activated_at
+ * forever. Sending them 'activate' would greet a professor who forgot her
+ * password with "An account has been created for you" — and, worse, mint an
+ * 'activate' token, which is exactly what pendingActivationFor counts, so she
+ * would surface as "invited" on every roster she teaches. That is the same false
+ * signal this work exists to remove.
+ *
+ * The bias is deliberately toward 'reset': it is harmless on any account, while
+ * 'activate' has a visible side effect on someone else's roster.
+ */
+function choosePurpose(user) {
+  const createdForThem = !!user.provisioned_via && user.provisioned_via !== 'self_register';
+  return (!user.activated_at && !user.last_auth_at && createdForThem) ? 'activate' : 'reset';
+}
+
+/**
+ * Branding for a self-sent email. Mirrors mailContext() in the roster routes,
+ * minus the instructor name — there is no instructor behind a self-service
+ * request. Never blocks the send: branding is cosmetic.
+ */
+async function siteNameForMail() {
+  try {
+    const s = await cybercoreQuery(
+      `SELECT value FROM cybercore_site_settings WHERE key = 'site_name'`);
+    return s.rows[0]?.value || 'CyberHub';
+  } catch {
+    return 'CyberHub';
+  }
+}
 
 /**
  * Audit an authentication event.
@@ -286,6 +348,22 @@ function isMfaRequired(role, scope) {
  */
 router.post('/register', registerValidation, async (req, res) => {
   try {
+    if (!SELF_REGISTRATION_ENABLED) {
+      // 403, not 404: the endpoint exists and is disabled, and saying so plainly
+      // is what stops someone retrying it as though it were a bug. The message
+      // names the two real routes in, so a person who lands here is not stuck.
+      auditAuth(req, 'auth.register', {
+        email: req.body?.email || null,
+        status: 'denied',
+        reason: 'self_registration_disabled',
+      });
+      return res.status(403).json({
+        error: 'This site does not accept self-registration. Accounts are created by '
+             + 'your instructor. If you already have one, use the "forgot your password" '
+             + 'link on the sign-in page to get a new link.',
+      });
+    }
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ error: 'Validation failed', details: errors.array() });
@@ -848,6 +926,145 @@ router.post('/activate', newPasswordValidation, async (req, res) => {
     console.error('Activation error:', error);
     res.status(500).json({ error: 'Could not activate your account. Please try again.' });
   }
+});
+
+/**
+ * POST /api/auth/password/request — "I didn't get my email" / "I forgot my password"
+ *
+ * The only unauthenticated way to obtain a link, and the reason instructors no
+ * longer have to be in the loop: a student who missed the window re-sends
+ * themselves one instead of asking someone with a roster to do it.
+ *
+ * ENUMERATION SAFETY IS THE WHOLE DESIGN.
+ * Every path — unknown address, disabled account, federated account, mail turned
+ * off, a thrown error — returns the SAME body. An endpoint that anyone on the
+ * internet can post an address to is an account-existence oracle the moment its
+ * answer varies, and "does this university address have an account on the cyber
+ * range" is exactly the question not to answer. This is the same reasoning
+ * consumeActivationToken() applies to its failure modes.
+ *
+ * Anything worth knowing about a request is written to the audit log, where it is
+ * visible to an administrator and to nobody else.
+ */
+// One frozen object, returned from every exit. Defined out here so no branch can
+// build its own variant, and so a test can assert that every res.json in the
+// handler names this constant.
+const RECOVERY_ACK = {
+  ok: true,
+  message: 'If that address has an account, a link is on its way. '
+         + 'Check your spam folder if it does not arrive within a few minutes.',
+};
+
+/**
+ * The account row this flow needs. findUserByEmail returns the GUARD column set,
+ * which omits last_auth_at — and choosePurpose depends on it.
+ */
+async function findUserForRecovery(email) {
+  const r = await cybercoreQuery(
+    `SELECT user_id, email, username, first_name, role, status, active,
+            auth_provider, activated_at, last_auth_at, provisioned_via
+       FROM cybercore_user
+      WHERE lower(email) = $1`,
+    [email]
+  );
+  return r.rows[0] || null;
+}
+
+/**
+ * Everything that happens after the caller has already been answered.
+ * Never throws to the request.
+ */
+async function deliverRecoveryLink(req, email) {
+  const user = await findUserForRecovery(email);
+
+  // Each is a real reason to send nothing, and none may change what the caller
+  // saw — which they cannot, because the caller was answered already.
+  let refusal = null;
+  if (!user) refusal = 'unknown_address';
+  else if (!user.active || user.status !== 'active') refusal = 'account_disabled';
+  // A NULL auth_provider reads as local, the same reading the provisioning guards use.
+  else if (user.auth_provider && user.auth_provider !== 'local') refusal = 'federated_account';
+  // MUST be tested BEFORE issueActivationToken. That call revokes the account's
+  // outstanding invitation before minting a replacement, so checking
+  // deliverability afterwards would let an unauthenticated request naming any
+  // student's address destroy their live link while queueing nothing to replace
+  // it — an unauthenticated denial-of-onboarding. Mail is disabled on this
+  // deployment today, which is exactly the condition under which that would bite.
+  else if (!mailer.canSendTo(user.email)) refusal = 'undeliverable';
+
+  if (refusal) {
+    auditAuth(req, 'auth.link_requested', { user, email, status: 'denied', reason: refusal });
+    return;
+  }
+
+  const purpose = choosePurpose(user);
+  const firstTime = purpose === 'activate';
+
+  const { token, expiresAt } = await activation.issueActivationToken(user.user_id, {
+    purpose,
+    context: { reason: 'self_service' },
+  });
+
+  const publicUrl = mailer.publicUrl();
+  const siteName = await siteNameForMail();
+  const body = firstTime
+    ? templates.activation({
+        siteName,
+        firstName: user.first_name,
+        username: user.username,
+        activationUrl: activation.activationUrl(token, publicUrl),
+        expiresAt,
+      })
+    : templates.passwordReset({
+        siteName,
+        firstName: user.first_name,
+        username: user.username,
+        // mode tracks the purpose so /activate greets them with matching wording.
+        resetUrl: activation.activationUrl(token, publicUrl, 'reset'),
+        expiresAt,
+      });
+
+  const queued = await mailer.enqueue({
+    to: user.email,
+    toUserId: user.user_id,
+    templateKey: firstTime ? 'activation' : 'passwordReset',
+    subject: body.subject,
+    text: body.text,
+    html: body.html,
+    context: { reason: 'self_service' },
+  });
+
+  auditAuth(req, 'auth.link_requested', {
+    user,
+    email,
+    status: queued.status === 'queued' ? 'success' : 'failure',
+    reason: queued.reason || null,
+    metadata: { purpose, delivery: queued.status },
+  });
+}
+
+router.post('/password/request', (req, res) => {
+  const email = normalizeEmail(req.body?.email);
+
+  // ANSWER FIRST, WORK AFTER.
+  //
+  // A miss is one SELECT. A hit is a SELECT plus a revoke, a token INSERT, and an
+  // outbox INSERT carrying a pgp_sym_encrypt. That is a measurable difference, and
+  // a measurable difference is a usable oracle for "does this address have an
+  // account here" even when the body is byte-identical. Responding before any of
+  // it runs removes the signal instead of trying to mask it.
+  //
+  // setImmediate-after-respond is the shape /register already uses for Guacamole
+  // provisioning. res is finished by the time this runs, so a throw cannot become
+  // a second write — but it is caught and logged regardless.
+  res.json(RECOVERY_ACK);
+
+  if (!email) return;
+  setImmediate(() => {
+    deliverRecoveryLink(req, email).catch((err) => {
+      console.error('Password request delivery failed:', err.message);
+    });
+  });
 });
 
 /**

@@ -1646,8 +1646,50 @@
         // says "Hide" over a hidden column and takes two clicks to reveal.
         _credsShown = false;
 
+        // Staff rows are appended by the API for the deploy modals; they are not
+        // the class, so they must not move these counts. This tab does not ask
+        // for them (deploy-targets.test.js pins that), but the deploy modals do,
+        // and they mark such rows in more than one way — so filter defensively
+        // rather than assume they can never appear here.
+        const isStaff = s => !!(s.is_self || s.is_course_instructor || s.invite_state === 'staff');
+        const roll = students.filter(s => !isStaff(s) && s.enrollment_role !== 'instructor');
+
+        // Counted on last_auth_at, which is what "logged in" actually means. Not
+        // on `activated`: a cohort class signs in with printed passwords and never
+        // sets activated_at, so an activation-based count would read 0 of 27 for a
+        // section where everyone had been working all week.
+        const signedIn = roll.filter(s => s.last_auth_at).length;
+        const expiredCount = roll.filter(s => s.invite_state === 'expired').length;
+        const invitedCount = roll.filter(s => s.invite_state === 'invited').length;
+        const canBulkResend = roll.some(s => s.can_resend);
+
+        // The direct answer to "who hasn't signed in yet", without reading the
+        // table. Expired is called out separately because it is the one state that
+        // needs the instructor to do something. Zero-count clauses are suppressed
+        // — a row of "· 0 ·" reads as noise.
+        const summary = roll.length ? `
+          <div style="margin-bottom:0.75rem; font-size:0.85rem; color:var(--text-secondary,#555);">
+            <strong>${signedIn} of ${roll.length}</strong> ${roll.length === 1 ? 'student has' : 'students have'} signed in
+            ${invitedCount ? ` · ${invitedCount} invited` : ''}
+            ${expiredCount ? ` · <strong style="color:#b45309;">${expiredCount} ${expiredCount === 1 ? 'invite has' : 'invites have'} expired</strong>` : ''}
+          </div>` : '';
+
+        // Without this, mail being off reads as "the Resend button is broken":
+        // can_resend folds in deliverability, so every button correctly vanishes
+        // at once and nothing on screen says why.
+        const mailBanner = (data.email_enabled === false && roll.some(s => s.invite_state !== 'active')) ? `
+          <div class="alert alert-warning" style="margin-bottom:0.75rem; font-size:0.85rem;">
+            Email is not configured on this server, so invitations cannot be sent.
+            Use <strong>New password</strong> to hand a credential over directly, or ask an administrator.
+          </div>` : '';
+
         let html = `
+          ${mailBanner}
+          ${summary}
           <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-bottom:0.75rem;">
+            ${canBulkResend ? `<button class="btn btn-sm btn-outline" id="bulkResendBtn" onclick="resendAllActivations(this)">
+              ✉️ Resend to everyone who hasn't signed in
+            </button>` : ''}
             <button class="btn btn-sm btn-outline" id="toggleCredsBtn" onclick="toggleCohortCredentials()">
               🔑 Show console logins
             </button>
@@ -1658,6 +1700,7 @@
             <th>Name</th>
             <th>Role</th>
             <th>Enrolled</th>
+            <th>Last sign-in</th>
             <th class="cred-col" style="display:none;">Console Login</th>
             <th>Actions</th>
           </tr></thead>
@@ -1671,22 +1714,44 @@
           //
           // Course-scoped actions (RDP, Remove) stay available for everyone,
           // including staff — those only touch the enrollment, not the account.
-          const accountActions = s.can_regenerate
-            ? `<button class="btn btn-sm btn-outline" onclick="regenerateStudentPassword('${escAttr(s.user_id)}')">🔑 New password</button>
-               ${s.activation_pending ? `<button class="btn btn-sm btn-outline" onclick="resendStudentActivation('${escAttr(s.user_id)}')">✉️ Resend invite</button>` : ''}`
-            : (s.elevated
-                ? `<span class="badge" title="This is a staff account. It's enrolled in your course, but you have no password or credential controls over it." style="font-size:0.7rem;">staff — no credential controls</span>`
-                : '');
+          // can_resend is computed SERVER-SIDE and is the fix for the original
+          // complaint. The old gate was activation_pending, which goes false the
+          // moment a link expires — so the button vanished from exactly the rows
+          // that needed it, and re-inviting anyone meant emailing an administrator.
+          // It also folds in deliverability, so no button is offered that 409s.
+          const accountActions = `
+            ${s.can_regenerate ? `<button class="btn btn-sm btn-outline" onclick="regenerateStudentPassword('${escAttr(s.user_id)}')">🔑 New password</button>` : ''}
+            ${s.can_resend ? `<button class="btn btn-sm btn-outline" onclick="resendStudentActivation('${escAttr(s.user_id)}', this)">✉️ Resend invite</button>` : ''}
+            ${(!s.can_regenerate && s.elevated) ? `<span class="badge" title="This is a staff account. It's enrolled in your course, but you have no password or credential controls over it." style="font-size:0.7rem;">staff — no credential controls</span>` : ''}`;
 
-          const statusBadge = s.activation_pending
-            ? `<span class="badge" title="Invited, but they haven't set a password yet" style="font-size:0.7rem; margin-left:0.35rem;">invited</span>`
-            : '';
+          const WARN_BADGE = 'font-size:0.7rem; margin-left:0.35rem; background:#fef3c7; color:#92400e; border-color:#fcd34d;';
+          let statusBadge = '';
+          if (s.invite_state === 'invited') {
+            const until = s.invite_expires_at
+              ? ` The link expires ${new Date(s.invite_expires_at).toLocaleString()}.` : '';
+            statusBadge = `<span class="badge" title="${escAttr(`Invited, but they haven't set a password yet.${until}`)}" style="font-size:0.7rem; margin-left:0.35rem;">invited</span>`;
+          } else if (s.invite_state === 'expired') {
+            statusBadge = `<span class="badge" title="Their invite link has lapsed, so it no longer works. Use Resend invite to send a new one." style="${WARN_BADGE}">invite expired</span>`;
+          } else if (s.invite_state === 'never_invited') {
+            // Not "expired" — no invitation was ever sent, so saying one lapsed
+            // would be untrue. Usually a cohort account handed a printed password.
+            statusBadge = `<span class="badge" title="No invitation has been sent to this account, and it has never been signed in to." style="${WARN_BADGE}">not invited</span>`;
+          }
+
+          // Read straight from the timestamp. Never inferred from invite_state:
+          // "—" rather than "Never", because for a row activated before
+          // last_auth_at was being written, "never" is a claim the data cannot
+          // support.
+          const lastSeen = s.last_auth_at
+            ? `<span title="${escAttr(String(s.last_auth_at))}">${new Date(s.last_auth_at).toLocaleString()}</span>`
+            : '<span style="color: var(--gray-400,#9ca3af);">—</span>';
 
           html += `<tr>
             <td><code style="font-size: 0.8rem;">${escHtml(s.email)}</code>${statusBadge}</td>
             <td>${escHtml((s.first_name || '') + ' ' + (s.last_name || ''))}</td>
             <td><span class="badge badge-active">${s.enrollment_role || 'Student'}</span></td>
             <td>${s.enrolled_at ? new Date(s.enrolled_at).toLocaleDateString() : 'N/A'}</td>
+            <td style="font-size:0.8rem;">${lastSeen}</td>
             <td class="cred-col" style="display:none;" data-cred-for="${escAttr(s.user_id)}">
               <span style="color: var(--text-muted, #6b7280); font-size:0.8rem;">…</span>
             </td>

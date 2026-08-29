@@ -198,7 +198,9 @@ services:
       # mistyped roster cannot turn the platform into a credential-phishing
       # sender. See G12 in the roster import plan.
       MAIL_ALLOWED_RECIPIENT_DOMAINS: ${MAIL_ALLOWED_RECIPIENT_DOMAINS:-}
-      ACTIVATION_TTL_HOURS: ${ACTIVATION_TTL_HOURS:-72}
+      ACTIVATION_TTL_HOURS: ${ACTIVATION_TTL_HOURS:-336}
+      # Accounts come from a roster; /register is closed unless this is "true".
+      ALLOW_SELF_REGISTRATION: ${ALLOW_SELF_REGISTRATION:-false}
       # Bounds the fallback credential — the temp password shown to an instructor
       # when an invitation could not be emailed, and the one a staff regenerate
       # hands out. Expired ones are refused at login.

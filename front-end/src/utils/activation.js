@@ -21,9 +21,14 @@ const { cybercoreQuery } = require('./cybercore-db');
 // 32 bytes -> 64 hex chars. Far beyond guessing, and still a tolerable URL.
 const TOKEN_BYTES = 32;
 
+// 14 days. A shorter window is not more secure in any way that matters here: the
+// token is single-use, and issuing a replacement revokes the old one, so at most
+// one live link exists per user regardless of the TTL. What a short window does
+// produce is an instructor manually re-sending invitations to students who opened
+// their mail on day four of an asynchronous course.
 const DEFAULT_TTL_HOURS = Number(process.env.ACTIVATION_TTL_HOURS) > 0
   ? Number(process.env.ACTIVATION_TTL_HOURS)
-  : 72;
+  : 336;
 
 const VALID_PURPOSES = ['activate', 'reset'];
 
@@ -160,6 +165,63 @@ async function pendingActivationFor(userIds) {
 }
 
 /**
+ * Live AND lapsed invitations, per user.
+ *
+ * pendingActivationFor above answers "is there a live invitation", which cannot
+ * tell "invited last week, still waiting" apart from "the link expired and they
+ * are stuck". Those need opposite responses from an instructor, and collapsing
+ * them is what made expired invitations invisible on the roster.
+ *
+ * Both branches compare against the DATABASE's NOW(), so clock skew between the
+ * app and Postgres cannot flip a row between the two states.
+ *
+ * Consumed tokens are excluded entirely — a consumed 'activate' token means the
+ * account was activated, which activated_at already reports — and that also keeps
+ * the query inside idx_activation_token_user, which is partial on consumed_at.
+ */
+async function invitationStateFor(userIds) {
+  if (!Array.isArray(userIds) || userIds.length === 0) return {};
+  const result = await cybercoreQuery(
+    `SELECT user_id,
+            MAX(expires_at) FILTER (WHERE expires_at >  NOW()) AS live_expires_at,
+            MAX(expires_at) FILTER (WHERE expires_at <= NOW()) AS expired_at
+       FROM cybercore_activation_token
+      WHERE user_id = ANY($1::uuid[])
+        AND purpose = 'activate'
+        AND consumed_at IS NULL
+      GROUP BY user_id`,
+    [userIds]
+  );
+  const out = {};
+  result.rows.forEach(r => {
+    out[r.user_id] = { liveExpiresAt: r.live_expires_at, expiredAt: r.expired_at };
+  });
+  return out;
+}
+
+/**
+ * Where an account sits between "invited" and "using the platform".
+ *
+ * Pure, exported, and shared so the roster and its tests agree on one definition.
+ *
+ * READ activatedAt AND lastAuthAt TOGETHER. Neither alone is "they have used this
+ * account": activated_at is written only by completePasswordChange, which two
+ * whole classes of account never reach — a self-registered user chose their
+ * password at signup, and a cohort student is handed one on a printed sheet with
+ * must_change_password false. Both have working logins and a NULL activated_at
+ * forever. Keying on activated_at alone would report an entire cohort section as
+ * "invite expired" while every one of them was signing in daily.
+ */
+function deriveInviteStatus({ activatedAt, lastAuthAt, invite }) {
+  if (activatedAt || lastAuthAt) return 'active';
+  if (invite?.liveExpiresAt) return 'invited';
+  if (invite?.expiredAt) return 'expired';
+  // No invitation was ever sent — a cohort account, or one enrolled by hand.
+  // Distinct from 'expired' because "invite expired" would simply be untrue.
+  return 'never_invited';
+}
+
+/**
  * Build the link that goes in the email.
  *
  * `mode` is COSMETIC ONLY, and nothing is authorized by it. /activate never
@@ -233,6 +295,8 @@ module.exports = {
   consumeActivationToken,
   revokeActivationTokens,
   pendingActivationFor,
+  invitationStateFor,
+  deriveInviteStatus,
   activationUrl,
   ensureActivationTokens,
   pruneActivationTokens,

@@ -82,6 +82,18 @@ const API = {
       return API.request('/auth/logout', { method: 'POST' });
     },
 
+    /**
+     * Ask for a fresh setup / reset link. The server answers identically whether
+     * or not the address has an account, so there is nothing here to branch on —
+     * show the caller's message verbatim and never infer existence from it.
+     */
+    async requestPasswordLink(email) {
+      return API.request('/auth/password/request', {
+        method: 'POST',
+        body: { email }
+      });
+    },
+
     async me() {
       return API.request('/auth/me');
     },

@@ -31,13 +31,24 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const UTILS = path.join(ROOT, 'src', 'utils');
 
+/**
+ * Read a source file with LF endings regardless of what the checkout has.
+ *
+ * Every slice below finds a function's end with indexOf('\n}\n') or
+ * indexOf('\n  }\n'). With core.autocrlf=true those never match, indexOf returns
+ * -1, and slice(0, -1 + 3) hands the assertions a two-character string that
+ * matches nothing — so the test fails on Windows for a reason that has nothing to
+ * do with the code it guards.
+ */
+function readSrc(...parts) {
+  return fs.readFileSync(path.join(...parts), 'utf8').replace(/\r\n/g, '\n');
+}
+
 const templates = require(path.join(UTILS, 'email-templates'));
 
-const ROUTE_SRC = fs.readFileSync(
-  path.join(ROOT, 'modules', 'crucible', 'plugins', 'cle', 'routes', 'course-roster.js'), 'utf8');
-const AUTH_SRC = fs.readFileSync(path.join(ROOT, 'src', 'routes', 'auth.js'), 'utf8');
-const CLIENT_SRC = fs.readFileSync(
-  path.join(ROOT, 'modules', 'crucible', 'plugins', 'cle', 'public', 'js', 'roster-import.js'), 'utf8');
+const ROUTE_SRC = readSrc(ROOT, 'modules', 'crucible', 'plugins', 'cle', 'routes', 'course-roster.js');
+const AUTH_SRC = readSrc(ROOT, 'src', 'routes', 'auth.js');
+const CLIENT_SRC = readSrc(ROOT, 'modules', 'crucible', 'plugins', 'cle', 'public', 'js', 'roster-import.js');
 
 /** The whole `router.post('/students/:studentId/password', ...)` handler. */
 function passwordRouteBody() {
@@ -108,7 +119,7 @@ test('activationUrl adds mode only when asked, and encodes it', () => {
 });
 
 test("'reset' is a purpose the token table actually accepts", () => {
-  const src = fs.readFileSync(path.join(UTILS, 'activation.js'), 'utf8');
+  const src = readSrc(UTILS, 'activation.js');
   assert.match(src, /VALID_PURPOSES\s*=\s*\[[^\]]*'reset'/,
     "issueActivationToken would reject 'reset' with a 400");
   assert.match(src, /CHECK \(purpose IN \('activate','reset'\)\)/,

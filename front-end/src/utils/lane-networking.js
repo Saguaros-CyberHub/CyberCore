@@ -382,6 +382,49 @@ function resolveVmSegments(vmSpec, { subnetScheme, isGoadVm = false } = {}) {
 }
 
 /**
+ * NIC model for a spec VM, when the spec did not name one.
+ *
+ * Windows guests get e1000: a stock Windows image has no virtio-net driver, so a
+ * virtio NIC comes up dead and the guest never DHCPs — the single most common
+ * way a "deployed" Windows box ends up unreachable, and the reason the GOAD lab
+ * definitions hardcode e1000 on every AD host.
+ *
+ * This is the spec-shaped twin of lane-deployer.resolveNicModel, which answers
+ * the same question for a CATALOG TEMPLATE ROW (`metadata.nic_model`,
+ * `os_family`). Two shapes, so two readers; the rule they encode is one rule and
+ * must stay identical in both.
+ *
+ * Returns null rather than 'virtio' when nothing applies, so buildLaneNet0's
+ * existing `nicModel || vmSpec.nic_model || 'virtio'` chain is untouched for any
+ * spec that carries neither os_family nor nic_model.
+ *
+ * THIS IS NOT INERT FOR EXISTING CHALLENGES. An earlier version of this comment
+ * claimed no stored spec carries os_family; that was wrong, and the test that
+ * "proved" it only checked challenge-spec.buildSpecVm, which is the CREATE path.
+ * The EDIT path persists it:
+ *
+ *   topology-editor.js:271   a palette drop stamps os_family from the catalog row
+ *   topology-editor.js:441   stripInternal() removes only __topoId
+ *   admin-challenges.js:940  saveTemplate posts vm_specs, then spec.vms = vm_specs
+ *   lab-templates.js:389     PUT does `nextSpec.vms = vm_specs` VERBATIM
+ *
+ * So a canvas-authored challenge with a Windows machine already has
+ * os_family:'windows_server' in crucible_challenge.spec.vms[], and its net0
+ * changes from virtio to e1000 the next time it deploys.
+ *
+ * That flip is deliberate and is a FIX — it is the same rule lane-deployer's
+ * resolveNicModel has always applied to catalog templates, and a stock Windows
+ * guest on virtio has no driver, never DHCPs, and comes up unreachable. But it
+ * IS a behaviour change to already-authored labs, not a dormant capability, and
+ * it must be described as one. See test/challenge-lane-addressing.test.js, which
+ * now pins the reachable path rather than the create path.
+ */
+function resolveSpecNicModel(vmSpec) {
+  if (vmSpec?.nic_model) return vmSpec.nic_model;
+  return String(vmSpec?.os_family || '').startsWith('windows') ? 'e1000' : null;
+}
+
+/**
  * The Proxmox config keys and values for a lane VM's NICs.
  *
  * Returns { nets, segments, dualHomed }:
@@ -427,14 +470,24 @@ function resolveVmNics(vmSpec, ctx = {}) {
     };
   }
 
+  // Resolved once for both renderings below. A dual-homed Windows pivot host is
+  // as dead on virtio as a single-homed one, and the branch that used to
+  // hardcode `virtio` here is the same defect in a second place.
+  //
+  // Note this widens the multi-NIC branch twice over: besides os_family, it now
+  // honours an explicit vmSpec.nic_model that the hardcoded 'virtio' used to
+  // ignore outright. A dual-homed spec VM carrying nic_model therefore changes
+  // behaviour even with no os_family in play.
+  const nicModel = goadVm?.nic_model || resolveSpecNicModel(vmSpec) || 'virtio';
+
   if (segments.length > 1) {
     const nets = {};
-    segments.forEach((segId, i) => { nets[`net${i}`] = `virtio,bridge=${bridgeFor(segId)}`; });
+    segments.forEach((segId, i) => { nets[`net${i}`] = `${nicModel},bridge=${bridgeFor(segId)}`; });
     return { nets, segments, dualHomed: true };
   }
 
   return {
-    nets: { net0: goadDeploy.buildLaneNet0(vmSpec, bridgeFor(segments[0]), mac, goadVm?.nic_model) },
+    nets: { net0: goadDeploy.buildLaneNet0(vmSpec, bridgeFor(segments[0]), mac, nicModel) },
     segments,
     dualHomed: false,
   };
@@ -466,5 +519,6 @@ module.exports = {
   resolveSegments,
   resolveSegmentBridges,
   resolveVmSegments,
+  resolveSpecNicModel,
   resolveVmNics,
 };

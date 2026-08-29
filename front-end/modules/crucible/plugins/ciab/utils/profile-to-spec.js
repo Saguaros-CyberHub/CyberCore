@@ -119,6 +119,102 @@ function inferVmType(matchedRow) {
   return 'qemu';
 }
 
+// ─── Lane addressing (A4) ───────────────────────────────────────────────────
+/**
+ * The band the shared deployer hands out to ordinary (non-console, non-GOAD)
+ * spec machines under `pinAllVms`.
+ *
+ * MIRRORED, not imported: challenge-lane-deployer.js pulls site-config at module
+ * load (via batch-deployer), which reads a gitignored config/site.json — and
+ * this file's whole point is being a pure synthesizer that unit tests can load
+ * with no cluster, no DB and no config. test/ciab-deploy-parity.test.js asserts
+ * the two agree, so a change to the band there fails here rather than silently
+ * handing out addresses the deployer will reject.
+ *
+ * Authority: src/utils/challenge-lane-deployer.js SPEC_OCTET_MIN / SPEC_OCTET_MAX.
+ */
+const SPEC_OCTET_MIN = 80;
+const SPEC_OCTET_MAX = 99;
+
+/**
+ * A profile hostname reduced to something dnsmasq will accept as a host-record.
+ *
+ * Only the FIRST label survives: a profile may name an asset `web01.corp.local`,
+ * but `resolveDnsAliases` validates against a single DNS label and drops
+ * anything with a dot — and a dropped alias is invisible until a student
+ * discovers `ping web01` does not work. Taking the label ourselves keeps the
+ * name the paper uses.
+ *
+ * Returns null when nothing usable survives, so the caller omits the key rather
+ * than publishing an empty alias.
+ */
+function dnsLabel(hostname) {
+  const first = String(hostname == null ? '' : hostname).trim().toLowerCase().split('.')[0];
+  const cleaned = first.replace(/[^a-z0-9-]/g, '-').replace(/^-+/, '').replace(/-+$/, '');
+  if (!cleaned || cleaned.length > 63) return null;
+  return cleaned;
+}
+
+/**
+ * Give every pinnable machine a fixed address and a stable in-lane name.
+ *
+ * This is the contract between a profile's generated paper and its lane's real
+ * addresses: the scan documents can only claim `10.x.y.83` for `web01` if the
+ * deploy actually puts it there. `ipOctet` is the EXISTING key the shared
+ * deployer honours (challenge-lane-deployer.js resolveSpecAddressing PASS 1,
+ * src/utils/attached-modules.js allocateIpOctets) — this does not invent a
+ * second spelling.
+ *
+ * Only QEMU single-homed machines are pinned, because those are exactly the ones
+ * `resolveSpecAddressing` treats as eligible. Pinning an LXC would write an
+ * address the deployer ignores, and the paper would then name an IP nothing
+ * lives at — worse than naming none.
+ *
+ * Mutates `vms` in place and returns it.
+ */
+function assignLaneAddressing(vms) {
+  const pinnable = vms.filter(vm =>
+    (vm.type || 'qemu') !== 'lxc'
+    && !(Array.isArray(vm.nics) && vm.nics.length > 1)
+  );
+
+  const capacity = SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1;
+  if (pinnable.length > capacity) {
+    // Fail here rather than let the deployer fail later, or — far worse — let a
+    // partially-pinned lane deploy. Half the hosts on their documented address
+    // and half on a pool lease is an environment whose own scan report is wrong
+    // about it, which is the one outcome this whole synthesizer exists to avoid.
+    throw new Error(
+      `This profile selects ${pinnable.length} deployable machines, but a lane can pin only ` +
+      `${capacity} (the .${SPEC_OCTET_MIN}-.${SPEC_OCTET_MAX} band). Deselect assets until at most ` +
+      `${capacity} remain, or split the profile across two engagements.`
+    );
+  }
+
+  const claimedAlias = new Map();
+  let octet = SPEC_OCTET_MIN;
+  for (const vm of pinnable) {
+    vm.ipOctet = octet++;
+
+    const alias = dnsLabel(vm.hostname || vm.name);
+    if (!alias) continue;
+    // The deployer THROWS when two machines claim one alias, which would fail
+    // the whole batch over a convenience name. First claimant wins; the loser
+    // keeps its pinned address and simply has no short name.
+    if (claimedAlias.has(alias)) {
+      console.warn(
+        `[profile-to-spec] '${vm.name}' wanted DNS alias '${alias}' but '${claimedAlias.get(alias)}' ` +
+        `already claimed it — deploying without a short name for this host`
+      );
+      continue;
+    }
+    claimedAlias.set(alias, vm.name);
+    vm.dns_aliases = [alias];
+  }
+
+  return vms;
+}
+
 // ─── Main synthesizer ──────────────────────────────────────────────────────
 /**
  * @param {object} args
@@ -364,6 +460,13 @@ function synthesizeSpecFromProfile({
     }
   }
 
+  // ─── Lane addressing ──────────────────────────────────────────────────────
+  // Last, so the synthetic vuln-app VM (appended above when the profile has no
+  // web server) is addressed like any other machine. Order is the contract: the
+  // octets follow spec order, so adding an asset must not silently move an
+  // existing one and invalidate paper that has already been handed out.
+  assignLaneAddressing(vms);
+
   return {
     spec: {
       vxlan_block: vxlanBlock,
@@ -382,5 +485,11 @@ module.exports = {
   synthesizeSpecFromProfile,
   parseOs,
   parseService,
-  isWebServer
+  isWebServer,
+  // Exported for the addressing tests, and so the band stays checkable against
+  // challenge-lane-deployer's own constants rather than by reading source text.
+  assignLaneAddressing,
+  dnsLabel,
+  SPEC_OCTET_MIN,
+  SPEC_OCTET_MAX
 };

@@ -10,7 +10,11 @@ const {
   synthesizeSpecFromProfile,
   parseOs,
   parseService,
-  isWebServer
+  isWebServer,
+  assignLaneAddressing,
+  dnsLabel,
+  SPEC_OCTET_MIN,
+  SPEC_OCTET_MAX
 } = require('../utils/profile-to-spec');
 
 let passed = 0;
@@ -387,6 +391,103 @@ test('vuln-app fully serverless profile (no servers at all) still deploys standa
   assert.strictEqual(result.spec.vuln_app_install.target_vm, 'vuln-app');
   const synthetic = result.spec.vms.find(v => v.synthetic);
   assert.ok(synthetic, 'expected a synthetic vuln-app VM');
+});
+
+// ─── Lane addressing (A4) ───────────────────────────────────────────────────
+// ipOctet is the contract between a profile's generated paper and its lane's
+// real addresses: the scan documents can only claim `10.x.y.83` for `web01` if
+// the deploy actually puts it there. These pin the properties the paper depends
+// on — stable order, no duplicate alias, nothing pinned that the deployer would
+// ignore.
+
+console.log('\nlane addressing');
+
+test('every deployable VM gets a sequential ipOctet from the band base', () => {
+  const result = synthesizeSpecFromProfile({
+    profile: profileWith([
+      { hostname: 'DC-01',  role: 'server', os: 'Windows Server 2022', services: ['445/SMB'] },
+      { hostname: 'WEB-01', role: 'server', os: 'Ubuntu Server 22.04', services: ['80/HTTP'] }
+    ]),
+    assetSelection: null, vmTemplateCatalog: VM_CATALOG, vulnScriptCatalog: VULN_SCRIPTS
+  });
+  const octets = result.spec.vms.map(v => v.ipOctet);
+  assert.deepStrictEqual(octets, [SPEC_OCTET_MIN, SPEC_OCTET_MIN + 1]);
+});
+
+test('the synthetic vuln-app VM is addressed like any other machine', () => {
+  // It is appended after the loop, so it is the one most likely to be forgotten
+  // — and it is the host the student's whole web exercise points at.
+  const result = synthesizeSpecFromProfile({
+    profile: profileWith([
+      { hostname: 'DC-01', role: 'server', os: 'Windows Server 2022', services: ['445/SMB'] }
+    ]),
+    assetSelection: null, vmTemplateCatalog: VM_CATALOG, vulnScriptCatalog: VULN_SCRIPTS,
+    vulnApp: { install_script: 'echo hi', delivery_mode: 'docker' }
+  });
+  const synthetic = result.spec.vms.find(v => v.synthetic);
+  assert.ok(synthetic, 'expected a synthetic vuln-app VM');
+  assert.strictEqual(typeof synthetic.ipOctet, 'number');
+  assert.deepStrictEqual(synthetic.dns_aliases, ['vuln-app']);
+});
+
+test('adding an asset does not move an existing octet', () => {
+  // Order is the contract. Paper already handed to a student must keep naming
+  // the address the lane actually uses.
+  const first = { hostname: 'DC-01',  role: 'server', os: 'Windows Server 2022', services: [] };
+  const added = { hostname: 'WEB-01', role: 'server', os: 'Ubuntu Server 22.04', services: [] };
+  const before = synthesizeSpecFromProfile({
+    profile: profileWith([first]),
+    assetSelection: null, vmTemplateCatalog: VM_CATALOG, vulnScriptCatalog: VULN_SCRIPTS
+  });
+  const after = synthesizeSpecFromProfile({
+    profile: profileWith([first, added]),
+    assetSelection: null, vmTemplateCatalog: VM_CATALOG, vulnScriptCatalog: VULN_SCRIPTS
+  });
+  assert.strictEqual(
+    before.spec.vms.find(v => v.name === 'DC-01').ipOctet,
+    after.spec.vms.find(v => v.name === 'DC-01').ipOctet
+  );
+});
+
+test('a dotted hostname publishes only its first label', () => {
+  // resolveDnsAliases validates a SINGLE DNS label and silently drops anything
+  // with a dot, so `web01.corp.local` would publish no name at all.
+  assert.strictEqual(dnsLabel('web01.corp.local'), 'web01');
+  assert.strictEqual(dnsLabel('FILE_01'), 'file-01');
+  assert.strictEqual(dnsLabel('   '), null);
+  assert.strictEqual(dnsLabel('---'), null);
+});
+
+test('two hosts cannot claim one DNS alias', () => {
+  // The deployer THROWS on a duplicate alias, which would fail the whole batch
+  // over a convenience name. First claimant wins; the loser keeps its address.
+  const vms = [
+    { name: 'a', hostname: 'web_01', type: 'qemu' },
+    { name: 'b', hostname: 'web-01', type: 'qemu' }
+  ];
+  assignLaneAddressing(vms);
+  assert.deepStrictEqual(vms[0].dns_aliases, ['web-01']);
+  assert.ok(!vms[1].dns_aliases, 'the second claimant must not publish the same alias');
+  assert.strictEqual(vms[1].ipOctet, SPEC_OCTET_MIN + 1, 'but it still gets a fixed address');
+});
+
+test('LXC machines are not pinned — the deployer would ignore the address', () => {
+  // Pinning one writes an address nothing honours, and the paper would then
+  // name an IP no host answers on. Worse than naming none.
+  const vms = [
+    { name: 'ct', hostname: 'ct', type: 'lxc' },
+    { name: 'vm', hostname: 'vm', type: 'qemu' }
+  ];
+  assignLaneAddressing(vms);
+  assert.strictEqual(vms[0].ipOctet, undefined);
+  assert.strictEqual(vms[1].ipOctet, SPEC_OCTET_MIN);
+});
+
+test('overflowing the band fails loudly rather than half-pinning the lane', () => {
+  const capacity = SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1;
+  const vms = [];
+  for (let i = 0; i <= capacity; i++) vms.push({ name: `h${i}`, hostname: `h${i}`, type: 'qemu' });
+  assert.throws(() => assignLaneAddressing(vms), /can pin only/);
 });
 
 // ─── Done ───────────────────────────────────────────────────────────────────

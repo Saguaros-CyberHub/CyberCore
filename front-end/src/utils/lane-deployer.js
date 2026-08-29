@@ -480,6 +480,23 @@ function resolveDnsAliases(template) {
 }
 
 /**
+ * The dnsmasq line that publishes one alias inside a lane.
+ *
+ * host-record (not address=) because it answers both A and PTR and does not
+ * wildcard subdomains. `domain=<LANE_DNS_DOMAIN>` + `expand-hosts` are set by
+ * the gateway firstboot hook, so both the short and FQDN forms resolve.
+ *
+ * Exported because challenge-lane-deployer.js publishes aliases into its OWN
+ * reservations file (the two paths cannot share one file — dnsmasq reads every
+ * *.conf in the directory and refuses to start when two claim one address). The
+ * FILE is separate; the LINE FORMAT must not be, or `elk.cybercore.lan` means
+ * one thing on a workstation lane and another on a challenge lane.
+ */
+function hostRecordLine(alias, ip) {
+  return `host-record=${alias},${alias}.${LANE_DNS_DOMAIN},${ip}`;
+}
+
+/**
  * NIC model for a QEMU workstation. Windows guests get e1000 by default: stock
  * Windows images have no virtio-net driver, so a virtio NIC comes up dead and
  * the VM never DHCPs — the single most common way a "deployed" Windows box ends
@@ -1047,7 +1064,7 @@ async function applyGatewayWorkstationAccess({ node, gatewayVmid, workstations }
   const aliasLines = [];
   for (const ws of workstations) {
     for (const alias of (ws.dnsAliases || [])) {
-      aliasLines.push(`host-record=${alias},${alias}.${LANE_DNS_DOMAIN},${ws.ip}`);
+      aliasLines.push(hostRecordLine(alias, ws.ip));
     }
   }
   if (aliasLines.length) {
@@ -3845,6 +3862,7 @@ module.exports = {
   // citype on Windows, the e1000 NIC, the cloud-init-drive probe — so the
   // challenge path must go through them rather than grow a second copy.
   resolveDnsAliases,
+  hostRecordLine,
   reserveWorkstationVmids,
   buildGuacParameters,
   resolveCitype,

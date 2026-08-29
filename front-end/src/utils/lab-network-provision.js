@@ -56,8 +56,20 @@ function encodeBase20(n) {
  * Find the next free VXLAN block of `numLanes` ids by scanning the vxlan_block
  * of every existing crucible_challenge. Blocks are allocated sequentially after
  * the global max, so CLE/CIAB/crucible reservations never overlap.
+ *
+ * @param {number} numLanes
+ * @param {object} [opts]
+ * @param {number} [opts.maxVxlanId]  refuse to hand out a block whose end exceeds
+ *   this id. Opt-in (default: no ceiling), so existing callers are unchanged.
+ *
+ *   The ceiling matters because a v2/v3 lane's LAN subnet is
+ *   10.[(vxlanId >> 8) & 0xFF].[vxlanId & 0xFF].0/24 (lane-networking.js:147).
+ *   Above 65535 those two bytes wrap and two lanes silently share a /24 — the
+ *   allocator would report success and the collision would surface much later
+ *   as unexplained cross-lane traffic. Blocks only ever climb (nothing is
+ *   re-used below the global max), so this is reachable given enough labs.
  */
-async function allocateVxlanBlock(numLanes) {
+async function allocateVxlanBlock(numLanes, { maxVxlanId = null } = {}) {
   const n = parseInt(numLanes, 10);
   if (!Number.isFinite(n) || n < 1) throw new Error(`numLanes must be >= 1 (got ${numLanes})`);
 
@@ -71,7 +83,14 @@ async function allocateVxlanBlock(numLanes) {
     if (row.vxlan_end && row.vxlan_end > maxEnd) maxEnd = row.vxlan_end;
   }
   const start = maxEnd + 1;
-  return { start, end: start + n - 1 };
+  const end = start + n - 1;
+  if (maxVxlanId != null && end > maxVxlanId) {
+    throw new Error(
+      `Cannot reserve ${n} contiguous VXLAN ids: the next free block is ${start}-${end}, ` +
+      `past the ${maxVxlanId} ceiling. Delete retired labs to reclaim the top of the range.`
+    );
+  }
+  return { start, end };
 }
 
 /**
@@ -133,6 +152,21 @@ async function ensureSdnZoneAndVnets({ zone, vxlanStart, vxlanEnd, subnetScheme 
     // operator-driven (Audit Proxmox -> Fix Peers), because applying SDN
     // commits every pending SDN change on the cluster, not just this one.
     log(`SDN zone '${zone}' already exists`);
+
+    // A zone created before this module owned zone creation can still carry
+    // ipam:'pve' — the setting the comment above refuses to write, because it
+    // puts per-VNet dnsmasq config on every node and has crashed the cluster at
+    // reboot. Nothing here can safely remove it (a zone PUT applies SDN
+    // cluster-wide, committing every pending change), and nothing else in the
+    // codebase reads zone settings at all, so without this line the hazard is
+    // invisible forever. Repair is operator-driven:
+    //   pvesh set /cluster/sdn/zones/<zone> --delete ipam && pvesh set /cluster/sdn
+    if (existingZone.ipam) {
+      log(`WARNING: zone '${zone}' has ipam='${existingZone.ipam}'. CyberCore manages lane ` +
+          `IP space itself; pve IPAM writes per-VNet dnsmasq config on every node. ` +
+          `Clear it with: pvesh set /cluster/sdn/zones/${zone} --delete ipam`);
+    }
+
     try {
       const clusterStatus = await proxmoxAPI('GET', '/api2/json/cluster/status');
       const expected = computeExpectedPeers(clusterStatus, getPhysicalClusterIps());
@@ -313,11 +347,18 @@ async function teardownSdnForBlock({ zone, vxlanBlock, subnetScheme = 'v2', log 
  * @param {object}  [a.spec={}]      caller-built spec; merged with block + zone
  * @param {string}  [a.zoneAbbrev]   defaults to a sanitized challengeKey
  * @param {string}  [a.status='active']
+ * @param {string}  [a.challengeType] crucible_challenge.challenge_type. Omitted from
+ *   the INSERT when null, so the column default ('single_vm') still applies and
+ *   existing callers write exactly the row they wrote before.
+ * @param {string}  [a.moduleKey]     crucible_challenge.module_key, same treatment
+ *   (column default is 'crucible').
+ * @param {number}  [a.maxVxlanId]    passed to allocateVxlanBlock; see its note.
  * @param {Function}[a.log]
  */
 async function reserveLabNetwork({
   challengeKey, name, description = null, difficulty = 2,
-  subnetScheme = 'v2', maxLanes, spec = {}, zoneAbbrev, status = 'active', log = () => {},
+  subnetScheme = 'v2', maxLanes, spec = {}, zoneAbbrev, status = 'active',
+  challengeType = null, moduleKey = null, maxVxlanId = null, log = () => {},
 }) {
   if (!challengeKey || !name) throw new Error('reserveLabNetwork: challengeKey and name are required');
   const scheme = ['v1', 'v2', 'v3'].includes(subnetScheme) ? subnetScheme : 'v2';
@@ -334,7 +375,7 @@ async function reserveLabNetwork({
   }
 
   log('Querying existing VXLAN blocks...');
-  const block = await allocateVxlanBlock(numLanes);
+  const block = await allocateVxlanBlock(numLanes, { maxVxlanId });
   log(`Allocated VXLAN block: ${block.start}-${block.end} (${numLanes} lanes)`);
 
   const fullSpec = {
@@ -343,12 +384,22 @@ async function reserveLabNetwork({
     vxlan_block: { start: block.start, end: block.end },
   };
 
+  // challenge_type / module_key are appended only when the caller asked for
+  // them. Building the column list this way (rather than passing NULL) is what
+  // keeps the column DEFAULTs in play for every pre-existing caller.
+  const cols = ['challenge_key', 'name', 'description', 'difficulty', 'spec', 'status', 'subnet_scheme'];
+  const vals = [challengeKey, name, description, difficulty, JSON.stringify(fullSpec), status, scheme];
+  const casts = { spec: '::jsonb' };
+  if (challengeType != null) { cols.push('challenge_type'); vals.push(challengeType); }
+  if (moduleKey != null) { cols.push('module_key'); vals.push(moduleKey); }
+  const placeholders = cols.map((c, i) => `$${i + 1}${casts[c] || ''}`).join(', ');
+
   log('Inserting challenge record...');
   const ins = await cybercoreQuery(
-    `INSERT INTO crucible_challenge (challenge_key, name, description, difficulty, spec, status, subnet_scheme)
-     VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)
+    `INSERT INTO crucible_challenge (${cols.join(', ')})
+     VALUES (${placeholders})
      RETURNING challenge_id, challenge_key`,
-    [challengeKey, name, description, difficulty, JSON.stringify(fullSpec), status, scheme]
+    vals
   );
   const challengeId = ins.rows[0].challenge_id;
   log(`Challenge created: ${challengeId}`);
@@ -384,8 +435,16 @@ async function reserveLabNetwork({
  * Tear down a lab's network: refuse (unless `force`) while active/deploying
  * lanes still use the block, then remove VNets + zone and delete the challenge.
  * Throws an Error with `.status = 400` when blocked by active lanes.
+ *
+ * @param {string}  challengeId
+ * @param {object}  [opts]
+ * @param {boolean} [opts.force=false]
+ * @param {string}  [opts.subnetScheme]  override the scheme used to decide which
+ *   VNet tags belong to this block. Omit (the default) to read it off the
+ *   challenge row exactly as before. See the note at the read site.
+ * @param {Function}[opts.log]
  */
-async function teardownLabNetwork(challengeId, { force = false, log = () => {} } = {}) {
+async function teardownLabNetwork(challengeId, { force = false, log = () => {}, subnetScheme: schemeOverride = null } = {}) {
   const chal = await cybercoreQuery(`SELECT * FROM crucible_challenge WHERE challenge_id = $1`, [challengeId]);
   if (chal.rows.length === 0) {
     const err = new Error('Challenge not found');
@@ -396,7 +455,15 @@ async function teardownLabNetwork(challengeId, { force = false, log = () => {} }
   const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : (challenge.spec || {});
   const zone = spec.zone?.abbrev;
   const vxlanBlock = spec.vxlan_block;
-  const subnetScheme = challenge.subnet_scheme || 'v2';
+  // The row's subnet_scheme is written once, at reservation time, and nothing
+  // ever updates it — but the scheme a lane is actually BUILT at is a per-deploy
+  // choice. When the two disagree (a block reserved v2 and later deployed v3),
+  // the internal VNets at tag+V3_INTERNAL_TAG_OFFSET exist but the row says v2,
+  // so the sweep below skips them and they are orphaned with nothing left that
+  // can name them. schemeOverride lets a caller that knows better say so; the
+  // internal range is derived from this block and can belong to no other lab, so
+  // sweeping it when it happens to be empty is a no-op.
+  const subnetScheme = schemeOverride || challenge.subnet_scheme || 'v2';
 
   let removed = { vnetsRemoved: 0, zoneRemoved: false };
   if (vxlanBlock?.start && vxlanBlock?.end) {

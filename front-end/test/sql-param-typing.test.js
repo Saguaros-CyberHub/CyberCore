@@ -65,7 +65,13 @@ test('no query puts an uncast parameter in a NULL test', () => {
 
   for (const file of ROOTS.flatMap((r) => jsFiles(r))) {
     const source = fs.readFileSync(file, 'utf8');
-    source.split('\n').forEach((line, i) => {
+    // split on /\r?\n/, not '\n'. With core.autocrlf=true a Windows checkout
+    // leaves a trailing \r on every line, and \r is a line terminator to a JS
+    // regex — so `.` cannot cross it, /\/\/.*$/ fails to match, and the comment
+    // stripper below silently stops stripping. That turns the explanatory comment
+    // in mailer.js, which quotes the broken form on purpose, into a false
+    // positive: the test fails on Windows and passes in CI.
+    source.split(/\r?\n/).forEach((line, i) => {
       // The explanatory comment in mailer.js quotes the broken form on purpose.
       const code = line.replace(/--.*$/, '').replace(/\/\/.*$/, '');
       for (const match of code.match(UNCAST_NULLTEST) || []) {
