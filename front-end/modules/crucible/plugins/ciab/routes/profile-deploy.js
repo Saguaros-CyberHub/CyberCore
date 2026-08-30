@@ -41,6 +41,7 @@ const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator')
 // semantics this path depends on are unchanged; see profile-students.js.
 const { provisionLaneStudents, slugForGroup } = require('../utils/profile-students');
 const laneProvision = require('../utils/lane-provision');
+const engagementProvision = require('../utils/engagement-provision');
 
 const { guacAPI } = require('../../../../../src/utils/guacamole');
 const {
@@ -235,13 +236,35 @@ async function runProfileDeploy(opts) {
         return null;
       });
 
+  // A8a: the reservation is NOT carved here any more.
+  //
+  // Carving it means 25-50 serial VNet POSTs, a CLUSTER-WIDE `PUT /cluster/sdn`
+  // apply (which commits every pending SDN change on the cluster, not just
+  // ours), up to three reconcile passes each with another apply, and then a wait
+  // for the bridges to materialize on every node. Doing that here put all of it
+  // in front of the lanes an instructor is waiting on — partly hidden behind the
+  // vuln-app LLM call on a first deploy, and fully exposed on any deploy where
+  // the app is a cache hit.
+  //
+  // It now happens when the ENGAGEMENT is created, usually days earlier. There
+  // is deliberately NO inline fallback: reserving "just this once" here is
+  // exactly how the cost became invisible in the first place.
+  const engagementRow = await engagementProvision.resolveEngagement(profileId, engagement);
+  engagementProvision.assertEngagementDeployable(engagementRow, {
+    profileId, engagementType: engagement,
+  });
+
+  // Idempotent read of the block the engagement already reserved. requestedMax
+  // is the engagement's own size, not the caller's — max_students locks with the
+  // reservation, and passing a different number here would ask the resize path
+  // to re-carve a block that lanes may already be sitting in.
   const reservationPromise = getOrCreateProfileChallenge({
     profileId,
     engagementType: engagement,
-    requestedMax: effectiveMaxStudents,
+    requestedMax: engagementRow.max_students,
     companyName: profile.company_name,
     spec: {},                            // synthesized spec filled in below
-    subnetScheme
+    subnetScheme: engagementRow.subnet_scheme || subnetScheme
   });
 
   const [vulnApp, reservation] = await Promise.all([vulnAppPromise, reservationPromise]);
@@ -639,6 +662,89 @@ router.get('/profiles/:profileId/reservation', authenticateToken, adminOnly, asy
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── A8: engagements — reserve the VXLAN block ahead of deploy day ──────────
+// Carving a block is 25-50 serial VNet POSTs plus a CLUSTER-WIDE SDN apply plus
+// a per-node bridge wait. These endpoints move that off the deploy path.
+
+// GET /api/profile-deploy/profiles/:profileId/engagements — status per engagement
+router.get('/profiles/:profileId/engagements', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const rows = await engagementProvision.listEngagements(req.params.profileId);
+    // Nothing recorded yet may still mean a pre-A8 reservation exists — adopt it
+    // so the UI shows the truth rather than offering to reserve a second block.
+    if (rows.length === 0) {
+      const adopted = await engagementProvision.resolveEngagement(
+        req.params.profileId, DEFAULT_ENGAGEMENT_TYPE);
+      return res.json({ engagements: adopted ? [adopted] : [] });
+    }
+    res.json({ engagements: rows });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/profile-deploy/engagements — create one and start carving in the background
+router.post('/engagements', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const { profile_id, engagement_type, subnet_scheme, max_students } = req.body || {};
+    const profRes = await query(`SELECT id, company_name FROM profiles WHERE id = $1`, [profile_id]);
+    if (profRes.rows.length === 0) return res.status(404).json({ error: 'Profile not found' });
+
+    const engagement = await engagementProvision.createEngagement({
+      profileId: profile_id,
+      engagementType: engagement_type || DEFAULT_ENGAGEMENT_TYPE,
+      subnetScheme: subnet_scheme || 'v2',
+      maxStudents: max_students,
+      companyName: profRes.rows[0].company_name,
+      actingUserId: req.user.userId,
+    });
+
+    audit.log({
+      req,
+      action: 'profile_engagement.created',
+      source: 'ciab',
+      target: { type: 'engagement', id: engagement.engagement_id },
+      metadata: {
+        profile_id, engagement_type: engagement.engagement_type,
+        max_students: engagement.max_students, subnet_scheme: engagement.subnet_scheme,
+      },
+    });
+
+    // 202: the row exists, the network does not yet. The UI polls the GET above.
+    res.status(202).json({ success: true, engagement });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// POST /api/profile-deploy/engagements/:id/reprovision — retry a failed reservation
+router.post('/engagements/:engagementId/reprovision', authenticateToken, adminOnly, async (req, res) => {
+  try {
+    const existing = await engagementProvision.getEngagementById(req.params.engagementId);
+    if (!existing) return res.status(404).json({ error: 'Engagement not found' });
+
+    const profRes = await query(`SELECT company_name FROM profiles WHERE id = $1`, [existing.profile_id]);
+    const engagement = await engagementProvision.reprovisionEngagement(req.params.engagementId, {
+      companyName: profRes.rows[0] && profRes.rows[0].company_name,
+      // Guarded on purpose: re-provisioning a HEALTHY block carves a second one,
+      // because the allocator only ever climbs and never re-uses range.
+      force: req.body && req.body.force === true,
+    });
+
+    audit.log({
+      req,
+      action: 'profile_engagement.reprovisioned',
+      source: 'ciab',
+      target: { type: 'engagement', id: req.params.engagementId },
+      metadata: { profile_id: existing.profile_id, previous_status: existing.provision_status },
+    });
+
+    res.status(202).json({ success: true, engagement });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 

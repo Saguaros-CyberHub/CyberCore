@@ -922,10 +922,50 @@ async function start() {
     // holding a machine this needs to switch back on.
     await recoverInterruptedResizes();
 
+    // Shared lab-network readiness, in cybercore_db because it is a fact about
+    // the RESERVATION (a crucible_challenge row) rather than about either
+    // plugin. One writer — reserveLabNetwork — and two readers, CIAB and CLE.
+    // A boot hook rather than a migration, because plugin migrations only run
+    // against that plugin's own database (same reason ensureLaneWanColumns and
+    // ensureAuditLog live here).
+    try {
+      await require('./utils/lab-network-provision').ensureLabReadinessTable();
+      console.log('✅ Lab network readiness table ensured');
+    } catch (e) {
+      console.warn(`⚠️  Could not ensure lab readiness table: ${e.message}`);
+    }
+
     // Read-only: says which lanes are double-booked on one gateway address.
     // Runs after recoverStrandedLanes so lanes it just released to 'error' are
     // already excluded rather than reported as conflicts.
     await warnWanIpConflicts();
+
+    // Same doctrine as recoverStrandedLanes, applied to CIAB's VXLAN
+    // reservations: carving a block is fire-and-forget async work inside THIS
+    // process with no resume, so any engagement still 'provisioning' at boot was
+    // abandoned by a previous one. Without this it spins "Initializing" forever
+    // and blocks every deploy for that client — which is exactly the state CLE
+    // courses can still get stuck in, because CLE never added this sweep.
+    //
+    // Lazy require: the CIAB plugin owns its own pool, and requiring it at module
+    // scope would pull clinic_db into the boot path of a deployment that has the
+    // plugin disabled.
+    try {
+      await require('../modules/crucible/plugins/ciab/utils/engagement-provision')
+        .recoverStrandedEngagements();
+    } catch (e) {
+      console.warn(`[Boot] CIAB engagement sweep skipped: ${e.message}`);
+    }
+
+    // The same doctrine for CLE course labs, which reserve through the same
+    // shared provisioner and had no sweep at all — a restart mid-provision left
+    // a course spinning "Initializing" forever with deletion as the only exit.
+    try {
+      await require('../modules/crucible/plugins/cle/routes/courses')
+        .recoverStrandedCourseLabs();
+    } catch (e) {
+      console.warn(`[Boot] CLE course-lab sweep skipped: ${e.message}`);
+    }
 
     // CYBR 400 attack console. The INVERSE of recoverStrandedLanes above: an
     // attack runs detached on the guest, so a restart here is invisible to it

@@ -301,22 +301,138 @@ async function loadReservationStatus(profileId) {
         </div>`;
       }
     } else {
-      const maxStudInput = document.getElementById('dep-max-students');
-      maxStudInput.disabled = false;
-      // The allocator packs each new block immediately above the highest one
-      // already reserved (src/utils/lab-network-provision.js allocateVxlanBlock).
-      // It does not search for gaps — saying so was true of a CIAB-private
-      // allocator that no longer exists.
-      const win = r.search_window || { min: 10100, max: 65535 };
-      el.innerHTML = `<div class="status-banner info">
-        🆕 No reservation yet — first deploy will carve a <strong id="rsv-preview-max">${maxStudInput.value}</strong>-slot VXLAN block
-        above the highest block already reserved, up to a ceiling of <code>${win.max}</code>
-        (same mechanism as challenge templates).
-        Max students locks at that value once set.
-      </div>`;
+      // A8b: nothing reserved. Reserving is a slow, cluster-wide operation
+      // (25-50 serial VNet POSTs, a cluster-wide SDN apply, then a per-node
+      // bridge wait), so it is an EXPLICIT action taken ahead of deploy day
+      // rather than something the first deploy does while an instructor waits.
+      await renderEngagementPanel(profileId, el);
     }
   } catch (err) {
     el.innerHTML = '';
+  }
+}
+
+
+// ─── A8b: the reservation panel ─────────────────────────────────────────────
+// Reserving a VXLAN block is minutes of cluster-wide work, so its state has to
+// be visible. Without this the wait is invisible and reads as a hang.
+
+/** Poll handle, so switching profiles cannot leave two timers running. */
+let ENGAGEMENT_POLL = null;
+
+function stopEngagementPoll() {
+  if (ENGAGEMENT_POLL) { clearTimeout(ENGAGEMENT_POLL); ENGAGEMENT_POLL = null; }
+}
+
+async function renderEngagementPanel(profileId, el) {
+  stopEngagementPoll();
+  const maxStudInput = document.getElementById('dep-max-students');
+  let engagements = [];
+  try {
+    const r = await apiCall(`/profile-deploy/profiles/${profileId}/engagements`);
+    engagements = Array.isArray(r.engagements) ? r.engagements : [];
+  } catch (_) { /* fall through to the "reserve it" state */ }
+
+  const eng = engagements[0] || null;
+
+  if (!eng) {
+    if (maxStudInput) maxStudInput.disabled = false;
+    el.innerHTML = `<div class="status-banner info">
+      🆕 <strong>No network reserved yet.</strong> Carving the VXLAN block takes a few minutes —
+      it creates one VNet per lane, applies SDN across the whole cluster, then waits for the
+      bridges to come up on every node. Do it now and deploy day is fast.
+      <div style="margin-top:10px">
+        <button class="btn btn-primary" id="btn-reserve-engagement">Reserve network</button>
+        <span class="muted" style="margin-left:8px">
+          Reserves <strong id="rsv-preview-max">${maxStudInput ? maxStudInput.value : ''}</strong> slots.
+          Max students locks once set.
+        </span>
+      </div>
+    </div>`;
+    const btn = document.getElementById('btn-reserve-engagement');
+    if (btn) btn.onclick = () => reserveEngagement(profileId, el);
+    return;
+  }
+
+  if (maxStudInput) {
+    maxStudInput.value = eng.max_students;
+    // The block size is fixed once carved — changing it here would ask the
+    // resize path to re-carve a block lanes may already be sitting in.
+    maxStudInput.disabled = true;
+  }
+
+  if (eng.provision_status === 'provisioning') {
+    el.innerHTML = `<div class="status-banner info">
+      ⏳ <strong>Reserving the network…</strong> Creating ${eng.max_students} VNets, applying SDN
+      across the cluster, then confirming the bridges on every node. This takes a few minutes and
+      continues if you navigate away.
+    </div>`;
+    // Poll rather than leaving the operator guessing. Cleared on profile switch.
+    ENGAGEMENT_POLL = setTimeout(() => renderEngagementPanel(profileId, el), 5000);
+    return;
+  }
+
+  if (eng.provision_status === 'failed') {
+    el.innerHTML = `<div class="status-banner error">
+      ❌ <strong>Network reservation failed.</strong>
+      <div class="muted" style="margin-top:4px">${escapeHtml(eng.provision_error || 'No reason recorded.')}</div>
+      <div style="margin-top:10px">
+        <button class="btn btn-secondary" id="btn-reprovision-engagement">Re-provision</button>
+        <span class="muted" style="margin-left:8px">A failed reservation self-cleans, so retrying is safe.</span>
+      </div>
+    </div>`;
+    const btn = document.getElementById('btn-reprovision-engagement');
+    if (btn) btn.onclick = () => reprovisionEngagement(eng.engagement_id, profileId, el);
+    return;
+  }
+
+  // ready
+  const bridgeNote = eng.bridges_ready
+    ? '<span class="muted">Bridges confirmed on every online node.</span>'
+    : `<span class="muted">⚠ Bridges not confirmed on every node — lanes placed on an
+       unconfirmed node will fail to cable. Re-provision once the node is back.</span>`;
+  el.innerHTML = `<div class="status-banner ${eng.bridges_ready ? 'info' : 'warning'}">
+    ✅ <strong>Network ready</strong> — ${eng.max_students} slots,
+    engagement <code>${escapeHtml(eng.engagement_type)}</code>,
+    challenge <code>${escapeHtml((eng.challenge_key || '').slice(0, 40))}</code>.
+    <div style="margin-top:4px">${bridgeNote}</div>
+  </div>`;
+}
+
+async function reserveEngagement(profileId, el) {
+  const maxStudInput = document.getElementById('dep-max-students');
+  const btn = document.getElementById('btn-reserve-engagement');
+  if (btn) setBtnLoading(btn, true);
+  try {
+    await apiCall('/profile-deploy/engagements', {
+      method: 'POST',
+      body: {
+        profile_id: profileId,
+        engagement_type: 'default',
+        subnet_scheme: (document.getElementById('dep-subnet-scheme') || {}).value || 'v2',
+        max_students: parseInt(maxStudInput.value, 10),
+      },
+    });
+    Toast.success('Reserving the network — this takes a few minutes.');
+    await renderEngagementPanel(profileId, el);
+  } catch (err) {
+    Toast.error(err.message || 'Could not start the reservation');
+  } finally {
+    if (btn) setBtnLoading(btn, false);
+  }
+}
+
+async function reprovisionEngagement(engagementId, profileId, el) {
+  const btn = document.getElementById('btn-reprovision-engagement');
+  if (btn) setBtnLoading(btn, true);
+  try {
+    await apiCall(`/profile-deploy/engagements/${engagementId}/reprovision`, { method: 'POST' });
+    Toast.success('Re-provisioning the network.');
+    await renderEngagementPanel(profileId, el);
+  } catch (err) {
+    Toast.error(err.message || 'Could not re-provision');
+  } finally {
+    if (btn) setBtnLoading(btn, false);
   }
 }
 

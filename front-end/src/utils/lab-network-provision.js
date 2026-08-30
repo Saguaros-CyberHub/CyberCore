@@ -266,28 +266,225 @@ async function ensureSdnZoneAndVnets({ zone, vxlanStart, vxlanEnd, subnetScheme 
     throw err;
   }
 
-  // 4. Wait for the VNet bridges to materialize on a node. Verify the whole
-  // expected set (not just the last one) so a mid-block gap can't pass.
-  let bridgesUp = false;
+  // 4. Wait for the VNet bridges to materialize — on EVERY node a lane could
+  // land on, not just one. See verifyBridgesOnAllNodes for why that matters.
+  const readiness = await verifyBridgesOnAllNodes({ tags: expectedTags, log });
+  const bridgesUp = readiness.ready;
+
+  return {
+    vnetsCreated, zoneCreated, bridgesUp,
+    expectedVnets: expectedTags.length,
+    // The per-node detail, so a caller can persist WHICH nodes were confirmed
+    // rather than a bare boolean. reserveLabNetwork spreads this through.
+    bridgeReadiness: readiness,
+  };
+}
+
+/**
+ * Create the shared readiness table if it is missing.
+ *
+ * WHY cybercore_db AND NOT EITHER PLUGIN. "Were this block's bridges verified,
+ * when, and on which nodes?" is a fact about the RESERVATION — the
+ * crucible_challenge row — not about a CIAB engagement or a CLE course. Both
+ * plugins reserve through reserveLabNetwork, so storing it per-plugin means the
+ * same fact written twice, by two writers, in two databases that cannot join.
+ * Here there is ONE writer (the shared provisioner) and two readers.
+ *
+ * A boot hook rather than a migration, because migrations only run against a
+ * plugin's OWN database — the same reason ensureLaneWanColumns and
+ * ensureAuditLog exist. Idempotent, and safe to call on every boot.
+ */
+async function ensureLabReadinessTable() {
+  await cybercoreQuery(`
+    CREATE TABLE IF NOT EXISTS cybercore_lab_readiness (
+      challenge_id      UUID PRIMARY KEY,
+      bridges_ready     BOOLEAN NOT NULL DEFAULT FALSE,
+      nodes_ready       TEXT[]      NOT NULL DEFAULT '{}',
+      nodes_pending     TEXT[]      NOT NULL DEFAULT '{}',
+      nodes_unreachable TEXT[]      NOT NULL DEFAULT '{}',
+      expected_vnets    INTEGER,
+      report            JSONB,
+      checked_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `);
+}
+
+/**
+ * Record a readiness result against its reservation. Best-effort: a reservation
+ * that succeeded must not be reported as failed because its bookkeeping row
+ * could not be written.
+ */
+async function recordLabReadiness(challengeId, readiness) {
+  if (!challengeId || !readiness) return;
   try {
-    const checkNodes = await proxmoxAPI('GET', '/api2/json/nodes');
-    const checkNode = (checkNodes || [])[0] && (checkNodes || [])[0].node;
-    if (checkNode) {
-      const expectedNames = expectedTags.map(encodeBase20);
-      const deadline = Date.now() + 240000; // 4 min cap
-      while (Date.now() < deadline) {
-        const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${checkNode}/network`);
-        const names = new Set((ifaces || []).map(i => i.iface));
-        if (expectedNames.every(v => names.has(v))) { bridgesUp = true; break; }
-        await new Promise(r => setTimeout(r, 4000));
+    await cybercoreQuery(
+      `INSERT INTO cybercore_lab_readiness
+         (challenge_id, bridges_ready, nodes_ready, nodes_pending, nodes_unreachable,
+          expected_vnets, report, checked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, now())
+       ON CONFLICT (challenge_id) DO UPDATE
+         SET bridges_ready = EXCLUDED.bridges_ready,
+             nodes_ready = EXCLUDED.nodes_ready,
+             nodes_pending = EXCLUDED.nodes_pending,
+             nodes_unreachable = EXCLUDED.nodes_unreachable,
+             expected_vnets = EXCLUDED.expected_vnets,
+             report = EXCLUDED.report,
+             checked_at = now()`,
+      [
+        challengeId, !!readiness.ready,
+        readiness.nodesReady || [], readiness.nodesPending || [], readiness.nodesUnreachable || [],
+        readiness.expected || null, JSON.stringify(readiness),
+      ]
+    );
+  } catch (err) {
+    console.warn(`[LabNetwork] Could not record readiness for ${challengeId}: ${err.message}`);
+  }
+}
+
+/** The recorded readiness for one reservation, or null if it was never verified. */
+async function getLabReadiness(challengeId) {
+  if (!challengeId) return null;
+  try {
+    const r = await cybercoreQuery(
+      `SELECT * FROM cybercore_lab_readiness WHERE challenge_id = $1`, [challengeId]);
+    return r.rows[0] || null;
+  } catch (err) {
+    // The table is created by a boot hook; a plugin reading before that ran
+    // should degrade to "unknown", not 500.
+    return null;
+  }
+}
+
+/** Readiness for many reservations at once, keyed by challenge_id. */
+async function getLabReadinessMap(challengeIds) {
+  const ids = (challengeIds || []).filter(Boolean);
+  if (ids.length === 0) return {};
+  try {
+    const r = await cybercoreQuery(
+      `SELECT * FROM cybercore_lab_readiness WHERE challenge_id = ANY($1::uuid[])`, [ids]);
+    const out = {};
+    for (const row of r.rows) out[row.challenge_id] = row;
+    return out;
+  } catch (err) {
+    return {};
+  }
+}
+
+/**
+ * Confirm the SDN bridges for a set of VXLAN tags exist on every online node.
+ *
+ * WHY EVERY NODE. A lane's node is chosen at DEPLOY time by
+ * batch-deployer.distributeAcrossNodes, which weighted-round-robins over
+ * whatever is online and above the free-memory floor — and that set can change
+ * between reserving a block and deploying from it (a node comes back, or drops
+ * below the floor). So the only safe meaning of "this block is ready" is: the
+ * bridges are up everywhere a lane might be placed. Checking one node answers a
+ * question nobody asked.
+ *
+ * WHAT THIS REPLACES. The previous check read `(await GET /nodes)[0].node` —
+ * whatever Proxmox happened to return first, with no online filter — polled only
+ * that node, and swallowed every error into a log line so a wedged or offline
+ * first node silently produced `bridgesUp: false` with no indication why. Its
+ * result was then read by nobody.
+ *
+ * NODES ARE POLLED CONCURRENTLY, and every call carries its own timeout. Serially
+ * sweeping nine nodes on proxmoxAPI's 30s default would let two dead nodes eat
+ * the entire deadline before a single healthy one was checked.
+ *
+ * NEVER THROWS. A node that cannot be reached is reported as unreachable, not as
+ * an exception — the caller decides whether an incomplete answer blocks a deploy.
+ *
+ * @param {object}   a
+ * @param {number[]} a.tags            VXLAN tags whose bridges must exist (v3 internal tags included by the caller)
+ * @param {string[]} [a.nodes]         override the node list; defaults to every ONLINE node
+ * @param {number}   [a.timeoutMs]     overall deadline (default 240000)
+ * @param {number}   [a.perCallMs]     per-request timeout (default 10000)
+ * @param {number}   [a.intervalMs]    poll interval (default 4000)
+ * @returns {Promise<{ready, nodesReady, nodesPending, nodesUnreachable, missingByNode, expected, checkedAt}>}
+ */
+async function verifyBridgesOnAllNodes({
+  tags, nodes = null, timeoutMs = 240000, perCallMs = 10000, intervalMs = 4000, log = () => {},
+}) {
+  const expectedNames = [...new Set((tags || []).filter(Number.isFinite))].map(encodeBase20);
+  const result = {
+    ready: false,
+    nodesReady: [], nodesPending: [], nodesUnreachable: [],
+    missingByNode: {}, expected: expectedNames.length, checkedAt: null,
+  };
+  if (expectedNames.length === 0) {
+    result.ready = true;
+    return result;
+  }
+
+  // The SAME source distributeAcrossNodes uses, filtered the same way, so the
+  // set we verify is the set a deploy can actually choose from.
+  let nodeNames = nodes;
+  if (!nodeNames) {
+    try {
+      const rows = await proxmoxAPI('GET', '/api2/json/cluster/resources?type=node', null, { timeoutMs: perCallMs });
+      nodeNames = (rows || []).filter(n => n.type === 'node' && n.status === 'online').map(n => n.node);
+    } catch (e) {
+      log(`Bridge readiness: could not list nodes (${e.message})`);
+      return result;
+    }
+  }
+  if (nodeNames.length === 0) {
+    log('Bridge readiness: no online nodes to check');
+    return result;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let pending = [...nodeNames];
+
+  while (pending.length > 0 && Date.now() < deadline) {
+    const checks = await Promise.all(pending.map(async (node) => {
+      try {
+        const ifaces = await proxmoxAPI('GET', `/api2/json/nodes/${node}/network`, null, { timeoutMs: perCallMs });
+        const present = new Set((ifaces || []).map(i => i.iface));
+        const missing = expectedNames.filter(n => !present.has(n));
+        return { node, missing, reachable: true };
+      } catch (e) {
+        return { node, missing: expectedNames, reachable: false, error: e.message };
+      }
+    }));
+
+    const stillPending = [];
+    for (const c of checks) {
+      if (c.reachable && c.missing.length === 0) {
+        if (!result.nodesReady.includes(c.node)) result.nodesReady.push(c.node);
+        delete result.missingByNode[c.node];
+      } else {
+        result.missingByNode[c.node] = c.reachable
+          ? c.missing
+          : [`unreachable: ${c.error}`];
+        stillPending.push(c.node);
       }
     }
-  } catch (e) {
-    log(`SDN bridge readiness check skipped: ${e.message}`);
+    pending = stillPending;
+    if (pending.length === 0) break;
+    if (Date.now() + intervalMs >= deadline) break;
+    await new Promise(r => setTimeout(r, intervalMs));
   }
-  log(bridgesUp ? 'SDN VNet bridges are up.' : 'WARNING: SDN bridges not confirmed within 4 min.');
 
-  return { vnetsCreated, zoneCreated, bridgesUp, expectedVnets: expectedTags.length };
+  // A node that never answered is reported separately from one that answered
+  // and was simply missing bridges — they need different operator responses.
+  for (const node of pending) {
+    const miss = result.missingByNode[node] || [];
+    if (miss.length === 1 && String(miss[0]).startsWith('unreachable:')) result.nodesUnreachable.push(node);
+    else result.nodesPending.push(node);
+  }
+
+  result.ready = pending.length === 0;
+  result.checkedAt = new Date().toISOString();
+
+  if (result.ready) {
+    log(`SDN bridges confirmed on all ${result.nodesReady.length} online node(s).`);
+  } else {
+    log(`WARNING: SDN bridges not confirmed on ${pending.length}/${nodeNames.length} node(s) — `
+      + `pending: ${result.nodesPending.join(', ') || 'none'}; `
+      + `unreachable: ${result.nodesUnreachable.join(', ') || 'none'}`);
+  }
+  return result;
 }
 
 /** Remove the block's VNets and (if it has no remaining VNets) its zone, then reload. */
@@ -421,6 +618,10 @@ async function reserveLabNetwork({
     throw err;
   }
 
+  // ONE writer for the shared fact. Both plugins read it back through
+  // getLabReadiness rather than each keeping their own copy in their own DB.
+  await recordLabReadiness(challengeId, infra.bridgeReadiness);
+
   return {
     challenge_id: challengeId,
     challenge_key: challengeKey,
@@ -492,6 +693,11 @@ module.exports = {
   allocateVxlanBlock,
   countActiveLanesInBlock,
   ensureSdnZoneAndVnets,
+  verifyBridgesOnAllNodes,
+  ensureLabReadinessTable,
+  recordLabReadiness,
+  getLabReadiness,
+  getLabReadinessMap,
   teardownSdnForBlock,
   reserveLabNetwork,
   teardownLabNetwork,

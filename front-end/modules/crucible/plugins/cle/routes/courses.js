@@ -229,19 +229,137 @@ async function provisionCourseLab(course) {
       log: (m) => console.log(`[CLE] Course lab: ${m}`),
     });
 
+    // reserveLabNetwork has always returned bridgesUp and this ignored it, so a
+    // course flipped to 'ready' whether or not a single bridge came up. Track A8
+    // made the underlying check honest (every ONLINE node, concurrently, instead
+    // of whichever node Proxmox listed first); recording it here is what makes
+    // that visible on the CLE side.
+    // Readiness is recorded against the RESERVATION by reserveLabNetwork, in
+    // cybercore_db, so it is not copied onto the course — CIAB reads the same
+    // row through getLabReadiness(challenge_id).
+    const readiness = reservation.bridgeReadiness || null;
     await query(`
       UPDATE cle_course
           SET challenge_id = $1, challenge_key = $2, subnet_scheme = $3,
               provision_status = 'ready', updated_at = NOW()
         WHERE course_id = $4
     `, [reservation.challenge_id, reservation.challenge_key, reservation.subnet_scheme, course.course_id]);
-    console.log(`[CLE] Course lab ready: ${course.course_id}`);
+    if (reservation.bridgesUp) {
+      console.log(`[CLE] Course lab ready: ${course.course_id}`);
+    } else {
+      // Still 'ready': the block exists and lanes can deploy onto the nodes that
+      // DID come up. Blocking a whole course over one node that is down for
+      // unrelated reasons would be worse than deploying with a warning.
+      const short = readiness
+        ? readiness.nodesPending.concat(readiness.nodesUnreachable).join(', ')
+        : 'unknown';
+      console.warn(`[CLE] Course lab ${course.course_id} reserved but bridges unconfirmed on ${short} — `
+        + `workstations placed there will fail to cable`);
+    }
   } catch (error) {
     console.error(`[CLE] Course lab provision failed for ${course.course_id}:`, error.message);
     await query(`
       UPDATE cle_course SET provision_status = 'failed', updated_at = NOW()
         WHERE course_id = $1
     `, [course.course_id]).catch(() => {});
+    // Deliberately not swallowed silently: before Track A8 the ONLY remedy for a
+    // failed course was deleting and recreating it, and the reason was in a log
+    // line nobody would look for. POST /:courseId/reprovision now exists.
+    console.error(`[CLE] Course ${course.course_id} can be retried: POST /api/cle/courses/${course.course_id}/reprovision`);
+  }
+}
+
+/**
+ * POST /api/cle/courses/:courseId/reprovision — retry a failed lab reservation.
+ *
+ * Track A8 parity. Before this, a course whose reservation failed could only be
+ * DELETED and recreated — which is what both error strings still told operators
+ * to do — and that throws away the roster and every enrollment with it.
+ *
+ * Guarded against the two ways a retry does damage:
+ *   - already 'provisioning' → refuse, because allocateVxlanBlock always carves
+ *     ABOVE the global maximum and never re-uses, so a concurrent second run
+ *     permanently burns a second block.
+ *   - already 'ready' → refuse for the same reason, unless explicitly forced.
+ */
+router.post('/:courseId/reprovision', adminOnly, async (req, res) => {
+  try {
+    const { courseId } = req.params;
+    const r = await query(
+      `SELECT course_id, course_name, max_students, provision_status, challenge_id
+         FROM cle_course WHERE course_id = $1`,
+      [courseId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Course not found' });
+    const course = r.rows[0];
+
+    if (course.provision_status === 'provisioning') {
+      return res.status(409).json({
+        error: 'This course is already being provisioned. Wait for it to finish.',
+      });
+    }
+    if (course.provision_status === 'ready' && req.body?.force !== true) {
+      return res.status(409).json({
+        error: 'This course already has a lab network. Re-provisioning a healthy one would carve '
+             + 'a second VXLAN block — blocks are only ever allocated above the highest in use, never reused.',
+      });
+    }
+
+    await query(
+      `UPDATE cle_course SET provision_status = 'provisioning', updated_at = NOW()
+        WHERE course_id = $1`,
+      [courseId]
+    );
+
+    audit.log({
+      req,
+      action: 'cle_course.reprovisioned',
+      source: 'cle',
+      target: { type: 'course', id: courseId, label: course.course_name },
+      metadata: { previous_status: course.provision_status },
+    });
+
+    // Detached, exactly as the create path does it.
+    provisionCourseLab(course)
+      .catch((err) => console.error('[CLE] Re-provision crashed:', err.message));
+
+    res.status(202).json({ success: true, course_id: courseId, provision_status: 'provisioning' });
+  } catch (error) {
+    console.error('[CLE] Reprovision error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Boot sweep for courses stranded mid-provision.
+ *
+ * Reserving a lab is fire-and-forget async work inside THIS process with no
+ * resume, so any course still 'provisioning' at boot was abandoned by a previous
+ * one. Without this it spins "Initializing" in the UI forever, its deploy stays
+ * blocked on a null challenge_id, and the only exit is deleting the course —
+ * which is exactly the state CLE could get stuck in before Track A8.
+ *
+ * Marks them 'failed' rather than auto-retrying: a half-built block may hold a
+ * challenge row, and an operator pressing Re-provision is a decision where an
+ * automatic retry at every boot is a loop.
+ *
+ * Exported for src/server.js, alongside recoverStrandedLanes.
+ */
+async function recoverStrandedCourseLabs() {
+  try {
+    const res = await query(
+      `UPDATE cle_course SET provision_status = 'failed', updated_at = NOW()
+        WHERE provision_status = 'provisioning'
+        RETURNING course_id, course_name`
+    );
+    if (res.rows.length > 0) {
+      console.warn(`[CLE] Marked ${res.rows.length} course lab(s) failed — stranded mid-provision by a `
+        + `restart: ${res.rows.map(c => c.course_name || c.course_id).join(', ')}. Re-provision to retry.`);
+    }
+    return res.rows.length;
+  } catch (err) {
+    console.warn(`[CLE] stranded course-lab sweep skipped: ${err.message}`);
+    return 0;
   }
 }
 
@@ -411,3 +529,6 @@ router.delete('/:courseId', adminOnly, async (req, res) => {
 });
 
 module.exports = router;
+// Named export alongside the router so src/server.js can run the boot sweep
+// without importing the route table.
+module.exports.recoverStrandedCourseLabs = recoverStrandedCourseLabs;
