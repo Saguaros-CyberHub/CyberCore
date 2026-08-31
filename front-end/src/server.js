@@ -152,7 +152,14 @@ app.use(helmet({
       fontSrc: ["'self'", "https://fonts.gstatic.com"],
       scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
       scriptSrcAttr: ["'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "blob:"],
+      // https: rather than a host allowlist. The site logo and favicon are
+      // admin-set URLs that can point anywhere, so a fixed list would silently
+      // block every branding change with nothing but a console violation to
+      // show for it -- which is exactly how the Logo URL field came to look
+      // like it did nothing. Images are passive content; the only exposure is
+      // that the chosen host sees viewers' IPs. Drop the file in public/img
+      // and use a relative path if you want branding to stay 'self'-only.
+      imgSrc: ["'self'", "data:", "blob:", "https:"],
       connectSrc: ["'self'"],
       frameSrc: frameSrcDirective,
       upgradeInsecureRequests: null

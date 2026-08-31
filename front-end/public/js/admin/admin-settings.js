@@ -2,6 +2,14 @@
 // SETTINGS TAB
 // ============================================================================
 
+// Layout paints the sidebar logo/favicon from localStorage; this is the only
+// place on the admin page that refreshes those keys.
+function cacheBranding(logoUrl, faviconUrl) {
+  localStorage.setItem('site_logo_url', logoUrl || '');
+  localStorage.setItem('site_favicon_url', faviconUrl || '');
+  if (typeof Layout !== 'undefined') Layout.applySiteBranding();
+}
+
 async function loadSiteSettings() {
   try {
     const data = await api('GET', '/settings');
@@ -12,6 +20,10 @@ async function loadSiteSettings() {
 
     // Update everywhere via Layout
     Layout.updateSiteName(siteName + ' Administration');
+    // Seed the cache Layout.applySiteBranding() paints from. Without this the
+    // admin's own sidebar keeps whatever logo it last saw on a non-admin page,
+    // because loadSiteBranding() deliberately does not run here.
+    cacheBranding(logoUrl, faviconUrl);
 
     // Pre-fill the input fields
     const nameInput = document.getElementById('settingsSiteName');
@@ -69,6 +81,10 @@ async function saveSiteSettings() {
 
     // Update everywhere via Layout
     Layout.updateSiteName(siteName + ' Administration');
+    // Repaint the sidebar against the values just saved, so the admin sees the
+    // new logo without a reload -- and sees it FAIL to load, via the console
+    // warning and the shield fallback, if the URL is hotlink-protected.
+    cacheBranding(logoUrl, faviconUrl);
 
     // Also update the admin page header
     document.getElementById('pageTitle').textContent = siteName + ' Administration';

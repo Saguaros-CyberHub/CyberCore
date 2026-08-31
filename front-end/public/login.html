@@ -170,14 +170,11 @@
           if (config.site_description) {
             document.getElementById('siteDescription').textContent = config.site_description;
           }
-          if (config.site_favicon_url) {
-            const link = document.querySelector("link[rel='icon']") || document.createElement('link');
-            link.rel = 'icon';
-            link.href = config.site_favicon_url;
-            if (!document.querySelector("link[rel='icon']")) {
-              document.head.appendChild(link);
-            }
-          }
+          // Logo was the piece missing here: the field was stored, served by
+          // /api/site-config and read straight back into the admin form, but
+          // no page ever rendered it. See Branding in app.js.
+          Branding.applyLogo(config);
+          Branding.applyFavicon(config);
           // Accounts come from a roster, so don't offer a route the API refuses.
           // Starts hidden in the markup and is revealed only on an explicit true:
           // if this fetch fails the prompt stays hidden, which is the harmless

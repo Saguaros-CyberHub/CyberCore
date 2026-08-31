@@ -370,6 +370,11 @@ const Layout = {
 
     // Fetch modules and populate nav
     this.loadModules();
+
+    // Repaint the name/logo. The innerHTML assignment above just threw away
+    // whatever applySiteBranding() had inserted, and this runs at least twice
+    // per page (DOMContentLoaded, then again on `authReady`).
+    this.applySiteBranding();
   },
 
   // ── Support tickets ─────────────────────────────────────────────────────
@@ -976,54 +981,114 @@ const Layout = {
     });
   },
 
-  // Load and apply site name from backend
-  async loadSiteNameFromSettings() {
+  // ── Site branding: name, logo, favicon ─────────────────────────────────────
+  //
+  // Reads the PUBLIC /api/site-config, NOT /api/admin/settings. The previous
+  // version used the admin endpoint, which 403s for every student and
+  // instructor, so a white-label deploy's branding only ever reached admins --
+  // everyone else sat on the hard-coded "CyberHub" fallback forever.
+  //
+  // The logo is applied through the DOM (img.src = url), never by interpolating
+  // the URL into getSidebarHTML()'s template string. Two reasons, both load-
+  // bearing: escapeHtml() below escapes < > & but NOT quotes, so it is not
+  // attribute-safe; and the two suites that eval this file against a stub
+  // browser context have no document.createElement, so getSidebarHTML() must
+  // stay free of any call that needs one.
+  async loadSiteBranding() {
     try {
-      // Skip if on admin page - admin.html handles its own site name loading
-      if (window.location.pathname.includes('/admin')) {
-        return;
-      }
-      
-      // Check if user is authenticated
-      const token = localStorage.getItem('token');
-      if (!token) {
-        return;
-      }
+      // admin.html drives its own branding (it appends " Administration" to the
+      // name and repaints after a save), so refreshing from the API here would
+      // race that and clobber it. The cached paint in applySiteBranding() still
+      // runs there, so the admin sidebar keeps the logo.
+      if (window.location.pathname.includes('/admin')) return;
 
-      const response = await fetch('/api/admin/settings', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        }
-      });
+      const response = await fetch('/api/site-config');
+      if (!response.ok) return;
+      const config = await response.json();
 
-      if (response.ok) {
-        const data = await response.json();
-        const siteName = data.site_name || 'CyberHub';
-        this.updateSiteName(siteName);
-      } else if (response.status === 403) {
-        // User is not admin - that's fine, just use default
-        return;
-      }
+      if (config.site_name) localStorage.setItem('site_name', config.site_name);
+      // Store '' rather than removeItem: an admin who CLEARS the logo field has
+      // to get the shield back, and a missing key is indistinguishable from
+      // "never fetched" to the cache read in applySiteBranding().
+      localStorage.setItem('site_logo_url', config.site_logo_url || '');
+      localStorage.setItem('site_favicon_url', config.site_favicon_url || '');
+
+      this.applySiteBranding();
     } catch (err) {
-      // Silent fail - just use default CyberHub
-      console.debug('[Layout] Could not load site name:', err.message);
+      // Silent: branding is cosmetic, and the cached values have already painted.
+      console.debug('[Layout] Could not load site branding:', err.message);
     }
   },
 
-  // Update site name everywhere in the UI
+  // Kept as a name-only setter because admin/admin-settings.js calls it to
+  // append " Administration" after a save.
   updateSiteName(siteName) {
     if (!siteName) return;
-    
-    // Update sidebar
+
     const sidebarEl = document.getElementById('sidebarSiteName');
     if (sidebarEl) sidebarEl.textContent = siteName;
-    
-    // Update page title
+
     document.title = siteName;
-    
-    // Store in localStorage
     localStorage.setItem('site_name', siteName);
+  },
+
+  // A branding asset must be a same-origin absolute path or an http(s) URL.
+  // The field is admin-only, but the value is stored in a DB row and rendered
+  // on every page of the site, so javascript: and data: do not get a pass.
+  isSafeAssetUrl(url) {
+    if (typeof url !== 'string') return false;
+    const u = url.trim();
+    if (!u) return false;
+    if (u.startsWith('/') && !u.startsWith('//')) return true;
+    return /^https?:\/\//i.test(u);
+  },
+
+  // Paint name + logo + favicon from the localStorage cache.
+  applySiteBranding() {
+    const siteName = localStorage.getItem('site_name');
+    if (siteName) this.updateSiteName(siteName);
+
+    const logoUrl = localStorage.getItem('site_logo_url');
+    const anchor = document.querySelector('.sidebar-logo');
+    if (anchor) {
+      const icon = anchor.querySelector('.icon');
+      let img = anchor.querySelector('.sidebar-logo-img');
+
+      if (this.isSafeAssetUrl(logoUrl)) {
+        if (!img) {
+          img = document.createElement('img');
+          img.className = 'sidebar-logo-img';
+          img.alt = '';
+          // Hotlink protection, a 404, or a dead host would otherwise wedge a
+          // broken-image glyph into the header of every page. Fail back to the
+          // shield instead -- and say why, because a hotlink block is invisible
+          // from the server side and impossible to guess from the UI.
+          img.onerror = () => {
+            console.warn('[Layout] Site logo failed to load (hotlink-blocked, ' +
+              '404, or CSP-blocked): ' + logoUrl);
+            img.remove();
+            if (icon) icon.style.display = '';
+          };
+          anchor.insertBefore(img, anchor.firstChild);
+        }
+        if (img.getAttribute('src') !== logoUrl) img.src = logoUrl;
+        if (icon) icon.style.display = 'none';
+      } else {
+        if (img) img.remove();
+        if (icon) icon.style.display = '';
+      }
+    }
+
+    const faviconUrl = localStorage.getItem('site_favicon_url');
+    if (this.isSafeAssetUrl(faviconUrl)) {
+      let link = document.querySelector("link[rel='icon']");
+      if (!link) {
+        link = document.createElement('link');
+        link.rel = 'icon';
+        document.head.appendChild(link);
+      }
+      if (link.getAttribute('href') !== faviconUrl) link.href = faviconUrl;
+    }
   }
 };
 
@@ -1032,11 +1097,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Small delay to ensure Auth is loaded
   setTimeout(() => {
     Layout.init();
-    // Load site name from localStorage (set by admin page or API)
-    const siteName = localStorage.getItem('site_name');
-    if (siteName) {
-      Layout.updateSiteName(siteName);
-    }
+    // Paint from cache first so a branded deploy does not flash "CyberHub" and
+    // the default shield on every navigation, then refresh from the API.
+    Layout.applySiteBranding();
+    Layout.loadSiteBranding();
   }, 100);
 });
 
@@ -1047,6 +1111,5 @@ window.addEventListener('authReady', () => {
   // /auth/me), so this is the pass that settles the mode — the same reason
   // the Admin gear only appears here.
   Layout.applyStudentViewFlag();
-  // Refresh site name from API for authenticated users
-  Layout.loadSiteNameFromSettings();
+  // Branding is repainted by injectSidebar() itself; no second fetch needed.
 });

@@ -100,14 +100,11 @@
           if (config.site_description) {
             document.getElementById('siteDescription').textContent = config.site_description;
           }
-          if (config.site_favicon_url) {
-            const link = document.querySelector("link[rel='icon']") || document.createElement('link');
-            link.rel = 'icon';
-            link.href = config.site_favicon_url;
-            if (!document.querySelector("link[rel='icon']")) {
-              document.head.appendChild(link);
-            }
-          }
+          // Logo was the piece missing here: the field was stored, served by
+          // /api/site-config and read straight back into the admin form, but
+          // no page ever rendered it. See Branding in app.js.
+          Branding.applyLogo(config);
+          Branding.applyFavicon(config);
           showRegistrationState(config.self_registration_enabled === true);
           return;
         }

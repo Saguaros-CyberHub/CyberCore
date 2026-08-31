@@ -118,14 +118,10 @@
         siteName = config.site_name || 'CyberHub';
         
         // Update favicon if available
-        if (config.site_favicon_url) {
-          const favicon = document.querySelector("link[rel='icon']") || document.createElement('link');
-          favicon.rel = 'icon';
-          favicon.href = config.site_favicon_url;
-          if (!document.querySelector("link[rel='icon']")) {
-            document.head.appendChild(favicon);
-          }
-        }
+        // The sidebar logo is Layout.applySiteBranding()'s job -- it owns the
+        // markup and repaints after every injectSidebar(). Only the favicon is
+        // this page's to set.
+        Branding.applyFavicon(config);
       } catch (err) {
         console.warn('Could not load site config:', err);
       }

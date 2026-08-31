@@ -784,6 +784,65 @@ const Utils = {
 };
 
 /**
+ * Site branding for pages that do NOT load layout.js -- login, register and
+ * activate. Those three each fetch /api/site-config already; this is the part
+ * they were all missing, which is why Admin -> Settings -> Logo URL appeared
+ * to do nothing anywhere in the product.
+ *
+ * The hub and every page with a sidebar are handled by Layout.applySiteBranding().
+ */
+const Branding = {
+  // Same rule as Layout.isSafeAssetUrl(): a same-origin absolute path or an
+  // http(s) URL. Admin-only field, but it is a stored value rendered on the
+  // sign-in page, so javascript: and data: do not get a pass.
+  isSafeAssetUrl(url) {
+    if (typeof url !== 'string') return false;
+    const u = url.trim();
+    if (!u) return false;
+    if (u.startsWith('/') && !u.startsWith('//')) return true;
+    return /^https?:\/\//i.test(u);
+  },
+
+  // Swap the .auth-logo emoji for the configured logo. Built with
+  // createElement + .src rather than innerHTML so the URL is never parsed as
+  // markup, and wired to fall back to the emoji if the image will not load --
+  // a hotlink-protected host (most free clip-art sites) returns 403 to a
+  // browser even though it serves the file fine to curl.
+  applyLogo(config, selector) {
+    const holder = document.querySelector(selector || '.auth-logo');
+    if (!holder) return;
+
+    const url = config && config.site_logo_url;
+    if (!this.isSafeAssetUrl(url)) return;
+
+    const fallback = holder.innerHTML;
+    const img = document.createElement('img');
+    img.alt = config.site_name || '';
+    img.onerror = () => {
+      console.warn('[Branding] Site logo failed to load (hotlink-blocked, 404, ' +
+        'or CSP-blocked): ' + url);
+      holder.innerHTML = fallback;
+    };
+    img.src = url;
+    holder.innerHTML = '';
+    holder.appendChild(img);
+  },
+
+  applyFavicon(config) {
+    const url = config && config.site_favicon_url;
+    if (!this.isSafeAssetUrl(url)) return;
+
+    let link = document.querySelector("link[rel='icon']");
+    if (!link) {
+      link = document.createElement('link');
+      link.rel = 'icon';
+      document.head.appendChild(link);
+    }
+    link.href = url;
+  }
+};
+
+/**
  * Form validation helpers
  */
 const Validator = {

@@ -55,6 +55,32 @@
   font-size: 1.5rem;
 }
 
+/* Site logo from Admin -> Settings -> Logo URL, inserted by
+   Layout.applySiteBranding() in place of the shield emoji. Constrained rather
+   than sized: the field takes any URL, so the image could be a 32px favicon or
+   a 2000px wordmark and the sidebar header has to survive both.
+
+   The white chip is not decoration. This sidebar is #0c234b -- Arizona Blue --
+   and the University of Arizona block A is outlined in that exact colour, so
+   the mark's whole outer shape vanishes into the background and it reads as a
+   floating red A. The alternative is a reversed (white-outline) logo, but the
+   SAME url also renders on the light sign-in card, where a reversed mark would
+   be invisible in the other direction. One field, two backgrounds: the chip is
+   what makes any uploaded logo legible on both without recolouring a mark that
+   brand guidelines almost never allow you to recolour. */
+.sidebar-logo-img {
+  display: block;
+  height: 28px;
+  width: auto;
+  max-width: 150px;
+  object-fit: contain;
+  flex-shrink: 0;
+  background: #fff;
+  padding: 4px 6px;
+  border-radius: 6px;
+  box-sizing: content-box;
+}
+
 .sidebar-nav {
   flex: 1;
   padding: 1rem 0;

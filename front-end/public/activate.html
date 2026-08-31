@@ -82,6 +82,9 @@
         if (config.site_description) {
           document.getElementById('siteDescription').textContent = config.site_description;
         }
+        // This page never applied the logo or the favicon at all.
+        Branding.applyLogo(config);
+        Branding.applyFavicon(config);
       } catch (e) {
         console.warn('[Activate] Could not load site config:', e.message);
       }
