@@ -2436,14 +2436,25 @@ async function rebuildLaneChallengeVms({
   const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
   const goadMacs = goadDeploy.prepareGoadMacs(spec, lane.vxlan_id, goadSubnetBase);
 
-  const vnets = await resolveVnets([lane.vxlan_id], subnetScheme);
-  const vnetPair = vnets[lane.vxlan_id] || vnets[String(lane.vxlan_id)];
+  // resolveVnets returns { resolved, missing } -- the VNets live under .resolved,
+  // keyed by vxlan id, and each entry is { vnet, vnetInt } where each of THOSE is
+  // the Proxmox VNet object whose .vnet property is the name. Indexing the
+  // wrapper directly was always undefined, so this threw 'cabled to nothing' on
+  // every rebuild no matter how healthy the lane was. Destructured the way
+  // deployChallengeLanesInner already does it.
+  const { resolved: vnetsByVxlan, missing: vnetsMissing } = await resolveVnets(
+    [lane.vxlan_id], subnetScheme);
+  const vnetPair = vnetsByVxlan[lane.vxlan_id] || vnetsByVxlan[String(lane.vxlan_id)];
   if (!vnetPair) {
+    // Report WHY: resolveVnets already tells 'no VNet at all' apart from 'v3 lane
+    // missing only its internal VNet', and those need different fixes.
+    const reason = (vnetsMissing.find(m => String(m.vxlanId) === String(lane.vxlan_id)) || {}).reason
+      || `No VNet with tag ${lane.vxlan_id}`;
     throw challengePreflightError(
-      `No SDN VNet for VXLAN ${lane.vxlan_id} \u2014 a rebuilt machine would be cabled to nothing.`);
+      `${reason} \u2014 a rebuilt machine would be cabled to nothing.`);
   }
-  const vnetExtName = (vnetPair.ext || vnetPair).vnet;
-  const vnetIntName = isV3 ? (vnetPair.int || vnetPair).vnet : vnetExtName;
+  const vnetExtName = vnetPair.vnet.vnet;
+  const vnetIntName = isV3 ? vnetPair.vnetInt.vnet : vnetExtName;
 
   const templateNodeByVmid = await resolveTemplateNodes(specVms, spec, false);
   const ctx = {
