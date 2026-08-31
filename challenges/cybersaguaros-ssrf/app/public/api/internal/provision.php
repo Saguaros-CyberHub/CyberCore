@@ -6,8 +6,8 @@
 // obtain a working admin session without an interactive login.
 //
 // nginx restricts the entire /api/internal/ path to 127.0.0.1, so the team
-// considers this endpoint "safe to leave unauthenticated." It is reachable
-// from loopback only — which is exactly what the SaguaroBot SSRF provides.
+// considers this endpoint safe to leave unauthenticated: it is reachable from
+// loopback only.
 // ============================================================================
 require_once __DIR__ . '/../../../includes/db.php';
 header('Content-Type: application/json');

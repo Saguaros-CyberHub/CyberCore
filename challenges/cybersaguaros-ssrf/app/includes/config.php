@@ -2,9 +2,8 @@
 // ============================================================================
 // CyberSaguaros Research Portal — application config
 // ============================================================================
-// DB credentials match what bake-cybersaguaros-template.sh provisions in
-// MariaDB. Lives outside the nginx webroot (app/includes/, not app/public/)
-// so it is never web-reachable.
+// Lives outside the nginx webroot (app/includes/, not app/public/) so it is
+// never web-reachable.
 // ============================================================================
 
 define('APP_NAME',   'CyberSaguaros Research Portal');

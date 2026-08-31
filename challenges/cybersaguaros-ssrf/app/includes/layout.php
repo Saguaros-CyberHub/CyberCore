@@ -10,8 +10,7 @@ require_once __DIR__ . '/config.php';
 // `global $pdo` inside admin_identity() resolves. Moved INSIDE render_header()
 // — as render_footer() does with chatwidget.php, so the shape looks
 // reasonable — db.php would execute in function scope, $pdo would become a
-// local, and every page would fatal with "prepare() on null". That surfaces at
-// bake as SITE_HTTP=no, which points nowhere near the actual cause.
+// local, and every page would fatal with "prepare() on null".
 require_once __DIR__ . '/auth.php';
 
 /** "Dr. Paul Wagner" -> "PW".  "Reggie Green" -> "RG". */
@@ -28,15 +27,13 @@ function initials(string $name): string {
 /**
  * The header identity chip. Four states, because the token admin has no user
  * row to name:
- *   1. anonymous              -> sign-in link
- *   2. researcher             -> who + log out
- *   3. admin via portal login -> who + Admin Panel + log out
- *   4. admin via SSRF token   -> "Admin session" + Admin Panel (no log out)
+ *   1. anonymous               -> sign-in link
+ *   2. researcher              -> who + log out
+ *   3. admin via portal login  -> who + Admin Panel + log out
+ *   4. admin via session token -> "Admin session" + Admin Panel (no log out)
  *
- * State 4 has no log-out link on purpose. logout.php destroys the PHP session,
- * not the admin_session cookie, so the link would do nothing for a token
- * admin; and wiring it up to clear the cookie too would put a student one
- * misclick away from destroying the token they just pulled out of the SSRF.
+ * State 4 has no log-out link. logout.php destroys the PHP session, not the
+ * admin_session cookie, so the link would do nothing for a token admin.
  */
 function render_userchip(?array $me, ?array $admin): void {
     if (!$me && !$admin) {
@@ -74,9 +71,8 @@ function render_header(string $title, string $active = ''): void {
     $me    = current_researcher();
     $admin = admin_identity();
 
-    // SaguaroBot (/chat.php) is intentionally NOT in the nav — it is found
-    // through directory enumeration during recon. login.php does not redirect
-    // there either, for the same reason.
+    // SaguaroBot (/chat.php) is not in the nav: the floating widget is on
+    // every page already, so a second entry point would be redundant.
     $nav = [
         '/'                 => 'Home',
         '/about.php'        => 'About',

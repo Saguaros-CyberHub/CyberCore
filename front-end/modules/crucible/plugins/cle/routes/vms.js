@@ -1215,7 +1215,14 @@ router.post('/redeploy', instructorOnly, async (req, res) => {
     )];
     if (wantTemplates.length) {
       const okT = await cybercoreQuery(
-        `SELECT id FROM cybercore_template_catalog`,
+        // ::uuid[] is not decoration. A bare $1 against `= ANY(...)` leaves the
+        // parameter untyped and the statement fails to PARSE, which surfaces as a
+        // redeploy that refuses for a reason unrelated to the templates.
+        `SELECT id
+           FROM cybercore_template_catalog
+          WHERE id = ANY($1::uuid[])
+            AND is_active = TRUE
+            AND status    = 'active'`,
         [wantTemplates]
       );
       const alive = new Set(okT.rows.map(r => r.id));

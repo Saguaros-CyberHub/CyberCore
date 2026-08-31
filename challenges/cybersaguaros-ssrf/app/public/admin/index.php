@@ -3,9 +3,8 @@ require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/layout.php';
 require_admin();
 
-// Which of the two surfaces let this request in. The SSRF path has no user
-// row, so this is also the clearest place in the app to show a student that
-// two independent routes reach the same door.
+// Which of the two surfaces let this request in. A token session has no user
+// row, so the panel names whichever one authorised the request.
 $who = admin_identity();
 
 $userCount    = $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
@@ -24,8 +23,7 @@ render_header('Control Panel', '');
        (@<?= htmlspecialchars((string) $who['username']) ?>) — portal administrator.</p>
   <?php else: ?>
     <?php
-      // admin_sessions.label is written by provision.php, but it comes back out
-      // of a database that anyone holding the SQLi can write to — escape it.
+      // admin_sessions.label comes back out of the database — escape it.
     ?>
     <p class="muted">Authorised by an <strong>admin session token</strong> —
        <?= htmlspecialchars($who['label']) ?>. No portal user is associated with

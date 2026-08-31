@@ -2,16 +2,8 @@
 // ============================================================================
 // SaguaroBot transcript review.
 // ============================================================================
-// *** ESCAPING HERE IS LOAD-BEARING. ***
-// chat_logs holds raw visitor input. Students WILL have typed
-// <script>alert(1)</script> and loopback URLs into the bot before an
-// instructor ever opens this page. Rendering `message` unescaped would turn
-// this into an accidental stored-XSS sink firing inside the admin panel — a
-// second injectable surface this challenge deliberately does not have.
-// /research.php is the one injection point in this app.
-//
-// Rendered escaped inside monospace turns, so a payload shows up as visible
-// text. That is a better teaching artifact than a popup anyway.
+// chat_logs holds raw visitor input, so every field is escaped on render and
+// shown as monospace turns.
 // ============================================================================
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/layout.php';

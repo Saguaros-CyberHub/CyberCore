@@ -2,14 +2,9 @@
 // ============================================================================
 // SaguaroBot — dataset integrity verification
 // ============================================================================
-// The bot fetches the researcher-supplied dataset URL server-side to check
-// it before review.
-//
-// *** VULNERABILITY: Server-Side Request Forgery ***
-// There is no scheme or host allowlist. The fetch runs from the web server,
-// so any URL the caller supplies is requested with the server's network
-// position — including loopback and internal-only services. The response
-// body snippet is returned to the caller, making this a fully readable SSRF.
+// The bot fetches the researcher-supplied dataset URL server-side to check it
+// before review, and returns a snippet of what came back so the submitter can
+// confirm it is the file they meant.
 // ============================================================================
 header('Content-Type: application/json');
 

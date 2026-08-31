@@ -2,9 +2,7 @@
 // ============================================================================
 // Portal user administration.
 // ============================================================================
-// Deliberately does NOT render password_hash. A real admin panel would not,
-// and rendering it here would hand the SSRF route the same hashes the SQLi
-// route works for — collapsing two distinct paths into one.
+// password_hash is never rendered here. A staff directory has no use for it.
 // ============================================================================
 require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/layout.php';

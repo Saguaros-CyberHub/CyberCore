@@ -2,24 +2,13 @@
 // ============================================================================
 // CyberSaguaros Research Portal — authentication helpers
 // ============================================================================
-// TWO independent admin surfaces, both first-class. Either one authorises
-// /admin/, including the Cloud Storage upload:
+// Two ways to hold admin on this portal:
 //
-//   'session' — a signed-in portal user whose users.role is 'admin'
-//               (dr.wagner). This is the route a student takes after dumping
-//               `users` through the /research.php SQLi and cracking the
-//               unsalted SHA-256 hashes: legitimate functionality, abused.
+//   'session' — a signed-in portal user whose users.role is 'admin'.
 //
 //   'token'   — a valid, unexpired admin_sessions row keyed by the
-//               `admin_session` cookie. Tokens are minted only by
-//               /api/internal/provision.php, which nginx binds to loopback,
-//               so in practice this route is reachable only through the
-//               SaguaroBot SSRF.
-//
-// The two converge deliberately. What keeps the credential route from
-// collapsing the REST of the chain is that hrivera is absent from `users`
-// (see db/seed.sql) — so SQLi still cannot shortcut past RCE into the SSH,
-// lateral-movement and privesc stages.
+//               `admin_session` cookie, as minted for on-host automation
+//               by /api/internal/provision.php.
 // ============================================================================
 require_once __DIR__ . '/db.php';
 
@@ -62,9 +51,9 @@ function require_researcher(): void {
  * page, and neither $_SESSION nor the cookie can change mid-request.
  *
  * Session first because it is free — the role is already in $_SESSION. A
- * student on the SSRF path has no PHP session at all, so the token branch is
- * still reached. An anonymous, cookie-less request issues ZERO queries, which
- * is what keeps the new header chip off the DB on public pages.
+ * request carrying only the admin_session cookie has no PHP session at all,
+ * so the token branch is still reached. An anonymous, cookie-less request
+ * issues ZERO queries, which keeps the header chip off the DB on public pages.
  *
  * @return array{via:string,username:?string,display_name:string,label:string}|null
  */
@@ -75,13 +64,6 @@ function admin_identity(): ?array {
     }
 
     $r = current_researcher();
-    // *** LOAD-BEARING: the role check, not a truthiness check. ***
-    // `if ($r)` here would hand admin — and therefore the Cloud Storage upload
-    // RCE — to rgreen and dvalmont as well. dvalmont is also a real Linux SSH
-    // account whose password is in the SQLi dump, so that single-character
-    // regression would collapse a large part of the chain. If you change
-    // anything here, verify by hand that rgreen / cactus still gets a 403
-    // from /admin/ -- nothing in the bake asserts it for you.
     if ($r && ($r['role'] ?? '') === 'admin') {
         return $cache = [
             'via'          => 'session',

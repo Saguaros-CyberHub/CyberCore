@@ -9,10 +9,8 @@ $me    = current_researcher();
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$me) {
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
-    // Passwords are stored as unsalted SHA-256 (deliberately weak). The lookup
-    // itself is a prepared statement — this form is not the injection point;
-    // /research.php is. What makes these credentials reachable is that the
-    // SQLi there dumps `users`, and every password is a rockyou word.
+    // Legacy hashing. The portal predates the password_hash() migration that
+    // has been on the backlog since the 2023 rebuild.
     $stmt = $pdo->prepare(
         'SELECT id, username, display_name, role
          FROM users WHERE username = ? AND password_hash = ?'
@@ -22,14 +20,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !$me) {
     if ($row) {
         session_regenerate_id(true);
         $_SESSION['researcher'] = $row;
-        // Used to send everyone to /chat.php, which granted nothing and also
-        // advertised a page recon is meant to discover. Administrators now
-        // land on the control panel their role actually unlocks.
+        // Administrators land on the control panel their role unlocks;
+        // everyone else goes to the publication index.
         header('Location: ' . ($row['role'] === 'admin' ? '/admin/' : '/'));
         exit;
     }
-    // Deliberately does not distinguish a bad username from a bad password —
-    // but note the account names are readable off the article bylines anyway.
+    // Does not distinguish a bad username from a bad password.
     $error = 'Invalid researcher credentials.';
 }
 

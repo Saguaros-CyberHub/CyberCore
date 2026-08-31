@@ -3,8 +3,8 @@
 // SaguaroBot floating chat widget
 // ============================================================================
 // Emitted on every page by render_footer(). Opens in-place — no navigation.
-// Conversational replies come from /api/chat.php; pasting a dataset URL makes
-// SaguaroBot fetch it via /api/verify.php (the SSRF surface of the challenge).
+// Conversational replies come from /api/chat.php; pasting a dataset URL hands
+// it to /api/verify.php for an integrity check.
 // ============================================================================
 ?>
 <button id="sbot-toggle" type="button" aria-label="Open SaguaroBot chat">

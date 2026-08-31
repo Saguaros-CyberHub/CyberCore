@@ -10,23 +10,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
     $f    = $_FILES['file'];
     $name = basename($f['name']);
 
-    // "Cloud Storage" accepts cactus imagery only.
-    //
-    // *** VULNERABILITY: file-upload extension-filter bypass ***
-    // The upload is validated by the file's LAST extension only. That blocks
-    // a naive `shell.php`, but the file keeps its full original name, so a
-    // double-extension upload such as `shell.php.jpg` passes the check (its
-    // last extension is `.jpg`). It lands in /uploads/, where the
-    // deliberately misconfigured nginx (`location ~ \.php`, not anchored
-    // with `$`) routes any path *containing* ".php" to PHP-FPM — whose
-    // `security.limit_extensions` has been widened to allow it — and the
-    // webshell executes.
-    $allowedExt = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'];
-    $ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $allowed = '/\.(jpe?g|png|gif|svg|webp)/i';
 
     if ($f['error'] !== UPLOAD_ERR_OK) {
         $err = 'Upload failed (error code ' . $f['error'] . ').';
-    } elseif (!in_array($ext, $allowedExt, true)) {
+    } elseif ($name === '' || strpos($name, "\0") !== false) {
+        $err = 'Invalid object name.';
+    } elseif (!preg_match($allowed, $name)) {
         $err = 'Only image files (jpg, jpeg, png, gif, svg, webp) may be '
              . 'uploaded to Cloud Storage.';
     } else {
@@ -44,12 +34,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
     }
 }
 
+$stored = $pdo->query(
+    'SELECT filename, uploaded_by, created_at
+       FROM uploads ORDER BY id DESC LIMIT 50'
+)->fetchAll();
+
 render_header('Cloud Storage', '');
 ?>
 <section class="narrow">
   <h1>Cloud Storage</h1>
   <p class="muted">Upload cactus imagery to the CyberSaguaros gallery archive.
-     Accepted formats: SVG, PNG, JPEG, GIF.</p>
+     Accepted formats: SVG, PNG, JPEG, GIF, WEBP.</p>
 
   <?php if ($msg): ?><p class="formok"><?= $msg ?></p><?php endif; ?>
   <?php if ($err): ?><p class="formerr"><?= htmlspecialchars($err) ?></p><?php endif; ?>
@@ -61,7 +56,26 @@ render_header('Cloud Storage', '');
     <button type="submit">Upload to Cloud Storage</button>
   </form>
 
-  <p class="muted">Uploaded images appear in the public
+  <h2>Stored objects</h2>
+  <?php if (!$stored): ?>
+    <p class="muted">Nothing has been contributed to the archive yet.</p>
+  <?php else: ?>
+    <table class="data">
+      <thead><tr><th>Object</th><th>Uploaded by</th><th>Stored</th></tr></thead>
+      <tbody>
+      <?php foreach ($stored as $r): ?>
+        <tr>
+          <td><a href="/uploads/<?= rawurlencode($r['filename']) ?>">
+              <?= htmlspecialchars($r['filename']) ?></a></td>
+          <td><?= htmlspecialchars((string) $r['uploaded_by']) ?></td>
+          <td class="muted"><?= htmlspecialchars((string) $r['created_at']) ?></td>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+    </table>
+  <?php endif; ?>
+
+  <p class="muted">Contributed imagery also appears in the public
      <a href="/gallery.php">field gallery</a>.</p>
 </section>
 <?php render_footer(); ?>

@@ -3,7 +3,7 @@ require_once __DIR__ . '/../../includes/auth.php';
 require_once __DIR__ . '/../../includes/layout.php';
 require_admin();
 
-// Mark a dataset verified (flavor admin tooling).
+// Mark a dataset verified.
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verify_id'])) {
     $stmt = $pdo->prepare('UPDATE datasets SET verified = 1 WHERE id = ?');
     $stmt->execute([(int)$_POST['verify_id']]);

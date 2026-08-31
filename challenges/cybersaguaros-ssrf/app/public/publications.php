@@ -2,21 +2,18 @@
 // ============================================================================
 // Publications — the article index.
 // ============================================================================
-// Bylines here and on article.php are what disclose the portal's account
-// names. That is deliberate: the naming convention is NOT uniform (rgreen and
-// dvalmont are finitial+lastname, dr.wagner is not), so a student who has
-// cracked the SQLi-dumped hashes learns which username pairs with which hash
-// by reading the site rather than by guessing. See db/seed.sql.
+// Bylines link through to the author pages. The naming convention is not
+// uniform: most accounts are finitial+lastname, but not all of them.
 //
-// Drafts are visible to ANY signed-in portal account. That is the whole payoff
-// for a non-admin login such as rgreen / cactus.
+// Drafts are visible to any signed-in portal account, published pieces to
+// everyone.
 // ============================================================================
 require_once __DIR__ . '/../includes/layout.php';   // pulls auth.php -> db.php
 
 $showDrafts = current_researcher() !== null;
 
 // Two literal query strings selected by a bool. Nothing user-supplied is
-// concatenated — the SQLi sink in this app is /research.php and only that.
+// concatenated.
 $sql = 'SELECT a.slug, a.title, a.abstract, a.published_on, a.status,
                a.co_authors, u.username, u.display_name
           FROM articles a

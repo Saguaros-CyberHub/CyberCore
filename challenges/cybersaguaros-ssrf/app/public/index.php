@@ -6,8 +6,7 @@ $datasets = $pdo->query('SELECT name, description FROM datasets ORDER BY id DESC
                 ->fetchAll();
 
 // Latest published articles for the homepage strip. Drafts never appear here:
-// this band is rendered for anonymous visitors and the draft gate is the
-// payoff for signing in.
+// this band is rendered for anonymous visitors.
 $latest = $pdo->query(
     "SELECT a.slug, a.title, a.abstract, a.published_on, u.username, u.display_name
        FROM articles a JOIN users u ON u.id = a.author_id

@@ -2,17 +2,10 @@
 // ============================================================================
 // Author profile — a staff page listing one researcher's articles.
 // ============================================================================
-// Reinforces the @username disclosure from the bylines and gives it a stable
-// address a student can enumerate. Prepared lookup by username; not an
-// injection sink.
+// Prepared lookup by username. Gives each byline a stable address, and shows
+// the staff member's portal role alongside their published work.
 //
-// The role badge below tells a student which of the three portal accounts is
-// the administrator, and therefore which cracked hash is the one worth using.
-// That is intentional — it is what makes the SQLi -> crack -> sign in route
-// discoverable. It is also the single line to remove if the challenge ever
-// needs to be harder.
-//
-// password_hash is NEVER rendered here or anywhere else in the app.
+// password_hash is never rendered here or anywhere else in the app.
 // ============================================================================
 require_once __DIR__ . '/../includes/layout.php';   // pulls auth.php -> db.php
 

@@ -3,7 +3,7 @@ require_once __DIR__ . '/../includes/layout.php';
 
 // The field gallery shows every image in two directories:
 //   assets/gallery/  — curated saguaro photography shipped with the portal
-//   uploads/         — images contributed through the admin "Cloud Storage"
+//   uploads/         — objects contributed through the admin "Cloud Storage"
 // Drop more saguaro photos into assets/gallery/ and they appear automatically.
 $imageExt = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp'];
 

@@ -2325,7 +2325,13 @@ async function rebuildLaneChallengeVms({
   laneId, vmNames = null, progress = null, cloneSem = null, logTag = LOG,
 }) {
   const laneRes = await cybercoreQuery(
-    `SELECT lane_id, user_id, module_key, name, status, vxlan_id,`,
+    // host() on the INET column: gateway_wan_ip is read back, never re-derived —
+    // resolveLaneNetworking below is handed this value, and the old derivation
+    // was not unique per lane.
+    `SELECT lane_id, user_id, module_key, name, status, vxlan_id, config,
+            host(gateway_wan_ip) AS gateway_wan_ip
+       FROM cybercore_lane
+      WHERE lane_id = $1`,
     [laneId]
   );
   if (!laneRes.rows.length) throw challengePreflightError('Lane not found');
@@ -2349,7 +2355,12 @@ async function rebuildLaneChallengeVms({
 
   const moduleKey = lane.module_key || 'crucible';
   const chal = await cybercoreQuery(
-    `SELECT spec FROM ${String(moduleKey).replace(/[^a-z0-9_]/gi, '')}_challenge`,
+    // The table name is interpolated because it is derived from module_key, which
+    // a bound parameter cannot supply — hence the character strip, which is the
+    // only thing standing between this and an injection. Everything else binds.
+    `SELECT spec FROM ${String(moduleKey).replace(/[^a-z0-9_]/gi, '')}_challenge
+      WHERE challenge_key = $1
+        AND status = 'active'`,
     [cfg.challenge_key]
   );
   if (!chal.rows.length) {
@@ -2501,7 +2512,12 @@ async function rebuildLaneChallengeVms({
   });
 
   await cybercoreQuery(
-    `UPDATE cybercore_lane`,
+    // Merged, not replaced: this runs while the lane is live and every other key
+    // in config (vms, console_*, gateway ids) must survive it untouched.
+    `UPDATE cybercore_lane
+        SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
+            updated_at = NOW()
+      WHERE lane_id = $1`,
     [laneId, JSON.stringify({
       rebuild: {
         at: new Date().toISOString(),
@@ -2578,7 +2594,40 @@ async function rebuildLaneChallengeVms({
   // would release its VXLAN and WAN address while both are still in use.
   const ok = errors.length === 0;
   await cybercoreQuery(
-    `UPDATE cybercore_lane l`,
+    // Spliced server-side, keyed on NAME — the challenge equivalent of
+    // lane-deployer.spliceLaneWorkstations, which does the same on slot.
+    //
+    // Read-modify-write in JS would lose whatever another operation wrote to
+    // this row while the clones were running, and the untouched machines' records
+    // must come through verbatim: they are still running, and their vm_id is the
+    // only handle teardown has on them.
+    //
+    // $3 carries the names ACTUALLY rebuilt rather than the names requested, so a
+    // machine whose clone failed keeps its old record instead of vanishing from
+    // config.vms and becoming an orphan nothing can destroy.
+    `UPDATE cybercore_lane l
+        SET config = jsonb_set(
+                       COALESCE(l.config, '{}'::jsonb),
+                       '{vms}',
+                       COALESCE((
+                         SELECT jsonb_agg(vm)
+                           FROM (
+                             SELECT p AS vm FROM jsonb_array_elements($2::jsonb) AS p
+                             UNION ALL
+                             SELECT e AS vm
+                               FROM jsonb_array_elements(
+                                      COALESCE(l.config->'vms', '[]'::jsonb)) AS e
+                              WHERE (e->>'name') IS NULL
+                                 OR NOT ((e->>'name') = ANY($3::text[]))
+                           ) u
+                       ), '[]'::jsonb)
+                     ) || $4::jsonb,
+            -- Back to ACTIVE even on partial failure: the gateway is up with the
+            -- untouched machines behind it, and 'error' would release this lane's
+            -- VXLAN and WAN address while both are still in use.
+            status = 'active',
+            updated_at = NOW()
+      WHERE lane_id = $1`,
     [
       laneId,
       JSON.stringify(rebuilt),

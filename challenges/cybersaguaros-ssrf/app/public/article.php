@@ -2,9 +2,7 @@
 // ============================================================================
 // A single article.
 // ============================================================================
-// Prepared lookup by slug. This page is deliberately NOT a second injection
-// sink — /research.php is the one SQLi surface in this app and the bake
-// asserts it there.
+// Prepared lookup by slug.
 // ============================================================================
 require_once __DIR__ . '/../includes/layout.php';   // pulls auth.php -> db.php
 
@@ -33,9 +31,9 @@ if (!$article) {
 }
 
 if ($locked) {
-    // Deliberately a 403 that ADVERTISES itself rather than a 404 that hides.
-    // The point of gating drafts is that a student can see there is something
-    // behind the portal login and go looking for credentials.
+    // A 403 rather than a 404: the piece exists, it is just not published yet,
+    // and staff who land here should be told to sign in rather than told it is
+    // missing.
     http_response_code(403);
     render_header($article['title'], '/publications.php');
     ?>

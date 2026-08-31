@@ -2,15 +2,14 @@
 // ============================================================================
 // SaguaroBot conversation backend — canned research-assistant replies.
 // ============================================================================
-// Not security-relevant; the integrity-check feature lives in verify.php.
-// Conversations are recorded into chat_logs and reviewed at /admin/chat.php.
+// The integrity-check feature lives in verify.php. Conversations are recorded
+// into chat_logs and reviewed at /admin/chat.php.
 //
-// NOTE: verify.php deliberately has NO database dependency and must keep it
-// that way. The floating widget POSTs the visitor's message here BEFORE it
-// calls verify.php, so any URL a visitor pastes is already recorded by this
-// file. Adding db.php to verify.php would buy nothing and would put a 500 path
-// on the SSRF endpoint, which the SSRF_ENDPOINT bake marker asserts returns a
-// clean 400.
+// NOTE: verify.php has NO database dependency and must keep it that way. The
+// floating widget POSTs the visitor's message here BEFORE it calls verify.php,
+// so any URL a visitor pastes is already recorded by this file. Adding db.php
+// to verify.php would buy nothing and would put a 500 path on an endpoint that
+// has to answer cleanly.
 // ============================================================================
 require_once __DIR__ . '/../../includes/auth.php';   // brings db.php with it
 header('Content-Type: application/json');
