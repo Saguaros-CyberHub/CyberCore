@@ -5357,21 +5357,66 @@
     function redeployStudentLab(btn) {
       const { labId, userId, email } = btn.dataset;
       const row = (_labRowsByLab[labId] || []).find(d => d.user_id === userId);
-      const vms = (row && Array.isArray(row.vms)) ? row.vms : [];
-      _labRebuild = { labId, userId, email, vms };
+      openLabRebuild({ labId, rows: row ? [row] : [], email });
+    }
 
-      document.getElementById('labRebuildWho').textContent = email || 'this student';
-      document.getElementById('labRebuildLine').textContent = vms.length
-        ? 'The lane stays exactly as it is \u2014 same network, same gateway, same console '
-          + 'address and the same Guacamole connection. Only the machines you tick are '
-          + 'destroyed and rebuilt, and their captured flags carry over.'
-        : 'This deployment records no machines, so only a whole-environment rebuild is '
-          + 'available.';
+    /**
+     * The machines EVERY selected student holds, by name.
+     *
+     * INTERSECTION, not union, and that is the whole point of the bulk picker: a
+     * name only some of them have would rebuild for those and skip the rest,
+     * which is precisely the per-row tedium this screen exists to remove. A
+     * student whose lane predates a spec edit simply narrows the list rather
+     * than turning the operation into a partial one.
+     *
+     * Power state comes from the first holder purely for the badge -- rows can
+     * legitimately disagree, and the badge is decoration, not a gate.
+     */
+    function _commonLabMachines(rows) {
+      if (!rows.length) return [];
+      const lists = rows.map(r => (Array.isArray(r.vms) ? r.vms : []));
+      if (lists.some(l => l.length === 0)) return [];
+      const [first, ...rest] = lists;
+      return first.filter(v => v && v.name
+        && rest.every(l => l.some(o => o && o.name === v.name)));
+    }
+
+    /**
+     * One dialog for one student and for fifty. Bulk is the same question asked
+     * of N rows at once, so it reuses the same picker, the same warnings and the
+     * same whole-environment escape hatch -- a second dialog would be a second
+     * place for those rules to drift apart.
+     */
+    function openLabRebuild({ labId, rows, email }) {
+      const bulk = rows.length > 1;
+      const vms = bulk ? _commonLabMachines(rows) : ((rows[0] && rows[0].vms) || []);
+      _labRebuild = { labId, rows, email, vms, bulk };
+
+      document.getElementById('labRebuildWho').textContent = bulk
+        ? `${rows.length} students’ environments`
+        : (email || 'this student');
+
+      const line = document.getElementById('labRebuildLine');
+      if (vms.length) {
+        line.textContent =
+          (bulk ? 'Every lane stays exactly as it is' : 'The lane stays exactly as it is')
+          + ' — same network, same gateway, same console address and the same '
+          + 'Guacamole connection. Only the machines you tick are destroyed and rebuilt, '
+          + 'and their captured flags carry over.'
+          + (bulk ? ' Students are rebuilt one at a time.' : '');
+      } else {
+        line.textContent = bulk
+          ? 'These students hold no machine in common, so only a whole-environment rebuild '
+            + 'is available for this selection.'
+          : 'This deployment records no machines, so only a whole-environment rebuild is '
+            + 'available.';
+      }
 
       const list = document.getElementById('labRebuildMachines');
       list.innerHTML = vms.length
         ? vms.map(_labMachineRow).join('')
-        : '<p class="deploy-env-hint" style="margin:0;">No machines recorded.</p>';
+        : `<p class="deploy-env-hint" style="margin:0;">${
+            bulk ? 'No machine is common to all selected students.' : 'No machines recorded.'}</p>`;
 
       const whole = document.getElementById('labRebuildWhole');
       whole.checked = vms.length === 0;
@@ -5447,23 +5492,36 @@
       const target = _labRebuild;
       if (!target) return;
       const courseId = currentCourseId;
-      const { labId, userId, email } = target;
+      const { labId, rows, bulk } = target;
+      const userIds = rows.map(r => r.user_id);
+      const userId = userIds[0];
       const whole = document.getElementById('labRebuildWhole').checked;
       const resetFlags = document.getElementById('labRebuildResetFlags').checked;
       const boxes = [...document.querySelectorAll('#labRebuildMachines .lab-rebuild-machine')];
       const vmNames = boxes.filter(b => b.checked).map(b => b.value);
 
+      // Four endpoints, one dialog. Both bulk routes pre-flight EVERY student
+      // before anything is destroyed, so a live-GOAD or attached environment
+      // fails while the whole class still has working machines.
+      const base = `/courses/${courseId}/labs/${labId}/students`;
+      const [url, body] =
+        bulk && whole ? [`${base}/bulk-redeploy`,         { user_ids: userIds, reset_flags: resetFlags }] :
+        bulk          ? [`${base}/bulk-rebuild-machines`, { user_ids: userIds, vm_names: vmNames }] :
+        whole         ? [`${base}/${userId}/redeploy`,    { reset_flags: resetFlags }] :
+                        [`${base}/${userId}/rebuild-machines`, { vm_names: vmNames }];
+
       Utils.setBtnLoading(btn, true, 'Starting\u2026');
       try {
-        const res = whole
-          ? await api('POST', `/courses/${courseId}/labs/${labId}/students/${userId}/redeploy`,
-              { reset_flags: resetFlags })
-          : await api('POST',
-              `/courses/${courseId}/labs/${labId}/students/${userId}/rebuild-machines`,
-              { vm_names: vmNames });
+        const res = await api('POST', url, body);
         toast(res.message || 'Rebuild started');
+        // Name who was left out and why, rather than letting the count quietly
+        // disagree with what was selected.
+        (res.skipped || []).slice(0, 3).forEach(sk =>
+          toast(`Skipped ${sk.email || sk.user_id}: ${sk.reason}`, true));
         closeLabRebuildModal();
-        pollLabProgress(labId, userId);
+        // A batch is polled on the lab-scoped key the banner watches; a single
+        // student polls their own.
+        pollLabProgress(labId, bulk ? undefined : userId);
       } catch (e) {
         // The per-machine path refuses an attached or live-GOAD environment with
         // an actionable message, and the whole-environment fallback is right
@@ -5536,40 +5594,12 @@
       const labId = btn.dataset.labId;
       const rows = _selectedLabRows(labId);
       if (!rows.length) return;
-      const courseId = currentCourseId;
-      const n = rows.length;
-
-      _labBulkBusy = true; _syncLabBulkBar(labId);
-      try {
-        const r = await Confirm.show({
-          title: n === 1 ? 'Redeploy this student\u2019s environment?' : `Redeploy ${n} students\u2019 environments?`,
-          message: `Destroys and rebuilds every machine this environment deployed for `
-                 + (n === 1 ? 'this student' : `these ${n} students`)
-                 + `, one at a time. Flags they have already captured are kept and their `
-                 + `grades are untouched. Anything saved inside the machines is lost. `
-                 + `Rebuilding: ${_labSelectionNames(rows)}.`,
-          confirmText: n === 1 ? 'Redeploy' : `Redeploy ${n}`,
-          danger: true,
-          checkbox: { label: 'Also reset flags (new values, clears their captures)', checked: false },
-        });
-        if (!r) return;
-
-        Utils.setBtnLoading(btn, true, 'Starting\u2026');
-        const res = await api('POST', `/courses/${courseId}/labs/${labId}/students/bulk-redeploy`,
-          { user_ids: rows.map(d => d.user_id), reset_flags: !!r.checked });
-        toast(res.message || 'Rebuild started');
-        (res.skipped || []).slice(0, 3).forEach(sk =>
-          toast(`Skipped ${sk.user_id}: ${sk.reason}`, true));
-        // The lab-scoped progress key is what the banner polls, and it is the
-        // same one a class-wide deploy uses — so no user_id here.
-        pollLabProgress(labId);
-      } catch (e) {
-        toast('Error redeploying: ' + e.message, true);
-      } finally {
-        _labBulkBusy = false;
-        Utils.setBtnLoading(btn, false);
-        if (currentCourseId === courseId) { clearLabSelection(labId); loadVulnerableLabs(); }
-      }
+      // The same dialog the per-row Redeploy opens, asked of N students at once.
+      // The machine picker IS the feature here: an environment that shipped a
+      // bad web01 needs that ONE machine replaced for everybody, not 57 lanes
+      // destroyed and rebuilt. Whole-environment is still a tick away, and that
+      // path keeps its own confirmation inside the dialog.
+      openLabRebuild({ labId, rows });
     }
 
     async function deleteLab(labId) {

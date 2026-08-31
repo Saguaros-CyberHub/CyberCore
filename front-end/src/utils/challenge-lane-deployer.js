@@ -2465,15 +2465,46 @@ async function rebuildLaneChallengeVms({
     _consoleOctetForVm: {},
   };
 
-  // The console plan is recomputed from the FULL machine list, not just the
-  // rebuilt ones: a designated console machine needs its pinned MAC set on net0
-  // at clone time, and the reservation file is rendered whole-lane below.
-  const consolePlan = resolveConsolePlan({
-    specVms, attackBoxes: !!cfg.attack_box_vm_id, extraWorkstations: [],
-    override: cfg.console_vm || null,
-  });
+  // Console addressing is REPLAYED from the lane's own config, not re-derived.
+  // Same rule the pinned_hosts block below already follows, and for a sharper
+  // reason: writeLaneReservations renders the file WHOLE-LANE and
+  // installLaneReservations overwrites it, so any machine missing from this map
+  // has its dhcp-host line DELETED -- including machines this rebuild was never
+  // asked to touch. They keep running on a stale lease until the next renew or
+  // reboot, then drop to a pool address while the gateway DNAT and their
+  // Guacamole connection still point at the old one. Nothing logs it.
+  //
+  // Re-deriving got this wrong twice over:
+  //   - `override: cfg.console_vm` reads a key NOTHING writes. The deploy
+  //     persists console_vm_name (and consoles[]), so the override was always
+  //     null -- and an override-PROMOTED console (a spec VM carrying no
+  //     console_role, which is exactly what promotion exists for) vanished from
+  //     the plan, losing both its pinned MAC and its reservation.
+  //   - `extraWorkstations: []` meant every instructor-added machine was absent
+  //     too, so rebuilding one spec VM silently unaddressed all of them.
   const reservationOctets = {};
-  {
+  const recordedConsoles = Array.isArray(cfg.consoles) ? cfg.consoles : [];
+  for (const c of recordedConsoles) {
+    // Kali is carried separately, by attackBoxOctet.
+    if (c.kind === 'kali') continue;
+    const octet = Number(String(c.ip || '').split('.').pop());
+    if (!Number.isFinite(octet)) continue;
+    reservationOctets[c.name] = octet;
+    // Only a SPEC machine is re-cloned here, and only it needs its MAC pinned at
+    // clone time; an added workstation is left running and just needs its
+    // reservation line preserved.
+    if (c.kind === 'spec') ctx._consoleOctetForVm[c.name] = octet;
+  }
+
+  // Lanes that predate config.consoles[] have nothing to replay, so fall back to
+  // deriving the plan. Narrow on purpose: it cannot reproduce an override-
+  // promoted console (the override was never persisted on those lanes either),
+  // and it is only reached for a lane deployed before consoles[] existed.
+  if (!recordedConsoles.length) {
+    const consolePlan = resolveConsolePlan({
+      specVms, attackBoxes: !!cfg.attack_box_vm_id, extraWorkstations: [],
+      override: cfg.console_vm_name || null,
+    });
     const taken = new Set([goadDeploy.INFRA_IP_OCTETS.Kali]);
     Object.values(goadMacs || {}).forEach((g) => {
       const last = Number(String(g.static_ip || '').split('.').pop());
@@ -2482,8 +2513,8 @@ async function rebuildLaneChallengeVms({
     let next = CONSOLE_OCTET_MIN;
     for (const c of consolePlan.consoles) {
       if (c.kind === 'kali') continue;
-      const wanted2 = Number(c.vm && c.vm.ipOctet);
-      const octet = Number.isFinite(wanted2) ? wanted2 : (() => {
+      const pinned = Number(c.vm && c.vm.ipOctet);
+      const octet = Number.isFinite(pinned) ? pinned : (() => {
         while (taken.has(next)) next += 1;
         return next;
       })();

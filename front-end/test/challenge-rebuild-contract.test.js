@@ -219,3 +219,56 @@ test('untouched machines are spliced by name, not overwritten wholesale', () => 
   assert.ok(/NOT \(\(e->>'name'\) = ANY\(\$3::text\[\]\)\)/.test(writeBack.slice(0, 1600)),
     'records whose name was NOT rebuilt must be carried through verbatim');
 });
+
+// -- addressing must be REPLAYED, never re-derived ---------------------------
+//
+// writeLaneReservations renders /etc/dnsmasq.d/lane-reservations.conf WHOLE-LANE
+// and installLaneReservations overwrites it. So any machine missing from the map
+// the rebuild builds has its dhcp-host line DELETED -- including machines the
+// rebuild was never asked to touch. They keep running on a stale lease, then
+// drop to a pool address on the next renew while the gateway DNAT and their
+// Guacamole connection still point at the old one. Nothing logs it.
+
+test('the rebuild replays console addressing from config.consoles', () => {
+  assert.ok(/recordedConsoles\s*=\s*Array\.isArray\(cfg\.consoles\)/.test(REBUILD),
+    'the lane records its own console addressing -- the rebuild must read it back');
+  assert.ok(/reservationOctets\[c\.name\] = octet/.test(REBUILD),
+    'every recorded console must keep its reservation line');
+});
+
+test('THE TRAP: it does not read cfg.console_vm, a key nothing writes', () => {
+  // The deploy persists console_vm_name and consoles[]. `cfg.console_vm` was
+  // always undefined, so an override-PROMOTED console -- a spec VM carrying no
+  // console_role, which is exactly what promotion exists for -- fell out of the
+  // plan and lost both its pinned MAC and its reservation.
+  // Strip line comments before matching -- this test's own explanation above
+  // names the key it is asserting the absence of.
+  const LINES = String.fromCharCode(10);
+  const code = REBUILD.split(LINES).filter((l) => !l.trim().startsWith('//')).join(LINES);
+  assert.ok(!/cfg\.console_vm(?!_name)/.test(code),
+    'cfg.console_vm is never written by any deploy path -- use console_vm_name or consoles[]');
+});
+
+test('instructor-added machines keep their reservations across a rebuild', () => {
+  // resolveConsolePlan derives kind:'extra' entries ONLY from its
+  // extraWorkstations argument, so passing [] dropped every added workstation
+  // from the map -- and with it, their dhcp-host lines.
+  assert.ok(/c\.kind === 'kali'\) continue/.test(REBUILD),
+    'Kali is carried separately by attackBoxOctet');
+  const replay = REBUILD.slice(REBUILD.indexOf('for (const c of recordedConsoles)'));
+  const body = replay.slice(0, replay.indexOf('\n  }') + 4);
+  assert.ok(!/kind === 'spec'\s*\)\s*\{?\s*reservationOctets/.test(body),
+    'the reservation must be kept for EVERY recorded console, not only spec ones');
+  assert.ok(/if \(c\.kind === 'spec'\) ctx\._consoleOctetForVm/.test(body),
+    'only a spec machine is re-cloned, so only it needs its MAC pinned');
+});
+
+test('the derive path is a fallback for pre-consoles[] lanes only', () => {
+  // Narrow on purpose: it cannot reproduce an override-promoted console either,
+  // so it must not run for a lane that recorded its addressing.
+  assert.ok(/if \(!recordedConsoles\.length\) \{/.test(REBUILD),
+    'deriving must be gated on the lane having recorded nothing');
+  const at = REBUILD.indexOf('if (!recordedConsoles.length) {');
+  const planAt = REBUILD.indexOf('resolveConsolePlan({');
+  assert.ok(planAt > at, 'resolveConsolePlan must only be reached inside that fallback');
+});

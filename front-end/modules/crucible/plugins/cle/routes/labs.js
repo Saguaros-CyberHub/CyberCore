@@ -1171,6 +1171,205 @@ router.post('/:labId/students/:userId/rebuild-machines', instructorOnly, async (
 });
 
 /**
+ * POST /:labId/students/bulk-rebuild-machines — rebuild the SAME machines
+ * across several students, in place.
+ *
+ * The per-student route above answers "this one student's web01 is broken".
+ * This one answers the far more common case: an environment ships a bad web01
+ * and every one of 57 students needs exactly that machine replaced. Doing it
+ * one row at a time is 57 dialogs, and the whole-environment Redeploy is the
+ * wrong instrument — it destroys the domain they have already worked in.
+ *
+ * EVERY student is pre-flighted before ANY machine is destroyed, the same rule
+ * bulk-redeploy follows: a live-GOAD environment or an attached copy must fail
+ * while the whole class still has working machines, not after the first eight
+ * have been torn down.
+ *
+ * Machine names are validated against what each student ACTUALLY holds rather
+ * than against the environment spec. A student whose lane predates a spec change
+ * may not have the named machine at all, and rebuilding "whatever matched" would
+ * silently do something different for them than for everyone else — so they are
+ * skipped with a reason instead.
+ *
+ * Two levels of progress key, both load-bearing, exactly as in bulk-redeploy:
+ *   - the LAB key is the mutex and the aggregate the banner polls;
+ *   - each student gets their own key for the work itself, because the entries
+ *     it creates are what light up each row's "working…" status in GET /.
+ *
+ * Body: { user_ids: string[], vm_names: string[] }   Responds 202.
+ */
+router.post('/:labId/students/bulk-rebuild-machines', instructorOnly, async (req, res) => {
+  const { courseId, labId } = req.params;
+  let claimed = null;
+  let ctx = null;
+  try {
+    const userIds = parseBulkUserIds(req.body);
+
+    const names = req.body?.vm_names;
+    if (!Array.isArray(names) || names.length === 0) {
+      return res.status(400).json({ error: 'non-empty vm_names array required' });
+    }
+    const vmNames = [...new Set(
+      names.filter(v => typeof v === 'string' && v.trim()).map(v => v.trim()))];
+    if (!vmNames.length) {
+      return res.status(400).json({ error: 'no valid machine names in the request' });
+    }
+
+    const course = await getCourse(courseId, req.user);
+    if (!course) return res.status(403).json({ error: 'Course not found or access denied' });
+    const lab = await getOwnedLab(labId, courseId);
+    if (!lab) return res.status(404).json({ error: 'Environment not found in this course' });
+
+    const { students, skipped } = await resolveTargetStudents(courseId, userIds, {
+      extraUserIds: courseStaffIds(course, req.user),
+    });
+    if (!students.length) {
+      return res.status(404).json({
+        error: 'None of the selected students can be rebuilt for this environment', skipped,
+      });
+    }
+
+    // One query for the whole batch rather than one per student. Each row also
+    // carries config so the machine names can be checked against what that
+    // student actually holds.
+    const laneRes = await cybercoreQuery(
+      `SELECT DISTINCT ON (user_id) user_id, lane_id, status, config
+         FROM cybercore_lane
+        WHERE user_id = ANY($1::uuid[])
+          AND config->>'material_id' = $2
+          AND status <> 'deleted'
+        ORDER BY user_id, created_at DESC`,
+      [students.map(s => s.id), labId]
+    );
+    const laneByUser = new Map(laneRes.rows.map(r => [r.user_id, r]));
+
+    const targets = [];
+    for (const student of students) {
+      const lane = laneByUser.get(student.id);
+      if (!lane) {
+        // No lane of its own = an attached copy riding the workstation lane.
+        skipped.push({
+          user_id: student.id, email: student.email,
+          reason: 'their copy is attached to their workstation lane, so its machines cannot be rebuilt individually',
+        });
+        continue;
+      }
+      if (lane.status !== 'active') {
+        skipped.push({
+          user_id: student.id, email: student.email,
+          reason: `their lane is ${lane.status}, not active — rebuild the whole environment instead`,
+        });
+        continue;
+      }
+      const cfg = typeof lane.config === 'string' ? JSON.parse(lane.config || '{}') : (lane.config || {});
+      const held = new Set((Array.isArray(cfg.vms) ? cfg.vms : []).map(v => v && v.name).filter(Boolean));
+      const wanted = vmNames.filter(n => held.has(n));
+      if (!wanted.length) {
+        skipped.push({
+          user_id: student.id, email: student.email,
+          reason: `their deployment has none of ${vmNames.join(', ')}`,
+        });
+        continue;
+      }
+      // Deliberately NOT the requested list: a student missing one of several
+      // named machines still gets the ones they do have, and the response says
+      // who got what.
+      targets.push({ student, laneId: lane.lane_id, vmNames: wanted });
+    }
+
+    if (!targets.length) {
+      return res.status(409).json({
+        error: `None of the selected students have ${vmNames.join(', ')} as a rebuildable machine.`,
+        skipped,
+      });
+    }
+
+    // Check and claim in ONE synchronous block, every await already done — see
+    // the per-student redeploy. Group scope, so nothing under this lab can start
+    // underneath it.
+    vulnLab.assertNoConflictingLabOperation({ materialId: labId, userId: null });
+    claimed = vulnLab.progressIdForLab(labId);
+    const progress = laneDeployer.initProgress(
+      claimed, `Rebuild ${vmNames.join(', ')} — ${targets.length} student(s)`, targets.length);
+    laneDeployer.setPhase(progress, 'preparing',
+      `Rebuilding ${vmNames.join(', ')} for ${targets.length} student(s)`);
+
+    audit.batch({
+      req,
+      source: 'cle',
+      action: 'lane.redeployed_bulk',
+      targetAction: 'lane.redeployed',
+      target: { type: 'material', id: labId },
+      metadata: {
+        course_id: courseId, material_id: labId, mode: 'in_place_vms',
+        vm_names: vmNames, student_count: targets.length,
+      },
+      targets: targets.map(t => ({
+        id: t.student.id, label: t.student.email,
+        metadata: { course_id: courseId, vm_names: t.vmNames },
+      })),
+    });
+
+    res.status(202).json({
+      success: true,
+      message: `Rebuilding ${vmNames.join(', ')} for ${targets.length} student(s)`,
+      lab_id: labId,
+      vm_names: vmNames,
+      student_count: targets.length,
+      ...(skipped.length ? { skipped } : {}),
+      progress_url: `/api/cle/courses/${courseId}/labs/${labId}/progress`,
+    });
+
+    ctx = { targets, progress };
+  } catch (error) {
+    console.error('[CLE] Bulk machine rebuild pre-flight error:', error.message);
+    if (claimed) { laneDeployer.finishProgress(claimed); claimed = null; }
+    if (res.headersSent) return;
+    return res.status(error.status || 500).json({ error: error.message });
+  }
+
+  // ── background ───────────────────────────────────────────────────────────
+  const claimedId = claimed;
+  const { targets, progress } = ctx;
+  (async () => {
+    try {
+      // Sequential, like every other batch on this lab. Each rebuild rewrites
+      // the lane's dnsmasq reservations whole-lane and re-clones onto the same
+      // node; overlapping students is exactly what the lab mutex exists to stop,
+      // and the per-lane work is I/O-bound on Proxmox either way.
+      for (const { student, laneId, vmNames } of targets) {
+        try {
+          const r = await challengeDeployer.rebuildLaneChallengeVms({
+            laneId, vmNames, progress,
+          });
+          if (r.errors.length) {
+            await setRedeployError(labId, student.id, r.errors[0]);
+            progress.failed++;
+          } else {
+            await setRedeployError(labId, student.id, null);
+            progress.succeeded++;
+          }
+        } catch (err) {
+          // destroyed === false means the pre-flight refused and the student
+          // still holds every machine — say so rather than reporting a
+          // half-rebuild they would go looking for.
+          const msg = err.destroyed === false
+            ? `${err.message} Nothing was changed.`
+            : err.message;
+          await setRedeployError(labId, student.id, msg);
+          progress.failed++;
+          console.error(`[CLE] Machine rebuild failed for ${student.email}: ${err.message}`);
+        } finally {
+          progress.completed++;
+        }
+      }
+    } finally {
+      laneDeployer.finishProgress(claimedId);
+    }
+  })();
+});
+
+/**
  * POST /:labId/students/bulk-remove — tear down several students' machines.
  *
  * Synchronous, like the per-student DELETE it batches. The work is sequential
