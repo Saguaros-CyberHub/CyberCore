@@ -248,6 +248,15 @@
        and the last one hangs out past the border. Same fix .resource-grid above
        already carries. width:100% then makes the inputs fill the tracks rather
        than sit at their intrinsic size inside them. */
+    /* Resize picker groups. A heading row per machine type, so "the Windows
+       ones" is one click rather than 42 unticks interleaved with 42 keeps. */
+    .vm-resize-group { border-top: 1px solid #eef0f3; padding: 0.35rem 0; }
+    .vm-resize-group:first-child { border-top: 0; padding-top: 0; }
+    .vm-resize-group-head {
+      display: flex; align-items: flex-start; gap: 0.5rem;
+      padding: 0.15rem 0 0.3rem; cursor: pointer;
+    }
+    .vm-resize-group-head:hover { background: rgba(30, 82, 136, 0.04); }
     .env-machine-res { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.4rem; margin-top: 0.55rem; }
     .env-machine-res label {
       display: flex; flex-direction: column; gap: 0.15rem; min-width: 0;
@@ -1053,6 +1062,8 @@
               select all
             </label>
           </label>
+          <p class="deploy-env-hint" id="vmResizeGroupHint"
+             style="margin: 0 0 0.4rem; display:none;"></p>
           <div class="env-students" id="vmResizeMachines"></div>
           <p class="deploy-env-hint" style="margin: 0.4rem 0 0;">
             <span id="vmResizeCount" aria-live="polite"></span> &middot;
@@ -4537,6 +4548,16 @@
     let _vmResizeMachines = [];
     /** The sizing the admin has typed, in Proxmox units (cores, MiB). */
     let _vmResizeSpec = { cores: null, memory_mb: null };
+    /**
+     * Has the admin touched the size fields yet?
+     *
+     * While false the fields TRACK the selection, so unticking the Linux group
+     * re-fills them with the Windows group's current size instead of leaving a
+     * number derived from a mixture. Once true they are left alone — silently
+     * overwriting a typed 32 with a re-derived 8 on the next tick would be the
+     * worst possible behaviour here.
+     */
+    let _vmResizeUserEdited = false;
 
     async function bulkResizeLanes(btn) {
       if (_vmBulkBusy) return;
@@ -4547,31 +4568,104 @@
     }
 
     /**
-     * One machine row in the resize picker.
+     * Group the selected lanes' machines by MACHINE TYPE.
      *
-     * Shows what it has NOW, because "8 cores / 16 GB" is meaningless without
-     * the number it is replacing — and a machine already at the target size is
-     * the case the server skips without rebooting, which is worth being able to
-     * see before submitting.
+     * A flat list is unusable at the scale this feature is for. A 42-lane class
+     * with two machines each is 84 rows, and the common request — "give the
+     * Windows box more RAM, leave the Linux sensor alone" — becomes 42 manual
+     * unticks interleaved with the 42 rows to keep. Grouped, it is one click.
+     *
+     * KEYED ON template_id, LABELLED with template_name. Slot is the obvious
+     * alternative and it is wrong: slot is a position, not a type. It happens to
+     * correlate on a course deployed in one pass, and stops correlating the
+     * moment one lane is rebuilt with its machines in the other order — at which
+     * point a slot-keyed group silently mixes the two images together. The
+     * header still SHOWS the slots, because that is what an admin recognises.
      */
+    function _vmResizeGroups() {
+      const byKey = new Map();
+      for (const m of _vmResizeMachines) {
+        const key = m.template_id ? `t:${m.template_id}` : `s:${m.slot}`;
+        if (!byKey.has(key)) {
+          byKey.set(key, {
+            key,
+            label: m.template_name || (m.slot === 0 ? 'Primary machine' : `Slot ${m.slot}`),
+            machines: [],
+          });
+        }
+        byKey.get(key).machines.push(m);
+      }
+      // Lowest slot first, so the student's console group leads.
+      return [...byKey.values()].sort((a, b) =>
+        Math.min(...a.machines.map(m => m.slot)) - Math.min(...b.machines.map(m => m.slot)));
+    }
+
+    /** The sizing a set of machines share, or null when they disagree. */
+    function _commonResources(machines) {
+      const out = {};
+      for (const field of ['cores', 'memory_mb']) {
+        const vals = [...new Set(machines.map(m => (m.resources || {})[field]).filter(v => v != null))];
+        if (vals.length === 1) out[field] = vals[0];
+      }
+      return Object.keys(out).length ? out : null;
+    }
+
+    /** One machine row. Shows what it has NOW — "8 GB" means nothing alone. */
     function _vmResizeMachineRow(m) {
       const cur = m.resources ? describeResources(m.resources) : 'template default';
-      const who = m._student || '';
       return `
-      <label style="display:flex; align-items:flex-start; gap:0.5rem;">
+      <label style="display:flex; align-items:flex-start; gap:0.5rem; padding:0.15rem 0 0.15rem 1.1rem;">
         <input type="checkbox" class="vm-resize-machine" value="${escAttr(m._key)}" checked
+               data-group="${escAttr(m._group)}"
                aria-label="Resize ${escAttr(m.hostname || ('slot ' + m.slot))}"
                onchange="_syncVMResizePicker()">
         <span style="min-width:0;">
           <span style="font-family:monospace; font-size:0.82rem;">${escHtml(m.hostname || '—')}</span>
-          <span class="env-chip" style="margin-left:0.35rem;">slot ${escHtml(String(m.slot))}</span>
-          ${m.slot === 0 ? '<span class="env-chip env-chip-console">student console</span>' : ''}
           ${_powerBadge(m.power_state)}
           <span style="display:block; font-size:0.72rem; color:var(--text-muted, #6b7280);">
-            ${escHtml([who, m.template_name, 'now: ' + cur].filter(Boolean).join(' · '))}
+            ${escHtml([m._student, 'now: ' + cur].filter(Boolean).join(' · '))}
           </span>
         </span>
       </label>`;
+    }
+
+    /**
+     * One group, header first.
+     *
+     * The header checkbox is the whole point of the grouping, so it carries the
+     * machine count and the group's shared size — an admin picking "the Windows
+     * ones" is really picking "the 32 GB ones", and seeing that on the header
+     * means not having to read a single row to be sure.
+     */
+    function _vmResizeGroupBlock(g) {
+      const slots = [...new Set(g.machines.map(m => m.slot))].sort((a, b) => a - b);
+      const common = _commonResources(g.machines);
+      const size = common ? describeResources(common) : 'mixed sizes';
+      return `
+      <div class="vm-resize-group" data-group="${escAttr(g.key)}">
+        <label class="vm-resize-group-head">
+          <input type="checkbox" class="vm-resize-group-box" data-group="${escAttr(g.key)}"
+                 checked onchange="toggleVMResizeGroup(this)">
+          <span style="min-width:0;">
+            <strong style="font-size:0.82rem;">${escHtml(g.label)}</strong>
+            <span class="env-chip" style="margin-left:0.35rem;">${escHtml(
+              slots.length === 1 ? `slot ${slots[0]}` : `slots ${slots.join(', ')}`)}</span>
+            ${slots.includes(0) ? '<span class="env-chip env-chip-console">student console</span>' : ''}
+            <span style="display:block; font-size:0.72rem; color:var(--text-muted, #6b7280);">
+              ${escHtml(`${g.machines.length} machine${g.machines.length === 1 ? '' : 's'} · ${size}`)}
+            </span>
+          </span>
+        </label>
+        ${g.machines.map(_vmResizeMachineRow).join('')}
+      </div>`;
+    }
+
+    /** Tick or untick every machine in one group. */
+    function toggleVMResizeGroup(box) {
+      const key = box.dataset.group;
+      document.querySelectorAll(`#vmResizeMachines .vm-resize-machine[data-group="${CSS.escape(key)}"]`)
+        .forEach(cb => { cb.checked = box.checked; });
+      _syncVMResizePicker();
     }
 
     /**
@@ -4604,6 +4698,7 @@
 
     /** Store one field in Proxmox units, or null when the admin clears it. */
     function setVMResizeField(field, value) {
+      _vmResizeUserEdited = true;
       const meta = RESOURCE_FIELDS[field];
       const raw = String(value == null ? '' : value).trim();
       if (raw === '') { _vmResizeSpec[field] = null; _resetVMResizeButton(); return; }
@@ -4637,6 +4732,7 @@
             ...m,
             _key: `${row.lane_id}:${m.slot}`,
             _laneId: row.lane_id,
+            _group: m.template_id ? `t:${m.template_id}` : `s:${m.slot}`,
             _student: [row.first_name, row.last_name].filter(Boolean).join(' ') || row.student_email,
           });
         }
@@ -4647,20 +4743,23 @@
             || rows[0].student_email || 'this lane')
         : `${rows.length} lanes`;
 
+      const groups = _vmResizeGroups();
       const list = document.getElementById('vmResizeMachines');
       list.innerHTML = _vmResizeMachines.length
-        ? _vmResizeMachines.map(_vmResizeMachineRow).join('')
+        ? groups.map(_vmResizeGroupBlock).join('')
         : '<p class="deploy-env-hint" style="margin:0;">These lanes record no machines.</p>';
 
-      // Pre-fill from the current sizing when every selected machine agrees on
-      // it. Filling from a disagreeing set would silently propose one machine's
-      // size for all of them.
-      const sizes = _vmResizeMachines.map(m => (m.resources || {}));
-      for (const field of ['cores', 'memory_mb']) {
-        const vals = [...new Set(sizes.map(r => r[field]).filter(v => v != null))];
-        _vmResizeSpec[field] = vals.length === 1 ? vals[0] : null;
-      }
-      _renderVMResizeFields();
+      // The hint only earns its space when there is actually a choice to make.
+      const hint = document.getElementById('vmResizeGroupHint');
+      hint.style.display = groups.length > 1 ? 'block' : 'none';
+      hint.textContent = groups.length > 1
+        ? `These lanes run ${groups.length} kinds of machine. Untick a heading to leave that `
+          + `kind alone — resizing only one of them is the usual case.`
+        : '';
+
+      // Nothing typed yet, so the fields track the selection.
+      _vmResizeUserEdited = false;
+      _syncVMResizeSpecFromSelection();
       document.getElementById('vmResizePreview').innerHTML = '';
       _resetVMResizeButton();
       _syncVMResizePicker();
@@ -4679,6 +4778,23 @@
       _syncVMResizePicker();
     }
 
+    /**
+     * Re-derive the size fields from what is currently ticked.
+     *
+     * Only while the admin has typed nothing. The point is the group workflow:
+     * open on a mixed selection and the fields are blank because the two kinds
+     * of machine disagree; untick the sensors and the fields fill with the
+     * Windows boxes' actual 4 cores / 32 GB, which is the number the admin
+     * wants to edit rather than re-enter.
+     */
+    function _syncVMResizeSpecFromSelection() {
+      if (_vmResizeUserEdited) return;
+      const sel = _selectedVMResizeMachines();
+      const common = _commonResources(sel.length ? sel : _vmResizeMachines) || {};
+      _vmResizeSpec = { cores: common.cores ?? null, memory_mb: common.memory_mb ?? null };
+      _renderVMResizeFields();
+    }
+
     function _selectedVMResizeMachines() {
       const keys = new Set([...document.querySelectorAll('#vmResizeMachines .vm-resize-machine')]
         .filter(b => b.checked).map(b => b.value));
@@ -4689,16 +4805,36 @@
       const boxes = [...document.querySelectorAll('#vmResizeMachines .vm-resize-machine')];
       const n = boxes.filter(b => b.checked).length;
 
+      // Group headers get the tri-state too, so a partly-ticked group reads as
+      // partly ticked rather than as ticked-and-lying.
+      document.querySelectorAll('#vmResizeMachines .vm-resize-group-box').forEach(head => {
+        const mine = boxes.filter(b => b.dataset.group === head.dataset.group);
+        const on = mine.filter(b => b.checked).length;
+        head.checked = mine.length > 0 && on === mine.length;
+        head.indeterminate = on > 0 && on < mine.length;
+      });
+
       const all = document.getElementById('vmResizeSelectAll');
       all.checked = boxes.length > 0 && n === boxes.length;
       all.indeterminate = n > 0 && n < boxes.length;
 
+      // Named by KIND, not just counted. "42 of 84" does not tell an admin
+      // whether they have the Windows boxes or the sensors; "42 machines ·
+      // Windows (CYBR 400 ELK Stack Template)" does.
+      const sel = _selectedVMResizeMachines();
+      const kinds = [...new Set(sel.map(m => m.template_name || `slot ${m.slot}`))];
+      const kindLabel = kinds.length === 0 ? ''
+        : kinds.length <= 2 ? ` · ${kinds.join(' + ')}`
+        : ` · ${kinds.length} kinds`;
       document.getElementById('vmResizeCount').textContent =
-        `${n} of ${boxes.length} machine${boxes.length === 1 ? '' : 's'}`;
+        `${n} of ${boxes.length} machine${boxes.length === 1 ? '' : 's'}${kindLabel}`;
+
+      // The fields follow the selection until the admin types something.
+      _syncVMResizeSpecFromSelection();
 
       // How many are live right now, so the reboot cost is stated in terms of
       // students who will actually notice it.
-      const running = _selectedVMResizeMachines().filter(m => m.power_state === 'running').length;
+      const running = sel.filter(m => m.power_state === 'running').length;
       const warn = document.getElementById('vmResizeRunningWarn');
       const text = document.getElementById('vmResizeRunningText');
       if (running > 0) {
@@ -4711,7 +4847,26 @@
         warn.style.display = 'none';
       }
 
-      // Nothing ticked, or nothing to change, is not a resize.
+      // A SELECTION CHANGE INVALIDATES A PREVIEW ALREADY ON SCREEN. It was
+      // computed for a different set of machines, and its verdict is what the
+      // commit button is gated on — unticking the Windows group after a preview
+      // that approved them would otherwise leave a live "Resize 42 machines"
+      // button backed by a capacity check for machines no longer selected.
+      //
+      // Done inline rather than through _resetVMResizeButton, which calls back
+      // into this function. The emptiness check is also what stops that path
+      // recursing: it has already cleared the preview by the time it gets here.
+      const pv = document.getElementById('vmResizePreview');
+      if (pv && pv.innerHTML) {
+        pv.innerHTML = '';
+        const btn = document.getElementById('vmResizeBtn');
+        Utils.setBtnLoading(btn, false);
+        btn.textContent = 'Check capacity';
+        btn.onclick = () => submitVMResize(btn);
+      }
+
+      // Nothing ticked, or nothing to change, is not a resize. Last, so it wins
+      // over the button reset above.
       const hasSpec = _vmResizeSpec.cores != null || _vmResizeSpec.memory_mb != null;
       document.getElementById('vmResizeBtn').disabled = n === 0 || !hasSpec;
     }
@@ -4729,18 +4884,27 @@
       if (_vmResizeRows) _syncVMResizePicker();
     }
 
-    /** The request body both the preview and the apply call send. */
+    /**
+     * The request body both the preview and the apply call send.
+     *
+     * A partial selection is sent as an EXPLICIT machine list, not as slot
+     * numbers. `slots: [0]` means "slot 0 on every selected lane", which is only
+     * the same thing as "these machines" while a given image sits at the same
+     * slot on every lane — and one lane rebuilt with its machines the other way
+     * round silently turns "resize the Windows boxes" into "resize that
+     * student's Linux sensor". Naming the pairs removes the inference.
+     *
+     * Omitted entirely when everything is ticked, so "all" stays the wire
+     * default and the common whole-class case sends the smaller body.
+     */
     function _vmResizeBody(confirm) {
       const machines = _selectedVMResizeMachines();
       const laneIds = [...new Set(machines.map(m => m._laneId))];
-      const slots = [...new Set(machines.map(m => m.slot))].sort((a, b) => a - b);
-      // Slots are omitted when every machine on every selected lane is ticked,
-      // so "all" is the wire default and the common case sends the smaller body.
       const allTicked = machines.length === _vmResizeMachines.length;
       const body = { lane_ids: laneIds, resources: {} };
       if (_vmResizeSpec.cores != null) body.resources.cores = _vmResizeSpec.cores;
       if (_vmResizeSpec.memory_mb != null) body.resources.memory_mb = _vmResizeSpec.memory_mb;
-      if (!allTicked) body.slots = slots;
+      if (!allTicked) body.machines = machines.map(m => ({ lane_id: m._laneId, slot: m.slot }));
       if (confirm) body.confirm = true;
       return body;
     }

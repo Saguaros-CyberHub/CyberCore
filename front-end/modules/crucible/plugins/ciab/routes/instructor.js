@@ -20,6 +20,16 @@ const { PART_DEFINITIONS } = require('../utils/part-definitions');
 
 const instructorOnly = requireRole('instructor', 'admin');
 
+// Track B1: the engagement model + the Engagements tab. Its own file so
+// routes/api.js needs no new mount -- that file is the one shared mount block
+// several tracks edit at once, and a zero diff there is worth one line here.
+// Inherits authenticateToken from routes/api.js:139 and, deliberately, neither
+// requireCiabAccess nor checkSchedule: every route inside carries its own
+// requireRole, and checkSchedule can refuse an instructor outside a group's
+// time window. Registered above every route below it, so a later /:param path
+// can never shadow it.
+router.use('/engagements', require('./engagements'));
+
 // ─── In-memory generation job tracker ────────────────────────────────────────
 // Tracks active example generation jobs so the frontend can check status on
 // page load/refresh and prevent duplicate generation requests.

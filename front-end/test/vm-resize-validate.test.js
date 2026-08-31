@@ -87,12 +87,14 @@ const MAX_RESIZE_TARGETS = 200;
 // laneWorkstationRecords is stubbed to the simple case — the legacy-lane
 // synthesis it performs is already covered by lane-deployer-slots.test.js, and
 // pulling it in whole would drag the octet/mac helpers along with it.
+const LANE_ID_RE = /^[0-9a-f-]{36}$/i;
+
 const { parseResizeSpec, resolveResizeTargets } = new Function(
-  'normalizeResourceSpec', 'WORKSTATION_MAX_SLOTS', 'MAX_RESIZE_TARGETS', 'laneDeployer',
+  'normalizeResourceSpec', 'WORKSTATION_MAX_SLOTS', 'MAX_RESIZE_TARGETS', 'LANE_ID_RE', 'laneDeployer',
   `${extractFn(routeSrc, 'parseResizeSpec', 'vms.js')}
    ${extractFn(routeSrc, 'resolveResizeTargets', 'vms.js')}
    return { parseResizeSpec, resolveResizeTargets };`
-)(normalizeResourceSpec, WORKSTATION_MAX_SLOTS, MAX_RESIZE_TARGETS, {
+)(normalizeResourceSpec, WORKSTATION_MAX_SLOTS, MAX_RESIZE_TARGETS, LANE_ID_RE, {
   laneWorkstationRecords: (lane) => {
     const ws = (lane.config || {}).workstations || [];
     return ws.filter(w => w && w.slot != null).slice().sort((a, b) => a.slot - b.slot);
@@ -259,6 +261,109 @@ test('slots and template scope compose', () => {
     { scope: 'template', template_id: 'sensor', slots: [1] }, [lane()]);
   assert.deepStrictEqual(targets.map(t => t.slot), [1]);
 });
+
+// ── explicit machine pairs ──────────────────────────────────────────────────
+
+const LANE_A = 'a'.repeat(36);
+const LANE_B = 'b'.repeat(36);
+
+test('an explicit machine list targets exactly those (lane, slot) pairs', () => {
+  const lanes = [lane({ lane_id: LANE_A }), lane({ lane_id: LANE_B })];
+  const { targets } = resolveResizeTargets({
+    machines: [{ lane_id: LANE_A, slot: 1 }, { lane_id: LANE_B, slot: 0 }],
+  }, lanes);
+  assert.deepStrictEqual(
+    targets.map(t => `${t.lane_id}:${t.slot}`), [`${LANE_A}:1`, `${LANE_B}:0`]);
+});
+
+test('the pairs are what make "the Windows ones" safe when slots differ per lane', () => {
+  // THE REASON THIS SELECTOR EXISTS. Lane B was rebuilt with its machines the
+  // other way round, so the Windows image sits at slot 1 there and slot 0 on
+  // lane A. A slots:[0] request resizes lane B's Linux sensor; naming the pairs
+  // cannot. Both halves are asserted, because the second is the bug.
+  const lanes = [
+    lane({ lane_id: LANE_A }),
+    lane({
+      lane_id: LANE_B,
+      config: {
+        workstations: [
+          { slot: 0, vmid: 2, template_id: 'sensor', provider_type: 'qemu' },
+          { slot: 1, vmid: 3, template_id: 'win11', provider_type: 'qemu' },
+        ],
+      },
+    }),
+  ];
+  const byPair = resolveResizeTargets({
+    machines: [{ lane_id: LANE_A, slot: 0 }, { lane_id: LANE_B, slot: 1 }],
+  }, lanes).targets;
+  assert.ok(byPair.length === 2 && byPair.every(t => t.template_id === 'win11'),
+    'an explicit pair list must never pick up the other image');
+
+  const bySlot = resolveResizeTargets({ slots: [0] }, lanes).targets;
+  assert.ok(bySlot.some(t => t.template_id === 'sensor'),
+    'this is the mis-targeting the pair list exists to prevent');
+});
+
+test('a lane whose machines were all deselected is skipped, not fatal', () => {
+  const lanes = [lane({ lane_id: LANE_A }), lane({ lane_id: LANE_B })];
+  const { targets, skipped } = resolveResizeTargets({
+    machines: [{ lane_id: LANE_A, slot: 0 }],
+  }, lanes);
+  assert.strictEqual(targets.length, 1);
+  assert.strictEqual(skipped.length, 1);
+  assert.match(skipped[0].reason, /was selected/i);
+});
+
+test('machines cannot be combined with slots or a template scope', () => {
+  // Three selectors that can disagree is three ways to act on machines nobody
+  // picked.
+  assert.strictEqual(threw(() => resolveResizeTargets(
+    { machines: [{ lane_id: LANE_A, slot: 0 }], slots: [1] },
+    [lane({ lane_id: LANE_A })])).status, 400);
+  assert.strictEqual(threw(() => resolveResizeTargets(
+    { scope: 'template', template_id: 'win11', machines: [{ lane_id: LANE_A, slot: 0 }] },
+    [lane({ lane_id: LANE_A })])).status, 400);
+});
+
+test('a malformed pair is a 400, never a silent slot 0 on some other lane', () => {
+  const bad = [
+    [{ lane_id: 'not-a-uuid', slot: 0 }],
+    [{ lane_id: LANE_A, slot: null }],
+    [{ lane_id: LANE_A, slot: '' }],
+    [{ lane_id: LANE_A, slot: -1 }],
+    [{ lane_id: LANE_A, slot: WORKSTATION_MAX_SLOTS }],
+    [{ slot: 0 }],
+    ['nope'],
+  ];
+  for (const machines of bad) {
+    const e = threw(() => resolveResizeTargets({ machines }, [lane({ lane_id: LANE_A })]));
+    assert.ok(e, `${JSON.stringify(machines)} was accepted`);
+    assert.strictEqual(e.status, 400);
+  }
+});
+
+test('an empty machine list is a 400, not "all machines"', () => {
+  assert.strictEqual(
+    threw(() => resolveResizeTargets({ machines: [] }, [lane({ lane_id: LANE_A })])).status, 400);
+});
+
+test('an oversized machine list is refused before any lane work', () => {
+  const machines = Array.from({ length: 201 }, () => ({ lane_id: LANE_A, slot: 0 }));
+  const e = threw(() => resolveResizeTargets({ machines }, [lane({ lane_id: LANE_A })]));
+  assert.strictEqual(e.status, 400);
+  assert.match(e.message, /at most 200/);
+});
+
+test('a pair naming a lane outside the resolved set can never widen the scope', () => {
+  // lanes[] is server-resolved from findCourseWorkstationLanes, so a pair for
+  // another course simply matches nothing.
+  const { targets } = resolveResizeTargets({
+    machines: [{ lane_id: LANE_A, slot: 0 }, { lane_id: 'f'.repeat(36), slot: 0 }],
+  }, [lane({ lane_id: LANE_A })]);
+  assert.strictEqual(targets.length, 1);
+  assert.strictEqual(targets[0].lane_id, LANE_A);
+});
+
 
 // ── the cap ─────────────────────────────────────────────────────────────────
 

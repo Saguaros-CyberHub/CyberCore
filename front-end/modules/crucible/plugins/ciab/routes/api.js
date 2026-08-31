@@ -35,6 +35,7 @@ const cisRamRoutes = require('./cis-ram');
 const profileDeployRoutes = require('./profile-deploy');
 const sectionRoutes = require('./sections');
 const sectionRosterRoutes = require('./section-roster');
+const sectionModuleRoutes = require('./section-modules');
 
 // The sidebar gate. GET /api/modules consults this to decide whether
 // Clinic-in-a-Box appears in the navigation at all, so a student who is on no
@@ -92,6 +93,18 @@ router.use(
   authenticateToken, requireCiabAccess,
   (req, res, next) => { res.locals.sectionId = req.params.sectionId; next(); },
   sectionRosterRoutes
+);
+
+// Section modules. CIAB-owned prefix, so gating here is correctly scoped.
+// Registered BEFORE the bare /api/instructor/sections mount for the same reason
+// the roster is: Express matches router.use() prefixes in REGISTRATION ORDER,
+// and sections.js owns the /:sectionId/... verbs this path sits under.
+// No checkSchedule -- a staff surface, exactly like the two mounts around it.
+router.use(
+  '/api/instructor/sections/:sectionId/modules',
+  authenticateToken, requireCiabAccess,
+  (req, res, next) => { res.locals.sectionId = req.params.sectionId; next(); },
+  sectionModuleRoutes
 );
 router.use('/api/instructor/sections', authenticateToken, requireCiabAccess, sectionRoutes);
 

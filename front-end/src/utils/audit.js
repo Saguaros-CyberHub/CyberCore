@@ -51,6 +51,7 @@ const CATEGORY_BY_PREFIX = {
   storage:       'infra',
   guac:          'infra',
   profile_lane:  'infra',
+  profile_engagement: 'infra',
   network:       'infra',
   access:        'access',
   flag:          'access',

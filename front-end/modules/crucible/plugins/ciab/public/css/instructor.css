@@ -511,3 +511,14 @@
 /* Tokens carry the palette; only shadow depth differs in the dark. */
 [data-theme="dark"] .student-card:hover { box-shadow: var(--shadow-md); }
 [data-theme="dark"] .instr-hero { box-shadow: var(--glow-primary, none); }
+
+/* -- Modules tab -----------------------------------------------------------
+   Additive only. Nothing in Overview carries .error or .info on an
+   .action-item, so its appearance is unchanged, and every token below is
+   defined in both the light and the dark block, so dark mode needs no work. */
+.action-item.error { border-left-color: var(--danger); }
+.action-item.info  { border-left-color: var(--info); }
+.mod-pos { display: inline-block; min-width: 1.75rem; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+.mod-order-btns { display: inline-flex; gap: 0.25rem; }
+.mod-archived { opacity: 0.6; }
+.mod-flash { outline: 2px solid var(--info); outline-offset: -2px; }

@@ -177,16 +177,43 @@ test('editing a field invalidates a preview already on screen', () => {
   assert.match(fnBody('_resetVMResizeButton'), /vmResizePreview/);
 });
 
+test('changing the SELECTION also invalidates a preview already on screen', () => {
+  // The preview approved a specific set of machines, and the commit button is
+  // gated on its verdict. Untick the Windows group after a preview that
+  // approved them and a live "Resize 42 machines" button would still be backed
+  // by a capacity check for machines no longer selected.
+  const body = fnBody('_syncVMResizePicker');
+  assert.match(body, /vmResizePreview/);
+  assert.match(body, /pv\.innerHTML = ''/);
+  assert.match(body, /Check capacity/, 'the button must fall back to the preview step');
+  // Inline, because _resetVMResizeButton calls back into this function.
+  assert.ok(!/_resetVMResizeButton\(\)/.test(body),
+    'calling the reset helper from here recurses');
+});
+
+
 test('the commit is refused while the preview says it cannot proceed', () => {
   assert.match(fnBody('submitVMResize'), /res\.canProceed/);
 });
 
 // -- selection and slot semantics -------------------------------------------
 
-test('slots are omitted when every machine is ticked, so "all" is the wire default', () => {
+test('a partial selection is sent as explicit machines, never as slot numbers', () => {
+  // `slots: [0]` means "slot 0 on every selected lane", which equals "these
+  // machines" only while an image sits at the same slot on every lane. One lane
+  // rebuilt with its machines the other way round turns "resize the Windows
+  // boxes" into "resize that student's Linux sensor" — silently, and on someone
+  // else's machine.
+  const body = fnBody('_vmResizeBody');
+  assert.match(body, /body\.machines = machines\.map/);
+  assert.match(body, /lane_id: m\._laneId, slot: m\.slot/);
+  assert.ok(!/body\.slots/.test(body), 'slot numbers are too coarse for a partial selection');
+});
+
+test('the machine list is omitted when everything is ticked, so "all" is the wire default', () => {
   const body = fnBody('_vmResizeBody');
   assert.match(body, /allTicked/);
-  assert.match(body, /if \(!allTicked\) body\.slots/);
+  assert.match(body, /if \(!allTicked\) body\.machines/);
 });
 
 test('the picker reads state, not :checked, when resolving machines', () => {
@@ -195,10 +222,75 @@ test('the picker reads state, not :checked, when resolving machines', () => {
   assert.match(fnBody('_selectedVMResizeMachines'), /_vmResizeMachines\.filter/);
 });
 
-test('pre-fill only happens when every selected machine agrees on a size', () => {
-  const body = fnBody('showVMResizeModal');
-  assert.match(body, /vals\.length === 1 \? vals\[0\] : null/,
-    'a disagreeing selection must leave the field blank, not propose one machine\'s size for all');
+test('pre-fill only happens when the selected machines agree on a size', () => {
+  // A disagreeing selection must leave the field blank rather than propose one
+  // machine's size for all of them.
+  assert.match(fnBody('_commonResources'), /vals\.length === 1/);
+});
+
+test('the size fields follow the selection until the admin types something', () => {
+  // The group workflow depends on this: open on a mixed selection and the
+  // fields are blank because the two kinds disagree; untick the sensors and
+  // they fill with the Windows boxes' real size — the number to edit, rather
+  // than one to re-enter from scratch.
+  assert.match(fnBody('_syncVMResizeSpecFromSelection'), /if \(_vmResizeUserEdited\) return/,
+    'a typed value must never be silently overwritten by a re-derived one');
+  assert.match(fnBody('_syncVMResizePicker'), /_syncVMResizeSpecFromSelection\(\)/);
+  assert.match(fnBody('setVMResizeField'), /_vmResizeUserEdited = true/);
+  assert.match(fnBody('showVMResizeModal'), /_vmResizeUserEdited = false/,
+    'a fresh open must start tracking again');
+});
+
+// -- grouping by machine type -----------------------------------------------
+
+test('machines are grouped by TEMPLATE, not by slot', () => {
+  // Slot is a position, not a type. It correlates with the image on a course
+  // deployed in one pass and stops correlating the moment one lane is rebuilt
+  // with its machines in the other order — at which point a slot-keyed group
+  // silently mixes the two images together.
+  const body = fnBody('_vmResizeGroups');
+  assert.match(body, /m\.template_id \?/, 'group on template_id first');
+  assert.match(body, /m\.slot/, 'fall back to slot only when there is no template');
+  assert.match(body, /m\.template_name/, 'the label is the template name');
+});
+
+test('the group heading carries a checkbox, so one kind is one click', () => {
+  const body = fnBody('_vmResizeGroupBlock');
+  assert.match(body, /vm-resize-group-box/);
+  assert.match(body, /toggleVMResizeGroup\(this\)/);
+});
+
+test('the heading shows the count and the shared size, not just a name', () => {
+  // An admin picking "the Windows ones" is really picking "the 32 GB ones".
+  const body = fnBody('_vmResizeGroupBlock');
+  assert.match(body, /_commonResources\(g\.machines\)/);
+  assert.match(body, /g\.machines\.length/);
+  assert.match(body, /mixed sizes/, 'a group whose machines disagree must say so');
+});
+
+test('a group toggle moves only its own machines', () => {
+  const body = fnBody('toggleVMResizeGroup');
+  assert.match(body, /CSS\.escape\(key\)/,
+    'scope the query to the group, and escape the key — template ids reach the selector');
+  assert.match(body, /data-group=/);
+});
+
+test('group headings get the tri-state, so a partial group cannot read as full', () => {
+  const body = fnBody('_syncVMResizePicker');
+  assert.match(body, /vm-resize-group-box/);
+  assert.match(body, /head\.indeterminate = on > 0 && on < mine\.length/);
+});
+
+test('the selection summary names the KIND, not just a count', () => {
+  // "42 of 84" does not tell an admin whether they have the Windows boxes or
+  // the sensors.
+  const body = fnBody('_syncVMResizePicker');
+  assert.match(body, /template_name/);
+  assert.match(body, /kindLabel/);
+});
+
+test('the "untick a heading" hint appears only when there is a choice to make', () => {
+  assert.match(fnBody('showVMResizeModal'), /groups\.length > 1 \? 'block' : 'none'/);
 });
 
 test('the dialog resets before it is shown, every time', () => {

@@ -164,7 +164,7 @@ function closeModal(id) { Modal.close(id); }
 
 // ── Tabs: hash routing + keyboard ───────────────────────────────────────────
 
-const TAB_NAMES = ['overview', 'sections', 'students', 'reviews', 'documents'];
+const TAB_NAMES = ['overview', 'sections', 'modules', 'students', 'reviews', 'documents'];
 const TAB_ALIASES = { dashboard: 'overview' }; // legacy callers/bookmarks
 
 function activateTabModule(name) {
@@ -172,6 +172,10 @@ function activateTabModule(name) {
   // preserving the selected section. The rebuilt tabs render once from state
   // and repaint via InstructorState subscriptions.
   if (name === 'sections') { if (window.Sections) Sections.load(); return; }
+  // Sections-style re-fetch on EVERY visit, not an ensureInit() map entry: this
+  // tab's content hangs off a section list the Sections tab can create or
+  // archive, and a co-instructor's reorder must never render stale.
+  if (name === 'modules') { if (window.CiabModules) CiabModules.load(); return; }
   const mod = {
     overview: window.Overview,
     students: window.Students,

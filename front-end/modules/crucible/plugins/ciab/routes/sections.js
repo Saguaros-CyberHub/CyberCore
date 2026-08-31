@@ -33,7 +33,7 @@ const roster = require('../utils/section-roster');
 const instructorOnly = requireRole('instructor', 'admin');
 
 /** Mounted at /api/instructor/sections; :sectionId also arrives via res.locals. */
-const sectionIdOf = (req, res) => res.locals.sectionId || req.params.sectionId;
+const sectionIdOf = (req, res) => req.params.sectionId || res.locals.sectionId;
 
 /** 403 and a null return, so callers can `if (!section) return;`. */
 async function mustManage(req, res, columns = 'section_id, name, code, status, max_students, instructor_id') {
@@ -275,12 +275,30 @@ router.delete('/:sectionId', instructorOnly, async (req, res) => {
       if (req.user.role !== 'admin') {
         return res.status(403).json({ error: 'Only an administrator can delete a section outright' });
       }
-      const any = await query(
-        `SELECT 1 FROM ciab_enrollment WHERE section_id = $1 LIMIT 1`, [section.section_id]
+      // ciab_module CASCADEs from ciab_section, so without this a hard delete
+      // takes every module, every prerequisite edge and every per-student
+      // completion record with it, and answers 200. See migration 014's header.
+      // ONE query, two booleans, three distinct sentences: a refusal that names
+      // the wrong blocker does not tell the admin what to do.
+      const blockers = await query(
+        `SELECT EXISTS (SELECT 1 FROM ciab_enrollment WHERE section_id = $1) AS has_enrollments,
+                EXISTS (SELECT 1 FROM ciab_module     WHERE section_id = $1) AS has_modules`,
+        [section.section_id]
       );
-      if (any.rowCount) {
+      const { has_enrollments: hasEnrollments, has_modules: hasModules } = blockers.rows[0];
+      if (hasEnrollments && hasModules) {
+        return res.status(409).json({
+          error: 'This section still has enrollments and modules. Archive it instead.',
+        });
+      }
+      if (hasEnrollments) {
         return res.status(409).json({
           error: 'This section still has enrollments. Archive it instead, or drop everyone first.',
+        });
+      }
+      if (hasModules) {
+        return res.status(409).json({
+          error: 'This section still has modules. Archive it instead, or delete them first.',
         });
       }
       await query(`DELETE FROM ciab_section WHERE section_id = $1`, [section.section_id]);

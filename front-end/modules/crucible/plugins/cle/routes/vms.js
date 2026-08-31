@@ -492,6 +492,51 @@ function resolveResizeTargets(body, lanes) {
     e.status = 400; throw e;
   }
 
+  // An EXPLICIT machine list, the most precise selector and the one the UI
+  // sends whenever the admin has not ticked everything.
+  //
+  // `slots` is not good enough on its own, and the gap is easy to miss: it
+  // means "slot N on every selected lane", which is only the same thing as
+  // "these machines" while a template sits at the same slot on every lane. A
+  // course where most students have Windows at slot 0 and one lane was rebuilt
+  // with the machines the other way round would, on a `slots:[0]` request,
+  // quietly resize that student's Linux sensor instead. Naming the pairs
+  // removes the inference entirely.
+  //
+  // Refused alongside `slots` or a template scope rather than merged: three
+  // selectors that can disagree is three ways to act on machines nobody picked.
+  let wantPairs = null;
+  if (b.machines !== undefined && b.machines !== null) {
+    if (wantSlots || wantTemplate) {
+      const e = new Error(
+        'machines cannot be combined with slots or a template scope — send exactly one selector');
+      e.status = 400; throw e;
+    }
+    if (!Array.isArray(b.machines) || b.machines.length === 0) {
+      const e = new Error('machines must be a non-empty array of { lane_id, slot }');
+      e.status = 400; throw e;
+    }
+    if (b.machines.length > MAX_RESIZE_TARGETS) {
+      const e = new Error(
+        `select at most ${MAX_RESIZE_TARGETS} machines at a time (got ${b.machines.length})`);
+      e.status = 400; throw e;
+    }
+    wantPairs = new Set();
+    for (const m of b.machines) {
+      const laneId = m && typeof m.lane_id === 'string' ? m.lane_id.trim() : '';
+      if (!LANE_ID_RE.test(laneId)) {
+        const e = new Error(`'${m && m.lane_id}' is not a lane id`); e.status = 400; throw e;
+      }
+      const raw = m.slot;
+      const n = typeof raw === 'number' ? raw
+        : (typeof raw === 'string' && /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : NaN);
+      if (!Number.isInteger(n) || n < 0 || n >= WORKSTATION_MAX_SLOTS) {
+        const e = new Error(`'${raw}' is not a slot number`); e.status = 400; throw e;
+      }
+      wantPairs.add(`${laneId}:${n}`);
+    }
+  }
+
   const targets = [];
   for (const lane of lanes) {
     if (lane.status !== 'active') {
@@ -509,13 +554,19 @@ function resolveResizeTargets(body, lanes) {
       continue;
     }
     let picked = records;
+    if (wantPairs) picked = picked.filter(r => wantPairs.has(`${lane.lane_id}:${r.slot}`));
     if (wantSlots) picked = picked.filter(r => wantSlots.includes(r.slot));
     if (wantTemplate) picked = picked.filter(r => String(r.template_id || '') === wantTemplate);
     if (!picked.length) {
+      // Not an error. With an explicit machine list the caller has usually
+      // selected a subset of the lanes it named — "the Windows box on all 42
+      // lanes" leaves nothing picked on a lane whose Windows box was
+      // deselected, and that is the request, not a failure.
       skipped.push({
         lane_id: lane.lane_id,
         reason: wantTemplate ? 'no machine on this lane came from that template'
-                             : 'this lane has none of the selected slots',
+              : wantPairs ? 'no machine on this lane was selected'
+                          : 'this lane has none of the selected slots',
       });
       continue;
     }

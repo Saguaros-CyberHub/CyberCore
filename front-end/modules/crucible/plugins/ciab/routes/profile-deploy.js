@@ -277,7 +277,29 @@ async function runProfileDeploy(opts) {
     vulnScriptCatalog,
     vulnApp,
     options: {
-      subnetScheme,
+      // B0: the ENGAGEMENT's scheme, not the request body's. The block was
+      // carved at engagementRow.subnet_scheme — the same expression this file
+      // already uses at line 267 for the reservation — and spec.subnet_scheme is
+      // the value engagement-plan.js reads to raise SCHEME_MISMATCH. Reserving
+      // at v2 and building at v3 creates internal VNets at
+      // tag+V3_INTERNAL_TAG_OFFSET that the teardown sweep can never name again;
+      // lane-reservation.js:91-105 has the full account.
+      //
+      // IT HAS EXACTLY ONE READER, AND THIS CHANGE SET ADDED IT.
+      // engagement-plan.js's compile reads spec.subnet_scheme and compares it
+      // with the engagement row's, raising SCHEME_MISMATCH when they disagree —
+      // which is the whole reason the field has to be honest here. Before that
+      // reader existed the field was decorative; it is not any more, and a
+      // refactor that reverted this expression to the request body's value
+      // would make the compile agree with a carve that never happened.
+      //
+      // INERT ON THE DEPLOY PATH, though: nothing in the BUILD reads it — the
+      // deployer takes the scheme from the challenge row
+      // (challenge-lane-deployer.js:1990) — so this makes the persisted spec
+      // honest about the carve without changing what gets built. Lines 383 and
+      // 430 still carry the request's value; closing that divergence needs a
+      // 400 on the mismatch and belongs to B2.
+      subnetScheme: engagementRow.subnet_scheme || subnetScheme,
       attackBoxes,
       vxlanBlock: { start: VXLAN_SEARCH_MIN, end: VXLAN_SEARCH_MAX }  // placeholder, replaced by reservation
     }

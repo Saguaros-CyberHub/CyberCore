@@ -42,6 +42,20 @@ const {
 const {
   verifyBridgesOnAllNodes, getLabReadiness, V3_INTERNAL_TAG_OFFSET,
 } = require('../../../../../src/utils/lab-network-provision');
+// ─── Track B0: the engagement MODEL ─────────────────────────────────────────
+// engagement-model.js has ZERO requires of its own — that is its contract, and
+// the new test file asserts it with a source scan. It matters here: this module
+// is loaded on a stubbed require.cache by test/ciab-engagement-provision.test.js
+// (:173-174, which stubs only site-config and proxmox), so a new impure
+// transitive require would fail that suite with an error naming the wrong file.
+//
+// engagement-plan.js is deliberately NOT required here. It pulls in
+// profile-to-spec.js and the shared ipv4 helper, none of which this path needs;
+// the compile is a caller's concern, not a projection's.
+const {
+  engagementModelFromRow, validateEngagementPlan, describeEngagementType,
+  MODEL_FIELDS, JSONB_MODEL_FIELDS, AUTHORABLE_FIELDS,
+} = require('./engagement-model');
 
 const LOG = '[CIAB Engagement]';
 
@@ -74,6 +88,25 @@ function rowToEngagement(row) {
     provisioned_at: row.provisioned_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    // ── Track B0: the engagement MODEL. ─────────────────────────────────────
+    // Via engagementModelFromRow rather than fifteen more hand-written lines,
+    // so a column added later cannot be silently dropped on every read path
+    // while SELECT * keeps returning it. This map is a WHITELIST — it already
+    // drops provision_started_at and created_by, which is the standing proof
+    // that a column absent from here is invisible to every caller, no matter
+    // what the database holds.
+    //
+    // engagementModelFromRow returns the migration's DEFAULTs for a row that
+    // carries none of these columns, so on a database where the model
+    // migration has not yet run the added keys read as null/[]/{} and no
+    // existing key changes value.
+    //
+    // test/ciab-engagement-model.test.js parses the migration's ADD COLUMN
+    // list and diffs it against this function's output, so the omission fails
+    // a test rather than a demo.
+    ...engagementModelFromRow(row),
+    retired_at: row.retired_at,
+    updated_by: row.updated_by,
   };
 }
 
@@ -165,6 +198,173 @@ async function adoptExistingReservation(profileId, engagementType) {
 async function resolveEngagement(profileId, engagementType = DEFAULT_ENGAGEMENT_TYPE) {
   return (await getEngagement(profileId, engagementType))
       || (await adoptExistingReservation(profileId, engagementType));
+}
+
+// ─── The model writer ───────────────────────────────────────────────────────
+
+/**
+ * Update the engagement MODEL — the display name, the perspective, what is in
+ * and out of scope, the rules of engagement, the accounts the client agreed to
+ * hand over, where each host sits relative to the perimeter, the objectives and
+ * the brief.
+ *
+ * This is the writer B1's PATCH route will call. B0 ships no route, so today its
+ * only caller is a test. It lives here rather than in the route because the
+ * validate-then-write pair must not be splittable — see the next paragraph.
+ *
+ * THE JS VALIDATOR RUNS FIRST, ALWAYS. The CHECK constraints on this table are
+ * backstops for a writer that is NOT this function (a psql session, a future
+ * import script) — they are not the guarantee. An off-vocabulary value that
+ * reaches Postgres raises 23514, and a pg error carries neither `status` nor
+ * `statusCode`, so every engagement endpoint's renderer
+ * (routes/profile-deploy.js:699, :733, :761 — `res.status(err.status || 500)`)
+ * turns it into an unhandled 500 naming a constraint, in place of the 400 the
+ * route already knows how to produce. So validateEngagementPlan refuses it here
+ * and the field-level report rides on the error, in the same shape
+ * createEngagement already throws (:498-505 below).
+ *
+ * PARTIAL PATCH SEMANTICS. validateEngagementPlan returns only the keys the
+ * caller actually sent, and the SET list below is built from exactly those, so
+ * an unmentioned column is never blanked. That is load-bearing: this model is
+ * authored across several screens over several sittings, and a PATCH that
+ * silently reset the fields it did not mention would lose an instructor's work.
+ *
+ * NOT A RETIREMENT PATH. retired_at is not a member of MODEL_FIELDS, so nothing
+ * here can hand a VXLAN block back; that decision needs its own action with its
+ * own confirmation, and B0 writes the column nowhere.
+ *
+ * @param {string}   engagementId
+ * @param {object}   patch                  a PARTIAL model; unknown keys ignored
+ * @param {object}   [opts]
+ * @param {?string}  [opts.actingUserId]    cybercore_user.user_id — cross-DB, no FK,
+ *                                          same pattern as created_by
+ * @param {boolean}  [opts.markAuthored]    record the touched AUTHORABLE fields as
+ *                                          human-authored. A patch carrying none of
+ *                                          them never rewrites authored_fields, so a
+ *                                          machine writer that forgets to opt out
+ *                                          cannot lock B2's refresh path out of a
+ *                                          field nobody edited.
+ * @returns {Promise<object>} the rowToEngagement projection of the updated row
+ * @throws {Error & {status:404}}
+ * @throws {Error & {status:400, code:'ENGAGEMENT_PLAN_INVALID', errors, warnings}}
+ */
+async function updateEngagementModel(engagementId, patch, {
+  actingUserId = null, markAuthored = true,
+} = {}) {
+  const current = await getEngagementById(engagementId);
+  if (!current) throw Object.assign(new Error('Engagement not found'), { status: 404 });
+
+  // knownVmNames is deliberately NOT passed. This path has no synthesized spec
+  // in hand, and building one here would be a fourth derivation of the host list
+  // — the exact duplication B0 exists to avoid. Every check that needs real
+  // hosts is a WARNING in the validator, so their absence costs a hint and never
+  // a guarantee; the compile (engagement-plan.js) is where a stored model is
+  // measured against the machines that actually deploy, because that is the only
+  // place those machines exist.
+  // subnetScheme comes from the ROW, not from the caller. This function already
+  // holds the engagement, and the scheme is the fact that decides whether a
+  // placement is real: on v1/v2 there is one flat lan0 (lane-networking.js
+  // resolveVmSegments), so an 'internal' or 'pivot' placement is a fiction and
+  // validateEngagementPlan raises EXPOSURE_REQUIRES_V3. Without this argument
+  // that warning could never fire on the authoring path — the only path an
+  // instructor uses — and the divergence would surface at deploy instead.
+  // A WARNING, never an error: the model is legitimately authored before the
+  // environment's scheme is settled.
+  const { errors, warnings, value } = validateEngagementPlan(patch, {
+    engagementType: current.engagement_type,
+    subnetScheme: current.subnet_scheme || null,
+  });
+  if (errors.length > 0) {
+    const more = errors.length > 1 ? ` (+${errors.length - 1} more)` : '';
+    throw Object.assign(new Error(`${errors[0].message}${more}`), {
+      status: 400, code: 'ENGAGEMENT_PLAN_INVALID', errors, warnings,
+    });
+  }
+
+  // Keyed BY COLUMN so a field can be assigned at most once. authored_fields is
+  // both an ordinary model column and the thing markAuthored maintains, and
+  // Postgres refuses two assignments to the same column in one UPDATE — a map
+  // makes that collision structurally impossible rather than a thing to
+  // remember.
+  const assignments = {};
+  for (const field of MODEL_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(value, field)) assignments[field] = value[field];
+  }
+
+  // NOTHING AUTHORABLE IN THE PATCH MEANS NOTHING WAS AUTHORED. markAuthored
+  // defaults to true because the human writer (B1's PATCH route) is the common
+  // caller, but the flag must never be able to mark a field nobody edited: a
+  // field listed here is one B2's refresh-from-the-client-file path will refuse
+  // to overwrite forever, and "which fields a human edited" is unrecoverable
+  // retroactively. So a patch that carries no authorable field — an empty
+  // patch, or one that only stamps updated_by, or one that only sets
+  // synthesis_meta — leaves authored_fields untouched rather than rewriting it
+  // to its own sorted self.
+  //
+  // A patch whose ONLY key is authored_fields still writes: that value was
+  // already assigned above from MODEL_FIELDS, so the caller's prune stands on
+  // its own without the union running.
+  const touched = Object.keys(value).filter(k => AUTHORABLE_FIELDS.includes(k));
+
+  if (markAuthored && touched.length > 0) {
+    // A UNION, never a replacement. A later "refresh from the client file"
+    // action fills everything NOT named here and leaves everything that is, so
+    // dropping an entry silently re-opens an authored field to being clobbered
+    // — and which fields a human edited is unrecoverable retroactively.
+    //
+    // An explicit authored_fields in the patch is the BASE of the union rather
+    // than a competitor, which keeps markAuthored purely additive and keeps the
+    // caller able to prune the list in the same request.
+    const base = Array.isArray(assignments.authored_fields)
+      ? assignments.authored_fields
+      : (Array.isArray(current.authored_fields) ? current.authored_fields : []);
+    assignments.authored_fields = Array.from(new Set([...base, ...touched])).sort();
+  }
+
+  // The column names interpolated below come from MODEL_FIELDS — a frozen module
+  // constant — and never from the caller: `value`'s keys were intersected with
+  // it above, so nothing a request body carries can reach the SQL TEXT. Only
+  // values are parameters.
+  //
+  // Every jsonb column is JSON.stringify'd and cast on FIRST reference. There is
+  // deliberately no `$n IS NULL` construction anywhere in this file: Postgres
+  // fixes a parameter's type at its first reference, so an uncast NULL test is a
+  // real parse failure, not a style preference — test/sql-param-typing.test.js
+  // scans every .js under src/ and modules/ for it.
+  const params = [engagementId];
+  const sets = [];
+  for (const field of MODEL_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(assignments, field)) continue;
+    const raw = assignments[field];
+    if (JSONB_MODEL_FIELDS.has(field)) {
+      params.push(JSON.stringify(raw === undefined ? null : raw));
+      sets.push(`${field} = $${params.length}::jsonb`);
+    } else {
+      params.push(raw === undefined ? null : raw);
+      sets.push(`${field} = $${params.length}`);
+    }
+  }
+
+  // Set by hand: this schema has no triggers anywhere, and every other UPDATE in
+  // this file does the same. Appended last so that even a patch which sets no
+  // model column still records who touched the engagement and when.
+  params.push(actingUserId);
+  sets.push(`updated_by = $${params.length}`);
+  sets.push('updated_at = now()');
+
+  const res = await query(
+    `UPDATE ciab_engagement
+        SET ${sets.join(', ')}
+      WHERE engagement_id = $1
+      RETURNING *`,
+    params
+  );
+  // Deleted between the read and the write. Rare, but returning null here would
+  // hand the caller an "updated" engagement that does not exist.
+  if (res.rows.length === 0) {
+    throw Object.assign(new Error('Engagement not found'), { status: 404 });
+  }
+  return rowToEngagement(res.rows[0]);
 }
 
 // ─── The deploy gate ────────────────────────────────────────────────────────
@@ -342,12 +542,43 @@ async function createEngagement({
     );
   }
 
+  // ── THE POSTURE IS WRITTEN AT INSERT, NOT LEFT TO THE COLUMN DEFAULTS ─────
+  //
+  // 011 declares perspective and credential_posture NOT NULL DEFAULT
+  // 'internal' / 'none' — the conservative pair every pre-B0 row already holds.
+  // A DEFAULT is the right answer for the 'default' type and the WRONG one for
+  // 'external_blackbox', and because the columns are NOT NULL the wrong answer
+  // is always a LEGAL value: nothing downstream can distinguish it from an
+  // authored choice, and a read-time registry fallback can never fire, because
+  // there is no null to fall back FROM. An engagement created as external would
+  // be stored as internal permanently, and every consumer of 'external' —
+  // exposure, scope, the brief, B1's per-perspective filter — would silently
+  // take the internal branch.
+  //
+  // describeEngagementType is TOTAL (engagement-model.js): a registry key gives
+  // its declared posture, and an unknown slug gives exactly the (internal,
+  // none) pair the DEFAULTs already assign. So this changes nothing for a
+  // custom slug and fixes the one case that matters. Both values satisfy 012's
+  // CHECK vocabularies by construction — the registry and the constraint are
+  // the same two lists.
+  //
+  // NOT a substitute for the model writer: updateEngagementModel remains the
+  // only way to change a posture afterwards (a custom slug declaring itself
+  // external), and it validates the pair against the registry first.
+  //
+  // adoptExistingReservation deliberately does NOT do this. It is on the READ
+  // path, its INSERT stays a fixed 8-column list, and it must never write a
+  // model column an instructor may have authored.
+  const posture = describeEngagementType(engagement);
+
   const res = await query(
     `INSERT INTO ciab_engagement
-       (profile_id, engagement_type, subnet_scheme, max_students, created_by, provision_status)
-     VALUES ($1, $2, $3, $4, $5, 'provisioning')
+       (profile_id, engagement_type, subnet_scheme, max_students, created_by,
+        provision_status, perspective, credential_posture)
+     VALUES ($1, $2, $3, $4, $5, 'provisioning', $6, $7)
      RETURNING *`,
-    [profileId, engagement, subnetScheme, max, actingUserId]
+    [profileId, engagement, subnetScheme, max, actingUserId,
+      posture.perspective, posture.credential_posture]
   );
   const row = rowToEngagement(res.rows[0]);
 
@@ -433,6 +664,58 @@ async function recoverStrandedEngagements() {
   }
 }
 
+/**
+ * Track B1: retirement.
+ *
+ * DELIBERATELY NOT PART OF updateEngagementModel. retired_at sits OUTSIDE
+ * MODEL_FIELDS on purpose (see that function's "NOT A RETIREMENT PATH" note),
+ * and test/ciab-engagement-model.test.js parses 011's ADD COLUMN list and pins
+ * `declared \ MODEL_FIELDS` to exactly ['retired_at','updated_by'] — so moving it
+ * into MODEL_FIELDS fails a test immediately, and for the right reason. Ending
+ * an engagement is an ACTION with its own confirmation, not a field somebody
+ * sets in passing while editing a scope rule.
+ *
+ * RETIRING DOES NOT RELEASE CAPACITY. It marks the row; the carved VXLAN block
+ * stays carved. Nothing anywhere in this tree hands a block back — the only
+ * teardown path is deleting the whole profile. The route's confirmation copy is
+ * the ONLY thing standing between an instructor and the belief that retiring
+ * frees a slot, so do not soften it.
+ *
+ * WHY A CONDITIONAL UPDATE RATHER THAN READ-THEN-WRITE. `AND retired_at IS NULL`
+ * makes a second retire a zero-row UPDATE instead of a silent second write that
+ * moves the timestamp — when an engagement ended is evidence, and a double click
+ * must not rewrite it. The two failure cases are told apart afterwards, on the
+ * cold path, so the hot path stays one statement. (`retired_at IS NULL` is a
+ * COLUMN null test, not a `$n IS NULL` parameter one — the construction
+ * test/sql-param-typing.test.js scans this file for.)
+ *
+ * @param {string}  engagementId
+ * @param {object}  [opts]
+ * @param {?string} [opts.actingUserId]  cybercore_user.user_id — cross-DB, no FK,
+ *                                       the same pattern as created_by/updated_by
+ * @returns {Promise<object>} the rowToEngagement projection of the retired row
+ * @throws {Error & {status:404}} no such engagement
+ * @throws {Error & {status:409}} already retired
+ */
+async function retireEngagement(engagementId, { actingUserId = null } = {}) {
+  const res = await query(
+    `UPDATE ciab_engagement
+        SET retired_at = now(), updated_by = $2, updated_at = now()
+      WHERE engagement_id = $1 AND retired_at IS NULL
+      RETURNING *`,
+    [engagementId, actingUserId]
+  );
+  if (res.rows.length === 0) {
+    // Zero rows means one of two things, and the caller must be able to tell
+    // them apart: a 404 is a bad id, a 409 is a button pressed twice. One extra
+    // round trip, only on a path that has already failed.
+    const existing = await getEngagementById(engagementId);
+    if (!existing) throw Object.assign(new Error('Engagement not found'), { status: 404 });
+    throw Object.assign(new Error('This engagement is already retired.'), { status: 409 });
+  }
+  return rowToEngagement(res.rows[0]);
+}
+
 module.exports = {
   getEngagement,
   getEngagementById,
@@ -443,7 +726,14 @@ module.exports = {
   provisionEngagementNetwork,
   reprovisionEngagement,
   recoverStrandedEngagements,
+  // Track B1: ends an engagement without pretending it hands the block back.
+  retireEngagement,
   assertEngagementDeployable,
+  // Track B0: the model writer B1's PATCH route calls.
+  updateEngagementModel,
+  // Exported so a test can assert it projects every column the migration adds —
+  // SELECT * hides the omission, because the database really does return them.
+  rowToEngagement,
   // Pure, so it is testable without a cluster.
   expectedTagsFor,
 };

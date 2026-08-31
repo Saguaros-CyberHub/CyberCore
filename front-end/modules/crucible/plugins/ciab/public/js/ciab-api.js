@@ -179,3 +179,33 @@ API.intakeForm = {
     return await response.blob();
   }
 };
+
+// Engagements (Track B1)
+// One namespace per route in modules/crucible/plugins/ciab/routes/engagements.js,
+// mounted by routes/instructor.js under /api/instructor/engagements. API.request
+// (public/js/app.js:16-77) attaches the bearer token, JSON-stringifies `body`
+// and throws APIError{message, status, data} — so a 400's err.data.errors and
+// err.data.warnings reach the form that raised it without any unwrapping here.
+//
+// EVERY id GOES THROUGH encodeURIComponent, exactly as list() already does with
+// its query parameter. An engagement id is a uuid on the happy path, but the id
+// these methods receive comes from a row the page is holding — and a page that
+// re-renders from stale state, a hand-typed id, or a future non-uuid identifier
+// puts arbitrary text into the path. Unencoded, a '#' truncates the request at
+// the fragment, a '?' turns the rest of the path into a query string, and a '/'
+// or an encoded '..' re-points the call at a DIFFERENT ROUTE — which on this
+// namespace means a POST landing on /reprovision or /retire, both of which
+// spend or end capacity. Encoding is one call and removes the whole class.
+API.engagements = {
+  types()                { return API.request('/instructor/engagements/types'); },
+  list(profileId)        { return API.request(`/instructor/engagements?profile_id=${encodeURIComponent(profileId)}`); },
+  get(id)                { return API.request(`/instructor/engagements/${encodeURIComponent(id)}`); },
+  patch(id, body)        { return API.request(`/instructor/engagements/${encodeURIComponent(id)}`, { method: 'PATCH', body }); },
+  create(body)           { return API.request('/instructor/engagements', { method: 'POST', body }); },
+  adopt(body)            { return API.request('/instructor/engagements/adopt', { method: 'POST', body }); },
+  reprovision(id, force) { return API.request(`/instructor/engagements/${encodeURIComponent(id)}/reprovision`, { method: 'POST', body: { force: !!force } }); },
+  retire(id)             { return API.request(`/instructor/engagements/${encodeURIComponent(id)}/retire`, { method: 'POST', body: { confirm: true } }); },
+  // B1b's route. Declared with the rest of the namespace so the two halves of
+  // the phase do not disagree about the URL; nothing in B1a calls it.
+  generateDocs(id, types){ return API.request(`/instructor/engagements/${encodeURIComponent(id)}/documents`, { method: 'POST', body: { types } }); },
+};

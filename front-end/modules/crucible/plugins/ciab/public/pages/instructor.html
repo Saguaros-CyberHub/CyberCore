@@ -43,8 +43,12 @@
                   aria-controls="tab-overview" aria-selected="true">Overview</button>
           <button class="tab" role="tab" id="tabbtn-sections" data-tab="sections"
                   aria-controls="tab-sections" aria-selected="false" tabindex="-1">Sections</button>
+          <button class="tab" role="tab" id="tabbtn-modules" data-tab="modules"
+                  aria-controls="tab-modules" aria-selected="false" tabindex="-1">Modules</button>
           <button class="tab" role="tab" id="tabbtn-students" data-tab="students"
                   aria-controls="tab-students" aria-selected="false" tabindex="-1">Students</button>
+          <button class="tab" role="tab" id="tabbtn-engagements" data-tab="engagements"
+                  aria-controls="tab-engagements" aria-selected="false" tabindex="-1" data-instructor-only>Engagements</button>
           <button class="tab" role="tab" id="tabbtn-reviews" data-tab="reviews"
                   aria-controls="tab-reviews" aria-selected="false" tabindex="-1">
             Review Queue <span class="pill-count" id="reviewsTabCount" hidden></span>
@@ -98,6 +102,7 @@
             <div class="card-body" id="recentSubmissions"></div>
           </div>
         </div>
+        <div class="tab-content" id="tab-engagements" role="tabpanel" aria-labelledby="tabbtn-engagements" data-instructor-only></div>
 
 
         <!-- ============================================================ -->
@@ -158,6 +163,46 @@
             </div>
 
             <div id="sectionRosterContent"></div>
+          </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: MODULES                                                  -->
+        <!-- Rendered by instructor-modules.js. The toolbar lives OUTSIDE   -->
+        <!-- #moduleListContent so an innerHTML repaint never steals the    -->
+        <!-- caret. No `hidden` and no inline display on the panel itself:  -->
+        <!-- visibility is the .active class, and switchTab's classList     -->
+        <!-- toggle would silently lose to an inline style.                 -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-modules" role="tabpanel" aria-labelledby="tabbtn-modules">
+
+          <div id="modulesNoSection" class="empty-state" style="display: none;">
+            <div class="icon">&#127891;</div>
+            <h3>No sections yet</h3>
+            <p>A module belongs to a section.<br>Create one first, then come back and build the sequence.</p>
+            <button class="btn btn-primary" onclick="switchTab('sections')">Go to Sections</button>
+          </div>
+
+          <div id="modulesMain" style="display: none;">
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem;">
+                <div style="display:flex; gap:1rem; flex-wrap:wrap; align-items:center;">
+                  <div style="flex:1; min-width:260px;">
+                    <select id="moduleSectionSelect" class="form-input" onchange="CiabModules.onSectionChange()"></select>
+                  </div>
+                  <button class="btn btn-primary btn-sm" onclick="CiabModules.showModuleModal()">&#65291; New Module</button>
+                  <label style="display:flex; align-items:center; gap:0.35rem; font-size:0.85rem; color:var(--gray-500);">
+                    <input type="checkbox" id="moduleHideArchived" onchange="CiabModules.render()"> Hide archived
+                  </label>
+                </div>
+                <div id="moduleSectionMeta" style="margin-top:0.75rem; color:var(--gray-500); font-size:0.9rem;"></div>
+              </div>
+            </div>
+
+            <!-- The resolver's diagnoses, above the list. -->
+            <div id="moduleIssues"></div>
+            <!-- Owned entirely by instructor-modules.js. -->
+            <div id="moduleListContent"></div>
           </div>
         </div>
 
@@ -689,6 +734,133 @@
     </div>
   </div>
 
+  <!-- New / edit a module (instructor-modules.js) -->
+  <div class="modal-overlay" id="moduleModal" role="dialog" aria-modal="true" aria-labelledby="moduleModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="moduleModalTitle">New Module</h3>
+        <button class="modal-close" onclick="closeModal('moduleModal')">&times;</button>
+      </div>
+      <form onsubmit="CiabModules.saveModule(event)">
+        <div class="form-group">
+          <label for="moduleTitle">Title</label>
+          <input type="text" id="moduleTitle" maxlength="255" required>
+        </div>
+        <div class="form-group">
+          <label for="moduleProfile">Client</label>
+          <input type="text" id="moduleClientFilter" oninput="CiabModules.filterClients()" placeholder="Filter clients&hellip;">
+          <select id="moduleProfile"></select>
+        </div>
+        <div class="form-group">
+          <label for="moduleEngagement">Engagement</label>
+          <input type="text" id="moduleEngagement" list="moduleEngagementList" maxlength="32" placeholder="default">
+          <datalist id="moduleEngagementList"></datalist>
+        </div>
+        <div class="form-group">
+          <label for="modulePart">Deliverable</label>
+          <select id="modulePart"></select>
+        </div>
+        <div class="form-group">
+          <label for="moduleReleaseState">Release</label>
+          <select id="moduleReleaseState"></select>
+        </div>
+        <div class="form-group">
+          <label for="moduleReleaseAt">Opens at</label>
+          <input type="datetime-local" id="moduleReleaseAt">
+          <small id="moduleReleaseTz"></small>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloseAt">Closes at</label>
+          <input type="datetime-local" id="moduleCloseAt">
+        </div>
+        <div class="form-group">
+          <label for="moduleBrief">Brief</label>
+          <textarea id="moduleBrief" rows="4"></textarea>
+          <small>Students see this once the module opens.</small>
+        </div>
+        <div class="form-group">
+          <label for="moduleNotes">Instructor notes</label>
+          <textarea id="moduleNotes" rows="3"></textarea>
+          <small>Staff only. Never shown to a student.</small>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('moduleModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="moduleSaveBtn">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Clone a module: SAME SHAPE, DIFFERENT CLIENT. Single-stage, so no
+       data-modal-static -- that attribute is only for a multi-stage flow whose
+       intermediate state cannot be recreated. -->
+  <div class="modal-overlay" id="moduleCloneModal" role="dialog" aria-modal="true" aria-labelledby="moduleCloneModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="moduleCloneModalTitle">Clone</h3>
+        <button class="modal-close" onclick="closeModal('moduleCloneModal')">&times;</button>
+      </div>
+      <form onsubmit="CiabModules.cloneModule(event)">
+        <div class="form-group">
+          <label for="moduleCloneSource">Cloning</label>
+          <input type="text" id="moduleCloneSource" readonly>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneTitle">New title</label>
+          <input type="text" id="moduleCloneTitle" maxlength="255" required>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneProfile">Client</label>
+          <input type="text" id="moduleCloneClientFilter" oninput="CiabModules.filterClients('clone')" placeholder="Filter clients&hellip;">
+          <select id="moduleCloneProfile"></select>
+          <small>Change this &mdash; cloning onto a different client is the point.</small>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneEngagement">Engagement</label>
+          <input type="text" id="moduleCloneEngagement" list="moduleCloneEngagementList" maxlength="32" placeholder="default">
+          <datalist id="moduleCloneEngagementList"></datalist>
+        </div>
+        <div class="form-group">
+          <label for="moduleCloneSection">Section</label>
+          <select id="moduleCloneSection" onchange="CiabModules.onCloneSectionChange()"></select>
+        </div>
+        <div class="form-group">
+          <label style="display:flex; align-items:center; gap:0.4rem;">
+            <input type="checkbox" id="moduleClonePrereqs" checked>
+            <span id="moduleClonePrereqsLabel">Copy the prerequisites this module follows</span>
+          </label>
+          <small id="moduleClonePrereqsNote"></small>
+        </div>
+        <div class="form-group">
+          <strong>What the copy gets</strong>
+          <p style="margin:0.35rem 0 0 0; font-size:0.85rem; color:var(--gray-500);">
+            Copied &mdash; title, brief, instructor notes, deliverable.<br>
+            Reset &mdash; it lands at the end of the sequence as a Draft with no open or close time.<br>
+            Not copied &mdash; student completions and overrides, and the modules that follow this one.
+          </p>
+        </div>
+        <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+          <button type="button" class="btn btn-secondary" onclick="closeModal('moduleCloneModal')">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="moduleCloneBtn">Clone</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Prerequisites for one module (instructor-modules.js fills the body) -->
+  <div class="modal-overlay" id="modulePrereqModal" role="dialog" aria-modal="true" aria-labelledby="modulePrereqModalTitle">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modulePrereqModalTitle">Prerequisites</h3>
+        <button class="modal-close" onclick="closeModal('modulePrereqModal')">&times;</button>
+      </div>
+      <div id="modulePrereqContent"></div>
+      <div style="display:flex; justify-content:flex-end; gap:0.5rem; margin-top:1rem;">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modulePrereqModal')">Done</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Load order matters. instructor-core.js replaces the old inline block as
        the provider of switchTab/closeModal/escapeHtml; instructor-sections.js
        and instructor-roster-import.js depend on those globals and must stay
@@ -701,8 +873,10 @@
   <script src="/ciab/js/instructor-students.js"></script>
   <script src="/ciab/js/instructor-reviews.js"></script>
   <script src="/ciab/js/instructor-documents.js"></script>
+  <script src="/ciab/js/instructor-engagements.js"></script>
   <script src="/js/csv.js"></script>
   <script src="/ciab/js/instructor-sections.js"></script>
   <script src="/ciab/js/instructor-roster-import.js"></script>
+  <script src="/ciab/js/instructor-modules.js"></script>
 </body>
 </html>

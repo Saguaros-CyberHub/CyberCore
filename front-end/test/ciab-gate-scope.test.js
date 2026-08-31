@@ -106,7 +106,7 @@ const leaf = (name) => {
 for (const name of [
   'profiles', 'progress', 'interview', 'instructor', 'intake-form',
   'real-client-intake', 'intakes', 'clinic-risk-assessment', 'cis-ram',
-  'profile-deploy', 'sections', 'section-roster',
+  'profile-deploy', 'sections', 'section-roster', 'section-modules',
 ]) {
   stub(path.join(CIAB, 'routes', `${name}.js`), leaf(name));
 }
