@@ -212,17 +212,33 @@ services:
     # External DNS so api.tailscale.com (and any other public hostnames the
     # orchestrator hits) resolve. Lab DNS at 100.100.0.1 doesn't recurse to
     # the public internet, so fetch() throws EAI_AGAIN on Tailscale calls
-    # without an internet-capable resolver in front. Order matters: Docker
-    # tries entries top-to-bottom.
+    # without an internet-capable resolver in front.
     #
-    # 127.0.0.11 MUST stay first. It is Docker's embedded resolver, and it is
-    # the only thing that resolves compose service names like `mailrelay` and
-    # `postgres`. Overriding dns: at all displaces it; listing it explicitly
-    # restores service discovery while keeping the public resolvers behind it.
-    # Verify after any change to this block:
-    #   docker compose exec app node -e "require('dns').lookup('mailrelay',console.log)"
+    # DO NOT PUT 127.0.0.11 IN THIS LIST. It was here once, on the belief that
+    # `dns:` replaces the container's nameservers and would otherwise displace
+    # Docker service discovery. It does neither.
+    #
+    # On a user-defined network (cybercore-net) the embedded resolver is ALWAYS
+    # at 127.0.0.11 and Docker writes it into the container's resolv.conf
+    # itself. This key configures the UPSTREAMS that resolver forwards external
+    # names to -- it shows up as `ExtServers` in the container's resolv.conf.
+    # Naming 127.0.0.11 there makes the resolver forward to ITSELF: every
+    # public lookup loops, waits out the ~4s resolver timeout, then falls
+    # through to the next entry.
+    #
+    # Measured in that state, inside the container:
+    #   dns.lookup smtp.resend.com   4043 ms   <- self-forward, then 1.1.1.1
+    #   dns.lookup postgres             2 ms   <- service discovery unaffected
+    #   TCP connect by IP              74 ms   <- the network was never the problem
+    # It broke outbound email first, because nodemailer gives the SMTP greeting
+    # a 10s budget that four seconds of DNS per round trip exhausts -- but it
+    # taxed every outbound call the orchestrator makes, LLM generation included.
+    #
+    # Verify after any change to this block -- BOTH lines, service and public:
+    #   docker compose exec app node -e "const t=Date.now();require('dns').lookup('postgres',(e,a)=>console.log(Date.now()-t,'ms',e||a))"
+    #   docker compose exec app node -e "const t=Date.now();require('dns').lookup('smtp.resend.com',(e,a)=>console.log(Date.now()-t,'ms',e||a))"
+    # Both must answer in tens of milliseconds.
     dns:
-      - 127.0.0.11
       - 1.1.1.1
       - 100.100.0.1
     ports:
@@ -337,10 +353,19 @@ services:
     # daemon's resolvers from the host /etc/resolv.conf, where dead lab
     # nameservers sit ahead of working ones — every lookup then pays their
     # full timeout, which stalls handshakes and fails ACME renewal.
-    # 127.0.0.11 stays first so compose service names (app, guacamole)
-    # still resolve; public resolvers sit behind it.
+    #
+    # NO 127.0.0.11 HERE either — see the long note on the app service. This
+    # key sets the resolver's UPSTREAMS, not the container's nameservers, so
+    # naming the embedded resolver makes it forward to itself and every public
+    # lookup eats a ~4s timeout before falling through. Service discovery does
+    # not depend on this list; Docker points the container at 127.0.0.11 on its
+    # own for any user-defined network.
+    #
+    # This is the far end of the same bug that broke outbound mail, and on this
+    # service it lands on OCSP and ACME — i.e. on TLS handshakes for the public
+    # site. A four-second stall in front of a handshake is the shape of the
+    # intermittent "stuck loading" that was being chased at the Caddy layer.
     dns:
-      - 127.0.0.11
       - 1.1.1.1
       - 100.100.10.1
     restart: unless-stopped

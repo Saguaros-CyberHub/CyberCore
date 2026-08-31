@@ -135,6 +135,17 @@ before(async () => {
   app.get('/api/cle/courses', (req, res) => res.json({ courses: [] }));
   app.get('/api/some-other-plugin/thing', (req, res) => res.json({ ok: true }));
 
+  // The CLE roster endpoints, at their real paths. Every one of them is a mail
+  // path and all four sit under /api/cle — so when CIAB's gate reached the whole
+  // /api namespace it took the platform's email with it: imports never created
+  // accounts or queued invitations, Resend did nothing, and the delivery-status
+  // panel showed nothing outbound. Three reported symptoms, one cause. Named
+  // here so the next person to touch the mount block sees what it costs.
+  app.post('/api/cle/courses/:courseId/roster/import', (req, res) => res.json({ ok: true }));
+  app.post('/api/cle/courses/:courseId/roster/students/:id/activation/resend', (req, res) => res.json({ ok: true }));
+  app.post('/api/cle/courses/:courseId/roster/students/:id/password', (req, res) => res.json({ ok: true }));
+  app.get('/api/cle/courses/:courseId/roster/email-status', (req, res) => res.json({ recipients: [] }));
+
   server = http.createServer(app);
   await new Promise((r) => server.listen(0, r));
   port = server.address().port;
@@ -250,4 +261,27 @@ test('the open endpoints stay open to any signed-in user', async () => {
     const res = await get(p);
     assert.notStrictEqual(res.status, 403, `${p} should not be enrollment-gated`);
   }
+});
+
+test('the CLE mail paths stay reachable — invitations, resend and delivery status', async () => {
+  // Reported as separate faults: "students are no longer receiving email" and
+  // "the resend isn't showing any going outbound". Both were CIAB's enrollment
+  // gate answering for /api/cle/*, which is where every mail path lives.
+  const post = (pathname) => new Promise((resolve, reject) => {
+    const req = http.request({
+      port, path: pathname, method: 'POST',
+      headers: { Authorization: `Bearer ${tokenFor('instructor')}`, 'Content-Length': 0 },
+    }, (res) => { res.resume(); res.on('end', () => resolve(res.statusCode)); });
+    req.on('error', reject);
+    req.end();
+  });
+
+  const C = '/api/cle/courses/abc/roster';
+  assert.strictEqual(await post(`${C}/import`), 200, 'roster import must reach CLE');
+  assert.strictEqual(await post(`${C}/students/u9/activation/resend`), 200, 'resend must reach CLE');
+  assert.strictEqual(await post(`${C}/students/u9/password`), 200, 'password reset must reach CLE');
+  assert.strictEqual((await get(`${C}/email-status`, 'instructor')).status, 200, 'delivery status must reach CLE');
+
+  // And for a student, who is who was actually locked out.
+  assert.strictEqual((await get('/api/cle/my/overview', 'student')).status, 200);
 });
