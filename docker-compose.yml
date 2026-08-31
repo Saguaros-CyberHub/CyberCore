@@ -209,38 +209,36 @@ services:
       # mailer regardless of any other setting — these credentials are handed
       # out on a printed sheet, never emailed. Must NOT be a domain you own.
       CLE_COHORT_EMAIL_DOMAIN: ${CLE_COHORT_EMAIL_DOMAIN:-cohort.invalid}
-    # External DNS so api.tailscale.com (and any other public hostnames the
-    # orchestrator hits) resolve. Lab DNS at 100.100.0.1 doesn't recurse to
-    # the public internet, so fetch() throws EAI_AGAIN on Tailscale calls
-    # without an internet-capable resolver in front.
+    # External DNS for api.tailscale.com and every other public hostname the
+    # orchestrator reaches -- Proxmox, Guacamole, the LLM API, the SMTP relay.
+    # RESOLVER ORDER IS THE WHOLE THING. Docker's embedded resolver tries these
+    # upstreams in order and waits out a ~4s timeout on each one that does not
+    # answer, so a dead entry at the FRONT taxes every public lookup in the
+    # container by four seconds even though the name resolves correctly.
     #
-    # DO NOT PUT 127.0.0.11 IN THIS LIST. It was here once, on the belief that
-    # `dns:` replaces the container's nameservers and would otherwise displace
-    # Docker service discovery. It does neither.
+    # Measured, in the container, with 1.1.1.1 first:
+    #   dns.lookup smtp.resend.com   4065 ms
+    #   dns.lookup postgres            10 ms   <- embedded resolver is healthy
+    # and on the HOST, using the two nameservers below:
+    #   getent hosts smtp.resend.com    2 ms
     #
-    # On a user-defined network (cybercore-net) the embedded resolver is ALWAYS
-    # at 127.0.0.11 and Docker writes it into the container's resolv.conf
-    # itself. This key configures the UPSTREAMS that resolver forwards external
-    # names to -- it shows up as `ExtServers` in the container's resolv.conf.
-    # Naming 127.0.0.11 there makes the resolver forward to ITSELF: every
-    # public lookup loops, waits out the ~4s resolver timeout, then falls
-    # through to the next entry.
+    # So the lab resolvers DO recurse to the public internet -- an earlier
+    # revision of this block assumed they did not and put 1.1.1.1 in front,
+    # which is what bought the 4s. They go first now; 1.1.1.1 stays as a last
+    # resort only.
     #
-    # Measured in that state, inside the container:
-    #   dns.lookup smtp.resend.com   4043 ms   <- self-forward, then 1.1.1.1
-    #   dns.lookup postgres             2 ms   <- service discovery unaffected
-    #   TCP connect by IP              74 ms   <- the network was never the problem
-    # It broke outbound email first, because nodemailer gives the SMTP greeting
-    # a 10s budget that four seconds of DNS per round trip exhausts -- but it
-    # taxed every outbound call the orchestrator makes, LLM generation included.
+    # DO NOT ADD 127.0.0.11 HERE. This key sets the resolver's UPSTREAMS, not
+    # the container's nameservers -- Docker points the container at 127.0.0.11
+    # itself on any user-defined network. Naming it here makes the resolver
+    # forward to itself, which is a second, independent way to buy the same 4s.
     #
-    # Verify after any change to this block -- BOTH lines, service and public:
+    # Verify after ANY change -- both lines, and both must be tens of ms:
     #   docker compose exec app node -e "const t=Date.now();require('dns').lookup('postgres',(e,a)=>console.log(Date.now()-t,'ms',e||a))"
     #   docker compose exec app node -e "const t=Date.now();require('dns').lookup('smtp.resend.com',(e,a)=>console.log(Date.now()-t,'ms',e||a))"
-    # Both must answer in tens of milliseconds.
     dns:
+      - 100.100.10.1
+      - 100.100.60.1
       - 1.1.1.1
-      - 100.100.0.1
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -348,26 +346,37 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: cybercore-caddy
-    # Caddy resolves Let's Encrypt and OCSP responders during certificate
-    # work and during TLS handshakes. Without this block it inherits the
-    # daemon's resolvers from the host /etc/resolv.conf, where dead lab
-    # nameservers sit ahead of working ones — every lookup then pays their
-    # full timeout, which stalls handshakes and fails ACME renewal.
+    # Caddy resolves Let's Encrypt and OCSP responders during certificate work
+    # and during TLS handshakes, so a slow resolver here stalls the public site
+    # rather than a background job.
+    # RESOLVER ORDER IS THE WHOLE THING. Docker's embedded resolver tries these
+    # upstreams in order and waits out a ~4s timeout on each one that does not
+    # answer, so a dead entry at the FRONT taxes every public lookup in the
+    # container by four seconds even though the name resolves correctly.
     #
-    # NO 127.0.0.11 HERE either — see the long note on the app service. This
-    # key sets the resolver's UPSTREAMS, not the container's nameservers, so
-    # naming the embedded resolver makes it forward to itself and every public
-    # lookup eats a ~4s timeout before falling through. Service discovery does
-    # not depend on this list; Docker points the container at 127.0.0.11 on its
-    # own for any user-defined network.
+    # Measured, in the container, with 1.1.1.1 first:
+    #   dns.lookup smtp.resend.com   4065 ms
+    #   dns.lookup postgres            10 ms   <- embedded resolver is healthy
+    # and on the HOST, using the two nameservers below:
+    #   getent hosts smtp.resend.com    2 ms
     #
-    # This is the far end of the same bug that broke outbound mail, and on this
-    # service it lands on OCSP and ACME — i.e. on TLS handshakes for the public
-    # site. A four-second stall in front of a handshake is the shape of the
-    # intermittent "stuck loading" that was being chased at the Caddy layer.
+    # So the lab resolvers DO recurse to the public internet -- an earlier
+    # revision of this block assumed they did not and put 1.1.1.1 in front,
+    # which is what bought the 4s. They go first now; 1.1.1.1 stays as a last
+    # resort only.
+    #
+    # DO NOT ADD 127.0.0.11 HERE. This key sets the resolver's UPSTREAMS, not
+    # the container's nameservers -- Docker points the container at 127.0.0.11
+    # itself on any user-defined network. Naming it here makes the resolver
+    # forward to itself, which is a second, independent way to buy the same 4s.
+    #
+    # Verify after ANY change (caddy has no node; time a name it must resolve):
+    #   time docker compose exec caddy nslookup acme-v02.api.letsencrypt.org
+    # Tens of milliseconds, not seconds.
     dns:
-      - 1.1.1.1
       - 100.100.10.1
+      - 100.100.60.1
+      - 1.1.1.1
     restart: unless-stopped
     depends_on:
       - app
