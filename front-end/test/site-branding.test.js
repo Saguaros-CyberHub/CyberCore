@@ -259,6 +259,46 @@ test('a failed fetch leaves the cached branding painted', async () => {
   assert.strictEqual(logoOf(anchor).getAttribute('src'), '/img/seal.svg');
 });
 
+// ── The admin console's decorated name must stay on the admin console ───────
+
+test('THE BUG: a display-only name never reaches the shared cache', () => {
+  // admin-settings.js appends " Administration" for its own sidebar. That
+  // string used to be written into the shared site_name key, so /hub, /login
+  // and every other page inherited it and read "CyberHub Administration".
+  const { Layout, store } = loadLayout({ store: { site_name: 'CyberHub' } });
+  Layout.updateSiteName('CyberHub Administration', { cache: false });
+  assert.strictEqual(store.site_name, 'CyberHub', 'the canonical name survives');
+});
+
+test('the decorated name is still shown, just not stored', () => {
+  const { Layout, anchor } = loadLayout({ store: { site_name: 'CyberHub' } });
+  // The stub's getElementById returns null, so assert on the call not throwing
+  // and on the cache -- the DOM half is covered by the sidebar tests above.
+  Layout.updateSiteName('CyberHub Administration', { cache: false });
+  assert.ok(anchor, 'no exception escaped');
+});
+
+test('caching is the default, so ordinary callers are unchanged', () => {
+  const { Layout, store } = loadLayout();
+  Layout.updateSiteName('CyberHub AZ');
+  assert.strictEqual(store.site_name, 'CyberHub AZ');
+});
+
+test('admin-settings.js caches the canonical name and marks the suffix display-only', () => {
+  const src = fs.readFileSync(
+    path.join(__dirname, '..', 'public', 'js', 'admin', 'admin-settings.js'), 'utf8');
+  // Every call that decorates the name with " Administration" has to opt out of
+  // caching. [^)] keeps each match inside a single call.
+  const decorated = [...src.matchAll(/Layout\.updateSiteName\([^)]*Administration[^)]*\)/g)];
+  assert.ok(decorated.length > 0, 'the admin console still decorates its own name');
+  for (const [call] of decorated) {
+    assert.ok(/cache:\s*false/.test(call),
+      'a name with " Administration" appended must never be cached: ' + call);
+  }
+  assert.ok(src.includes("localStorage.setItem('site_name', siteName)"),
+    'the clean name still has to reach the cache for the other pages');
+});
+
 // ── The favicon shares the path ─────────────────────────────────────────────
 
 test('a configured favicon is applied, and an unsafe one is not', () => {
@@ -295,6 +335,26 @@ test('the CSP is not loosened beyond images', () => {
 });
 
 // ── The setting is no longer write-only anywhere in the product ─────────────
+
+test('the three auth pages share one tagline fallback, and it matches the seed', () => {
+  // site_description overwrites all three from a single admin field, so a
+  // divergent fallback is invisible until the day the fetch fails -- which is
+  // precisely when you want the page to still say the right thing. register.html
+  // used to carry its own "Join the Cyber Risk Assessment Platform".
+  const pub = path.join(__dirname, '..', 'public');
+  const taglines = ['login.html', 'register.html', 'activate.html'].map(page => {
+    const src = fs.readFileSync(path.join(pub, page), 'utf8');
+    const m = src.match(/<p id="siteDescription">([^<]*)<\/p>/);
+    assert.ok(m, page + ' still has a #siteDescription fallback');
+    return m[1];
+  });
+  assert.strictEqual(new Set(taglines).size, 1, 'all three read: ' + taglines.join(' | '));
+
+  const seed = fs.readFileSync(
+    path.join(__dirname, '..', '..', 'config', 'postgres', '004_site_settings.sql'), 'utf8');
+  assert.ok(seed.includes("('site_description', '" + taglines[0] + "')"),
+    'a fresh install must seed the same string the markup falls back to');
+});
 
 test('every brand-bearing page that fetches site-config also renders the logo', () => {
   const pub = path.join(__dirname, '..', 'public');

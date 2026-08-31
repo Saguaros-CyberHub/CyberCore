@@ -19,7 +19,7 @@ INSERT INTO cybercore_site_settings (key, value) VALUES
   ('site_name', 'CyberHub'),
   ('site_logo_url', NULL),
   ('site_favicon_url', NULL),
-  ('site_description', 'A comprehensive cybersecurity training and assessment platform')
+  ('site_description', 'University of Arizona Cyber Training Platform')
 ON CONFLICT (key) DO NOTHING;
 
 -- Grant permissions to application user

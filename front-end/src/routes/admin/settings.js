@@ -17,6 +17,7 @@ const audit = require('../../utils/audit');
 // implementations that disagreed about bcrypt cost, username derivation, and —
 // the bug that mattered — whether the stored email was lowercased.
 const accountProvisioning = require('../../utils/account-provisioning');
+const siteConfigRouter = require('../site-config');
 
 const adminOnly = requireRole('admin');
 
@@ -150,7 +151,13 @@ router.patch('/settings/site-config', authenticateToken, adminOnly, async (req, 
       await cybercoreQuery(`
         CREATE TABLE IF NOT EXISTS cybercore_site_settings (
           key VARCHAR(255) PRIMARY KEY,
-          value TEXT NOT NULL,
+          -- Nullable, matching config/postgres/004_site_settings.sql. The two
+          -- disagreed: clearing the Logo URL, Favicon URL or Site Description
+          -- writes NULL, and on any database where THIS statement created the
+          -- table first, that write violated NOT NULL. The per-key try/catch
+          -- below turns that into a console.warn, so the field simply refused
+          -- to clear with nothing on screen to say why.
+          value TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -198,38 +205,11 @@ router.patch('/settings/site-config', authenticateToken, adminOnly, async (req, 
   }
 });
 
-// Public endpoint — no auth required
-router.get('/site-config', async (req, res) => {
-  try {
-    let siteConfig = {
-      site_name: 'CyberHub',
-      site_logo_url: null,
-      site_favicon_url: null,
-      site_description: null,
-      // Lets the sign-in and registration pages stop offering something the API
-      // will refuse. Read from env, not the settings table: it gates a route, and
-      // a route's availability should not depend on a row anyone with the admin
-      // console can edit. Authoritative check stays in POST /api/auth/register.
-      self_registration_enabled: process.env.ALLOW_SELF_REGISTRATION === 'true'
-    };
-
-    try {
-      const result = await cybercoreQuery('SELECT key, value FROM cybercore_site_settings');
-      result.rows.forEach(row => {
-        if (row.key === 'site_name') siteConfig.site_name = row.value;
-        if (row.key === 'site_logo_url') siteConfig.site_logo_url = row.value;
-        if (row.key === 'site_favicon_url') siteConfig.site_favicon_url = row.value;
-        if (row.key === 'site_description') siteConfig.site_description = row.value;
-      });
-    } catch (err) {
-      console.warn('[Site Config] Could not fetch settings:', err.message);
-    }
-
-    res.json(siteConfig);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+// Public endpoint — no auth required. The handler now lives in
+// routes/site-config.js and is mounted at '/api' by server.js, which is the
+// address every page in the product actually calls. Re-mounting it here keeps
+// /api/admin/site-config answering for anything already pointed at it.
+router.use(siteConfigRouter);
 
 router.get('/settings/modules', authenticateToken, adminOnly, async (req, res) => {
   try {
@@ -841,7 +821,7 @@ router.patch('/settings/mfa', authenticateToken, adminOnly, async (req, res) => 
     await cybercoreQuery(`
       CREATE TABLE IF NOT EXISTS cybercore_site_settings (
         key VARCHAR(255) PRIMARY KEY,
-        value TEXT NOT NULL,
+        value TEXT,   -- nullable, matching 004_site_settings.sql (see above)
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )

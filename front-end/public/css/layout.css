@@ -60,25 +60,22 @@
    than sized: the field takes any URL, so the image could be a 32px favicon or
    a 2000px wordmark and the sidebar header has to survive both.
 
-   The white chip is not decoration. This sidebar is #0c234b -- Arizona Blue --
-   and the University of Arizona block A is outlined in that exact colour, so
-   the mark's whole outer shape vanishes into the background and it reads as a
-   floating red A. The alternative is a reversed (white-outline) logo, but the
-   SAME url also renders on the light sign-in card, where a reversed mark would
-   be invisible in the other direction. One field, two backgrounds: the chip is
-   what makes any uploaded logo legible on both without recolouring a mark that
-   brand guidelines almost never allow you to recolour. */
+   This carried a white chip for a while, to stop the University of Arizona
+   block A vanishing into a sidebar that is the same #0c234b as the mark's own
+   outline. That turned out to be a workaround for a broken asset -- the logo
+   had been cut from a JPEG screenshot whose "transparency" checkerboard was
+   painted in, and the flood fill that removed it also ate the mark's white
+   keyline. With the real vector in place that keyline defines the silhouette
+   against any dark ground, and the chip is just a badge around a logo that
+   does not need one. A logo with no light edge of its own would want it back:
+   background:#fff; padding:4px 6px; border-radius:6px; box-sizing:content-box. */
 .sidebar-logo-img {
   display: block;
-  height: 28px;
+  height: 32px;
   width: auto;
-  max-width: 150px;
+  max-width: 160px;
   object-fit: contain;
   flex-shrink: 0;
-  background: #fff;
-  padding: 4px 6px;
-  border-radius: 6px;
-  box-sizing: content-box;
 }
 
 .sidebar-nav {

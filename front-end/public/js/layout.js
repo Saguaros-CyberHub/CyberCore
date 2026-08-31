@@ -1020,16 +1020,20 @@ const Layout = {
     }
   },
 
-  // Kept as a name-only setter because admin/admin-settings.js calls it to
-  // append " Administration" after a save.
-  updateSiteName(siteName) {
+  // admin/admin-settings.js appends " Administration" for its own sidebar, and
+  // that decorated string used to be written straight into the shared
+  // `site_name` cache -- so every other page in the product then painted
+  // "CyberHub Administration" too, and stayed that way. Pass {cache: false} for
+  // a display-only name; the canonical one belongs in the cache and nothing
+  // else.
+  updateSiteName(siteName, { cache = true } = {}) {
     if (!siteName) return;
 
     const sidebarEl = document.getElementById('sidebarSiteName');
     if (sidebarEl) sidebarEl.textContent = siteName;
 
     document.title = siteName;
-    localStorage.setItem('site_name', siteName);
+    if (cache) localStorage.setItem('site_name', siteName);
   },
 
   // A branding asset must be a same-origin absolute path or an http(s) URL.

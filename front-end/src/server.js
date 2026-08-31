@@ -105,6 +105,7 @@ if (!process.env.SESSION_SECRET) {
 // Import core routes
 const authRoutes = require('./routes/auth');
 const adminRoutes = require('./routes/admin');
+const siteConfigRoutes = require('./routes/site-config');
 const labTemplateRoutes = require('./routes/lab-templates');
 const moduleRoutes = require('./routes/modules');
 const laneBootstrapRoutes = require('./routes/lane-bootstrap');
@@ -489,6 +490,12 @@ app.use('/vuln-assets', (req, res, next) => {
 // CORE API ROUTES
 // ============================================================================
 
+// Unauthenticated branding read. Every page fetches /api/site-config on load;
+// the handler used to be reachable only at /api/admin/site-config, so all of
+// them 404'd silently and fell back to their hard-coded defaults. Like the
+// ticket routes below, this MUST be registered here in the core block -- the
+// CIAB plugin mounts at '/' with an /api catch-all that would swallow it.
+app.use('/api', siteConfigRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/admin', labTemplateRoutes);

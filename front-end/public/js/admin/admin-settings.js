@@ -2,9 +2,12 @@
 // SETTINGS TAB
 // ============================================================================
 
-// Layout paints the sidebar logo/favicon from localStorage; this is the only
-// place on the admin page that refreshes those keys.
-function cacheBranding(logoUrl, faviconUrl) {
+// Layout paints the sidebar from localStorage; this is the only place on the
+// admin page that refreshes those keys. It writes the CANONICAL site name --
+// the admin sidebar's " Administration" suffix is display-only and must never
+// reach the cache, or every other page inherits it.
+function cacheBranding(siteName, logoUrl, faviconUrl) {
+  localStorage.setItem('site_name', siteName);
   localStorage.setItem('site_logo_url', logoUrl || '');
   localStorage.setItem('site_favicon_url', faviconUrl || '');
   if (typeof Layout !== 'undefined') Layout.applySiteBranding();
@@ -18,12 +21,12 @@ async function loadSiteSettings() {
     const faviconUrl = data.site_favicon_url || '';
     const description = data.site_description || '';
 
-    // Update everywhere via Layout
-    Layout.updateSiteName(siteName + ' Administration');
     // Seed the cache Layout.applySiteBranding() paints from. Without this the
     // admin's own sidebar keeps whatever logo it last saw on a non-admin page,
-    // because loadSiteBranding() deliberately does not run here.
-    cacheBranding(logoUrl, faviconUrl);
+    // because loadSiteBranding() deliberately does not run here. This repaints,
+    // so the display-only decoration below has to come after it.
+    cacheBranding(siteName, logoUrl, faviconUrl);
+    Layout.updateSiteName(siteName + ' Administration', { cache: false });
 
     // Pre-fill the input fields
     const nameInput = document.getElementById('settingsSiteName');
@@ -79,12 +82,11 @@ async function saveSiteSettings() {
       site_description: description || null
     });
 
-    // Update everywhere via Layout
-    Layout.updateSiteName(siteName + ' Administration');
     // Repaint the sidebar against the values just saved, so the admin sees the
     // new logo without a reload -- and sees it FAIL to load, via the console
     // warning and the shield fallback, if the URL is hotlink-protected.
-    cacheBranding(logoUrl, faviconUrl);
+    cacheBranding(siteName, logoUrl, faviconUrl);
+    Layout.updateSiteName(siteName + ' Administration', { cache: false });
 
     // Also update the admin page header
     document.getElementById('pageTitle').textContent = siteName + ' Administration';
