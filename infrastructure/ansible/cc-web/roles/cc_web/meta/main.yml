@@ -1,0 +1,31 @@
+---
+galaxy_info:
+  role_name: cc_web
+  namespace: cybercore
+  author: CyberCore
+  description: >-
+    Curated web tier for a CIAB lane's dual-homed DMZ host. Builds exactly the
+    server product, ports, TLS protocol set and routes that the generated scan
+    documents claim, and plants the domain service account that turns a web
+    compromise into an AD foothold.
+  license: MIT
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+  galaxy_tags:
+    - web
+    - apache
+    - lab
+
+# DELIBERATELY EMPTY. A dependency here would be resolved through roles_path,
+# whose later entries are upstream GOAD's read-only tree — so a dependency
+# added carelessly is how this role would start pulling GOAD roles into a
+# standalone DMZ host that must never be domain-joined.
+dependencies: []

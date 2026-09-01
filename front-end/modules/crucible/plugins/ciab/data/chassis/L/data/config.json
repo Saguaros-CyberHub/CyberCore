@@ -1,0 +1,114 @@
+{
+"lab" : {
+    "hosts" : {
+        "dc01" : {
+            "hostname" : "CHASSIS-DC01",
+            "type" : "dc",
+            "local_admin_password" : "CHASSIS-PLACEHOLDER-PW-ROOT",
+            "domain" : "chassis.invalid",
+            "path" : "DC=chassis,DC=invalid",
+            "local_groups" : {},
+            "scripts" : [],
+            "vulns" : [],
+            "vulns_vars" : {},
+            "security" : [],
+            "security_vars" : {}
+        },
+        "dc02" : {
+            "hostname" : "CHASSIS-DC02",
+            "type" : "dc",
+            "local_admin_password" : "CHASSIS-PLACEHOLDER-PW-CHILD",
+            "domain" : "child.chassis.invalid",
+            "path" : "DC=child,DC=chassis,DC=invalid",
+            "local_groups" : {},
+            "scripts" : [],
+            "vulns" : [],
+            "vulns_vars" : {},
+            "security" : [],
+            "security_vars" : {}
+        },
+        "srv02" : {
+            "hostname" : "CHASSIS-SRV02",
+            "type" : "server",
+            "local_admin_password" : "CHASSIS-PLACEHOLDER-PW-CHILD",
+            "domain" : "child.chassis.invalid",
+            "path" : "DC=child,DC=chassis,DC=invalid",
+            "use_laps" : false,
+            "local_groups" : {},
+            "scripts" : [],
+            "vulns" : [],
+            "vulns_vars" : {},
+            "security" : [],
+            "security_vars" : {}
+        },
+        "dc03" : {
+            "hostname" : "CHASSIS-DC03",
+            "type" : "dc",
+            "local_admin_password" : "CHASSIS-PLACEHOLDER-PW-FOREST-B",
+            "domain" : "chassis-b.invalid",
+            "path" : "DC=chassis-b,DC=invalid",
+            "local_groups" : {},
+            "scripts" : [],
+            "vulns" : [],
+            "vulns_vars" : {},
+            "security" : [],
+            "security_vars" : {}
+        },
+        "srv03" : {
+            "hostname" : "CHASSIS-SRV03",
+            "type" : "server",
+            "local_admin_password" : "CHASSIS-PLACEHOLDER-PW-FOREST-B",
+            "domain" : "chassis-b.invalid",
+            "path" : "DC=chassis-b,DC=invalid",
+            "use_laps" : true,
+            "local_groups" : {},
+            "scripts" : [],
+            "vulns" : [],
+            "vulns_vars" : {},
+            "security" : [],
+            "security_vars" : {}
+        }
+    },
+    "domains" : {
+        "chassis.invalid" : {
+            "dc" : "dc01",
+            "domain_password" : "CHASSIS-PLACEHOLDER-PW-ROOT",
+            "netbios_name" : "CHASSIS",
+            "trust" : "chassis-b.invalid",
+            "laps_path" : "OU=Laps,DC=chassis,DC=invalid",
+            "organisation_units" : {},
+            "groups" : {},
+            "multi_domain_groups_member" : {},
+            "gmsa" : {},
+            "acls" : {},
+            "users" : {}
+        },
+        "child.chassis.invalid" : {
+            "dc" : "dc02",
+            "domain_password" : "CHASSIS-PLACEHOLDER-PW-CHILD",
+            "netbios_name" : "CHASSISCHILD",
+            "trust" : "",
+            "laps_path" : "OU=Laps,DC=child,DC=chassis,DC=invalid",
+            "organisation_units" : {},
+            "groups" : {},
+            "multi_domain_groups_member" : {},
+            "gmsa" : {},
+            "acls" : {},
+            "users" : {}
+        },
+        "chassis-b.invalid" : {
+            "dc" : "dc03",
+            "domain_password" : "CHASSIS-PLACEHOLDER-PW-FOREST-B",
+            "netbios_name" : "CHASSISB",
+            "ca_server" : "CHASSIS-SRV03",
+            "trust" : "chassis.invalid",
+            "laps_path" : "OU=Laps,DC=chassis-b,DC=invalid",
+            "organisation_units" : {},
+            "groups" : {},
+            "multi_domain_groups_member" : {},
+            "gmsa" : {},
+            "acls" : {},
+            "users" : {}
+        }
+    }
+}}

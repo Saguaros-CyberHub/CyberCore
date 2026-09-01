@@ -1,0 +1,167 @@
+---
+# ===========================================================================
+# cc_web — normalise the contract. PURE: reads variables, writes facts, touches
+# nothing on the host.
+#
+# Every lookup below carries a default, so this file cannot raise on a
+# malformed cc_web_facts. That is deliberate: a Jinja "dict object has no
+# attribute 'ports'" traceback names the template, not the problem. Producing
+# an empty normalised value here and letting tasks/assert.yml say
+# "cc_web_facts.ports is empty" is the difference between a diagnosable failure
+# and a stack trace at minute 88.
+#
+# WHY THIS MIRRORS readWebFacts() IN service-inference.js RATHER THAN TRUSTING
+# IT: the JS normaliser runs in the generator, on the way to the report. This
+# role is handed the RAW asset.web_facts out of the spec, and there is no
+# guarantee the two objects took the same path. Both ends therefore normalise,
+# and both ends must normalise the SAME WAY or the report and the host disagree
+# about what was declared. The rules replicated here are, in order: a port is an
+# integer in 1..65535; TLS is on only when `enabled` is literally true; a
+# declared TLS port is added to the port set even when `ports` omitted it; every
+# path is made absolute; '/' is always present.
+# ===========================================================================
+
+- name: Reset the accumulators so a second include cannot append to the first
+  ansible.builtin.set_fact:
+    cc_web_routes_resolved: []
+
+- name: Normalise the declared product and version
+  ansible.builtin.set_fact:
+    cc_web_product: "{{ (cc_web_facts.product | default('')) | trim | lower }}"
+    cc_web_version: "{{ (cc_web_facts.version | default('')) | trim }}"
+
+- name: Normalise the declared TCP port set
+  # map('int') turns anything unparseable into 0, which the range filters then
+  # drop — the same "unparseable is absent" rule toPort() applies in the JS.
+  ansible.builtin.set_fact:
+    cc_web_ports_declared: >-
+      {{ cc_web_facts.ports | default([]) | map('int') | select('gt', 0)
+      | select('lt', 65536) | unique | sort | list }}
+
+- name: Decide whether a TLS listener was really asserted
+  # STRICTLY `is sameas true`, mirroring `tlsIn.enabled === true` in the JS.
+  # `| bool` would promote the string 'yes' — and "probably TLS" is exactly what
+  # put POODLE findings on hosts that never opened 443.
+  ansible.builtin.set_fact:
+    cc_web_tls_enabled: >-
+      {{ ((cc_web_facts.tls | default({})).enabled | default(false)) is sameas true }}
+
+- name: Squash the TLS protocol spellings a compiler might emit
+  # Lowercase, then drop every character that is not a letter, digit or dot:
+  # 'TLS 1.0', 'tls_1.0' and 'TLSv1' all land on a key in cc_web_tls_alias.
+  ansible.builtin.set_fact:
+    cc_web_tls_tokens: >-
+      {{ (cc_web_facts.tls | default({})).protocols | default([])
+      | map('string') | map('lower') | map('regex_replace', '[^a-z0-9.]', '')
+      | reject('equalto', '') | unique | list }}
+
+- name: Split the protocol tokens into recognised and unrecognised
+  # The unrecognised list is carried rather than discarded so assert.yml can
+  # NAME the token. A silently dropped token is a protocol the report claims and
+  # the listener never offers.
+  ansible.builtin.set_fact:
+    cc_web_tls_protocols: >-
+      {{ cc_web_tls_tokens | select('in', cc_web_tls_alias)
+      | map('extract', cc_web_tls_alias) | unique | list }}
+    cc_web_tls_unknown: >-
+      {{ cc_web_tls_tokens | reject('in', cc_web_tls_alias) | list }}
+
+- name: Resolve which port terminates TLS
+  # Mirrors readWebFacts: an explicit port wins; otherwise 443 if it was
+  # declared; otherwise the highest declared port. 0 means "there is no answer",
+  # which assert.yml reports rather than papering over with a guess.
+  ansible.builtin.set_fact:
+    cc_web_tls_port: >-
+      {{ ((cc_web_facts.tls | default({})).port | default(0) | int)
+      if (((cc_web_facts.tls | default({})).port | default(0) | int) > 0)
+      else (443 if 443 in cc_web_ports_declared
+      else (cc_web_ports_declared | last | default(0))) }}
+  when: cc_web_tls_enabled | bool
+
+- name: Default the TLS port to zero when no TLS listener was declared
+  # cc_web_tls_port is referenced unconditionally further down (difference(),
+  # the observed-facts template). Leaving it undefined when TLS is off would
+  # turn a normal HTTP-only lane into an undefined-variable failure.
+  ansible.builtin.set_fact:
+    cc_web_tls_port: 0
+  when: not (cc_web_tls_enabled | bool)
+
+- name: Fold the TLS port into the port set
+  # A declared TLS listener implies its port is open even when `ports` forgot
+  # it. Without this the vhost would listen on 443 while ports.conf never says
+  # Listen 443, and apache refuses to serve a VirtualHost with no matching
+  # Listen — silently, by never answering, not by failing to start.
+  ansible.builtin.set_fact:
+    cc_web_ports: >-
+      {{ (cc_web_ports_declared + ([cc_web_tls_port | int] if (cc_web_tls_enabled | bool) else []))
+      | map('int') | select('gt', 0) | unique | sort | list }}
+
+- name: Separate the plain-HTTP listeners from the TLS one
+  ansible.builtin.set_fact:
+    cc_web_http_ports: >-
+      {{ cc_web_ports | difference([cc_web_tls_port | int] if (cc_web_tls_enabled | bool) else []) }}
+
+- name: Decide whether the exercise asked for a deliberately weak protocol
+  ansible.builtin.set_fact:
+    cc_web_tls_weak_requested: >-
+      {{ (cc_web_tls_protocols | intersect(cc_web_weak_protocols) | length) > 0 }}
+    cc_web_tls_undeliverable: >-
+      {{ cc_web_tls_protocols | intersect(cc_web_undeliverable_protocols) }}
+
+- name: Build the SSLProtocol and SSLCipherSuite lines the vhost will carry
+  # '-all' first, then an explicit '+' per declared protocol. Starting from
+  # '-all' is what makes the declaration exhaustive: without it httpd keeps its
+  # compiled-in default set and the listener quietly offers protocols the paper
+  # never claimed, which breaks the contract in the other direction.
+  ansible.builtin.set_fact:
+    cc_web_ssl_protocol: >-
+      -all {{ cc_web_tls_protocols | map('extract', cc_web_tls_directive)
+      | map('regex_replace', '^', '+') | join(' ') }}
+    cc_web_ssl_cipher_suite: >-
+      {{ cc_web_cipher_suite_weak if (cc_web_tls_weak_requested | bool)
+      else cc_web_cipher_suite_modern }}
+
+- name: Normalise the declared paths
+  # Absolute, de-duplicated, '/' always first. '/' is the one route a fact block
+  # never has to spell out, exactly as readWebFacts unshifts it.
+  ansible.builtin.set_fact:
+    cc_web_paths: >-
+      {{ ['/'] + (cc_web_facts.paths | default([]) | map('string') | map('trim')
+      | reject('equalto', '') | map('regex_replace', '^(?!/)', '/')
+      | reject('equalto', '/') | unique | list) }}
+
+- name: Resolve each declared route to a file under the docroot
+  # The derivation lives here, once, so content.yml and verify.yml consume the
+  # SAME resolved list. Deriving it twice is how a verification ends up proving
+  # the existence of a file the serving path never writes.
+  #
+  #   '/'            -> index.html
+  #   '/status/'     -> status/index.html
+  #   '/health.json' -> health.json          (last segment has an extension)
+  #   '/login'       -> login/index.html     (no extension: treated as a dir)
+  #
+  # The last case costs a 301 from '/login' to '/login/' via mod_dir. That is
+  # accepted rather than worked around: nmap's http-enum and ZAP's spider both
+  # treat a 3xx as "this route exists", and verify.yml follows redirects for the
+  # same reason. A route that must answer 200 at an extensionless URL should
+  # carry an explicit `file`.
+  ansible.builtin.set_fact:
+    cc_web_routes_resolved: >-
+      {{ cc_web_routes_resolved + [{'path': _cc_p, 'file': _cc_f,
+      'dest': cc_web_docroot ~ '/' ~ _cc_f,
+      'content': item.content | default('')}] }}
+  vars:
+    _cc_p: "{{ (item.path | default('/')) | trim | regex_replace('^(?!/)', '/') }}"
+    _cc_rel: "{{ _cc_p | regex_replace('^/+', '') }}"
+    _cc_seg: "{{ _cc_rel.split('/') | last }}"
+    _cc_f: >-
+      {{ item.file | default(_cc_rel ~ 'index.html'
+      if (_cc_rel == '' or _cc_p.endswith('/'))
+      else (_cc_rel if ('.' in _cc_seg) else _cc_rel ~ '/index.html')) }}
+  loop: "{{ cc_web_routes }}"
+  loop_control:
+    label: "{{ item.path | default('<no path>') }}"
+
+- name: Collect the route paths so assert.yml can compare them against the facts
+  ansible.builtin.set_fact:
+    cc_web_route_paths: "{{ cc_web_routes_resolved | map(attribute='path') | list }}"

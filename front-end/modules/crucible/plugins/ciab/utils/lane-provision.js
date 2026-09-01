@@ -29,6 +29,7 @@
  *   - hold the operation mutex for a deploy group
  *   - turn spec.vms[].post_clone_scripts into the deployer's vulnScripts shape
  *   - install the LLM-generated vuln app through the postDeploy hook
+ *   - reseed everything that must differ per student, through the same hook
  *   - mirror the deployer's results into ciab_profile_lane_jobs
  *
  * Keep it that way. If something here starts looking like deploy logic — a
@@ -43,6 +44,7 @@ const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const challengeLaneDeployer = require('../../../../../src/utils/challenge-lane-deployer');
 const { installVulnAppOnVM } = require('./vuln-app-install');
 const { ensureVulnImage } = require('./vuln-app-builder');
+const laneReseed = require('./lane-reseed');
 
 const MODULE_KEY = 'ciab';
 const LOG = '[CIAB Lane]';
@@ -177,6 +179,81 @@ function vulnScriptsFromSpec(spec) {
   return out;
 }
 
+// ─── The last place a golden-image lane can be caught being built wrong ─────
+
+/**
+ * Refuse to build a PRE-BAKED lane whose spec does not actually name the golden
+ * templates it is supposed to clone.
+ *
+ * THIS IS A BOUNDARY CHECK, NOT A SECOND OPINION. profile-deploy resolves
+ * bake.golden_vmids onto the spec and persists the result; three call paths then
+ * read that persisted spec back — the first deploy, add-lanes and retry-lane —
+ * and only the first of them is anywhere near the code that wrote it. If the
+ * overlay is ever lost (a stored spec written before the client was baked, a
+ * hand-edited challenge row, a reservation adopted from an older engagement),
+ * every symptom is silent:
+ *
+ *   no template_vmid on a lab host   the clone falls back to the CATALOG image,
+ *                                    so the lane comes up with a stock Windows
+ *                                    box carrying none of the baked AD state,
+ *                                    and the pre-baked heal then "repairs" a
+ *                                    secure channel that was never established.
+ *   no fixed_subnet                  every lane takes its own per-lane base
+ *                                    while the golden images answer on the one
+ *                                    they were baked on. applyPrebakedFixedSubnet
+ *                                    catches the missing `int` today; `ext` is
+ *                                    passed through as-is, so a spec pinning
+ *                                    only half of it is silently half-right.
+ *
+ * All of them end with a lane that reports `active`. So this refuses at the last
+ * moment before the first clone, which is the only place left that can.
+ *
+ * Pure and exported, so the refusal is assertable without a cluster.
+ *
+ * @param {object} spec  the challenge spec about to be deployed
+ * @returns {object} the same spec
+ * @throws {Error & {status:409, code:'CIAB_PREBAKED_TEMPLATES_UNRESOLVED'}}
+ */
+function assertPrebakedTemplatesResolved(spec) {
+  const goad = (spec && spec.goad) || {};
+  if (!goad.prebaked) return spec;
+
+  const fixed = goad.fixed_subnet || {};
+  const missingBase = ['int', 'ext']
+    .filter((k) => !String(fixed[k] == null ? '' : fixed[k]).trim())
+    .map((k) => `goad.fixed_subnet.${k}`);
+
+  // The lab definition is what says which machines are INSIDE the forest, and
+  // therefore which ones must have come from the capture. A spec VM outside it
+  // (Kali, the DMZ pivot) legitimately still clones from the catalog.
+  const labVms = (goad.lab && Array.isArray(goad.lab.vms)) ? goad.lab.vms : [];
+  const byName = new Map(labVms.map((v) => [String(v.name || '').toLowerCase(), v]));
+  const unresolved = [];
+  for (const vm of (spec && Array.isArray(spec.vms) ? spec.vms : [])) {
+    if (!byName.has(String(vm.name || '').toLowerCase())) continue;
+    const vmid = Number(vm.template_vmid);
+    if (!Number.isInteger(vmid) || vmid <= 0) unresolved.push(vm.name);
+  }
+
+  if (missingBase.length === 0 && labVms.length > 0 && unresolved.length === 0) return spec;
+
+  const problems = [];
+  if (labVms.length === 0) problems.push('it names no goad.lab.vms, so nothing says which machines the bake built');
+  if (unresolved.length > 0) problems.push(`${unresolved.join(', ')} carr${unresolved.length === 1 ? 'ies' : 'y'} no template_vmid`);
+  if (missingBase.length > 0) problems.push(`it declares no ${missingBase.join(' and no ')}`);
+
+  const err = new Error(
+    `Refusing to deploy: this challenge is marked pre-baked GOAD (spec.goad.prebaked) but `
+    + `${problems.join('; ')}. A pre-baked lane clones golden images and runs no ansible, so a `
+    + 'machine with no golden template clones the stock catalog image instead — it boots, it joins '
+    + 'nothing, the heal reports it repaired, and the lane still reads active. Re-deploy this group '
+    + "from the client's bake, or clear spec.goad.prebaked to provision the lab live."
+  );
+  err.status = 409;
+  err.code = 'CIAB_PREBAKED_TEMPLATES_UNRESOLVED';
+  throw err;
+}
+
 // ─── The vuln-app install, as a postDeploy hook ─────────────────────────────
 
 /**
@@ -218,6 +295,66 @@ function makeVulnAppPostDeploy(vulnAppInstall) {
       throw new Error(res.error || 'vuln-app install failed');
     }
   };
+}
+
+// ─── Per-lane reseed, on the same hook ─────────────────────────────────
+
+/**
+ * Compose the two pieces of per-lane work CIAB owns into the ONE postDeploy
+ * function the deployer accepts.
+ *
+ * ORDER IS LOAD-BEARING. The vuln app is installed first because the reseed
+ * writes the lane's flag, its pivot credential and its seeded record ids INTO
+ * that app's directory — reseeding before the install would have the installer
+ * overwrite every one of them.
+ *
+ * A FAILED INSTALL DOES NOT SKIP THE RESEED. Its error is held and rethrown at
+ * the end, so config.post_deploy_error keeps exactly the meaning it has today,
+ * but the reseed still runs in between. That matters: the SSH host keys, the
+ * machine-id and above all the AD-side credential are per-student values that
+ * have nothing to do with whether a Docker pull succeeded, and leaving them at
+ * the golden image's baked values is the defect this whole design exists to
+ * remove.
+ *
+ * The reseed hook never throws — see lane-reseed.reseedLane — so it can never
+ * be the reason a lane that otherwise deployed is reported as failed.
+ */
+function makeProfilePostDeploy({ vulnAppInstall, reseedHook }) {
+  const vulnHook = makeVulnAppPostDeploy(vulnAppInstall);
+  if (!vulnHook && !reseedHook) return null;
+
+  return async function profilePostDeploy(hookArgs) {
+    let vulnErr = null;
+    if (vulnHook) {
+      try {
+        await vulnHook(hookArgs);
+      } catch (err) {
+        vulnErr = err;
+      }
+    }
+    if (reseedHook) await reseedHook(hookArgs);
+    if (vulnErr) throw vulnErr;
+  };
+}
+
+/**
+ * Re-apply the reseed records once deployChallengeLanes has finished.
+ *
+ * NOT REDUNDANT WITH THE WRITE reseedLane ALREADY DID. challenge-lane-deployer
+ * builds each lane's active config from the batch-wide `laneConfig` object and
+ * writes it WHOLE (`config = $2::jsonb`) in its final step — which runs AFTER
+ * the postDeploy hook. Anything the hook merged into config is therefore gone
+ * by the time the deploy returns. This is the pass that makes the reseed
+ * outcome, and the verification result on it, actually reach the instructor.
+ *
+ * Best-effort per lane: losing the record must not fail a lane that deployed.
+ */
+async function applyReseedRecords(records) {
+  for (const [laneId, record] of (records || new Map())) {
+    await laneReseed.recordReseedOnLane(laneId, record).catch((err) => {
+      console.warn(`${LOG} Could not record reseed on lane ${laneId}: ${err.message}`);
+    });
+  }
 }
 
 // ─── ciab_profile_lane_jobs as a derived mirror ─────────────────────────────
@@ -286,12 +423,16 @@ async function provisionProfileLanes({
   }
 
   const progressId = progressIdForGroup(groupId);
+  const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : (challenge.spec || {});
+
+  // BEFORE the mutex claim, so a refusal leaves no progress entry behind that a
+  // later deploy would have to wait out. See assertPrebakedTemplatesResolved for
+  // why a golden-image lane that is built from the wrong templates is silent.
+  assertPrebakedTemplatesResolved(spec);
 
   // Claim and conflict-check in ONE synchronous block, every await already done.
   assertNoConflictingProfileOperation({ groupId, ignoreProgressId: progressId });
   laneDeployer.initProgress(progressId, groupName || groupId, students.length);
-
-  const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : (challenge.spec || {});
 
   // Pre-build the vuln-app image ONCE for the batch. The orchestrator has
   // internet; the lane subnet does not, so each lane pulls the ready image over
@@ -309,6 +450,11 @@ async function provisionProfileLanes({
 
   const indexByUserId = new Map(students.map(s => [s.id, s.index]));
 
+  // Per-lane reseed. Everything a student is supposed to DISCOVER has to be
+  // written after the clone, because a golden image is identical by definition
+  // — see lane-reseed.js. `records` is drained after the deploy returns.
+  const reseed = laneReseed.makeReseedPostDeploy({ logTag: `${LOG}[${groupName || groupId}]` });
+
   const result = await challengeLaneDeployer.deployChallengeLanes({
     users: students.map(s => ({ id: s.id, email: s.email })),
     challenge,
@@ -324,7 +470,10 @@ async function provisionProfileLanes({
     // is silent rather than loud.
     vulnScripts: vulnScriptsFromSpec(spec),
 
-    postDeploy: makeVulnAppPostDeploy(resolvedVulnApp),
+    postDeploy: makeProfilePostDeploy({
+      vulnAppInstall: resolvedVulnApp,
+      reseedHook: reseed.hook,
+    }),
 
     // Batch-wide only: laneConfig is spread verbatim into every lane's config,
     // so nothing per-student belongs here. Student identity is already on the
@@ -341,6 +490,10 @@ async function provisionProfileLanes({
     progressId,
     progressLabel: groupName || challenge.name || challenge.challenge_key,
   });
+
+  // The deployer has now written each lane's config whole, so this is the first
+  // moment a reseed record can survive being written. See applyReseedRecords.
+  await applyReseedRecords(reseed.records);
 
   // Mirror outcomes. Authoritative pass — the hook cannot run for a lane that
   // failed before it, and a failed lane still needs a row the UI can show.
@@ -408,6 +561,14 @@ async function retryProfileLane({
   if (!laneId) throw new Error('retryProfileLane: laneId is required');
   if (!user || !user.id) throw new Error('retryProfileLane: user is required');
 
+  // BEFORE the teardown, not after it. A retry DESTROYS the lane first, so a
+  // refusal raised any later would leave the student with no lane at all — and
+  // this route is the one most likely to be reached with a stale stored spec,
+  // because it rebuilds its challenge object from the reservation row days after
+  // the deploy that wrote it.
+  assertPrebakedTemplatesResolved(
+    typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : (challenge.spec || {}));
+
   const progressId = progressIdForLane(groupId, laneId);
   assertNoConflictingProfileOperation({ groupId, laneId, ignoreProgressId: progressId });
   laneDeployer.initProgress(progressId, `${groupName || groupId} — retry`, 1);
@@ -441,6 +602,11 @@ async function retryProfileLane({
       .catch(() => vulnAppInstall);
   }
 
+  // A retry is a fresh lane row with a fresh VXLAN id, so it needs the same
+  // per-lane reseed the first deploy did — the rebuilt machines are clones of
+  // the same golden images and carry the same baked values.
+  const reseed = laneReseed.makeReseedPostDeploy({ logTag: `${LOG}[retry]` });
+
   const result = await challengeLaneDeployer.deployChallengeLanes({
     users: [{ id: user.id, email: user.email }],
     challenge,
@@ -448,7 +614,10 @@ async function retryProfileLane({
     attackBoxes,
     pinAllVms: true,
     vulnScripts: vulnScriptsFromSpec(spec),
-    postDeploy: makeVulnAppPostDeploy(resolvedVulnApp),
+    postDeploy: makeProfilePostDeploy({
+      vulnAppInstall: resolvedVulnApp,
+      reseedHook: reseed.hook,
+    }),
     laneConfig: { ciab: true, profile_lane_group: true, group_id: groupId },
     namePrefix: laneNamePrefix(groupSlug),
     guacParent: 'ROOT',
@@ -456,6 +625,8 @@ async function retryProfileLane({
     progressId,
     progressLabel: `${groupName || groupId} — retry`,
   });
+
+  await applyReseedRecords(reseed.records);
 
   const fresh = (result.provisioned || [])[0];
   const failed = (result.failed || [])[0];
@@ -508,8 +679,11 @@ module.exports = {
   groupOperationsInFlight,
   assertNoConflictingProfileOperation,
   // Pure, so they are testable without a cluster.
+  assertPrebakedTemplatesResolved,
   vulnScriptsFromSpec,
   laneNamePrefix,
   makeVulnAppPostDeploy,
+  makeProfilePostDeploy,
+  applyReseedRecords,
   MAX_SLUG_LEN,
 };

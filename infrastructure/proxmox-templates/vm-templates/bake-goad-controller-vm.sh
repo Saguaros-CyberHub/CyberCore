@@ -16,10 +16,51 @@
 # already exists. To re-bake, destroy first:
 #   qm destroy 1700 --purge
 # (or `pct destroy 1700 --purge` if the old LXC version is still there)
+#
+# ----------------------------------------------------------------------------
+# ROLLBACK — READ THIS BEFORE YOU RE-BAKE
+# ----------------------------------------------------------------------------
+# 1700 is the LIVE deploy target. front-end/src/utils/goad-deploy.js pins
+# CONTROLLER_TEMPLATE_VMID = 1700 and every lane full-clones it. Proxmox cannot
+# renumber a VMID, so "keep the old template around" necessarily means keeping a
+# SECOND template at a second id. That id is ROLLBACK_TEMPLATE_VMID below.
+#
+# STEP 1 — freeze the working template BEFORE destroying it. Once 1700 is
+# purged there is nothing to copy, and the tree inside it is not reproducible:
+# cloud-init git-fetches GOAD_REF and ansible-galaxy resolves requirements.yml
+# at bake time, so a re-bake is a NEW build, not the same build again.
+#     qm clone 1700 1701 --name goad-controller-template-frozen --full --storage vmpool
+#     qm template 1701
+#     qm set 1701 --description "FROZEN <date>: last known-good GOAD controller"
+#   A template can be cloned while it is a template; the clone lands as a normal
+#   VM, which is why the 'qm template' line is needed to re-freeze it. Do NOT
+#   boot 1701 — booting it runs cloud-init against a stale instance-id.
+#
+# STEP 2 — re-bake:
+#     qm destroy 1700 --purge && ./bake-goad-controller-vm.sh
+#
+# STEP 3 — IF THE NEW BAKE MISBEHAVES, revert the deploy target. One line, no
+# re-bake, no restore, no Proxmox surgery:
+#     front-end/src/utils/goad-deploy.js
+#       const CONTROLLER_TEMPLATE_VMID = 1700;   ->   = 1701;
+#     then restart the node process. New lanes clone the frozen template again.
+#     Already-deployed lanes are unaffected: each holds a FULL clone, not a link
+#     to the template, so nothing in flight depends on which id is current.
+#
+# The rollback is a source constant on purpose. The Proxmox-side alternative —
+# destroy 1700 and clone the frozen copy back onto that id — has to destroy the
+# live target while lanes may be mid-clone, and it is not undoable if the
+# "known good" copy turns out not to be.
 # ============================================================================
 set -euo pipefail
 
 VMID=1700
+# FROZEN PREVIOUS-GENERATION TEMPLATE — the one-line rollback target.
+# This script bakes onto $VMID and nothing else; ROLLBACK_TEMPLATE_VMID is never
+# written to, only checked for existence (section 0b) and printed. It exists so
+# the id is stated ONCE, in the file that destroys the thing it protects, rather
+# than living only in someone's shell history. Full procedure: header, ROLLBACK.
+ROLLBACK_TEMPLATE_VMID=1701
 NAME="goad-controller-template"
 STORAGE="vmpool"                                  # where the VM disk + cloudinit drive live
 SNIPPET_STORAGE="${SNIPPET_STORAGE:-}"            # auto-detected if empty; override to force a specific storage
@@ -32,7 +73,21 @@ BAKE_DNS="${BAKE_DNS:-100.100.0.1}"
 # CyberSaguaros fork of GOAD — carries the re-themed GOAD-Light lab data
 # (ad/GOAD-Light/). Override with GOAD_REPO=... to bake from a different repo.
 GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
-GOAD_REF="${GOAD_REF:-main}"
+# PINNED COMMIT, not a branch. This default used to be 'main', which made
+# "immutable versioned bakes" false at the root: template 1700 is baked once and
+# every lane clones it, but a RE-bake months later would silently pick up a
+# different role library — new required item.value keys, renamed roles, changed
+# ACL vocabularies — under lane data that was authored against the old one. The
+# failure mode is not a build error; it is a lane that provisions green with
+# vulns that were never planted (see the never_emit notes in the vendored
+# manifest for how quietly these roles fail).
+#
+# GOAD-main/ is gitignored, so the working copy is NOT the record. The record is
+# front-end/modules/crucible/plugins/ciab/data/goad-role-manifest.json, whose
+# goad_ref field must equal this SHA. Moving this pin means re-vendoring that
+# manifest in the same commit, or the validator built on it describes a GOAD the
+# controller no longer runs.
+GOAD_REF="${GOAD_REF:-00e9b63eb1e82f16780943f5d237d5529fd4a1a9}"
 MEMORY=2048
 CORES=2
 DISK_GB=10
@@ -53,6 +108,32 @@ if pct status $VMID >/dev/null 2>&1; then
   echo "ERROR: LXC $VMID exists (likely the old LXC controller template)."
   echo "       Destroy first: pct destroy $VMID --purge"
   exit 1
+fi
+
+# ---------- 0b. Rollback safety net ----------
+# Warn loudly rather than refuse. The FIRST bake on a fresh cluster has nothing
+# to freeze, and a hard failure there would be unfixable without editing this
+# script — but every bake after that one replaces a template lanes are cloning
+# right now, and that bake must not proceed unnoticed without a way back.
+# Checked here, after the "1700 must not exist" guard, because by the time you
+# run this you have already destroyed 1700: if the freeze did not happen, the
+# last known-good tree is already gone and the only honest thing left to do is
+# say so before spending 25 minutes on the replacement.
+if qm status $ROLLBACK_TEMPLATE_VMID >/dev/null 2>&1; then
+  echo "==> Rollback template $ROLLBACK_TEMPLATE_VMID present — revert path is one line in goad-deploy.js."
+else
+  echo ""
+  echo "==================================================================="
+  echo "  WARNING: no frozen rollback template at $ROLLBACK_TEMPLATE_VMID"
+  echo "==================================================================="
+  echo "  If a previous $VMID existed, it is gone and this bake has no way back."
+  echo "  To freeze a WORKING $VMID (do this BEFORE 'qm destroy $VMID --purge'):"
+  echo "    qm clone $VMID $ROLLBACK_TEMPLATE_VMID --name goad-controller-template-frozen --full --storage $STORAGE"
+  echo "    qm template $ROLLBACK_TEMPLATE_VMID"
+  echo "  Then rollback is: CONTROLLER_TEMPLATE_VMID = $ROLLBACK_TEMPLATE_VMID in"
+  echo "  front-end/src/utils/goad-deploy.js, and restart the node process."
+  echo "==================================================================="
+  echo ""
 fi
 
 # ---------- Pick a storage with 'snippets' content enabled ----------
@@ -155,7 +236,7 @@ resolv_conf:
   domain: ""
 
 # bootcmd MUST be fast and non-blocking. Any blocking command (e.g.,
-# `systemctl reload`) will hang cloud-init at init-local stage, since cloud-init
+# 'systemctl reload') will hang cloud-init at init-local stage, since cloud-init
 # runs bootcmd synchronously with capture=False. We intentionally do NOT do:
 #   - systemctl operations  (can block on service deps at this early stage)
 #   - operations that need network  (network not fully up yet)
@@ -230,7 +311,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
   # ----- Python helper scripts called by run.sh -----
   # These live in standalone files (not inline heredocs in run.sh) so the
   # outer YAML block scalar doesn't choke on column-0 Python lines. The
-  # `content: |` block stripped by 6 spaces gives Python source at column 0
+  # 'content: |' block stripped by 6 spaces gives Python source at column 0
   # — correct for module-level statements.
   - path: /opt/goad-light/patch-mssql.py
     permissions: '0755'
@@ -287,7 +368,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # span multiple lines or use template vars (no literal "setup.exe" +
       # "sql_conf.ini" on the same line).
       #
-      # If the task already has its own `register:` (upstream typically
+      # If the task already has its own 'register:' (upstream typically
       # registers as something like 'install_result'), reuse that name in
       # our failed_when expression — this avoids the duplicate-mapping-key
       # warning that would otherwise appear at task evaluation.
@@ -321,7 +402,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
           if 'cybercore-mssql-tolerate' in task_block:
               print(f"  Patch 2: install task already tolerant (skip)", file=sys.stderr)
           else:
-              # Detect existing `register: <var>` inside the task body and
+              # Detect existing 'register: <var>' inside the task body and
               # reuse the var name. Falls back to our own name if upstream
               # doesn't register this task.
               existing_register = None
@@ -439,6 +520,220 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       " < "\$RESV_FILE"
       echo "[prep.sh] Reservations applied."
 
+  # ----- Receiving directory for pushed lab trees -----
+  # THE CONTRACT. Stated here because the other half lives in another tree
+  # (front-end/modules/crucible/plugins/ciab/utils/goad-lab-push.js) and this
+  # is the half that actually runs on the lane.
+  #
+  # There are TWO delivery routes and they deliberately end in the same state:
+  #
+  #   ROUTE A (goad-lab-push.js) streams base64 chunks over the guest agent,
+  #     stages under a work directory, and rename()s the finished tree onto
+  #     /opt/goad/ad/<LAB>/ as its LAST act. Nothing here has to run for it.
+  #
+  #   ROUTE B (this directory) is for a delivery that arrives as one file —
+  #     an scp onto the node, a guest file-write, a manual copy while
+  #     debugging. Layout:
+  #
+  #       /opt/goad-inbox/                    root:root 0755, created at bake
+  #                                           time (runcmd, below) so it exists
+  #                                           in every clone before any push
+  #       /opt/goad-inbox/<LAB>/              <LAB> is exactly run.sh's LAB argv
+  #                                           and the ad/ directory name
+  #       /opt/goad-inbox/<LAB>/lab.tar.gz    gzipped tar of the lab directory's
+  #                                           CONTENTS, not of the directory:
+  #                                             tar -czf lab.tar.gz -C <dir> .
+  #       /opt/goad-inbox/<LAB>/.cc-manifest  WRITTEN LAST
+  #
+  # .cc-manifest — same grammar in both routes, because extract-lab.sh copies
+  # the inbox manifest into the lab directory on success, and goad-lab-push.js
+  # writes the same file from its side. One token per line, 'key=value', no
+  # spaces, so it can be matched with grep -qxF and no sha or lab name can leak
+  # a regex metacharacter:
+  #
+  #   schema=1                (informational)
+  #   lab=<LAB>               must equal the directory name   (route B: checked)
+  #   tree_sha256=<64 hex>    content address of the payload  (route B: of the
+  #                           tarball; route A: of its own deterministic tar)
+  #   bytes=<n>               size of lab.tar.gz     (route B only, optional)
+  #   goad_ref=<sha>          the GOAD ref the tree was generated against
+  #
+  # ad/<LAB>/.cc-manifest is therefore the ONE record of what is installed,
+  # whichever route delivered it — which is what makes 'is this already
+  # delivered?' a single grep for both halves.
+  #
+  # WHY THE MANIFEST IS THE COMMIT POINT AND THE PAYLOAD IS NOT:
+  # a transfer that dies halfway leaves lab.tar.gz PRESENT and SHORT. Presence,
+  # size and mtime cannot tell that apart from a complete file, and a truncated
+  # data/ tree still parses and still provisions — the only things missing are
+  # the objects nobody notices are missing, which is this pipeline's dominant
+  # failure mode. So nothing about the payload is ever allowed to mean 'done'.
+  # The manifest means done, it is written last, and extract-lab.sh refuses
+  # every other state.
+  - path: /opt/goad-light/extract-lab.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # extract-lab.sh LAB — idempotent receiver for a lab tree pushed as one
+      # tarball (route B; see the contract block in the bake script).
+      #
+      #   exit 0  /opt/goad/ad/<LAB> is present and matches the inbox manifest,
+      #           OR there is nothing in the inbox for <LAB> — which is the case
+      #           for every lab baked into the image (GOAD-Light, GOAD, NHA...)
+      #           and for anything delivered by route A
+      #   exit 1  a bundle IS present but is incomplete, corrupt or misaddressed
+      #
+      # Called by run.sh on every provisioning run, and safe to call directly
+      # after a push.
+      set -euo pipefail
+
+      LAB="\${1:-}"
+      if [ -z "\$LAB" ]; then
+        echo "Usage: \$0 LAB" >&2
+        exit 1
+      fi
+      # The lab name indexes a path on BOTH sides of the contract, so a name
+      # with a slash escapes the inbox and the ad/ tree in the same step.
+      # Rejected here rather than at either join, so there is one guard to read.
+      case "\$LAB" in
+        .|*/*|*..*)
+          echo "extract-lab: refusing unsafe lab name '\$LAB'" >&2
+          exit 1
+          ;;
+      esac
+
+      INBOX="/opt/goad-inbox/\$LAB"
+      BUNDLE="\$INBOX/lab.tar.gz"
+      MANIFEST="\$INBOX/.cc-manifest"
+      AD_ROOT="/opt/goad/ad"
+      DEST="\$AD_ROOT/\$LAB"
+      # The installed record, shared with route A. NOT a second stamp file:
+      # two records of the same fact drift, and the one that drifts is always
+      # the one the next reader trusts.
+      DEST_MANIFEST="\$DEST/.cc-manifest"
+
+      # Nothing pushed for this lab. NOT an error: run.sh calls this
+      # unconditionally, for baked-in labs and route-A deliveries alike.
+      if [ ! -d "\$INBOX" ]; then
+        exit 0
+      fi
+
+      if [ ! -f "\$MANIFEST" ]; then
+        echo "extract-lab: \$INBOX exists but \$MANIFEST does not." >&2
+        echo "  The pusher writes .cc-manifest LAST, so this is an INCOMPLETE push." >&2
+        echo "  Refusing to extract a partial tree. Re-push, then re-run." >&2
+        exit 1
+      fi
+      if [ ! -f "\$BUNDLE" ]; then
+        echo "extract-lab: \$MANIFEST is present but \$BUNDLE is missing." >&2
+        exit 1
+      fi
+
+      # 'key=value', first match wins. Unknown keys are ignored on purpose, so
+      # the pusher can add fields without breaking an older controller.
+      manifest_get() {
+        awk -F= -v k="\$1" '\$1 == k { print \$2; exit }' "\$MANIFEST"
+      }
+
+      WANT_SHA="\$(manifest_get tree_sha256 || true)"
+      WANT_LAB="\$(manifest_get lab || true)"
+      WANT_BYTES="\$(manifest_get bytes || true)"
+
+      if [ -z "\$WANT_SHA" ]; then
+        echo "extract-lab: \$MANIFEST carries no tree_sha256 line — cannot prove the push completed." >&2
+        exit 1
+      fi
+      if [ -n "\$WANT_LAB" ] && [ "\$WANT_LAB" != "\$LAB" ]; then
+        echo "extract-lab: manifest says lab='\$WANT_LAB' but this is '\$LAB' — misaddressed push." >&2
+        exit 1
+      fi
+      if [ -n "\$WANT_BYTES" ]; then
+        HAVE_BYTES="\$(wc -c < "\$BUNDLE" | tr -d ' ')"
+        if [ "\$HAVE_BYTES" != "\$WANT_BYTES" ]; then
+          echo "extract-lab: \$BUNDLE is \$HAVE_BYTES bytes, manifest says \$WANT_BYTES — truncated push." >&2
+          exit 1
+        fi
+      fi
+
+      HAVE_SHA="\$(sha256sum "\$BUNDLE" | awk '{print \$1}')"
+      if [ "\$HAVE_SHA" != "\$WANT_SHA" ]; then
+        echo "extract-lab: tree_sha256 mismatch on \$BUNDLE — corrupt or still being written." >&2
+        echo "  manifest: \$WANT_SHA" >&2
+        echo "  on disk:  \$HAVE_SHA" >&2
+        exit 1
+      fi
+
+      # IDEMPOTENCE, matched exactly the way the pusher's own probe matches it:
+      # grep -qxF on the whole line, fixed string. A hit is a hard no-op, not a
+      # cheap re-extract — run.sh and goad-deploy.js both patch roles and data
+      # IN PLACE after delivery (the mssql win_template fix, the child_domain
+      # reboot fix), and re-unpacking identical bytes would silently revert
+      # those edits mid-chain.
+      if [ -f "\$DEST_MANIFEST" ] && grep -qxF "tree_sha256=\$WANT_SHA" "\$DEST_MANIFEST"; then
+        echo "extract-lab: \$DEST already at \$WANT_SHA — nothing to do."
+        exit 0
+      fi
+
+      # Stage, validate, THEN swap. Untarring over \$DEST in place would leave a
+      # half-written lab in the exact directory run.sh is about to read — which
+      # is precisely the state this helper exists to make unreachable.
+      STAGE="\$AD_ROOT/.incoming-\$LAB.\$\$"
+      rm -rf "\$STAGE"
+      mkdir -p "\$STAGE"
+      tar -xzf "\$BUNDLE" -C "\$STAGE"
+
+      # run.sh needs exactly these two directories. Failing here names the
+      # missing piece; failing in run.sh a few lines later says only
+      # "Lab not found", which sends the reader to the wrong machine.
+      if [ ! -d "\$STAGE/data" ] || [ ! -d "\$STAGE/providers/proxmox" ]; then
+        echo "extract-lab: bundle for '\$LAB' has no data/ and/or providers/proxmox/." >&2
+        echo "  Tar the CONTENTS of the lab dir: tar -czf lab.tar.gz -C <labdir> ." >&2
+        rm -rf "\$STAGE"
+        exit 1
+      fi
+      # The manifest goes in LAST here too, and it goes in BEFORE the rename —
+      # so it becomes visible at the same instant the tree does, and never
+      # describes a directory that is still being assembled.
+      cp "\$MANIFEST" "\$STAGE/.cc-manifest"
+
+      # rename(2) within one filesystem, so the window in which \$DEST does not
+      # exist is a single syscall and no reader can observe a partial tree.
+      PREV=""
+      if [ -e "\$DEST" ]; then
+        PREV="\$AD_ROOT/.replaced-\$LAB.\$\$"
+        mv "\$DEST" "\$PREV"
+      fi
+      mv "\$STAGE" "\$DEST"
+      if [ -n "\$PREV" ]; then
+        rm -rf "\$PREV"
+      fi
+      echo "extract-lab: extracted '\$LAB' at \$WANT_SHA -> \$DEST"
+      exit 0
+
+  # ----- Capability marker: this run.sh reads ad/<LAB>/playbooks.yml -----
+  # The pusher has to decide FROM OUTSIDE whether the controller it is talking
+  # to honours a per-lab chain, because a lane cloned from the previous
+  # template does not, and a lab delivered to one of those with no shared-file
+  # merge silently inherits playbooks.yml 'default' — the 16-play chain, most
+  # of an hour burned, then plays against empty groups.
+  #
+  # Its fallback test is a grep of run.sh for a line carrying both 'LAB' and
+  # 'playbooks.yml', which our LAB_PLAYBOOKS_YML= line happens to satisfy. That
+  # is a COINCIDENCE OF SPELLING, not a contract: rename the variable and the
+  # probe silently answers 'no' forever after. This file is the contract, and
+  # its presence is the whole assertion.
+  # Consumed as /opt/goad-light/.cc-per-lab-playbooks by
+  # ciab/utils/goad-lab-push.js (cmdSupportsPerLabPlaybooks). Neither half moves
+  # without the other.
+  - path: /opt/goad-light/.cc-per-lab-playbooks
+    permissions: '0644'
+    content: |
+      # Presence of this file asserts the capability; the content is
+      # informational. See run.sh, section 'Which playbook chain?'.
+      capability=per_lab_playbooks_yml
+      path=ad/<LAB>/playbooks.yml
+      shapes=bare list, or a mapping keyed by <LAB> with a default fallback
+
   - path: /opt/goad-light/run.sh
     permissions: '0755'
     content: |
@@ -479,10 +774,27 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       LAB="\$1"; HOST_MAP="\$2"; INITIAL_USER="\$3"; INITIAL_PASSWORD="\$4"
 
       GOAD_ROOT=/opt/goad
-      LAB_DATA="\$GOAD_ROOT/ad/\$LAB/data"
-      LAB_PROVIDER="\$GOAD_ROOT/ad/\$LAB/providers/proxmox"
+      LAB_ROOT="\$GOAD_ROOT/ad/\$LAB"
+      LAB_DATA="\$LAB_ROOT/data"
+      LAB_PROVIDER="\$LAB_ROOT/providers/proxmox"
       ANSIBLE_DIR="\$GOAD_ROOT/ansible"
+      # Upstream's shared chain map: ONE mutable file keyed by every lab name.
+      # Still the fallback, no longer the only source — see LAB_PLAYBOOKS_YML.
       PLAYBOOKS_YML="\$GOAD_ROOT/playbooks.yml"
+      # v2 contract, both optional, both shipped INSIDE the lab tree so they are
+      # versioned with the data they drive and a push is one atomic operation:
+      #   playbooks.yml   this lab's own chain      (see 'Which playbook chain?')
+      #   extra_vars.yml  this lab's own overlay    (see 'extra-vars overlay')
+      LAB_PLAYBOOKS_YML="\$LAB_ROOT/playbooks.yml"
+      LAB_EXTRA_VARS="\$LAB_ROOT/extra_vars.yml"
+
+      # Land any pushed tree for this lab BEFORE the existence check below —
+      # a generated lab does not exist in the image, it arrives in the inbox.
+      # No-op for every baked-in lab (no inbox entry), and a hard failure for a
+      # push that did not complete. Unconditional on purpose: guarding it with
+      # a [ -x ] test would turn a missing helper into a silent skip, and then
+      # into "lab not found" pointing at the wrong half of the contract.
+      /opt/goad-light/extract-lab.sh "\$LAB"
 
       if [ ! -d "\$LAB_DATA" ] || [ ! -d "\$LAB_PROVIDER" ]; then
         echo "ERROR: Lab '\$LAB' not found at \$LAB_DATA / \$LAB_PROVIDER"
@@ -571,17 +883,53 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       export LC_ALL=C.UTF-8
       cd "\$ANSIBLE_DIR"
 
-      # Read the per-lab playbook chain from upstream's playbooks.yml
+      # ---------- Which playbook chain? ----------
+      # PREFERENCE ORDER:
+      #   1. ad/<LAB>/playbooks.yml   the lab's OWN chain, shipped in its tree
+      #   2. /opt/goad/playbooks.yml  upstream's shared map — unchanged
+      #                               behaviour for every lab that ships no
+      #                               chain of its own
+      #
+      # WHY 1 EXISTS. Upstream's file is a single mutable map keyed by lab name.
+      # A generated lab that used it would have to read-modify-write shared
+      # state inside the guest on every push: concurrent pushes race, a failed
+      # push leaves a key pointing at a tree that is not there, and no key is
+      # traceable to the lab that added it. Owning the file removes the shared
+      # mutable state instead of synchronising it.
+      #
+      # WHY IT IS NOT COSMETIC. A miss on data.get(LAB) falls through to
+      # 'default', and 'default' is the FULL GOAD chain: 16 playbooks including
+      # a hard five-minute wait5m.yml plus child-domain, trust, gmsa and laps
+      # plays. A single-domain generated lab needs none of them — and they do
+      # not skip. They run, and fail 15-25 minutes in, on reciprocal data
+      # (parent/child domain passwords, trust endpoints) that a single-domain
+      # lab has no way to make consistent. The failure lands ~95% of the way
+      # through a ~90-minute bake, which is the most expensive place in this
+      # entire pipeline to discover a data problem.
+      if [ -f "\$LAB_PLAYBOOKS_YML" ]; then
+        CHAIN_SRC="\$LAB_PLAYBOOKS_YML"
+      else
+        CHAIN_SRC="\$PLAYBOOKS_YML"
+      fi
+      echo "==> Playbook chain source: \$CHAIN_SRC"
       PLAYBOOKS=\$(python3 - <<PY
       import yaml
-      with open("\$PLAYBOOKS_YML") as f:
+      with open("\$CHAIN_SRC") as f:
           data = yaml.safe_load(f)
-      chain = data.get("\$LAB") or data.get("default") or []
+      # A per-lab file may be a bare LIST — the whole file IS this lab's chain,
+      # which is the shape a generator should emit, because it cannot then name
+      # the wrong key. The shared file is a MAPPING keyed by lab name with a
+      # 'default' fallback; that read is deliberately byte-for-byte what it has
+      # always been, since every shipped lab still goes through it.
+      if isinstance(data, list):
+          chain = data
+      else:
+          chain = (data or {}).get("\$LAB") or (data or {}).get("default") or []
       print(" ".join(chain))
       PY
       )
       if [ -z "\$PLAYBOOKS" ]; then
-        echo "ERROR: no playbook chain found for lab '\$LAB' in \$PLAYBOOKS_YML"
+        echo "ERROR: no playbook chain found for lab '\$LAB' in \$CHAIN_SRC"
         exit 1
       fi
 
@@ -644,6 +992,34 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       ad_http_proxy: "http://x.x.x.x:8080"
       ad_https_proxy: "http://x.x.x.x:8080"
       EXTRA
+
+      # ---------- Optional per-lab extra-vars overlay ----------
+      # If the lab tree ships ad/<LAB>/extra_vars.yml, its contents are APPENDED
+      # to the file above, verbatim. Appending is the whole mechanism: ansible
+      # loads --extra-vars '@file' as one YAML document and PyYAML's mapping
+      # loader keeps the LAST occurrence of a duplicate key, so an overlay key
+      # wins over the block above without the pusher having to rewrite run.sh's
+      # own file — which is the read-modify-write we are removing everywhere
+      # else in this contract.
+      #
+      # PRECEDENCE WARNING, and it cuts both ways:
+      #   --extra-vars OUTRANKS EVERY INVENTORY LEVEL — host_vars, group_vars,
+      #   play vars, role defaults, and upstream's own data/inventory. Nothing
+      #   in the overlay is a default; each key is a hard override that no
+      #   playbook downstream can walk back. Put a variable here only when it
+      #   must hold for the entire chain.
+      #   In particular do NOT set data_path (see the note in the block above):
+      #   each upstream playbook sets it per-import, and overriding it globally
+      #   breaks 'lab' loading for every play at once.
+      if [ -f "\$LAB_EXTRA_VARS" ]; then
+        echo "==> Appending per-lab extra-vars overlay: \$LAB_EXTRA_VARS"
+        {
+          echo ""
+          echo "# ---- appended by run.sh from \$LAB_EXTRA_VARS ----"
+          cat "\$LAB_EXTRA_VARS"
+          echo ""
+        } >> "\$RUNTIME/extra_vars.yml"
+      fi
 
       INV_FLAGS_INITIAL="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides_initial"
       INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides"
@@ -724,10 +1100,10 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         tasks:
           # Some Windows hosts (notably srv02) bring WinRM up later than the
           # DCs. If the play starts before a host's WinRM listener is ready,
-          # Ansible marks it `unreachable` on the very first task and the whole
+          # Ansible marks it 'unreachable' on the very first task and the whole
           # GOAD chain fails — even though the host comes up fine seconds later.
           # wait_for_connection polls the connection and rides out a slow boot
-          # (it catches the not-yet-reachable state and retries to `timeout`),
+          # (it catches the not-yet-reachable state and retries to 'timeout'),
           # so a laggy host is WAITED FOR instead of instantly failed. Runs
           # per-host in parallel, so hosts already up don't pay the wait.
           - name: Wait for WinRM to come up (slow boots get marked unreachable, e.g. srv02)
@@ -814,7 +1190,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
           # fail the whole 30-min GOAD chain on one cold-start blip: RETRY.
           # Invoke-WebRequest -TimeoutSec keeps each attempt short (the old
           # WebClient.DownloadString had a ~100s default timeout, so a single
-          # miss burned ~100s); `until`/retries rides out the transient.
+          # miss burned ~100s); 'until'/retries rides out the transient.
           - name: Verify outbound HTTPS to PSGallery (TLS 1.2, retried through cold-start)
             win_shell: |
               [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -837,18 +1213,18 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
           # modules PRE-INSTALLED, so upstream's online installs were all no-ops.
           # The new sysprep-generalized template (bake-win-server-template.sh,
           # vmid 1004) is clean, so those tasks now RUN online — and the very
-          # first, `Install-PackageProvider -Name NuGet -Force`, FAILS headlessly
+          # first, 'Install-PackageProvider -Name NuGet -Force', FAILS headlessly
           # ("NoMatchFoundForProvider" + "NonInteractive mode ... Prompt
-          # functionality is not available"): bare `-Force` does NOT bootstrap the
-          # provider non-interactively — it needs `-ForceBootstrap`.
+          # functionality is not available"): bare '-Force' does NOT bootstrap the
+          # provider non-interactively — it needs '-ForceBootstrap'.
           #
           # Fix in ONE place: as Administrator (before the upstream roles run as
           # vagrant), bootstrap NuGet correctly, trust PSGallery, and PRE-STAGE
           # every PSGallery module the GOAD chain installs, machine-wide. The
-          # upstream `win_psmodule` / `Install-Module` tasks then find each module
+          # upstream 'win_psmodule' / 'Install-Module' tasks then find each module
           # already present (state: present) and no-op — restoring the old
           # template's behavior without re-baking Windows. Module list = every
-          # name from `grep win_psmodule|Install-Module` across the GOAD roles:
+          # name from 'grep win_psmodule|Install-Module' across the GOAD roles:
           #   common:               ComputerManagementDsc, xNetworking
           #   domain_controller/child_domain: xDnsServer, ActiveDirectoryDSC
           #   adcs:                 PSPKI, xAdcsDeployment
@@ -959,7 +1335,20 @@ runcmd:
   - [ systemctl, enable, --now, qemu-guest-agent ]
   - [ systemctl, enable, ssh ]
   - [ update-locale, LANG=C.UTF-8, LC_ALL=C.UTF-8 ]
-  - [ git, clone, --depth, '1', --branch, '$GOAD_REF', '$GOAD_REPO', /opt/goad ]
+  # Receiving directory for pushed lab trees. Created at BAKE time, not on
+  # first push, so the pusher never has to mkdir over the guest agent and can
+  # never create it with the wrong mode. root:root 0755: the guest-agent
+  # channel runs as root, and nothing else on this VM has any business writing
+  # a lab tree. Full contract: the block above /opt/goad-light/extract-lab.sh.
+  - [ install, -d, -m, '0755', -o, root, -g, root, /opt/goad-inbox ]
+  # NOT "git clone --branch \$GOAD_REF": that flag takes branch and tag names
+  # only and rejects a commit SHA outright, and --depth 1 fetches just the tip
+  # so a follow-up "git checkout <sha>" would die with "reference is not a
+  # tree". init + fetch-by-ref is the shallow form that accepts all three
+  # spellings, so a GOAD_REF override of a branch or tag still bakes.
+  # (github.com serves arbitrary full SHAs to fetch; a self-hosted GOAD_REPO
+  # would need uploadpack.allowAnySHA1InWant for the SHA form to work.)
+  - bash -c 'set -e; git init -q /opt/goad; cd /opt/goad; git remote add origin "$GOAD_REPO"; git fetch -q --depth 1 origin "$GOAD_REF"; git checkout -q FETCH_HEAD'
   - bash -c 'cd /opt/goad/ansible && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && ansible-galaxy install -r requirements.yml'
   - bash -c 'cd /opt/goad && git log -1 --oneline > /opt/goad-light/upstream-commit.txt'
   - [ apt-get, clean ]
@@ -1130,4 +1519,8 @@ echo "                 qm start 9994 && sleep 60"
 echo "  Inspect:       qm guest exec 9994 -- /bin/sh -c 'ls /opt/goad /opt/goad-light'"
 echo "  Sanity:        qm guest exec 9994 -- /bin/sh -c 'cat /opt/goad-light/upstream-commit.txt'"
 echo "  Cleanup test:  qm stop 9994 && qm destroy 9994 --purge"
+echo "-------------------------------------------------------------------"
+echo "  ROLLBACK:      front-end/src/utils/goad-deploy.js"
+echo "                 const CONTROLLER_TEMPLATE_VMID = $VMID;  ->  = $ROLLBACK_TEMPLATE_VMID;"
+echo "                 then restart the node process (see header, ROLLBACK)."
 echo "==================================================================="

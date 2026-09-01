@@ -1,0 +1,143 @@
+---
+# ===========================================================================
+# cc_web — static vocabulary.
+#
+# Everything here is a LOOKUP TABLE, never a derived value. Derived values live
+# in tasks/resolve.yml as set_facts, because role vars (precedence 14) lose to
+# set_fact (18) and defining the same name in both places would make which
+# definition wins depend on whether resolve.yml had run yet.
+#
+# Nothing in this file may identify a tenant either — these are facts about
+# Debian and about OpenSSL, not about a client.
+# ===========================================================================
+
+# --- the one supported platform --------------------------------------------
+# Debian family only, and that is a refusal rather than a gap. The Debian
+# packaging splits config into sites-available/conf-available with a2enmod as
+# the sanctioned enable path; the RedHat packaging has none of that. A role that
+# pretended to cover both would be one untested branch that fails at ~95% of a
+# provisioning run, which is precisely the failure shape this whole pipeline
+# exists to remove. tasks/assert.yml names the family it got.
+cc_web_supported_os_families:
+  - Debian
+
+cc_web_service_name: apache2
+cc_web_ctl: apache2ctl
+
+# openssl and curl are verification dependencies, not serving dependencies: the
+# role proves the listener speaks each declared protocol and that each declared
+# route answers, and it cannot do either without them on the host. iproute2
+# provides `ss`, used to prove the ports are really bound.
+cc_web_packages:
+  - apache2
+  - openssl
+  - curl
+  - iproute2
+  - ca-certificates
+
+# mod_ssl is the TLS listener. mod_headers is used for the response headers the
+# vhost sets; it is NOT used for the Server header (see cc_web_supported_products
+# in defaults/main.yml for why that is impossible in httpd).
+cc_web_apache_modules:
+  - ssl
+  - headers
+
+cc_web_sites_available: /etc/apache2/sites-available
+cc_web_sites_enabled: /etc/apache2/sites-enabled
+cc_web_conf_available: /etc/apache2/conf-available
+cc_web_conf_enabled: /etc/apache2/conf-enabled
+cc_web_mods_enabled: /etc/apache2/mods-enabled
+cc_web_ports_conf: /etc/apache2/ports.conf
+cc_web_site_conf_name: cc-web.conf
+cc_web_banner_conf_name: cc-web-banner.conf
+cc_web_log_dir: /var/log/apache2
+cc_web_run_user: www-data
+cc_web_run_group: www-data
+
+# Debian ships these two enabled. Both bind *:80 (and *:443) and both point at
+# /var/www/html, so leaving either in place means the first-matching vhost for a
+# request without a matching ServerName is Debian's placeholder page — every
+# declared route 404s while apache reports a clean start.
+cc_web_stock_site_links:
+  - /etc/apache2/sites-enabled/000-default.conf
+  - /etc/apache2/sites-enabled/default-ssl.conf
+
+# --- TLS protocol vocabulary -----------------------------------------------
+# THREE SPELLINGS OF THE SAME THING, AND THEY ARE ALL DIFFERENT.
+#
+#   the contract   'TLSv1.2'   — what a compiler writes into web_facts
+#   httpd          'TLSv1.2'   — SSLProtocol token; note TLS 1.0 is "TLSv1",
+#                                with NO .0, and getting that wrong is an
+#                                apache config parse error at restart time
+#   openssl CLI    '-tls1_2'   — s_client flag used to PROVE the handshake
+#
+# The alias table is keyed on the spelling squashed to lowercase with every
+# separator removed, mirroring normalizeTlsProtocol() in service-inference.js.
+# It is deliberately explicit and has no default: an unrecognised token is a
+# named failure in tasks/assert.yml, because silently dropping one is how a
+# report ends up claiming a protocol the listener never offered.
+cc_web_tls_alias:
+  sslv2: sslv2
+  ssl2: sslv2
+  sslv3: sslv3
+  ssl3: sslv3
+  tlsv1: "tlsv1.0"
+  tls1: "tlsv1.0"
+  "tlsv1.0": "tlsv1.0"
+  "tls1.0": "tlsv1.0"
+  "tlsv1.1": "tlsv1.1"
+  "tls1.1": "tlsv1.1"
+  "tlsv1.2": "tlsv1.2"
+  "tls1.2": "tlsv1.2"
+  "tlsv1.3": "tlsv1.3"
+  "tls1.3": "tlsv1.3"
+
+cc_web_tls_directive:
+  sslv2: SSLv2
+  sslv3: SSLv3
+  "tlsv1.0": TLSv1
+  "tlsv1.1": TLSv1.1
+  "tlsv1.2": TLSv1.2
+  "tlsv1.3": TLSv1.3
+
+cc_web_sclient_flag:
+  sslv2: "-ssl2"
+  sslv3: "-ssl3"
+  "tlsv1.0": "-tls1"
+  "tlsv1.1": "-tls1_1"
+  "tlsv1.2": "-tls1_2"
+  "tlsv1.3": "-tls1_3"
+
+# Declaring any of these means the system OpenSSL policy has to be relaxed as
+# well as the vhost. sslv2 is in the list for completeness and is rejected up
+# front — no OpenSSL 3 build has it compiled in, so a report claiming an SSLv2
+# finding can never be true on a modern base image and should fail at provision
+# time rather than at grading time.
+cc_web_weak_protocols:
+  - sslv2
+  - sslv3
+  - "tlsv1.0"
+  - "tlsv1.1"
+
+# Protocols this role refuses outright, with the reason it hands the operator.
+cc_web_undeliverable_protocols:
+  - sslv2
+
+# SECLEVEL=0 is the point when a weak protocol is declared: OpenSSL 3 rejects
+# the RSA/SHA1 handshakes TLS 1.0 needs at any higher level, so a "TLS 1.0
+# enabled" listener at SECLEVEL=2 advertises the protocol and then fails every
+# handshake. When only modern protocols are declared, nothing is loosened.
+cc_web_cipher_suite_weak: "ALL:@SECLEVEL=0"
+cc_web_cipher_suite_modern: "HIGH:!aNULL:!MD5:!3DES"
+
+# --- pivot credential file formats -----------------------------------------
+# One template renders all of these. `raw` is deliberately absent: a caller-
+# supplied file body would be re-rendered by Jinja on the way through (see the
+# CONTENT IS TEMPLATED note in tasks/content.yml), so a generated config
+# containing {{ }} would either explode or, worse, evaluate.
+cc_web_pivot_formats:
+  - dotenv
+  - php
+  - json
+  - ini
+  - xml

@@ -140,6 +140,75 @@ const CONSOLE_OCTET_MAX = 79;
 const SPEC_OCTET_MIN = 80;
 const SPEC_OCTET_MAX = 99;
 
+// The v3 dual-homed DMZ pivot's host octet, on BOTH of its segments. It used to
+// be .50, but the gateway firstboot reserves ext .50 for Kali's RDP DNAT
+// (wan0:3389 -> ext.50), so the two collided and student RDP landed on the web
+// host rather than the attack box. .240 is above the gateway's DHCP pool
+// (.10-.200), so no lease can claim it and no gateway re-bake is needed. It is
+// deliberately outside both bands above, because a dual-homed machine is never
+// handed one: resolveVmNics builds its NICs inline and ignores the pinned MAC,
+// so a band reservation would be one nothing ever requests.
+//
+// NAMED, because two readers in this file have to agree on it and a second
+// literal 240 is exactly how they drift: cloneChallengeVm writes the static
+// ipconfig, and resolveLaneDnsExtras publishes the company's web name AT that
+// address. Exported for the same reason the CiAB paper already spells it
+// (plugins/ciab/utils/engagement-model.js DUAL_HOMED_OCTET, whose comment names
+// this file as the authority) - one place to read, none to re-spell.
+const DUAL_HOMED_OCTET = 240;
+
+/**
+ * Pin a pre-baked ("GOAD-Like") lane onto the subnet its golden images were
+ * baked on — and REFUSE to build one that never declared it.
+ *
+ * The refusal is the point. A golden AD image bakes its addresses into itself:
+ * the AD-integrated DNS zone, the SYSVOL/DFS referral paths and every SPN all
+ * name the IP the image was provisioned on. Clone it onto a per-lane subnet and each
+ * of those records points at an address that does not exist on the lane —
+ * while nothing fails: the clones boot, DHCP hands them the lane's own
+ * addresses, the lane reports `active`, and the first `nxc`, domain join or
+ * Kerberos ticket request is where a student discovers the forest is fiction.
+ *
+ * All three call sites used to spell this as
+ * `if (prebaked && fixed_subnet) applyFixedSubnet(...)` with no else, so a spec
+ * missing the field took exactly that silent path three times over.
+ *
+ * Empty counts as missing. applyFixedSubnet ignores a falsy base, so
+ * `fixed_subnet: { int: '' }` — which is precisely what the topology canvas
+ * seeds a new pre-baked challenge with (topology-seed.fromGoadLab) — is the
+ * same silent per-lane subnet, with a field present to make it look answered.
+ * The canvas's own validateCreateState already refuses that at authoring time;
+ * this is the deploy-time backstop for a spec that arrived some other way.
+ *
+ * `ext` is passed through as-is rather than defaulted to `int`: a spec that
+ * pins only the internal base leaves the EXTERNAL segment per-lane today, and
+ * on v3 defaulting it would put both segments on one base. Only the internal
+ * base is load-bearing — that is the segment the baked AD lives on.
+ *
+ * @returns {object} the same `net`, mutated by applyFixedSubnet
+ * @throws when spec.goad.prebaked is set without a usable fixed_subnet.int
+ */
+function applyPrebakedFixedSubnet(net, isV3, spec) {
+  if (!spec?.goad?.prebaked) return net;
+  const fixed = spec.goad.fixed_subnet || {};
+  // Trimmed because these are hand-typed into the create form: ' 10.39.16'
+  // survives the truthiness check and then builds ' 10.39.16.1' as the gateway
+  // address, which Proxmox accepts as a net config and no guest can reach.
+  const int = String(fixed.int == null ? '' : fixed.int).trim();
+  const ext = String(fixed.ext == null ? '' : fixed.ext).trim();
+  if (!int) {
+    throw new Error(
+      'This challenge is marked pre-baked GOAD (spec.goad.prebaked) but its spec declares no ' +
+      'goad.fixed_subnet.int, so every lane would be built on a per-lane subnet while the golden ' +
+      'images still answer on the base they were baked on — their DNS, SYSVOL and SPN records would ' +
+      'all name an address the lane does not have, and the lane would still report active. ' +
+      'Set spec.goad.fixed_subnet = { int: "<base the images were baked on>", ext: "<external base>" }, ' +
+      'or clear spec.goad.prebaked to provision the lab live instead.'
+    );
+  }
+  return applyFixedSubnet(net, isV3, int, ext);
+}
+
 /**
  * Decide which machines on a lane get a Guacamole console, and which one the
  * student's console button opens (the "primary").
@@ -267,7 +336,9 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
  *                claim one — which takes DHCP down for the WHOLE lane.
  *   dual-homed   resolveVmNics builds those NICs inline and ignores the MAC
  *                entirely, so a pin would write a reservation nothing ever
- *                requests. v3 pins them to .240 by design.
+ *                requests. v3 pins them to .DUAL_HOMED_OCTET by design, and
+ *                resolveLaneDnsExtras reads that pin back out — a machine
+ *                missing from pinnedHosts is NOT a machine with no address.
  *
  * DNS records are emitted for pinned AND console machines (an alias has to
  * resolve to an address, and only those have one that is knowable at deploy
@@ -647,10 +718,9 @@ async function cloneGateway(job, sourceNode, sourceVmid, ctx) {
 
   const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId, { wanIp });
   // Pre-baked ("GOAD-Like") lanes pin a fixed subnet so the gateway's ext0/int0
-  // land on the same base the golden-image AD was baked on.
-  if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
-    applyFixedSubnet(net, subnetScheme === 'v3', spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
-  }
+  // land on the same base the golden-image AD was baked on. Throws when the spec
+  // is pre-baked and never said which base that is — see applyPrebakedFixedSubnet.
+  applyPrebakedFixedSubnet(net, subnetScheme === 'v3', spec);
 
   if (subnetScheme === 'v3') {
     await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/config`, {
@@ -767,8 +837,8 @@ async function cloneChallengeVm({ vmSpec, vxlanId, targetNode, laneId, user, ctx
       // v1/v2 lane still gets both NICs above, just no static pinning.
       if (isV3) {
         await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/qemu/${vmId}/config`, {
-          ipconfig0:  `ip=${net.lanExt.base3}.240/24,gw=${net.lanExt.gatewayIp}`,
-          ipconfig1:  `ip=${net.lanInt.base3}.240/24`,
+          ipconfig0:  `ip=${net.lanExt.base3}.${DUAL_HOMED_OCTET}/24,gw=${net.lanExt.gatewayIp}`,
+          ipconfig1:  `ip=${net.lanInt.base3}.${DUAL_HOMED_OCTET}/24`,
           nameserver: net.lanExt.gatewayIp,
           citype:     'nocloud',
         });
@@ -958,6 +1028,219 @@ async function cloneAttackBox({ attackBoxVmId, vxlanId, targetNode, laneId, user
   await proxmoxAPI('PUT', `/api2/json/nodes/${targetNode}/qemu/${attackBoxVmId}/cloudinit`);
 }
 
+// A DNS NAME, not the single LABEL lane-deployer.resolveDnsAliases validates.
+// Both lines resolveLaneDnsExtras writes carry a dotted name — `sevenkingdoms.local`
+// for the forwarder, `www.acme-clinic.com` for the company site — and DNS_LABEL_RE
+// would reject them both, so this is the one place that needs its own pattern.
+// Per-label rules are the same (letters/digits/inner hyphens, 63 octets).
+const DNS_NAME_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i;
+
+// Range-checked rather than /\d+(\.\d+){3}/: `10.39.999.10` is four numbers and
+// not an address, and dnsmasq refuses to start on the line rather than ignoring
+// it — which takes DHCP down for every machine on the lane (installLaneReservations).
+const IPV4_RE = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+/** A spec-supplied DNS name, normalised — or '' when it is not one. */
+function dnsNameOrEmpty(value) {
+  // The trailing dot of a root-form FQDN is stripped rather than rejected: it is
+  // a normal way to type one, and dnsmasq wants the name without it.
+  const name = String(value == null ? '' : value).trim().toLowerCase().replace(/\.$/, '');
+  if (!name || name.length > 253 || !DNS_NAME_RE.test(name)) return '';
+  return name;
+}
+
+/**
+ * The company's own DNS answers for a lane: a conditional forwarder for its AD
+ * forest, and a name for its public web site.
+ *
+ * WHY THIS EXISTS. Nothing on a lane resolves the company's domain. The gateway
+ * serves `cybercore.lan` and forwards everything else upstream, so Kali's
+ * resolver knows the lane's short names and nothing about the forest. Every AD
+ * tool invoked the way a student is taught to invoke it — `nxc smb dc01.corp.local`,
+ * `bloodhound-python -d corp.local`, `GetUserSPNs.py corp.local/user` without
+ * `-dc-ip` — fails at name resolution, before it has touched the target once.
+ * `server=/<domain>/<dc>` fixes all of them at once: dnsmasq matches the domain
+ * AND every subdomain, so the `_msdcs`/`_tcp` SRV records Kerberos and the
+ * DC-locator actually look up are covered by the single line.
+ *
+ * OPT-IN. Reads `spec.dns` and nothing else, and no challenge in the tree carries
+ * one, so every existing lane's reservations file is byte-identical:
+ *
+ *   spec.dns = {
+ *     ad_domain: 'corp.acme-clinic.local',  // forest to forward (defaults to spec.goad.domain)
+ *     ad_dc:     'DC01',                    // SPEC name of the DC that answers it
+ *     web_name:  'www.acme-clinic.com',     // the company's public web name
+ *     web_vm:    'web01',                   // SPEC name of the machine serving it
+ *   }
+ *
+ * The DC and the web server are named as MACHINES, never as addresses: the lane
+ * subnet is allocated per lane (`10.<vxh>.<vxl>`), so an IP literal in a spec is
+ * right for at most one student and silently wrong for the rest.
+ *
+ * Pure over its inputs, like resolveSpecAddressing, and it validates before it
+ * emits: these lines land in the SAME file as the lane's DHCP reservations, and
+ * dnsmasq refuses to start on one malformed directive — which would take DHCP
+ * down for the whole lane. So anything unusable is skipped with a warning
+ * naming what was there, never written through.
+ *
+ * @param {string} [a.subnetScheme] the lane's scheme; only v3 statically pins its
+ *   dual-homed DMZ host, so only v3 can publish that host's address
+ * @returns {string[]} dnsmasq lines, empty when the spec declares no `dns` block
+ */
+function resolveLaneDnsExtras({
+  spec = {}, goadMacs = {}, consoleOctets = {}, pinnedHosts = [],
+  extSubnetBase, subnetScheme, logTag = LOG,
+}) {
+  const dns = spec && spec.dns;
+  if (!dns || typeof dns !== 'object') return [];
+
+  // Every address on this lane that is knowable at deploy time, keyed by the
+  // SPEC name — the name an author writes in ad_dc / web_vm, not the Proxmox
+  // clone name (which carries the student's username appended).
+  const ipFor = {};
+  for (const [name, info] of Object.entries(goadMacs || {})) {
+    if (info && info.static_ip) ipFor[name] = info.static_ip;
+  }
+  for (const h of (pinnedHosts || [])) {
+    if (h && h.name && h.subnetBase && h.octet != null) ipFor[h.name] = `${h.subnetBase}.${h.octet}`;
+  }
+  // Consoles draw the EXTERNAL base, matching writeLaneReservations' own console
+  // loop — the two must agree or the record points at an off-subnet address.
+  for (const [name, octet] of Object.entries(consoleOctets || {})) {
+    if (extSubnetBase && octet != null) ipFor[name] = `${extSubnetBase}.${octet}`;
+  }
+  // The v3 dual-homed DMZ host. It is in NONE of the three sources above, and
+  // that is deliberate in every one of them: resolveSpecAddressing skips a
+  // multi-segment VM before it can reach pinnedHosts (resolveVmNics builds those
+  // NICs inline and ignores the pinned MAC, so a reservation would be one
+  // nothing ever requests), the pivot is not a GOAD lab host, and cloneChallengeVm
+  // throws outright if it is named the console. So the company's own website —
+  // on exactly the topology profile-to-spec now defaults to — resolved to
+  // nothing: an empty record list plus a warning that web_vm could not be found.
+  //
+  // Its address IS knowable, and from the same constant the clone path writes:
+  // cloneChallengeVm gives a dual-homed guest a STATIC .DUAL_HOMED_OCTET on both
+  // segments (ipconfig0/ipconfig1), which is why no reservation is needed for it
+  // in the first place.
+  //
+  // THE EXTERNAL ADDRESS, not the internal one. The host answers on both, and
+  // ext is the segment Kali sits on: the site is meant to be reachable from the
+  // attack box directly, and an int-side answer would route the student THROUGH
+  // the machine they are attacking. It is also the address ipconfig0 carries, so
+  // the record and the guest's primary interface cannot disagree.
+  //
+  // v3 ONLY. A multi-NIC spec on a v1/v2 lane still gets both NICs, but no
+  // static pinning — there is no .240 there, and publishing one anyway would
+  // point the company's name at an address nothing holds. No scheme, no entry.
+  if (subnetScheme === 'v3' && extSubnetBase) {
+    for (const vmSpec of (Array.isArray(spec.vms) ? spec.vms : [])) {
+      const name = vmSpec && vmSpec.name;
+      // Already resolved above means a real dhcp-host line exists for it; that
+      // address is the one the lane hands out, so it wins over this inference.
+      if (!name || ipFor[name]) continue;
+      // An LXC gets net1 and one segment whatever its spec says (resolveVmNics),
+      // so it never reaches the .240 ipconfig pass either.
+      if ((vmSpec.type || 'qemu') === 'lxc') continue;
+      // resolveVmSegments is the same predicate resolveVmNics derives dualHomed
+      // from — asked here rather than re-spelled, so "which machines are pinned
+      // to .240" has one answer for the clone path and the DNS table both.
+      const segs = resolveVmSegments(vmSpec, { subnetScheme, isGoadVm: !!(goadMacs || {})[name] });
+      if (segs.length < 2) continue;
+      ipFor[name] = `${extSubnetBase}.${DUAL_HOMED_OCTET}`;
+    }
+  }
+  const machines = () => Object.keys(ipFor).join(', ') || '(none)';
+
+  const lines = [];
+
+  // ── conditional forwarder for the AD forest ────────────────────────────────
+  // An author who names the DC but not the domain means the one the GOAD half of
+  // the spec already declares; making them write it twice is how the two drift.
+  const declaredAdDomain = String(dns.ad_domain == null ? '' : dns.ad_domain).trim();
+  const declaredAdDc = String(dns.ad_dc == null ? '' : dns.ad_dc).trim();
+  const rawAdDomain = declaredAdDomain
+    || (declaredAdDc ? String((spec.goad || {}).domain || '').trim() : '');
+  if (declaredAdDc && !rawAdDomain) {
+    // Named the machine, named no forest, and the spec has no GOAD domain to
+    // borrow. Silence here would read as "the author didn't want a forwarder".
+    console.warn(
+      `${logTag} spec.dns.ad_dc '${declaredAdDc}' names a domain controller but no domain to ` +
+      `forward to it — set dns.ad_domain (or spec.goad.domain), or nothing on this lane resolves ` +
+      `the forest.`);
+  } else if (rawAdDomain) {
+    const adDomain = dnsNameOrEmpty(rawAdDomain);
+    let dcName = declaredAdDc;
+    // A named machine wins. Otherwise the lab's own DC, whose address
+    // prepareGoadMacs has already resolved onto this lane's internal segment.
+    // A profile-derived lane has no GOAD lab at all — its DC is an ordinary
+    // pinned machine — so `ad_dc` is the only way to name it there.
+    //
+    // The FIRST DC, not every DC: a second `server=/<forest>/` line would send
+    // part of the lane's forest traffic to DC02, which in the stock labs holds a
+    // DIFFERENT domain and is not guaranteed authoritative for the root. Name
+    // `ad_dc` explicitly when the first DC is not the one that should answer.
+    let dcIp = dcName ? (ipFor[dcName] || null) : null;
+    if (!dcName) {
+      const dc = Object.entries(goadMacs || {})
+        .find(([, info]) => info && info.role === 'dc' && info.static_ip);
+      if (dc) { dcName = dc[0]; dcIp = dc[1].static_ip; }
+    }
+    if (!adDomain) {
+      console.warn(
+        `${logTag} spec.dns.ad_domain ${JSON.stringify(rawAdDomain)} is not a usable DNS name — ` +
+        `skipping the AD forwarder. Nothing on this lane will resolve the forest.`);
+    } else if (!dcIp) {
+      console.warn(
+        `${logTag} spec.dns: no address on this lane for the '${adDomain}' domain controller` +
+        `${dcName ? ` '${dcName}'` : ' (no dns.ad_dc, and no GOAD host with role dc)'} — ` +
+        `skipping the forwarder. Lane machines: ${machines()}`);
+    } else if (!IPV4_RE.test(dcIp)) {
+      console.warn(
+        `${logTag} spec.dns: domain controller '${dcName}' resolved to ${JSON.stringify(dcIp)}, ` +
+        `which is not an IPv4 address — skipping the '${adDomain}' forwarder.`);
+    } else {
+      lines.push(`server=/${adDomain}/${dcIp}`);
+    }
+  }
+
+  // ── the company's public web name ─────────────────────────────────────────
+  const declaredWebName = String(dns.web_name == null ? '' : dns.web_name).trim();
+  if (declaredWebName) {
+    const webName = dnsNameOrEmpty(declaredWebName);
+    const webVm = String(dns.web_vm == null ? '' : dns.web_vm).trim();
+    const webIp = webVm ? (ipFor[webVm] || null) : null;
+    if (!webName) {
+      console.warn(
+        `${logTag} spec.dns.web_name ${JSON.stringify(declaredWebName)} is not a usable DNS name — skipping it.`);
+    } else if (!webVm) {
+      console.warn(
+        `${logTag} spec.dns.web_name '${webName}' names no machine (set dns.web_vm to a spec VM) — skipping it.`);
+    } else if (!webIp) {
+      console.warn(
+        `${logTag} spec.dns.web_vm '${webVm}' has no address on this lane, so '${webName}' would ` +
+        `resolve to nothing — skipping it. A machine only has a knowable address if it is a GOAD ` +
+        `host, a console, pinned, or the v3 dual-homed DMZ host. Lane machines: ${machines()}`);
+    } else if (!IPV4_RE.test(webIp)) {
+      console.warn(
+        `${logTag} spec.dns.web_vm '${webVm}' resolved to ${JSON.stringify(webIp)}, which is not an ` +
+        `IPv4 address — skipping '${webName}'.`);
+    } else if (webName.includes('.')) {
+      // A public name is already fully qualified, so it CANNOT go through
+      // hostRecordLine: that helper appends the lane's own search domain and
+      // would publish `www.acme-clinic.com.cybercore.lan` while leaving the name
+      // the student was actually given unresolvable. Two-field host-record is
+      // the same directive, minus the suffix.
+      lines.push(`host-record=${webName},${webIp}`);
+    } else {
+      // A bare label goes through the shared helper, so it is published exactly
+      // like every other in-lane alias (short AND `.cybercore.lan` forms).
+      lines.push(laneDeployer.hostRecordLine(webName, webIp));
+    }
+  }
+
+  return lines;
+}
+
 /**
  * Write the lane's MAC-keyed DHCP reservations into the gateway's dnsmasq.
  *
@@ -983,13 +1266,18 @@ async function cloneAttackBox({ attackBoxVmId, vxlanId, targetNode, laneId, user
  * duplicate `dhcp-host` for the same MAC out of dnsmasq, which it treats as
  * fatal.
  *
+ * It also carries the lane's DNS, for the same reason: dnsmasq reads every
+ * *.conf in /etc/dnsmasq.d and refuses to start when two files disagree, so the
+ * per-machine host-records and the company's own names (resolveLaneDnsExtras)
+ * go in THIS file rather than a second one.
+ *
  * Best-effort by design: it needs a shell inside the gateway LXC over SSH
  * (Proxmox has no LXC exec API). If that isn't configured the lane still comes
  * up, so this logs loudly rather than failing the deploy.
  */
 async function writeLaneReservations({
   gatewayVmId, node, vxlanId, goadMacs, attackBoxOctet, consoleOctets,
-  pinnedHosts = [], dnsRecords = [],
+  pinnedHosts = [], dnsRecords = [], spec = {}, subnetScheme,
   extSubnetBase, intSubnetBase, liveGoadController, laneId, logTag,
 }) {
   const lines = [
@@ -1052,6 +1340,21 @@ async function writeLaneReservations({
     for (const r of dnsRecords) lines.push(laneDeployer.hostRecordLine(r.alias, r.ip));
   }
 
+  // The COMPANY's names — the AD forest's conditional forwarder and its public
+  // web name — as opposed to the lane-local ones above. Empty for every spec
+  // that does not declare `spec.dns`, which is all of them today.
+  // subnetScheme, because only a v3 lane statically pins its dual-homed host —
+  // without it the resolver cannot tell "the DMZ host is at .240" from "this
+  // lane has no .240 at all", and one of those two answers is a DNS record
+  // pointing at an address nothing holds.
+  const dnsExtras = resolveLaneDnsExtras({
+    spec, goadMacs, consoleOctets, pinnedHosts, extSubnetBase, subnetScheme, logTag,
+  });
+  if (dnsExtras.length) {
+    lines.push('# The company being attacked: AD forwarder + public web name (spec.dns).');
+    lines.push(...dnsExtras);
+  }
+
   if (lines.length === 3) return;  // header only — nothing to reserve
 
   // installLaneReservations, NOT a bare push+restart. Our Kali line claims the
@@ -1071,7 +1374,8 @@ async function writeLaneReservations({
     const nReservations = lines.filter(l => l.startsWith('dhcp-host=')).length;
     console.log(
       `${logTag} Lane ${laneId}: ${nReservations} DHCP reservation(s) written` +
-      (dnsRecords.length ? ` + ${dnsRecords.length} DNS host-record(s)` : '')
+      (dnsRecords.length ? ` + ${dnsRecords.length} DNS host-record(s)` : '') +
+      (dnsExtras.length ? ` + ${dnsExtras.length} company DNS line(s): ${dnsExtras.join(' ')}` : '')
     );
   } catch (err) {
     // A dead DHCP server is not survivable — every guest on this lane would sit
@@ -1349,9 +1653,10 @@ async function deployLaneVms(job, ctx) {
   const gatewayVmId = GATEWAY_VMID_OFFSET + vxlanId;
 
   const net = resolveLaneNetworking(subnetScheme, moduleKey, vxlanId, { wanIp });
-  if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
-    applyFixedSubnet(net, isV3, spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
-  }
+  // Same pin the gateway took in cloneGateway, and the same refusal: the two
+  // must agree on the lane's bases or the machines land on a subnet their own
+  // gateway does not route.
+  applyPrebakedFixedSubnet(net, isV3, spec);
   const vnetExtName    = vnet.vnet;
   const vnetIntName    = isV3 ? vnetInt.vnet : vnet.vnet;
   const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
@@ -1507,7 +1812,7 @@ async function deployLaneVms(job, ctx) {
   await writeLaneReservations({
     gatewayVmId, node: targetNode, vxlanId, goadMacs,
     attackBoxOctet: attackBoxVmId ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
-    consoleOctets: reservationOctets, pinnedHosts, dnsRecords,
+    consoleOctets: reservationOctets, pinnedHosts, dnsRecords, spec, subnetScheme,
     extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
     liveGoadController: !!(spec.goad?.enabled && !spec.goad?.prebaked),
     laneId, logTag,
@@ -2429,8 +2734,14 @@ async function rebuildLaneChallengeVms({
   const isV3 = subnetScheme === 'v3';
   const net = resolveLaneNetworking(subnetScheme, moduleKey, lane.vxlan_id,
     lane.gateway_wan_ip ? { wanIp: lane.gateway_wan_ip } : {});
-  if (spec.goad?.prebaked && spec.goad?.fixed_subnet) {
-    applyFixedSubnet(net, isV3, spec.goad.fixed_subnet.int, spec.goad.fixed_subnet.ext);
+  // Re-wrapped as a pre-flight failure: this runs before anything on the lane is
+  // touched, and the rest of this function's refusals promise the caller that
+  // nothing was destroyed. Rebuilding a pre-baked machine onto a per-lane subnet
+  // is the same silent breakage as deploying one — see applyPrebakedFixedSubnet.
+  try {
+    applyPrebakedFixedSubnet(net, isV3, spec);
+  } catch (fixedErr) {
+    throw challengePreflightError(fixedErr.message);
   }
   const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
   const goadSubnetBase = isV3 ? net.lanInt.base3 : net.lan.base3;
@@ -2547,7 +2858,11 @@ async function rebuildLaneChallengeVms({
   await writeLaneReservations({
     gatewayVmId, node: gatewayNode, vxlanId: lane.vxlan_id, goadMacs,
     attackBoxOctet: cfg.attack_box_vm_id ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
-    consoleOctets: reservationOctets, pinnedHosts, dnsRecords,
+    // `spec` is the lane's own stored challenge spec (parsed above), so a rebuild
+    // re-emits the company DNS lines the deploy wrote. The file is rendered
+    // WHOLE-LANE and overwritten, so omitting them here would silently delete the
+    // forwarder from a lane nobody asked to change.
+    consoleOctets: reservationOctets, pinnedHosts, dnsRecords, spec, subnetScheme,
     extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
     liveGoadController: false,
     laneId, logTag,
@@ -2710,6 +3025,19 @@ module.exports = {
   resolveSpecVms,
   resolveConsolePlan,
   resolveSpecAddressing,
+  // Pure, and exported for the same reason resolveSpecAddressing is: both encode
+  // a rule whose failure mode is a lane that deploys, reports active, and is
+  // silently wrong — which no test can reach through the deploy path itself.
+  resolveLaneDnsExtras,
+  // Exported for ONE reason: the reservations file is rendered whole-lane and
+  // overwritten, so "this change did not alter what an existing lane writes" is
+  // a claim about the WHOLE file — not about the resolver that contributes two
+  // of its lines. A test can only make that claim by rendering the file, and the
+  // deploy path around this function needs Proxmox, SSH and a DB. Stub
+  // laneDeployer.installLaneReservations and the `lines` array is the artifact.
+  writeLaneReservations,
+  applyPrebakedFixedSubnet,
+  DUAL_HOMED_OCTET,
   CONSOLE_OCTET_MIN,
   CONSOLE_OCTET_MAX,
   SPEC_OCTET_MIN,

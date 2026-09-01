@@ -1,0 +1,66 @@
+---
+# ===========================================================================
+# cc_web — the listen set and the vhosts.
+# ===========================================================================
+
+- name: Write the listen set
+  # ports.conf is REPLACED rather than edited. Debian's stock file already says
+  # `Listen 80` and, inside <IfModule mod_ssl.c>, `Listen 443`; adding our own
+  # Listen lines beside them makes httpd fail to start with "Address already in
+  # use" the moment the declared set overlaps — a hard failure at restart time,
+  # after every task in this role has already reported green.
+  ansible.builtin.template:
+    src: cc-web-ports.conf.j2
+    dest: "{{ cc_web_ports_conf }}"
+    owner: root
+    group: root
+    mode: "0644"
+    backup: true
+  notify: cc_web restart
+
+- name: Write the site configuration
+  ansible.builtin.template:
+    src: cc-web.conf.j2
+    dest: "{{ cc_web_sites_available }}/{{ cc_web_site_conf_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: cc_web restart
+
+- name: Enable the site
+  ansible.builtin.file:
+    src: "{{ cc_web_sites_available }}/{{ cc_web_site_conf_name }}"
+    dest: "{{ cc_web_sites_enabled }}/{{ cc_web_site_conf_name }}"
+    state: link
+  notify: cc_web restart
+
+- name: Disable the stock Debian vhosts
+  # Both stock vhosts bind the same ports and point at /var/www/html. httpd
+  # serves the FIRST vhost defined for an address:port to any request whose Host
+  # does not match a ServerName, and sites-enabled is loaded alphabetically — so
+  # 000-default.conf wins over cc-web.conf, and every route the report links to
+  # returns Debian's placeholder page. The failure looks like "the content did
+  # not deploy" and is actually "the content deployed and is unreachable".
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ cc_web_stock_site_links }}"
+  notify: cc_web restart
+
+- name: Prove the configuration parses before anything tries to restart on it
+  # The last line of defence against a restart handler that fires into a broken
+  # config and leaves the host with no listener at all. It runs here, before
+  # meta: flush_handlers in tasks/main.yml, so a template bug is reported as a
+  # config error naming the file and line rather than as a service that will not
+  # come back up.
+  ansible.builtin.command:
+    cmd: "{{ cc_web_ctl }} -t"
+  register: cc_web_configtest
+  changed_when: false
+  failed_when: cc_web_configtest.rc != 0
+
+- name: Ensure the engine is enabled and running
+  ansible.builtin.service:
+    name: "{{ cc_web_service_name }}"
+    state: "{{ cc_web_service_state }}"
+    enabled: "{{ cc_web_service_enabled | bool }}"

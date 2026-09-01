@@ -1,0 +1,33 @@
+{
+"lab" : {
+    "hosts" : {
+        "dc01" : {
+            "hostname" : "CHASSIS-DC01",
+            "type" : "dc",
+            "local_admin_password" : "CHASSIS-PLACEHOLDER-PW-ROOT",
+            "domain" : "chassis.invalid",
+            "path" : "DC=chassis,DC=invalid",
+            "local_groups" : {},
+            "scripts" : [],
+            "vulns" : [],
+            "vulns_vars" : {},
+            "security" : [],
+            "security_vars" : {}
+        }
+    },
+    "domains" : {
+        "chassis.invalid" : {
+            "dc" : "dc01",
+            "domain_password" : "CHASSIS-PLACEHOLDER-PW-ROOT",
+            "netbios_name" : "CHASSIS",
+            "trust" : "",
+            "laps_path" : "OU=Laps,DC=chassis,DC=invalid",
+            "organisation_units" : {},
+            "groups" : {},
+            "multi_domain_groups_member" : {},
+            "gmsa" : {},
+            "acls" : {},
+            "users" : {}
+        }
+    }
+}}

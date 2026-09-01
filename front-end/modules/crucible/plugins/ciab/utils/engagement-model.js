@@ -156,6 +156,32 @@ function titleCaseSlug(slug) {
  *  migration 009's DEFAULT backfilled every pre-existing group to. */
 const DEFAULT_TYPE_KEY = 'default';
 
+/**
+ * The engagement a BAKE borrows for its staging network.
+ *
+ * WHY IT IS DECLARED HERE, AS A REGISTRY KEY, AND NOT LEFT AS A BARE STRING.
+ * routes/profile-deploy.js spends this slug: a bake needs a lane, a lane needs
+ * a VXLAN id out of a carved block, and the block it borrows is a DEDICATED
+ * one-slot engagement rather than the client's student block — one id instead
+ * of a student's seat, and a block of exactly one id is what makes the staging
+ * lane's id, and therefore the two /24 bases the golden templates bake into
+ * themselves, knowable BEFORE the lane exists.
+ *
+ * That reasoning is sound and the slug it produced was not: an undeclared
+ * string is invisible to every reader of this registry. describeEngagementType
+ * answered known:false, so the row rendered in the operator's engagement list
+ * as an ordinary, locally defined engagement with a Retire button on it — and
+ * retiring it pulls the recorded block out from under a bake whose golden
+ * templates were built against that exact pair of bases, with no error anywhere
+ * that names the cause.
+ *
+ * Registered, it is a first-class type: the list can say who owns it, the
+ * create form can decline to offer it, and the retirement path can refuse while
+ * a bake is still running. isSystemEngagementType() below is the predicate
+ * every one of those places asks.
+ */
+const BAKE_TYPE_KEY = 'bake';
+
 /** Which side of the perimeter the team starts on. Stored, defaulted, queried,
  *  and mirrored by a named CHECK in the B0 guards migration. */
 const PERSPECTIVES = Object.freeze(['internal', 'external']);
@@ -427,6 +453,9 @@ const ENGAGEMENT_TYPES = deepFreeze({
     perspective: 'internal',
     credential_posture: 'credentialed',
     summary: 'The team starts on the inside, with accounts handed over on day one.',
+    // Every entry states this, so `system` is a boolean everywhere rather than
+    // an absence that reads as false in one place and undefined in another.
+    system: false,
   },
   external_blackbox: {
     key: 'external_blackbox',
@@ -434,6 +463,7 @@ const ENGAGEMENT_TYPES = deepFreeze({
     perspective: 'external',
     credential_posture: 'none',
     summary: 'The team starts on the outside, with nothing but the forward-facing site.',
+    system: false,
   },
   default: {
     key: 'default',
@@ -441,8 +471,39 @@ const ENGAGEMENT_TYPES = deepFreeze({
     perspective: 'internal',
     credential_posture: 'none',
     summary: 'The original single-engagement shape: the whole environment, no issued accounts.',
+    system: false,
+  },
+  // ── SYSTEM-OWNED. Created by the platform, never by an operator. ──────────
+  //
+  // A bake carves this one-slot block for itself (see BAKE_TYPE_KEY) and builds
+  // the golden templates against the addresses derived from it. It is a real
+  // engagement holding a real block, so it must stay VISIBLE to an admin who is
+  // working out why a bake is stuck — hiding it makes exactly that diagnosis
+  // harder. What it must not be is ORDINARY: nothing an operator does in the
+  // engagement list may end it, because ending it strands the bake.
+  //
+  // The posture pair is the conservative one, unchanged from what the column
+  // DEFAULTs and the total fallback already gave this slug, so registering it
+  // rewrites nothing about the rows that already exist.
+  [BAKE_TYPE_KEY]: {
+    key: BAKE_TYPE_KEY,
+    label: 'Bake — staging network',
+    perspective: 'internal',
+    credential_posture: 'none',
+    summary: 'The one-slot network a bake builds its golden templates on. Bake creates and owns it; '
+           + 'it holds no student slots and is not an engagement anyone teaches from.',
+    system: true,
   },
 });
+
+/**
+ * Every registry key the PLATFORM owns. Derived from the entries rather than
+ * re-listed, so a second system type cannot be added to the registry and
+ * forgotten here — which is the failure this entry exists to fix.
+ */
+const SYSTEM_ENGAGEMENT_TYPES = deepFreeze(
+  Object.keys(ENGAGEMENT_TYPES).filter(k => ENGAGEMENT_TYPES[k].system === true)
+);
 
 /**
  * DISPLAY-ONLY aliases. These NEVER rewrite a stored slug.
@@ -473,7 +534,7 @@ const ENGAGEMENT_TYPE_ALIASES = deepFreeze({
  *
  * @param {string|null} engagementType
  * @returns {{key:string, known:boolean, label:string, perspective:string,
- *            credential_posture:string, summary:string}}
+ *            credential_posture:string, summary:string, system:boolean}}
  */
 function describeEngagementType(engagementType) {
   const raw = engagementType === null || engagementType === undefined
@@ -492,7 +553,28 @@ function describeEngagementType(engagementType) {
     perspective: 'internal',
     credential_posture: 'none',
     summary: 'A locally defined engagement type. Its posture is whatever this engagement declares.',
+    // A slug this registry does not know is never platform-owned: the platform
+    // only ever writes slugs it declares. Stated rather than left undefined, so
+    // every caller reads the flag as a boolean.
+    system: false,
   };
+}
+
+/**
+ * Is this slug one the PLATFORM owns rather than one an operator authors?
+ *
+ * TOTAL, like describeEngagementType, and for the same reason: it is asked on
+ * paths that accept any string — a route body, a stored slug from before this
+ * registry existed — and a throw there would surface as a 500 in place of the
+ * answer 'no'.
+ *
+ * Read this rather than comparing against a literal. The places that ask (the
+ * create-form vocabulary, the create refusal, and the projection that decides
+ * whether a Retire button is drawn) must agree, and three spellings of 'bake'
+ * is how they stop agreeing.
+ */
+function isSystemEngagementType(engagementType) {
+  return describeEngagementType(engagementType).system === true;
 }
 
 /** Resolve a display alias to a canonical registry key, or null. Never applied
@@ -1617,8 +1699,14 @@ module.exports = {
   // The registry
   ENGAGEMENT_TYPES,
   ENGAGEMENT_TYPE_ALIASES,
+  SYSTEM_ENGAGEMENT_TYPES,
+  // The one spelling of the slug a bake's staging network is keyed on. Exported
+  // so routes/profile-deploy.js's BAKE_ENGAGEMENT_TYPE and this registry can be
+  // proved identical by a test rather than by two people remembering.
+  BAKE_TYPE_KEY,
   // Descriptors
   describeEngagementType,
+  isSystemEngagementType,
   resolveEngagementTypeAlias,
   engagementDisplayName,
   isEngagementLive,

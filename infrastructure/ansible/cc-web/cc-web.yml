@@ -1,0 +1,33 @@
+---
+# ===========================================================================
+# cc-web.yml — apply the curated web tier to a lane's DMZ host.
+#
+# NOT NAMED site.yml. The repository .gitignore carries a bare `site.yml` rule
+# (it exists to keep the platform's own site configuration out of git), so a
+# playbook by that name here would be untracked, would work perfectly on the
+# machine that wrote it, and would be absent everywhere else — the same
+# invisibility that ciab-goad-role-manifest.test.js was written to close for the
+# GOAD role library. front-end/test/ciab-cc-web-role.test.js asserts no file in
+# this tree lands on a gitignore rule.
+#
+# Run it with this directory's ansible.cfg, which is what puts ./roles ahead of
+# upstream GOAD's read-only role tree:
+#
+#     cd infrastructure/ansible/cc-web
+#     ANSIBLE_CONFIG=./ansible.cfg ansible-playbook -i <inventory> cc-web.yml \
+#       -e @/path/to/lane-web-vars.yml
+#
+# INVENTORY CONTRACT: one group, `cc_web`, holding exactly the lane's dual-homed
+# DMZ host. It is a standalone box — this play never joins it to the domain, and
+# the group must not overlap with any GOAD inventory group.
+# ===========================================================================
+
+- name: Curated web tier
+  hosts: "{{ cc_web_hosts | default('cc_web') }}"
+  become: true
+  # gather_facts is REQUIRED, not incidental: tasks/assert.yml reads
+  # ansible_facts.os_family to refuse a platform this role cannot configure, and
+  # tasks/verify.yml stamps ansible_date_time into the published facts.
+  gather_facts: true
+  roles:
+    - role: cc_web

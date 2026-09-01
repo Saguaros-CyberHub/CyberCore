@@ -12,6 +12,8 @@
  * but don't throw. The orchestrator decides what to do with the patched output.
  */
 
+const { isDcRecord } = require('./dc-name');
+
 // ─── A: organization ─────────────────────────────────────────────────────
 
 function validateOrg(payload, ctx) {
@@ -187,7 +189,13 @@ function validateSizing(payload, ctx = {}) {
 
   // ── S: identity and servers ───────────────────────────────────────────
   const servers = Array.isArray(it.servers) ? it.servers : [];
-  const isDc = (s) => /domain controller|\bdc\b|active directory/i.test(`${s.role || ''} ${s.hostname || ''}`);
+  // The domain-controller predicate is IMPORTED, never re-spelled here: the
+  // compiler adopts this same register's controllers into the forest by name
+  // (utils/goad-lab-compile.js/paperForestNames), so a machine S-01 demotes
+  // that the compiler still reads as a DC — or the reverse — is a profile whose
+  // paper and lane disagree about which host runs the directory, and that is
+  // only discovered ninety minutes into a bake. See ai/profile/dc-name.js.
+  const isDc = isDcRecord;
   const isFs = (s) => /file server|\bfs\b/i.test(`${s.role || ''} ${s.hostname || ''}`);
 
   const dcs = servers.filter(isDc);

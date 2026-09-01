@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "tier": "S",
+  "derived_from": "ad/GOAD-Mini",
+  "goad_ref": "00e9b63eb1e82f16780943f5d237d5529fd4a1a9",
+  "goad_repo": "https://github.com/joshmp087/GOAD.git",
+  "hosts": 1,
+  "domains": 1,
+  "topology": {
+    "forests": 1,
+    "domains": [
+      {
+        "name": "chassis.invalid",
+        "netbios_name": "CHASSIS",
+        "dc": "dc01",
+        "forest_root": true,
+        "parent": null,
+        "trust": ""
+      }
+    ],
+    "dcs": ["dc01"],
+    "servers": [],
+    "workstations": []
+  },
+  "playbooks": {
+    "file": "playbooks.yml",
+    "upstream_key": "GOAD-Mini",
+    "why": "ad/GOAD-Mini has its OWN entry in the fork's top-level playbooks.yml, so this tier must not fall through to `default:` — that chain runs ad-child_domain.yml and ad-trusts.yml against empty groups."
+  },
+  "kept": [
+    "data/inventory group layout and host-key membership, verbatim",
+    "providers/proxmox/inventory host -> {{ip_range}}.N -> dict_key mapping, octets unchanged",
+    "data/config.json hosts: hostname / type / domain / path / local_admin_password (values replaced with generic placeholders)",
+    "data/config.json domains: dc / netbios_name / domain_password / laps_path / trust (values replaced with generic placeholders)"
+  ],
+  "stripped": [
+    "domains[*].users — emptied to {}",
+    "domains[*].groups — emptied to {} (upstream carries the universal/global/domainlocal scope buckets; the composer must re-emit all three, roles/ad indexes ad_groups.global with no default)",
+    "domains[*].organisation_units — emptied to {}",
+    "domains[*].acls — emptied to {}",
+    "domains[*].multi_domain_groups_member — emptied to {}",
+    "domains[*].gmsa — emptied to {} (absent on this tier upstream; carried as an empty object so every tier has one shape)",
+    "hosts[*].vulns / vulns_vars — emptied ([] / {}); upstream dc01 planted disable_firewall, directory, files and adcs_templates",
+    "hosts[*].security / security_vars — emptied ([] / {}); upstream dc01 planted account_is_sensitive",
+    "hosts[*].scripts — emptied to []",
+    "hosts[*].local_groups — emptied to {}; every upstream entry named a domain user or group, i.e. payload",
+    "files/ — dropped entirely (upstream shipped files/dc01/templates/ESC1.json for the adcs_templates role)",
+    "README.md — dropped; provenance lives in this file",
+    "data/inventory_disable_vagrant — dropped; only data/inventory is a chassis input",
+    "providers/{aws,azure,ludus,virtualbox,vmware,vmware_esxi} and every *.tf — dropped; the lane provider is proxmox"
+  ],
+  "composer_must_fill": [
+    "domains[*].users and domains[*].groups — goad-preflight REQUIRED_DOMAIN_KEYS lists both; ansible/ad-data.yml reads lab.domains[d].users and .groups with NO `| default(...)`",
+    "domains[*].organisation_units if any users[*].path or groups[*][*].path names an OU",
+    "the placeholder identifiers below — every one is deliberately implausible so a leak is unmistakable rather than believable"
+  ],
+  "placeholders": {
+    "domains": ["chassis.invalid"],
+    "hostnames": ["CHASSIS-DC01"],
+    "netbios_names": ["CHASSIS"],
+    "passwords": ["CHASSIS-PLACEHOLDER-PW-ROOT"],
+    "inventory_domain_name": "CHASSIS-S",
+    "why": ".invalid is the RFC 2606 reserved TLD, so a chassis domain that survives into a generated lab cannot be mistaken for a client's."
+  },
+  "note": "A CHASSIS IS DELIBERATELY NOT DEPLOYABLE. It is compile-time INPUT read on the orchestrator, not a lab: the compiler repopulates it and emits ad/CIAB-<hash>/, which is pushed to the controller separately. The controller never reads a chassis. Deploying one as-is dies in ad-data.yml, which dereferences lab.domains[d].users and .groups with no default — a domain whose groups are empty kills that play. That is correct and expected. Re-syncing when upstream moves is a mechanical diff: point at the same paths under the goad_ref above, re-apply the `stripped` list, and re-run front-end/test/ciab-chassis.test.js."
+}

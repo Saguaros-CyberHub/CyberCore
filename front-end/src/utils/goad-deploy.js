@@ -30,7 +30,7 @@
 // controller goes through the Proxmox HTTPS API — no SSH from this app.
 // The controller VM in turn SSHes into the lane gateway (192.18.0.1) to
 // write DHCP reservations, using a keypair baked into both templates.
-const { agentExec, pollExecStatus, waitForGuestAgent } = require('./script-executor');
+const { agentExec, agentShellExec, pollExecStatus, waitForGuestAgent } = require('./script-executor');
 // pct exec/push into the lane gateway LXC (used by writeDhcpReservations to drop
 // the per-lane dnsmasq reservation file). Same module attached-modules.js uses.
 const nodeSsh = require('./node-ssh');
@@ -87,6 +87,14 @@ function buildIp(laneSubnetBase, octet) {
 // values and create an entry here. The bake script (run.sh) reads the
 // playbook chain from upstream's playbooks.yml at deploy time, so we don't
 // need to track that here.
+//
+// DO NOT INDEX THIS TABLE DIRECTLY. It has exactly two legal readers:
+//   resolveGoadLab(spec)  the deploy-time resolver — it also honours a
+//                         spec-supplied goad.lab, which a raw GOAD_LABS[x]
+//                         lookup silently ignores.
+//   getLab(labName)       the catalog reader, for "what does CyberCore ship?".
+// Every inlined copy of the lookup is one more chance for a site to resolve a
+// different lab from its neighbours, and nothing throws when they disagree.
 const GOAD_LABS = {
   'GOAD-Light': {
     displayName:  'GOAD-Light (3 Win VMs, 2 domains)',
@@ -121,7 +129,14 @@ const GOAD_LABS = {
   'NHA': {
     displayName:  'NHA — No Hope Alpha (5 Win VMs, 2 domains)',
     description:  'Multi-server cross-domain lab without child domain (uses trusts).',
-    forestRoot:   'north.sevenkingdoms.local',
+    // WAS 'north.sevenkingdoms.local' — a Seven Kingdoms (GOAD) domain that has
+    // nothing to do with this lab, copy-pasted when the entry was added. NHA's
+    // own ad/NHA/data/config.json declares exactly two domains, ninja.hack and
+    // academy.ninja.lan (the second a trust of the first), so ninja.hack is the
+    // forest root. Wrong here it is not cosmetic: forestRoot is what
+    // /api/lab-templates hands the topology seed, so every NHA artifact named a
+    // domain the lane does not have.
+    forestRoot:   'ninja.hack',
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
       { name: 'DC02',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 11, nic_model: 'e1000' },
@@ -224,7 +239,12 @@ function getVmResources(vmDef) {
 }
 
 /**
- * Return the lab definition or throw if unknown.
+ * Return a BUILT-IN lab definition by name, or throw if unknown.
+ *
+ * Catalog lookup only — it deliberately does NOT consider a spec-supplied
+ * goad.lab, because its callers (the /api/lab-templates lab list, the topology
+ * seed) are asking what CyberCore ships, not what one engagement is running.
+ * Anything resolving a lab FOR A DEPLOY must call resolveGoadLab(spec).
  */
 function getLab(labName) {
   const lab = GOAD_LABS[labName];
@@ -239,6 +259,194 @@ function getLab(labName) {
  * specs that only had goad.enabled=true).
  */
 const DEFAULT_LAB = 'GOAD-Light';
+
+// Roles whose machines sit OUTSIDE the AD forest by design, so their absence
+// from the lab table is intentional rather than a typo: 'dmz' is the v3
+// dual-homed pivot (topology-seed's web01), 'attacker' is the per-lane Kali the
+// GOAD preset appends to every lab. Same two names topology-validate.js exempts
+// when it paints the canvas — one policy, spelled once per module because
+// topology-validate already requires THIS file and the reverse edge would leave
+// one of them holding a half-initialised module at load time.
+const EXTERNAL_ROLES = new Set(['dmz', 'attacker']);
+
+/**
+ * Is this spec VM one the GOAD layer is supposed to own?
+ *
+ * Only machines that answer yes are reconciled against the lab definition, so
+ * this predicate is exactly the line between "you named a host wrong" (fatal)
+ * and "this box is deliberately not in the forest" (fine). Three exemptions:
+ *
+ *   EXTERNAL_ROLES  the Kali and the pivot above.
+ *   explicit nics[] the author placed the machine on a segment by hand;
+ *                   resolveVmSegments rung 1 honours that over lab membership,
+ *                   so the GOAD layer must not second-guess it either.
+ *   type 'lxc'      every lab host is a full QEMU clone (template 1002/1003/1004)
+ *                   and an LXC takes net1 with the template owning net0, so a
+ *                   container can never BE a lab host. A container that shares a
+ *                   lab host's NAME is still caught — it drops out of the managed
+ *                   set, which leaves that lab host missing from spec.vms.
+ */
+function isGoadManagedVm(vmSpec) {
+  if (!vmSpec || typeof vmSpec.name !== 'string' || !vmSpec.name) return false;
+  if (EXTERNAL_ROLES.has(vmSpec.role)) return false;
+  if (Array.isArray(vmSpec.nics) && vmSpec.nics.some(n => n && n.segment)) return false;
+  if ((vmSpec.type || 'qemu') === 'lxc') return false;
+  return true;
+}
+
+/**
+ * Validate a spec-supplied lab definition before anything reads it.
+ *
+ * Hand-rolled — there is no schema library in this repo — and deliberately
+ * strict, because every field below is load-bearing at deploy time and each one
+ * fails QUIETLY when it is wrong: a missing ipOctet yields a MAC ending in the
+ * hex of NaN and a reservation for "<base>.undefined" that dnsmasq refuses,
+ * taking DHCP down for the whole lane; a role outside ROLE_RESOURCES is never
+ * filtered out of the WinRM wait, so a Linux box is polled on 5985 for the full
+ * 30 minutes before the deploy finally fails.
+ */
+function assertValidLabDef(labDef, labName) {
+  const where = `spec.goad.lab (version '${labName}')`;
+  const shape = 'Shape: { forestRoot: "corp.local", vms: [{ name, role, os, template_vmid, ipOctet, nic_model }] }.';
+  if (!labDef || typeof labDef !== 'object' || Array.isArray(labDef)) {
+    throw new Error(`${where} must be an object. ${shape}`);
+  }
+  if (typeof labDef.forestRoot !== 'string' || !labDef.forestRoot.trim()) {
+    throw new Error(`${where} needs a non-empty string forestRoot — it names the domain every artifact greets the lane by. ${shape}`);
+  }
+  if (!Array.isArray(labDef.vms) || labDef.vms.length === 0) {
+    throw new Error(`${where} needs a non-empty vms[]. A lab with no hosts reconciles against an empty roster, which would make EVERY machine in spec.vms a stray. ${shape}`);
+  }
+  const roles = Object.keys(ROLE_RESOURCES);
+  const seenName = new Map();
+  const seenOctet = new Map();
+  labDef.vms.forEach((v, i) => {
+    const at = `${where}.vms[${i}]`;
+    if (!v || typeof v !== 'object' || typeof v.name !== 'string' || !v.name.trim()) {
+      throw new Error(`${at} needs a non-empty string name — the name is the ONLY thing that binds it to a machine in spec.vms.`);
+    }
+    if (!roles.includes(v.role)) {
+      throw new Error(`${at} ('${v.name}') has role ${JSON.stringify(v.role)}; it must be one of ${roles.join(', ')}. Role picks the memory/core defaults AND decides whether the host is polled for WinRM ('linux' is skipped).`);
+    }
+    // 2..254: .0 is the network address, .255 the broadcast, .1 the gateway.
+    if (!Number.isInteger(v.ipOctet) || v.ipOctet < 2 || v.ipOctet > 254) {
+      throw new Error(`${at} ('${v.name}') needs an integer ipOctet in 2..254; got ${JSON.stringify(v.ipOctet)}. It is both the host's last octet and the last byte of its deterministic MAC.`);
+    }
+    const key = v.name.toLowerCase();
+    if (seenName.has(key)) {
+      throw new Error(`${at} repeats the name '${v.name}' (already at vms[${seenName.get(key)}]). Matching is case-insensitive, so the second entry would shadow the first and one host would silently take the other's address.`);
+    }
+    seenName.set(key, i);
+    if (seenOctet.has(v.ipOctet)) {
+      throw new Error(`${at} ('${v.name}') reuses ipOctet ${v.ipOctet}, already taken by '${seenOctet.get(v.ipOctet)}'. Two dhcp-host lines claiming one address make dnsmasq refuse to start, which takes DHCP down for the whole lane.`);
+    }
+    seenOctet.set(v.ipOctet, v.name);
+  });
+  // Kali (.50) is deliberately NOT checked: it lives on the EXTERNAL segment
+  // while lab hosts live on the internal one, so on a v3 lane .50 is genuinely
+  // free for a lab host. The gateway and the controller share the lab hosts'
+  // subnet on every scheme, so those two are always a collision.
+  for (const v of labDef.vms) {
+    for (const infra of ['gateway', 'controller']) {
+      if (v.ipOctet === INFRA_IP_OCTETS[infra]) {
+        throw new Error(`${where}: '${v.name}' claims ipOctet ${v.ipOctet}, which is the lane ${infra}. Lab hosts share that subnet, so the ${infra} would be unreachable from inside the lane.`);
+      }
+    }
+  }
+}
+
+/**
+ * THE resolver. Every deploy-time read of a lab definition goes through here,
+ * with one precedence:
+ *
+ *     spec.goad.lab  →  GOAD_LABS[spec.goad.version]  →  GOAD_LABS[DEFAULT_LAB]
+ *
+ * WHY IT IS A FUNCTION AND NOT FIVE COPIES OF ONE EXPRESSION: this module had
+ * the lookup inlined at five sites, and a site that missed a term resolved a
+ * DIFFERENT lab from its neighbours — the MAC table built from one lab, the
+ * WinRM wait list from another. Nothing throws when those disagree; the lane
+ * just comes up wrong. One reader means a new precedence rule (goad.lab is the
+ * first in years) reaches every site or none.
+ *
+ * spec.goad.lab exists so a GENERATED engagement can describe its own forest on
+ * the spec instead of requiring a commit to GOAD_LABS per engagement. Note that
+ * goad.version still selects the upstream ad/<name>/ playbook chain run.sh
+ * executes, so a spec-supplied lab should ALSO set a version its controller
+ * knows — the definition here governs addressing and sizing, not the playbook.
+ *
+ * @returns {{ labName: string, labDef: object, fromSpec: boolean }}
+ */
+function resolveGoadLab(specArg) {
+  // macFor() resolves a lab with no spec in hand at all. Normalising the shape
+  // here keeps the precedence chain below written exactly once rather than once
+  // per flavour of caller — which is the entire point of this function.
+  const spec = (specArg && specArg.goad) ? specArg : { goad: {} };
+  const labName = spec.goad.version || DEFAULT_LAB;
+  const supplied = spec.goad.lab;
+  if (supplied) assertValidLabDef(supplied, labName);
+  const lab = supplied || GOAD_LABS[labName];
+  if (!lab) {
+    console.warn(`[GOAD] Unknown lab version '${labName}' — falling back to ${DEFAULT_LAB}`);
+  }
+  const labDef = lab || GOAD_LABS[DEFAULT_LAB];
+  return { labName, labDef, fromSpec: !!supplied };
+}
+
+/**
+ * Reconcile spec.vms against the resolved lab definition, and THROW on any
+ * disagreement. This is the guard the rest of this module is arranged around.
+ *
+ * WHAT IT PREVENTS. prepareGoadMacs used to skip past a spec VM whose name
+ * matched nothing in the lab. That host then got no deterministic MAC and no
+ * DHCP reservation; resolveVmSegments rung 4 dropped it onto the EXTERNAL
+ * segment; it took a random pool lease; the pre-baked heal skipped it because
+ * the heal tags VMs by lab name; and the WinRM wait polled the address the lab
+ * table said it should have had, which nobody owned. Every one of those is
+ * silent. The lane finished, reported active, and was wrong — the worst failure
+ * mode in the system, because a lane that fails loudly gets retried and a lane
+ * that lies gets graded.
+ *
+ * BOTH DIRECTIONS ARE CHECKED. A stray in spec.vms is the case above. A lab host
+ * ABSENT from spec.vms is its mirror: nothing clones it, macs[name] is
+ * undefined, .filter(Boolean) quietly drops it from the WinRM list, and the
+ * playbook runs against a forest missing a DC — which surfaces hours later as
+ * replication failures rather than as a deploy error.
+ */
+function assertGoadRoster(spec, labName, labDef, fromSpec) {
+  const declared = new Map(labDef.vms.map(v => [v.name.toLowerCase(), v.name]));
+  const managed = new Map();
+  const strays = [];
+  for (const vm of spec.vms) {
+    if (!isGoadManagedVm(vm)) continue;
+    const key = vm.name.toLowerCase();
+    managed.set(key, vm.name);
+    if (!declared.has(key)) strays.push(vm.name);
+  }
+  const absent = [...declared.keys()].filter(k => !managed.has(k)).map(k => declared.get(k));
+  if (strays.length === 0 && absent.length === 0) return;
+
+  const source = fromSpec ? 'spec.goad.lab' : `the built-in '${labName}' lab`;
+  const clauses = [];
+  if (strays.length) {
+    clauses.push(`${strays.join(', ')} ${strays.length === 1 ? 'is' : 'are'} in spec.vms but not in ${source}`);
+  }
+  if (absent.length) {
+    clauses.push(`${absent.join(', ')} ${absent.length === 1 ? 'is' : 'are'} in ${source} but not in spec.vms`);
+  }
+  throw new Error(
+    `GOAD lab roster mismatch: ${clauses.join('; ')}. ` +
+    `Declared roster: ${labDef.vms.map(v => v.name).join(', ')}. ` +
+    'Remedy — pick one: (1) rename the spec machine to the lab host it is meant to be (matching is ' +
+    'case-insensitive but NOT trimmed); (2) if it belongs outside the AD forest, give it "role": "dmz" ' +
+    'or "role": "attacker", or attach it to a segment explicitly with nics[]; (3) add the missing lab ' +
+    'host to spec.vms; (4) for a generated lab, describe it on the spec itself as ' +
+    'goad.lab = { forestRoot, vms: [{ name, role, os, template_vmid, ipOctet }] } instead of ' +
+    'requiring an entry in GOAD_LABS. Refusing to deploy: an unmatched host gets no deterministic MAC ' +
+    'and no DHCP reservation, lands on the EXTERNAL segment on a random pool lease, is skipped by the ' +
+    'pre-baked heal, and the WinRM wait polls an address nobody owns — the lane reports active and is ' +
+    'silently wrong.'
+  );
+}
 
 /**
  * Build a deterministic locally-administered MAC from an IP last octet.
@@ -257,13 +465,18 @@ function macForOctet(ipOctet, vxlanId) {
 
 /**
  * Back-compat shim: old call sites used macFor('controller'|'DC01'|...).
- * Resolves the role via INFRA_IP_OCTETS first, then falls back to
- * GOAD-Light's VM list (the original default).
+ * Resolves the role via INFRA_IP_OCTETS first, then falls back to the DEFAULT
+ * lab's VM list (the original behaviour).
+ *
+ * It has no spec, so it cannot honour a spec-supplied goad.lab — which is why
+ * the only live caller is deployController('controller', …), an INFRA octet
+ * that never reaches the lab table at all. Anything resolving a LAB HOST must
+ * take the MAC from prepareGoadMacs, which does have the spec.
  */
 function macFor(role, vxlanId) {
   if (INFRA_IP_OCTETS[role] !== undefined) return macForOctet(INFRA_IP_OCTETS[role], vxlanId);
-  const lab = GOAD_LABS[DEFAULT_LAB];
-  const vm = lab.vms.find(v => v.name === role);
+  const { labDef } = resolveGoadLab(null);
+  const vm = labDef.vms.find(v => v.name === role);
   if (!vm) throw new Error(`Unknown GOAD role for MAC derivation: ${role}`);
   return macForOctet(vm.ipOctet, vxlanId);
 }
@@ -276,8 +489,12 @@ function macFor(role, vxlanId) {
  *
  * Returns: { '<vmName>': { mac, static_ip, role, nic_model }, ... }
  *
- * Lab is selected by spec.goad.version (defaults to GOAD-Light). VMs whose
- * name doesn't match a known role in that lab fall through to dynamic DHCP.
+ * The lab comes from resolveGoadLab (spec.goad.lab, else spec.goad.version,
+ * else the default). THROWS when spec.vms and that lab disagree about which
+ * hosts exist — see assertGoadRoster for why a mismatch must never be survived.
+ * Machines exempted by isGoadManagedVm (Kali, the dmz pivot, anything with
+ * explicit nics[], containers) are simply absent from the returned map, which
+ * is how the rest of the deploy learns they are not lab hosts.
  *
  * @param {object} spec
  * @param {number} vxlanId
@@ -287,19 +504,22 @@ function prepareGoadMacs(spec, vxlanId, laneSubnetBase) {
   if (!spec?.goad?.enabled) return {};
   if (!Array.isArray(spec.vms)) return {};
 
-  const labName = spec.goad.version || DEFAULT_LAB;
-  const lab = GOAD_LABS[labName];
-  if (!lab) {
-    console.warn(`[GOAD] Unknown lab version '${labName}' — falling back to ${DEFAULT_LAB}`);
-  }
-  const labDef = lab || GOAD_LABS[DEFAULT_LAB];
+  const { labName, labDef, fromSpec } = resolveGoadLab(spec);
 
   const byName = Object.fromEntries(labDef.vms.map(v => [v.name.toLowerCase(), v]));
+
+  // THE HARD ERROR. Before this line existed the loop below silently skipped
+  // any name it could not match, and the lane came up wrong without a word.
+  assertGoadRoster(spec, labName, labDef, fromSpec);
 
   const out = {};
   for (const vm of spec.vms) {
     if (!vm?.name) continue;
     const labVm = byName[vm.name.toLowerCase()];
+    // Reaching this only happens for a machine assertGoadRoster has already
+    // proved is EXEMPT (Kali, the pivot, an explicitly-placed box, an LXC);
+    // an unmatched lab host threw above. Falling through here is deliberate:
+    // those machines are addressed by the deployer's own octet band.
     if (!labVm) continue;
     // Per-VM overrides on `vm` (from the challenge spec in DB) take precedence
     // over the lab definition's own fields, which take precedence over role
@@ -348,7 +568,7 @@ function buildLaneNet0(vmSpec, vnetName, mac, nicModel) {
 async function writeDhcpReservations({ gatewayVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase }) {
   if (!spec?.goad?.enabled) return;
 
-  const labName = spec.goad.version || DEFAULT_LAB;
+  const { labName } = resolveGoadLab(spec);
   const lines = [`# GOAD-${labName} lane DHCP reservations — generated by goad-deploy.js`];
 
   // Controller — always (every lab uses one)
@@ -512,7 +732,9 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   // laneSubnetBase (internal for v3). Defaults to laneSubnetBase for the
   // single-segment v1/v2 case where ext == int.
   const kaliBase = extSubnetBase || laneSubnetBase;
-  const labName = goad.version || DEFAULT_LAB;
+  // labName, not labDef: run.sh takes the upstream ad/<name>/ playbook chain by
+  // name. A spec-supplied goad.lab changes addressing, not which chain runs.
+  const { labName } = resolveGoadLab(spec);
   // initialUser / initialPass: the account run.sh's preflight uses for the first
   // WinRM connection. Default to vagrant/vagrant — the local-admin account GOAD
   // bakes, which (unlike the built-in Administrator) stays ENABLED through
@@ -709,6 +931,447 @@ async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
   }
 }
 
+// ─── Generated labs: deliver the tree, then prove what it planted ───────────
+/**
+ * A GENERATED lab is one CIAB compiled for a client (ad/CIAB-<hash8>), not one
+ * of the built-in trees baked into controller template 1700 by
+ * infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh.
+ * Two things have to happen for a generated lab that a built-in lane must never
+ * pay for, and both hang off spec.goad.generated_lab so they are OPT-IN:
+ *
+ *   DELIVERY  the tree must be at /opt/goad/ad/<LAB>/ before run.sh looks for
+ *             it, because the controller has never seen it. A built-in lane
+ *             must NOT take this path: its tree is already on the box from the
+ *             bake, and re-pushing it would swap the reference lab every other
+ *             lane runs for a copy assembled by a different program — with no
+ *             undo, and nothing raised if the two ever disagreed by a byte.
+ *
+ *   PROOF     the chain's exit code carries almost no information. An audit of
+ *             the pinned role library found 20 sites where a task reports
+ *             SUCCESS and does nothing, three of them shipped vulnerabilities
+ *             that are simply absent afterwards. So what a generated lab claims
+ *             to plant is asserted against the machines once the chain is done.
+ *
+ * A spec without generated_lab therefore makes exactly the calls it made before
+ * this section existed, in the same order, and never even loads the two plugin
+ * modules below.
+ */
+
+/**
+ * The real implementations this section injects.
+ *
+ * LAZY, and only reached on the generated-lab path: goad-lab-push and
+ * goad-postcondition-probe live in the CIAB plugin, and requiring a plugin from
+ * src/ at module scope would put clinic_db's neighbourhood in the load path of
+ * every deployment, including ones with the plugin disabled. server.js reaches
+ * into a plugin the same way, for the same reason, and defers it to the call.
+ *
+ * It is a factory rather than a frozen object so a test can assert that the
+ * defaults really are the shipped functions — the one property an injected-deps
+ * design otherwise loses, and the one that matters here, because "wired to
+ * something" and "wired to the thing that does the work" look identical from
+ * every other angle.
+ */
+function defaultGoadDeps() {
+  /* eslint-disable global-require */
+  const push     = require('../../modules/crucible/plugins/ciab/utils/goad-lab-push');
+  const probe    = require('../../modules/crucible/plugins/ciab/utils/goad-postcondition-probe');
+  const validate = require('../../modules/crucible/plugins/ciab/utils/goad-lab-validate');
+  /* eslint-enable global-require */
+  return {
+    pushLabTree:           push.pushLabTree,
+    buildExpectationSet:   probe.buildExpectationSet,
+    collectLabSecrets:     probe.collectLabSecrets,
+    assertNoSecrets:       probe.assertNoSecrets,
+    runPostconditionProbe: probe.runPostconditionProbe,
+    parseLabConfig:        validate.parseLabConfig,
+    runPlaybook:           runGoadPlaybook,
+    sleep,
+  };
+}
+
+/** deps, with the shipped implementation filled in for anything omitted. */
+function withGoadDeps(deps) {
+  return { ...defaultGoadDeps(), ...(deps || {}) };
+}
+
+/**
+ * THE OPT-IN. Returns null for every spec that declares no generated lab tree —
+ * which is every built-in GOAD lane — and a validated descriptor for one that
+ * does. Throws only on a malformed descriptor, because each field below fails
+ * QUIETLY when it is wrong and the cheapest place to find out is here.
+ *
+ * Shape:
+ *   spec.goad.generated_lab = {
+ *     name:  'CIAB-3f9a2c1b',                    // the ad/<LAB> directory
+ *     files: { 'data/config.json': '…', 'data/inventory': '…', … },
+ *     chain: ['build.yml', 'ad-parent_domain.yml', …],
+ *     root?, runShPath?, perLabPlaybooks?, chunkSize?, force?
+ *   }
+ *
+ * WHY name MUST EQUAL spec.goad.version. runGoadPlaybook hands run.sh the
+ * labName resolveGoadLab produced — i.e. spec.goad.version — and run.sh resolves
+ * both ad/<that>/ and that key in playbooks.yml from it. Pushing CIAB-3f9a2c1b
+ * while running GOAD-Light raises nothing anywhere: the push succeeds, the
+ * playbook succeeds, and the lane is a different lab from the one the students
+ * were briefed on. So the two names are reconciled here, loudly, before either
+ * has run. Defaulting the name to labName would be worse than requiring it —
+ * an unset version defaults to a BUILT-IN, and pushLabTree's refusal of
+ * reserved names would be the only thing between a generator and ad/GOAD-Light.
+ */
+function resolveGeneratedLab(spec) {
+  const gen = (spec && spec.goad) ? spec.goad.generated_lab : null;
+  if (gen === undefined || gen === null || gen === false) return null;
+  if (typeof gen !== 'object' || Array.isArray(gen)) {
+    throw new Error(
+      'spec.goad.generated_lab must be an object { name, files, chain } (or absent, for a lab the '
+      + 'controller template already carries).');
+  }
+
+  const { labName } = resolveGoadLab(spec);
+  const name = typeof gen.name === 'string' ? gen.name.trim() : '';
+  if (!name) {
+    throw new Error(
+      'spec.goad.generated_lab.name is required — it is the ad/<LAB> directory the tree installs '
+      + 'into and the playbooks.yml key run.sh resolves the chain from. It is deliberately not '
+      + `defaulted: an unset spec.goad.version resolves to the built-in '${DEFAULT_LAB}', so a `
+      + 'default here would aim a generated tree at a reference lab.');
+  }
+  if (name !== labName) {
+    throw new Error(
+      `spec.goad.generated_lab.name is '${name}' but this deploy runs lab '${labName}' `
+      + '(spec.goad.version, which is what runGoadPlaybook passes to run.sh). The tree would be '
+      + `delivered to a directory nothing executes and the lane would provision as '${labName}' `
+      + `without a word. Set spec.goad.version = '${name}'.`);
+  }
+
+  const files = gen.files;
+  const noFiles = !files
+    || (Array.isArray(files) ? files.length === 0
+      : (typeof files !== 'object' || Object.keys(files).length === 0));
+  if (noFiles) {
+    throw new Error(
+      `spec.goad.generated_lab.files is empty for '${name}'. A lab is data/config.json plus `
+      + 'data/inventory; pushing nothing would stage an empty directory and run.sh would stop at '
+      + '"Lab not found" — after the whole lane had already been built.');
+  }
+  if (!Array.isArray(gen.chain) || gen.chain.length === 0) {
+    throw new Error(
+      `spec.goad.generated_lab.chain is required for '${name}'. A lab with no chain of its own falls `
+      + 'through to playbooks.yml\'s `default:` key, which is the FULL 16-playbook GOAD chain — child '
+      + 'domain, trusts, gmsa, laps, wait5m — run against empty inventory groups. That does not fail '
+      + 'fast; it fails 15-25 minutes in, on reciprocal data it cannot make consistent.');
+  }
+
+  return {
+    name,
+    files,
+    chain: gen.chain,
+    root: gen.root,
+    runShPath: gen.runShPath,
+    perLabPlaybooks: gen.perLabPlaybooks,
+    chunkSize: gen.chunkSize,
+    force: gen.force === true,
+  };
+}
+
+/**
+ * Deliver a generated lab tree to the controller. Returns null — having done
+ * nothing at all — for a spec that declares none.
+ *
+ * CALLED ONCE, as soon as the controller's guest agent answers and BEFORE the
+ * Windows VMs are restarted onto their reserved IPs, i.e. at the first moment
+ * anything can talk to the controller. A malformed tree then costs thirty
+ * seconds; the same push placed just before run.sh costs the DHCP restart plus
+ * the thirty-minute WinRM wait first.
+ *
+ * The transport is the SAME pair the rest of this module uses (agentShellExec +
+ * pollExecStatus from script-executor), passed explicitly rather than left to
+ * goad-lab-push's own lazy default — otherwise a caller who injected an exec
+ * would find the push, alone, still talking to the real cluster.
+ */
+async function deliverGeneratedLab({ controllerVmId, bestNode, spec, deps }) {
+  const gen = resolveGeneratedLab(spec);
+  if (!gen) return null;
+
+  const d = withGoadDeps(deps);
+  console.log(`[GOAD] Delivering generated lab ${gen.name} to controller ${controllerVmId}`);
+
+  const opts = {
+    node: bestNode,
+    vmId: controllerVmId,
+    lab: gen.name,
+    files: gen.files,
+    chain: gen.chain,
+    force: gen.force,
+    deps: { agentShellExec, pollExecStatus },
+  };
+  // Only forward the optional knobs the spec actually set: pushLabTree defaults
+  // each of them, and an explicit `undefined` would override the default with
+  // nothing on the ones it reads with `||`.
+  if (gen.root) opts.root = gen.root;
+  if (gen.runShPath) opts.runShPath = gen.runShPath;
+  if (gen.perLabPlaybooks !== undefined) opts.perLabPlaybooks = gen.perLabPlaybooks;
+  if (gen.chunkSize) opts.chunkSize = gen.chunkSize;
+
+  const result = await d.pushLabTree(opts);
+  console.log(`[GOAD] ${gen.name}: ${result.skipped ? 'already at' : 'installed'} `
+    + `${String(result.treeSha256).slice(0, 12)} (${result.chainMode} chain)`);
+  return result;
+}
+
+/**
+ * The probe's options block, or null when this lane is not to be probed.
+ * `spec.goad.probe === false` is the explicit opt-out; anything else yields an
+ * options object (possibly empty) and the decision then rests on whether there
+ * is a lab to grade.
+ */
+function probeOptionsFor(spec) {
+  const p = (spec && spec.goad) ? spec.goad.probe : undefined;
+  if (p === false) return null;
+  return (p && typeof p === 'object' && !Array.isArray(p)) ? p : {};
+}
+
+/**
+ * WHERE the lab config the probe grades against comes from, or null when there
+ * is nothing to grade. Two sources, in precedence order:
+ *
+ *   spec.goad.probe.lab             an already-parsed inner lab object, for a
+ *                                   caller that has one in hand
+ *   generated_lab data/config.json  the normal case — the probe grades exactly
+ *                                   the lab that was just delivered
+ *
+ * A built-in GOAD lane hits neither and returns null, which is what keeps it as
+ * it was: no probe, no fifteen-minute wait, no new failure mode. Not probing
+ * the built-ins is a decision, not a gap — their content is fixed, upstream,
+ * and pinned by the controller-template contract tests.
+ */
+function probeConfigSource(spec) {
+  const opts = probeOptionsFor(spec);
+  if (!opts) return null;
+  if (opts.lab && typeof opts.lab === 'object' && !Array.isArray(opts.lab)) {
+    return { opts, lab: opts.lab, text: null, source: 'spec.goad.probe.lab' };
+  }
+  const gen = resolveGeneratedLab(spec);
+  if (!gen) return null;
+  const raw = Array.isArray(gen.files)
+    ? ((gen.files.find(f => f && f.path === 'data/config.json') || {}).content)
+    : gen.files['data/config.json'];
+  if (raw === undefined || raw === null) return null;
+  return {
+    opts,
+    lab: null,
+    text: typeof raw === 'string' ? raw : String(raw),
+    source: `${gen.name}/data/config.json`,
+  };
+}
+
+/**
+ * Is a probe EXPECTED on this lane? Answered without parsing anything and
+ * without loading the plugin modules, because deployGoadLane needs it on the
+ * path where the playbook failed and there is nothing to parse. It is the
+ * difference between 'not probed' and 'nothing to probe', and those two must
+ * never write the same lane row.
+ */
+function laneWantsProbe(spec) {
+  try { return probeConfigSource(spec) !== null; } catch (_) { return false; }
+}
+
+/** The parsed lab, or null. Only this one loads the validator. */
+function resolveProbeLab(spec, d) {
+  const src = probeConfigSource(spec);
+  if (!src) return null;
+  if (src.lab) return { lab: src.lab, opts: src.opts };
+  const { lab } = d.parseLabConfig(src.text, { source: src.source });
+  return { lab, opts: src.opts };
+}
+
+/**
+ * The two credentials the probe needs, taken from the lab itself.
+ *
+ *   become    the identity each check runs AS on the target. GOAD's inventory
+ *             connects as `vagrant`, a LOCAL admin, which cannot read the
+ *             directory facts most checks are about — so the probe becomes
+ *             `administrator` with the domain password out of the lab config.
+ *             The playbook carries ONE become credential for the whole run, so
+ *             a lab whose domains use different admin passwords reports the
+ *             other domain's hosts as errored rather than as absent. That is
+ *             visible in the report, which is the point; pin it with
+ *             become_password if a lab ever needs it.
+ *
+ *   per-ref   only when verify_credentials is on. buildExpectationSet emits a
+ *             credential_ref for each check that must ACT as a principal ("can
+ *             this user really read that share?"), and the .ps1 looks the
+ *             credential up by that exact string. A ref with no entry reports
+ *             INCONCLUSIVE, which parseProbeResult grades as a FAILURE — a
+ *             missing password must never read as "absent, as intended".
+ *
+ * Everything returned here is a secret and leaves this process only as
+ * runPostconditionProbe options. See runLaneVerification for the route.
+ */
+function resolveProbeCredentials(lab, opts, expectationSet) {
+  const domains = (lab && lab.domains) ? lab.domains : {};
+  // Forest root = fewest labels, ties broken alphabetically. GOAD's config.json
+  // carries no forest_root flag, and its child domains are always a sub-label of
+  // the parent (north.sevenkingdoms.local under sevenkingdoms.local), so this
+  // picks the root on every shipped lab and is at least DETERMINISTIC on any
+  // other — key order is not, and a become account that changed between two runs
+  // of the same lab would be the worst kind of flake.
+  const rootName = Object.keys(domains).sort((a, b) => {
+    const byDepth = a.split('.').length - b.split('.').length;
+    return byDepth !== 0 ? byDepth : a.localeCompare(b);
+  })[0] || null;
+  const root = rootName ? (domains[rootName] || {}) : {};
+
+  const becomeUser = opts.become_user || 'administrator';
+  const becomePassword = opts.become_password || root.domain_password || '';
+
+  const credentials = {};
+  for (const ref of (expectationSet.credential_refs || [])) {
+    const supplied = opts.credentials ? opts.credentials[ref] : null;
+    if (supplied && supplied.password) { credentials[ref] = supplied; continue; }
+    // The refs buildExpectationSet derives from domain users are spelled
+    // `domain\sam`; the ones it takes verbatim from vulns_vars are whatever the
+    // lab author wrote. Only the first kind can be resolved from the config, and
+    // a ref left unresolved reports inconclusive rather than being quietly
+    // dropped — so there is deliberately no fallback here.
+    const at = String(ref).indexOf('\\');
+    if (at === -1) continue;
+    const user = ((domains[String(ref).slice(0, at)] || {}).users || {})[String(ref).slice(at + 1)];
+    if (user && user.password) credentials[ref] = { username: ref, password: user.password };
+  }
+  return {
+    becomeUser,
+    becomePassword,
+    credentials: Object.keys(credentials).length > 0 ? credentials : null,
+  };
+}
+
+/**
+ * Run the post-condition probe and RETURN its report. IT NEVER THROWS.
+ *
+ * TWO RULES, both load-bearing:
+ *
+ * 1. THE REPORT IS DATA AT THIS LAYER, NOT A GATE. A failing probe does not
+ *    fail the deploy. If it did, a lane that is genuinely broken and a probe
+ *    that could not answer would produce the identical outcome — and the probe
+ *    exists precisely because that ambiguity is what makes a green GOAD run
+ *    meaningless. Deciding what a report MEANS belongs to the bake
+ *    orchestrator's verify phase, which can tell the three cases apart
+ *    (`passed: true` / `passed: false` / `passed: null`, the last being "the
+ *    probe itself could not answer"). A student lane just records it.
+ *
+ * 2. THE CREDENTIALS NEVER TOUCH ARGV OR A WORLD-TRAVERSABLE PATH. They go in
+ *    as runPostconditionProbe OPTIONS, which writes them to a 0600 file under
+ *    /var/lib/goad-run/probe (root-only, umask 077 before the redirect) and
+ *    hands them to the guest as win_powershell `parameters:` under no_log —
+ *    never script_args, which script-executor.js interpolates UNQUOTED, and
+ *    never C:\Windows\Temp, which Users can traverse. What DOES land in
+ *    C:\Windows\Temp is the expectation set, so collectLabSecrets +
+ *    assertNoSecrets run HERE, before the set can leave this process. The probe
+ *    module asserts it again internally; being checked twice is the design and
+ *    not a redundancy — this call site is the one that holds the lab.
+ *
+ * @returns {Promise<{ran:boolean, reason:?string, passed:?boolean, error:?string, report:?object}>}
+ */
+async function runLaneVerification({ controllerVmId, bestNode, spec, proxmoxAPI, deps }) {
+  // `applicable` is what stops 'this lane has no probe' and 'the probe did not
+  // answer' from writing the same row: only the second is worth recording, and
+  // only the second is a refusal upstream.
+  const notRun = (reason, error, applicable) => ({
+    ran: false, applicable: applicable !== false, reason: reason || null,
+    passed: null, error: error || null, report: null,
+  });
+
+  const opts = probeOptionsFor(spec);
+  if (!opts) {
+    return notRun('the spec opted out of post-condition probing (spec.goad.probe === false)', null, false);
+  }
+
+  let d;
+  let resolved;
+  try {
+    // Nothing above this line loads the plugin modules, so a lane with no probe
+    // target reaches the return below having done exactly what it always did.
+    d = withGoadDeps(deps);
+    resolved = resolveProbeLab(spec, d);
+  } catch (err) {
+    return notRun(null, `could not resolve a lab to probe: ${err.message}`);
+  }
+  if (!resolved) {
+    return notRun('this lane runs a lab the controller template already carries, and the spec names no probe target', null, false);
+  }
+
+  try {
+    const { labName } = resolveGoadLab(spec);
+    const expectationSet = d.buildExpectationSet(resolved.lab, {
+      labName,
+      negatives: opts.negatives !== false,
+      verifyCredentials: opts.verify_credentials === true,
+      extra: Array.isArray(opts.extra) ? opts.extra : [],
+    });
+
+    // Rule 2, at the last point this process controls.
+    const secrets = d.collectLabSecrets(resolved.lab);
+    d.assertNoSecrets(expectationSet, secrets);
+
+    const cred = resolveProbeCredentials(resolved.lab, opts, expectationSet);
+
+    console.log(`[GOAD] Probing ${expectationSet.checks.length} post-condition(s) for ${labName}`);
+    const report = await d.runPostconditionProbe({
+      controllerVmId,
+      bestNode,
+      proxmoxAPI,
+      labName,
+      expectationSet,
+      credentials: cred.credentials,
+      becomeUser: cred.becomeUser,
+      becomePassword: cred.becomePassword,
+      // The needle list, so the module's own guard is armed rather than nominal.
+      secrets,
+      // undefined keeps runPostconditionProbe's own 15-minute default.
+      timeoutMs: Number(opts.timeout_ms) > 0 ? Number(opts.timeout_ms) : undefined,
+      // The three impure helpers the probe deliberately does not require of its
+      // own accord: it takes THIS module's, which is what makes the probe travel
+      // the same guest-agent path the playbook did.
+      sleep: d.sleep,
+      agentExecArgv,
+      pollExecStatus,
+    });
+
+    const passed = report.passed === true;
+    console.log(`[GOAD] Post-condition probe ${passed ? 'passed' : 'FAILED'}: `
+      + `${report.summary.ok}/${report.summary.total} ok, ${report.summary.failed} failed, `
+      + `${report.summary.inconclusive} inconclusive`);
+    return { ran: true, applicable: true, reason: null, passed, error: null, report };
+  } catch (err) {
+    // Rule 1: a probe that broke is recorded as a probe that broke. Rethrowing
+    // would make it indistinguishable from a lab that is missing its vulns.
+    console.warn(`[GOAD] Post-condition probe could not run: ${err.message}`);
+    return notRun(null, err.message);
+  }
+}
+
+/**
+ * The compact form that goes on the LANE row. A full report can carry hundreds
+ * of checks and the lane config is polled by the admin UI, so the row gets the
+ * verdict plus the failing ids while the caller gets the whole document to put
+ * somewhere sized for it (the bake's verify_report jsonb).
+ */
+function summariseVerification(v) {
+  if (!v) return null;
+  const report = v.report;
+  return {
+    ran: v.ran,
+    passed: v.passed,
+    reason: v.reason,
+    error: v.error,
+    summary: report ? report.summary : null,
+    errors: report ? report.errors : [],
+    failed_checks: report ? report.checks.filter(c => !c.ok).map(c => c.id).slice(0, 50) : [],
+  };
+}
+
 /**
  * Top-level orchestrator. Call AFTER the gateway and the 3 Windows VMs
  * (and optional Kali) have been cloned + started by the normal deploy path.
@@ -727,15 +1390,19 @@ async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
  */
 async function deployGoadLane({
   lane, spec, module, vnet, vxlanId, gatewayVmId, bestNode, templateNode,
-  laneSubnetBase, extSubnetBase, deployedVMs, proxmoxAPI, waitForTask, query
+  laneSubnetBase, extSubnetBase, deployedVMs, proxmoxAPI, waitForTask, query,
+  // Optional, and empty on every production call: the generated-lab push,
+  // the post-condition probe and the playbook itself, so the ORDER they run
+  // in is assertable offline. Defaults are the shipped implementations —
+  // see defaultGoadDeps().
+  deps = {}
 }) {
   if (!spec?.goad?.enabled) return null;
   if (!laneSubnetBase) {
     throw new Error('deployGoadLane: laneSubnetBase is required (admin.js passes the lane subnet — net.lan.base3 for v1/v2, net.lanInt.base3 for v3 segmented lanes)');
   }
 
-  const labName = spec.goad.version || DEFAULT_LAB;
-  const labDef = GOAD_LABS[labName] || GOAD_LABS[DEFAULT_LAB];
+  const { labName, labDef } = resolveGoadLab(spec);
   console.log(`[GOAD] Starting ${labName} provisioning for lane ${lane.lane_id} (vxlan ${vxlanId}, subnet ${laneSubnetBase}.0/24)`);
 
   // 1. Deploy controller (QEMU VM with qemu-guest-agent)
@@ -752,6 +1419,16 @@ async function deployGoadLane({
   if (!agentReady) {
     throw new Error(`Controller VM ${controllerVmId} guest agent never came up within 3 min`);
   }
+
+  // 1b. GENERATED LAB DELIVERY — null, and zero calls, for every built-in lab.
+  //     Placed here rather than beside runGoadPlaybook on purpose: this is the
+  //     first instant the controller is reachable, so a tree that cannot be
+  //     built or installed fails now instead of after the DHCP restart and the
+  //     thirty-minute WinRM wait. Deliberately NOT caught — a lab that never
+  //     arrived would otherwise be provisioned as whatever ad/<version> the
+  //     controller already had, which is the silent-wrong failure this whole
+  //     path exists to avoid.
+  const delivery = await deliverGeneratedLab({ controllerVmId, bestNode, spec, deps });
 
   // 2. Run prep.sh on the controller — writes DHCP reservations on the gateway
   //    BEFORE the Windows VMs renew DHCP. Without this, Windows VMs sit on
@@ -814,37 +1491,72 @@ async function deployGoadLane({
   // 4. Run the playbook
   let playbookResult;
   let provisioningError = null;
+  const runPlaybook = deps.runPlaybook || runGoadPlaybook;
   try {
-    playbookResult = await runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI });
+    playbookResult = await runPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI });
     console.log(`[GOAD] Playbook completed for lane ${lane.lane_id}`);
   } catch (err) {
     provisioningError = err.message;
     console.error(`[GOAD] Playbook failed for lane ${lane.lane_id}: ${err.message}`);
   }
 
-  // 5. Stop the controller (success or failure — credentials stay off the wire)
+  // 5. POST-CONDITION PROBE — after the chain, before the controller goes down
+  //    (the probe reaches the lane THROUGH the controller, over the same WinRM
+  //    connection ansible just proved, so it cannot run once the box is off).
+  //
+  //    Its report is DATA here, never a gate: runLaneVerification does not
+  //    throw, and nothing below branches the deploy on `passed`. A probe that
+  //    could abort a deploy would make a lane whose vulns are missing and a
+  //    probe that could not connect the same event, which is the precise
+  //    ambiguity the probe was built to remove. The bake orchestrator's verify
+  //    phase is what turns a report into a refusal.
+  //
+  //    Skipped when the playbook FAILED: the probe grades a finished forest, so
+  //    running it over a half-built one costs up to fifteen minutes to restate
+  //    something the exit code already said. The reason is recorded either way —
+  //    "not probed" and "probed clean" must never look alike.
+  const verification = provisioningError
+    ? {
+      ran: false,
+      applicable: laneWantsProbe(spec),
+      reason: `the playbook failed, so there is no finished forest to grade: ${provisioningError}`,
+      passed: null, error: null, report: null,
+    }
+    : await runLaneVerification({ controllerVmId, bestNode, spec, proxmoxAPI, deps });
+
+  // 6. Stop the controller (success or failure — credentials stay off the wire)
   await stopController({ controllerVmId, bestNode, proxmoxAPI });
   console.log(`[GOAD] Controller stopped: VMID ${controllerVmId}`);
 
   // Persist GOAD provisioning result on the lane record (clinic_db)
   if (query) {
     try {
+      // The two new keys are added ONLY when the thing they describe actually
+      // happened, so a built-in GOAD lane writes byte-for-byte the object it
+      // wrote before delivery and probing existed.
+      const goadMeta = {
+        controller_vmid: controllerVmId,
+        status: provisioningError ? 'failed' : 'provisioned',
+        error: provisioningError,
+        provisioned_at: new Date().toISOString()
+      };
+      if (delivery) {
+        goadMeta.generated_lab = {
+          lab: delivery.lab,
+          tree_sha256: delivery.treeSha256,
+          chain_mode: delivery.chainMode,
+          already_present: delivery.skipped === true,
+        };
+      }
+      if (verification.applicable) {
+        goadMeta.probe = summariseVerification(verification);
+      }
       await query(
         `UPDATE cybercore_lane
          SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb,
              updated_at = NOW()
          WHERE lane_id = $2`,
-        [
-          JSON.stringify({
-            goad: {
-              controller_vmid: controllerVmId,
-              status: provisioningError ? 'failed' : 'provisioned',
-              error: provisioningError,
-              provisioned_at: new Date().toISOString()
-            }
-          }),
-          lane.lane_id
-        ]
+        [JSON.stringify({ goad: goadMeta }), lane.lane_id]
       );
     } catch (dbErr) {
       console.warn(`[GOAD] Failed to persist metadata: ${dbErr.message}`);
@@ -854,7 +1566,10 @@ async function deployGoadLane({
   if (provisioningError) {
     throw new Error(`GOAD provisioning failed: ${provisioningError}`);
   }
-  return { controllerVmId, playbookResult };
+  // delivery and verification ride along for a caller that stores them whole —
+  // the bake's verify_report column is sized for the full check list, the lane
+  // row is not.
+  return { controllerVmId, playbookResult, delivery, verification };
 }
 
 // Full path so QEMU guest-agent CreateProcess resolves it regardless of the
@@ -886,8 +1601,7 @@ async function deployPrebakedGoadLane({
   lane, spec, vxlanId, gatewayVmId, bestNode, laneSubnetBase, extSubnetBase, deployedVMs, proxmoxAPI
 }) {
   if (!spec?.goad?.enabled || !spec?.goad?.prebaked) return null;
-  const labName = spec.goad.version || DEFAULT_LAB;
-  const labDef = GOAD_LABS[labName] || GOAD_LABS[DEFAULT_LAB];
+  const { labDef } = resolveGoadLab(spec);
   console.log(`[GOAD] Pre-baked lane ${lane.lane_id} (vxlan ${vxlanId}) — golden images; post-clone heal (no controller/ansible)`);
 
   // Tag each cloned QEMU VM with its lab role (match on lowercased name).
@@ -984,6 +1698,17 @@ module.exports = {
   // High-level
   deployGoadLane,
   deployPrebakedGoadLane,
+  // Generated labs: the delivery half and the proof half. Exported so the
+  // ORDER deployGoadLane runs them in is assertable without a cluster, and so
+  // the bake orchestrator can grade a report it did not itself produce.
+  deliverGeneratedLab,
+  runLaneVerification,
+  laneWantsProbe,
+  resolveGeneratedLab,
+  summariseVerification,
+  // The wiring itself, so a test can prove the defaults are the shipped
+  // functions rather than something merely callable.
+  defaultGoadDeps,
   // Per-lane MAC/IP lookup table (called from admin.js once per lane)
   prepareGoadMacs,
   // Net0 string builder (called from admin.js inside the VM clone loop)
@@ -999,6 +1724,12 @@ module.exports = {
   // Lab catalog (also surfaced via API endpoint for the admin UI)
   GOAD_LABS,
   DEFAULT_LAB,
+  // The single deploy-time lab reader, plus the two rules it enforces. Exported
+  // so a caller outside this module can ask "what lab is this spec, really?"
+  // without re-deriving the precedence — and so the guard has tests.
+  resolveGoadLab,
+  isGoadManagedVm,
+  EXTERNAL_ROLES,
   INFRA_IP_OCTETS,
   ROLE_RESOURCES,
   buildIp,

@@ -1,0 +1,61 @@
+---
+# ===========================================================================
+# cc_web — lay out the docroot and publish every declared route.
+#
+# CONTENT IS TEMPLATED ON THE WAY THROUGH, AND THE ROLE CANNOT STOP THAT.
+# ansible renders variable values recursively: if a route's `content` contains
+# {{ ... }}, ansible will try to evaluate it while substituting the variable,
+# long before the bytes reach this task. For AI-authored HTML that is a real
+# hazard — Vue, Angular, Handlebars and Jinja itself all use {{ }} as their
+# interpolation syntax, and a generated page that ships a client-side template
+# will either raise AnsibleUndefinedVariable (loud, fine) or silently evaluate
+# to something else (quiet, not fine).
+#
+# There is no fix available from inside the role: by the time this task reads
+# cc_web_routes the rendering has already happened. The caller must tag the
+# value, e.g.
+#
+#     cc_web_routes:
+#       - path: /
+#         content: !unsafe "<div>{{ product.name }}</div>"
+#
+# The README says the same thing where the runner authors will read it. It is
+# written down in both places on purpose: this is the kind of trap that costs a
+# day to re-derive from a page that renders as "49".
+# ===========================================================================
+
+- name: Create the docroot
+  ansible.builtin.file:
+    path: "{{ cc_web_docroot }}"
+    state: directory
+    owner: root
+    group: "{{ cc_web_run_group }}"
+    mode: "0755"
+
+- name: Create the parent directory of every declared route
+  # Routes resolve to nested files ('/status/health' -> status/health/index.html)
+  # and ansible.builtin.copy does not create intermediate directories.
+  ansible.builtin.file:
+    path: "{{ item.dest | dirname }}"
+    state: directory
+    owner: root
+    group: "{{ cc_web_run_group }}"
+    mode: "0755"
+  loop: "{{ cc_web_routes_resolved }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Publish every declared route
+  # `content:` rather than `template:` — the body is finished output from the
+  # generator, not a template this role owns, and running it through the
+  # template module would re-render it a second time (see the header).
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: "{{ cc_web_run_group }}"
+    mode: "0644"
+  loop: "{{ cc_web_routes_resolved }}"
+  loop_control:
+    label: "{{ item.path }} -> {{ item.file }}"
+  notify: cc_web restart

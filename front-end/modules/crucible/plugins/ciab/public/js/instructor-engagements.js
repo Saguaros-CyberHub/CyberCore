@@ -114,6 +114,9 @@ const ENG_ACCOUNT_KINDS = ['local', 'domain', 'app', 'service'];
 const ENG_CREDENTIAL_SOURCES = ['cloudinit', 'template', 'baked', 'app_seed', 'manual'];
 const ENG_PLACEMENTS = ['pivot', 'public', 'internal'];
 const ENG_SUBNET_SCHEMES = ['v1', 'v2', 'v3'];
+// Mirrors utils/profile-to-spec.js's DEFAULT_SUBNET_SCHEME. A browser file
+// cannot require() it, so it is named once here rather than spelled inline.
+const ENG_DEFAULT_SUBNET_SCHEME = 'v3';
 
 const ENG_PLACEMENT_LABELS = {
   pivot: 'Pivot (dual-homed)',
@@ -1513,10 +1516,11 @@ const Engagements = {
             <div class="form-group">
               <label class="form-label" for="engNewScheme">Subnet scheme</label>
               <select id="engNewScheme" class="form-select">
-                ${ENG_SUBNET_SCHEMES.map((s) => `<option value="${esc(s)}"${s === 'v2' ? ' selected' : ''}>${esc(s)}</option>`).join('')}
+                ${ENG_SUBNET_SCHEMES.map((s) => `<option value="${esc(s)}"${s === ENG_DEFAULT_SUBNET_SCHEME ? ' selected' : ''}>${esc(s)}</option>`).join('')}
               </select>
               <div class="form-hint">
-                An outward-facing surface and a bridge machine need v3 — a v2 reservation has one flat segment.
+                v3 is the default: two segments behind one gateway, so the pivot is enforced by the network.
+                v2 reserves one flat segment (and one VNet per lane instead of two).
               </div>
             </div>
             <div class="form-group">
@@ -1548,7 +1552,7 @@ const Engagements = {
     if (!profileId) return;
     const engagementType = (document.getElementById('engNewType') || {}).value || 'default';
     const displayName = ((document.getElementById('engNewName') || {}).value || '').trim();
-    const subnetScheme = (document.getElementById('engNewScheme') || {}).value || 'v2';
+    const subnetScheme = (document.getElementById('engNewScheme') || {}).value || ENG_DEFAULT_SUBNET_SCHEME;
     const maxStudents = parseInt((document.getElementById('engNewMax') || {}).value, 10);
 
     if (!Number.isInteger(maxStudents) || maxStudents < 1 || maxStudents > 200) {

@@ -1,0 +1,297 @@
+---
+# ===========================================================================
+# cc_web — the fail-fast gate. Nothing before this file has touched the host;
+# nothing after it may run on an incomplete contract.
+#
+# WHY THIS FILE IS LONG AND BORING
+# The chain this role plugs into is sixteen separate ansible-playbook
+# invocations across roughly ninety minutes, and the recovery model is "replay
+# the failed playbook". Both facts push the same way: a missing variable has to
+# become a NAMED failure in the first seconds of the run, not a templated empty
+# string that produces a listener on port 0, a vhost with no ServerName, or a
+# credential file containing the word "None".
+#
+# Every assertion below therefore states the variable by name in fail_msg. A
+# bare "assertion failed" is only marginally better than the silent success it
+# replaces, because the operator reading it is not the person who wrote this.
+# ===========================================================================
+
+- name: Refuse an OS family this role cannot actually configure
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['os_family'] in cc_web_supported_os_families
+    fail_msg: >-
+      cc_web: this role configures Debian-family apache2 only, and this host
+      reports os_family '{{ ansible_facts['os_family'] | default('unknown') }}'.
+      The sites-available/conf-available/a2enmod layout it writes into does not
+      exist elsewhere. Point the play at a Debian-family DMZ host, or grow the
+      role an engine for this family — do not let it half-apply.
+    quiet: true
+
+# --- the web-facts contract ------------------------------------------------
+
+- name: Require a web-facts block
+  ansible.builtin.assert:
+    that:
+      - cc_web_facts is mapping
+      - cc_web_facts | length > 0
+    fail_msg: >-
+      cc_web: cc_web_facts is empty. This role is driven entirely by the
+      web-facts contract (asset.web_facts, documented in
+      ai/scan-documents/service-inference.js) and has no opinion of its own
+      about what to serve. Pass the same block the scan documents were
+      generated from.
+    quiet: true
+
+- name: Require a product this role can really deliver
+  # The product is not decoration: the scan report prints it as the service
+  # banner. httpd builds its Server header in the core output filter, so
+  # mod_headers cannot rewrite it and there is no honest way to serve apache
+  # under another product's name. Refusing here is the whole point — a role that
+  # quietly served apache while the report said nginx would be a new instance of
+  # exactly the defect this role was written to remove.
+  ansible.builtin.assert:
+    that:
+      - cc_web_product | length > 0
+      - cc_web_product in cc_web_supported_products
+    fail_msg: >-
+      cc_web: cc_web_facts.product is '{{ cc_web_product }}', which this role
+      cannot build. Deliverable products are
+      {{ cc_web_supported_products | join(', ') }}. Either declare one of those
+      in web_facts so the report and the host agree, or add an engine to this
+      role. Do not serve one product under another product's name.
+    quiet: true
+
+- name: Require at least one TCP port
+  ansible.builtin.assert:
+    that:
+      - cc_web_ports | length > 0
+    fail_msg: >-
+      cc_web: cc_web_facts.ports resolved to an empty set (raw value
+      {{ cc_web_facts.ports | default('<absent>') }}). A fact block with no
+      usable listener describes nothing, and the report would name ports this
+      host never binds.
+    quiet: true
+
+# --- site identity ---------------------------------------------------------
+
+- name: Require a ServerName
+  ansible.builtin.assert:
+    that:
+      - cc_web_server_name is string
+      - cc_web_server_name | trim | length > 0
+    fail_msg: >-
+      cc_web: cc_web_server_name is empty. It is the vhost ServerName and the
+      -servername passed to openssl s_client during verification, so an empty
+      value both breaks name-based virtual hosting and makes the TLS proof
+      meaningless.
+    quiet: true
+
+- name: Require an absolute docroot
+  ansible.builtin.assert:
+    that:
+      - cc_web_docroot is string
+      - cc_web_docroot is match('^/')
+      - cc_web_docroot | length > 1
+    fail_msg: >-
+      cc_web: cc_web_docroot must be an absolute path, got
+      '{{ cc_web_docroot }}'. A relative docroot resolves against the apache
+      ServerRoot and lands somewhere no one will look for it.
+    quiet: true
+
+- name: Require the site content
+  ansible.builtin.assert:
+    that:
+      - cc_web_routes is sequence
+      - cc_web_routes | length > 0
+    fail_msg: >-
+      cc_web: cc_web_routes is empty. The AI generates the site; this role
+      installs it. With no routes the docroot would be an empty directory that
+      answers 403 or a directory index at every path the report links to.
+    quiet: true
+
+- name: Require every route to declare a path
+  ansible.builtin.assert:
+    that:
+      - cc_web_routes_resolved | rejectattr('path', 'match', '^/') | list | length == 0
+    fail_msg: >-
+      cc_web: at least one entry in cc_web_routes has no usable `path`. Resolved
+      paths were {{ cc_web_route_paths | join(', ') }}.
+    quiet: true
+
+- name: Require exactly one file per route path
+  # Two routes resolving to the same file is a lost page rather than an error:
+  # the second copy wins and the first route serves someone else's content.
+  ansible.builtin.assert:
+    that:
+      - "(cc_web_routes_resolved | map(attribute='dest') | unique | list | length) == (cc_web_routes_resolved | length)"
+    fail_msg: >-
+      cc_web: two routes resolve to the same file under the docroot. Destinations
+      were {{ cc_web_routes_resolved | map(attribute='dest') | join(', ') }}.
+      Give one of them an explicit `file`.
+    quiet: true
+
+- name: Require a route for every path the scan report is allowed to name
+  # ONE DIRECTION ONLY. A route not named in web_facts.paths is fine — a hidden
+  # admin panel is legitimate exercise design. A path the paper links to that
+  # serves nothing is the paper lying, which is the defect this role exists to
+  # close.
+  ansible.builtin.assert:
+    that:
+      - (cc_web_paths | difference(cc_web_route_paths) | length) == 0
+    fail_msg: >-
+      cc_web: web_facts.paths names
+      {{ cc_web_paths | difference(cc_web_route_paths) | join(', ') }}, and
+      cc_web_routes has no content for
+      {{ 'it' if (cc_web_paths | difference(cc_web_route_paths) | length) == 1 else 'them' }}.
+      The scan documents link to every declared path; a declared path with no
+      route is a 404 in the student's browser and a false statement in the
+      report.
+    quiet: true
+
+# --- TLS -------------------------------------------------------------------
+
+- name: Require a protocol set when a TLS listener is declared
+  ansible.builtin.assert:
+    that:
+      - cc_web_tls_protocols | length > 0
+    fail_msg: >-
+      cc_web: web_facts.tls.enabled is true but tls.protocols resolved to an
+      empty set. SSLProtocol would be written as '-all' with nothing added back,
+      producing a listener that accepts no handshake at all while apache starts
+      cleanly and the report claims TLS.
+    quiet: true
+  when: cc_web_tls_enabled | bool
+
+- name: Refuse a TLS protocol token this role does not recognise
+  ansible.builtin.assert:
+    that:
+      - cc_web_tls_unknown | length == 0
+    fail_msg: >-
+      cc_web: unrecognised TLS protocol token(s)
+      {{ cc_web_tls_unknown | join(', ') }} in web_facts.tls.protocols. Accepted
+      spellings are the keys of cc_web_tls_alias
+      ({{ cc_web_tls_alias.keys() | list | join(', ') }}). Dropping a token
+      silently would leave the report claiming a protocol the listener never
+      offers.
+    quiet: true
+  when: cc_web_tls_enabled | bool
+
+- name: Refuse a TLS protocol no modern base image can actually serve
+  # SSLv2 has not been compiled into OpenSSL for years. A report claiming an
+  # SSLv2 finding can never be true here, so this fails at provision time rather
+  # than at grading time.
+  ansible.builtin.assert:
+    that:
+      - cc_web_tls_undeliverable | length == 0
+    fail_msg: >-
+      cc_web: web_facts.tls.protocols asks for
+      {{ cc_web_tls_undeliverable | join(', ') }}, which is not compiled into
+      any OpenSSL this role can install. Remove it from the facts, or build the
+      lane on a base image whose OpenSSL still carries it — do not ship a report
+      that claims it.
+    quiet: true
+  when: cc_web_tls_enabled | bool
+
+- name: Require a real TLS port inside the declared port set
+  ansible.builtin.assert:
+    that:
+      - (cc_web_tls_port | int) > 0
+      - (cc_web_tls_port | int) in cc_web_ports
+    fail_msg: >-
+      cc_web: could not resolve which port terminates TLS. tls.port was
+      '{{ (cc_web_facts.tls | default({})).port | default('<absent>') }}' and the
+      declared ports are {{ cc_web_ports | join(', ') }}.
+    quiet: true
+  when: cc_web_tls_enabled | bool
+
+- name: Require at least one plain-HTTP listener
+  # Verification reads the Server banner over HTTP, and every report this
+  # pipeline generates opens with an http:// URL. A TLS-only host is a valid
+  # thing to want; it is not a thing this role currently proves, so it says so.
+  ansible.builtin.assert:
+    that:
+      - cc_web_http_ports | length > 0
+    fail_msg: >-
+      cc_web: every declared port is the TLS port, leaving no plain-HTTP
+      listener. This role verifies the server banner over HTTP and has no
+      HTTPS-only banner path, so it would report success without ever checking
+      the banner the report names.
+    quiet: true
+
+# --- the pivot credential --------------------------------------------------
+
+- name: Require the pivot credential
+  ansible.builtin.assert:
+    that:
+      - cc_web_pivot is mapping
+      - cc_web_pivot | length > 0
+    fail_msg: >-
+      cc_web: cc_web_pivot is empty. The domain service account in an app config
+      file is the seam between this website and Active Directory and is the
+      reason this host is dual-homed — without it the external half of the
+      engagement dead-ends at a compromised web server. Pass it from a vaulted
+      vars file (it must never be defaulted in the role), or set
+      cc_web_pivot_required=false to state on the record that this host is
+      deliberately not the pivot.
+    quiet: true
+  when: cc_web_pivot_required | bool
+
+- name: Require every field the pivot credential file is built from
+  ansible.builtin.assert:
+    that:
+      - cc_web_pivot.path | default('') | trim | length > 0
+      - cc_web_pivot.path | default('') is match('^/')
+      - cc_web_pivot.format | default('') | trim | length > 0
+      - cc_web_pivot.domain | default('') | trim | length > 0
+      - cc_web_pivot.username | default('') | trim | length > 0
+      - cc_web_pivot.password | default('') | length > 0
+    fail_msg: >-
+      cc_web: cc_web_pivot needs an absolute `path`, a `format`, a `domain`, a
+      `username` and a `password`. A missing one templates as an empty string,
+      which writes a config file that looks planted and names no account —
+      success reported, nothing there.
+    quiet: true
+  when: cc_web_pivot | length > 0
+
+- name: Require a pivot credential format this role can render
+  ansible.builtin.assert:
+    that:
+      - cc_web_pivot.format in cc_web_pivot_formats
+    fail_msg: >-
+      cc_web: cc_web_pivot.format is
+      '{{ cc_web_pivot.format | default('<absent>') }}'; supported formats are
+      {{ cc_web_pivot_formats | join(', ') }}.
+    quiet: true
+  when: cc_web_pivot | length > 0
+
+- name: Refuse to publish the domain password on the web unless told to
+  # A credential file inside the docroot is downloadable by anyone who can reach
+  # port 80 — a completely different exercise from "find the LFI, then read the
+  # config". Both are legitimate; picking one by accident is not.
+  ansible.builtin.assert:
+    that:
+      - "(not (cc_web_pivot.path is match(cc_web_docroot | regex_escape ~ '/'))) or (cc_web_pivot.allow_in_docroot | default(false) | bool)"
+    fail_msg: >-
+      cc_web: cc_web_pivot.path '{{ cc_web_pivot.path | default('') }}' is inside
+      the docroot '{{ cc_web_docroot }}', so the domain password would be served
+      to any unauthenticated request. If that is the exercise, say so with
+      cc_web_pivot.allow_in_docroot=true; otherwise move the file outside the
+      docroot.
+    quiet: true
+  when: cc_web_pivot | length > 0
+
+- name: Require the file mode to be a quoted string
+  # YAML reads an unquoted 0640 as the decimal integer 640, and ansible's file
+  # modules then apply mode 0o1200 — a credential file that ends up group- and
+  # world-unreadable, so the exercise's own LFI path finds nothing.
+  ansible.builtin.assert:
+    that:
+      - cc_web_pivot.mode is string
+    fail_msg: >-
+      cc_web: cc_web_pivot.mode must be QUOTED ('0640', not 0640). Unquoted it
+      is parsed as the integer 640 and applied as a nonsense permission set.
+    quiet: true
+  when:
+    - cc_web_pivot | length > 0
+    - cc_web_pivot.mode is defined

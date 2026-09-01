@@ -971,6 +971,22 @@ async function start() {
       console.warn(`[Boot] CIAB engagement sweep skipped: ${e.message}`);
     }
 
+    // The same doctrine again for per-profile GOAD bakes. A bake is a ~90 minute
+    // detached chain owned by THIS process with no resume, so any row still in a
+    // non-terminal status at boot was abandoned by a previous one. It matters
+    // more than the sweeps above rather than less: an abandoned bake holds a
+    // whole staging lane (VXLAN, controller VM, half-captured golden VMIDs) that
+    // nothing else will ever free, so without this the leak is permanent and
+    // silent. recoverStrandedBakes marks those rows failed and tears the lane
+    // down; it never retries, because re-running a chain whose failure nobody
+    // has read is how you burn ninety minutes to reach the same place.
+    try {
+      await require('../modules/crucible/plugins/ciab/utils/bake-orchestrator')
+        .recoverStrandedBakes();
+    } catch (e) {
+      console.warn(`[Boot] CIAB profile-bake sweep skipped: ${e.message}`);
+    }
+
     // The same doctrine for CLE course labs, which reserve through the same
     // shared provisioner and had no sweep at all — a restart mid-provision left
     // a course spinning "Initializing" forever with deletion as the only exit.

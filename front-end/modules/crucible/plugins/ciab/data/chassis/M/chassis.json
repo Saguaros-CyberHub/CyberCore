@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "tier": "M",
+  "derived_from": "ad/GOAD-Light",
+  "goad_ref": "00e9b63eb1e82f16780943f5d237d5529fd4a1a9",
+  "goad_repo": "https://github.com/joshmp087/GOAD.git",
+  "hosts": 3,
+  "domains": 2,
+  "topology": {
+    "forests": 1,
+    "domains": [
+      {
+        "name": "chassis.invalid",
+        "netbios_name": "CHASSIS",
+        "dc": "dc01",
+        "forest_root": true,
+        "parent": null,
+        "trust": ""
+      },
+      {
+        "name": "child.chassis.invalid",
+        "netbios_name": "CHASSISCHILD",
+        "dc": "dc02",
+        "forest_root": false,
+        "parent": "chassis.invalid",
+        "trust": ""
+      }
+    ],
+    "dcs": ["dc01", "dc02"],
+    "servers": ["srv02"],
+    "workstations": []
+  },
+  "playbooks": {
+    "file": null,
+    "upstream_key": "default",
+    "why": "ad/GOAD-Light has no entry of its own in the fork's top-level playbooks.yml, so it runs the 16-invocation `default:` chain. Nothing to carry."
+  },
+  "kept": [
+    "data/inventory group layout and host-key membership, verbatim — including the parent/child split ([parent_dc] dc01, [child_dc] dc02) that ad-child_domain.yml keys on",
+    "providers/proxmox/inventory host -> {{ip_range}}.N -> dict_key mapping, octets unchanged (dc01 .10, dc02 .11, srv02 .22)",
+    "the dns_domain wiring: dc02 resolves through dc01, srv02 resolves through dc02 — a child DC must resolve the parent forest before it can be promoted",
+    "data/config.json hosts: hostname / type / domain / path / local_admin_password / use_laps (values replaced with generic placeholders)",
+    "data/config.json domains: dc / netbios_name / domain_password / laps_path / trust (values replaced with generic placeholders)",
+    "the password invariant: a member host carries its OWN domain's domain_password as local_admin_password"
+  ],
+  "stripped": [
+    "the entire reskin. ad/GOAD-Light in the fork is a themed rebrand — a company domain, site-prefixed hostnames, a named staff roster, and scripts/ hardcoded to those names. None of it survives: domains, hostnames, NetBIOS names and passwords are generic placeholders.",
+    "domains[*].users — emptied to {}",
+    "domains[*].groups — emptied to {} (upstream carries the universal/global/domainlocal scope buckets; the composer must re-emit all three, roles/ad indexes ad_groups.global with no default)",
+    "domains[*].organisation_units — emptied to {}",
+    "domains[*].acls — emptied to {}. This is the one that matters most: the parent domain upstream carries a 12-edge ACL ladder, and letting it survive a re-sync would hand every tier-M client the identical attack path.",
+    "domains[*].multi_domain_groups_member — emptied to {}",
+    "domains[*].gmsa — emptied to {} (absent on this tier upstream; carried as an empty object so every tier has one shape)",
+    "hosts[*].vulns / vulns_vars — emptied ([] / {})",
+    "hosts[*].security / security_vars — emptied ([] / {})",
+    "hosts[*].scripts — emptied to []; upstream dc02 listed seven .ps1 files from the lab's scripts/ directory",
+    "hosts[*].local_groups — emptied to {}; every upstream entry named a domain user or group, i.e. payload",
+    "hosts.srv02.mssql — dropped entirely (sa_password, service account, sysadmins, EXECUTE AS mappings). srv02 is still in [mssql], so a chassis fed straight to goad-preflight is rejected with GOAD_PF_MSSQL_SA_PASSWORD_MISSING — which is the point.",
+    "files/ — dropped entirely (ESC1 template, IIS webroot with the roslyn compiler, SYSVOL bait scripts, share bait)",
+    "scripts/ — dropped entirely; every file was hardcoded to the reskin's identifiers",
+    "README.md — dropped; it still described the ORIGINAL lab's hosts, not the reskin's, and provenance now lives in this file",
+    "data/inventory_disable_vagrant — dropped; only data/inventory is a chassis input",
+    "providers/{aws,azure,ludus,virtualbox,vmware,vmware_esxi} and every *.tf — dropped; the lane provider is proxmox"
+  ],
+  "composer_must_fill": [
+    "domains[*].users and domains[*].groups — goad-preflight REQUIRED_DOMAIN_KEYS lists both; ansible/ad-data.yml reads lab.domains[d].users and .groups with NO `| default(...)`",
+    "domains[*].organisation_units if any users[*].path or groups[*][*].path names an OU",
+    "hosts.srv02.mssql.sa_password — servers.yml:31 is the only line in that play without a `| default(...)`",
+    "the placeholder identifiers below — every one is deliberately implausible so a leak is unmistakable rather than believable"
+  ],
+  "placeholders": {
+    "domains": ["chassis.invalid", "child.chassis.invalid"],
+    "hostnames": ["CHASSIS-DC01", "CHASSIS-DC02", "CHASSIS-SRV02"],
+    "netbios_names": ["CHASSIS", "CHASSISCHILD"],
+    "passwords": ["CHASSIS-PLACEHOLDER-PW-ROOT", "CHASSIS-PLACEHOLDER-PW-CHILD"],
+    "inventory_domain_name": "CHASSIS-M",
+    "why": ".invalid is the RFC 2606 reserved TLD, so a chassis domain that survives into a generated lab cannot be mistaken for a client's. The child FQDN must stay a strict suffix extension of the parent: ad-child_domain.yml derives parent_domain by dropping the first label and then reads lab.domains[parent].domain_password with no default."
+  },
+  "note": "A CHASSIS IS DELIBERATELY NOT DEPLOYABLE. It is compile-time INPUT read on the orchestrator, not a lab: the compiler repopulates it and emits ad/CIAB-<hash>/, which is pushed to the controller separately. The controller never reads a chassis. Deploying one as-is dies in ad-data.yml, which dereferences lab.domains[d].users and .groups with no default — a domain whose groups are empty kills that play. That is correct and expected. Re-syncing when upstream moves is a mechanical diff: point at the same paths under the goad_ref above, re-apply the `stripped` list, and re-run front-end/test/ciab-chassis.test.js."
+}

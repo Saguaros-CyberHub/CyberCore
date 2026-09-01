@@ -10,6 +10,45 @@ proxmox-automated-install/
 
 # CIAB threat scenario library — canonical starter findings, version-controlled.
 !**/data/threat-scenario-library.json
+
+# CIAB GOAD role manifest — the vendored, pinned description of upstream GOAD's
+# ansible role library. This one MUST stay tracked: GOAD-main/ is ignored below
+# and has no tracked files, so this manifest is the only reviewable record of
+# what the baked controller actually runs. Ignoring it would recreate exactly
+# the invisibility it exists to fix (see ciab/utils/goad-role-manifest.js).
+!**/data/goad-role-manifest.json
+
+# CIAB GOAD corpus calibration baseline — the written verdict for every finding
+# the validator emits against the eight shipped upstream labs, with the file:line
+# evidence and the runtime consequence for each. ciab-goad-lab-validate.test.js
+# asserts the pinned finding set against this document, so an ignored copy is an
+# artifact that exists only on the authoring machine and shows up in no diff —
+# the same failure the manifest negation above exists to prevent.
+!**/data/goad-corpus-findings.md
+
+# CIAB GOAD post-condition probe — the read-only PowerShell that asserts what is
+# ACTUALLY TRUE in a baked lab (see ciab/utils/goad-postcondition-probe.js). It is
+# staged to a guest at run time, so it is data rather than a module this process
+# requires, but it is the executable half of the contract with the parser and has to
+# be reviewable in a diff. BOTH lines are required — `**/data/*` on line 4 excludes
+# the probe DIRECTORY itself and git never descends into an excluded directory, so
+# the /** negation alone would re-include nothing (same pairing, same reason, as the
+# frameworks/ and chassis/ rules).
+!**/data/probe/
+!**/data/probe/**
+
+# CIAB GOAD chassis — the three stripped lab skeletons (S/M/L) the AD compiler
+# repopulates per client profile. COMPILE-TIME INPUT, not a runtime artifact:
+# the compiler reads these on the orchestrator and emits ad/CIAB-<hash>/, which
+# is pushed to the controller separately — the controller never reads a chassis.
+# They live here rather than in GOAD-main/ for the same reason the manifest above
+# does: GOAD-main/ has zero tracked files, so a chassis kept there would be
+# invisible to `node --test` and to every reviewer. BOTH lines are required —
+# `**/data/*` on line 4 excludes the chassis DIRECTORY itself, and git never
+# descends into an excluded directory, so the /** negation alone would re-include
+# nothing (same pairing, same reason, as the frameworks/ rules above).
+!**/data/chassis/
+!**/data/chassis/**
 __pycache__/
 db_data/
 cookies/

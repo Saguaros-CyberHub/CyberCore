@@ -1,0 +1,674 @@
+{
+  "schema_version": 1,
+  "goad_repo": "https://github.com/joshmp087/GOAD.git",
+  "goad_ref": "00e9b63eb1e82f16780943f5d237d5529fd4a1a9",
+  "generated_from": "GOAD-main/ansible/roles/{vulns,security} @ goad_ref",
+  "generated_note": "GOAD-main/ is gitignored and has zero tracked files, so the working copy cannot be reviewed, diffed, or read by node --test. This file is the vendored, tracked substitute. Re-vendor it in the SAME commit that moves GOAD_REF in infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh.",
+  "vars_key_by_kind": {
+    "vulns": "vulns_vars",
+    "security": "security_vars"
+  },
+  "counts": {
+    "vulns": 29,
+    "security": 9
+  },
+  "acl_rights_domain": {
+    "context": "domain",
+    "source": "ansible/roles/acl/tasks/main.yml",
+    "vars_key": "ad_acls",
+    "standard": [
+      "AccessSystemSecurity",
+      "CreateChild",
+      "Delete",
+      "DeleteChild",
+      "DeleteTree",
+      "ExtendedRight",
+      "GenericAll",
+      "GenericExecute",
+      "GenericRead",
+      "GenericWrite",
+      "ListChildren",
+      "ListObject",
+      "ReadControl",
+      "ReadProperty",
+      "Self",
+      "Synchronize",
+      "WriteDacl",
+      "WriteOwner",
+      "WriteProperty"
+    ],
+    "extended": [
+      "Ext-User-Force-Change-Password",
+      "Ext-Self-Self-Membership",
+      "Ext-Write-Self-Membership",
+      "Ext-ManageCA",
+      "Ext-Write-SPN"
+    ]
+  },
+  "acl_rights_host": {
+    "context": "host",
+    "source": "ansible/roles/vulns/acls/tasks/main.yml",
+    "vars_key": "vulns_vars",
+    "standard": [
+      "AccessSystemSecurity",
+      "CreateChild",
+      "Delete",
+      "DeleteChild",
+      "DeleteTree",
+      "ExtendedRight",
+      "GenericAll",
+      "GenericExecute",
+      "GenericRead",
+      "GenericWrite",
+      "ListChildren",
+      "ListObject",
+      "ReadControl",
+      "ReadProperty",
+      "Self",
+      "Synchronize",
+      "WriteDacl",
+      "WriteOwner",
+      "WriteProperty"
+    ],
+    "extended": [
+      "Ext-User-Force-Change-Password",
+      "Ext-Self-Self-Membership",
+      "Ext-Write-Self-Membership"
+    ]
+  },
+  "acl_vocabulary_note": "TWO SEPARATE VOCABULARIES. NEVER MERGE THEM. roles/acl (domain, over ad_acls) and roles/vulns/acls (host, over vulns_vars) each embed their own $aclExtendValues literal in their own PowerShell payload. They agree on the 19 standard rights and differ on the extended ones: the domain role added Ext-ManageCA and Ext-Write-SPN, the host role did not. Emitting Ext-ManageCA or Ext-Write-SPN into a host-level acls entry produces no ACE and no error — see acl_matching_note.",
+  "acl_matching_note": "ORDINAL AND CASE-SENSITIVE. The check is PowerShell's `$aclValues.contains($right)` on a [string[]], i.e. Array/IList.Contains with the default ordinal comparer: 'genericall' does NOT match 'GenericAll'. An unrecognised right matches neither $aclValues nor $aclExtendValues, so $ace is never assigned, the `if ($ace)` block never runs, and the task exits having set $Ansible.Changed = $false. Ansible reports the task GREEN. A typo, a lowercase right, and a host-context Ext-ManageCA are therefore all indistinguishable from a correct idempotent run — validate the string BEFORE it ships, because nothing downstream will. Contrast $inheritance, which goes through a [System.DirectoryServices.ActiveDirectorySecurityInheritance] cast: that cast is case-INSENSITIVE and THROWS on an unknown value, so a bad inheritance fails loudly.",
+  "acl_inheritance": {
+    "values": [
+      "None",
+      "All",
+      "Descendents",
+      "SelfAndChildren",
+      "Children"
+    ],
+    "observed_in_lab_data": [
+      "All",
+      "None"
+    ],
+    "note": "The full System.DirectoryServices.ActiveDirectorySecurityInheritance enum, which is what the cast accepts. Upstream lab data uses only All and None. 'Descendents' is Microsoft's spelling — not 'Descendants'; the cast is case-insensitive but not spelling-forgiving, and a wrong value throws rather than silently no-opping."
+  },
+  "roles": [
+    {
+      "name": "acls",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "for",
+        "inheritance",
+        "right",
+        "to"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": "HOST-level ACLs. Accepts the acl_rights_host vocabulary only — see acl_rights_host and acl_matching_note."
+    },
+    {
+      "name": "adcs_esc10_case1",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "adcs_esc10_case2",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "adcs_esc11",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": "adcs",
+      "inventory_group_reason": "`certutil -setreg CA\\InterfaceFlags` plus a restart-adcs handler — both need the local AD CS service that ansible/adcs.yml installs for [adcs].",
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "adcs_esc13",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "adcs_esc13_group",
+        "adcs_esc13_template"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": "Copies its own files/esc13.ps1 to C:\\setup first, so it carries no ordering dependency on adcs_templates."
+    },
+    {
+      "name": "adcs_esc15",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": "Imports the ADCSTemplate PowerShell module without installing it. The module is deployed by vulns/adcs_templates, so this role must be ordered after it on the same host or the Import-Module fails."
+    },
+    {
+      "name": "adcs_esc6",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": "adcs",
+      "inventory_group_reason": "`certutil -setreg policy\\Editflags` writes the local CA's registry and notifies a restart-adcs handler; only a host in [adcs] (ansible/adcs.yml) has the AD CS role installed.",
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "adcs_esc7",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "ca_manager"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": true,
+      "never_emit_reason": "BROKEN UPSTREAM: the guard is INVERTED. The grant sits in the ELSE branch of `if (Get-Module -ListAvailable -Name PSPKI)`, so ManageCA is only attempted when PSPKI is ABSENT — and the branch then calls Import-Module PSPKI, which cannot succeed in that state. The task immediately before it runs `Install-Module PSPKI -Force`, guaranteeing the module IS available, so the guard is always true, the else never runs, and every run reports green with $Ansible.Changed = $false having granted nothing. Grant the right through the domain-level `acl` role with right 'Ext-ManageCA' instead — which is exactly why acl_rights_domain and acl_rights_host must not be merged: Ext-ManageCA exists only in the domain vocabulary.",
+      "note": null
+    },
+    {
+      "name": "adcs_templates",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "template_file",
+        "template_name"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "administrator_folder",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "autologon",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "password",
+        "username"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "credentials",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "secret",
+        "username"
+      ],
+      "optional_item_keys": [
+        {
+          "key": "runas",
+          "default": "domain_username"
+        },
+        {
+          "key": "runas_password",
+          "default": "domain_password"
+        }
+      ],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "directory",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_scalars",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": "Consumes `{{item.value}}` BARE as the directory path. Every sibling role indexes item.value.<key>, so this one is the odd shape and the easy generator bug: emit {'x': {'path': 'C:\\\\share'}} here and win_file receives the stringified dict as a path."
+    },
+    {
+      "name": "disable_firewall",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "enable_credssp_client",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "enable_credssp_server",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "enable_llmnr",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "enable_nbt-ns",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "files",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "dest",
+        "src"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "mssql",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "cmd"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": "mssql",
+      "inventory_group_reason": "The role shells out to `SqlCmd -E`, which exists only on a host that ansible/servers.yml installed SQL Server on (hosts: mssql). Anywhere else the win_shell task fails with 'SqlCmd is not recognized'.",
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "no_ldap_channel_binding",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "no_ldap_integrity",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "no_ldap_signing",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "ntlmdowngrade",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "openshares",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "permissions",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "path",
+        "rights",
+        "user"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "schedule",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "cmd",
+        "interval",
+        "name"
+      ],
+      "optional_item_keys": [
+        {
+          "key": "multiple_instances",
+          "default": "'2'"
+        }
+      ],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "shares",
+      "kind": "vulns",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "path"
+      ],
+      "optional_item_keys": [
+        {
+          "key": "description",
+          "default": "item.key"
+        },
+        {
+          "key": "list",
+          "default": "'yes'"
+        },
+        {
+          "key": "full",
+          "default": "'Administrators'"
+        },
+        {
+          "key": "change",
+          "default": "''"
+        },
+        {
+          "key": "read",
+          "default": "''"
+        },
+        {
+          "key": "deny",
+          "default": "''"
+        }
+      ],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": true,
+      "never_emit_reason": "BROKEN UPSTREAM, and the breakage is ansible-core-version dependent. The four perm.yml includes pass `item.value.<full|change|read|deny> | split(',') | trim`: `split` returns a LIST and Jinja's `trim` is a STRING filter. On ansible-core >= 2.16 (jinja2 3.x) that raises 'expected string or bytes-like object' and the play dies part-way through, leaving shares created but unpermissioned; on older cores it can coerce and hand win_acl one mangled principal. The trailing `| default([])` rescues nothing — it substitutes only for an UNDEFINED left-hand side, and it sits AFTER the filter that throws. Note also that the defaults on full/change/read/deny exist only in the win_share task; the perm includes reference those keys BARE, so omitting one is a second, independent failure. Plant shares with a post_clone script, or use `permissions` against an explicit path.",
+      "note": null
+    },
+    {
+      "name": "smbv1",
+      "kind": "vulns",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "account_is_sensitive",
+      "kind": "security",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "account"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "asr",
+      "kind": "security",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "ruleid"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": "defender_on",
+      "inventory_group_reason": "Add-MpPreference requires a running Windows Defender. security.yml turns Defender on only for [defender_on]; on a [defender_off] host the cmdlet errors.",
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "directory",
+      "kind": "security",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_scalars",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": "Same bare-scalar shape as vulns/directory, but fed from security_vars. The two roles share a NAME and nothing else — resolve by kind, never by name alone."
+    },
+    {
+      "name": "enable_run_as_ppl",
+      "kind": "security",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "files",
+      "kind": "security",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "dest",
+        "src"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "ldaps",
+      "kind": "security",
+      "consumes_vars": true,
+      "vars_shape": "dict_of_objects",
+      "required_item_keys": [
+        "cert_password",
+        "pfx"
+      ],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "maq0_client",
+      "kind": "security",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "maq0_server",
+      "kind": "security",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    },
+    {
+      "name": "powershell_restrict",
+      "kind": "security",
+      "consumes_vars": false,
+      "vars_shape": "none",
+      "required_item_keys": [],
+      "optional_item_keys": [],
+      "needs_inventory_group": null,
+      "inventory_group_reason": null,
+      "never_emit": false,
+      "never_emit_reason": null,
+      "note": null
+    }
+  ]
+}

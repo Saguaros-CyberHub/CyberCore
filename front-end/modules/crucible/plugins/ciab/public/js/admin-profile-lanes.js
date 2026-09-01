@@ -19,6 +19,15 @@
  *   GET  /api/profiles?user_id=*
  */
 
+// The browser half of utils/profile-to-spec.js's DEFAULT_SUBNET_SCHEME. This
+// file cannot require() it, so it is re-stated ONCE here rather than spelled
+// inline at each <select> read — the six bare 'v2' literals scattered across
+// the server routes are exactly what made the server-side flip inert, and the
+// same drift is available in the UI. The two <select>s in
+// public/pages/admin-profile-lanes.html mark this value `selected`; this
+// constant only covers the case where the element is missing entirely.
+const DEFAULT_SUBNET_SCHEME = 'v3';
+
 let CURRENT_PROFILE = null;   // last loaded profile (from picker or upload)
 let CURRENT_ASSETS  = [];     // assets from that profile
 let GROUPS_POLL_TIMER = null;
@@ -172,7 +181,7 @@ async function generateAndDeploy() {
     num_lanes:    valInt('gen-num-lanes'),
     max_students: valInt('gen-max-students'),
     group_name:   valStr('gen-group-name'),
-    subnet_scheme: valStr('gen-subnet-scheme') || 'v2',
+    subnet_scheme: valStr('gen-subnet-scheme') || DEFAULT_SUBNET_SCHEME,
     attack_boxes: $('gen-attack-boxes').checked,
     vuln_app: {
       enabled: $('gen-vuln-app').checked,
@@ -409,7 +418,7 @@ async function reserveEngagement(profileId, el) {
       body: {
         profile_id: profileId,
         engagement_type: 'default',
-        subnet_scheme: (document.getElementById('dep-subnet-scheme') || {}).value || 'v2',
+        subnet_scheme: (document.getElementById('dep-subnet-scheme') || {}).value || DEFAULT_SUBNET_SCHEME,
         max_students: parseInt(maxStudInput.value, 10),
       },
     });

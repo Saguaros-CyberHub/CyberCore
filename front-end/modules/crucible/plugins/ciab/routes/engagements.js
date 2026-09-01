@@ -60,11 +60,19 @@ const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
 const engagementProvision = require('../utils/engagement-provision');
 const { compileEngagementPlan } = require('../utils/engagement-plan');
-const { synthesizeSpecFromProfile } = require('../utils/profile-to-spec');
+// DEFAULT_SUBNET_SCHEME is imported, never re-spelled. R1's whole finding was
+// that the constant existed and no live caller read it: every route said
+// `|| 'v2'`, so flipping the constant to 'v3' changed nothing anywhere.
+// profile-to-spec.js is its one owner — see the long note above its declaration
+// for why v3 is the right default at all.
+const { synthesizeSpecFromProfile, DEFAULT_SUBNET_SCHEME } = require('../utils/profile-to-spec');
 const laneReservation = require('../utils/lane-reservation');
 const {
   ENGAGEMENT_TYPES, describeEngagementType, engagementDisplayName,
   resolveEngagementTypeAlias, validateEngagementPlan,
+  // B3. The registry now declares which types the PLATFORM owns, and this file
+  // asks it in three places rather than comparing against a literal 'bake'.
+  isSystemEngagementType,
 } = require('../utils/engagement-model');
 
 const instructorOnly = requireRole('instructor', 'admin');
@@ -135,6 +143,12 @@ function sendErr(res, err) {
   if (err && err.code) body.code = err.code;
   if (err && Array.isArray(err.errors)) body.errors = err.errors;
   if (err && Array.isArray(err.warnings)) body.warnings = err.warnings;
+  // assertBakeEngagementRetirable attaches the bake it is refusing over
+  // ({bake_id, lab_name, status}) so a caller can link straight to it rather
+  // than parsing the prose. Forwarded here for the same reason `errors` and
+  // `warnings` are: a structured payload the producer builds and the renderer
+  // drops is a payload that does not exist.
+  if (err && err.bake && typeof err.bake === 'object') body.bake = err.bake;
   res.status(status).json(body);
 }
 
@@ -264,8 +278,34 @@ function project(row, admin) {
   delete out.challenge_id;
   out.display_label   = engagementDisplayName(row);
   out.type_descriptor = describeEngagementType(row.engagement_type);
+
+  // ── B3: A SYSTEM-OWNED ENGAGEMENT IS VISIBLE, AND IS NOT RETIRABLE ───────
+  //
+  // A bake borrows a dedicated one-slot engagement for its staging network, and
+  // the golden templates are built against the addresses derived from the one
+  // VXLAN id that block holds. Until this flag existed the row rendered here as
+  // an ordinary engagement with a Retire button on it, and pressing it ends the
+  // system's only record of which block those templates belong to — the bake
+  // itself reports nothing, because nothing in a ninety-minute build reads this
+  // table.
+  //
+  // VISIBLE, DELIBERATELY. It is real infrastructure holding a real block, and
+  // an admin working out why a bake is stuck needs to see it. So the answer is
+  // not to filter it out of the list: it is to say who owns it and to stop
+  // offering the one action that strands a build.
+  //
+  // Re-provision stays open on purpose — 'the staging reservation carries no
+  // block, re-provision it' is a remedy routes/profile-deploy.js hands the
+  // operator by name, and closing it here would leave that refusal unanswerable.
+  //
+  // ADVICE, NOT THE GATE. The retire route refuses it too, and refuses again
+  // underneath in engagement-provision.retireEngagement while a bake is live —
+  // a hidden button is a screen decision and never a guarantee.
+  const systemOwned = isSystemEngagementType(row.engagement_type);
+  out.system_owned = systemOwned;
   out.can = {
-    create: admin, adopt: admin, reprovision: admin, retire: admin,
+    create: admin, adopt: admin, reprovision: admin,
+    retire: admin && !systemOwned,
     edit: true,
   };
   return out;
@@ -313,7 +353,10 @@ async function compilePlanFor(engagement) {
     vmTemplateCatalog: vmCat.rows,
     vulnScriptCatalog: vulnCat.rows,
     vulnApp: null,
-    options: { subnetScheme: engagement.subnet_scheme || 'v2', attackBoxes: true },
+    // The ROW's scheme wins — that is the scheme the block was carved at, and
+    // compileEngagementPlan compares it with spec.subnet_scheme to raise
+    // SCHEME_MISMATCH. The default only covers a row so old it carries none.
+    options: { subnetScheme: engagement.subnet_scheme || DEFAULT_SUBNET_SCHEME, attackBoxes: true },
   });
 
   return compileEngagementPlan({
@@ -342,7 +385,23 @@ async function compilePlanFor(engagement) {
  */
 router.get('/types', instructorOnly, (req, res) => {
   try {
-    res.json({ types: Object.values(ENGAGEMENT_TYPES).map(t => ({ ...t })) });
+    // ── B3: SYSTEM-OWNED TYPES ARE NOT OFFERED HERE ───────────────────────
+    //
+    // This list is the CREATE FORM's vocabulary — public/js/instructor-engagements.js
+    // renders one <option> per entry — so anything in it is something an
+    // operator can ask for. A bake's staging network is not: Bake creates it,
+    // sized at exactly one slot, and one created by hand at thirty slots is a
+    // block the bake path then refuses (BAKE_NETWORK_BLOCK_TOO_BIG) after the
+    // range has already been spent.
+    //
+    // THIS DOES NOT HIDE THE ENGAGEMENT. A staging row still appears in the
+    // list below, with the registry's own label and summary on it, because
+    // project() resolves its descriptor from the registry directly. Hiding a
+    // real block from the person debugging a stuck bake is the opposite of the
+    // point; what is withheld is the ability to ask for a NEW one.
+    res.json({
+      types: Object.values(ENGAGEMENT_TYPES).filter(t => !t.system).map(t => ({ ...t })),
+    });
   } catch (err) {
     sendErr(res, err);
   }
@@ -525,6 +584,32 @@ router.post('/', adminOnly, async (req, res) => {
     const body = req.body || {};
     const engagementType = laneReservation.sanitizeEngagementType(body.engagement_type);
 
+    // ── B3: A SYSTEM-OWNED TYPE IS NEVER CREATED FROM HERE ────────────────
+    //
+    // BEFORE the unknown-type check and independent of allow_custom_type: a
+    // system type IS known, so the refusal below would wave it through, and the
+    // override exists to license an UNKNOWN slug rather than to license taking
+    // over a slug the platform writes.
+    //
+    // The one that exists today is the staging network a bake borrows. Its size
+    // is not a preference — a block of exactly one id is what makes the staging
+    // lane's id, and therefore the two /24 bases the golden templates bake into
+    // themselves, knowable before the lane exists — so one created here at the
+    // form's default of thirty slots produces a reservation the bake path then
+    // refuses, after the range has already been spent and with no way to hand
+    // it back.
+    if (isSystemEngagementType(engagementType)) {
+      const descriptor = describeEngagementType(engagementType);
+      return res.status(400).json({
+        code: 'SYSTEM_ENGAGEMENT_TYPE',
+        error: `"${engagementType}" (${descriptor.label}) is created and owned by this system, not `
+             + 'by an operator, and it is sized for the job that owns it. Creating one by hand '
+             + 'reserves a network block that nothing can hand back and that the owning path will '
+             + 'then refuse to use. Use the action that owns it — Bake creates its own staging '
+             + 'network the first time a client is baked.',
+      });
+    }
+
     // BEFORE THE PROFILE LOOKUP, AND BEFORE ANY WRITE. See
     // classifyEngagementTypeSlug: this is the only thing standing between a
     // one-character typo and a permanently carved VXLAN block stored under the
@@ -546,7 +631,10 @@ router.post('/', adminOnly, async (req, res) => {
     let engagement = await engagementProvision.createEngagement({
       profileId: body.profile_id,
       engagementType,
-      subnetScheme: body.subnet_scheme || 'v2',
+      // An explicit body.subnet_scheme ALWAYS wins: v2 stays fully selectable,
+      // and this is the one place an operator gets to choose. The default is
+      // only what an omitted field means.
+      subnetScheme: body.subnet_scheme || DEFAULT_SUBNET_SCHEME,
       maxStudents: body.max_students,
       companyName: profRes.rows[0].company_name,
       actingUserId: req.user.userId,
@@ -799,6 +887,41 @@ router.post('/:engagementId/retire', adminOnly, async (req, res) => {
       });
     }
 
+    // ── B3: SYSTEM-OWNED NEEDS A SECOND, EXPLICIT STATEMENT ───────────────
+    //
+    // project() already withholds the Retire button for these rows, so nothing
+    // on the screen can reach this line — which is exactly why the route must
+    // check too: a hidden button is not a guarantee, and this endpoint is
+    // reachable by anything holding an admin token.
+    //
+    // AN EXTRA PARAMETER RATHER THAN A FLAT REFUSAL, for the same reason
+    // allow_custom_type is one on create: the thing being defended against is a
+    // MISTAKE, and the only reliable way to tell a mistake from an intention is
+    // to make the operator state the intention. It has to stay reachable —
+    // 'retire the staging engagement and let Bake re-create it at one slot' is a
+    // remedy routes/profile-deploy.js hands the operator by name when a staging
+    // block was carved at the wrong size.
+    //
+    // This is the OUTER guard only. Whether a bake is currently building on that
+    // block is not a question a screen may answer: engagement-provision's
+    // retireEngagement asks it underneath, on every path, and refuses there.
+    const existing = await engagementProvision.getEngagementById(req.params.engagementId);
+    if (existing && isSystemEngagementType(existing.engagement_type)
+        && (req.body || {}).confirm_system_owned !== true) {
+      // The description comes from the REGISTRY, not from prose written here, so
+      // a second system type added later is explained correctly rather than
+      // described as the first one.
+      const owned = describeEngagementType(existing.engagement_type);
+      return res.status(400).json({
+        code: 'SYSTEM_ENGAGEMENT_CONFIRM_REQUIRED',
+        error: `${engagementDisplayName(existing)} is owned by this system, not by an operator: `
+             + `${owned.summary} Retiring it ends this system's record of the network block that `
+             + 'work was built on. If a bake is still running on it the retirement is refused '
+             + 'outright; if you are deliberately clearing a staging network that was reserved at '
+             + 'the wrong size, resend with confirm_system_owned: true.',
+      });
+    }
+
     const engagement = await engagementProvision.retireEngagement(req.params.engagementId, {
       actingUserId: req.user.userId,
     });
@@ -819,6 +942,10 @@ router.post('/:engagementId/retire', adminOnly, async (req, res) => {
         // Stated explicitly so the audit row itself records the fact the copy
         // above exists to defend: nothing was released.
         capacity_released: false,
+        // B3. Ending a platform-owned engagement is a rare, deliberate act with
+        // a build's worth of consequence behind it, and a run of these rows is
+        // how "why did that bake lose its network" gets answered afterwards.
+        system_owned: isSystemEngagementType(engagement.engagement_type),
       },
     });
 

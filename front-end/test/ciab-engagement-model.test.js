@@ -2520,9 +2520,16 @@ test('B0-100: one predicate answers "can this machine be the bridge?", and every
   assert.ok(/if \(segs\.length > 1\) continue;/.test(deployer),
     `challenge-lane-deployer.js:310-311 — and neither does anything asking for two segments. ${TRACK_B} (B0)`);
   assert.ok(/if \(dualHomed\) \{/.test(deployer) && /if \(isV3\) \{/.test(deployer)
-    && /ip=\$\{net\.lanExt\.base3\}\.240\/24/.test(deployer),
+    && /ip=\$\{net\.lanExt\.base3\}\.\$\{DUAL_HOMED_OCTET\}\/24/.test(deployer),
     'challenge-lane-deployer.js:758-772 — the .240 write is gated on dualHomed AND on isV3. BOTH. Neither '
     + `alone. ${TRACK_B} (B0)`);
+  // The deployer stopped spelling the octet inline: resolveLaneDnsExtras now
+  // publishes the company's web name AT that address, so the clone path and the
+  // DNS table read ONE named constant rather than two literals that can drift.
+  // The value is still pinned here, because "gated on both" is only half the
+  // claim — the address the gates guard has to be .240.
+  assert.ok(/const DUAL_HOMED_OCTET = 240;/.test(deployer),
+    `challenge-lane-deployer.js — and the constant those gates write is .240. ${TRACK_B} (B0)`);
   const planSrc = read(PLAN_REL);
   assert.ok(/lane-networking\.js:465-471/.test(planSrc) && /challenge-lane-deployer\.js:303/.test(planSrc)
     && /challenge-lane-deployer\.js:768/.test(planSrc),

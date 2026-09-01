@@ -13,6 +13,14 @@
  * of what services the profile declared — making fake-vs-real diffs glaring
  * the moment a student ran `nmap` themselves. This version emits findings
  * ONLY for services that appear in profile.assets[].services.
+ *
+ * TWO SOURCES OF TRUTH, IN ORDER. A web host may carry `web_facts` — the
+ * contract documented in service-inference.js, written by the compiler that
+ * builds the vuln app. Where it exists it wins: the banner, the port set, the
+ * TLS reality and the route list all come from it, and a finding it
+ * contradicts (POODLE without a TLS listener, an alert on a route the app
+ * doesn't serve) is dropped rather than printed. Where it does not exist,
+ * inference runs exactly as it always has and the documents are unchanged.
  */
 
 const {
@@ -21,7 +29,7 @@ const {
   getFindings,
   PORT_DEFAULTS
 } = require('./vuln-knowledge');
-const { inferServices } = require('./service-inference');
+const { inferServices, readWebFacts, isTlsPort } = require('./service-inference');
 
 // ─── helpers ───────────────────────────────────────────────────────────────
 
@@ -47,11 +55,58 @@ function scannableAssets(profileData) {
   });
 }
 
+// Findings from vuln-knowledge that are only true if a specific SSL/TLS
+// protocol version is actually offered. Keyed by plugin_id: the finding NAME is
+// prose that will get reworded, the id is the stable join with the knowledge
+// table. Values are canonical protocol tokens (see normalizeTlsProtocol) —
+// ANY match is enough, since either SSLv2 or SSLv3 makes 20007 true.
+const TLS_PROTOCOL_GATED = {
+  '20007': ['sslv2', 'sslv3'],  // SSL Version 2 and 3 Protocol Detection (POODLE)
+  '104743': ['tlsv1.0']         // TLS Version 1.0 Protocol Detection
+};
+
+/**
+ * Findings for one open port, minus anything the host's web facts contradict.
+ *
+ * Without facts this is getFindings() verbatim — the inference path claims what
+ * it always claimed. With facts, a protocol-gated finding survives only if the
+ * compiler said that protocol is really offered, so a lane whose container
+ * speaks TLS 1.2 (or no TLS at all) stops being reported as POODLE-vulnerable.
+ */
+function findingsForPort(port, facts) {
+  const all = getFindings(port.normalized);
+  if (!facts || !facts.ports.includes(port.port)) return all;
+  return all.filter(f => {
+    const needs = TLS_PROTOCOL_GATED[f.plugin_id];
+    return !needs || needs.some(proto => facts.tls.protocols.includes(proto));
+  });
+}
+
+/**
+ * The banner a fact-declared web port answers with, replacing the PORT_DEFAULTS
+ * guess. That table says every :80 is Apache httpd 2.4.52; the compiled lane is
+ * whatever container the model wrote. The TLS flag also decides http vs https
+ * here, and that decision is what keeps a TLS finding set off a port with no
+ * TLS listener — every https finding downstream keys off `normalized`.
+ */
+function webBannerFromFacts(facts, port, banner) {
+  const tls = isTlsPort(facts, port);
+  return {
+    service: tls ? 'ssl/http' : 'http',
+    product: facts.product || banner.product,
+    // Version belongs to whichever product won: pairing the facts' version with
+    // the default product (or the reverse) would invent a release that never shipped.
+    version: facts.product ? facts.version : banner.version,
+    normalized: tls ? 'https' : 'http'
+  };
+}
+
 // Build the per-host port list: union of declared services + a small floor of
 // info ports (ICMP-equivalent + closed/filtered noise). Every entry traces
 // back to a profile.services token — never invented.
 function buildHostPorts(asset) {
   const services = inferServices(asset);
+  const facts = readWebFacts(asset);
   const ports = [];
   const seen = new Set();
 
@@ -62,14 +117,15 @@ function buildHostPorts(asset) {
     if (!port || seen.has(port)) continue;
     seen.add(port);
     const banner = getBanner(port, parsed.normalized);
+    const web = facts && facts.ports.includes(port) ? webBannerFromFacts(facts, port, banner) : null;
     ports.push({
       port,
       protocol: 'tcp',
       state: 'open',
-      service: banner.service,
-      product: banner.product,
-      version: banner.version,
-      normalized: parsed.normalized
+      service: web ? web.service : banner.service,
+      product: web ? web.product : banner.product,
+      version: web ? web.version : banner.version,
+      normalized: web ? web.normalized : parsed.normalized
     });
   }
   return ports.sort((a, b) => a.port - b.port);
@@ -145,6 +201,7 @@ function osDetectionBlock(asset) {
 // info blocks (smb-security-mode, rdp-ntlm-info, ...) mirror what -sC emits.
 function nmapScriptBlocks(ports, asset, domain) {
   const blocks = [];
+  const facts = readWebFacts(asset);
   const normSet = new Set(ports.map(p => p.normalized));
   const hostUpper = String(asset.hostname || 'HOST').toUpperCase();
   const fqdn = domain ? `${asset.hostname}.${domain}` : (asset.hostname || 'host');
@@ -152,7 +209,7 @@ function nmapScriptBlocks(ports, asset, domain) {
 
   // Per-service VULNERABLE blocks, derived from the shared finding knowledge.
   for (const p of ports) {
-    for (const f of getFindings(p.normalized)) {
+    for (const f of findingsForPort(p, facts)) {
       if (f.severity < 3) continue; // only High/Critical surface as nmap vuln scripts
       const scriptId = f.name.toLowerCase().includes('ms17-010') ? 'smb-vuln-ms17-010'
         : f.name.toLowerCase().includes('bluekeep') ? 'rdp-vuln-cve2019-0708'
@@ -364,6 +421,7 @@ function generateNessus({ profileData, companyName }) {
     const hostname = asset.hostname || 'unknown';
     const os = asset.os || 'Unknown';
     const ports = buildHostPorts(asset);
+    const facts = readWebFacts(asset);
 
     // Always include a few info-level baseline findings (per-host inventory)
     const baseline = [
@@ -390,7 +448,7 @@ function generateNessus({ profileData, companyName }) {
       </ReportItem>`);
 
       // Any service-specific known findings
-      for (const f of getFindings(p.normalized)) {
+      for (const f of findingsForPort(p, facts)) {
         findings.push(`      <ReportItem port="${p.port}" svc_name="${xmlEsc(p.service)}" protocol="${p.protocol}" severity="${f.severity}" pluginID="${f.plugin_id}" pluginName="${xmlEsc(f.name)}" pluginFamily="${xmlEsc(guessPluginFamily(p.normalized))}">
         <plugin_name>${xmlEsc(f.name)}</plugin_name>
         <risk_factor>${severityName(f.severity)}</risk_factor>
@@ -493,6 +551,27 @@ function xmlDecode(s) {
 // Only emit findings if at least one scannable asset declares HTTP/HTTPS.
 // Otherwise ZAP would have nothing to scan — emit an empty report.
 
+/**
+ * The base URL this report is allowed to link to for one web host.
+ *
+ * The scheme is whatever is really listening. It used to be decided twice: the
+ * Target header said `https://` while every alert URL beneath it said
+ * `http://` — no real ZAP report contradicts itself like that, and on a lane
+ * with no TLS listener the header was the wrong one. Both now read this.
+ *
+ * A non-default port is spelled out, because a fact-declared app on :8080 is
+ * not reachable at the URL a reader would otherwise copy out of the report.
+ */
+function webBaseUrl(host, domain) {
+  const facts = readWebFacts(host);
+  const authority = domain ? `${host.hostname}.${domain}` : assetIp(host);
+  const tls = !!(facts && facts.tls.enabled);
+  const scheme = tls ? 'https' : 'http';
+  const port = facts ? (tls ? facts.tls.port : facts.ports.find(p => !isTlsPort(facts, p))) : null;
+  const suffix = port && port !== 80 && port !== 443 ? `:${port}` : '';
+  return `${scheme}://${authority}${suffix}`;
+}
+
 function generateZap({ profileData, companyName, domain }) {
   const targets = scannableAssets(profileData);
   const webHosts = targets.filter(a => {
@@ -502,7 +581,7 @@ function generateZap({ profileData, companyName, domain }) {
 
   const scanDate = new Date().toUTCString();
   const target = webHosts[0]
-    ? (domain ? `https://${webHosts[0].hostname}.${domain}` : `http://${assetIp(webHosts[0])}`)
+    ? webBaseUrl(webHosts[0], domain)
     : 'http://(no-web-hosts-in-profile)';
 
   if (webHosts.length === 0) {
@@ -519,53 +598,77 @@ function generateZap({ profileData, companyName, domain }) {
   // to only those plausibly triggered by services the profile actually has.
   const alerts = [];
   for (const host of webHosts) {
-    const fqdn = domain ? `${host.hostname}.${domain}` : assetIp(host);
-    const base = `http://${fqdn}`;
-    alerts.push({
-      risk: 'Medium', confidence: 'Medium',
-      name: 'Cross-Site Scripting (Reflected)',
-      url: `${base}/search?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E`,
-      param: 'q',
-      evidence: '<script>alert(1)</script>',
-      description: 'Cross-site Scripting (XSS) is an attack technique that involves echoing attacker-supplied code into a user\'s browser instance.',
-      solution: 'Phase: Architecture and Design — Use a vetted library or framework that does not allow this weakness to occur.'
-    });
-    alerts.push({
-      risk: 'High', confidence: 'High',
-      name: 'SQL Injection',
-      url: `${base}/search?q=%27+OR+%271%27%3D%271`,
-      param: 'q',
-      evidence: 'SQL syntax error in response body',
-      description: 'SQL injection may be possible. The page parameter appears to be vulnerable to SQL injection attacks.',
-      solution: 'Do not trust client-side input even if there is client-side validation. Check user input against a positive specification.'
-    });
-    alerts.push({
-      risk: 'Medium', confidence: 'High',
-      name: 'Missing Anti-clickjacking Header',
-      url: base + '/',
-      param: '',
-      evidence: '',
-      description: 'The response does not include either Content-Security-Policy with frame-ancestors directive or X-Frame-Options.',
-      solution: 'Modern web browsers support Content-Security-Policy and X-Frame-Options HTTP headers.'
-    });
-    alerts.push({
-      risk: 'Low', confidence: 'Medium',
-      name: 'Cookie Without Secure Flag',
-      url: base + '/login',
-      param: 'session',
-      evidence: 'session=...',
-      description: 'A cookie has been set without the secure flag, which means that the cookie can be accessed via unencrypted connections.',
-      solution: 'Whenever a cookie contains sensitive information, set the secure flag.'
-    });
-    alerts.push({
-      risk: 'Informational', confidence: 'Medium',
-      name: 'Server Leaks Version Information via "Server" HTTP Response Header',
-      url: base + '/',
-      param: '',
-      evidence: 'Server: Apache/2.4.52',
-      description: 'The web/application server is leaking version information via the "Server" HTTP response header.',
-      solution: 'Configure the web server to suppress "Server" header.'
-    });
+    const facts = readWebFacts(host);
+    const base = webBaseUrl(host, domain);
+
+    // An alert names a URL, and a URL that 404s is the tell that the paper was
+    // written before the app was. With facts, only a declared route may be
+    // named — the compiled app rarely has /search or /login. Without facts the
+    // legacy route set stands unchanged; test/ciab-web-facts.test.js pins it.
+    const serves = (p) => !facts || facts.paths.includes(p);
+
+    // Evidence for the Server-header leak. With facts we quote what the
+    // container will really answer — minus the daemon suffix, because
+    // `product` is spelled the way nmap -sV names it ("Apache httpd") and a
+    // Server header is not ("Apache"). Without facts, this literal is the
+    // frozen legacy string; it mirrors PORT_DEFAULTS[80] (Apache httpd
+    // 2.4.52), which is what inference puts in the nmap version column for :80.
+    const serverHeader = facts && facts.product
+      ? `Server: ${[facts.product.replace(/\s+httpd$/i, ''), facts.version].filter(Boolean).join('/')}`
+      : 'Server: Apache/2.4.52';
+
+    // Route-keyed so the gate above can drop an alert without disturbing the
+    // order of the ones that survive.
+    const candidates = [
+      { path: '/search', alert: {
+        risk: 'Medium', confidence: 'Medium',
+        name: 'Cross-Site Scripting (Reflected)',
+        url: `${base}/search?q=%3Cscript%3Ealert%281%29%3C%2Fscript%3E`,
+        param: 'q',
+        evidence: '<script>alert(1)</script>',
+        description: 'Cross-site Scripting (XSS) is an attack technique that involves echoing attacker-supplied code into a user\'s browser instance.',
+        solution: 'Phase: Architecture and Design — Use a vetted library or framework that does not allow this weakness to occur.'
+      } },
+      { path: '/search', alert: {
+        risk: 'High', confidence: 'High',
+        name: 'SQL Injection',
+        url: `${base}/search?q=%27+OR+%271%27%3D%271`,
+        param: 'q',
+        evidence: 'SQL syntax error in response body',
+        description: 'SQL injection may be possible. The page parameter appears to be vulnerable to SQL injection attacks.',
+        solution: 'Do not trust client-side input even if there is client-side validation. Check user input against a positive specification.'
+      } },
+      { path: '/', alert: {
+        risk: 'Medium', confidence: 'High',
+        name: 'Missing Anti-clickjacking Header',
+        url: base + '/',
+        param: '',
+        evidence: '',
+        description: 'The response does not include either Content-Security-Policy with frame-ancestors directive or X-Frame-Options.',
+        solution: 'Modern web browsers support Content-Security-Policy and X-Frame-Options HTTP headers.'
+      } },
+      { path: '/login', alert: {
+        risk: 'Low', confidence: 'Medium',
+        name: 'Cookie Without Secure Flag',
+        url: base + '/login',
+        param: 'session',
+        evidence: 'session=...',
+        description: 'A cookie has been set without the secure flag, which means that the cookie can be accessed via unencrypted connections.',
+        solution: 'Whenever a cookie contains sensitive information, set the secure flag.'
+      } },
+      { path: '/', alert: {
+        risk: 'Informational', confidence: 'Medium',
+        name: 'Server Leaks Version Information via "Server" HTTP Response Header',
+        url: base + '/',
+        param: '',
+        evidence: serverHeader,
+        description: 'The web/application server is leaking version information via the "Server" HTTP response header.',
+        solution: 'Configure the web server to suppress "Server" header.'
+      } }
+    ];
+    for (const c of candidates) {
+      if (serves(c.path)) alerts.push(c.alert);
+    }
   }
 
   const summary = {

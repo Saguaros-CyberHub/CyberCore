@@ -561,13 +561,16 @@ router.post('/generate-and-deploy', authenticateToken, adminOnly, async (req, re
 
     // Lazy-require profile-deploy to avoid a circular dependency at module load.
     const { runProfileDeploy } = require('./profile-deploy');
+    // R1: the ONE default, imported — never a bare 'v2' literal. Lazy-required
+    // alongside profile-deploy above so this route adds no module-load edge.
+    const { DEFAULT_SUBNET_SCHEME } = require('../utils/profile-to-spec');
     const deployResult = await runProfileDeploy({
       profileId: profile.id,
       userId: req.user.userId,
       numLanes: parseInt(num_lanes, 10),
       groupName: group_name,
       attackBoxes: attack_boxes !== false,
-      subnetScheme: subnet_scheme || 'v2',
+      subnetScheme: subnet_scheme || DEFAULT_SUBNET_SCHEME,
       assetSelection: asset_selection,
       vulnAppOpts: vuln_app || {},
       engagementType: engagement_type

@@ -1,0 +1,370 @@
+---
+# ===========================================================================
+# cc_web — the verification. THIS IS THE FILE THE ROLE IS FOR.
+#
+# An audit of upstream GOAD found twenty places where a task reports SUCCESS and
+# did nothing: an inverted Get-Module guard that skips the grant it exists to
+# make, `$x = Get-ADOrganizationalUnit ... > $null` consuming the success stream
+# so the variable is always null, a registry write to
+# HKLM:\SYSTEM\CurrentControlSet\Services\LDAP — a key Windows does not read —
+# next to a sibling that writes the correct NTDS\Parameters path. All three ship
+# as vulnerabilities that are simply not there, and all three are green.
+#
+# What made them survivable is that nothing ever looked. So every check below
+# reads the HOST, never a variable this role set and never a module's own return
+# value:
+#
+#   * the config files are read back off disk, not compared to the template
+#   * the ports are read from `ss`, not from the Listen lines we wrote
+#   * the banner is read from a live HTTP response
+#   * each declared TLS protocol is proved by completing a real handshake, and
+#     each UNdeclared one is proved to fail
+#   * each declared route is fetched
+#   * the credential file is grepped for the account it is supposed to name
+#
+# The last task publishes what was OBSERVED to cc_web_facts_out. That file is
+# the return path: a generator that reads it writes a report about the host that
+# exists rather than about the host that was requested.
+# ===========================================================================
+
+- name: Pick the port the HTTP probes will use
+  ansible.builtin.set_fact:
+    cc_web_probe_port: "{{ cc_web_http_ports | first }}"
+
+# --- 1. read back what was written ----------------------------------------
+
+- name: Read the site configuration back off disk
+  ansible.builtin.slurp:
+    src: "{{ cc_web_sites_available }}/{{ cc_web_site_conf_name }}"
+  register: cc_web_site_readback
+
+- name: Assert the site configuration on disk carries the declared identity
+  ansible.builtin.assert:
+    that:
+      - "(cc_web_site_readback.content | b64decode) is search('(?m)^\\s*ServerName\\s+' ~ (cc_web_server_name | regex_escape))"
+      - "(cc_web_site_readback.content | b64decode) is search('(?m)^\\s*DocumentRoot\\s+' ~ (cc_web_docroot | regex_escape))"
+    fail_msg: >-
+      cc_web: {{ cc_web_sites_available }}/{{ cc_web_site_conf_name }} does not
+      name ServerName '{{ cc_web_server_name }}' and DocumentRoot
+      '{{ cc_web_docroot }}'. The template rendered, the task reported changed,
+      and the file on disk is not what was asked for.
+    quiet: true
+
+- name: Assert the TLS protocol set on disk is the one that was declared
+  ansible.builtin.assert:
+    that:
+      - "(cc_web_site_readback.content | b64decode) is search('(?m)^\\s*SSLProtocol\\s+' ~ (cc_web_ssl_protocol | trim | regex_escape))"
+    fail_msg: >-
+      cc_web: the SSLProtocol line on disk is not
+      '{{ cc_web_ssl_protocol | trim }}'. Everything downstream — the POODLE
+      finding, the TLS 1.0 finding, the sslscan output the student pastes into
+      their report — depends on this one line.
+    quiet: true
+  when: cc_web_tls_enabled | bool
+
+- name: Read back every file the routes were published to
+  ansible.builtin.stat:
+    path: "{{ item.dest }}"
+  register: cc_web_route_stat
+  loop: "{{ cc_web_routes_resolved }}"
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Assert every published route is a real, non-empty file
+  # size > 0 as well as exists: `copy` with an empty `content` writes a
+  # zero-byte file and reports changed, which is a 200 with nothing in it — a
+  # route that technically resolves and teaches nothing.
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.size > 0
+    fail_msg: >-
+      cc_web: {{ item.item.dest }} (route {{ item.item.path }}) is missing or
+      empty after the publish step reported success.
+    quiet: true
+  loop: "{{ cc_web_route_stat.results }}"
+  loop_control:
+    label: "{{ item.item.path }}"
+
+# --- 2. the ports are really bound ----------------------------------------
+
+- name: Read the listening TCP sockets
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -ltn
+  register: cc_web_sockets
+  changed_when: false
+  failed_when: cc_web_sockets.rc != 0
+
+- name: Assert every port the scan report names is really open
+  ansible.builtin.assert:
+    that:
+      - "cc_web_sockets.stdout is search(':' ~ item ~ '\\s')"
+    fail_msg: >-
+      cc_web: nothing is listening on TCP {{ item }}, which web_facts declares
+      and the scan report prints. `ss -ltn` said:
+      {{ cc_web_sockets.stdout | trim }}
+    quiet: true
+  loop: "{{ cc_web_ports }}"
+
+# --- 3. the banner ---------------------------------------------------------
+
+- name: Read the Server header the engine really emits
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -D
+      - "-"
+      - -H
+      - "Host: {{ cc_web_server_name }}"
+      - "http://127.0.0.1:{{ cc_web_probe_port }}/"
+  register: cc_web_head
+  changed_when: false
+  failed_when: cc_web_head.rc != 0
+  when: cc_web_verify_banner | bool
+
+- name: Assert the banner names the product the scan report names
+  ansible.builtin.assert:
+    that:
+      - "cc_web_head.stdout is search('(?im)^Server:\\s*Apache')"
+    fail_msg: >-
+      cc_web: the live Server header is not an Apache banner. Response headers
+      were: {{ cc_web_head.stdout | trim }}
+    quiet: true
+  when: cc_web_verify_banner | bool
+
+- name: Assert the banner carries the version the scan report prints
+  # THE ONE CHECK THAT CANNOT BE SATISFIED BY CONFIGURATION. ServerTokens
+  # decides how much of the version is disclosed; it cannot invent a different
+  # one, and httpd builds the Server header in its core output filter where
+  # mod_headers cannot reach it. So a declared version that does not match the
+  # installed binary is a defect in the FACTS, not in this role, and the only
+  # honest outcomes are to correct web_facts.version to what is printed below or
+  # to pin a base image that ships the declared version. Serving 2.4.62 while
+  # the report says 2.4.52 is the failure this role was written to remove.
+  ansible.builtin.assert:
+    that:
+      - "cc_web_head.stdout is search('(?im)^Server:[^\\r\\n]*' ~ (cc_web_version | regex_escape))"
+    fail_msg: >-
+      cc_web: web_facts declares version '{{ cc_web_version }}' and the host
+      really serves: {{ cc_web_head.stdout | regex_search('(?im)^Server:[^\r\n]*') }}.
+      Correct web_facts.version to the version the image ships, or build the
+      lane on an image that ships the declared version. Do not ship a report
+      that names a version this host does not have.
+    quiet: true
+  when:
+    - cc_web_verify_banner | bool
+    - cc_web_version | length > 0
+
+# --- 4. the TLS listener really speaks what the report claims --------------
+
+- name: Prove the listener completes a handshake on every declared protocol
+  # A completed handshake, not an open port. `openssl s_client` prints the peer
+  # certificate only after the handshake succeeds, so grepping for it is the
+  # cheapest available proof that the protocol is genuinely offered rather than
+  # merely advertised — which is exactly what a SECLEVEL floor produces (see
+  # tasks/tls.yml).
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      openssl s_client -connect 127.0.0.1:{{ cc_web_tls_port }}
+      -servername {{ cc_web_server_name }} {{ cc_web_sclient_flag[item] }}
+      < /dev/null 2> /dev/null | grep -q 'BEGIN CERTIFICATE'
+    executable: /bin/bash
+  register: cc_web_tls_proof
+  changed_when: false
+  failed_when: cc_web_tls_proof.rc != 0
+  loop: "{{ cc_web_tls_protocols }}"
+  when:
+    - cc_web_tls_enabled | bool
+    - cc_web_verify_tls | bool
+
+- name: Prove the listener refuses every protocol the report does NOT claim
+  # The other direction, and it matters as much. A vhost that silently offers
+  # TLS 1.2 alongside the declared TLS 1.0 makes the report's protocol list
+  # false in the permissive direction, and a student's sslscan output will not
+  # match the appendix they were handed. rc != 0 here includes "this openssl has
+  # no such flag", which is the correct answer to "can a client negotiate it".
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      openssl s_client -connect 127.0.0.1:{{ cc_web_tls_port }}
+      -servername {{ cc_web_server_name }} {{ cc_web_sclient_flag[item] }}
+      < /dev/null 2> /dev/null | grep -q 'BEGIN CERTIFICATE'
+    executable: /bin/bash
+  register: cc_web_tls_negative
+  changed_when: false
+  failed_when: cc_web_tls_negative.rc == 0
+  loop: "{{ cc_web_sclient_flag.keys() | list | difference(cc_web_tls_protocols) }}"
+  when:
+    - cc_web_tls_enabled | bool
+    - cc_web_verify_tls | bool
+    - cc_web_verify_tls_exhaustive | default(true) | bool
+
+# --- 5. every route the report links to really resolves --------------------
+
+- name: Fetch every path the scan report is allowed to name
+  # -L follows the 301 that mod_dir issues for an extensionless route resolved
+  # to a directory index (see the derivation in tasks/resolve.yml). nmap's
+  # http-enum and ZAP's spider both follow it too, so this matches what the
+  # student's tooling will see.
+  ansible.builtin.command:
+    argv:
+      - curl
+      - -sS
+      - -o
+      - /dev/null
+      - -L
+      - -w
+      - "%{http_code}"
+      - -H
+      - "Host: {{ cc_web_server_name }}"
+      - "http://127.0.0.1:{{ cc_web_probe_port }}{{ item }}"
+  register: cc_web_route_probe
+  changed_when: false
+  failed_when: "cc_web_route_probe.rc != 0 or (cc_web_route_probe.stdout | int) >= 400"
+  loop: "{{ cc_web_paths }}"
+  when: cc_web_verify_routes | bool
+
+# --- 6. the pivot credential is really planted -----------------------------
+
+- name: Read the credential file's metadata back
+  ansible.builtin.stat:
+    path: "{{ cc_web_pivot.path }}"
+  register: cc_web_pivot_stat
+  when:
+    - cc_web_pivot | length > 0
+    - cc_web_verify_pivot | bool
+
+- name: Assert the credential file exists with the permissions the exercise needs
+  ansible.builtin.assert:
+    that:
+      - cc_web_pivot_stat.stat.exists
+      - cc_web_pivot_stat.stat.size > 0
+    fail_msg: >-
+      cc_web: {{ cc_web_pivot.path }} is missing or empty. The template task
+      reported success, so the file was written somewhere else or removed —
+      either way the lane has no path from the web tier into the domain and the
+      external engagement dead-ends.
+    quiet: true
+  when:
+    - cc_web_pivot | length > 0
+    - cc_web_verify_pivot | bool
+
+- name: Assert the credential file names the service account
+  # The username and the domain are identifiers, not secrets, so they can be
+  # matched on the command line where a failure is readable. They are two
+  # SEPARATE greps on purpose: `grep -e a -e b` is an OR, so one task would pass
+  # on a file that named the account and lost the domain — which is a credential
+  # a student cannot actually use.
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -F
+      - -q
+      - -e
+      - "{{ cc_web_pivot.username }}"
+      - "--"
+      - "{{ cc_web_pivot.path }}"
+  register: cc_web_pivot_user_grep
+  changed_when: false
+  failed_when: cc_web_pivot_user_grep.rc != 0
+  when:
+    - cc_web_pivot | length > 0
+    - cc_web_verify_pivot | bool
+
+- name: Assert the credential file names the domain the account belongs to
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -F
+      - -q
+      - -e
+      - "{{ cc_web_pivot.domain }}"
+      - "--"
+      - "{{ cc_web_pivot.path }}"
+  register: cc_web_pivot_domain_grep
+  changed_when: false
+  failed_when: cc_web_pivot_domain_grep.rc != 0
+  when:
+    - cc_web_pivot | length > 0
+    - cc_web_verify_pivot | bool
+
+- name: Assert the credential file carries the password
+  # The pattern goes in on STDIN, never on the command line: an argv entry is
+  # visible in `ps`, in the ansible task banner and in the job log an instructor
+  # can open. no_log covers the rest.
+  ansible.builtin.command:
+    argv:
+      - grep
+      - -F
+      - -q
+      - -f
+      - "-"
+      - "--"
+      - "{{ cc_web_pivot.path }}"
+    stdin: "{{ cc_web_pivot.password }}"
+  register: cc_web_pivot_pass_grep
+  changed_when: false
+  failed_when: cc_web_pivot_pass_grep.rc != 0
+  no_log: true
+  when:
+    - cc_web_pivot | length > 0
+    - cc_web_verify_pivot | bool
+
+# --- 7. publish what was OBSERVED ------------------------------------------
+
+- name: Assemble the observed facts
+  # Deliberately shaped like asset.web_facts, so the generator can consume it
+  # with readWebFacts() and nothing new has to learn a second contract. The
+  # difference is provenance: web_facts is what was requested, this is what
+  # answered.
+  ansible.builtin.set_fact:
+    cc_web_observed:
+      product: apache
+      version: "{{ cc_web_head.stdout | default('') | regex_search('(?im)^Server:\\s*Apache/([^\\s\\r\\n]+)', '\\1') | default([], true) | first | default('') }}"
+      ports: "{{ cc_web_ports }}"
+      tls:
+        enabled: "{{ cc_web_tls_enabled | bool }}"
+        # 0, not null: a JSON null and a missing key read the same to half the
+        # consumers this file will meet, and readWebFacts already treats a
+        # non-positive port as "no answer".
+        port: "{{ cc_web_tls_port | int }}"
+        protocols: "{{ (cc_web_tls_proof.results | default([])) | rejectattr('skipped', 'defined') | map(attribute='item') | list }}"
+      paths: "{{ cc_web_paths }}"
+      server_name: "{{ cc_web_server_name }}"
+      docroot: "{{ cc_web_docroot }}"
+      pivot_credential_path: "{{ cc_web_pivot.path | default('') }}"
+      verified_at: "{{ ansible_date_time.iso8601 | default('') }}"
+
+- name: Publish the observed facts
+  ansible.builtin.copy:
+    content: "{{ cc_web_observed | to_nice_json }}\n"
+    dest: "{{ cc_web_facts_out }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Read the observed facts back and confirm they parse
+  # The last re-read. A JSON file that a consumer cannot parse is the same
+  # nothing as a file that was never written, and to_nice_json emitting an
+  # unquoted Jinja artefact is exactly the kind of thing that only shows up when
+  # something tries to load it.
+  ansible.builtin.slurp:
+    src: "{{ cc_web_facts_out }}"
+  register: cc_web_facts_readback
+
+- name: Assert the published facts describe this host
+  ansible.builtin.assert:
+    that:
+      - "(cc_web_facts_readback.content | b64decode | from_json).ports | length == (cc_web_ports | length)"
+      - "(cc_web_facts_readback.content | b64decode | from_json).server_name == cc_web_server_name"
+    fail_msg: >-
+      cc_web: {{ cc_web_facts_out }} did not read back as JSON describing this
+      host. Everything upstream of this point may still be correct, but nothing
+      downstream can trust the published facts.
+    quiet: true

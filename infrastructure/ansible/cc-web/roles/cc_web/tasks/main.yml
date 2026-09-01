@@ -1,0 +1,86 @@
+---
+# ===========================================================================
+# cc_web — entry point.
+#
+# ORDER IS THE DESIGN.
+#
+#   resolve  is PURE. It reads cc_web_facts defensively (every lookup carries a
+#            default) and normalises it into the shape the rest of the role
+#            consumes. It touches nothing on the host, so it is safe to run
+#            before validation.
+#   assert   is the fail-fast gate, and it validates the RESOLVED shape rather
+#            than the caller's raw input. Checking the raw input would leave the
+#            normalisation itself unchecked — a protocol token that silently
+#            normalised to nothing would pass a raw-input check and then produce
+#            an SSLProtocol line with no protocols on it.
+#   ...      everything after assert may mutate the host.
+#   verify   runs LAST and re-reads the host, not the variables.
+#
+# Nothing between assert and verify is allowed to be the only evidence that it
+# worked. GOAD's audit found 20 places where a task reports SUCCESS and did
+# nothing; the answer here is that success is defined by verify.yml re-reading
+# the artifact, never by a module's own return value.
+# ===========================================================================
+
+- name: Normalise the web-facts contract into the shape this role consumes
+  ansible.builtin.include_tasks: resolve.yml
+  tags:
+    - cc_web
+    - cc_web_resolve
+
+- name: Refuse to touch the host unless the contract is complete and buildable
+  ansible.builtin.include_tasks: assert.yml
+  tags:
+    - cc_web
+    - cc_web_assert
+
+- name: Install the web engine and the tools verification depends on
+  ansible.builtin.include_tasks: packages.yml
+  tags:
+    - cc_web
+    - cc_web_install
+
+- name: Publish the docroot and every declared route
+  ansible.builtin.include_tasks: content.yml
+  tags:
+    - cc_web
+    - cc_web_content
+
+- name: Set the server banner the scan report names
+  ansible.builtin.include_tasks: banner.yml
+  tags:
+    - cc_web
+    - cc_web_banner
+
+- name: Stand up the TLS listener the scan report names
+  ansible.builtin.include_tasks: tls.yml
+  when: cc_web_tls_enabled | bool
+  tags:
+    - cc_web
+    - cc_web_tls
+
+- name: Write the vhosts and the listen set
+  ansible.builtin.include_tasks: vhosts.yml
+  tags:
+    - cc_web
+    - cc_web_vhosts
+
+- name: Plant the pivot credential
+  ansible.builtin.include_tasks: pivot_credential.yml
+  when: cc_web_pivot | length > 0
+  tags:
+    - cc_web
+    - cc_web_pivot
+
+# WITHOUT THIS THE VERIFICATION IS A LIE. Handlers do not run until the end of
+# the play, so a verify block placed after them in file order still executes
+# BEFORE the restart — it would read the previous config off a still-running
+# server and pass. Flushing here is what makes "verify re-reads the host" true.
+- name: Apply pending restarts before anything reads the listener
+  ansible.builtin.meta: flush_handlers
+
+- name: Prove the host really is what the paper says it is
+  ansible.builtin.include_tasks: verify.yml
+  tags:
+    - cc_web
+    - cc_web_verify

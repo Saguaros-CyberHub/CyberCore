@@ -54,10 +54,66 @@ const {
 // the compile is a caller's concern, not a projection's.
 const {
   engagementModelFromRow, validateEngagementPlan, describeEngagementType,
-  MODEL_FIELDS, JSONB_MODEL_FIELDS, AUTHORABLE_FIELDS,
+  MODEL_FIELDS, JSONB_MODEL_FIELDS, AUTHORABLE_FIELDS, BAKE_TYPE_KEY,
 } = require('./engagement-model');
+// ─── B3: the staging engagement cannot be pulled out from under a bake ───────
+// TWO NAMES ONLY — the status vocabulary and the per-client read — from the
+// module that OWNS ciab_profile_bake. Not a second SELECT spelled here: this
+// file would then hold its own copy of another module's table name and its own
+// idea of which statuses are finished, and the day a status is added the copy
+// would quietly start calling a running bake finished.
+//
+// LOAD-SAFE, and checked rather than assumed: bake-orchestrator.js's only
+// top-level require is './db', the same handle this file already holds, so it
+// adds no cluster call, no site-config read and no new failure mode to the
+// stubbed module caches that load this file (test/ciab-engagement-provision.test.js
+// and test/ciab-engagement-model.test.js). It does not require this module
+// back, so there is no cycle.
+const {
+  listBakes, TERMINAL_STATUSES: BAKE_TERMINAL_STATUSES,
+} = require('./bake-orchestrator');
+// ─── R1: the default scheme has exactly ONE spelling ────────────────────────
+// It used to have six — a bare 'v2' literal in each of routes/engagements.js,
+// routes/profile-deploy.js and this file — which is precisely why flipping
+// profile-to-spec.js's DEFAULT_SUBNET_SCHEME to 'v3' changed nothing: that
+// constant only fires when a caller OMITS the option, and every live caller
+// passed a literal. So the constant is IMPORTED here rather than re-declared;
+// a second declaration is the same drift wearing a different name.
+//
+// LOAD-SAFE, and that is not an accident. profile-to-spec.js's own header
+// records that it imports nothing which needs a cluster or a database: its
+// heaviest edge is src/utils/vm-template-resolver.js -> site-config.js, whose
+// getConfig() reads config/site.json LAZILY, on call, not at require time. So
+// this adds no new failure mode to the stubbed module caches that load this
+// file (test/ciab-engagement-provision.test.js:36-46 and
+// test/ciab-engagement-model.test.js:141-156, which stub site-config only).
+const { DEFAULT_SUBNET_SCHEME } = require('./profile-to-spec');
 
 const LOG = '[CIAB Engagement]';
+
+/**
+ * The scheme an ADOPTED pre-A8 reservation is recorded as — 'v2', and
+ * deliberately NOT DEFAULT_SUBNET_SCHEME.
+ *
+ * This is not a stale literal that R1 missed; it is the same rule migration
+ * 016 refuses to break with a backfill, applied on the read path.
+ *
+ * adoptExistingReservation writes a ciab_engagement row for a VXLAN block that
+ * was ALREADY CARVED, before this table existed — by the inline path in
+ * routes/profile-deploy.js, which defaulted to v2 and carved ONE VNet per lane.
+ * subnet_scheme on such a row is therefore not a preference to be defaulted; it
+ * is a DESCRIPTION of what is in Proxmox. Recording 'v3' would claim an internal
+ * VNet at tag + V3_INTERNAL_TAG_OFFSET that nothing ever created, and the next
+ * deploy would cable its lanes onto bridges that do not exist on any node —
+ * while expectedTagsFor() below would start demanding those same tags and call
+ * a perfectly healthy block unready.
+ *
+ * reservationFromRow (lane-reservation.js:145-158) does not project a
+ * subnet_scheme at all, so `reservation.subnet_scheme` is always undefined here
+ * and this value is always the one written. Stated as a named constant so that
+ * is a decision on the record rather than a fallback nobody re-read.
+ */
+const ADOPTED_SUBNET_SCHEME = 'v2';
 
 /**
  * Engagements currently being provisioned in THIS process.
@@ -182,7 +238,9 @@ async function adoptExistingReservation(profileId, engagementType) {
      RETURNING *`,
     [
       profileId, engagement,
-      reservation.subnet_scheme || 'v2',
+      // NOT the default — see ADOPTED_SUBNET_SCHEME. An adopted row describes a
+      // carve that already happened; it does not get to choose one.
+      reservation.subnet_scheme || ADOPTED_SUBNET_SCHEME,
       size && size >= 1 && size <= 200 ? size : 1,
       reservation.challenge_id, reservation.challenge_key,
     ]
@@ -521,7 +579,11 @@ async function provisionEngagementNetwork(engagement, { companyName = null } = {
  * UI polls. Nothing awaits the provision.
  */
 async function createEngagement({
-  profileId, engagementType = DEFAULT_ENGAGEMENT_TYPE, subnetScheme = 'v2',
+  profileId, engagementType = DEFAULT_ENGAGEMENT_TYPE,
+  // R1: the ONE default, imported. A caller that names a scheme still wins —
+  // this fires only when the field is absent or empty, which is what makes an
+  // explicit 'v2' a first-class choice rather than a legacy value.
+  subnetScheme = DEFAULT_SUBNET_SCHEME,
   maxStudents, companyName = null, actingUserId = null,
 }) {
   if (!profileId) throw Object.assign(new Error('profile_id required'), { status: 400 });
@@ -665,6 +727,77 @@ async function recoverStrandedEngagements() {
 }
 
 /**
+ * B3: refuse to retire the staging engagement out from under a running bake.
+ *
+ * WHAT GOES WRONG WITHOUT IT. A bake borrows a DEDICATED one-slot engagement —
+ * routes/profile-deploy.js's BAKE_ENGAGEMENT_TYPE, and its header explains at
+ * length why a one-id block is the only shape that makes the staging lane's
+ * VXLAN id, and therefore the pair of /24 bases the golden templates write into
+ * their own DNS zone, their SYSVOL referrals and every SPN, knowable before the
+ * lane exists. That row is the system's whole record of which block those
+ * templates were built against. Retiring it is one confirmed click in a list
+ * that, until this phase, showed it as an ordinary engagement — and the bake it
+ * strands reports nothing at all, because nothing in a ninety-minute ansible run
+ * reads this table.
+ *
+ * THE SHAPE IS assertEngagementDeployable's, deliberately: a 409 with a
+ * SCREAMING_SNAKE code, naming the state it found and the remedy, and NO INLINE
+ * FALLBACK. There is nothing sensible to do on behalf of the operator here —
+ * pausing the bake is not a thing this system can do, and retiring anyway is the
+ * failure — so the only honest answer is to refuse and say what to do instead.
+ *
+ * NOT RESTRICTED TO A ROUTE. It lives on retireEngagement because that is the
+ * one function every retirement path goes through; a guard in the handler would
+ * be bypassed by the next caller, and the whole finding is that a second caller
+ * appeared without anyone noticing.
+ *
+ * TERMINAL IS THE BAKE MODULE'S WORD, not a list copied here — ready, failed and
+ * superseded are the three states nothing will move on its own. 'pending' is
+ * NOT terminal: it has allocated nothing yet, but it is a bake about to start on
+ * exactly this block, and retiring underneath it strands it just as thoroughly.
+ *
+ * A READ THAT CANNOT RUN IS NOT AN ABSENT BAKE. If ciab_profile_bake is missing
+ * or unreadable this throws the pg error, the route renders it (42P01 becomes a
+ * 503 naming the migration), and the retirement does not happen. Refusing on
+ * "could not check" is the safe direction: the cost of a wrong refusal is one
+ * operator re-reading a message, and the cost of a wrong retirement is a
+ * ninety-minute build with no evidence of what broke it.
+ *
+ * @param {object} engagement  a rowToEngagement projection, or a bare row —
+ *                             only engagement_type and profile_id are read
+ * @returns {Promise<void>}
+ * @throws {Error & {status:409, code:'ENGAGEMENT_BAKE_IN_FLIGHT'}}
+ */
+async function assertBakeEngagementRetirable(engagement) {
+  // Every other type keeps exactly the behaviour it had: no second read, no new
+  // failure mode, no new refusal. This guard is about ONE slug.
+  if (!engagement || engagement.engagement_type !== BAKE_TYPE_KEY) return;
+
+  const bakes = await listBakes(engagement.profile_id);
+  const live = bakes.filter(b => !BAKE_TERMINAL_STATUSES.includes(b.status));
+  if (live.length === 0) return;
+
+  // listBakes orders created_at DESC, so this is the newest live one. The count
+  // is named too: an operator who clears one and is refused again should not
+  // have to guess that there was a second.
+  const bake = live[0];
+  const also = live.length > 1 ? ` (and ${live.length - 1} more still running)` : '';
+  const err = new Error(
+    `Bake ${bake.lab_name} is still running on this staging network — it reads ` +
+    `'${bake.status}': ${bake.phase_detail || 'no progress recorded yet'}${also}. Retiring the ` +
+    `'${BAKE_TYPE_KEY}' engagement now would end the record of the one-slot block that bake's golden ` +
+    `templates are being built against, and nothing in the build would report the cause. Wait for it ` +
+    `to finish — a bake ends as ${BAKE_TERMINAL_STATUSES.join(', ')} — or, if no process is still ` +
+    `running it, restart the server: the boot sweep marks an abandoned bake failed and tears its ` +
+    `staging lane down. Then retire.`
+  );
+  err.status = 409;
+  err.code = 'ENGAGEMENT_BAKE_IN_FLIGHT';
+  err.bake = { bake_id: bake.bake_id, lab_name: bake.lab_name, status: bake.status };
+  throw err;
+}
+
+/**
  * Track B1: retirement.
  *
  * DELIBERATELY NOT PART OF updateEngagementModel. retired_at sits OUTSIDE
@@ -698,6 +831,21 @@ async function recoverStrandedEngagements() {
  * @throws {Error & {status:409}} already retired
  */
 async function retireEngagement(engagementId, { actingUserId = null } = {}) {
+  // B3: ONE extra SELECT, and only far enough to learn the type — the guard
+  // itself reads nothing more for any engagement that is not the staging one.
+  // The conditional UPDATE below stays exactly as it was, including its zero-row
+  // 404/409 split: a missing row falls straight through here (there is no type
+  // to guard) and is still told apart on the cold path.
+  //
+  // Retirement is a confirmed, admin-only action taken a handful of times in an
+  // environment's life, so a second round trip on it is not a cost worth
+  // trading against a stranded ninety-minute build.
+  const before = await query(
+    `SELECT engagement_id, profile_id, engagement_type FROM ciab_engagement WHERE engagement_id = $1`,
+    [engagementId]
+  );
+  await assertBakeEngagementRetirable(before.rows[0]);
+
   const res = await query(
     `UPDATE ciab_engagement
         SET retired_at = now(), updated_by = $2, updated_at = now()
@@ -728,6 +876,9 @@ module.exports = {
   recoverStrandedEngagements,
   // Track B1: ends an engagement without pretending it hands the block back.
   retireEngagement,
+  // B3: exported so a caller — and a test — can ask the question without
+  // performing the retirement, and so the refusal has exactly one author.
+  assertBakeEngagementRetirable,
   assertEngagementDeployable,
   // Track B0: the model writer B1's PATCH route calls.
   updateEngagementModel,
@@ -736,4 +887,13 @@ module.exports = {
   rowToEngagement,
   // Pure, so it is testable without a cluster.
   expectedTagsFor,
+  // ─── R1 ───────────────────────────────────────────────────────────────────
+  // Re-exported, NOT re-declared: profile-to-spec.js owns the only literal, and
+  // this is the same binding. It is here so that the module which WRITES
+  // ciab_engagement.subnet_scheme can also state what that column defaults to,
+  // and so a test can prove the two agree by identity rather than by spelling.
+  DEFAULT_SUBNET_SCHEME,
+  // The read-path exception, exported so a test can pin that it is NOT the
+  // default and cannot quietly become it.
+  ADOPTED_SUBNET_SCHEME,
 };
