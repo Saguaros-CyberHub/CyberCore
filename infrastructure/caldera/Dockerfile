@@ -150,6 +150,20 @@ RUN find /src/caldera -maxdepth 4 -name '.git' -prune -exec rm -rf {} +
 FROM node:20-bookworm-slim AS magma
 COPY --from=source /src/caldera/plugins/magma /magma
 WORKDIR /magma
+# Node's default old-space ceiling is ~2 GB, and magma's `vite build` exceeds it:
+# the first build of 5.3.0 died at 1915.8 MB with
+#   FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory
+# after ~120 s in `transforming...`, exiting 134. It is not a leak and not a
+# broken tag — vite 2.9.15 holds the whole module graph in memory, and magma
+# vendors every plugin's GUI source into one bundle (prebundle.js copies them in
+# first), so the graph is large by construction.
+#
+# Raised here rather than in the compose build args because it is a property of
+# THIS build step, not of the deployment: a `docker build` run by hand needs it
+# just as much. 4096 is roughly double the observed peak — the BUILD HOST needs
+# that much free RAM, so bump it here if a future magma grows past it.
+ARG MAGMA_HEAP_MB=4096
+ENV NODE_OPTIONS="--max-old-space-size=${MAGMA_HEAP_MB}"
 # `npm ci` when a lockfile is present (reproducible), `npm install` otherwise —
 # older magma tags do not ship package-lock.json.
 RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
@@ -272,10 +286,19 @@ CMD ["python", "server.py", "--environment", "local"]
 #  1. THE VERSION TAG. `git clone --branch 5.3.0` fails loudly if that tag does
 #     not exist upstream. That is the intended failure mode; run the ls-remote
 #     above and set ARG CALDERA_VERSION to a real tag.
-#  2. THE MAGMA BUILD. If stage 2 fails on the npm build, check the Node major
-#     magma's package.json asks for and change the `node:20-bookworm-slim` base.
-#     A magma that fails to build yields a server with a working API and a blank
-#     page, which reads like a proxy problem and is not.
+#  2. THE MAGMA BUILD. Two distinct failures, and they look nothing alike.
+#     a) OOM — OBSERVED AND FIXED, kept here because it will recur if the heap
+#        ARG is lowered or magma grows. The first 5.3.0 build died at 1915.8 MB
+#        with "FATAL ERROR: ... JavaScript heap out of memory", exit 134, after
+#        ~120 s in `transforming...`. Node's default old-space ceiling is ~2 GB
+#        and vite 2.9.15 holds the whole module graph at once. Fixed by
+#        MAGMA_HEAP_MB (default 4096) in stage 2. THE BUILD HOST MUST HAVE THAT
+#        MUCH FREE RAM — if it does not, the same OOM returns and the fix is
+#        more memory on the builder, not a smaller number here.
+#     b) Wrong Node major — if npm itself refuses, check what magma's
+#        package.json asks for and change the `node:20-bookworm-slim` base.
+#     Either way a magma that fails to build yields a server with a working API
+#     and a blank page, which reads like a proxy problem and is not.
 #  3. THE SUBPATH. Caddy serves this under /caldera via handle_path, which STRIPS
 #     the prefix — but magma emits root-absolute URLs (/api/v2/*, /assets/*).
 #     If the login page renders and its assets 404, the fix is a dedicated
