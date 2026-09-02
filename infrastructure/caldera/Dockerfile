@@ -197,22 +197,22 @@ ARG MAGMA_HEAP_MB=4096
 ENV NODE_OPTIONS="--max-old-space-size=${MAGMA_HEAP_MB}"
 # `npm ci` when a lockfile is present (reproducible), `npm install` otherwise —
 # older magma tags do not ship package-lock.json.
-# THE SUBPATH IS A BUILD INPUT. Caddy serves this under /caldera on the main
-# site, and vite bakes `base` into index.html at BUILD time: without it magma
-# emits root-absolute asset URLs (/assets/index-*.js), the browser requests them
-# at the site root, they miss `handle_path /caldera/*`, fall through to the
-# CyberCore app and 404. The HTML loads, no JS does, and you get a WHITE PAGE
-# with no error anywhere in the server logs — which reads like a proxy fault and
-# is not one. Observed on the first working deploy.
+# vite bakes `base` into index.html at BUILD time, so where this console is
+# served is a build input, not just a proxy setting. It is served at its own
+# HOSTNAME (the {$CALDERA_HOST} blocks in config/caddy/Caddyfile), so the
+# correct value is root.
 #
-# `npm run build -- --base=...` forwards the flag through the npm script to vite,
-# whose CLI value wins over anything in vite.config. Paired with
-# app.frontend.api_base_url in conf/local.yml, which does the same job for the
-# API calls the bundle makes at runtime — BOTH are required, and they must agree.
+# DO NOT set a subpath here. It was tried, together with
+# app.frontend.api_base_url in conf/local.yml, and a subpath cannot work:
+# magma bootstraps from GET /api/v2/config/main at the ORIGIN ROOT, so it
+# uses the default base for the one call that would have told it otherwise.
+# Observed: assets resolved correctly under /caldera/assets/... while the SPA
+# 404'd on /api/v2/config/main and rendered a login form, because its API was
+# unreachable rather than because anything was unauthenticated.
 #
-# If this ever moves to its own hostname, set CALDERA_BASE_PATH=/ and clear
-# api_base_url; serving at an origin root is what upstream assumes.
-ARG CALDERA_BASE_PATH=/caldera/
+# `npm run build -- --base=...` forwards the flag through the npm script to
+# vite, whose CLI value wins over anything in vite.config.
+ARG CALDERA_BASE_PATH=/
 RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
     else npm install --no-audit --no-fund; fi \
  && npm run build -- --base="${CALDERA_BASE_PATH}" \

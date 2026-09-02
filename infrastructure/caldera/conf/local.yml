@@ -29,23 +29,19 @@
 host: 0.0.0.0
 port: 8888
 
-# THE PREFIX THE BROWSER USES, not the one the upstream sees. These are different
-# and conflating them is what produced a white page on the first working deploy.
+# EMPTY, AND IT MUST STAY EMPTY. The console is served at its own HOSTNAME
+# (the {$CALDERA_HOST} blocks in config/caddy/Caddyfile), so the page origin IS
+# Caldera's origin and magma resolving the API against it is exactly right.
 #
-# Caddy serves this under /caldera and `handle_path` STRIPS that prefix before
-# Caldera sees the request. So Caldera is correct to think it lives at "/", but
-# the BROWSER does not: an empty value here makes magma resolve the API against
-# the page origin, so it calls https://<site>/api/v2/... — which misses
-# `handle_path /caldera/*`, falls through to the CyberCore app, and 404s.
-#
-# Setting it to /caldera makes the bundle call /caldera/api/v2/..., which matches
-# the handler, gets stripped back to /api/v2/... and reaches Caldera correctly.
-#
-# ITS TWIN IS A BUILD ARG. This covers the API calls the bundle makes at runtime;
-# vite's `base` (CALDERA_BASE_PATH in the Dockerfile) covers the asset URLs baked
-# into index.html. BOTH are required and they must agree — one without the other
-# still gives a blank page, just for the other half of the reason.
-app.frontend.api_base_url: "/caldera"
+# DO NOT SET THIS TO A SUBPATH. It was tried, with vite's `base` set to match,
+# and it cannot work: magma bootstraps by calling GET /api/v2/config/main to
+# learn its own configuration, so it uses the DEFAULT base for the one request
+# that would have told it a different base. Observed under a /caldera mount —
+# assets loaded from /caldera/assets/... correctly while the SPA 404'd on
+# https://<site>/api/v2/config/main and /api/v2/plugins, and rendered a login
+# form because its API was unreachable. A subpath needs Caldera's own traffic
+# rewritten; a hostname needs nothing.
+app.frontend.api_base_url: ""
 
 # --- Authentication ----------------------------------------------------------
 # DELIBERATELY 'default'. Authentication does NOT happen here.

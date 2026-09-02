@@ -516,6 +516,11 @@ services:
       - caldera
     environment:
       CYBERHUB_HOST: ${CYBERHUB_HOST}
+      # The authoring console's OWN hostname. It is a separate site block rather
+      # than a path on CYBERHUB_HOST because magma is an SPA that bootstraps from
+      # /api/v2/config/main at the origin root — a subpath mount cannot work. Point
+      # a Cloudflare tunnel ingress rule at this container for this hostname.
+      CALDERA_HOST: ${CALDERA_HOST:-caldera.localhost}
       # The /caldera* upstream in config/caddy/Caddyfile. It is a compose SERVICE
       # NAME now — the authoring instance moved from a Proxmox VM into the
       # `caldera` container above — but it stays an environment variable so a

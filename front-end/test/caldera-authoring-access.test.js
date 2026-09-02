@@ -389,33 +389,43 @@ test('THE POINT OF THIS FILE: /caldera is proxied in BOTH site blocks, and NEITH
   const publicSite = findOne('CYBERHUB_HOST');   // «CYBERHUB_HOST» after substitution
   const internalSite = findOne('http://:80');
 
+  // Guacamole's own proxy must survive any edit to this file.
   for (const [name, block] of [['public site', publicSite], ['internal :80 listener', internalSite]]) {
-    // The route exists at all. handle or handle_path — handle_path is what
-    // strips the prefix before the upstream sees it.
-    assert.match(block.body, /handle(_path)?\s+\/caldera/,
-      `${name}: no /caldera handle — the authoring console is unreachable from the main site`);
-
-    // …and it is gated. THIS is the assertion the file exists for.
-    assert.match(block.body, /forward_auth\s+\S+\s*\{[^}]*\}/,
-      `${name}: /caldera is proxied with NO forward_auth. That publishes an adversary authoring `
-      + 'console behind nothing but Caldera\'s own shared static password.');
-
-    // The gate and the proxy must be in the SAME handle block: a forward_auth
-    // sitting elsewhere in the site guards something else entirely.
-    const gated = directiveBlock(block.body, /handle(_path)?\s+\/caldera/);
-    assert.ok(gated, `${name}: could not read the /caldera handle block`);
-    assert.match(gated, /forward_auth/, `${name}: the gate is not inside the /caldera handle`);
-    assert.match(gated, /reverse_proxy/, `${name}: the /caldera handle proxies nothing`);
-
-    // The upstream is a VM address supplied by the environment, never a literal
-    // baked into the repo.
-    assert.match(gated, /reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM:[^»]+»/,
-      `${name}: the authoring VM's address must come from CALDERA_AUTHORING_UPSTREAM`);
-    assert.ok(!/reverse_proxy\s+\d+\.\d+\.\d+\.\d+/.test(gated),
-      `${name}: a hard-coded IP for the authoring VM`);
-
-    // Guacamole's own proxy is still here — this edit must not have eaten it.
     assert.match(block.body, /handle\s+\/guacamole\*/, `${name}: the guacamole handle went missing`);
+  }
+
+  // THE CONSOLE IS ON ITS OWN HOSTNAME, NOT A PATH. magma is an SPA that
+  // bootstraps from GET /api/v2/config/main at the ORIGIN ROOT, so it uses the
+  // default base for the one call that would have told it a different base — a
+  // subpath mount was tried and the SPA 404'd its own API, rendering a login
+  // form that looked like an auth failure and was not.
+  const serving = blocks.filter((b) => /\bimport\s+caldera_gate\b/.test(b.body));
+  assert.ok(serving.length >= 2,
+    `expected >= 2 site blocks serving the console, found ${serving.length}. Two are needed because a `
+    + 'Cloudflare tunnel may deliver either http:// or https:// to this container.');
+  for (const b of serving) {
+    assert.match(b.header, /«CALDERA_HOST»/,
+      `site block \`${b.header}\` imports the gate but is not the console's own hostname`);
+  }
+
+  // THE GATE ITSELF, defined once and imported. This is the assertion the file
+  // exists for: without forward_auth the public site would publish an adversary
+  // authoring console behind nothing but Caldera's own login form.
+  const snippet = blocks.find((b) => /^\(caldera_gate\)$/.test(b.header.trim()));
+  assert.ok(snippet, 'no `(caldera_gate)` snippet — the gate must be defined once and imported');
+  assert.match(snippet.body, /forward_auth\s+\S+\s*\{[^}]*\}/, 'the gate snippet has no forward_auth');
+  assert.match(snippet.body, /reverse_proxy/, 'the gate snippet proxies nothing');
+  assert.match(snippet.body, /reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM:[^»]+»/,
+    'the upstream must come from CALDERA_AUTHORING_UPSTREAM, never a literal');
+  assert.ok(!/reverse_proxy\s+\d+\.\d+\.\d+\.\d+/.test(snippet.body),
+    'a hard-coded IP for the authoring console');
+
+  // And NOTHING may reach the upstream without going through it.
+  for (const b of blocks) {
+    if (/^\(caldera_gate\)$/.test(b.header.trim())) continue;
+    assert.ok(!/reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM/.test(b.body),
+      `site block \`${b.header}\` proxies to Caldera directly instead of importing the gate, so it `
+      + 'never runs forward_auth');
   }
 });
 
@@ -424,7 +434,11 @@ test('forward_auth points at the path server.js actually mounts', () => {
   // allows EVERY request, silently. So the two ends are compared directly.
   const caddy = fs.readFileSync(CADDYFILE, 'utf8');
   const uris = [...caddy.matchAll(/forward_auth[^{]*\{[^}]*?uri\s+(\S+)/g)].map((m) => m[1]);
-  assert.ok(uris.length >= 2, 'both site blocks must name the authorize endpoint');
+  // ONE now, not two: the gate is defined once in the `(caldera_gate)` snippet
+  // and imported by each serving site block, so there is a single forward_auth
+  // to keep in step with the app. That every serving block imports it is
+  // asserted in the test above.
+  assert.ok(uris.length >= 1, 'the gate must name the authorize endpoint');
   for (const uri of uris) {
     assert.strictEqual(uri, calderaAuthoring.AUTHORIZE_PATH,
       'the Caddyfile asks a different path than the app answers on');

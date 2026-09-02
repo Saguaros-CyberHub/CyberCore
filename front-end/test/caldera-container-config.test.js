@@ -403,85 +403,131 @@ function directiveBlock(body, re) {
   return null;
 }
 
-/** Every site block that routes /caldera, whatever its header. */
-function calderaBlocks() {
-  return siteBlocks(read(CADDYFILE))
-    .map((b) => ({ ...b, handle: directiveBlock(b.body, /handle(_path)?\s+\/caldera/) }))
-    .filter((b) => /handle(_path)?\s+\/caldera/.test(b.body));
+/** The one place the gate is defined: the `(caldera_gate)` snippet. */
+function gateSnippet() {
+  const b = siteBlocks(read(CADDYFILE)).find((x) => /^\(caldera_gate\)$/.test(x.header.trim()));
+  return b ? b.body : null;
 }
 
-test('THE OTHER POINT OF THIS FILE: every /caldera block has BOTH the gate and the strip', () => {
-  const blocks = calderaBlocks();
+/**
+ * Every site block that SERVES the authoring console.
+ *
+ * A block serves it if it imports the gate snippet. The snippet itself is
+ * excluded — it is the definition, not a site.
+ */
+function calderaBlocks() {
+  return siteBlocks(read(CADDYFILE))
+    .filter((b) => !/^\(caldera_gate\)$/.test(b.header.trim()))
+    .filter((b) => /\bimport\s+caldera_gate\b/.test(b.body));
+}
 
-  // Two today: the public site and the internal :80 listener. The assertions run
-  // per block rather than once per file precisely so that a THIRD block — the
-  // documented fix for the SPA-subpath problem, a dedicated hostname — cannot be
-  // added without them.
-  assert.ok(
-    blocks.length >= 2,
-    `expected the console to be routed in at least 2 site blocks, found ${blocks.length}`
+test('THE OTHER POINT OF THIS FILE: the gate snippet has every part, in order', () => {
+  // The gate is defined ONCE and imported, rather than copy-pasted into each
+  // site block. That is deliberate: forgetting one line of it publishes an
+  // adversary authoring console to the internet behind Caldera's own login form,
+  // and a copy-paste is exactly how a line goes missing. These assertions are
+  // therefore about the single definition; the test below is about every block
+  // using it.
+  const gate = gateSnippet();
+  assert.ok(gate, 'no `(caldera_gate)` snippet in the Caddyfile — the gate must be defined once and imported');
+
+  // Directive order is Caddy's own unless you are inside a `route`, and in
+  // Caddy's order request_header runs AFTER forward_auth — which would delete
+  // the header the gate just installed.
+  const route = directiveBlock(gate, /(^|\s)route\s*\{/);
+  assert.ok(route, 'the gate snippet has no `route` block, so directive order is Caddy\'s, not the file\'s');
+
+  // (a) THE STRIPS. KEY is the one that matters most: it is the credential that
+  // actually authenticates the proxied request, so a client allowed to send its
+  // own would reach Caldera without passing the gate at all. X-CyberCore-Auth
+  // closes Caddy advisory GHSA-7r4p-vjf4-gxv4, where copy_headers does NOT
+  // remove a client-supplied header when the auth response omits it.
+  for (const h of ['KEY', 'X-CyberCore-Auth']) {
+    assert.match(
+      // Built from a normal string, NOT a template literal: in a template
+      // literal `\s` collapses to "s" and `\b` becomes a backspace character,
+      // so the regex silently matches nothing and the gate looks present.
+      route, new RegExp('request_header\\s+-' + h + '\\b'),
+      `the gate does not strip an inbound ${h}`
+    );
+  }
+
+  // (b) THE GATE ITSELF.
+  assert.match(route, /forward_auth\s+\S+\s*\{[^}]*\}/, 'the gate snippet has no forward_auth');
+
+  // (c) ORDER: strips before the gate, gate before the proxy.
+  const stripAt = route.search(/request_header\s+-KEY\b/);
+  const gateAt = route.search(/forward_auth\b/);
+  const injectAt = route.search(/request_header\s+KEY\s+«/);
+  const proxyAt = route.search(/reverse_proxy\b/);
+  assert.ok(stripAt < gateAt, 'the inbound strip is written AFTER forward_auth');
+  assert.ok(gateAt < injectAt, 'the KEY is injected BEFORE the gate runs, so an unapproved request would carry it');
+  assert.ok(injectAt < proxyAt, 'the KEY is injected after the proxy, so the upstream never sees it');
+
+  // (d) WHAT AUTHENTICATES. auth_svc.check_permissions() short-circuits on
+  // Caldera's own api key for every route; without this line the console falls
+  // through to Caldera's stock login form, whose passwords are random per start
+  // and known to nobody.
+  assert.match(
+    route, /request_header\s+KEY\s+«CALDERA_API_KEY_RED»/,
+    'the gate never injects Caldera\'s KEY header — nothing would authenticate the console'
   );
 
-  for (const block of blocks) {
-    const where = `site block \`${block.header}\``;
-    assert.ok(block.handle, `${where}: could not read the /caldera handle`);
+  // (e) The upstream comes from the environment, never a literal.
+  assert.match(
+    route, /reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM:[^»]+»/,
+    'the upstream must come from CALDERA_AUTHORING_UPSTREAM, never a literal in this file'
+  );
+  assert.ok(
+    !/reverse_proxy\s+\d+\.\d+\.\d+\.\d+/.test(route),
+    'a hard-coded IP for the authoring console'
+  );
 
-    // (a) THE GATE. Without it the public block publishes an adversary
-    // authoring console behind a login form that accepts no password.
-    assert.match(
-      block.handle, /forward_auth\s+\S+\s*\{[^}]*\}/,
-      `${where}: /caldera is proxied with NO forward_auth`
-    );
+  // (f) ONE signed header copied out of the gate, and only that one. A second,
+  // unsigned identity header would be the advisory all over again.
+  const copied = [...route.matchAll(/copy_headers\s+([^\n]+)/g)]
+    .flatMap((m) => m[1].trim().split(/[\s,]+/))
+    .filter(Boolean);
+  assert.deepStrictEqual(
+    copied, ['X-CyberCore-Auth'],
+    `copy_headers must carry the signed token and nothing else, got [${copied.join(', ')}]`
+  );
+});
 
-    // (b) THE STRIP. GHSA-7r4p-vjf4-gxv4 — copy_headers does not remove the
-    // client's own copy, so an authorize response that is 2xx without the header
-    // forwards whatever the browser sent.
-    assert.match(
-      block.handle, /request_header\s+-X-CyberCore-Auth\b/,
-      `${where}: no inbound strip of X-CyberCore-Auth before the gate. `
-      + 'Caddy advisory GHSA-7r4p-vjf4-gxv4: without it, a client that supplies '
-      + 'its own X-CyberCore-Auth has that value survive forward_auth to Caldera.'
-    );
-
-    // (c) ORDER. The strip must be written before the gate...
-    const stripAt = block.handle.search(/request_header\s+-X-CyberCore-Auth\b/);
-    const gateAt = block.handle.search(/forward_auth\b/);
+test('NOTHING reaches the Caldera upstream without importing the gate', () => {
+  // The invariant that actually protects the console. It is stated as "no block
+  // proxies to the upstream except the gate snippet" rather than "each block has
+  // a gate", because with a snippet the failure mode changed: the danger is no
+  // longer a missing line inside a block, it is a NEW block that proxies
+  // directly and never imports.
+  const all = siteBlocks(read(CADDYFILE));
+  for (const b of all) {
+    if (/^\(caldera_gate\)$/.test(b.header.trim())) continue;
     assert.ok(
-      stripAt < gateAt,
-      `${where}: the header strip is written AFTER forward_auth; it would delete the token the gate installed`
+      !/reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM/.test(b.body),
+      `site block \`${b.header}\` proxies to the Caldera upstream directly instead of \`import caldera_gate\`, `
+      + 'so it does not run forward_auth and publishes the authoring console unauthenticated.'
     );
+  }
 
-    // ...and both must be inside a `route`, because outside one Caddy sorts
-    // directives into ITS OWN order, in which request_header runs AFTER
-    // forward_auth. Written order only equals executed order inside a route.
-    const route = directiveBlock(block.handle, /(^|\s)route\s*\{/);
-    assert.ok(route, `${where}: the /caldera handle has no \`route\` block, so directive order is Caddy's, not yours`);
-    assert.match(route, /request_header\s+-X-CyberCore-Auth\b/, `${where}: the strip is outside the route`);
-    assert.match(route, /forward_auth\b/, `${where}: the gate is outside the route`);
-    assert.match(route, /reverse_proxy\b/, `${where}: the proxy is outside the route`);
+  // Two today: the console's hostname over HTTPS and the same hostname over
+  // plain HTTP, because a Cloudflare tunnel may deliver either scheme.
+  const serving = calderaBlocks();
+  assert.ok(
+    serving.length >= 2,
+    `expected the console to be served by at least 2 site blocks, found ${serving.length}`
+  );
 
-    // (d) The gate and the proxy in the SAME handle: a forward_auth elsewhere in
-    // the site guards something else entirely.
-    assert.match(block.handle, /reverse_proxy/, `${where}: the /caldera handle proxies nothing`);
+  // It must be its OWN hostname, not a path on the main site. magma is an SPA
+  // that bootstraps from GET /api/v2/config/main at the ORIGIN ROOT, so it uses
+  // the default base for the one call that would have told it a different base.
+  // A subpath mount was tried and produced a login form, because the SPA's API
+  // calls 404'd rather than because anything was unauthenticated.
+  for (const b of serving) {
     assert.match(
-      block.handle, /reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM:[^»]+»/,
-      `${where}: the upstream must come from CALDERA_AUTHORING_UPSTREAM, never a literal in this file`
-    );
-    assert.ok(
-      !/reverse_proxy\s+\d+\.\d+\.\d+\.\d+/.test(block.handle),
-      `${where}: a hard-coded IP for the authoring console`
-    );
-
-    // (e) ONE signed header, and only that one. A second, unsigned identity
-    // header next to it would be the advisory all over again — the strip covers
-    // the names we know about, and a name nobody stripped is a name a client can
-    // set.
-    const copied = [...block.handle.matchAll(/copy_headers\s+([^\n]+)/g)]
-      .flatMap((m) => m[1].trim().split(/[\s,]+/))
-      .filter(Boolean);
-    assert.deepStrictEqual(
-      copied, ['X-CyberCore-Auth'],
-      `${where}: copy_headers must carry the signed token and nothing else, got [${copied.join(', ')}]`
+      b.header, /«CALDERA_HOST»/,
+      `site block \`${b.header}\` imports the gate but is not the console's own hostname. `
+      + 'Serving Caldera under a path cannot work: its SPA requests /api/v2/* from the origin root.'
     );
   }
 });
@@ -491,12 +537,14 @@ test('the /caldera upstream is the compose service, not the retired VM name', ()
   // baked into the placeholder is what applies when nobody sets the variable, so
   // a stale default is a deployment that silently probes a name that no longer
   // resolves and reports the console as down.
-  for (const block of calderaBlocks()) {
-    const m = block.handle.match(/reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM:([^»]+)»/);
-    assert.ok(m, `site block \`${block.header}\`: no CALDERA_AUTHORING_UPSTREAM placeholder`);
+  // One definition now — the gate snippet — so this reads it once rather than
+  // per site block.
+  {
+    const m = gateSnippet().match(/reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM:([^»]+)»/);
+    assert.ok(m, 'the gate snippet has no CALDERA_AUTHORING_UPSTREAM placeholder');
     assert.strictEqual(
       m[1], 'caldera:8888',
-      `site block \`${block.header}\`: the default upstream should be the compose service name`
+      'the default upstream should be the compose service name'
     );
   }
 
@@ -511,19 +559,20 @@ test('forward_auth still asks the app, and asks it for the authorize path', () =
   // anyone who is not staff. A `uri` naming a path that answers 200
   // unauthenticated allows every request with no error anywhere.
   const calderaAuthoring = require(path.join(ROOT, 'src', 'routes', 'caldera-authoring.js'));
-  for (const block of calderaBlocks()) {
-    const gate = directiveBlock(block.handle, /forward_auth\b/);
-    assert.ok(gate, `site block \`${block.header}\`: unreadable forward_auth block`);
-    const uri = (gate.match(/uri\s+(\S+)/) || [])[1];
-    assert.strictEqual(
-      uri, calderaAuthoring.AUTHORIZE_PATH,
-      `site block \`${block.header}\`: the Caddyfile asks a different path than the app answers on`
-    );
-    assert.match(
-      block.handle, /forward_auth\s+app:3000\b/,
-      `site block \`${block.header}\`: the gate must ask the app container, over the internal network`
-    );
-  }
+  // Read once, from the single gate definition, rather than per site block.
+  const snippet = gateSnippet();
+  assert.ok(snippet, 'no `(caldera_gate)` snippet to check');
+  const gate = directiveBlock(snippet, /forward_auth\b/);
+  assert.ok(gate, 'unreadable forward_auth block in the gate snippet');
+  const uri = (gate.match(/uri\s+(\S+)/) || [])[1];
+  assert.strictEqual(
+    uri, calderaAuthoring.AUTHORIZE_PATH,
+    'the Caddyfile asks a different path than the app answers on'
+  );
+  assert.match(
+    snippet, /forward_auth\s+app:3000\b/,
+    'the gate must ask the app container, over the internal network'
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -618,30 +667,31 @@ test('the console has exactly one working authentication path', () => {
   const declared = (conf.match(/^auth\.login\.handler\.module\s*:\s*(\S+)\s*$/m) || [])[1];
   assert.ok(declared, 'conf/local.yml does not set auth.login.handler.module at all');
 
-  const blocks = calderaBlocks();
-  assert.ok(blocks.length >= 1, 'no /caldera block found in the Caddyfile');
+  assert.ok(calderaBlocks().length >= 1, 'no site block serves the console');
 
   if (declared === 'default') {
-    // Mechanism (b). Every block must inject the key AND strip a client-supplied
+    // Mechanism (b). The gate must inject the key AND strip a client-supplied
     // one — the strip is not hygiene here, it is the whole gate: a caller who
     // could set their own KEY would authenticate to Caldera directly.
-    for (const block of blocks) {
-      const where = `site block \`${block.header}\``;
-      assert.ok(block.handle, `${where}: could not read the /caldera handle`);
-      assert.ok(
-        // siteBlocks() normalises Caddy's {$VAR} placeholders to «VAR» so its
-        // brace counting is not confused by them — so match that form, not the
-        // raw one that appears in the file.
-        /request_header\s+KEY\s+«CALDERA_API_KEY_RED»/.test(block.handle),
-        `${where} does not inject Caldera's KEY header, and the login handler is 'default' — `
-        + 'nothing would authenticate the console and Caldera would serve its stock login form.'
-      );
-      assert.ok(
-        /request_header\s+-KEY\b/.test(block.handle),
-        `${where} injects KEY but never strips an inbound one. A client supplying its own KEY `
-        + 'would bypass forward_auth and authenticate to Caldera directly.'
-      );
-    }
+    //
+    // Checked once against the single gate definition. That every serving block
+    // actually imports it — and that nothing reaches the upstream without it —
+    // is asserted separately above.
+    const gate = gateSnippet();
+    assert.ok(gate, 'no `(caldera_gate)` snippet to check');
+    assert.ok(
+      // siteBlocks() normalises Caddy's {$VAR} placeholders to «VAR» so its
+      // brace counting is not confused by them — so match that form, not the
+      // raw one that appears in the file.
+      /request_header\s+KEY\s+«CALDERA_API_KEY_RED»/.test(gate),
+      "the gate does not inject Caldera's KEY header, and the login handler is 'default' — "
+      + 'nothing would authenticate the console and Caldera would serve its stock login form.'
+    );
+    assert.ok(
+      /request_header\s+-KEY\b/.test(gate),
+      'the gate injects KEY but never strips an inbound one. A client supplying its own KEY '
+      + 'would bypass forward_auth and authenticate to Caldera directly.'
+    );
   } else {
     // Mechanism (a). The module name must match what the Dockerfile installs;
     // the destination basename IS the import path, since it lands at the top of
