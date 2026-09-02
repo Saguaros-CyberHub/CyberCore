@@ -312,6 +312,86 @@ function createCalderaClient(opts) {
       return call('POST', '/api/v2/adversaries', adversary, 'POST /adversaries', [409]);
     },
 
+    // -----------------------------------------------------------------------
+    // AUTHORING READS AND FACT SOURCES — used by the standalone authoring
+    // instance, and by nothing that dispatches
+    // -----------------------------------------------------------------------
+    //
+    // WHY THESE LIVE HERE AND NOWHERE ELSE. src/incident/caldera/fact-source.js
+    // duck-types the client and refuses with CALDERA_CLIENT_NO_SOURCE_API when
+    // they are absent, naming this file: it is the ONLY place in this adapter
+    // allowed to open a socket, and that single seam is the entire reason the
+    // rest of the adapter can be tested against a server that does not exist.
+    // Reaching around it — a fetch() in the fact-source module, or a second
+    // client built inside a plugin route — would put a second call site in the
+    // graph and take the testability with it.
+    //
+    // NONE OF THESE EXECUTE ANYTHING. A source is a bag of facts and an
+    // adversary is an ordered list of ability ids; neither creates an operation,
+    // and the verbs that DO (createOperation / getOperation / listLinks /
+    // finishOperation / abortOperation) are already below and are reached only
+    // by src/incident/engines/caldera.js, which is still unregistered.
+
+    /**
+     * Every fact source this server holds.
+     *
+     * Caldera has NO per-object ownership, so this returns EVERY source on the
+     * server and not "mine" — there is no such concept. syncFactSource() is what
+     * turns that list into one class's row, by matching the deterministic id
+     * first and the name second.
+     */
+    listSources() {
+      return call('GET', '/api/v2/sources', null, 'GET /sources');
+    },
+
+    /**
+     * One fact source by id.
+     *
+     * 404 TOLERATED, and that is load-bearing rather than defensive: the id is a
+     * uuidv5 derived from the scope key, so the FIRST sync for any class asks
+     * for a row that does not exist yet. A throw here would make "this class has
+     * never been authored for" indistinguishable from "the server is broken",
+     * and syncFactSource would never reach createSource at all.
+     */
+    getSource(sourceId) {
+      return call('GET', '/api/v2/sources/' + encodeURIComponent(sourceId), null,
+        'GET /sources/' + sourceId, [404]);
+    },
+
+    /** Create one class's fact source. Body comes from fact-source.toWire(). */
+    createSource(source) {
+      return call('POST', '/api/v2/sources', source, 'POST /sources');
+    },
+
+    /**
+     * Replace one class's facts.
+     *
+     * PATCH rather than PUT because that is what the v2 API documents, and the
+     * body toWire() builds carries relationships/rules/adjustments as EXPLICIT
+     * empty arrays for exactly that reason: a key a PATCH omits is a key the
+     * server may keep, so a source that once held a rule would go on applying it
+     * to a class that no longer declares one.
+     */
+    updateSource(sourceId, source) {
+      return call('PATCH', '/api/v2/sources/' + encodeURIComponent(sourceId), source,
+        'PATCH /sources/' + sourceId);
+    },
+
+    /**
+     * Every adversary profile on this server.
+     *
+     * The authoring console's whole output. Read-only, and read by CyberCore
+     * alone: an instructor builds a profile in Caldera's own UI, and this is how
+     * a console lists what they built so it can be picked for a class.
+     *
+     * As with sources there is no "mine" — every red user sees every adversary,
+     * because the conf/local.yml users are a ROLE and not tenancy. The CALLER
+     * owns the scoping; this owns the request.
+     */
+    listAdversaries() {
+      return call('GET', '/api/v2/adversaries', null, 'GET /adversaries');
+    },
+
     /** Agents that have beaconed to this server. */
     listAgents() {
       return call('GET', '/api/v2/agents', null, 'GET /agents');

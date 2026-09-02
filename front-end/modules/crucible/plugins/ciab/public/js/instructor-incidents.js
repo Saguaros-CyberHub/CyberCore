@@ -21,6 +21,14 @@
  *                                                       incidents, projected
  *   GET  /api/engagements/:id/incidents/targets         the Environment picker
  *   POST /api/engagements/:id/incidents                 launch
+ *   POST /api/engagements/:id/incidents/authoring/fact-source
+ *                                                       refresh what the attack
+ *                                                       authoring console knows
+ *                                                       about this Engagement,
+ *                                                       and only THEN hand back
+ *                                                       the link to it
+ *   GET  /api/engagements/:id/incidents/authoring/adversaries
+ *                                                       what that console holds
  *   GET  /api/engagements/:id/incidents/:runId/status   the 2s poll
  *   POST /api/engagements/:id/incidents/:runId/abort    stop it
  *   POST /api/engagements/:id/incidents/:runId/retry    re-fire what missed
@@ -46,6 +54,36 @@
  * are six techniques knows when to stop looking, which is why
  * src/incident/projection.js keeps that number off every student payload and
  * why the release gate withholds it pre-release.
+ *
+ * ── ATTACK AUTHORING, AND WHY THE ORDER OF TWO THINGS MATTERS ───────────────
+ * Adversaries are built in a SEPARATE Caldera console, on a machine that sits
+ * outside every Environment with no agents on it. It executes nothing; an
+ * instructor uses its own web UI to build an adversary and CyberCore reads it
+ * back out.
+ *
+ * That console has no idea which Engagement anyone is authoring for — it has no
+ * per-user view and no ownership at all, so everyone who opens it sees the same
+ * shared store. What it CAN be told is a set of facts: the machines this
+ * Engagement actually deployed. Refreshing that set is what POST
+ * .../authoring/fact-source does, and this file does not render the link until
+ * that request has come back `ready`.
+ *
+ * DO NOT "SIMPLIFY" THAT INTO AN <a href> THE BROWSER CAN JUST FOLLOW. A link
+ * followed before the refresh lands is an instructor authoring against the
+ * machines the PREVIOUS deployment had. Nothing about it looks wrong: they
+ * build a careful adversary aimed at a file server, the console still holds
+ * last term's facts, and every step aimed at a machine this Engagement does not
+ * have simply never runs. The console reports success, having done nothing.
+ *
+ * The platform summary is rendered for the same reason and in the same breath:
+ * "3 Windows, 1 Linux" is the one thing an instructor needs in their head
+ * BEFORE they are looking at a UI CyberCore cannot help them inside.
+ *
+ * AND NOTHING HERE CAN LAUNCH ONE. Picking an adversary sets a value on this
+ * page and does nothing else — there is no request that takes an adversary id.
+ * The server refuses one by name if it ever arrives, and the engine registry
+ * refuses the whole engine. That is deliberate and it is explained on the
+ * screen rather than expressed as a disabled button nobody can interpret.
  *
  * ── WHY THE POLL TARGET ENDS IN /status ─────────────────────────────────────
  * src/server.js exempts GETs matching /\/status$/ from the global API rate
@@ -158,7 +196,33 @@
     pollTimer: null,
     board: null,              // the BlueTeamBoard handle, so it can be destroyed
     boardRunId: null,
+
+    // Attack authoring. `state` is a single discriminant on purpose: the link
+    // and the platform summary arrive in ONE answer and must be rendered
+    // together or not at all, and two booleans would admit a fourth state that
+    // shows one without the other.
+    //   idle        nothing asked for yet
+    //   working     the refresh is in flight
+    //   ready       refreshed; the link and the summary are safe to show
+    //   unavailable it cannot be done, and `reason` says why
+    authoring: null,
+    adversaries: null,
   };
+
+  /** The authoring panel's whole state, freshly blank. */
+  function blankAuthoring() {
+    return {
+      state: 'idle',
+      reason: null,
+      data: null,
+      list: 'idle',           // the adversary picker's own load state
+      listReason: null,
+      items: [],
+      picked: null,           // an id on this page and nowhere else. See below.
+      execution: null,        // what the SERVER said about the launch gate
+      upstream: null,
+    };
+  }
 
   // ── Transport ─────────────────────────────────────────────────────────────
 
@@ -411,6 +475,10 @@
     S.runs = [];
     S.runId = null;
     S.status = null;
+    // A different Engagement is a different set of machines, so every authored
+    // fact about the last one is wrong here. Blanked rather than refreshed:
+    // refreshing writes to a shared server, and nobody asked.
+    S.authoring = blankAuthoring();
 
     const launcher = el('incidentLauncher');
     if (launcher) launcher.innerHTML = '<div class="skeleton skel-row"></div>'.repeat(3);
@@ -559,6 +627,8 @@
     const chosen = currentSelection();
 
     box.innerHTML = `
+      <div id="incidentAuthoring"></div>
+
       <div class="card" style="margin-bottom: 1rem;">
         <div class="card-header">
           <span class="card-title">&#9889; Launch an incident</span>
@@ -638,6 +708,205 @@
 
     renderPicker();
     renderTargets();
+    renderAuthoring();
+  }
+
+  // ── Attack authoring ──────────────────────────────────────────────────────
+
+  /**
+   * What an administrator has to do, per refusal code.
+   *
+   * The SERVER answers in codes and this file writes the sentences, because the
+   * two products on this platform do not share copy and a shared string is how
+   * one product's nouns end up on the other's screen.
+   *
+   * Every branch says what to DO. "Attack authoring is unavailable" on its own
+   * sends an instructor to a help desk that cannot help them either; the
+   * variable to set, or the machine to power on, is the whole value of this
+   * screen over a dead link.
+   */
+  function authoringProblem(reason, upstream) {
+    const where = upstream ? ` (${esc(upstream)})` : '';
+    switch (reason) {
+      case 'not_configured':
+        return 'Attack authoring is not set up on this platform. An administrator needs to '
+          + 'tell CyberCore where the authoring machine is: set '
+          + '<code>CALDERA_AUTHORING_UPSTREAM=&lt;host-or-ip&gt;:8888</code> on both the app '
+          + 'and the proxy, then restart them.';
+      case 'no_api_key':
+        return `The authoring machine${where} is configured, but CyberCore has no key to read `
+          + 'it with. An administrator needs to mount the red API key and point '
+          + '<code>CALDERA_AUTHORING_API_KEY_FILE</code> at it.';
+      case 'unreachable':
+        return `The authoring machine${where} did not answer. It may be powered off, or the `
+          + 'network path from this server to it may be down. An administrator can confirm '
+          + 'both from the platform&rsquo;s own status page.';
+      case 'unauthorized':
+        return `The authoring machine${where} refused CyberCore&rsquo;s key. An administrator `
+          + 'needs to re-issue it: the key CyberCore holds and the one baked into that machine '
+          + 'are not the same.';
+      case 'no_spec':
+        return 'Nothing is deployed in this Engagement yet, so there are no machines to author '
+          + 'against. Deploy the Environments first &mdash; an adversary aimed at a machine that '
+          + 'does not exist produces a step that silently never runs.';
+      case 'sync_failed':
+        return 'The authoring machine answered but would not accept this Engagement&rsquo;s '
+          + 'machine list, so nothing was changed there. An administrator can find the reason in '
+          + 'the application log.';
+      default:
+        return 'Attack authoring could not be prepared. An administrator can find the reason in '
+          + 'the application log.';
+    }
+  }
+
+  /** "3 Windows and 1 Linux machine" — the sentence, not the object. */
+  function platformSentence(p) {
+    const parts = [];
+    const n = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+    if (p.windows) parts.push(n(p.windows, 'Windows machine'));
+    if (p.linux) parts.push(n(p.linux, 'Linux machine'));
+    // 'other' is macOS and anything whose operating system the deployment never
+    // recorded. Named separately because an adversary chosen for it may target
+    // the wrong platform, which is a different problem from having none.
+    if (p.other) parts.push(n(p.other, 'machine of another or unrecorded type'));
+    if (!parts.length) return 'no machines that can be targeted';
+    if (parts.length === 1) return parts[0];
+    return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  }
+
+  function renderAuthoring() {
+    const box = el('incidentAuthoring');
+    if (!box) return;
+    const a = S.authoring || blankAuthoring();
+
+    const head = '<div class="card" style="margin-bottom:1rem;">'
+      + '<div class="card-header"><span class="card-title">&#127919; Attack authoring</span></div>'
+      + '<div class="card-body">';
+    const tail = '</div></div>';
+
+    if (a.state === 'idle' || a.state === 'working') {
+      box.innerHTML = head
+        + '<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.9rem;">'
+        + 'Adversaries are built in a separate console that sits outside every Environment and '
+        + 'runs nothing. Before it opens, CyberCore refreshes what it knows about the machines '
+        + 'this Engagement actually deployed &mdash; so what you build there addresses machines '
+        + 'that exist here.</p>'
+        + `<button class="btn btn-primary btn-sm" id="incidentAuthorBtn"
+                  onclick="Incidents.authorAttacks(this)" ${a.state === 'working' ? 'disabled' : ''}>
+             ${a.state === 'working' ? 'Preparing&hellip;' : 'Author attacks'}
+           </button>`
+        + tail;
+      return;
+    }
+
+    if (a.state === 'unavailable') {
+      box.innerHTML = head
+        + '<p style="margin:0 0 0.5rem; font-weight:600;">Attack authoring is not set up.</p>'
+        + `<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.88rem;">${authoringProblem(a.reason, a.upstream)}</p>`
+        // NO LINK ON THIS BRANCH, ever. A link to a machine that is not there,
+        // or that CyberCore could not refresh, is worse than no link: the
+        // instructor authors anyway, against whatever it happens to hold.
+        + '<button class="btn btn-outline btn-sm" onclick="Incidents.authorAttacks(this)">Try again</button>'
+        + tail;
+      return;
+    }
+
+    const d = a.data || {};
+    const plat = d.platforms || { windows: 0, linux: 0, other: 0 };
+    const hosts = d.hosts || [];
+    const warnings = d.warnings || [];
+
+    box.innerHTML = head
+      + '<p style="margin:0 0 0.5rem;"><strong>This Engagement has '
+      + `${esc(platformSentence(plat))}.</strong></p>`
+      + `<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.85rem;">
+           The authoring console now holds this Engagement&rsquo;s machine list under
+           <code>${esc((d.fact_source || {}).name || '')}</code>. Build against those names:
+           anything else has nothing here to run on.
+         </p>`
+      + (hosts.length
+        ? '<div style="font-family:monospace; font-size:0.75rem; color:var(--gray-500); '
+          + 'margin:0 0 0.75rem; word-break:break-all;">'
+          + hosts.map((h) => esc(h.fqdn || h.name)).join(' &middot; ') + '</div>'
+        : '')
+      + (warnings.length
+        ? '<ul style="margin:0 0 0.75rem 1rem; padding:0; font-size:0.78rem; color:var(--warning);">'
+          // Capped at three. These are diagnostic sentences from the machine-list
+          // builder and there can be one per machine; a wall of them buries the
+          // link this panel exists to offer.
+          + warnings.slice(0, 3).map((w) => `<li>${esc(String(w))}</li>`).join('')
+          + (warnings.length > 3
+            ? `<li>and ${warnings.length - 3} more &mdash; see the application log</li>` : '')
+          + '</ul>'
+        : '')
+      + `<a class="btn btn-primary btn-sm" href="${esc(d.console_path || '')}"
+            target="_blank" rel="noopener noreferrer">Open the authoring console &#8599;</a>`
+      + '<hr style="margin:1rem 0; border:0; border-top:1px solid var(--border-color);">'
+      + adversaryPicker(a)
+      + tail;
+  }
+
+  /**
+   * The adversary picker.
+   *
+   * PICKING ONE IS NOT A LAUNCH AND MUST NOT LOOK LIKE ONE. There is no button
+   * here that fires anything, and there is no request in this file that carries
+   * an adversary id. The reason is written out in full rather than expressed as
+   * a disabled control: an instructor who cannot tell why something is greyed
+   * out concludes the platform is broken, and this one is not broken, it is
+   * waiting on a piece of infrastructure that has not been signed off.
+   */
+  function adversaryPicker(a) {
+    const header = '<div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;'
+      + ' margin-bottom:0.5rem;">'
+      + '<strong style="font-size:0.9rem;">Adversaries on the authoring console</strong>'
+      + '<span style="flex:1;"></span>'
+      + `<button class="btn btn-outline btn-sm" onclick="Incidents.loadAdversaries(this)"
+                ${a.list === 'working' ? 'disabled' : ''}>&#8635; Refresh</button></div>`;
+
+    if (a.list === 'working') {
+      return header + '<div class="skeleton skel-row"></div>';
+    }
+    if (a.list === 'unavailable') {
+      return header
+        + `<p class="text-muted" style="margin:0; font-size:0.85rem;">${authoringProblem(a.listReason, a.upstream)}</p>`;
+    }
+    if (a.list === 'idle') {
+      return header + '<p class="text-muted" style="margin:0; font-size:0.85rem;">'
+        + 'Not loaded yet.</p>';
+    }
+    if (!a.items.length) {
+      return header + '<p class="text-muted" style="margin:0; font-size:0.85rem;">'
+        + 'Nothing has been built on the authoring console yet. Open it above, build an adversary '
+        + 'against the machines listed here, then refresh this list.</p>';
+    }
+
+    const rows = a.items.map((it) => {
+      const on = it.adversary_id === a.picked;
+      return `<div onclick="Incidents.selectAdversary('${escJs(it.adversary_id)}')"
+               style="cursor:pointer; padding:0.6rem 0.7rem; border-radius:6px; margin-bottom:0.4rem;
+                      border:2px solid ${on ? 'var(--primary)' : 'var(--border-color)'};">
+            <div style="font-weight:600; font-size:0.88rem;">${esc(it.name)}</div>
+            <div style="font-size:0.75rem; color:var(--gray-500);">
+              ${esc(String(it.ability_count))} step(s)${it.description ? ' &middot; ' + esc(it.description) : ''}
+            </div>
+          </div>`;
+    }).join('');
+
+    const picked = a.items.find((it) => it.adversary_id === a.picked) || null;
+    const note = picked
+      ? `<div style="margin-top:0.6rem; padding:0.7rem 0.9rem; border-radius:6px;
+                     border-left:4px solid var(--warning); background:rgba(245,158,11,.12);
+                     font-size:0.85rem;">
+           <strong>${esc(picked.name)} is prepared, not scheduled.</strong>
+           An adversary from this console cannot be fired into your Environments yet: that half
+           is switched on once the cluster it needs has been signed off. Until then, use
+           <em>Launch an incident</em> below &mdash; this Client&rsquo;s own scenarios, a
+           technique, a tactic or an attack chain.
+         </div>`
+      : '';
+
+    return header + rows + note;
   }
 
   function renderPicker() {
@@ -1067,6 +1336,84 @@
     }
   }
 
+  /**
+   * "Author attacks" — refresh first, hand over the link second.
+   *
+   * The await below is the whole feature. Nothing renders a link until this
+   * request has come back ready, because the server only fills console_path in
+   * once it has refreshed the machine list on the authoring console. See the
+   * header for what a link offered early actually costs.
+   */
+  async function authorAttacks(btn) {
+    if (!S.engagementId) return;
+    S.authoring = S.authoring || blankAuthoring();
+    S.authoring.state = 'working';
+    S.authoring.reason = null;
+    renderAuthoring();
+    if (btn) Utils.setBtnLoading(btn, true, 'Preparing…');
+    try {
+      const res = await inc('/authoring/fact-source', { method: 'POST', body: {} });
+      S.authoring.upstream = res.upstream || null;
+      S.authoring.execution = res.execution || null;
+      if (res.ready) {
+        S.authoring.state = 'ready';
+        S.authoring.data = res;
+        renderAuthoring();
+        // Only now, and only because the refresh landed. A picker offered on the
+        // unavailable branch would be a list of things nobody can author for.
+        await loadAdversaries(null);
+      } else {
+        S.authoring.state = 'unavailable';
+        S.authoring.reason = res.reason || 'error';
+        renderAuthoring();
+      }
+    } catch (err) {
+      // A transport failure or a refusal from this platform, NOT from the
+      // authoring machine — that one answers 200 with a reason. Rendered as the
+      // same calm panel rather than a red toast: either way the instructor's
+      // next move is to tell an administrator.
+      S.authoring.state = 'unavailable';
+      S.authoring.reason = 'error';
+      renderAuthoring();
+      console.warn('[instructor-incidents] authoring prepare failed:', err && err.message);
+    } finally {
+      if (btn) Utils.setBtnLoading(btn, false);
+    }
+  }
+
+  /** What the authoring console holds. A read; it changes nothing anywhere. */
+  async function loadAdversaries(btn) {
+    if (!S.engagementId || !S.authoring) return;
+    S.authoring.list = 'working';
+    renderAuthoring();
+    if (btn) Utils.setBtnLoading(btn, true, 'Loading…');
+    try {
+      const res = await inc('/authoring/adversaries');
+      S.authoring.execution = res.execution || S.authoring.execution;
+      S.authoring.upstream = res.upstream || S.authoring.upstream;
+      if (res.ready) {
+        S.authoring.list = 'ready';
+        S.authoring.items = res.adversaries || [];
+        // A pick that is no longer on the console is dropped rather than left
+        // pointing at nothing: somebody deleted it there, and the store is
+        // shared, so that is an ordinary event and not an error.
+        if (S.authoring.picked && !S.authoring.items.some((x) => x.adversary_id === S.authoring.picked)) {
+          S.authoring.picked = null;
+        }
+      } else {
+        S.authoring.list = 'unavailable';
+        S.authoring.listReason = res.reason || 'error';
+      }
+    } catch (err) {
+      S.authoring.list = 'unavailable';
+      S.authoring.listReason = 'error';
+      console.warn('[instructor-incidents] adversary list failed:', err && err.message);
+    } finally {
+      renderAuthoring();
+      if (btn) Utils.setBtnLoading(btn, false);
+    }
+  }
+
   async function abort(btn) {
     if (!S.runId) return;
     const ok = await Confirm.show({
@@ -1140,6 +1487,21 @@
     launch,
     abort,
     retry,
+    authorAttacks,
+    loadAdversaries,
+    /**
+     * Remember which adversary the instructor is looking at.
+     *
+     * THAT IS ALL IT DOES. It sets a value on this page; nothing reads it into a
+     * request, and the server refuses a launch body that names an adversary
+     * anyway. Deliberately not stored anywhere either: a persisted choice would
+     * imply the platform intends to act on it.
+     */
+    selectAdversary(id) {
+      if (!S.authoring) return;
+      S.authoring.picked = S.authoring.picked === id ? null : String(id);
+      renderAuthoring();
+    },
     selectRun(runId) {
       if (!runId || runId === S.runId) return;
       stopPoll();

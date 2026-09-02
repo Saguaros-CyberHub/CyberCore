@@ -114,6 +114,7 @@ const workstationRoutes = require('./routes/workstations');
 const flagRoutes = require('./routes/flags');
 const chatStatusRoutes = require('./routes/chat-status');
 const ticketRoutes = require('./routes/tickets');
+const calderaAuthoringRoutes = require('./routes/caldera-authoring');
 
 // Import loaders
 const moduleLoader = require('./module-loader');
@@ -200,6 +201,14 @@ app.use(cookieParser());
 // brute-force protection stays enforced separately by `authLimiter`.
 const RATE_LIMIT_SKIP_PATHS = [
   '/api/auth/me',
+  // Caddy's forward_auth probe in front of the Caldera authoring console. It
+  // fires once per SUBREQUEST — every asset, every XHR, every websocket upgrade
+  // of a single-page app — so one instructor with the console open outruns any
+  // sane abuse cap in minutes. A 429 here is non-2xx, which forward_auth reads
+  // as DENY, so the console would appear to log the instructor out mid-session
+  // with nothing in the app's own logs to explain it. The probe stays gated by
+  // authenticateToken + requireRole; the limiter was never what protected it.
+  '/api/caldera-authoring/authorize',
 ];
 const RATE_LIMIT_SKIP_PATTERNS = [
   /\/status$/,   // e.g. workstation/lab status polls: /api/.../:id/status
@@ -508,6 +517,30 @@ app.use('/api/flags', flagRoutes);
 // /api/* request in the application (ciab/routes/api.js, test/ciab-gate-scope.test.js),
 // and core routes survive only by being registered before moduleLoader.loadAll().
 app.use('/api/tickets', ticketRoutes);
+
+// Caldera AUTHORING console access control. Two endpoints, both instructor/admin:
+// /authorize is the target of Caddy's forward_auth in front of /caldera* (its
+// STATUS is the whole decision, so the path here and the `uri` in
+// config/caddy/Caddyfile must never drift — test/caldera-authoring-access.test.js
+// asserts they match), and /status reports whether the authoring VM is
+// configured and answering so a UI can say "not set up" instead of offering a
+// dead link. Core, and registered here for the same reason as the ticket routes
+// above: the CIAB plugin mounts at '/' with an /api catch-all.
+//
+// This is an AUTHORING surface. It does not register, select or dispatch an
+// incident engine — engineFor('caldera') still throws by design.
+app.use('/api/caldera-authoring', calderaAuthoringRoutes);
+
+// The SSO nonce burn, called by the Caldera container (never by a browser) as
+// the last step of verifying the signed X-CyberCore-Auth token /authorize
+// minted. A separate mount because the path is half of a contract with
+// infrastructure/caldera/login_handler.py: /api/caldera/redeem on both sides.
+// It is self-guarding — the caller must present the token whose jti it is
+// burning — because the Caddyfile's catch-all publishes every app path.
+app.use(
+  calderaAuthoringRoutes.REDEEM_MOUNT_PATH,
+  calderaAuthoringRoutes.createCalderaRedeemRouter()
+);
 
 // Reports whether an LLM is configured, so the global chat widget can hide its
 // launcher instead of offering a button that always fails. Must stay in core:

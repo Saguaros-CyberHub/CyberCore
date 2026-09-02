@@ -41,6 +41,51 @@
         reverse_proxy guacamole:8080
     }
 
+    # Caldera AUTHORING console — instructor-only. See the long note below the
+    # internal listener for what is on the other end, why the gate is the whole
+    # point, and the two things about it that are NOT verified.
+    redir /caldera /caldera/
+    handle_path /caldera/* {
+        # `route` IS LOAD-BEARING, not decoration. Everywhere else in a Caddyfile
+        # directives run in Caddy's own default order, and in that order
+        # forward_auth comes BEFORE request_header. Written outside a route, the
+        # strip below would therefore run AFTER the gate and delete the token
+        # copy_headers had just installed — the console would break in a way that
+        # looks like an app bug. Inside `route`, execution order is written
+        # order. Do not unwrap this.
+        route {
+            # --- GHSA-7r4p-vjf4-gxv4 ------------------------------------------
+            # forward_auth's copy_headers does NOT remove a header the CLIENT
+            # supplied. If the authorize endpoint ever answers 2xx WITHOUT
+            # setting X-CyberCore-Auth, the browser's own value rides through to
+            # Caldera untouched — a caller naming their own identity, straight
+            # past the gate. Deleting these inbound makes that impossible here,
+            # and the token being HMAC-signed makes a forged one worthless even
+            # if this line were lost. Belt AND braces, because this door opens
+            # onto an adversary authoring console.
+            request_header -X-CyberCore-Auth
+            request_header -X-CyberCore-User
+            request_header -X-CyberCore-Role
+            request_header -Remote-User
+            request_header -Remote-Groups
+            request_header -Remote-Email
+            request_header -Remote-Name
+
+            # FAIL CLOSED. If app:3000 is down, unreachable, or answers anything
+            # outside 2xx, Caddy returns 502 and does NOT proxy. There is no
+            # "auth service unavailable, allow through" path in forward_auth.
+            forward_auth app:3000 {
+                uri /api/caldera-authoring/authorize
+                # The ONE header carrying identity, and it carries a signed,
+                # single-use, 60-second token rather than a name. Minted by
+                # src/utils/caldera-sso.js on the 204, verified by
+                # infrastructure/caldera/login_handler.py.
+                copy_headers X-CyberCore-Auth
+            }
+            reverse_proxy {$CALDERA_AUTHORING_UPSTREAM:caldera:8888}
+        }
+    }
+
     # CyberHub application
     handle {
         reverse_proxy app:3000
@@ -66,7 +111,179 @@ http://:80 {
     handle /guacamole* {
         reverse_proxy guacamole:8080
     }
+
+    # Caldera AUTHORING console. Present here for the staff workstation that
+    # sits ON the lab VLAN and reaches the orchestrator by IP rather than by the
+    # public name — the same reason /guacamole* is duplicated into this block.
+    #
+    # NOTE WHAT THAT MEANS: on THIS listener the path is reachable from every
+    # lab subnet the OPNsense rules allow in, which includes hosts a student can
+    # get a shell on. The forward_auth gate is therefore LOAD-BEARING here, not
+    # belt-and-braces — it is the only thing between a lane VM and an authoring
+    # console. That is also why the deny response carries no body: see
+    # statusOnly() in front-end/src/routes/caldera-authoring.js.
+    redir /caldera /caldera/
+    handle_path /caldera/* {
+        # IDENTICAL TO THE PUBLIC BLOCK, DELIBERATELY. Read the comments there
+        # for why `route` wraps this and why the strip precedes the gate; both
+        # matter MORE here, because this listener is reachable from lab subnets
+        # a student can get a shell on. A copy that drifts is the failure mode
+        # this listener was going to have anyway, so
+        # front-end/test/caldera-container-config.test.js asserts the gate and
+        # the strip PER BLOCK rather than once per file.
+        route {
+            # GHSA-7r4p-vjf4-gxv4 — stop a caller supplying their own identity
+            # header and having it survive forward_auth to the backend.
+            request_header -X-CyberCore-Auth
+            request_header -X-CyberCore-User
+            request_header -X-CyberCore-Role
+            request_header -Remote-User
+            request_header -Remote-Groups
+            request_header -Remote-Email
+            request_header -Remote-Name
+
+            # FAIL CLOSED: app down or non-2xx ⇒ 502, and nothing is proxied.
+            forward_auth app:3000 {
+                uri /api/caldera-authoring/authorize
+                copy_headers X-CyberCore-Auth
+            }
+            reverse_proxy {$CALDERA_AUTHORING_UPSTREAM:caldera:8888}
+        }
+    }
+
     handle {
         reverse_proxy app:3000
     }
 }
+
+# =============================================================================
+# THE CALDERA AUTHORING CONSOLE — what those two blocks reach, and why
+# =============================================================================
+# WHAT IS ON THE OTHER END
+# A CONTAINER, exactly like guacamole:8080 above. It was a Proxmox VM in an
+# earlier revision of this file; that placement is superseded. The authoring
+# instance has no agents and executes nothing — it is a web app plus a content
+# store — so it is a compose service, built by infrastructure/caldera/Dockerfile
+# and declared as `caldera` in docker-compose.yml.
+#
+# THE ADDRESS STAYS AN ENVIRONMENT VARIABLE even though the default is now a
+# service name, so a deployment that fronts a separate authoring host can
+# repoint it without editing this file and this file never carries an address:
+#
+#     CALDERA_AUTHORING_UPSTREAM=caldera:8888     # the default
+#
+# It is passed to this container from the `caddy:` service's environment: block
+# in docker-compose.yml, next to CYBERHUB_HOST, and to the app as well — the app
+# reads it for GET /api/caldera-authoring/status, which is what lets the UI say
+# "authoring is not set up" instead of offering a dead link.
+#
+# THE CONTAINER PUBLISHES NO PORTS. That is the single most important fact about
+# it and it is expressed in docker-compose.yml BY AN ABSENT `ports:` KEY, which
+# is easy to "helpfully" add — so it carries a comment, and
+# front-end/test/caldera-container-config.test.js fails the build if one appears.
+# With no port binding the only route to that container is the two handle blocks
+# above, both of which run forward_auth first.
+#
+# IT HAS NO AGENTS AND NO IMPLANTS. conf/local.yml defines no `app.contact.*` key
+# of any kind and the Dockerfile deletes both the agent-payload plugins (sandcat,
+# manx) and every contact module that opens a listener, so "takes no check-in" is
+# a property of the image and not of a config file. Instructors use its real web
+# UI to BUILD adversaries; CyberCore reads an adversary back out and replicates
+# it into each lane's own lane-local Caldera at launch. NOTHING INSIDE A LANE
+# EVER TALKS TO THIS CONTAINER, and dispatch into lanes goes over guest-exec
+# through the Proxmox API — there is no IP route from the orchestrator into a
+# lane and this does not add one.
+#
+# THE GATE IS WHAT STOPS THIS BEING OPEN TO THE WORLD
+# Without forward_auth, the public block above would publish an adversary
+# authoring console on the internet behind nothing but Caldera's own login form
+# — one shared, baked, static password, on software whose threat model assumes
+# it is on an isolated range. `forward_auth` makes Caddy issue a subrequest to
+# the app for every request on this path and forward the original ONLY if that
+# subrequest answered 2xx; the app answers 204 for an instructor or admin, 401
+# for anonymous, 403 for anyone else, all with an empty body.
+#
+# READ forward_auth CAREFULLY BEFORE EDITING IT. Three ways to break it silently:
+#
+#   1. THE STATUS IS THE ENTIRE DECISION. Point `uri` at a path that does not
+#      exist and Express answers 404 — non-2xx, so everything is denied and the
+#      failure is at least loud. Point it at almost any path that DOES exist
+#      unauthenticated (a static file, /api/site-config, a health check) and it
+#      answers 200, and then EVERY request is allowed with no error anywhere.
+#      The uri below must stay in lockstep with the mount in
+#      front-end/src/server.js; test/caldera-authoring-access.test.js asserts
+#      the two match.
+#   2. copy_headers COPIES FROM THE AUTH RESPONSE ONTO THE PROXIED REQUEST, AND
+#      DOES NOT REMOVE THE CLIENT'S OWN COPY — Caddy advisory
+#      GHSA-7r4p-vjf4-gxv4, which affects every stable release from v2.10.0 on.
+#      So if /api/caldera-authoring/authorize ever answered 2xx WITHOUT setting
+#      X-CyberCore-Auth, whatever the BROWSER sent under that name would be
+#      forwarded verbatim. Two things stop that, and they are independent:
+#
+#        - the `request_header -X-CyberCore-Auth` lines above delete the client's
+#          value before the gate ever runs, so there is nothing to survive; and
+#        - the value is an HMAC-signed token, not a name, so a header a client
+#          invents is not a valid token whatever it says. The client does not
+#          hold CALDERA_SSO_SECRET.
+#
+#      An EARLIER REVISION OF THIS FILE said copy_headers was deliberately
+#      absent because Caldera had no header-based SSO. It has one now:
+#      infrastructure/caldera/login_handler.py, installed by
+#      auth.login.handler.module. The one header it trusts is signed,
+#      single-use (the jti is burned against POST /api/caldera/redeem, which is
+#      why a replay inside the 60-second window still fails) and expires in 60
+#      seconds. DO NOT ADD A SECOND, UNSIGNED HEADER next to it.
+#   3. DIRECTIVE ORDER IS NOT LINE ORDER — except inside `route`, which is why
+#      each /caldera handle above wraps its body in one. Caddy sorts directives
+#      in a block by its own default order, and in that order `request_header`
+#      comes AFTER `forward_auth`. Unwrap the route and the strip runs last,
+#      deleting the token the gate just installed. `route` makes execution order
+#      equal written order; leave it. (Outside the route, the same default
+#      ordering puts `redir` ahead of the handle blocks, so the bare /caldera →
+#      /caldera/ redirect is answered before the gate runs. That is deliberate
+#      and costs nothing: it discloses only that the path exists, which a 401
+#      discloses anyway, and it carries no session and reaches no upstream.)
+#
+# CALDERA'S OWN LOGIN, AND THE ATTRIBUTION TRADE-OFF
+# There is no second password. infrastructure/caldera/conf/local.yml points
+# auth.login.handler.module at the SSO handler, which replaces Caldera's built-in
+# username/password comparison outright, and the entrypoint gives every account a
+# random password generated per container start that is never printed and never
+# stored — so the login form magma still renders is a dead end, not a door.
+#
+# ATTRIBUTION IS STILL LOST ON THE CALDERA SIDE, for an unchanged reason: Caldera
+# groups ('red'/'blue') are a ROLE, not tenancy, with no per-object ownership, so
+# there is nothing finer than one account per group to attach an instructor to.
+# Accepted: authoring an adversary changes nothing in any lane, and the act that
+# does — launching one — is attributed by CyberCore, which records launched_by on
+# the run row. Note that the identity IS carried across: the token names the
+# CyberCore user id in its `sub` claim, so the handler can log who it admitted
+# even though Caldera's own object model cannot record it.
+#
+# THE APP STILL HOLDS NO CALDERA PASSWORD. It holds a signing key, which is not
+# the same thing: a key that mints a 60-second single-use token grants nothing on
+# its own and is never sent anywhere — only the token it produces is. Should a
+# credential ever have to be supplied server-side, it arrives as a root-owned
+# 0600 FILE the way bake-caldera-server.sh delivers every secret it has, never as
+# a script_arg.
+#
+# NOT VERIFIED — THE TWO THINGS TO CHECK FIRST WHEN IT MISBEHAVES
+# Nothing in this repository has ever talked to a running Caldera.
+#   a. THE SUBPATH. handle_path strips /caldera before proxying, so the upstream
+#      sees its own root — but Caldera 5 serves a Vue SPA that emits ROOT-
+#      ABSOLUTE URLs (/js/*, /api/v2/*, the login POST). Those come back to
+#      Caddy without the prefix and fall through to `handle` → app:3000 → 404.
+#      If the login page renders but its assets or its form 404, the fix is a
+#      DEDICATED HOSTNAME for the authoring console, not a workaround here: add
+#      a third site block whose body is the `route { strip… forward_auth…
+#      reverse_proxy… }` from above with no handle_path around it, and point DNS
+#      at this Caddy. COPY THE WHOLE ROUTE WITH IT — a hostname is not a gate,
+#      and a gate without the header strip is the advisory above with the door
+#      already open. front-end/test/caldera-container-config.test.js asserts
+#      both PER BLOCK, so a third block that forgets either one fails the suite
+#      rather than shipping.
+#   b. WEBSOCKETS. Caldera's operation view uses one; Caddy upgrades WebSocket
+#      connections automatically, and forward_auth runs on the upgrade request
+#      like any other, so an expired session drops the socket rather than
+#      leaving it open.
+# =============================================================================

@@ -1,0 +1,147 @@
+# =============================================================================
+# CALDERA CONFIG — AUTHORING ROLE.  THIS IS A TEMPLATE, NOT THE LIVE CONFIG.
+# =============================================================================
+# The Dockerfile copies this to conf/local.yml.template. entrypoint.sh loads it
+# with PyYAML at container start, fills the secret-bearing keys from the
+# environment (or from a value it generated once and persisted into the data
+# volume), and writes the result to conf/local.yml.
+#
+# WHY A TEMPLATE AND NOT JUST A CONFIG. Every secret Caldera needs — the API
+# keys, the object-store encryption key, the password on the account the SSO
+# handler attaches to — would otherwise be a literal in a container image layer,
+# readable by anyone who can pull it and unchangeable without a rebuild.
+# Upstream's shipped default.yml is exactly that mistake: it carries the
+# published constants ADMIN123 / BLUEADMIN123 / admin:admin, which is why
+# `server.py --insecure` is never used here.
+#
+# EDITING RULES
+#   - A key whose value is the empty string is FILLED BY THE ENTRYPOINT. Do not
+#     put a real value here; it would be baked into the image.
+#   - Read "WHAT IS DELIBERATELY ABSENT" before adding a key back.
+# =============================================================================
+
+# --- Network -----------------------------------------------------------------
+# 0.0.0.0 INSIDE THE CONTAINER, which is not the same thing as exposed. The
+# container publishes no host ports (docker-compose.yml has no `ports:` for this
+# service, on purpose), so the only thing that can open a socket here is another
+# container on cybercore-net — in practice, Caddy, and Caddy only forwards a
+# request that the app's forward_auth gate already approved.
+host: 0.0.0.0
+port: 8888
+
+# Relative, not absolute. Caddy serves this instance under /caldera on the main
+# site (handle_path strips the prefix before the upstream sees it), so any
+# absolute base URL baked in here would be wrong for every client. An empty value
+# leaves magma resolving the API against the origin the page was served from.
+app.frontend.api_base_url: ""
+
+# --- Authentication ----------------------------------------------------------
+# THE ONLY DOOR. This key names a Python import path to a module exposing load(),
+# and Caldera calls that module's handler INSTEAD OF its built-in username and
+# password comparison. The module is infrastructure/caldera/login_handler.py,
+# copied into the image as the top-level module cybercore_login_handler.py; it
+# verifies the HMAC-signed, single-use, 60-second X-CyberCore-Auth token that
+# Caddy's forward_auth copied onto the request.
+#
+# THIS IS WHAT DISABLES THE BUILT-IN PASSWORD FORM. magma still renders a login
+# page — it is a Vue route we do not patch — but the POST behind it no longer
+# performs any credential comparison, so the form is not a second door. The
+# entrypoint additionally gives every account below a random password that is
+# generated per container start and never printed, so even a code path that
+# somehow reached the old comparison has no credential to match.
+auth.login.handler.module: cybercore_login_handler
+
+# --- Accounts ----------------------------------------------------------------
+# Caldera's `users:` block maps credentials into a GROUP ('red' or 'blue'), which
+# is a ROLE and not tenancy: every red user sees every adversary. There is
+# therefore no per-instructor account to create — one account per group is the
+# whole vocabulary Caldera has. CALDERA-SIDE ATTRIBUTION IS LOST BY DESIGN; the
+# act that matters (LAUNCHING an adversary into a lane) is attributed by
+# CyberCore on cybercore_incident_run.launched_by.
+#
+# Passwords are filled by the entrypoint with a per-start random value. The SSO
+# handler attaches an authenticated instructor to the `cybercore` account by
+# NAME, never by password; CALDERA_SSO_USER / CALDERA_SSO_GROUP in the compose
+# environment carry that name to it.
+users:
+  red:
+    cybercore: ""
+  blue:
+    cybercore-blue: ""
+
+# --- Secrets, all filled by the entrypoint -----------------------------------
+# api_key_red / api_key_blue authenticate machine callers on Caldera's v2 API —
+# this is the key src/incident/caldera/client.js sends as the `KEY` header when a
+# future phase reads an authored adversary back out. Pin it by setting
+# CALDERA_API_KEY_RED in the environment; leave it unset and the entrypoint
+# generates one per start, which is fine today because nothing consumes it yet
+# (engineFor('caldera') still throws).
+api_key_red: ""
+api_key_blue: ""
+
+# encryption_key and crypt_salt encrypt the object store on disk. THESE MUST BE
+# STABLE ACROSS RESTARTS or the persisted store cannot be decrypted and the
+# authoring content in the named volume is effectively lost. The entrypoint
+# therefore generates them ONCE and keeps them inside the data volume; an
+# environment value always wins.
+encryption_key: ""
+crypt_salt: ""
+
+# --- Content -----------------------------------------------------------------
+# Only the plugins that survive the prune in the Dockerfile. Naming a plugin here
+# that is not in the image is a startup error, so this list and that `rm -rf`
+# must be changed together.
+#
+# NOT HERE, AND NOT IN THE IMAGE: sandcat and manx (the agent payloads), access,
+# human, response, training, gameboard, debrief. See the PLUGIN PRUNE comment in
+# the Dockerfile for why each one is a security decision rather than a size one.
+plugins:
+  - magma
+  - stockpile
+  - compass
+  - atomic
+  - fieldmanual
+
+# The default planner ships inside stockpile. Authoring never runs a planner;
+# this only decides what an adversary's editor pre-selects.
+objects.planners.default: atomic
+
+# How often Caldera re-reads ability YAML off disk. Authors edit abilities in the
+# UI and expect them back promptly.
+ability_refresh: 60
+
+# Nothing exfiltrates here — there are no agents — but the key must exist or the
+# file service has nowhere to point. The Dockerfile creates it owned by the
+# unprivileged runtime user.
+exfil_dir: /tmp/caldera
+
+# Startup dependency checks. The Go entry upstream ships is deliberately dropped:
+# Go exists only to compile the sandcat agent, sandcat is not in this image, and
+# leaving the requirement in would print a scary and permanently-unfixable
+# warning on every boot.
+requirements:
+  python:
+    attr: version
+    module: sys
+    type: python_module
+    version: 3.9.0
+
+# =============================================================================
+# WHAT IS DELIBERATELY ABSENT — READ BEFORE ADDING A KEY
+# =============================================================================
+# NO `app.contact.*` KEY OF ANY KIND. Not http, not tcp, not udp, not websocket,
+# not dns, not gist, not slack, not ftp, not html, not tunnel.ssh. This instance
+# must never take an agent check-in, and a contact is precisely the thing that
+# accepts one. The Dockerfile also DELETES those modules from app/contacts/, so
+# the absence is a property of the image and not merely of this file — adding a
+# key back here will not resurrect a listener, and that is intentional.
+#
+# If you find yourself wanting one, you are looking at the wrong Caldera. The
+# per-lane EXECUTOR instances are VMs baked by
+# infrastructure/proxmox-templates/vm-templates/bake-caldera-server.sh with
+# CALDERA_ROLE=executor, and that is where agents belong.
+#
+# NO `app.contact.tunnel.ssh.*`, for the same reason plus one more: upstream's
+# default ships a literal user_password, and a shipped credential in a config
+# file is exactly what this template exists to prevent.
+# =============================================================================

@@ -66,6 +66,7 @@ const { macForOctet, INFRA_IP_OCTETS } = require('./goad-deploy');
 const nodeSsh = require('./node-ssh');
 const tailscale = require('./tailscale');
 const { claimsSql } = require('./lane-claims');
+const { isHiddenTemplateRow } = require('./workspace-visibility');
 
 const GATEWAY_VMID_OFFSET = 100000;     // gateway LXC = 100000 + vxlanId (matches groups.js)
 const WORKSTATION_VMID_OFFSET = 600000; // slot-0 workstation = 600000 + vxlanId
@@ -1222,8 +1223,20 @@ function buildGuacParameters({ protocol, hostname, port, creds, template }) {
  * connection identifier, or null if Guacamole is off/unreachable — a lane
  * without a console is still a usable lane, and losing the whole deploy over a
  * Guac hiccup is worse than an instructor re-creating one connection.
+ *
+ * `grantOwnerRead: false` still CREATES the connection — instructors and admins
+ * reach it through the admin Guacamole token, and the incident engine needs the
+ * machine on the board — but withholds the owner's READ permission. That is how
+ * a machine hidden from its own student (utils/workspace-visibility.js) stays
+ * hidden: the console-launch route hands the browser a scoped per-user Guac
+ * token, and with READ on the connection a student can open /guac directly and
+ * find it there regardless of what CyberCore's own list shows.
+ *
+ * NOT retroactive. A re-provision reuses the connection name and takes the PUT
+ * branch above; Guacamole keeps permissions across that, so a grant made by an
+ * earlier deploy survives and has to be revoked by hand.
  */
-async function createGuacConnection({ connName, user, hostname, port, protocol, creds, template, parentIdentifier }) {
+async function createGuacConnection({ connName, user, hostname, port, protocol, creds, template, parentIdentifier, grantOwnerRead = true }) {
   if (process.env.GUAC_ENABLED !== 'true') return null;
   try {
     const connBody = {
@@ -1265,16 +1278,51 @@ async function createGuacConnection({ connName, user, hostname, port, protocol, 
       const conn = await guacAPI('POST', '/connections', connBody);
       connId = conn?.identifier || null;
     }
-    if (connId && user.email) {
+    if (connId && user.email && grantOwnerRead) {
       await ensureGuacUser(user.id, user.email);
       await guacAPI('PATCH', `/users/${encodeURIComponent(user.email)}/permissions`, [
         { op: 'add', path: `/connectionPermissions/${connId}`, value: 'READ' },
       ]).catch((e) => console.warn(`${LOG} Guac permission grant failed for ${user.email}: ${e.message}`));
+    } else if (connId && !grantOwnerRead) {
+      console.log(`${LOG} ${connName}: lab infrastructure — owner READ withheld in Guacamole.`);
     }
     return connId;
   } catch (err) {
     console.warn(`${LOG} Guac setup failed for ${connName}: ${err.message}`);
     return null;
+  }
+}
+
+/**
+ * Is this template lab infrastructure the owning STUDENT must not reach?
+ *
+ * The template objects reaching this file come from four different SELECTs
+ * (cle/routes/vms.js TEMPLATE_COLS, the CIAB lane-provision paths, the admin
+ * lane deploy, and the test fixtures), and only some of them select
+ * `role_hints`. So: use the column when the caller happened to bring it, and
+ * otherwise go and read it. One extra SELECT per workstation, against a VM
+ * clone that takes minutes.
+ *
+ * FAILS OPEN, on purpose. A refusal here would withhold the owner's READ on a
+ * NORMAL workstation, and the student cannot open the machine they were told to
+ * work on — a whole class blocked by a transient database error. Granting when
+ * unsure leaves the sensor visible in a direct /guac listing, which is the
+ * behaviour that already existed and is still filtered out of every CyberCore
+ * surface by utils/workspace-visibility.js.
+ */
+async function isTemplateHiddenFromOwner(template) {
+  if (!template) return false;
+  if (Array.isArray(template.role_hints)) return isHiddenTemplateRow(template);
+  if (!template.id) return isHiddenTemplateRow({ template_key: template.template_key });
+  try {
+    const r = await cybercoreQuery(
+      `SELECT role_hints, template_key FROM cybercore_template_catalog WHERE id = $1`,
+      [template.id]
+    );
+    return isHiddenTemplateRow(r.rows[0] || { template_key: template.template_key });
+  } catch (err) {
+    console.warn(`${LOG} Could not read role_hints for template ${template.id}: ${err.message} — granting console access.`);
+    return isHiddenTemplateRow({ template_key: template.template_key });
   }
 }
 
@@ -1828,6 +1876,10 @@ async function deployOneWorkstation(job, ws) {
     connName: `${laneName}-${workstationVmid}`,
     user, template, creds, parentIdentifier: guacParent,
     hostname: consoleHost, port: consolePort, protocol: con.protocol,
+    // The connection is always created — instructors reach it through the admin
+    // token — but the OWNER's READ is withheld for lab infrastructure, or the
+    // scoped Guac token their real workstation hands them lists this too.
+    grantOwnerRead: !(await isTemplateHiddenFromOwner(template)),
   });
 
   // 7. Surface it on the owner's own dashboard.

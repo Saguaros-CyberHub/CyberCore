@@ -269,6 +269,18 @@ const VmWorkspaces = (() => {
       ? `<span class="wks-vm-owner" title="Owner">👤 ${Utils.escapeHtml(vm.ownerEmail)}</span>`
       : '';
 
+    // Lab infrastructure the student who owns it cannot see, launch, or read a
+    // password for (server-side — see src/utils/workspace-visibility.js). The
+    // flag only ever reaches an admin or instructor, so this badge cannot
+    // appear on a student's page and tell them what they are missing. Without
+    // it, the rule is invisible: an instructor comparing their screen to a
+    // student's would find an extra card and no explanation for it.
+    // The title is one line on purpose: a browser renders a tooltip attribute
+    // verbatim, newlines and source indentation included.
+    const hiddenBadge = vm.studentHidden
+      ? `<span class="vml-badge vml-badge-idle" title="Lab infrastructure. The student this is allocated to cannot see it, open its console, or read its password.">🙈 Hidden from student</span>`
+      : '';
+
     // displayName is the Proxmox guest name (e.g. "cle-cybv454-10446"), which is
     // what an instructor sees in the Proxmox UI. vm.name is the internal unique
     // resource name — kept in the tooltip so a card can still be traced back.
@@ -304,6 +316,7 @@ const VmWorkspaces = (() => {
               ${_osTag(vm)}
               ${_moduleTag(vm.moduleKey)}
               ${_powerBadge(vm.powerState || 'unknown')}
+              ${hiddenBadge}
               ${ownerBadge}
             </div>
           </div>

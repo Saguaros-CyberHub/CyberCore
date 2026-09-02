@@ -1,0 +1,142 @@
+{
+  "_comment": "Cross-language agreement vectors for the CyberCore/Caldera SSO token. Regenerate with test/fixtures/caldera-sso-vectors.gen.js, and only for a deliberate contract change: these are the ONLY proof that front-end/src/utils/caldera-sso.js and infrastructure/caldera/login_handler.py agree. The secret is a TEST secret.",
+  "secret": "cybercore-caldera-sso-vector-secret-0123456789",
+  "header": "X-CyberCore-Auth",
+  "version": "v1",
+  "ttl_seconds": 60,
+  "cases": [
+    {
+      "name": "a valid instructor token verifies",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "ok",
+      "payload": {
+        "sub": "11111111-1111-1111-1111-111111111111",
+        "role": "instructor",
+        "path": "/caldera",
+        "exp": 1767225660,
+        "jti": "0123456789abcdef0123456789abcdef"
+      }
+    },
+    {
+      "name": "a valid admin token verifies on a deep path",
+      "token": "v1.eyJzdWIiOiIyMjIyMjIyMi0yMjIyLTIyMjItMjIyMi0yMjIyMjIyMjIyMjIiLCJyb2xlIjoiYWRtaW4iLCJwYXRoIjoiL2NhbGRlcmEiLCJleHAiOjE3NjcyMjU2NjAsImp0aSI6ImZlZGNiYTk4NzY1NDMyMTBmZWRjYmE5ODc2NTQzMjEwIn0.MpGJfD1UmSTkeXMC4i9fjbPYEf8KvQVeTpr0YtCBxRQ",
+      "request_path": "/caldera/api/v2/abilities",
+      "verify_at": 1767225630,
+      "expect": "ok",
+      "payload": {
+        "sub": "22222222-2222-2222-2222-222222222222",
+        "role": "admin",
+        "path": "/caldera",
+        "exp": 1767225660,
+        "jti": "fedcba9876543210fedcba9876543210"
+      }
+    },
+    {
+      "name": "a tampered payload (role escalated to admin) fails",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiYWRtaW4iLCJwYXRoIjoiL2NhbGRlcmEiLCJleHAiOjE3NjcyMjU2NjAsImp0aSI6IjAxMjM0NTY3ODlhYmNkZWYwMTIzNDU2Nzg5YWJjZGVmIn0.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "bad_signature"
+    },
+    {
+      "name": "a tampered MAC fails",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSncA",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "bad_signature"
+    },
+    {
+      "name": "a truncated token fails",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "malformed"
+    },
+    {
+      "name": "an empty token fails",
+      "token": "",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "malformed"
+    },
+    {
+      "name": "an expired token fails one second past exp",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera/",
+      "verify_at": 1767225661,
+      "expect": "expired"
+    },
+    {
+      "name": "exp is exclusive — exactly at exp is already expired",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera/",
+      "verify_at": 1767225660,
+      "expect": "expired"
+    },
+    {
+      "name": "role \"student\" fails even with a perfect signature",
+      "token": "v1.eyJzdWIiOiJ1IiwicGF0aCI6Ii9jYWxkZXJhIiwiZXhwIjoxNzY3MjI1NjYwLCJqdGkiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiIsInJvbGUiOiJzdHVkZW50In0.C2gJnJggqywk8fOruw6dmyGws6oXwTrZEbsa_wkcmtQ",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "bad_role"
+    },
+    {
+      "name": "a missing role fails",
+      "token": "v1.eyJzdWIiOiJ1IiwicGF0aCI6Ii9jYWxkZXJhIiwiZXhwIjoxNzY3MjI1NjYwLCJqdGkiOiIwMTIzNDU2Nzg5YWJjZGVmMDEyMzQ1Njc4OWFiY2RlZiJ9.MUBUcfkdJtE3mfCM6rdA5-JwtMMECI0-uKIInQ8ZRBg",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "missing_claim"
+    },
+    {
+      "name": "a path mismatch fails",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera-admin/steal",
+      "verify_at": 1767225601,
+      "expect": "path_mismatch"
+    },
+    {
+      "name": "a sibling prefix is not a match (/calderaX)",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/calderaX",
+      "verify_at": 1767225601,
+      "expect": "path_mismatch"
+    },
+    {
+      "name": "an unknown version fails before anything else",
+      "token": "v2.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "bad_version"
+    },
+    {
+      "name": "padded base64url is not canonical and fails",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ=.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "malformed"
+    },
+    {
+      "name": "a non-hex jti fails",
+      "token": "v1.eyJzdWIiOiJ1IiwicGF0aCI6Ii9jYWxkZXJhIiwiZXhwIjoxNzY3MjI1NjYwLCJqdGkiOiJub3QtaGV4LW5vdC1oZXgtbm90LWhleC1ub3QtaGV4eCIsInJvbGUiOiJhZG1pbiJ9.c_03FuJ8ffGAXmerFr_XOA4VOYemyj4E6IrWZ-PYJwE",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "malformed"
+    },
+    {
+      "name": "a canonical but SHORT MAC is a rejection, not a crash",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15Q",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "bad_signature"
+    },
+    {
+      "name": "an over-long MAC is a rejection too",
+      "token": "v1.eyJzdWIiOiIxMTExMTExMS0xMTExLTExMTEtMTExMS0xMTExMTExMTExMTEiLCJyb2xlIjoiaW5zdHJ1Y3RvciIsInBhdGgiOiIvY2FsZGVyYSIsImV4cCI6MTc2NzIyNTY2MCwianRpIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYifQ.Hl73EX0p7pTB9ubcBpi15U0jBWi0cD7HHi99_3rSnc0AAAAAAAAAAA",
+      "request_path": "/caldera/",
+      "verify_at": 1767225601,
+      "expect": "bad_signature"
+    }
+  ]
+}

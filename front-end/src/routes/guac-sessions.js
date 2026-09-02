@@ -24,6 +24,9 @@ const { proxmoxAPI } = require('../utils/proxmox');
 const { getV2LabNetwork } = require('../utils/site-config');
 const { ipInCidr } = require('../utils/ipv4');
 const laneCreds = require('../utils/lane-credentials');
+const {
+  hiddenBindValues, catalogJoinSql, studentHiddenSql,
+} = require('../utils/workspace-visibility');
 const audit = require('../utils/audit');
 
 const GUAC_ENABLED = process.env.GUAC_ENABLED === 'true';
@@ -298,6 +301,12 @@ const DISPLAY_COLUMNS = `
 // Admins/instructors see every active VM (with ownerEmail) by default. They
 // can pass ?scope=mine to fall back to the per-user filter.
 // Regular users always get the per-user filter regardless of query params.
+//
+// Students additionally never see lab infrastructure that happens to be
+// allocated to them — the CYBR 400 telemetry sensor being the case this exists
+// for. See utils/workspace-visibility.js. The gate is on ROLE, not on ?scope:
+// an instructor asking for "Me only" is still an instructor, and hiding their
+// own sensor from them would leave them nothing to click when it stops.
 // ============================================================================
 router.get('/vms', authenticateToken, async (req, res) => {
   if (!GUAC_ENABLED) {
@@ -311,6 +320,11 @@ router.get('/vms', authenticateToken, async (req, res) => {
     let result;
 
     if (showAll) {
+      // $1/$2 are the hint + template-key lists. The privileged list is never
+      // FILTERED by them —
+      // it is selected so the card can be badged "Hidden from students", which
+      // is how an instructor finds out this rule is in force at all.
+      const hiddenExpr = studentHiddenSql({ param: 1 });
       // LEFT JOIN LATERAL pulls the first open allocation's user so the
       // admin UI can show who owns each VM. NULL when nobody is currently
       // allocated to the resource (rare — usually only for in-flight deploys).
@@ -323,6 +337,7 @@ router.get('/vms', authenticateToken, async (req, res) => {
           vi.power_state,
           vi.metadata->>'guac_connection_id' AS guac_connection_id,
           ${DISPLAY_COLUMNS},
+          ${hiddenExpr}            AS student_hidden,
           owner.email              AS owner_email,
           owner.user_id            AS owner_id
         FROM cybercore_vm_instance vi
@@ -342,8 +357,12 @@ router.get('/vms', authenticateToken, async (req, res) => {
           AND vi.destroyed_at IS NULL
           AND ${LIVE_LANE_FILTER}
         ORDER BY r.module_key, r.name
-      `);
+      `, hiddenBindValues());
     } else {
+      // $1 userId, $2/$3 the hint + template-key lists. A privileged caller who
+      // asked for ?scope=mine takes this branch too, and must not be filtered.
+      const hiddenExpr = studentHiddenSql({ param: 2 });
+      const hideClause = isPrivileged ? '' : `AND NOT ${hiddenExpr}`;
       result = await cybercoreQuery(`
         SELECT
           vi.vm_instance_id        AS id,
@@ -355,7 +374,8 @@ router.get('/vms', authenticateToken, async (req, res) => {
             vi.metadata->>'guac_connection_id',
             a.metadata->>'guac_connection_id'
           )                        AS guac_connection_id,
-          ${DISPLAY_COLUMNS}
+          ${DISPLAY_COLUMNS},
+          ${hiddenExpr}            AS student_hidden
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
         ${DISPLAY_JOINS}
@@ -367,8 +387,9 @@ router.get('/vms', authenticateToken, async (req, res) => {
           AND r.status != 'retired'
           AND vi.destroyed_at IS NULL
           AND ${LIVE_LANE_FILTER}
+          ${hideClause}
         ORDER BY r.module_key, r.name
-      `, [userId]);
+      `, [userId, ...hiddenBindValues()]);
     }
 
     const vms = result.rows.map(row => {
@@ -392,6 +413,10 @@ router.get('/vms', authenticateToken, async (req, res) => {
         // load, unlogged. The secret is fetched per-VM below instead.
         hasCredentials: laneCreds.resolveLaneWorkstationCredential(
                           row.lane_config, row.provider_vmid).available,
+        // Privileged-only, like ownerEmail. A student's list has already had
+        // these rows removed, so shipping the flag there would only tell them
+        // that a hidden machine exists.
+        ...(isPrivileged ? { studentHidden: !!row.student_hidden } : {}),
         ...(showAll ? { ownerEmail: row.owner_email || null, ownerId: row.owner_id || null } : {}),
       };
     });
@@ -455,7 +480,13 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
       `, [vmId, process.env.GUAC_ENCRYPT_KEY || '']);
       vmRow = r.rows[0];
     } else {
-      // Require an active allocation linking this user to this VM.
+      // Require an active allocation linking this user to this VM, AND that
+      // the VM is not lab infrastructure hidden from its own student
+      // (utils/workspace-visibility.js). Both conditions, not just the first:
+      // GET /vms filtering the sensor out of the list is decluttering, not
+      // hiding, while a vmId from a bookmark or a page open since before this
+      // landed still opens the console. The row simply does not come back, so
+      // the 404 below is the same one an unallocated VM gets.
       const r = await cybercoreQuery(`
         SELECT
           vi.vm_instance_id,
@@ -478,6 +509,7 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
           a.metadata      AS alloc_metadata
         FROM cybercore_vm_instance vi
         JOIN cybercore_resource r ON r.resource_id = vi.resource_id
+        ${catalogJoinSql()}
         JOIN cybercore_allocation a
           ON  a.resource_id = r.resource_id
           AND a.user_id     = $1
@@ -486,7 +518,8 @@ router.post('/vms/:vmId/guac-session', authenticateToken, async (req, res) => {
         WHERE vi.vm_instance_id = $2
           AND vi.destroyed_at IS NULL
           AND r.status != 'retired'
-      `, [userId, vmId, process.env.GUAC_ENCRYPT_KEY || '']);
+          AND NOT ${studentHiddenSql({ param: 4 })}
+      `, [userId, vmId, process.env.GUAC_ENCRYPT_KEY || '', ...hiddenBindValues()]);
       vmRow = r.rows[0];
     }
 
@@ -618,6 +651,10 @@ router.get('/vms/:vmId/credentials', authenticateToken, async (req, res) => {
     const cred = await laneCreds.getLaneWorkstationCredentialForVm(vmId, {
       userId: req.user.userId,
       isAdmin,
+      // Lifts ONLY the hidden-infrastructure filter, never the owner-or-admin
+      // scope above — an instructor still reaches nothing but their own
+      // machines here. See that function's header.
+      isPrivileged: isAdmin || req.user.role === 'instructor',
     });
 
     if (!cred) {

@@ -26,11 +26,26 @@
 #
 # Bakes a LANE-LOCAL MITRE Caldera command-and-control server: one per student
 # lane, reachable only from inside that lane, driving real adversary emulation
-# against the lane's own Windows assets.
+# against the lane's own Windows assets. Agents beacon to it. It exists to
+# EXECUTE, and it is the only kind of machine this script builds — there is no
+# role switch and no second template.
+#
+# THE AUTHORING INSTANCE IS NOT A VM AND IS NOT BAKED HERE.
+# A previous revision of this file carried a second role that produced a
+# standalone, agent-less VM for instructors to build adversaries on. That
+# placement is superseded. The authoring instance has NO agents and executes
+# NOTHING — it is a web app in front of a content store — so it is a DOCKER
+# CONTAINER on the CyberCore host now, a compose service with no published host
+# port, reached only through Caddy, exactly like Guacamole. Section 6 of the
+# hand-off block at the bottom says what that means for whoever deploys this
+# template; config/caddy/Caddyfile and docker-compose.yml are the authority.
+#
+# So everything below is about the EXECUTOR, because there is nothing else.
 #
 # This is Track E phase E9, which is DROPPABLE and which ships nothing until the
-# E8 cluster gate has passed. Read the hand-off block at the bottom before doing
-# anything with the template this produces.
+# E8 cluster gate has passed. EXECUTION — which is the whole of what this
+# template is — stays gated on that. Read the hand-off block at the bottom
+# before doing anything with the template this produces.
 #
 # ----------------------------------------------------------------------------
 # WHY LANE-LOCAL, AND WHY THAT IS NOT NEGOTIABLE
@@ -59,6 +74,39 @@
 # What this script CANNOT prove is that the lane gateway actually drops egress.
 # That is a deploy-time property of the lane, not a bake-time property of the
 # image, and it is listed in the hand-off block as something to verify per lane.
+#
+# ----------------------------------------------------------------------------
+# WHERE THE AUTHORING INSTANCE WENT, AND WHY IT IS NOT A TEMPLATE
+# ----------------------------------------------------------------------------
+# Instructors still need one good place to build an adversary, and Caldera's own
+# web UI is that place. But building an adversary needs no agent, no operation
+# and no target — it is content authoring against the ability catalog — so the
+# authoring instance has no contact host, nothing staged, and nothing to execute
+# with. A machine that executes nothing does not need to be a machine.
+#
+# It is a CONTAINER on the CyberCore host now, alongside Guacamole:
+#
+#   - a compose service on cybercore-net that publishes NO host port. With no
+#     port binding it is unreachable except through Caddy — structurally, with
+#     no firewall rule to maintain and no "we meant to close that" to drift.
+#   - Caddy's /caldera* handle fronts it in BOTH site blocks of
+#     config/caddy/Caddyfile, gated by an authorization subrequest the app
+#     answers, which is the same shape /guacamole* already uses.
+#   - CyberCore reads an authored adversary back over the REST API and
+#     replicates it into each lane's own executor at launch.
+#
+# HOW THAT GATE WORKS IS NOT RESTATED HERE. Read config/caddy/Caddyfile and
+# front-end/src/routes/caldera-authoring.js. A bake script carrying its own copy
+# of somebody else's security mechanism is a copy that goes stale in silence,
+# and the stale copy is the one people believe.
+#
+# WHAT IT MEANS FOR THIS FILE: the template baked here never talks to the
+# authoring instance, and the authoring instance never talks to a lane.
+# Replication INTO lanes goes over guest-exec (agentShellExec via the Proxmox
+# API), which is how everything else in this codebase reaches a lane VM. There
+# is no IP route from the orchestrator into a lane and this design does not add
+# one. If you find yourself writing a firewall rule between a container on the
+# CyberCore host and a lane, stop: the design has been misread.
 #
 # ----------------------------------------------------------------------------
 # WHY THE API KEY IS A FILE INSIDE THE GUEST AND NEVER A SCRIPT ARGUMENT
@@ -119,6 +167,29 @@
 # ============================================================================
 set -euo pipefail
 
+# ---------- TOMBSTONE: CALDERA_ROLE is gone, and silence would be worse -------
+# This script used to take CALDERA_ROLE=executor|authoring and bake two images
+# that were opposites. The authoring half is a container on the CyberCore host
+# now (see the header, and hand-off section 6), so there is one image and no
+# switch — the variable is not read anywhere below.
+#
+# It is refused rather than ignored because ignoring it is the dangerous half. A
+# stale runbook or an exported shell variable would otherwise bake a LANE-LOCAL
+# C2 — contact host, sandcat, Go toolchain, everything an implant needs — and
+# hand it to somebody who believes they just built the agent-less authoring box.
+# Eight lines here turn that into a named error at second zero.
+if [ -n "${CALDERA_ROLE:-}" ]; then
+  echo "ERROR: CALDERA_ROLE is no longer a thing ('$CALDERA_ROLE' was passed)." >&2
+  echo "       This script bakes exactly one image: the LANE-LOCAL EXECUTOR, and it" >&2
+  echo "       always has a contact host, sandcat and a Go toolchain. It is a C2." >&2
+  echo "       The AUTHORING instance is a Docker container on the CyberCore host now:" >&2
+  echo "       a compose service with no published host port, reached only through" >&2
+  echo "       Caddy's /caldera* handle. There is no template to bake for it and" >&2
+  echo "       nothing on a Proxmox node to point at. See hand-off section 6." >&2
+  echo "       Unset CALDERA_ROLE and re-run." >&2
+  exit 1
+fi
+
 VMID=${VMID:-1008}
 SRC_VMID=${SRC_VMID:-1001}                  # rocky-linux-template
 NAME=${NAME:-caldera-server-template}
@@ -155,6 +226,12 @@ CALDERA_PY="${CALDERA_PY:-python3.11}"
 # this name to its OWN server. Nothing in the image is per-lane, which is the
 # point, and it is also what keeps the bake lane-local without hardcoding an
 # octet that a topology change would silently invalidate.
+#
+# DEFAULTED UNCONDITIONALLY, and note that ${VAR:-default} substitutes for an
+# EMPTY value as well as an unset one. There is exactly one kind of machine in
+# this file, it needs an address, and an empty string is never a legal one — so
+# no path through this script bakes an image with no contact host, and the
+# lane-local check below never has an empty case to consider.
 CALDERA_CONTACT_HOST="${CALDERA_CONTACT_HOST:-caldera.cybercore.lan}"
 CALDERA_PORT="${CALDERA_PORT:-8888}"
 
@@ -231,9 +308,11 @@ for BAD in ADMIN123 BLUEADMIN123 REPLACE_WITH_RANDOM_VALUE admin password; do
   done
 done
 
-# LANE-LOCAL ENFORCEMENT. Syntactic, and it is the one mistake worth catching at
-# bake time: a contact host that is public or routable means every baked agent
-# beacons off-lane, which is the failure this whole design exists to prevent.
+# LANE-LOCAL ENFORCEMENT. Syntactic, UNCONDITIONAL, and it is the one mistake
+# worth catching at bake time: a contact host that is public or routable means
+# every baked agent beacons off-lane, which is the failure this whole design
+# exists to prevent. Nothing branches around this check — there is one kind of
+# image and it is always subject to it.
 case "$CALDERA_CONTACT_HOST" in
   *.lan|*.local|*.internal|localhost)
     : ;;
@@ -325,6 +404,30 @@ ENV_FILE=/etc/cybercore-caldera.env
 # shellcheck disable=SC1090
 . "$ENV_FILE"
 
+# Defaulted before the guard below rather than relied on: this script runs under
+# `set -u`, so an env file someone deleted the key out of would otherwise abort
+# here with "unbound variable" instead of with the reason.
+CALDERA_CONTACT_HOST="${CALDERA_CONTACT_HOST:-}"
+
+# THE EMPTY-CONTACT-HOST GUARD, and it is not a formality. With no contact
+# address the block below renders
+#
+#     app.contact.http: http://:8888
+#
+# which Caldera ACCEPTS. The server then comes up healthy, serves its UI, and
+# tells every agent to beacon at a hostless URL that resolves to nothing. The
+# symptom is a lane whose C2 is up and on which no agent ever appears —
+# indistinguishable from a lane where the agent install failed, so it sends
+# whoever debugs it to the wrong half of the system entirely. A dead unit with
+# this line in the journal is strictly better than a healthy one nothing can
+# use, which is why this refuses rather than warns.
+if [ -z "$CALDERA_CONTACT_HOST" ]; then
+  echo "render-conf: CALDERA_CONTACT_HOST is empty or absent in $ENV_FILE." >&2
+  echo "render-conf: agents would be told to beacon at a hostless URL, which Caldera" >&2
+  echo "render-conf: accepts and no agent can ever use. Refusing to start." >&2
+  exit 1
+fi
+
 read_secret() {  # read_secret <file>
   [ -r "$1" ] || { echo "render-conf: $1 missing or unreadable" >&2; exit 1; }
   # `head -c` rather than $(cat) so a trailing newline never becomes part of an
@@ -358,6 +461,7 @@ umask 077
   echo "# To rotate a secret, replace the key file and restart caldera.service."
   echo "host: 0.0.0.0"
   echo "port: ${CALDERA_PORT}"
+  # The address agents are told to beacon to. Non-empty by the guard above.
   echo "app.contact.http: http://${CALDERA_CONTACT_HOST}:${CALDERA_PORT}"
   echo "api_key_red: $(yq_quote "$API_RED")"
   echo "api_key_blue: $(yq_quote "$API_BLUE")"
@@ -368,6 +472,9 @@ umask 077
   echo "    red: $(yq_quote "$UI_RED")"
   echo "  blue:"
   echo "    blue: $(yq_quote "$UI_BLUE")"
+  # PLUGINS. sandcat is the agent: it compiles the implant, serves it for
+  # download, and owns the HTTP endpoints an agent beacons into. stockpile is
+  # where the abilities an adversary is built FROM live.
   echo "plugins:"
   echo "  - access"
   echo "  - sandcat"
@@ -458,6 +565,12 @@ write_files:
     content: |
       CALDERA_REF=${CALDERA_REF}
       CALDERA_PORT=${CALDERA_PORT}
+      # Agents beacon to the name below and the LANE GATEWAY publishes it.
+      # Emptying it or deleting the line does not produce a server with no
+      # agents — caldera.service's ExecStartPre refuses to render a config
+      # without it, so the unit fails loudly instead of coming up telling every
+      # agent to beacon at a hostless URL. Rotating it means re-installing
+      # every agent in the lane.
       CALDERA_CONTACT_HOST=${CALDERA_CONTACT_HOST}
 
   # ---- THE SECRETS. Files, 0600, root. Never arguments. See the header. ----
@@ -558,6 +671,9 @@ runcmd:
   - [ sh, -c, '${CALDERA_PY} -m venv /opt/caldera-venv' ]
   - [ sh, -c, '/opt/caldera-venv/bin/pip install --upgrade pip wheel' ]
   - [ sh, -c, 'cd /opt/caldera && /opt/caldera-venv/bin/pip install -r requirements.txt' ]
+CLOUDINIT
+
+cat >> "$USERDATA_PATH" <<CLOUDINIT
 
   # ---- Render the config from the key files, then start ----
   - [ sh, -c, 'mkdir -p /opt/cybercore && chmod 700 /opt/cybercore' ]
@@ -607,8 +723,24 @@ runcmd:
   # Caldera's documented placeholder key and nothing anywhere says so.
   - [ sh, -c, 'grep -q "api_key_red" /opt/caldera/conf/local.yml && echo "CONF_RENDERED=yes" >> /etc/cybercore-bake.env || echo "CONF_RENDERED=no" >> /etc/cybercore-bake.env' ]
 
-  # LANE-LOCAL. The address agents are told to beacon to must be the name the
-  # lane gateway publishes, never a literal and never something routable.
+  # THE CONTACT HOST, PROVEN THREE WAYS. Two of these came in with the role
+  # split and are kept because neither was ever about the role: each asks a
+  # different question about the one address that decides whether this image is
+  # a lane's own C2 or a pivot between lanes.
+  #
+  #   CONTACT_CONFIGURED   the rendered config has an app.contact.http key at
+  #                        all. Without one the server is up and no agent can
+  #                        ever reach it.
+  #   CONTACT_ENV_PRESENT  the guest's env file still carries the key that the
+  #                        ExecStartPre render reads, so the NEXT boot — in a
+  #                        lane, weeks from now — renders too. Without this
+  #                        marker the only symptom of a lost key is
+  #                        "caldera.service is not active", which reads like a
+  #                        dependency failure and sends you to the wrong place.
+  #   CONTACT_LANE_LOCAL   the address is the exact lane-local name this bake
+  #                        was told to use, not merely present.
+  - [ sh, -c, 'grep -q "^app.contact.http:" /opt/caldera/conf/local.yml && echo "CONTACT_CONFIGURED=yes" >> /etc/cybercore-bake.env || echo "CONTACT_CONFIGURED=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'grep -q "^CALDERA_CONTACT_HOST=" /etc/cybercore-caldera.env && echo "CONTACT_ENV_PRESENT=yes" >> /etc/cybercore-bake.env || echo "CONTACT_ENV_PRESENT=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'grep -q "app.contact.http: http://${CALDERA_CONTACT_HOST}:${CALDERA_PORT}" /opt/caldera/conf/local.yml && echo "CONTACT_LANE_LOCAL=yes" >> /etc/cybercore-bake.env || echo "CONTACT_LANE_LOCAL=no" >> /etc/cybercore-bake.env' ]
 
   # AGENT DELIVERY. sandcat is what compiles and serves the agent; stockpile is
@@ -618,6 +750,12 @@ runcmd:
   - [ sh, -c, 'test -d /opt/caldera/plugins/stockpile/data/abilities && echo "STOCKPILE_ABILITIES=yes" >> /etc/cybercore-bake.env || echo "STOCKPILE_ABILITIES=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'command -v go >/dev/null && echo "GO_TOOLCHAIN=yes" >> /etc/cybercore-bake.env || echo "GO_TOOLCHAIN=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'test -x /opt/caldera-venv/bin/python && echo "PY_VENV=yes" >> /etc/cybercore-bake.env || echo "PY_VENV=no" >> /etc/cybercore-bake.env' ]
+CLOUDINIT
+
+# BAKE_COMPLETE is written LAST, on its own, and the host polls for it. Anything
+# appended after this line would be running after the host has already decided
+# the bake is finished.
+cat >> "$USERDATA_PATH" <<CLOUDINIT
 
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 CLOUDINIT
@@ -709,14 +847,24 @@ check CALDERA_SERVICE_ENABLED yes "caldera.service is not enabled — a cloned l
 check CALDERA_SERVICE_ACTIVE  yes "caldera.service is enabled but not running — read 'journalctl -u caldera'; a config error looks identical to a dependency error from outside"
 check CALDERA_API_LOCAL     yes "the API does not answer on 127.0.0.1 — the server is not serving, so no adapter and no agent will ever reach it. This is the single marker that most nearly proves the bake worked"
 check CONF_RENDERED         yes "conf/local.yml was not rendered — Caldera then falls back to the shipped conf/default.yml, which carries the DOCUMENTED PLACEHOLDER API KEY, and nothing anywhere says so"
-check CONTACT_LANE_LOCAL    yes "app.contact.http is not the lane-local name — agents baked from this image would beacon somewhere other than their own lane's server, which is a live pivot between student lanes"
 check API_KEY_FILE          yes "the API key file is missing — the render script has nothing to read and the config falls back to defaults"
 check API_KEY_PERMS         600 "the API key file is not 0600 — a C2 credential readable by any local account on a machine whose whole job is running commands"
 check CONF_PERMS            600 "conf/local.yml is not 0600 — it holds every secret in this image in plaintext"
 check KEY_IS_DEFAULT        no  "Caldera's shipped placeholder key is still in the rendered config"
-check SANDCAT_PLUGIN        yes "the sandcat plugin is missing — the server cannot produce an agent, so nothing can ever be executed. Almost always a non-recursive clone"
 check STOCKPILE_ABILITIES   yes "the stockpile plugin has no abilities — src/incident/caldera/adversary.js maps techniques onto ability ids from this catalog, so an empty one makes EVERY scenario step unmapped"
-check GO_TOOLCHAIN          yes "no Go toolchain — sandcat compiles its agent binary on demand and the download endpoint 500s without one"
+
+# ---- The contact host: present, readable on the NEXT boot, and lane-local ----
+#
+# Three checks on one address, and they fail differently. CONTACT_CONFIGURED is
+# about the config the server is running RIGHT NOW; CONTACT_ENV_PRESENT is about
+# whether the ExecStartPre render will still succeed after the clone reboots in
+# a lane; CONTACT_LANE_LOCAL is about whether the address is the RIGHT one. A
+# bake can pass the first and fail either of the others.
+check CONTACT_CONFIGURED  yes "conf/local.yml has no app.contact.http key — agents have no address to beacon to, and the symptom is a healthy lane C2 that no agent ever appears on"
+check CONTACT_ENV_PRESENT yes "/etc/cybercore-caldera.env has no CALDERA_CONTACT_HOST — this bake's render happened to run with one in the environment, but caldera.service's ExecStartPre reads that FILE and will refuse to start on the next boot. Every clone of this template would come up dead, in a lane, with nobody watching"
+check CONTACT_LANE_LOCAL  yes "app.contact.http is not the lane-local name — agents baked from this image would beacon somewhere other than their own lane's server, which is a live pivot between student lanes"
+check SANDCAT_PLUGIN      yes "the sandcat plugin is missing — the server cannot produce an agent, so nothing can ever be executed. Almost always a non-recursive clone"
+check GO_TOOLCHAIN        yes "no Go toolchain — sandcat compiles its agent binary on demand and the download endpoint 500s without one"
 
 ACTUAL_TAG=$(marker CALDERA_TAG_ACTUAL)
 ACTUAL_SHA=$(marker CALDERA_SHA_ACTUAL)
@@ -774,30 +922,40 @@ rm -f "$USERDATA_PATH"
 
 qm template $VMID
 echo "==> Template $VMID ($NAME) sealed"
-
 # ---------- 6. What still has to happen by hand ----------
 cat <<NEXTSTEPS
-
 ============================================================================
- Template $VMID ($NAME) is built. Nothing about it is wired into CyberCore,
- and it must stay that way for now.
+ Template $VMID ($NAME) is built: a LANE-LOCAL Caldera executor, one clone per
+ student lane. Nothing about it is wired into CyberCore yet.
 
- 0. E8 MUST PASS FIRST. THIS IS NOT A SEQUENCING PREFERENCE.
+ 0. WHAT IS GATED ON E8, AND WHAT IS NOT.
 
     Caldera is Track E phase E9 and E9 is explicitly DROPPABLE. The E8 cluster
     gate — a defensive_monitoring engagement deployed end to end, the synthetic
-    scenario landing in Kibana, a student board submitted and released — is
-    what proves the incident engine works AT ALL. Standing Caldera up first
-    means debugging a real C2 on top of an unproven pipeline, and every failure
-    would have two candidate causes.
+    scenario landing in Kibana, a student board submitted and released — is what
+    proves the incident engine works AT ALL.
 
-    Concretely, as of this bake:
+    EXECUTION — WHICH IS THIS TEMPLATE — IS GATED ON IT, and stays gated.
+    Standing a real C2 up on top of an unproven pipeline means every failure has
+    two candidate causes. As of this bake:
+
       - 'caldera' is legal in cybercore_incident_run's engine CHECK but is NOT
-        registered in front-end/src/incident/engines/index.js, and engineFor()
-        THROWS a named error for it. That is deliberate and correct.
+        registered in front-end/src/incident/engines/index.js: engineFor()
+        THROWS a named error for it and registeredEngines() is ["synthetic"].
+        That gate is deliberate and correct. Do not open it here.
       - front-end/src/incident/caldera/adversary.js compiles an adversary and
-        an answer key, and is required by nothing.
-      - There is no engine adapter, no route, and no UI. Do not add one here.
+        an answer key; front-end/src/incident/engines/caldera.js is a complete
+        nine-method adapter that nothing reaches.
+      - there is no route and no UI that dispatches to Caldera. Do not add one,
+        and do not let a route read an engine name off a request body.
+
+    AUTHORING IS NOT GATED ON IT, and authoring is not this template — it is a
+    container. See section 6. An authoring instance has no agents, no contact
+    host and no path into any lane, so an instructor building adversaries on it
+    cannot affect a student machine: there is nothing on it to affect one with.
+NEXTSTEPS
+
+cat <<NEXTSTEPS
 
  1. REGISTER THE TEMPLATE.
 
@@ -825,7 +983,7 @@ cat <<NEXTSTEPS
     Do NOT add a seed migration: front-end/migrations/ has no runner, so a file
     there would never execute.
 
- 2. TAG role_hints SO A RESOLVER CAN FIND IT.
+ 2. TAG role_hints SO A RESOLVER CAN FIND IT — AND CANNOT CONFUSE IT.
 
     role_hints is not writable from any admin UI, so it is one SQL statement:
 
@@ -836,6 +994,13 @@ cat <<NEXTSTEPS
     Mirror of the 'loggen' and 'elk' tags. A missing tag must become a NAMED
     400 at deploy time in whatever resolver eventually reads it — never a lane
     that deploys happily with no C2.
+
+    'caldera' is the ONLY Caldera role hint there is, and it must resolve to
+    this template and nothing else. There is no 'caldera-authoring' template to
+    confuse it with any more — authoring is a container, see section 6 — so the
+    mistake left to make is a lane whose C2 resolves to something OUTSIDE the
+    lane. That is one controller holding implants from every student at once,
+    with no lane isolation in front of it.
 
  3. NEVER PUBLISH A STUDENT CONSOLE FOR THIS MACHINE.
 
@@ -851,6 +1016,13 @@ cat <<NEXTSTEPS
 
     The SSH password-auth drop-in baked in above is for STAFF reaching it from
     inside the lane, and for nothing else.
+
+    To confirm over guest-exec that a machine really is a lane's own C2, read
+    the address its agents were told to beacon to — that is the fact that
+    matters, and it is the one the service refuses to start without:
+
+        qm guest exec $VMID -- /bin/sh -c 'cat /etc/cybercore-caldera.env'
+        -> CALDERA_CONTACT_HOST=${CALDERA_CONTACT_HOST}
 
  4. WHAT THIS SCRIPT COULD NOT VERIFY, AND WHO HAS TO.
 
@@ -898,6 +1070,45 @@ cat <<NEXTSTEPS
     DO NOT rotate caldera-encryption-key on a server that already holds
     objects: everything encrypted under the old key becomes undecryptable, and
     the symptom is a server that starts fine and has lost its operations.
+NEXTSTEPS
+
+cat <<NEXTSTEPS
+
+ 6. THE AUTHORING INSTANCE IS NOT THIS TEMPLATE, AND IS NOT A VM AT ALL.
+
+    An earlier revision of this script carried a second role that baked a
+    standalone, agent-less authoring VM. That is gone. The authoring instance
+    has NO agents and executes NOTHING — it is a web app in front of a content
+    store — so it is a DOCKER CONTAINER on the CyberCore host now:
+
+      - a compose service in docker-compose.yml on cybercore-net that publishes
+        NO host port. That is the security property and it is structural: with
+        no port binding there is nothing to reach except through Caddy, so there
+        is no firewall rule to maintain and none to forget.
+      - fronted by the /caldera* handle in BOTH site blocks of
+        config/caddy/Caddyfile, gated by an authorization subrequest the app
+        answers — the same shape /guacamole* already uses.
+      - front-end/src/routes/caldera-authoring.js answers that gate. Read it and
+        the Caddyfile before touching either. The mechanism is deliberately NOT
+        restated in this script: a second copy of somebody else's security
+        decision goes stale in silence, and the stale copy is the one people
+        believe.
+
+    So there is nothing to register: no 'caldera-authoring' template row, no VM
+    to bake, no 'caldera-authoring' role hint on any catalog row. There is
+    nothing on a Proxmox node to point one at.
+
+    THE TWO ARE NEVER SUBSTITUTABLE. This template is a lane's own C2 and it is
+    the only thing that should ever answer to the 'caldera' role hint. The
+    authoring container must never become selectable as an EXECUTION engine, and
+    no lane must ever resolve its C2 to something outside the lane — one
+    controller, every student, no isolation in front of it is precisely the
+    failure the whole lane-local design exists to prevent.
+
+    GATING, RESTATED BECAUSE IT IS ASYMMETRIC AND EASY TO GET BACKWARDS:
+    AUTHORING is not gated on E8, because it cannot touch a lane. EXECUTION —
+    this template — still is: engineFor('caldera') throws and registeredEngines()
+    is ["synthetic"].
 
  Test clone: qm clone $VMID 9993 --name caldera-test --full --storage $STORAGE
 ============================================================================

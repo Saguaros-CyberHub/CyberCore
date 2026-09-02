@@ -101,6 +101,34 @@ const { engagementDisplayName, isEngagementLive } = require('../utils/engagement
 const scenarioSource = require('../utils/scenario-source');
 
 /**
+ * ATTACK AUTHORING. Both halves come from core, and the split between them is
+ * deliberate:
+ *
+ *   routes/caldera-authoring.js  owns WHERE the authoring instance is (the same
+ *                                value Caddy substitutes into its reverse_proxy)
+ *                                and the public path it is served on. It holds
+ *                                no credential and never will.
+ *   incident/caldera/authoring.js owns the API key, the client, the fact-source
+ *                                sync and the adversary list.
+ *
+ * Requiring the route module for two constants is not a layering violation: a
+ * plugin requiring core is the allowed direction, and the alternative — a second
+ * resolver for the upstream address in this file — is exactly the drift
+ * test/caldera-authoring-access.test.js exists to prevent between the app and
+ * the Caddyfile.
+ *
+ * NEITHER OF THESE CAN DISPATCH. See src/incident/caldera/authoring.js's header:
+ * the client it builds calls the source and adversary endpoints and nothing
+ * else, engineFor('caldera') still throws, and POST / below refuses a body that
+ * names an authored adversary.
+ */
+const authoring = require('../../../../../src/incident/caldera/authoring');
+const {
+  authoringConfig,
+  PUBLIC_PATH: AUTHORING_PATH,
+} = require('../../../../../src/routes/caldera-authoring');
+
+/**
  * engagement-provision.js is LAZILY required, and this is not style.
  *
  * Its dependency graph reaches src/utils/batch-deployer.js, which reads
@@ -425,6 +453,178 @@ router.get('/targets', instructorOnly, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Attack authoring — prepare this Engagement, THEN hand over the link
+// ---------------------------------------------------------------------------
+/**
+ * WHAT THIS IS. One standalone Caldera "authoring" instance lives outside every
+ * Environment, with no agents and no implants. An instructor builds adversaries
+ * in its own web UI; CyberCore reads them back out. Nothing inside an
+ * Environment ever talks to it, and nothing here launches anything.
+ *
+ * WHY THESE TWO ROUTES ARE REGISTERED ABOVE POST /:runId/abort AND /retry.
+ * Express matches in REGISTRATION ORDER, and `/authoring/fact-source` would be
+ * read as a run id by any :runId route declared first. Neither of those two
+ * would actually match a second segment of 'fact-source' — but that is a
+ * property of the current path names and not of the design, and the same
+ * accident already cost this file's mount its own comment in routes/incidents.js.
+ * Registered first, it cannot happen.
+ *
+ * THE ROLE GATE IS instructorOnly, LIKE EVERY OTHER WRITE HERE. Caldera itself
+ * has no per-user and no per-object ownership — its users are credentials in a
+ * 'red' or 'blue' GROUP, which is a role and not tenancy — so CYBERCORE OWNS ALL
+ * SCOPING, exactly as it does for the launcher: loadEngagement() decides whether
+ * this staff member may drive this Engagement at all, and a student never gets
+ * past requireRole.
+ */
+
+/**
+ * The authoring instance for this deployment, or the reason there isn't one.
+ *
+ * WHERE the box is comes from routes/caldera-authoring.js — the same value
+ * Caddy proxies to. The CREDENTIAL comes from incident/caldera/authoring.js,
+ * because that route file deliberately holds none and says so at length. The
+ * decision itself lives in core, so the CLE twin cannot answer it differently.
+ */
+const authoringTarget = () => authoring.resolveTarget(authoringConfig());
+
+/**
+ * POST /authoring/fact-source — the "Author attacks" click.
+ *
+ * THE ORDER IS THE POINT AND IT IS WHY THIS IS A REQUEST AT ALL, rather than a
+ * link the browser could simply follow. The fact source Caldera seeds an
+ * operation from is REFRESHED FROM THE DEPLOYED SPEC HERE, and the console_path
+ * this answers with is only present once that refresh has been accepted by the
+ * server. An instructor who reaches the authoring UI before the refresh is
+ * authoring against the machines the PREVIOUS environment had: every ability
+ * they aim at one of them produces a link that can never run, the operation
+ * completes in seconds having done nothing, and the run row says it succeeded.
+ *
+ * A POST rather than a GET because it WRITES — it creates or replaces a row on a
+ * shared server. The same request is safe to repeat: syncFactSource() matches
+ * the class's deterministic id first and its name second, so re-pressing the
+ * button updates one row rather than accumulating thirty.
+ *
+ * ANSWERS 200 EVEN WHEN IT CANNOT BE DONE. `ready` is the discriminant, and the
+ * reasons are codes this route turns into nothing at all: the CONSOLE writes the
+ * sentences, because CiAB and CLE do not share copy. A 4xx here would reach
+ * public/js/app.js as an APIError and become a red toast reading "Internal
+ * error", which is precisely the dead end this endpoint exists to replace.
+ */
+router.post('/authoring/fact-source', instructorOnly, async (req, res) => {
+  try {
+    const engagement = await loadEngagement(req, res);
+    if (!engagement) return notFound(res);
+    const engagementId = engagement.engagement_id;
+
+    // The Client's own document, for the company name and the asset list. A
+    // failure here is NOT fatal: assets are ENRICHMENT ONLY (an OS string for a
+    // machine whose spec row carries none) and the label falls back to the
+    // Engagement's own display name. Blanking the whole card because a profile
+    // moved would take away authoring that would otherwise work.
+    let ctx = null;
+    try {
+      ctx = await scenarioSource.loadEngagementScenarioContext(engagementId);
+    } catch (err) {
+      console.warn(`[CIAB incident-launch] authoring context unavailable: ${err.message}`);
+    }
+
+    // THE DEPLOYED SPEC, never the profile. A profile describes an estate on
+    // paper and the Environment deploys a subset of it; seeding the authoring UI
+    // from the paper makes every machine that was never built look targetable.
+    const { spec, lanes } = await authoring.loadScopeSpec(scopeOf(engagementId));
+
+    const target = authoringTarget();
+    const label = [ctx && ctx.companyName, engagementDisplayName(engagement)]
+      .filter(Boolean).join(' — ');
+
+    const result = await authoring.prepareAuthoring({
+      client: target.client,
+      unavailable: target.unavailable,
+      // The scope KEY is the engagement id and the LABEL is for humans. Two
+      // Engagements a human called the same thing are two scopes; the id is what
+      // keeps their fact sources apart on a server with no ownership.
+      scopeKey: engagementId,
+      scopeLabel: label || engagementDisplayName(engagement),
+      spec,
+      assets: ctx ? ctx.assets : null,
+    });
+
+    if (result.ready) {
+      // Audited ONCE per click, unlike the forward_auth probe next door which
+      // fires per subrequest and is deliberately not audited on the allow side.
+      // This one is a staff action that writes to a server every instructor
+      // shares, so it is worth a row. Names and counts only — the host list
+      // describes a Client's estate and does not belong in an audit metadata
+      // blob that admins browse.
+      audit.log({
+        req,
+        action: 'incident.authoring_prepared',
+        source: 'ciab',
+        target: {
+          type: 'engagement',
+          id: engagementId,
+          label: engagementDisplayName(engagement),
+        },
+        metadata: {
+          fact_source: result.fact_source.name,
+          action: result.fact_source.action,
+          windows: result.platforms.windows,
+          linux: result.platforms.linux,
+          other: result.platforms.other,
+        },
+      }).catch(() => {});
+    }
+
+    return res.json({
+      ...result,
+      // The link, and ONLY on the ready path. This is the ordering rule made
+      // structural: there is no branch in which a console can render a link
+      // without having rendered the platform summary that came back with it.
+      console_path: result.ready ? `${AUTHORING_PATH}/` : null,
+      upstream: target.upstream,
+      environments: lanes,
+      // Travels with every answer so a console renders the gate from the
+      // SERVER's word rather than a constant of its own that could drift open.
+      execution: authoring.EXECUTION_GATE,
+    });
+  } catch (error) {
+    return fail(res, error, 'POST /authoring/fact-source');
+  }
+});
+
+/**
+ * GET /authoring/adversaries — what the authoring instance holds.
+ *
+ * A READ of a content store. Caldera has no per-object ownership, so this is
+ * every adversary on the box and not "this Engagement's" — there is no such
+ * concept over there, and pretending otherwise in the payload would invent a
+ * boundary the server does not enforce.
+ *
+ * PICKING ONE CANNOT LAUNCH IT. There is no endpoint in this router, or in the
+ * CLE twin, that accepts an adversary id and dispatches it: POST / refuses a
+ * body naming one outright, INCIDENT_ENGINE is the literal 'synthetic', and
+ * engineFor('caldera') throws underneath all of that. `execution` says so in the
+ * payload so the console can explain the gate rather than silently disabling a
+ * button.
+ */
+router.get('/authoring/adversaries', instructorOnly, async (req, res) => {
+  try {
+    if (!(await loadEngagement(req, res))) return notFound(res);
+    const target = authoringTarget();
+    const result = await authoring.listAdversaryProfiles(target.client, {
+      unavailable: target.unavailable,
+    });
+    // PRIVATE and uncached. The list names one department's authored intrusions
+    // and changes the moment an instructor saves in Caldera's UI; a stale picker
+    // is how somebody launches last week's adversary.
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ...result, upstream: target.upstream });
+  } catch (error) {
+    return fail(res, error, 'GET /authoring/adversaries');
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST / — launch
 // ---------------------------------------------------------------------------
 
@@ -434,6 +634,23 @@ router.post('/', instructorOnly, async (req, res) => {
     if (!engagement) return notFound(res);
     const engagementId = engagement.engagement_id;
     const body = req.body || {};
+
+    // ── EXECUTION IS SHUT, AND THIS IS WHERE THAT IS ENFORCED ─────────────
+    // An adversary authored in the attack-authoring console is PREPARED, never
+    // dispatchable: src/incident/engines/index.js does not register the caldera
+    // adapter, engineFor('caldera') throws, and INCIDENT_ENGINE below is the
+    // literal 'synthetic'. So a body naming one could only ever be ignored —
+    // and an ignored field is how an instructor comes to believe they launched
+    // the intrusion they authored while the class hunts a different one.
+    // Refused by name instead, with the reason in it.
+    if (body.adversary_id || body.adversary) {
+      return res.status(400).json({
+        error: 'An adversary from the attack-authoring console cannot be launched yet. '
+             + 'Authoring is available now; execution is enabled after the cluster gate '
+             + 'passes. Launch a scenario, a technique, a tactic or an attack chain.',
+        code: 'AUTHORED_ADVERSARY_NOT_DISPATCHABLE',
+      });
+    }
 
     const engine = engines.engineFor(INCIDENT_ENGINE);
 

@@ -33,6 +33,9 @@
 
 const { cybercoreQuery } = require('./cybercore-db');
 const { claimsSql } = require('./lane-claims');
+const {
+  hiddenBindValues, catalogJoinSql, studentHiddenSql,
+} = require('./workspace-visibility');
 
 const LOG = '[LaneCreds]';
 
@@ -126,10 +129,19 @@ function resolveLaneWorkstationCredential(laneConfig, providerVmid) {
  * (routes/workstations.js) has no per-VM password at all — that path never
  * injects cloud-init credentials — so there is nothing here to return for one.
  *
+ * @param {string} vmInstanceId
+ * @param {object} opts
+ * @param {string} opts.userId
+ * @param {boolean} [opts.isAdmin=false]  skips the ownership join entirely
+ * @param {boolean} [opts.isPrivileged=isAdmin]  admin OR instructor; only lifts
+ *   the hidden-infrastructure filter, never the ownership scope
  * @returns {Promise<object|null>} the resolved credential plus `ownerUserId` and
- *   `vmName`, or null when the VM does not exist or is not the caller's.
+ *   `vmName`, or null when the VM does not exist, is not the caller's, or is
+ *   hidden from them (utils/workspace-visibility.js).
  */
-async function getLaneWorkstationCredentialForVm(vmInstanceId, { userId, isAdmin = false } = {}) {
+async function getLaneWorkstationCredentialForVm(
+  vmInstanceId, { userId, isAdmin = false, isPrivileged = isAdmin } = {}
+) {
   const SELECT_COLUMNS = `
       vi.provider_vmid,
       dl.config                    AS lane_config,
@@ -143,7 +155,22 @@ async function getLaneWorkstationCredentialForVm(vmInstanceId, { userId, isAdmin
   const FROM_JOINS = `
     FROM cybercore_vm_instance vi
     JOIN cybercore_resource r ON r.resource_id = vi.resource_id
-    LEFT JOIN cybercore_lane dl ON dl.lane_id::text = r.metadata->>'lane_id'`;
+    LEFT JOIN cybercore_lane dl ON dl.lane_id::text = r.metadata->>'lane_id'
+    ${catalogJoinSql()}`;
+
+  // A machine hidden from its own student (utils/workspace-visibility.js) does
+  // not hand that student its password either. The console route and the list
+  // both refuse it, and leaving this one open would mean the sensor's login is
+  // still one click away on the card that the list no longer draws — reachable
+  // by anyone replaying the request.
+  //
+  // Gated on `isPrivileged`, NOT on the ownership scope above it. Hidden means
+  // hidden from the STUDENT; an instructor or admin looking up the sensor login
+  // is the normal way that machine gets fixed, and it is also the only reading
+  // that agrees with GET /vms, which still lists a professor's own sensor when
+  // they ask for ?scope=mine. This relaxes nothing about WHOSE machine may be
+  // read — a non-admin still has to clear the allocation join below.
+  const NOT_HIDDEN = isPrivileged ? '' : `AND NOT ${studentHiddenSql({ param: 3 })}`;
 
   // Mirrors LIVE_LANE_FILTER in routes/guac-sessions.js: a lane row that is gone
   // or torn down must not keep serving a credential through an orphaned resource
@@ -173,9 +200,16 @@ async function getLaneWorkstationCredentialForVm(vmInstanceId, { userId, isAdmin
           AND vi.destroyed_at IS NULL
           AND r.status != 'retired'
           AND r.metadata->>'vm_category' = 'lane_vm'
-          ${LIVE_LANE}`;
+          ${LIVE_LANE}
+          ${NOT_HIDDEN}`;
 
-  const params = isAdmin ? [vmInstanceId] : [vmInstanceId, userId];
+  // $3/$4 go ONLY where NOT_HIDDEN put placeholders for them. Postgres rejects
+  // a bind that supplies more parameters than the statement references, so a
+  // privileged non-admin caller would otherwise turn every credential read into
+  // a 500 rather than the relaxation it is meant to be.
+  const params = isAdmin
+    ? [vmInstanceId]
+    : (NOT_HIDDEN ? [vmInstanceId, userId, ...hiddenBindValues()] : [vmInstanceId, userId]);
   const result = await cybercoreQuery(sql, params).catch((err) => {
     console.warn(`${LOG} Credential lookup failed for ${vmInstanceId}: ${err.message}`);
     throw err;

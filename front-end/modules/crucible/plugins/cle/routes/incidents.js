@@ -62,6 +62,33 @@ const audit = require('../../../../../src/utils/audit');
 const board = require('../../../../../src/incident/board');
 const projection = require('../../../../../src/incident/projection');
 
+/**
+ * ATTACK AUTHORING. Core, both halves, and the split between them matters:
+ *
+ *   routes/caldera-authoring.js   owns WHERE the standalone authoring instance
+ *                                 is and what public path it is served on. It
+ *                                 holds no Caldera credential and never will.
+ *   incident/caldera/authoring.js owns the API key, the client, the fact-source
+ *                                 sync and the adversary list.
+ *
+ * NEITHER CAN DISPATCH. The client they build calls the source and adversary
+ * endpoints only; src/incident/engines/index.js still refuses 'caldera', so no
+ * run row can name it as an engine and there is no path from a picked adversary
+ * to a launch. cle/routes/attacks.js — the file that CAN launch — is untouched
+ * by this and gains no adversary parameter.
+ *
+ * These sit in the BOARD file rather than in attacks.js because the panel that
+ * shows them (public/js/blue-team.js) already speaks to this collection and
+ * already learns its own tier from it. A second base URL for two staff-only
+ * reads would be a second thing to keep in step with routes/api.js — the exact
+ * drift test/blueteam-mount.test.js exists to catch.
+ */
+const authoring = require('../../../../../src/incident/caldera/authoring');
+const {
+  authoringConfig,
+  PUBLIC_PATH: AUTHORING_PATH,
+} = require('../../../../../src/routes/caldera-authoring');
+
 /** Course id arrives via mergeParams; the res.locals shim in api.js is a backstop. */
 function courseIdOf(req, res) {
   return req.params.courseId || res.locals.courseId;
@@ -175,6 +202,159 @@ router.get('/', async (req, res) => {
     });
   } catch (error) {
     fail(res, error, 'GET /');
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Attack authoring — staff only, and registered BEFORE anything taking :runId
+// ---------------------------------------------------------------------------
+/**
+ * WHAT THIS IS. One standalone Caldera "authoring" instance lives outside every
+ * lane, with no agents and no implants. An instructor builds adversaries in its
+ * own web UI; CyberCore reads them back out. Nothing inside a lane ever talks to
+ * it, and nothing below launches anything.
+ *
+ * REGISTRATION ORDER IS LOAD-BEARING. Express matches in the order routes are
+ * declared, and '/authoring/adversaries' would be read as a run id by
+ * GET /:runId/status if that were declared first — resolving to run_id
+ * 'authoring', which board.readRunFor*() refuses before SQL, so the symptom
+ * would be a flat 404 that looks exactly like "this course has no incidents".
+ * Declared here, above /:runId, it cannot happen.
+ *
+ * STAFF ONLY, AND THE TIER IS THE SERVER'S. resolveTier() answers 'staff' for
+ * whoever MANAGES this course and 'student' for whoever is enrolled in it, per
+ * request — so an instructor of another course is a student here and gets the
+ * same 403 as anyone else. Caldera itself has no per-user and no per-object
+ * ownership (its users are credentials in a 'red'/'blue' GROUP, which is a role,
+ * not tenancy), so CYBERCORE OWNS ALL SCOPING and this is where it is owned.
+ *
+ * NOT GATED ON THE blue_team FEATURE. That flag governs student writes on the
+ * board — see note 3 in this file's header. Authoring is neither a write to the
+ * board nor a student action; gating it here would make an instructor unable to
+ * prepare a course whose board they had merely not enabled yet.
+ */
+
+/** Staff on THIS course, or the response is already sent. */
+async function loadStaffCourse(req, res) {
+  const courseId = courseIdOf(req, res);
+  const { tier, course } = await resolveTier(courseId, req.user);
+  if (!tier) {
+    // The same 404 a non-member gets everywhere else in this file: "no such
+    // course" and "not your course" must stay indistinguishable from outside.
+    res.status(404).json({ error: 'Not found' });
+    return null;
+  }
+  if (tier !== 'staff') {
+    res.status(403).json({ error: 'Instructors only' });
+    return null;
+  }
+  return { courseId, course };
+}
+
+/**
+ * POST /authoring/fact-source — the "Author attacks" click.
+ *
+ * THE ORDER IS THE POINT, and it is why this is a request at all rather than a
+ * link the browser could just follow. The fact source Caldera seeds an operation
+ * from is REFRESHED FROM THE DEPLOYED SPEC HERE, and console_path is present
+ * only once the server has accepted that refresh. An instructor who reached the
+ * authoring UI first would be authoring against the machines the PREVIOUS
+ * deployment had: every ability aimed at one of them makes a link that can never
+ * run, the operation finishes in seconds having done nothing, and the run row
+ * reports success.
+ *
+ * A POST because it WRITES a row on a shared server — and safe to repeat,
+ * because syncFactSource() matches this course's deterministic id first and its
+ * name second, so pressing the button twice updates one row.
+ *
+ * ANSWERS 200 EVEN WHEN IT CANNOT BE DONE. `ready` is the discriminant and the
+ * reasons are CODES; the panel writes the sentences, because the two products do
+ * not share copy. A 4xx would reach the browser as a bare error message where
+ * what is needed is "authoring is not set up, here is what an admin does".
+ */
+router.post('/authoring/fact-source', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return undefined;
+
+    // THE DEPLOYED SPEC, never a catalog entry. A course whose lanes are plain
+    // workstation pairs has no challenge spec at all, which comes back as
+    // no_spec — a state the panel explains rather than an error it reports.
+    const { spec, lanes } = await authoring.loadScopeSpec(scopeOf(ctx.courseId));
+
+    const target = authoring.resolveTarget(authoringConfig());
+    const label = [ctx.course.code, ctx.course.course_name].filter(Boolean).join(' — ');
+
+    const result = await authoring.prepareAuthoring({
+      client: target.client,
+      unavailable: target.unavailable,
+      // The KEY is the course id and the LABEL is for humans. Two courses a
+      // human called "Blue Team" are two scopes; the id is what keeps their fact
+      // sources apart on a server that has no per-object ownership.
+      scopeKey: ctx.courseId,
+      scopeLabel: label || String(ctx.courseId),
+      spec,
+    });
+
+    if (result.ready) {
+      audit.log({
+        req,
+        action: 'incident.authoring_prepared',
+        source: 'cle',
+        target: { type: 'course', id: ctx.courseId, label: ctx.course.code || ctx.course.course_name },
+        // Names and counts only. The host list describes an estate and has no
+        // business in an audit blob admins browse.
+        metadata: {
+          fact_source: result.fact_source.name,
+          action: result.fact_source.action,
+          windows: result.platforms.windows,
+          linux: result.platforms.linux,
+          other: result.platforms.other,
+        },
+      }).catch(() => {});
+    }
+
+    return res.json({
+      ...result,
+      // The link, and ONLY on the ready path — the ordering rule made
+      // structural. There is no branch in which the panel can render a link
+      // without the platform summary that came back with it.
+      console_path: result.ready ? `${AUTHORING_PATH}/` : null,
+      upstream: target.upstream,
+      lanes,
+      execution: authoring.EXECUTION_GATE,
+    });
+  } catch (error) {
+    return fail(res, error, 'POST /authoring/fact-source');
+  }
+});
+
+/**
+ * GET /authoring/adversaries — what the authoring instance holds.
+ *
+ * A read of a content store. Caldera has no per-object ownership, so this is
+ * every adversary on the box and not "this course's" — inventing that boundary
+ * in the payload would claim an isolation the server does not enforce.
+ *
+ * PICKING ONE CANNOT LAUNCH IT. Nothing in this router or in
+ * cle/routes/attacks.js accepts an adversary id, and engineFor('caldera')
+ * throws underneath all of it. `execution` travels in the payload so the panel
+ * explains the gate instead of silently disabling a control.
+ */
+router.get('/authoring/adversaries', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return undefined;
+    const target = authoring.resolveTarget(authoringConfig());
+    const result = await authoring.listAdversaryProfiles(target.client, {
+      unavailable: target.unavailable,
+    });
+    // Uncached: the list changes the moment an instructor saves in Caldera's UI,
+    // and a stale picker is how somebody prepares last week's adversary.
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ...result, upstream: target.upstream });
+  } catch (error) {
+    return fail(res, error, 'GET /authoring/adversaries');
   }
 });
 

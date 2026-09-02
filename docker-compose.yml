@@ -7,6 +7,12 @@ volumes:
   cybercore-postgres-data:
   cybercore-caddy-data:
   cybercore-caddy-config:
+  # Caldera's object store and authored content (data/adversaries, data/sources,
+  # data/objectives, data/abilities). A NAMED volume, not a bind mount, for the
+  # same reason the postgres data is: `docker compose build caldera` replaces the
+  # image and everything in it, and an instructor's afternoon of adversary
+  # authoring must not be part of what gets replaced.
+  cybercore-caldera-data:
 
 services:
   # ============================================================================
@@ -135,6 +141,22 @@ services:
       GUAC_DB_NAME: ${GUAC_DB_NAME:-guacamole_db}
       GUAC_DB_USER: ${GUAC_DB_USER:-guacamole_user}
       GUAC_DB_PASSWORD: ${GUAC_DB_PASSWORD}
+      # ----------------------------------------------------------------------
+      # Caldera AUTHORING — internal service, exactly like Guacamole above.
+      # ----------------------------------------------------------------------
+      # THE SIGNING KEY FOR THE SSO TOKEN. The app MINTS the X-CyberCore-Auth
+      # token (src/utils/caldera-sso.js) and the caldera container VERIFIES it,
+      # so the SAME value must reach both services — that is why it is named
+      # here as well as in the caldera service below, from one .env entry.
+      # There is no default and both sides fail closed without it: the mint
+      # throws, forward_auth then answers non-2xx, and the door stays shut.
+      #   openssl rand -hex 32
+      CALDERA_SSO_SECRET: ${CALDERA_SSO_SECRET:-}
+      # Where the authoring instance lives, for GET /api/caldera-authoring/status
+      # (which decides whether the UI offers the link at all). It is now a compose
+      # service name, because the authoring instance moved from a Proxmox VM into
+      # the `caldera` container below — the executor Calderas are still VMs.
+      CALDERA_AUTHORING_UPSTREAM: ${CALDERA_AUTHORING_UPSTREAM:-caldera:8888}
       # Proxmox
       PROXMOX_API_URL: ${PROXMOX_API_URL}
       PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}
@@ -338,13 +360,123 @@ services:
       - cybercore-net
 
   # ============================================================================
+  # CALDERA (AUTHORING) — adversary authoring console
+  # ----------------------------------------------------------------------------
+  # ONE instance, platform-wide, with NO agents and NO agent contact. It EXECUTES
+  # NOTHING: instructors use its web UI to BUILD adversaries and CyberCore later
+  # replicates one into a lane's own lane-local Caldera. Those PER-LANE EXECUTORS
+  # ARE STILL VMs (bake-caldera-server.sh, CALDERA_ROLE=executor) and are not
+  # here. A web app plus a content store is a container.
+  #
+  # >>> THE MOST IMPORTANT LINE IN THIS SERVICE IS THE ONE THAT IS NOT HERE. <<<
+  # THERE IS DELIBERATELY NO `ports:` MAPPING. Do not add one. Not for
+  # "debugging", not "just on 127.0.0.1", not temporarily. With no port binding
+  # this container is unreachable from the host and from the lab network, and the
+  # ONLY path to it is Caddy's /caldera* handle — which runs forward_auth against
+  # the app first. That is a STRUCTURAL control: there is no firewall rule to
+  # keep correct and nothing to drift. Publish a port and an adversary authoring
+  # console becomes reachable from every lab subnet behind nothing at all,
+  # because the Caldera login form on the other side accepts no password (see
+  # infrastructure/caldera/conf/local.yml). `mailrelay` below is internal-only
+  # for the same reason and says so at the same volume.
+  # front-end/test/caldera-container-config.test.js fails if a ports: key appears.
+  #
+  # To reach it for debugging, go through the front door as an instructor, or
+  # `docker compose exec caldera sh` — both leave a trace, which is the point.
+  # ============================================================================
+  caldera:
+    build:
+      # Built from source, not pulled: mitre/caldera's published tags lag the
+      # releases and the plugins are git submodules that only a
+      # `git clone --recursive --branch <tag>` populates. See the Dockerfile.
+      context: ./infrastructure/caldera
+      dockerfile: Dockerfile
+      args:
+        # Bumping Caldera is this one line plus a rebuild.
+        CALDERA_VERSION: ${CALDERA_VERSION:-5.3.0}
+    container_name: cybercore-caldera
+    restart: unless-stopped
+    depends_on:
+      # Only for the token burn (POST /api/caldera/redeem). Nothing here reads
+      # the database, so postgres is not a dependency.
+      app:
+        condition: service_started
+    environment:
+      # The shared HMAC key. Same .env entry the app reads above; the token is
+      # minted there and verified here, so a mismatch means every login is
+      # refused (fail closed) rather than every login accepted.
+      CALDERA_SSO_SECRET: ${CALDERA_SSO_SECRET:-}
+      # Single use. The container has no Redis of its own, so the nonce burn
+      # happens server-side in CyberCore: the login handler POSTs the token's
+      # jti here and requires 200. 409 means "already used" and the login is
+      # refused — which is what stops a replay inside the 60-second window.
+      # The service name, not the public hostname: this call must not leave
+      # cybercore-net.
+      CYBERCORE_REDEEM_URL: ${CYBERCORE_REDEEM_URL:-http://app:3000/api/caldera/redeem}
+      # The `path` claim the token must carry, matching the prefix Caddy serves
+      # the console on and PUBLIC_PATH in src/routes/caldera-authoring.js. A
+      # token minted for some other path is refused here.
+      CALDERA_SSO_PATH_PREFIX: ${CALDERA_SSO_PATH_PREFIX:-/caldera}
+      # Which Caldera account an authenticated instructor is attached to. Caldera
+      # groups are ROLES, not tenancy, so there is exactly one per group; see the
+      # attribution note in conf/local.yml.
+      CALDERA_SSO_USER: cybercore
+      CALDERA_SSO_GROUP: red
+      # Optional. Unset means the entrypoint generates an ephemeral v2 API key
+      # per start, which is correct today because nothing consumes it yet
+      # (engineFor('caldera') still throws). Pin it when the engine adapter in
+      # src/incident/caldera/client.js is finally wired up.
+      CALDERA_API_KEY_RED: ${CALDERA_API_KEY_RED:-}
+      CALDERA_API_KEY_BLUE: ${CALDERA_API_KEY_BLUE:-}
+      # Optional. The entrypoint generates these once and keeps them inside the
+      # data volume; set them only to hold them in your own secret store. They
+      # decrypt the object store, so CHANGING them orphans existing content.
+      CALDERA_ENCRYPTION_KEY: ${CALDERA_ENCRYPTION_KEY:-}
+      CALDERA_CRYPT_SALT: ${CALDERA_CRYPT_SALT:-}
+    volumes:
+      # Authored adversaries, sources, objectives and the object store. Survives
+      # `docker compose build caldera`, which is the whole reason it is named.
+      - cybercore-caldera-data:/usr/src/app/data
+    healthcheck:
+      # Defined in the Dockerfile (this image is ours, so it has one). Repeated
+      # here only to give the app-side `depends_on` something to wait on if one
+      # is ever added; the interval is generous because Caldera parses every
+      # stockpile and atomic ability out of YAML on a cold start.
+      test: ["CMD", "python", "-c", "import urllib.request as r, urllib.error as e, sys\ntry:\n    r.urlopen('http://127.0.0.1:8888/', timeout=5)\nexcept e.HTTPError:\n    pass\nexcept Exception:\n    sys.exit(1)\n"]
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
+    networks:
+      - cybercore-net
+
+  # ============================================================================
   # CADDY — Reverse proxy and automatic HTTPS
   # Routes / → app:3000 and /guacamole/* → guacamole:8080
   # Set CYBERHUB_HOST=yourdomain.example.edu for auto-HTTPS via Let's Encrypt.
   # Set CYBERHUB_HOST=:80 to disable HTTPS (offline / LAN mode).
   # ============================================================================
   caddy:
-    image: caddy:2-alpine
+    # PINNED, NOT FLOATING. This used to be `caddy:2-alpine`, which is a moving
+    # target: every `docker compose pull` could bring a different minor release.
+    #
+    # That matters here because of advisory GHSA-7r4p-vjf4-gxv4 — `forward_auth`
+    # with `copy_headers` does NOT strip a header the CLIENT supplied, so if the
+    # auth service ever answers 2xx without setting a copied header, the client's
+    # own value survives all the way to the backend. Identity injection. The
+    # Caddyfile mitigates it explicitly (`request_header -X-CyberCore-Auth`
+    # before forward_auth, inside a `route` so the order is the written order),
+    # and the token is HMAC-signed so a forged header is worthless anyway.
+    #
+    # BOTH of those mitigations are written against a KNOWN forward_auth
+    # behaviour. A floating tag lets that behaviour change underneath them
+    # silently, with no diff anywhere in this repository to review. So the
+    # version is a literal, and bumping it is a reviewed edit:
+    #   1. read the release notes for changes to forward_auth / copy_headers
+    #   2. bump this line
+    #   3. docker compose up -d caddy, then confirm a request carrying its own
+    #      X-CyberCore-Auth still reaches Caldera without that value.
+    image: caddy:2.10.2-alpine
     container_name: cybercore-caddy
     # Caddy resolves Let's Encrypt and OCSP responders during certificate work
     # and during TLS handshakes, so a slow resolver here stalls the public site
@@ -381,8 +513,15 @@ services:
     depends_on:
       - app
       - guacamole
+      - caldera
     environment:
       CYBERHUB_HOST: ${CYBERHUB_HOST}
+      # The /caldera* upstream in config/caddy/Caddyfile. It is a compose SERVICE
+      # NAME now — the authoring instance moved from a Proxmox VM into the
+      # `caldera` container above — but it stays an environment variable so a
+      # deployment that fronts a separate authoring host can repoint it without
+      # editing the Caddyfile, and so the Caddyfile never carries an address.
+      CALDERA_AUTHORING_UPSTREAM: ${CALDERA_AUTHORING_UPSTREAM:-caldera:8888}
     ports:
       - "0.0.0.0:80:80"
       - "0.0.0.0:443:443"
