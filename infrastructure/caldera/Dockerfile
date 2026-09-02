@@ -112,19 +112,31 @@ RUN rm -rf \
 # -----------------------------------------------------------------------------
 # CONTACT PRUNE — remove every module that OPENS A LISTENER for agents.
 # -----------------------------------------------------------------------------
-# conf/local.yml deliberately defines no `app.contact.*` key at all (see the note
-# there). These modules are removed as well so that "no contact" is a property of
-# the IMAGE rather than of a config file: contact_tcp/udp/websocket/dns/ftp each
-# bind a socket at startup when configured, and gist/slack/html reach OUT to a
-# third party to collect beacons. None of them has a purpose on a box with no
-# agents.
+# These modules are removed so that "no agent contact" is a property of the
+# IMAGE rather than of a config file: contact_tcp/udp/dns/ftp each bind a socket
+# at startup when configured, and gist/slack/html reach OUT to a third party to
+# collect beacons. None has a purpose on a box with no agents.
+#
+# WEBSOCKET IS DELIBERATELY NOT IN THIS LIST, and removing it is a mistake this
+# build already made once. Caldera's own event bus runs over it: server.py's
+# run_tasks() fires the "ready" event through event_svc.fire_event(), which does
+# `websockets.connect(uri)` built from app.contact.websocket. With the module
+# gone and the key undefined the URI has an empty host, and the server dies at
+# startup in a restart loop with
+#   socket.gaierror: [Errno -2] Name or service not known
+# which reads like a DNS or network problem and is neither.
+#
+# Keeping it costs nothing, because the isolation property never came from this
+# file: sandcat and manx are gone so no agent payload can be built or served,
+# the compose service publishes NO ports, and local.yml binds the websocket to
+# 127.0.0.1. Nothing outside this container — not even a peer on cybercore-net —
+# can reach it.
 #
 # `rm -f` tolerates a name that moved between releases. The `ls` prints what is
 # left, which is how a rename becomes visible instead of silent.
 RUN rm -f \
       app/contacts/contact_tcp.py \
       app/contacts/contact_udp.py \
-      app/contacts/contact_websocket.py \
       app/contacts/contact_dns.py \
       app/contacts/contact_ftp.py \
       app/contacts/contact_gist.py \

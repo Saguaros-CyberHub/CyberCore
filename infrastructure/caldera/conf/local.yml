@@ -127,14 +127,31 @@ requirements:
     version: 3.9.0
 
 # =============================================================================
+# THE ONE CONTACT KEY, AND WHY IT IS NOT AN AGENT CHANNEL HERE
+# =============================================================================
+# Caldera's own EVENT BUS runs over the websocket contact. server.py's
+# run_tasks() fires the "ready" event through event_svc.fire_event(), which
+# opens `websockets.connect(uri)` built from this key. Leave it undefined and
+# the URI has an empty host, so the server dies at startup in a restart loop:
+#   socket.gaierror: [Errno -2] Name or service not known
+# This build made that mistake once. It reads like a DNS fault and is not one.
+#
+# 127.0.0.1 is what keeps it internal. The container publishes NO ports, so a
+# loopback bind is unreachable from the host, from a lane, and from a peer
+# container on cybercore-net. Combined with sandcat and manx being deleted from
+# the image — so no agent payload can be built or served — nothing can check in
+# here even though a contact module now exists.
+app.contact.websocket: 127.0.0.1:7012
+
+# =============================================================================
 # WHAT IS DELIBERATELY ABSENT — READ BEFORE ADDING A KEY
 # =============================================================================
-# NO `app.contact.*` KEY OF ANY KIND. Not http, not tcp, not udp, not websocket,
-# not dns, not gist, not slack, not ftp, not html, not tunnel.ssh. This instance
-# must never take an agent check-in, and a contact is precisely the thing that
-# accepts one. The Dockerfile also DELETES those modules from app/contacts/, so
-# the absence is a property of the image and not merely of this file — adding a
-# key back here will not resurrect a listener, and that is intentional.
+# NO OTHER `app.contact.*` KEY. Not http, not tcp, not udp, not dns, not gist,
+# not slack, not ftp, not html, not tunnel.ssh. This instance must never take an
+# agent check-in, and those contacts are precisely what accept one. The
+# Dockerfile also DELETES their modules from app/contacts/, so the absence is a
+# property of the image and not merely of this file — adding a key back here
+# will not resurrect a listener, and that is intentional.
 #
 # If you find yourself wanting one, you are looking at the wrong Caldera. The
 # per-lane EXECUTOR instances are VMs baked by

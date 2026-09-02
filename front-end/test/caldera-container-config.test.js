@@ -630,12 +630,36 @@ test('the image configures NO agent contact of any kind', () => {
     .map((l) => (l.match(/^([A-Za-z][\w.]*)\s*:/) || [])[1])
     .filter(Boolean);
 
+  // The invariant is NOT "zero contact keys" — that version of this test was
+  // right about the goal and wrong about the mechanism, and it cost a restart
+  // loop. Caldera's own EVENT BUS runs over the websocket contact:
+  // server.py run_tasks() -> event_svc.fire_event() -> websockets.connect(uri)
+  // built from app.contact.websocket. Undefined, the URI has an empty host and
+  // the server dies at startup with
+  //   socket.gaierror: [Errno -2] Name or service not known
+  //
+  // So the real invariant is: the ONLY contact permitted is the websocket event
+  // bus, and it MUST be bound to loopback. Everything that can accept an agent
+  // check-in from off-box stays absent.
   const contacts = keys.filter((k) => k.startsWith('app.contact'));
   assert.deepStrictEqual(
-    contacts, [],
-    `conf/local.yml declares agent contacts: ${contacts.join(', ')}. The authoring instance `
-    + 'has no agents and must never take a check-in; the per-lane EXECUTOR Calderas are VMs '
-    + 'baked by bake-caldera-server.sh and that is where contacts belong.'
+    contacts, ['app.contact.websocket'],
+    `conf/local.yml's contact keys are ${JSON.stringify(contacts)}. Exactly one is allowed — `
+    + 'app.contact.websocket, which is Caldera\'s internal event bus and without which the '
+    + 'server will not start. Every other contact accepts an agent check-in, and the authoring '
+    + 'instance has no agents; the per-lane EXECUTOR Calderas are VMs baked by '
+    + 'bake-caldera-server.sh and that is where contacts belong.'
+  );
+
+  // Loopback is what makes the one permitted contact unreachable. Paired with
+  // the service publishing no ports, nothing off-container can reach it — not
+  // the host, not a lane, not a peer on cybercore-net.
+  const wsBind = (read(CALDERA_CONF).match(/^app\.contact\.websocket:\s*(\S+)/m) || [])[1];
+  assert.ok(
+    wsBind && /^127\.0\.0\.1:\d+$/.test(wsBind),
+    `app.contact.websocket is bound to ${wsBind || '(unset)'}. It must bind 127.0.0.1 — on `
+    + '0.0.0.0 the event bus becomes a reachable agent contact the moment anything publishes '
+    + 'or forwards that port.'
   );
 
   // …and the payload plugins are not merely unconfigured, they are deleted, so
