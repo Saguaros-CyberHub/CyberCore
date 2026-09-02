@@ -30,8 +30,8 @@
 const {
   agentShellExec,
   pollExecStatus,
-} = require('../../../../../src/utils/script-executor');
-const { formatDuration, findTechnique, findTactic, findChain, TECHNIQUE_RE, TACTIC_RE } = require('./loggen-catalog');
+} = require('../utils/script-executor');
+const { formatDuration, findTechnique, findTactic, findChain, TECHNIQUE_RE, TACTIC_RE } = require('./catalog');
 
 /** Where the wrapper and its per-run state live on the guest. */
 const GUEST_BASE = '/opt/cybercore';
@@ -131,7 +131,7 @@ const WRAPPER_B64 = Buffer.from(WRAPPER_SH, 'utf8').toString('base64');
 const PLAYBOOKS = (() => {
   const fs = require('fs');
   const path = require('path');
-  const dir = path.join(__dirname, '..', 'playbooks');
+  const dir = path.join(__dirname, 'playbooks');
   const out = new Map();
   let names = [];
   try { names = fs.readdirSync(dir); } catch (e) { return out; }
@@ -394,10 +394,26 @@ function parseGuestState(stdout) {
 // Target discovery
 // ---------------------------------------------------------------------------
 
-const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { proxmoxAPI } = require('../../../../../src/utils/proxmox');
-const { query } = require('./db');
-const { getSchedulingConfig } = require('../../../../../src/utils/site-config');
+const { cybercoreQuery } = require('../utils/cybercore-db');
+const { proxmoxAPI } = require('../utils/proxmox');
+// TEMPORARY, AND IT IS A LAYERING INVERSION — E2 DELETES THIS LINE.
+//
+// `query` is the CLE PLUGIN'S pool (cle_db), which is where cle_attack_run and
+// cle_attack_target still live. src/ requiring into modules/crucible/plugins/ is
+// backwards: plugins may require core, core must not require a plugin, or a
+// disabled plugin takes core down with it.
+//
+// It survives this phase ON PURPOSE. E1 is a pure relocation — every assertion
+// in the existing test suite has to pass with no edit — so the SQL keeps talking
+// to the same database it talked to yesterday. E2 swaps this for
+// `cybercoreQuery` against cybercore_incident_run / _target (see
+// src/incident/schema.js) and this require disappears with it.
+//
+// Precedent for the direction while it exists: src/server.js already requires
+// the CLE and CiAB plugins for their boot sweeps, for the same reason — the
+// plugin owns the pool and only the plugin loader can inject it.
+const { query } = require('../../modules/crucible/plugins/cle/utils/db');
+const { getSchedulingConfig } = require('../utils/site-config');
 
 /**
  * Lazily required. src/utils/batch-deployer calls getSchedulingConfig() at
@@ -409,7 +425,7 @@ const { getSchedulingConfig } = require('../../../../../src/utils/site-config');
  */
 let _runBatch = null;
 function runBatch(...args) {
-  if (!_runBatch) _runBatch = require('../../../../../src/utils/batch-deployer').runBatch;
+  if (!_runBatch) _runBatch = require('../utils/batch-deployer').runBatch;
   return _runBatch(...args);
 }
 
@@ -417,7 +433,7 @@ function runBatch(...args) {
 function dispatchConcurrency() {
   return Math.max(1, Number(getSchedulingConfig().max_concurrent_lanes) || 5);
 }
-const attackTarget = require('./attack-target');
+const attackTarget = require('./target');
 
 /**
  * Every active lane belonging to a course, with its owner's email.

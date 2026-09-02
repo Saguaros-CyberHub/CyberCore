@@ -313,7 +313,7 @@ function formatDuration(seconds) {
 const PLAYBOOK_FACTS = (() => {
   const fs = require('fs');
   const path = require('path');
-  const dir = path.join(__dirname, '..', 'playbooks');
+  const dir = path.join(__dirname, 'playbooks');
   const out = new Map();
   let emit;
   let names = [];

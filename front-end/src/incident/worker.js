@@ -36,13 +36,29 @@
  * ============================================================================
  */
 
-const { query } = require('./db');
-const runner = require('./attack-runner');
-const attackTarget = require('./attack-target');
+// TEMPORARY, AND IT IS A LAYERING INVERSION — E2 DELETES THIS LINE.
+//
+// `query` is the CLE PLUGIN'S pool (cle_db), which is where cle_attack_run and
+// cle_attack_target still live. src/ requiring into modules/crucible/plugins/ is
+// backwards: plugins may require core, core must not require a plugin, or a
+// disabled plugin takes core down with it.
+//
+// It survives this phase ON PURPOSE. E1 is a pure relocation — every assertion
+// in the existing test suite has to pass with no edit — so the SQL keeps talking
+// to the same database it talked to yesterday. E2 swaps this for
+// `cybercoreQuery` against cybercore_incident_run / _target (see
+// src/incident/schema.js) and this require disappears with it.
+//
+// Precedent for the direction while it exists: src/server.js already requires
+// the CLE and CiAB plugins for their boot sweeps, for the same reason — the
+// plugin owns the pool and only the plugin loader can inject it.
+const { query } = require('../../modules/crucible/plugins/cle/utils/db');
+const runner = require('./runner');
+const attackTarget = require('./target');
 const {
   agentShellExec,
   pollExecStatus,
-} = require('../../../../../src/utils/script-executor');
+} = require('../utils/script-executor');
 
 const POLL_MS = Number(process.env.CYBR400_SWEEP_MS) > 0
   ? Number(process.env.CYBR400_SWEEP_MS) : 30_000;

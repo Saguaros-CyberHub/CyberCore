@@ -45,8 +45,8 @@
  * ============================================================================
  */
 
-const { cybercoreQuery } = require('../../../../../src/utils/cybercore-db');
-const { normalizeOs } = require('../../../../../src/utils/flag-manager');
+const { cybercoreQuery } = require('../utils/cybercore-db');
+const { normalizeOs } = require('../utils/flag-manager');
 
 /** spec.vms[].role values that name the sensor outright. */
 const LOGGEN_ROLES = new Set(['loggen', 'log-generator', 'log_generator', 'siem-source', 'sensor']);
