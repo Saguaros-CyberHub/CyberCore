@@ -112,6 +112,15 @@ services:
       JWT_EXPIRES_IN: 7d
       SESSION_SECRET: ${SESSION_SECRET}
       COOKIE_SECURE: "false"
+      # Widens the session cookie to subdomains. REQUIRED for the Caldera
+      # authoring console: it is served on its own hostname (its SPA requests
+      # /api/v2/* from the origin root, so it cannot live under a path), and a
+      # cookie with no domain is HOST-ONLY — the browser never sends the session
+      # there, Caddy's forward_auth gate gets an anonymous subrequest, and the
+      # console shows a bare "HTTP ERROR 401" with nothing wrong in any log.
+      # Set it to the parent domain WITH the leading dot, e.g. .example.edu.
+      # Empty = host-only, the previous behaviour. See example.env for the trade.
+      COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
       # Encryption keys for pgcrypto (pgp_sym_encrypt) at-rest secrets.
       # These MUST be passed through or guac_password / MFA secrets can't be
       # written and mfaKey() returns null (500 on /api/auth/mfa/setup).

@@ -310,13 +310,45 @@ async function findUserForLogin(identifier) {
   return null;
 }
 
+/**
+ * Options shared by the set and the clear.
+ *
+ * COOKIE_DOMAIN WIDENS THE SESSION TO SUBDOMAINS, and exists for exactly one
+ * reason: a cookie with no `domain` is HOST-ONLY, so a session created on
+ * cyberhub.example.edu is never sent to caldera.cyberhub.example.edu. The
+ * Caldera authoring console is served on its own hostname (it has to be — its
+ * SPA requests /api/v2/* from the origin root), and Caddy's forward_auth asks
+ * this app to authorise each request. With a host-only cookie that subrequest
+ * carries no session, the app correctly answers 401, and the console shows
+ * "HTTP ERROR 401" with nothing wrong anywhere in the logs.
+ *
+ * SET IT TO THE PARENT DOMAIN, e.g. COOKIE_DOMAIN=.cyberhub.example.edu.
+ *
+ * THE TRADE, stated plainly: every subdomain of that parent can then read the
+ * session cookie. That is acceptable when one operator controls every
+ * subdomain, and NOT acceptable if any subdomain is delegated to somebody else
+ * or serves untrusted content — a lane VM's published console, for instance,
+ * must never live under it.
+ *
+ * Unset by default, which keeps the pre-existing host-only behaviour.
+ */
+function sessionCookieOptions() {
+  const opts = {
+    httpOnly: true,
+    secure: process.env.COOKIE_SECURE === 'true',
+    sameSite: 'lax',
+    path: '/',
+  };
+  const domain = (process.env.COOKIE_DOMAIN || '').trim();
+  if (domain) opts.domain = domain;
+  return opts;
+}
+
 // Set the 7-day session cookie. Called only from issueSession() — every route
 // that logs somebody in goes through there, so the options live in one place.
 function setSessionCookie(res, accessToken) {
   res.cookie('token', accessToken, {
-    httpOnly: true,
-    secure: process.env.COOKIE_SECURE === 'true',
-    sameSite: 'lax',
+    ...sessionCookieOptions(),
     maxAge: 7 * 24 * 60 * 60 * 1000
   });
 }
@@ -1072,7 +1104,10 @@ router.post('/password/request', (req, res) => {
  */
 router.post('/logout', authenticate, async (req, res) => {
   try {
-    res.clearCookie('token');
+    // SAME options as the set, or the browser keeps the cookie. A clearCookie
+    // whose domain/path do not match the one that was set removes nothing, and
+    // logout silently stops working the moment COOKIE_DOMAIN is configured.
+    res.clearCookie('token', sessionCookieOptions());
     auditAuth(req, 'auth.logout', {
       user: { user_id: req.user.userId, email: req.user.email, role: req.user.role },
     });
