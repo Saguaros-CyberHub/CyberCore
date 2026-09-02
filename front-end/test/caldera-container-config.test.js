@@ -597,26 +597,64 @@ test('the clone is RECURSIVE and uses the pinned tag — Caldera plugins are sub
   assert.ok(!/--branch\s+(master|main|develop)\b/.test(clone), 'the clone names a branch instead of the pinned release');
 });
 
-test('the SSO login handler is baked in and wired to auth.login.handler.module', () => {
-  const ins = dockerInstructions(read(DOCKERFILE));
-  const copies = ins.filter((i) => i.op === 'COPY' && /login_handler\.py/.test(i.args));
-  assert.strictEqual(copies.length, 1, 'the Dockerfile must COPY infrastructure/caldera/login_handler.py into the image');
-
-  // The destination basename IS the Python import path, because it lands at the
-  // top of the app directory that server.py runs from. If the two drift, Caldera
-  // falls back to its DEFAULT login handler — a password comparison against
-  // accounts whose passwords are random and unknown — and every login fails with
-  // no clue as to why.
-  const dest = copies[0].args.trim().split(/\s+/).pop();
-  const moduleName = path.basename(dest).replace(/\.py$/, '');
-
+test('the console has exactly one working authentication path', () => {
+  // THE INVARIANT IS "AUTHENTICATED", NOT "USES THE CUSTOM HANDLER".
+  //
+  // There are two mechanisms that can log the console in, and the config must
+  // commit to one of them:
+  //
+  //   a) auth.login.handler.module names our module -> Caldera calls it and it
+  //      verifies the signed token. Loaded correctly, but Caldera never reaches
+  //      it on a browser page load: check_permissions() returns early on the api
+  //      key and only IT calls login_redirect().
+  //   b) auth.login.handler.module is 'default' -> Caddy must inject Caldera's
+  //      own `KEY` header, because check_permissions() short-circuits on it for
+  //      EVERY route. This is the shipped design.
+  //
+  // Getting this wrong in either direction produces the SAME symptom — Caldera's
+  // stock login form, with random unknowable passwords — and no error anywhere.
+  // That cost several hours once; this test exists so it costs zero next time.
   const conf = read(CALDERA_CONF);
   const declared = (conf.match(/^auth\.login\.handler\.module\s*:\s*(\S+)\s*$/m) || [])[1];
-  assert.ok(declared, 'conf/local.yml does not set auth.login.handler.module — Caldera would use its built-in password login');
-  assert.strictEqual(
-    declared, moduleName,
-    `conf/local.yml points auth.login.handler.module at "${declared}" but the Dockerfile installs the handler as "${moduleName}"`
-  );
+  assert.ok(declared, 'conf/local.yml does not set auth.login.handler.module at all');
+
+  const blocks = calderaBlocks();
+  assert.ok(blocks.length >= 1, 'no /caldera block found in the Caddyfile');
+
+  if (declared === 'default') {
+    // Mechanism (b). Every block must inject the key AND strip a client-supplied
+    // one — the strip is not hygiene here, it is the whole gate: a caller who
+    // could set their own KEY would authenticate to Caldera directly.
+    for (const block of blocks) {
+      const where = `site block \`${block.header}\``;
+      assert.ok(block.handle, `${where}: could not read the /caldera handle`);
+      assert.ok(
+        // siteBlocks() normalises Caddy's {$VAR} placeholders to «VAR» so its
+        // brace counting is not confused by them — so match that form, not the
+        // raw one that appears in the file.
+        /request_header\s+KEY\s+«CALDERA_API_KEY_RED»/.test(block.handle),
+        `${where} does not inject Caldera's KEY header, and the login handler is 'default' — `
+        + 'nothing would authenticate the console and Caldera would serve its stock login form.'
+      );
+      assert.ok(
+        /request_header\s+-KEY\b/.test(block.handle),
+        `${where} injects KEY but never strips an inbound one. A client supplying its own KEY `
+        + 'would bypass forward_auth and authenticate to Caldera directly.'
+      );
+    }
+  } else {
+    // Mechanism (a). The module name must match what the Dockerfile installs;
+    // the destination basename IS the import path, since it lands at the top of
+    // the directory server.py runs from.
+    const ins = dockerInstructions(read(DOCKERFILE));
+    const copies = ins.filter((i) => i.op === 'COPY' && /login_handler\.py/.test(i.args));
+    assert.strictEqual(copies.length, 1, 'the Dockerfile must COPY infrastructure/caldera/login_handler.py into the image');
+    const moduleName = path.basename(copies[0].args.trim().split(/\s+/).pop()).replace(/\.py$/, '');
+    assert.strictEqual(
+      declared, moduleName,
+      `conf/local.yml points auth.login.handler.module at "${declared}" but the Dockerfile installs the handler as "${moduleName}"`
+    );
+  }
 });
 
 test('the image configures NO agent contact of any kind', () => {

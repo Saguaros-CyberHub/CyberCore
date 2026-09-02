@@ -48,20 +48,33 @@ port: 8888
 app.frontend.api_base_url: "/caldera"
 
 # --- Authentication ----------------------------------------------------------
-# THE ONLY DOOR. This key names a Python import path to a module exposing load(),
-# and Caldera calls that module's handler INSTEAD OF its built-in username and
-# password comparison. The module is infrastructure/caldera/login_handler.py,
-# copied into the image as the top-level module cybercore_login_handler.py; it
-# verifies the HMAC-signed, single-use, 60-second X-CyberCore-Auth token that
-# Caddy's forward_auth copied onto the request.
+# DELIBERATELY 'default'. Authentication does NOT happen here.
 #
-# THIS IS WHAT DISABLES THE BUILT-IN PASSWORD FORM. magma still renders a login
-# page — it is a Vue route we do not patch — but the POST behind it no longer
-# performs any credential comparison, so the form is not a second door. The
-# entrypoint additionally gives every account below a random password that is
-# generated per container start and never printed, so even a code path that
-# somehow reached the old comparison has no credential to match.
-auth.login.handler.module: cybercore_login_handler
+# Caldera authenticates the proxied request on its own api key. From auth_svc:
+#
+#     async def check_permissions(self, group, request):
+#         if self.request_has_valid_api_key(request):
+#             return True
+#
+# — which short-circuits EVERY route, not only /api/*, and get_permissions()
+# grants Access.RED + Access.APP for the red key. Caddy injects that key as the
+# `KEY` header AFTER forward_auth has approved the caller, and strips any KEY the
+# client sent. So the gate is CyberCore's, and the credential between Caddy and
+# this container is Caldera's own supported mechanism.
+#
+# WHY NOT THE CUSTOM LOGIN HANDLER. infrastructure/caldera/login_handler.py
+# implements LoginHandlerInterface and IS loaded correctly when this key names
+# it — proven from a debug boot: "Setting primary login handler: CyberCore SSO
+# Login Handler". But Caldera never calls it on a browser page load. Only
+# check_permissions() reaches login_redirect(), and the API-key branch above
+# returns before it. The handler therefore added an untestable Python dependency
+# on Caldera internals for no authentication we do not already have. The file is
+# kept, unwired, because it is the fallback if the api-key branch ever changes.
+#
+# The built-in password form is still not a second door: the entrypoint gives
+# every account below a random password generated per container start and never
+# printed, so there is no credential for anyone to enter.
+auth.login.handler.module: default
 
 # --- Accounts ----------------------------------------------------------------
 # Caldera's `users:` block maps credentials into a GROUP ('red' or 'blue'), which

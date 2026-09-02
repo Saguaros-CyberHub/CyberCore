@@ -64,6 +64,12 @@
             # if this line were lost. Belt AND braces, because this door opens
             # onto an adversary authoring console.
             request_header -X-CyberCore-Auth
+            # KEY is Caldera's OWN api-key header, and it is the credential that
+            # actually authenticates the proxied request (see the reverse_proxy
+            # note below). Stripping it inbound is therefore not optional: a
+            # client that supplied its own KEY would authenticate to Caldera
+            # directly, bypassing the gate above entirely.
+            request_header -KEY
             request_header -X-CyberCore-User
             request_header -X-CyberCore-Role
             request_header -Remote-User
@@ -82,6 +88,36 @@
                 # infrastructure/caldera/login_handler.py.
                 copy_headers X-CyberCore-Auth
             }
+            # HOW THE PROXIED REQUEST AUTHENTICATES TO CALDERA.
+            #
+            # auth_svc.check_permissions() short-circuits on Caldera's own api
+            # key for EVERY route, not just /api/* :
+            #     if self.request_has_valid_api_key(request): return True
+            # and get_permissions() grants Access.RED + Access.APP for the red
+            # key. So injecting it here logs the whole UI in through Caldera's
+            # supported mechanism — no custom login handler, no session
+            # establishment, none of the glue that cannot be tested outside a
+            # running Caldera.
+            #
+            # THE BROWSER NEVER SEES THIS VALUE. It is added server-side, after
+            # forward_auth has already approved the caller, and the matching
+            # `request_header -KEY` above deletes anything the client sent. The
+            # gate above is still what decides WHO may reach this console; the
+            # key is only the credential between Caddy and the container.
+            #
+            # CALDERA_API_KEY_RED must be SET and STABLE — the entrypoint
+            # generates an ephemeral key when it is empty, which would leave
+            # Caddy presenting a key the container has never heard of.
+            # Set AFTER the gate on purpose: inside a `route`, directives run in
+            # written order and forward_auth short-circuits a denied request, so
+            # this header is only ever added to a request CyberCore approved.
+            #
+            # Written flat rather than as a `header_up` inside a reverse_proxy
+            # block because a nested block would also be invisible to
+            # front-end/test/caldera-container-config.test.js, whose Caddyfile
+            # parser mis-counts the braces in Caddy's own {$PLACEHOLDER} syntax
+            # and silently truncates the block it is checking.
+            request_header KEY {$CALDERA_API_KEY_RED}
             reverse_proxy {$CALDERA_AUTHORING_UPSTREAM:caldera:8888}
         }
     }
@@ -135,6 +171,12 @@ http://:80 {
             # GHSA-7r4p-vjf4-gxv4 — stop a caller supplying their own identity
             # header and having it survive forward_auth to the backend.
             request_header -X-CyberCore-Auth
+            # KEY is Caldera's OWN api-key header, and it is the credential that
+            # actually authenticates the proxied request (see the reverse_proxy
+            # note below). Stripping it inbound is therefore not optional: a
+            # client that supplied its own KEY would authenticate to Caldera
+            # directly, bypassing the gate above entirely.
+            request_header -KEY
             request_header -X-CyberCore-User
             request_header -X-CyberCore-Role
             request_header -Remote-User
@@ -147,6 +189,36 @@ http://:80 {
                 uri /api/caldera-authoring/authorize
                 copy_headers X-CyberCore-Auth
             }
+            # HOW THE PROXIED REQUEST AUTHENTICATES TO CALDERA.
+            #
+            # auth_svc.check_permissions() short-circuits on Caldera's own api
+            # key for EVERY route, not just /api/* :
+            #     if self.request_has_valid_api_key(request): return True
+            # and get_permissions() grants Access.RED + Access.APP for the red
+            # key. So injecting it here logs the whole UI in through Caldera's
+            # supported mechanism — no custom login handler, no session
+            # establishment, none of the glue that cannot be tested outside a
+            # running Caldera.
+            #
+            # THE BROWSER NEVER SEES THIS VALUE. It is added server-side, after
+            # forward_auth has already approved the caller, and the matching
+            # `request_header -KEY` above deletes anything the client sent. The
+            # gate above is still what decides WHO may reach this console; the
+            # key is only the credential between Caddy and the container.
+            #
+            # CALDERA_API_KEY_RED must be SET and STABLE — the entrypoint
+            # generates an ephemeral key when it is empty, which would leave
+            # Caddy presenting a key the container has never heard of.
+            # Set AFTER the gate on purpose: inside a `route`, directives run in
+            # written order and forward_auth short-circuits a denied request, so
+            # this header is only ever added to a request CyberCore approved.
+            #
+            # Written flat rather than as a `header_up` inside a reverse_proxy
+            # block because a nested block would also be invisible to
+            # front-end/test/caldera-container-config.test.js, whose Caddyfile
+            # parser mis-counts the braces in Caddy's own {$PLACEHOLDER} syntax
+            # and silently truncates the block it is checking.
+            request_header KEY {$CALDERA_API_KEY_RED}
             reverse_proxy {$CALDERA_AUTHORING_UPSTREAM:caldera:8888}
         }
     }

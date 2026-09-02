@@ -120,11 +120,24 @@ def persistent(name):
 conf["encryption_key"] = persistent("CALDERA_ENCRYPTION_KEY")
 conf["crypt_salt"] = persistent("CALDERA_CRYPT_SALT")
 
-# The v2 API keys. Pinned from the environment when an operator has set them
-# (src/incident/caldera/client.js will need api_key_red when the engine adapter
-# is finally wired up); otherwise ephemeral, which is safe today because nothing
-# reads them yet and is far better than the published upstream constant.
-conf["api_key_red"] = os.environ.get("CALDERA_API_KEY_RED") or secrets.token_hex(32)
+# The v2 API keys. api_key_red is NO LONGER OPTIONAL: Caddy injects it as the
+# `KEY` header on every proxied request, and auth_svc.check_permissions()
+# short-circuits on it for every route, which is how the console authenticates.
+# An ephemeral value here would leave Caddy presenting a key this container has
+# never heard of — every request would fall through to Caldera's own login form,
+# which is exactly the symptom that cost hours to diagnose the first time.
+# So: fail closed and say why, rather than start into a broken state.
+_red = os.environ.get("CALDERA_API_KEY_RED") or ""
+if len(_red) < 32:
+    sys.stderr.write(
+        "caldera-entrypoint: CALDERA_API_KEY_RED must be set and at least 32 characters.\n"
+        "  It is the credential Caddy presents as the KEY header, so it must be STABLE\n"
+        "  and identical in the caddy and caldera services. Generate one with:\n"
+        "      openssl rand -hex 32\n"
+        "  and set CALDERA_API_KEY_RED in .env.\n"
+    )
+    raise SystemExit(1)
+conf["api_key_red"] = _red
 conf["api_key_blue"] = os.environ.get("CALDERA_API_KEY_BLUE") or secrets.token_hex(32)
 
 # Account passwords: random every start, never printed, never stored. The SSO

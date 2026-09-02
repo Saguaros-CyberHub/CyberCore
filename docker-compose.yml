@@ -522,6 +522,12 @@ services:
       # deployment that fronts a separate authoring host can repoint it without
       # editing the Caddyfile, and so the Caddyfile never carries an address.
       CALDERA_AUTHORING_UPSTREAM: ${CALDERA_AUTHORING_UPSTREAM:-caldera:8888}
+      # Injected onto the proxied request as Caldera's `KEY` header, which is
+      # what actually authenticates the console (see config/caddy/Caddyfile).
+      # Must be the SAME value the caldera service receives, and must be set:
+      # the container refuses to start without it rather than mint an ephemeral
+      # key Caddy would not know.
+      CALDERA_API_KEY_RED: ${CALDERA_API_KEY_RED:-}
     ports:
       - "0.0.0.0:80:80"
       - "0.0.0.0:443:443"
