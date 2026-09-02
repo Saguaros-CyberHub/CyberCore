@@ -609,21 +609,44 @@ class CyberCoreSsoLoginHandler(LoginHandlerInterface):  # pragma: no cover
     async def handle_login(self, request, **kwargs):
         raise web.HTTPUnauthorized()
 
+    def _logger(self):
+        """Caldera's logger if we have one, the module logger otherwise.
+
+        THIS IS NOT A STYLE CHOICE. Caldera installs its own rich log handlers
+        and a bare logging.getLogger("cybercore.sso") does not surface through
+        them, so every rejection this handler emitted was written to nowhere.
+        The visible symptom is a stock login form and an empty log — which is
+        indistinguishable from "the handler was never loaded", and cost several
+        rounds of debugging to tell apart. self.log comes from BaseService via
+        LoginHandlerInterface; the fallback keeps the module importable and
+        unit-testable outside Caldera.
+        """
+        return getattr(self, "log", None) or LOG
+
     async def handle_login_redirect(self, request, **kwargs):
+        log = self._logger()
         try:
             request_path = reconstruct_request_path(
                 request.path,
                 public_path=public_path(),
                 forwarded_uri=request.headers.get("X-Forwarded-Uri"),
             )
+            # The one line that distinguishes "Caddy never attached the token"
+            # from "the token arrived and failed verification". Presence only —
+            # never the token itself, which is a bearer credential.
+            log.info(
+                "cybercore sso: login redirect path=%s token_header=%s",
+                request_path,
+                "present" if request.headers.get(SSO_HEADER) else "ABSENT",
+            )
             payload = await authorize_request(request.headers, request_path)
         except SsoError as err:
-            # ONE line, ONE word, no token material and no user id. And no
-            # detail in the RESPONSE at all: the reason is the oracle.
-            LOG.warning("cybercore sso rejected a login (%s)", err.reason)
+            # ONE word of reason in the LOG, and no detail in the RESPONSE at
+            # all: the reason is the oracle.
+            log.warning("cybercore sso rejected a login (%s)", err.reason)
             raise web.HTTPUnauthorized()
         except Exception:
-            LOG.exception("cybercore sso handler failed")
+            log.exception("cybercore sso handler failed")
             raise web.HTTPUnauthorized()
 
         username = caldera_user_for(payload["role"])
