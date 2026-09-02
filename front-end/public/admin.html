@@ -1005,9 +1005,10 @@
                   </label>
                   <div id="topoGoadExtensions"></div>
                   <p class="topo-settings-hint">
-                    Upstream GOAD extensions. CyberCore never runs GOAD&#39;s Ansible at deploy time, so ticking one
-                    is a <strong>declaration of what the golden images already contain</strong> — it places the
-                    machine and pins its address. Ticking is surgical: nothing else on the canvas is disturbed.
+                    Upstream GOAD extensions. Ticking one places the machine, pins its address, and hands the key to the
+                    controller&#39;s <code>run.sh</code>, which installs the extension in-lane — so it is a
+                    <strong>request to install</strong>, not a label. Ticking is surgical: nothing else on the canvas is
+                    disturbed. A <strong>pre-baked</strong> environment runs no Ansible, so the two are refused together.
                   </p>
                 </div>
                 <p class="topo-settings-hint" id="topoGoadVersionDesc"></p>
@@ -1927,7 +1928,21 @@ msmith@arizona.edu, Mark, Smith"
       <div id="tplReservationNotice" style="display: none; border: 1px solid #4299e1; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(66, 153, 225, 0.12); font-size: 0.85rem;"></div>
 
       <div id="tplBuilderSections">
-      <!-- GOAD configuration card -->
+      <!-- GOAD configuration card.
+           FIELD-FOR-FIELD the same card as the Topology Designer's (admin.html
+           ~line 940), with tplGoad* ids instead of topoGoad*. Every behaviour
+           behind it is the ONE shared implementation in admin-topology.js
+           ("GOAD CARD — ONE implementation, two surfaces"); the wrappers that
+           bind it to this modal are tplGoadCard() and friends in
+           admin-challenges.js.
+
+           Two copies of the markup survive only because the Designer's block is
+           pinned by test/ad-domain-rules.test.js reading this file. They are
+           held together by test/goad-card-parity.test.js, which strips the
+           prefix off both blocks and fails on the first field, handler or
+           readonly flag that one grows and the other does not. If you add a
+           field here, add it there — the gate will tell you, but it is cheaper
+           to do it in one pass. -->
       <div style="border: 1px solid #f6ad55; border-radius: 10px; padding: 0.85rem; margin-top: 0.75rem; background: rgba(245, 158, 11, 0.12);">
         <label style="display: flex; align-items: center; gap: 0.6rem; cursor: pointer; margin: 0;">
           <input type="checkbox" id="tplGoadEnabled" onchange="onTplGoadToggle()" style="width: 18px; height: 18px; cursor: pointer; margin: 0;">
@@ -1943,25 +1958,63 @@ msmith@arizona.edu, Mark, Smith"
               </select>
             </div>
             <div class="form-group" style="margin: 0;">
-              <label style="font-size: 0.75rem;">Forest Domain (read-only)</label>
-              <input type="text" id="tplGoadDomain" value="cybersaguaros.local" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
+              <label style="font-size: 0.75rem;" for="tplGoadDomain">Forest Domain</label>
+              <input type="text" id="tplGoadDomain" value="cybersaguaros.local" oninput="onTplGoadDomainInput()"
+                     title="Resets to the selected lab's own forest root when you change the GOAD version. A pre-baked lane cannot rename its forest — the domain lives in NTDS inside the golden image — so editing this only takes effect on a lane that runs the playbook."
+                     style="font-size: 0.85rem; font-family: monospace;">
             </div>
             <div class="form-group" style="margin: 0;">
-              <label style="font-size: 0.75rem;">Child Subdomain (read-only)</label>
-              <input type="text" id="tplGoadChild" value="tumamoc" readonly title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)" style="font-size: 0.85rem; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
+              <label style="font-size: 0.75rem;" for="tplGoadChild">Child Subdomain</label>
+              <input type="text" id="tplGoadChild" value="tumamoc" oninput="onTplGoadDomainInput()"
+                     placeholder="none"
+                     title="A single label, e.g. tumamoc — the child is always <label>.<forest domain>. Leave blank for a single-domain lab (GOAD-Mini, SCCM, NHA, DRACARYS)."
+                     style="font-size: 0.85rem; font-family: monospace;">
             </div>
           </div>
-          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem;">
+          <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem; align-items: end;">
             <div class="form-group" style="margin: 0;">
               <label style="font-size: 0.75rem;">Local Administrator Password (read-only — baked into the Windows template)</label>
               <input type="text" id="tplGoadPassword" value="vagrant" readonly title="GOAD's Autounattend.xml bakes the Windows Administrator password as 'vagrant' — change it in the packer answer file, not here" style="font-size: 0.85rem; font-family: monospace; background:var(--gray-100); color:var(--gray-500); cursor:not-allowed;">
             </div>
-            <div style="display: flex; align-items: center; gap: 0.5rem; padding-top: 1.3rem;">
+            <div style="display: flex; align-items: center; gap: 0.5rem; padding-bottom: 0.4rem;">
               <input type="checkbox" id="tplGoadKali" checked onchange="onTplGoadKaliToggle()" style="width: 16px; height: 16px; cursor: pointer;">
               <label for="tplGoadKali" style="font-size: 0.8rem; cursor: pointer; margin: 0;">Include Kali (.50)</label>
             </div>
+            <div style="display: flex; align-items: center; gap: 0.5rem; padding-bottom: 0.4rem;">
+              <input type="checkbox" id="tplGoadPrebaked" onchange="onTplGoadPrebakedToggle()" style="width: 16px; height: 16px; cursor: pointer;">
+              <label for="tplGoadPrebaked" style="font-size: 0.8rem; cursor: pointer; margin: 0;">Pre-baked golden images</label>
+            </div>
           </div>
-          <p id="tplGoadVersionDesc" style="font-size: 0.72rem; color: var(--gray-500); margin: 0.5rem 0 0 0;"></p>
+          <div id="tplGoadPrebakedConfig" style="display: none; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem;">
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 0.75rem;">Fixed internal subnet (first 3 octets)</label>
+                <input type="text" id="tplGoadFixedInt" placeholder="10.167.161" style="font-size: 0.85rem; font-family: monospace;">
+              </div>
+              <div class="form-group" style="margin: 0;">
+                <label style="font-size: 0.75rem;">Fixed external subnet (first 3 octets)</label>
+                <input type="text" id="tplGoadFixedExt" placeholder="10.39.161" style="font-size: 0.85rem; font-family: monospace;">
+              </div>
+            </div>
+            <p class="topo-settings-hint">
+              Clones provisioned golden images instead of running the ~90-min ansible bake. Every pre-baked lane
+              reuses these exact subnets (safe — v3 lanes are VXLAN-isolated), and they <strong>must</strong> match
+              the base the image's AD/DNS was provisioned on. Requires a <strong>v3</strong> challenge; this
+              environment's subnet scheme was fixed when it was created and cannot be changed here.
+            </p>
+          </div>
+          <div style="margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px dashed #f6ad55;">
+            <label style="font-size: 0.75rem; font-weight: 600; display: block; margin-bottom: 0.3rem;">Extensions</label>
+            <div id="tplGoadExtensions"></div>
+            <p class="topo-settings-hint">
+              Upstream GOAD extensions. Ticking one places the machine, pins its address, and hands the key to the
+              controller's <code>run.sh</code>, which installs the extension in-lane — so it is a
+              <strong>request to install</strong>, not a label. Ticking is surgical: nothing else on the canvas is
+              disturbed. A <strong>pre-baked</strong> environment runs no Ansible, so the two are refused together.
+            </p>
+          </div>
+          <p class="topo-settings-hint" id="tplGoadVersionDesc"></p>
+          <div class="topo-field-error" id="tplErrGoad" style="display: none;"></div>
         </div>
       </div>
 
@@ -2153,7 +2206,13 @@ msmith@arizona.edu, Mark, Smith"
   <!-- After admin-challenges.js: the Topology tab reuses its GOAD catalog
        helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml.
        goad-extensions.js is the same pair for the extension catalog and must
-       precede admin-topology.js, which calls into it. -->
+       precede admin-topology.js, which calls into it.
+
+       The dependency also runs the OTHER way now: admin-topology.js owns the
+       shared GOAD card ("GOAD CARD — ONE implementation, two surfaces") that
+       admin-challenges.js's template-editor modal binds to. That is safe in this
+       order because classic scripts share one global scope and every one of
+       those calls happens on a user gesture, long after both files evaluate. -->
   <script src="/js/admin/goad-extensions.js"></script>
   <script src="/js/admin/admin-topology.js"></script>
   <script src="/js/admin/admin-broadcast.js"></script>

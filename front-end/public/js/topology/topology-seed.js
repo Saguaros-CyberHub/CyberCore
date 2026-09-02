@@ -159,8 +159,10 @@
    * Takes the lab OBJECT from GET /goad/labs rather than its key, so this stays
    * pure. Emits templateVMs shape — `services`/`default_scripts` as ARRAYS. The
    * create-form's buildGoadVmRows emits them as comma strings, which the canvas
-   * property panel would then .join() into garbage; this is the shape
-   * buildTplGoadVMs produces, and it is the correct one for a canvas.
+   * property panel would then .join() into garbage. This is now the ONLY
+   * builder either canvas uses: goadCardRebuildFromLab (admin-topology.js) calls
+   * it for the Topology Designer AND for the template editor's modal, which used
+   * to keep a second copy of this function called buildTplGoadVMs.
    *
    * opts.includeKali  append the attacker box (.50)
    * opts.addPivot     append the dual-homed web01 DMZ pivot and force v3

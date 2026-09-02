@@ -11,13 +11,20 @@
 //             challenge's spec, so intended-vs-actual is one dropdown apart.
 //
 // ── What this file deliberately does NOT do ─────────────────────────────────
-// It owns no rendering. Every canvas behaviour — the context menu, the last-NIC
-// refusal, the GOAD name locks — lives in topology-editor.js/topology-render.js
-// and is therefore shared with the Challenge Template editor modal's canvas,
-// which is the point: two surfaces, one set of rules. This file consumes only
+// It owns no CANVAS rendering. Every canvas behaviour — the context menu, the
+// last-NIC refusal, the GOAD name locks — lives in
+// topology-editor.js/topology-render.js and is therefore shared with the
+// Challenge Template editor modal's canvas, which is the point: two surfaces,
+// one set of rules. This file consumes only
 // the public APIs: CyberCoreTopology.create,
 // CyberCoreTopologyEditor.{mount,segmentsForScheme,deriveSegments,stripInternal,
 // menuGuards}, CyberCoreTopologySeed, and goad-extensions.js's catalog pair.
+//
+// What it DOES own for someone else is the GOAD configuration card. See "GOAD
+// CARD — ONE implementation, two surfaces" below: those `goadCard*` functions
+// back both this tab's card and the Challenge Template editor modal's, and
+// admin-challenges.js binds to them through tplGoadCard(). Everything else in
+// this file is `topo`-prefixed and private to the tab.
 //
 // ── Naming ─────────────────────────────────────────────────────────────────
 // Classic scripts share ONE global lexical scope, so a top-level `let` that
@@ -124,26 +131,6 @@ function setTopoMode(mode) {
 
 function topoScheme() {
   return document.getElementById('topoSubnetScheme').value || 'v1';
-}
-
-/**
- * Names whose placement is fixed by the environment rather than by the author.
- *
- * The lab's own hosts, plus the machines contributed by the ticked extensions.
- * Both are NAME CONTRACTS, not labels: prepareGoadMacs matches AD hosts by name,
- * and an extension machine's name is what the golden image's baked agent config
- * and (for the SIEMs) its `<name>.cybercore.lan` record are built around. A
- * rename silently converts a domain controller into an unrecognised machine, or
- * points every winlogbeat in the lane at a host that no longer answers.
- *
- * The editor turns this into `goadHosts`, which disables the name field, draws
- * the double border, and now also disables Rename/Remove in the context menu.
- */
-function topoGoadHostNames() {
-  if (!document.getElementById('topoGoadEnabled')?.checked) return null;
-  const lab = findGoadLab(document.getElementById('topoGoadVersion')?.value);
-  const names = lab ? lab.vms.map(v => v.name) : [];
-  return names.concat(goadExtensionMachineNames(readTopoGoadExtensions()));
 }
 
 /**
@@ -348,46 +335,159 @@ async function applyTopoSeedResult(seed) {
 }
 
 // ============================================================================
-// DESIGNER — GOAD card
+// GOAD CARD — ONE implementation, two surfaces
+// ============================================================================
+// Everything from here to "DESIGNER — table view" is shared by BOTH of the GOAD
+// configuration cards this page still has:
+//
+//   · the Topology Designer's  (#topoGoad*, this tab)
+//   · the Template Editor's    (#tplGoad*,  the modal in admin-challenges.js)
+//
+// (There is a third, #chalGoad*, on the old "Create New Environment" form. It is
+// the oldest and least capable surface and is deliberately left alone.)
+//
+// ── WHY THIS IS SHARED AT ALL ───────────────────────────────────────────────
+// It was not, and that is the bug this section exists to end. The editor's card
+// had fallen a whole feature set behind: no Extensions group, read-only forest
+// and child domains, no pre-baked toggle and no fixed_subnet. So someone who
+// opened an existing environment with "Edit" could not reach the pre-baked
+// golden-image flow at all — and spec.goad.prebaked REQUIRES goad.fixed_subnet
+// to deploy, so the one surface that edits an existing spec could not author the
+// pair the deploy demands. Three copies of one card is HOW that drift happened;
+// a fourth copy of the fix would guarantee it happens again.
+//
+// ── THE APPROACH, AND WHY IT IS NOT THE STRONGER ONE ────────────────────────
+// The stronger option was to generate the card's MARKUP here too and mount it
+// into both hosts, so there is literally one source for the FIELDS as well as
+// the behaviour. It is not available. test/ad-domain-rules.test.js reads
+// public/admin.html and asserts on `id="topoGoadDomain" …
+// oninput="onTopoGoadDomainInput()"` being in that file; generating the markup
+// from JS deletes the text it matches. The Designer works today and its tests
+// pass, and breaking it to fix the editor is a net loss.
+//
+// So: every BEHAVIOUR lives here exactly once, parameterised by a card
+// descriptor, and the two markup blocks are held together by a source-text
+// DRIFT GATE — test/goad-card-parity.test.js strips the prefix off both blocks
+// and fails on the first field, handler or readonly flag that one card grows and
+// the other does not. That gate is the price of leaving two copies of the
+// markup; it is what makes this arrangement honest rather than merely smaller.
+//
+// ── WHY IT LIVES IN admin-topology.js ───────────────────────────────────────
+// Because the working implementation is already here, and three existing
+// assertions name THIS FILE for it: ad-domain-rules.test.js pins
+// `childEl.value = (lab && lab.childSubdomain) || '';`,
+// `window.CyberCoreAdDomainRules` and `topoErrGoad` in
+// public/js/admin/admin-topology.js, and goad-extensions.test.js's headless
+// harness loads exactly {goad-extensions.js, admin-topology.js} and drives
+// onTopoExtensionToggle through it. Moving the code to a new file — or to
+// goad-extensions.js, otherwise the natural home — breaks all of them for no
+// behavioural gain. admin-challenges.js therefore CALLS INTO this file. That
+// direction is safe even though admin.html loads it first: classic scripts share
+// one global scope and every call here happens on a user gesture, long after
+// both files have evaluated.
+//
+// ── THE CARD DESCRIPTOR ─────────────────────────────────────────────────────
+// A surface hands its differences in as a plain object, rebuilt on every call so
+// it always reads the CURRENT machine array rather than a stale capture:
+//
+//   prefix          'topo' | 'tpl' — every element is `<prefix>Goad<Suffix>`
+//   errId           the field-error element for this card
+//   extToggleFn     the global name the generated checkboxes call on change
+//   getVms()        the machine array the canvas is holding
+//   setVms(vms)     REPLACE it — a wholesale lab rebuild only, see below
+//   editor()        the CyberCoreTopologyEditor controller, or null
+//   refresh()       re-render this surface's table view
+//   mount()         remount the canvas; mandatory after setVms
+//   getScheme()     'v1' | 'v2' | 'v3'
+//   applyScheme(s)  adopt the scheme a seed chose, or say why it cannot
+//   clearNetwork()  drop stored segment positions after a wholesale rebuild
+//
+// See topoGoadCard() at the end of this section and tplGoadCard() in
+// admin-challenges.js — those two factories are the ONLY place the surfaces
+// differ.
+//
+// ── THE TWO LOAD-BEARING BEHAVIOURS ─────────────────────────────────────────
+// 1. THE KALI PATTERN, NOT THE VERSION PATTERN. goadCardRebuildFromLab replaces
+//    the machine list WHOLESALE — correct when the author picks a different lab,
+//    catastrophic for an extension tick, which would discard the canvas layout,
+//    every hand-added machine and every template_vmid typed by hand.
+//    goadCardOnKaliToggle and goadCardToggleExtension are therefore surgical:
+//    push/splice on the SAME array the editor closes over, then refresh. Pinned
+//    by IDENTITY in goad-extensions.test.js, not by contents.
+// 2. EXTENSION MACHINE NAMES ARE NAME-LOCKED. goadCardHostNames feeds goadHosts
+//    into the editor mount, which disables the name field and the Rename/Remove
+//    menu items. The names are a contract with the golden images and the baked
+//    agent configs, not labels.
 // ============================================================================
 
-async function populateTopoGoadVersions() {
+/** The `<prefix>Goad<suffix>` element for this card, or null. */
+function goadCardEl(card, suffix) {
+  return document.getElementById(card.prefix + 'Goad' + suffix);
+}
+
+/** Is GOAD switched on for this card? */
+function goadCardOn(card) {
+  const cb = goadCardEl(card, 'Enabled');
+  return !!(cb && cb.checked);
+}
+
+/**
+ * The next free slot in the 600000 + n*10000 band.
+ *
+ * Two machines on one vm_offset clone to the same VMID and the second deploy
+ * fails, so neither the Kali toggle nor an extension tick may assume the array
+ * is contiguous — an author who removed a row leaves a hole that
+ * `600000 + length * 10000` would land on top of.
+ */
+function goadCardFreeOffset(vms) {
+  const used = new Set((vms || []).map(v => Number(v.vm_offset)));
+  let offset = 600000;
+  while (used.has(offset)) offset += 10000;
+  return offset;
+}
+
+async function goadCardPopulateVersions(card) {
   const catalog = await loadGoadCatalog();
-  const select = document.getElementById('topoGoadVersion');
+  const select = goadCardEl(card, 'Version');
+  if (!select) return;
   const previous = select.value || catalog.default_lab;
   select.innerHTML = (catalog.labs || []).map(l =>
     `<option value="${topoAttr(l.key)}">${escHtml(l.displayName || l.key)}</option>`
   ).join('') || '<option value="GOAD-Light">GOAD-Light</option>';
   select.value = (catalog.labs || []).some(l => l.key === previous)
     ? previous : (catalog.default_lab || 'GOAD-Light');
-  updateTopoGoadDesc();
+  goadCardUpdateDesc(card);
 }
 
-function updateTopoGoadDesc() {
-  const lab = findGoadLab(document.getElementById('topoGoadVersion').value);
-  const desc = document.getElementById('topoGoadVersionDesc');
+function goadCardUpdateDesc(card) {
+  const select = goadCardEl(card, 'Version');
+  const lab = findGoadLab(select && select.value);
+  const desc = goadCardEl(card, 'VersionDesc');
   if (desc) desc.textContent = (lab && lab.description) || '';
 }
 
 // ── Forest domain / child subdomain ────────────────────────────────────────
 //
-// These fields used to be readonly AND STALE: onTopoGoadVersionChange() only
-// refreshed the description and the machine list, so picking GOAD-Mini left
+// These fields used to be readonly AND STALE on every card: a version change
+// only refreshed the description and the machine list, so picking GOAD-Mini left
 // 'cybersaguaros.local' on screen while the lab's own forestRoot is
 // 'sevenkingdoms.local' — and the stale value is what got stored. Every lab but
-// GOAD-Light persisted a domain it does not have.
+// GOAD-Light persisted a domain it does not have. (The template editor's card
+// still said "Forest Domain (read-only)" until this section became shared, which
+// is the same bug wearing a label.)
 //
 // They are editable now, so the fix is two-part: RESET them from the lab on a
 // version change (the lab's values are the defaults, which is what makes them
 // correct rather than merely fresh), and VALIDATE what the author types against
 // ad-domain-rules — the same rulebook the create handler runs server-side and
-// Track G's compiler mints against.
+// Track G's compiler mints against. There is no second rulebook here.
 
 /** Stamp the selected lab's own domain names into the two fields. */
-function resetTopoGoadDomainsFromLab() {
-  const lab = findGoadLab(document.getElementById('topoGoadVersion').value);
-  const domainEl = document.getElementById('topoGoadDomain');
-  const childEl = document.getElementById('topoGoadChild');
+function goadCardResetDomainsFromLab(card) {
+  const select = goadCardEl(card, 'Version');
+  const lab = findGoadLab(select && select.value);
+  const domainEl = goadCardEl(card, 'Domain');
+  const childEl = goadCardEl(card, 'Child');
   if (!domainEl || !childEl) return;
   // `|| ''` on the child, not a fallback to 'tumamoc': GOAD-Mini, SCCM, NHA and
   // DRACARYS have exactly one domain, and childSubdomain is null for them.
@@ -395,27 +495,29 @@ function resetTopoGoadDomainsFromLab() {
   // got into every spec in the first place.
   domainEl.value = (lab && lab.forestRoot) || 'cybersaguaros.local';
   childEl.value = (lab && lab.childSubdomain) || '';
-  validateTopoGoadDomains();
+  goadCardValidateDomains(card);
 }
 
 /**
- * Paint domain problems into #topoErrGoad. Returns the rule result so the
- * create path can refuse on an error without re-deriving anything.
+ * Paint domain problems into this card's error line. Returns the rule result so
+ * the create path can refuse on an error without re-deriving anything.
  *
  * Errors block; a reserved TLD is only a WARNING, because every lab CyberCore
  * ships is named under .local and that name lives in the golden image's NTDS —
  * hard-failing it would make an unedited legacy lab unauthorable.
  */
-function validateTopoGoadDomains() {
-  const err = document.getElementById('topoErrGoad');
+function goadCardValidateDomains(card) {
+  const err = document.getElementById(card.errId);
   const Rules = window.CyberCoreAdDomainRules;
-  if (!document.getElementById('topoGoadEnabled')?.checked || !Rules) {
+  const domainEl = goadCardEl(card, 'Domain');
+  const childEl = goadCardEl(card, 'Child');
+  if (!goadCardOn(card) || !Rules || !domainEl || !childEl) {
     if (err) { err.style.display = 'none'; err.textContent = ''; err.classList.remove('is-warning'); }
     return { errors: [], warnings: [] };
   }
   const result = Rules.validateGoadDomains({
-    domain: document.getElementById('topoGoadDomain').value,
-    child_subdomain: document.getElementById('topoGoadChild').value
+    domain: domainEl.value,
+    child_subdomain: childEl.value
   });
   if (!err) return result;
   const lines = result.errors.length ? result.errors : result.warnings;
@@ -427,133 +529,169 @@ function validateTopoGoadDomains() {
   return result;
 }
 
-function onTopoGoadDomainInput() { validateTopoGoadDomains(); }
+function goadCardOnDomainInput(card) { goadCardValidateDomains(card); }
 
-/** Rebuild the machine list from the selected lab. User-intent only — never on load. */
-function topoRebuildFromGoadLab() {
-  const lab = findGoadLab(document.getElementById('topoGoadVersion').value);
-  const prebaked = document.getElementById('topoGoadPrebaked').checked;
+/**
+ * Rebuild the machine list from the selected lab. USER INTENT ONLY — never on
+ * load, and never on an extension tick.
+ *
+ * This is the wholesale path: it throws away the canvas layout and every
+ * hand-added machine, which is right when the author has just chosen a different
+ * lab and wrong for anything else.
+ */
+function goadCardRebuildFromLab(card) {
+  const select = goadCardEl(card, 'Version');
+  const lab = findGoadLab(select && select.value);
+  const prebakedEl = goadCardEl(card, 'Prebaked');
+  const prebaked = !!(prebakedEl && prebakedEl.checked);
+  const kaliEl = goadCardEl(card, 'Kali');
   const seed = TopoSeed().fromGoadLab(lab, {
-    includeKali: document.getElementById('topoGoadKali').checked,
+    includeKali: !!(kaliEl && kaliEl.checked),
     addPivot: prebaked,
     blankVmids: prebaked,
-    subnetScheme: topoScheme()
+    subnetScheme: card.getScheme()
   });
   if (!seed.ok) { Toast.error('GOAD', seed.reason); return; }
-  topoVms = seed.vms;
+  card.setVms(seed.vms);
   // A lab change rebuilds the machine list wholesale, so the extension machines
   // have to be re-stamped onto the fresh list — otherwise ticking elk, then
   // switching lab, silently drops the SIEM while its checkbox stays ticked.
   // Rendered FIRST so a selection the new lab cannot take is already unticked.
-  renderTopoGoadExtensions(readTopoGoadExtensions());
-  readTopoGoadExtensions().forEach(key => {
+  goadCardRenderExtensions(card, goadCardReadExtensions(card));
+  goadCardReadExtensions(card).forEach(key => {
     const ext = findGoadExtension(key);
     if (!ext) return;
-    if (topoVms.some(v => String(v.name).toLowerCase() === ext.machine.toLowerCase())) return;
-    topoVms.push(buildGoadExtensionRow(ext, 600000 + topoVms.length * 10000));
+    const vms = card.getVms();
+    if (vms.some(v => String(v.name).toLowerCase() === ext.machine.toLowerCase())) return;
+    vms.push(buildGoadExtensionRow(ext, goadCardFreeOffset(vms)));
   });
-  topoNetwork = null;
-  document.getElementById('topoSubnetScheme').value = seed.subnet_scheme;
-  onTopoSchemeChange();
-  topoDesignMount();       // new array AND a different locked-host set
-  renderTopoVmTable(true);
+  card.clearNetwork();
+  card.applyScheme(seed.subnet_scheme);
+  card.mount();            // the array was REPLACED and the locked-host set changed
+  card.refresh();
 }
 
-async function onTopoGoadToggle() {
-  const enabled = document.getElementById('topoGoadEnabled').checked;
-  document.getElementById('topoGoadConfig').style.display = enabled ? 'block' : 'none';
+async function goadCardOnToggle(card) {
+  const enabled = goadCardOn(card);
+  const cfg = goadCardEl(card, 'Config');
+  if (cfg) cfg.style.display = enabled ? 'block' : 'none';
   if (enabled) {
-    await populateTopoGoadVersions();
+    await goadCardPopulateVersions(card);
     await loadGoadExtensionCatalog();
-    renderTopoGoadExtensions([]);
-    resetTopoGoadDomainsFromLab();
-    topoRebuildFromGoadLab();
-    Toast.info('GOAD enabled', `Machine list set to the ${document.getElementById('topoGoadVersion').value} topology`);
+    goadCardRenderExtensions(card, []);
+    goadCardResetDomainsFromLab(card);
+    goadCardRebuildFromLab(card);
+    const select = goadCardEl(card, 'Version');
+    Toast.info('GOAD enabled', `Machine list set to the ${select && select.value} topology`);
   } else {
-    document.getElementById('topoGoadPrebaked').checked = false;
-    document.getElementById('topoGoadPrebakedConfig').style.display = 'none';
+    const pb = goadCardEl(card, 'Prebaked');
+    if (pb) pb.checked = false;
+    const pbc = goadCardEl(card, 'PrebakedConfig');
+    if (pbc) pbc.style.display = 'none';
+    goadCardValidateDomains(card);      // clears the error line with the card off
     // Only the locked-host set changes; the machines stay so turning GOAD off is
     // not a destructive act on work already on the canvas.
-    if (topoDesigner) topoDesigner.setGoadHosts(null);
+    const editor = card.editor();
+    if (editor) editor.setGoadHosts(null);
   }
 }
 
-function onTopoGoadVersionChange() {
-  updateTopoGoadDesc();
-  if (!document.getElementById('topoGoadEnabled').checked) return;
+function goadCardOnVersionChange(card) {
+  goadCardUpdateDesc(card);
+  if (!goadCardOn(card)) return;
   // The lab's own forest names are the defaults, so a version change RESETS
   // both fields — this is the fix for the stale-value bug that made every lab
   // but GOAD-Light persist a domain it does not have. An author who has already
   // overridden them loses that override, which is the correct trade: the fields
   // describe the lab that is now selected.
-  resetTopoGoadDomainsFromLab();
-  topoRebuildFromGoadLab();   // re-renders the extension list and re-stamps it
+  goadCardResetDomainsFromLab(card);
+  goadCardRebuildFromLab(card);   // re-renders the extension list and re-stamps it
 }
 
-function onTopoGoadKaliToggle() {
-  if (!document.getElementById('topoGoadEnabled').checked) return;
-  const includeKali = document.getElementById('topoGoadKali').checked;
-  const hasKali = topoVms.some(v => v.name === 'Kali');
+function goadCardOnKaliToggle(card) {
+  if (!goadCardOn(card)) return;
+  const includeKali = goadCardEl(card, 'Kali').checked;
+  const vms = card.getVms();
+  const hasKali = vms.some(v => v.name === 'Kali');
   if (includeKali && !hasKali) {
     // Mutate in place — the editor holds this array, so a push is visible to it.
-    topoVms.push({
+    vms.push({
       name: 'Kali', role: 'attacker', os: 'Kali Linux', template_vmid: 1699, type: 'qemu',
-      vm_offset: 600000 + topoVms.length * 10000, default_scripts: [], services: []
+      vm_offset: goadCardFreeOffset(vms), default_scripts: [], services: []
     });
-    if (topoDesigner) topoDesigner.refresh(topoVms);
-    renderTopoVmTable(true);
   } else if (!includeKali && hasKali) {
     // splice, not filter — replacing the array would orphan the editor's handle.
-    for (let i = topoVms.length - 1; i >= 0; i--) if (topoVms[i].name === 'Kali') topoVms.splice(i, 1);
-    if (topoDesigner) topoDesigner.refresh(topoVms);
-    renderTopoVmTable(true);
+    for (let i = vms.length - 1; i >= 0; i--) if (vms[i].name === 'Kali') vms.splice(i, 1);
+  } else {
+    return;
   }
+  const editor = card.editor();
+  if (editor) editor.refresh(vms);
+  card.refresh();
 }
 
-function onTopoGoadPrebakedToggle() {
-  const on = document.getElementById('topoGoadPrebaked').checked;
-  document.getElementById('topoGoadPrebakedConfig').style.display = on ? 'block' : 'none';
-  if (on) {
-    document.getElementById('topoSubnetScheme').value = 'v3';
-    onTopoSchemeChange();
-  }
-  if (document.getElementById('topoGoadEnabled').checked) {
-    topoRebuildFromGoadLab();
+function goadCardOnPrebakedToggle(card) {
+  const on = goadCardEl(card, 'Prebaked').checked;
+  const pbc = goadCardEl(card, 'PrebakedConfig');
+  if (pbc) pbc.style.display = on ? 'block' : 'none';
+  // Pre-baked AD images carry full per-segment IPs, so they only make sense on a
+  // segmented lane, and fromGoadLab forces the seed to v3 for exactly that
+  // reason. The rebuild below already hands that choice to applyScheme, so this
+  // must NOT also call it — the Designer would harmlessly set its dropdown
+  // twice, but the template editor's applyScheme is a warning toast, and saying
+  // the same thing twice is how a warning becomes noise. Only the (unreachable
+  // through the UI) GOAD-off path needs the direct call.
+  if (goadCardOn(card)) {
+    goadCardRebuildFromLab(card);
     if (on) Toast.info('Pre-baked mode', 'Enter each golden-image Template VMID — including web01, the DMZ pivot');
+  } else if (on) {
+    card.applyScheme('v3');
   }
 }
 
-function resetTopoGoadFields() {
-  const cb = document.getElementById('topoGoadEnabled');
+function goadCardReset(card) {
+  const cb = goadCardEl(card, 'Enabled');
   if (cb) cb.checked = false;
-  document.getElementById('topoGoadConfig').style.display = 'none';
-  const pb = document.getElementById('topoGoadPrebaked');
+  const cfg = goadCardEl(card, 'Config');
+  if (cfg) cfg.style.display = 'none';
+  const pb = goadCardEl(card, 'Prebaked');
   if (pb) pb.checked = false;
-  document.getElementById('topoGoadPrebakedConfig').style.display = 'none';
-  document.getElementById('topoGoadFixedInt').value = '';
-  document.getElementById('topoGoadFixedExt').value = '';
-  document.getElementById('topoGoadVersionDesc').textContent = '';
-  const ext = document.getElementById('topoGoadExtensions');
+  const pbc = goadCardEl(card, 'PrebakedConfig');
+  if (pbc) pbc.style.display = 'none';
+  const fixedInt = goadCardEl(card, 'FixedInt');
+  if (fixedInt) fixedInt.value = '';
+  const fixedExt = goadCardEl(card, 'FixedExt');
+  if (fixedExt) fixedExt.value = '';
+  const desc = goadCardEl(card, 'VersionDesc');
+  if (desc) desc.textContent = '';
+  const ext = goadCardEl(card, 'Extensions');
   if (ext) ext.innerHTML = '';
-  const err = document.getElementById('topoErrGoad');
+  const err = document.getElementById(card.errId);
   if (err) { err.style.display = 'none'; err.textContent = ''; err.classList.remove('is-warning'); }
 }
 
 /**
  * Write a stored GOAD config into the card WITHOUT rebuilding the machine list.
  *
- * That distinction is the point: a seeded spec already carries its machines, and
- * those rows may hold golden-image template_vmids that the catalog's base
- * template would overwrite. So this calls updateTopoGoadDesc(), never
- * onTopoGoadVersionChange().
+ * That distinction is the point, and it is why both surfaces call this rather
+ * than the version-change handler: a stored spec already carries its machines,
+ * and those rows may hold golden-image template_vmids that the catalog's base
+ * template would overwrite. The other half of the same rule is that the STORED
+ * domain names win over the lab's defaults — showing what is stored is what
+ * makes an edit an edit rather than a silent rewrite.
+ *
+ * This is the LOAD half of the round trip; goadCardReadFields is the save half.
+ * The two must stay symmetric across extensions, prebaked and fixed_subnet, or a
+ * field renders, saves, and comes back empty — which is worse than one that
+ * never rendered.
  */
-async function applyTopoGoadFields(goad) {
-  if (!goad || !goad.enabled) { resetTopoGoadFields(); return; }
-  document.getElementById('topoGoadEnabled').checked = true;
-  document.getElementById('topoGoadConfig').style.display = 'block';
-  await populateTopoGoadVersions();
+async function goadCardApplyFields(card, goad) {
+  if (!goad || !goad.enabled) { goadCardReset(card); return; }
+  goadCardEl(card, 'Enabled').checked = true;
+  goadCardEl(card, 'Config').style.display = 'block';
+  await goadCardPopulateVersions(card);
 
-  const select = document.getElementById('topoGoadVersion');
+  const select = goadCardEl(card, 'Version');
   // `_goadCatalog` is admin-challenges.js's top-level `let`. A top-level `let` is
   // NOT a window property, so it must be read by bare name — window._goadCatalog
   // is always undefined. Classic scripts share one global lexical scope, which is
@@ -561,62 +699,64 @@ async function applyTopoGoadFields(goad) {
   const version = goad.version || (_goadCatalog && _goadCatalog.default_lab) || 'GOAD-Light';
   if ([...select.options].some(o => o.value === version)) select.value = version;
 
-  document.getElementById('topoGoadKali').checked = goad.include_kali !== false;
-  document.getElementById('topoGoadPrebaked').checked = !!goad.prebaked;
-  document.getElementById('topoGoadPrebakedConfig').style.display = goad.prebaked ? 'block' : 'none';
-  document.getElementById('topoGoadFixedInt').value = (goad.fixed_subnet && goad.fixed_subnet.int) || '';
-  document.getElementById('topoGoadFixedExt').value = (goad.fixed_subnet && goad.fixed_subnet.ext) || '';
+  goadCardEl(card, 'Kali').checked = goad.include_kali !== false;
+  const pb = goadCardEl(card, 'Prebaked');
+  if (pb) pb.checked = !!goad.prebaked;
+  const pbc = goadCardEl(card, 'PrebakedConfig');
+  if (pbc) pbc.style.display = goad.prebaked ? 'block' : 'none';
+  const fixedInt = goadCardEl(card, 'FixedInt');
+  if (fixedInt) fixedInt.value = (goad.fixed_subnet && goad.fixed_subnet.int) || '';
+  const fixedExt = goadCardEl(card, 'FixedExt');
+  if (fixedExt) fixedExt.value = (goad.fixed_subnet && goad.fixed_subnet.ext) || '';
 
-  // A seeded spec carries its OWN domain names — possibly hand-edited, possibly
-  // stale from before this card validated anything. Show what is stored rather
-  // than what the lab would default to, for the same reason this function never
-  // calls onTopoGoadVersionChange(): a seed already has its machines, and
-  // overwriting its authored values with catalog defaults would silently rewrite
-  // the spec the author asked to open.
   const lab = findGoadLab(select.value);
-  document.getElementById('topoGoadDomain').value =
+  goadCardEl(card, 'Domain').value =
     goad.domain || (lab && lab.forestRoot) || 'cybersaguaros.local';
-  document.getElementById('topoGoadChild').value =
+  goadCardEl(card, 'Child').value =
     goad.child_subdomain || (lab && lab.childSubdomain) || '';
 
   await loadGoadExtensionCatalog();
-  renderTopoGoadExtensions(Array.isArray(goad.extensions) ? goad.extensions : []);
+  goadCardRenderExtensions(card, Array.isArray(goad.extensions) ? goad.extensions : []);
 
-  updateTopoGoadDesc();
-  validateTopoGoadDomains();
+  goadCardUpdateDesc(card);
+  goadCardValidateDomains(card);
 }
 
-function readTopoGoadFields() {
-  if (!document.getElementById('topoGoadEnabled').checked) return null;
+function goadCardReadFields(card) {
+  if (!goadCardOn(card)) return null;
   const goad = {
     enabled: true,
-    version: document.getElementById('topoGoadVersion').value ||
+    version: goadCardEl(card, 'Version').value ||
       (_goadCatalog && _goadCatalog.default_lab) || 'GOAD-Light',
-    domain: document.getElementById('topoGoadDomain').value.trim() || 'cybersaguaros.local',
+    domain: goadCardEl(card, 'Domain').value.trim() || 'cybersaguaros.local',
     // No 'tumamoc' fallback any more. An empty child means "this lab has one
     // domain", which is true of GOAD-Mini, SCCM, NHA and DRACARYS — inventing a
     // child for them is exactly the hardcoded default that put a domain nobody
     // chose into every spec.
-    child_subdomain: document.getElementById('topoGoadChild').value.trim() || null,
+    child_subdomain: goadCardEl(card, 'Child').value.trim() || null,
     admin_user: 'Administrator',
-    admin_password: document.getElementById('topoGoadPassword').value || 'vagrant',
-    include_kali: document.getElementById('topoGoadKali').checked
+    admin_password: goadCardEl(card, 'Password').value || 'vagrant',
+    include_kali: goadCardEl(card, 'Kali').checked
   };
-  const extensions = readTopoGoadExtensions();
+  const extensions = goadCardReadExtensions(card);
   // Written only when something is ticked, so a challenge authored without
   // extensions posts the same body it posted before this feature existed.
   if (extensions.length) goad.extensions = extensions;
-  if (document.getElementById('topoGoadPrebaked').checked) {
+  const prebaked = goadCardEl(card, 'Prebaked');
+  if (prebaked && prebaked.checked) {
     goad.prebaked = true;
-    const int = document.getElementById('topoGoadFixedInt').value.trim();
-    const ext = document.getElementById('topoGoadFixedExt').value.trim();
+    const int = goadCardEl(card, 'FixedInt').value.trim();
+    const ext = goadCardEl(card, 'FixedExt').value.trim();
+    // applyPrebakedFixedSubnet THROWS at deploy when `int` is empty, and that is
+    // the right place for it: a pre-baked lane built on a per-lane subnet boots,
+    // reports active, and is fiction. The field is authored here so it can be.
     goad.fixed_subnet = { int, ext: ext || int };
   }
   return goad;
 }
 
 // ============================================================================
-// DESIGNER — GOAD extensions
+// GOAD CARD — extensions
 // ============================================================================
 // `spec.goad.extensions` is a REQUEST TO INSTALL. On a LIVE lane the ticked keys
 // are handed to the controller's run.sh as its 5th argument; it layers each
@@ -624,17 +764,16 @@ function readTopoGoadFields() {
 // extensions/<key>/ansible/install.yml — upstream's `install_extension <key>`,
 // verbatim. So ticking `elk` places the machine, pins its address, AND installs
 // Elasticsearch + Kibana on it, with Sysmon and winlogbeat pushed to every host
-// in [domain]. (This comment used to claim the opposite — that extensions were a
-// declaration of what a golden image already contained. That design is gone.)
+// in [domain].
 //
-// The ONE exception is a pre-baked environment (#topoGoadPrebaked): it clones
-// golden images and runs no Ansible at all, so nothing would be installed. That
-// combination is refused — topology-validate reports `prebaked-extension` on the
-// canvas, and goad-deploy.assertGoadExtensionsRunnable throws before any clone.
+// The ONE exception is a pre-baked environment: it clones golden images and runs
+// no Ansible at all, so nothing would be installed. That combination is refused
+// — topology-validate reports `prebaked-extension` on the canvas, and
+// goad-deploy.assertGoadExtensionsRunnable throws before any clone.
 
 /** The ticked extension keys, in catalog order. */
-function readTopoGoadExtensions() {
-  return [...document.querySelectorAll('#topoGoadExtensions input[data-ext]:checked')]
+function goadCardReadExtensions(card) {
+  return [...document.querySelectorAll('#' + card.prefix + 'GoadExtensions input[data-ext]:checked')]
     .map(el => el.getAttribute('data-ext'));
 }
 
@@ -648,12 +787,14 @@ function readTopoGoadExtensions() {
  *
  * Incompatible entries are rendered DISABLED WITH THE REASON rather than
  * hidden: "why can't I add a workstation to SCCM?" is a question the UI should
- * answer where it is asked.
+ * answer where it is asked. The ok/reason pair is SERVED on the lab row, so
+ * compatibility, name collisions and octet collisions have one implementation.
  */
-function renderTopoGoadExtensions(keep) {
-  const host = document.getElementById('topoGoadExtensions');
+function goadCardRenderExtensions(card, keep) {
+  const host = goadCardEl(card, 'Extensions');
   if (!host) return;
-  const lab = findGoadLab(document.getElementById('topoGoadVersion')?.value);
+  const select = goadCardEl(card, 'Version');
+  const lab = findGoadLab(select && select.value);
   const rows = goadExtensionsForLab(lab);
   const wanted = new Set(keep || []);
 
@@ -675,7 +816,7 @@ function renderTopoGoadExtensions(keep) {
       // &#39;, which the HTML parser decodes BEFORE the JS runs and breaks the
       // string literal. Same rule the create-status buttons follow.
       `<input type="checkbox" data-ext="${topoAttr(r.key)}"${on ? ' checked' : ''}` +
-      `${r.ok ? '' : ' disabled'} onchange="onTopoExtensionToggle(this.dataset.ext)"` +
+      `${r.ok ? '' : ' disabled'} onchange="${card.extToggleFn}(this.dataset.ext)"` +
       ` style="width:15px; height:15px; margin-top:0.15rem; cursor:inherit;">` +
       `<span style="font-size:0.78rem; line-height:1.3;">` +
       `<strong>${escHtml(ext.displayName || ext.key)}</strong>` +
@@ -688,29 +829,27 @@ function renderTopoGoadExtensions(keep) {
 /**
  * Tick / untick one extension. SURGICAL, and that is the whole point.
  *
- * onTopoGoadVersionChange() rebuilds the machine list WHOLESALE via fromGoadLab.
- * That is correct for a lab change and catastrophic for an extension tick: it
- * would throw away the canvas layout, every hand-added machine, and every
- * template_vmid the author typed. onTopoGoadKaliToggle() is deliberately a
- * push/splice on the SAME array the editor is holding, and this follows it
- * exactly — mutate in place, refresh, never replace.
+ * goadCardRebuildFromLab() replaces the machine list WHOLESALE. That is correct
+ * for a lab change and catastrophic for an extension tick: it would throw away
+ * the canvas layout, every hand-added machine, and every template_vmid the
+ * author typed. goadCardOnKaliToggle() is deliberately a push/splice on the SAME
+ * array the editor is holding, and this follows it exactly — mutate in place,
+ * refresh, never replace.
  */
-function onTopoExtensionToggle(key) {
-  if (!document.getElementById('topoGoadEnabled').checked) return;
+function goadCardToggleExtension(card, key) {
+  if (!goadCardOn(card)) return;
   const ext = findGoadExtension(key);
   if (!ext) return;
-  const on = !!document.querySelector(`#topoGoadExtensions input[data-ext="${key}"]:checked`);
-  const idx = topoVms.findIndex(v => String(v.name).toLowerCase() === ext.machine.toLowerCase());
+  const on = !!document.querySelector(`#${card.prefix}GoadExtensions input[data-ext="${key}"]:checked`);
+  const vms = card.getVms();
+  const idx = vms.findIndex(v => String(v.name).toLowerCase() === ext.machine.toLowerCase());
 
   if (on && idx === -1) {
     // Next free offset in the 600000 + n*10000 band, so a tick cannot collide
     // with a row the author already placed (two VMs on one offset clone to the
     // same VMID and the second deploy fails).
-    const used = new Set(topoVms.map(v => Number(v.vm_offset)));
-    let offset = 600000;
-    while (used.has(offset)) offset += 10000;
     // push, not concat — the editor closes over this array.
-    topoVms.push(buildGoadExtensionRow(ext, offset));
+    vms.push(buildGoadExtensionRow(ext, goadCardFreeOffset(vms)));
 
     // ws01 is the right blue-team console and it costs nothing to say so: a
     // domain-joined Windows 11 analyst box that browses to http://elk:5601,
@@ -718,28 +857,109 @@ function onTopoExtensionToggle(key) {
     // instrumented, so the student's own activity becomes telemetry. Only
     // claimed when NOTHING else is already primary; an author's explicit choice
     // is never overwritten by a checkbox.
-    if (key === 'ws01' && !topoVms.some(v => v.console_role === 'primary')) {
-      topoVms[topoVms.length - 1].console_role = 'primary';
+    if (key === 'ws01' && !vms.some(v => v.console_role === 'primary')) {
+      vms[vms.length - 1].console_role = 'primary';
       Toast.info('Student console', 'ws01 is now the machine students open. Change it in the property panel or the table.');
     }
   } else if (!on && idx !== -1) {
     // splice, not filter — replacing the array would orphan the editor's handle.
-    if (topoVms[idx].console_role === 'primary') {
+    if (vms[idx].console_role === 'primary') {
       Toast.warning('Console cleared', `${ext.machine} was the student console — pick another machine.`);
     }
-    topoVms.splice(idx, 1);
+    vms.splice(idx, 1);
   } else {
     return;   // already in the wanted state; nothing to do and nothing to redraw
   }
 
   // The name lock set changed, so the editor needs the new list before it can
   // disable the right fields.
-  if (topoDesigner) {
-    topoDesigner.setGoadHosts(topoGoadHostNames());
-    topoDesigner.refresh(topoVms);
+  const editor = card.editor();
+  if (editor) {
+    editor.setGoadHosts(goadCardHostNames(card));
+    editor.refresh(vms);
   }
-  renderTopoVmTable(true);
+  card.refresh();
 }
+
+/**
+ * Names whose placement is fixed by the environment rather than by the author.
+ *
+ * The lab's own hosts, plus the machines contributed by the ticked extensions.
+ * Both are NAME CONTRACTS, not labels: prepareGoadMacs matches AD hosts by name,
+ * and an extension machine's name is what the golden image's baked agent config
+ * and (for the SIEMs) its `<name>.cybercore.lan` record are built around. A
+ * rename silently converts a domain controller into an unrecognised machine, or
+ * points every winlogbeat in the lane at a host that no longer answers.
+ *
+ * The editor turns this into `goadHosts`, which disables the name field, draws
+ * the double border, and also disables Rename/Remove in the context menu.
+ */
+function goadCardHostNames(card) {
+  if (!goadCardOn(card)) return null;
+  const select = goadCardEl(card, 'Version');
+  const lab = findGoadLab(select && select.value);
+  const names = lab ? lab.vms.map(v => v.name) : [];
+  return names.concat(goadExtensionMachineNames(goadCardReadExtensions(card)));
+}
+
+// ============================================================================
+// DESIGNER — GOAD card (the topo half of the shared implementation)
+// ============================================================================
+// Everything below is a thin binding: the descriptor naming the Designer's half
+// of the differences, plus the handlers admin.html's inline attributes call. No
+// behaviour lives here — if you are about to add some, add it above, so the
+// template editor gets it too.
+
+/**
+ * The Designer's card descriptor.
+ *
+ * Rebuilt on every call rather than cached, because `topoVms` is REPLACED (not
+ * mutated) by a wholesale rebuild and a captured reference would go stale the
+ * first time the author changed lab.
+ */
+function topoGoadCard() {
+  return {
+    prefix: 'topo',
+    errId: 'topoErrGoad',
+    extToggleFn: 'onTopoExtensionToggle',
+    getVms: () => topoVms,
+    setVms: (vms) => { topoVms = vms; },
+    editor: () => topoDesigner,
+    refresh: () => renderTopoVmTable(true),
+    mount: () => topoDesignMount(),
+    getScheme: () => topoScheme(),
+    // The Designer authors a NEW challenge, so its scheme is still a choice.
+    applyScheme: (scheme) => {
+      document.getElementById('topoSubnetScheme').value = scheme;
+      onTopoSchemeChange();
+    },
+    clearNetwork: () => { topoNetwork = null; }
+  };
+}
+
+async function populateTopoGoadVersions() { return goadCardPopulateVersions(topoGoadCard()); }
+function updateTopoGoadDesc() { goadCardUpdateDesc(topoGoadCard()); }
+async function onTopoGoadToggle() { return goadCardOnToggle(topoGoadCard()); }
+
+// A version change RESETS both domain fields from the lab and only then
+// rebuilds the machine list. goadCardOnVersionChange() does both, in that
+// order, for both cards; these three wrappers are the Designer's end of that
+// one chain, kept together so the order is readable here too.
+function onTopoGoadVersionChange() { goadCardOnVersionChange(topoGoadCard()); }
+function resetTopoGoadDomainsFromLab() { goadCardResetDomainsFromLab(topoGoadCard()); }
+function topoRebuildFromGoadLab() { goadCardRebuildFromLab(topoGoadCard()); }
+
+function validateTopoGoadDomains() { return goadCardValidateDomains(topoGoadCard()); }
+function onTopoGoadDomainInput() { goadCardOnDomainInput(topoGoadCard()); }
+function onTopoGoadKaliToggle() { goadCardOnKaliToggle(topoGoadCard()); }
+function onTopoGoadPrebakedToggle() { goadCardOnPrebakedToggle(topoGoadCard()); }
+function resetTopoGoadFields() { goadCardReset(topoGoadCard()); }
+async function applyTopoGoadFields(goad) { return goadCardApplyFields(topoGoadCard(), goad); }
+function readTopoGoadFields() { return goadCardReadFields(topoGoadCard()); }
+function readTopoGoadExtensions() { return goadCardReadExtensions(topoGoadCard()); }
+function renderTopoGoadExtensions(keep) { goadCardRenderExtensions(topoGoadCard(), keep); }
+function onTopoExtensionToggle(key) { goadCardToggleExtension(topoGoadCard(), key); }
+function topoGoadHostNames() { return goadCardHostNames(topoGoadCard()); }
 
 // ============================================================================
 // DESIGNER — table view + phantoms

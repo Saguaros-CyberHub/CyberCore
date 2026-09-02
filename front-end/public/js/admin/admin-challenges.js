@@ -511,120 +511,84 @@ let templateEditSpec = {};
 // the VM/GOAD builders to edit, and their reservation keys must survive a save.
 let templateIsReservation = false;
 
-// ---- Template editor GOAD handlers (tplGoad*) ----
-let _preTplGoadVMs = null;
-async function populateTplGoadVersionDropdown() {
-  const catalog = await loadGoadCatalog();
-  const select = document.getElementById('tplGoadVersion');
-  const previous = select.value || catalog.default_lab;
-  select.innerHTML = (catalog.labs || []).map(l =>
-    `<option value="${l.key}">${escHtml(l.displayName)}</option>`
-  ).join('') || `<option value="GOAD-Light">GOAD-Light</option>`;
-  select.value = (catalog.labs || []).some(l => l.key === previous) ? previous : (catalog.default_lab || 'GOAD-Light');
-  onTplGoadVersionChange();
-}
-// Convert a GOAD VM row (from catalog) to the templateVMs shape
-function tplVmFromGoad(v, idx) {
+// ---- Template editor GOAD card (tplGoad*) ----
+//
+// THIN BINDINGS ONLY. Every behaviour behind this card is the ONE shared
+// implementation in admin-topology.js — read "GOAD CARD — ONE implementation,
+// two surfaces" there for what a card descriptor is and why the code lives in
+// that file rather than this one.
+//
+// This modal's card and the Designer's were separate copies of one form until
+// that section existed, and this was the copy that fell behind: no Extensions
+// group, read-only forest/child domains, no pre-baked toggle, no fixed_subnet.
+// The whole pre-baked golden-image flow was unreachable from "Edit" — and
+// spec.goad.prebaked REQUIRES goad.fixed_subnet to deploy, so the one surface
+// that edits an existing spec could not author the pair the deploy demands.
+//
+// If you are about to add behaviour here, add it to the shared section instead,
+// so the Designer gets it in the same commit.
+
+/**
+ * The template editor's card descriptor.
+ *
+ * Rebuilt on every call rather than cached: `templateVMs` is REPLACED (not
+ * mutated) by a wholesale lab rebuild, so a captured reference would go stale
+ * the first time the author changed lab.
+ */
+function tplGoadCard() {
   return {
-    name:            v.name,
-    role:            v.role,
-    os:              v.os,
-    template_vmid:   v.template_vmid,
-    type:            'qemu',
-    vm_offset:       600000 + idx * 10000,
-    default_scripts: [],
-    services:        []
+    prefix: 'tpl',
+    errId: 'tplErrGoad',
+    extToggleFn: 'onTplExtensionToggle',
+    getVms: () => templateVMs,
+    setVms: (vms) => { templateVMs = vms; },
+    editor: () => tplTopo,
+    refresh: () => renderTemplateVMs(true),
+    mount: () => tplTopoMount(),
+    getScheme: () => tplSubnetScheme,
+    // Unlike the Designer, this modal edits an EXISTING challenge, and
+    // subnet_scheme is a COLUMN on that row — written once by reserveLabNetwork
+    // and not accepted by PUT /lab-templates/:id. So a seed's choice cannot be
+    // adopted here: flipping tplSubnetScheme would only make the canvas draw
+    // segments the lane will never have, which is a prettier lie than the one
+    // this whole section exists to remove. Say it out loud instead.
+    applyScheme: (scheme) => {
+      if (scheme === tplSubnetScheme) return;
+      Toast.warning('Subnet scheme is fixed',
+        `Pre-baked GOAD needs a v3 (segmented) environment; this one is ${tplSubnetScheme}. ` +
+        'A challenge\'s subnet scheme is set when its VXLAN block is reserved and cannot be edited here — ' +
+        're-create the environment as v3 from the Topology Designer.');
+    },
+    // The stored positions belong to the machine list a rebuild just discarded.
+    clearNetwork: () => { templateNetwork = null; }
   };
 }
-function buildTplGoadVMs(labKey, includeKali) {
-  const lab = findGoadLab(labKey);
-  if (!lab) return [];
-  const vms = lab.vms.map((v, i) => tplVmFromGoad(v, i));
-  if (includeKali) {
-    vms.push({ name: 'Kali', role: 'attacker', os: 'Kali Linux', template_vmid: 1699, type: 'qemu', vm_offset: 600000 + vms.length * 10000, default_scripts: [], services: [] });
-  }
-  return vms;
-}
-async function onTplGoadToggle() {
-  const enabled = document.getElementById('tplGoadEnabled').checked;
-  document.getElementById('tplGoadConfig').style.display = enabled ? 'block' : 'none';
-  if (enabled) {
-    await populateTplGoadVersionDropdown();
-    if (_preTplGoadVMs === null) _preTplGoadVMs = templateVMs.slice();
-    const labKey = document.getElementById('tplGoadVersion').value;
-    const includeKali = document.getElementById('tplGoadKali').checked;
-    templateVMs = buildTplGoadVMs(labKey, includeKali);
-    // templateVMs was REPLACED, not mutated — the canvas holds the old array,
-    // so remount rather than refresh.
-    tplTopoMount();
-    renderTemplateVMs(true);
-    if (typeof Toast !== 'undefined') Toast.info('GOAD enabled', `VM list set to ${labKey} topology`);
-  } else {
-    if (_preTplGoadVMs !== null) { templateVMs = _preTplGoadVMs; _preTplGoadVMs = null; }
-    else templateVMs = [];
-    tplTopoMount();
-    renderTemplateVMs(true);
-  }
-}
-function onTplGoadVersionChange() {
-  const labKey = document.getElementById('tplGoadVersion').value;
-  const lab = findGoadLab(labKey);
-  const desc = document.getElementById('tplGoadVersionDesc');
-  if (desc && lab) desc.textContent = lab.description || '';
-  if (document.getElementById('tplGoadEnabled').checked) {
-    const includeKali = document.getElementById('tplGoadKali').checked;
-    templateVMs = buildTplGoadVMs(labKey, includeKali);
-    tplTopoMount();          // new array + different locked host set
-    renderTemplateVMs(true);
-  }
-}
-function onTplGoadKaliToggle() {
-  if (!document.getElementById('tplGoadEnabled').checked) return;
-  const includeKali = document.getElementById('tplGoadKali').checked;
-  const hasKali = templateVMs.some(v => v.name === 'Kali');
-  if (includeKali && !hasKali) {
-    templateVMs.push({ name: 'Kali', role: 'attacker', os: 'Kali Linux', template_vmid: 1699, type: 'qemu', vm_offset: 600000 + templateVMs.length * 10000, default_scripts: [], services: [] });
-    renderTemplateVMs();
-  } else if (!includeKali && hasKali) {
-    templateVMs = templateVMs.filter(v => v.name !== 'Kali');
-    renderTemplateVMs();
-  }
-}
-function readTplGoadFields() {
-  if (!document.getElementById('tplGoadEnabled').checked) return null;
-  return {
-    enabled:         true,
-    version:         document.getElementById('tplGoadVersion').value || (_goadCatalog?.default_lab) || 'GOAD-Light',
-    domain:          document.getElementById('tplGoadDomain').value.trim() || 'cybersaguaros.local',
-    child_subdomain: document.getElementById('tplGoadChild').value.trim() || 'tumamoc',
-    admin_user:      'Administrator',
-    admin_password:  document.getElementById('tplGoadPassword').value || 'vagrant',
-    include_kali:    document.getElementById('tplGoadKali').checked
-  };
-}
-function resetTplGoadFields() {
-  _preTplGoadVMs = null;
-  const cb = document.getElementById('tplGoadEnabled');
-  if (cb) cb.checked = false;
-  const cfg = document.getElementById('tplGoadConfig');
-  if (cfg) cfg.style.display = 'none';
-  const desc = document.getElementById('tplGoadVersionDesc');
-  if (desc) desc.textContent = '';
-}
-async function loadTplGoadFields(goad) {
-  if (!goad || !goad.enabled) { resetTplGoadFields(); return; }
-  document.getElementById('tplGoadEnabled').checked = true;
-  document.getElementById('tplGoadConfig').style.display = 'block';
-  await populateTplGoadVersionDropdown();
-  const select = document.getElementById('tplGoadVersion');
-  const version = goad.version || (_goadCatalog?.default_lab) || 'GOAD-Light';
-  if ([...select.options].some(o => o.value === version)) select.value = version;
-  // Forest domain / child subdomain / local-admin password are read-only —
-  // they reflect the GOAD fork + Windows template, not per-challenge values.
-  // Leave the static read-only fields as-is; only version + Kali are editable.
-  document.getElementById('tplGoadKali').checked   = goad.include_kali !== false;
-  onTplGoadVersionChange();
-}
+
+async function onTplGoadToggle() { return goadCardOnToggle(tplGoadCard()); }
+
+// A version change RESETS both domain fields from the lab and only then rebuilds
+// the machine list — the same chain, in the same order, as the Designer's.
+function onTplGoadVersionChange() { goadCardOnVersionChange(tplGoadCard()); }
+function onTplGoadDomainInput() { goadCardOnDomainInput(tplGoadCard()); }
+
+function onTplGoadKaliToggle() { goadCardOnKaliToggle(tplGoadCard()); }
+function onTplGoadPrebakedToggle() { goadCardOnPrebakedToggle(tplGoadCard()); }
+function onTplExtensionToggle(key) { goadCardToggleExtension(tplGoadCard(), key); }
+function readTplGoadExtensions() { return goadCardReadExtensions(tplGoadCard()); }
+function resetTplGoadFields() { goadCardReset(tplGoadCard()); }
+function readTplGoadFields() { return goadCardReadFields(tplGoadCard()); }
+
+/**
+ * The LOAD half of the round trip: paint a stored spec.goad back into the card.
+ *
+ * Deliberately does NOT rebuild the machine list — the spec already carries its
+ * machines, and a pre-baked one carries golden-image template_vmids the
+ * catalog's base template would overwrite. Extensions, prebaked and
+ * fixed_subnet come back too; before this they were dropped on load and then
+ * saved away, so opening an environment to change its name silently deleted its
+ * pre-baked configuration.
+ */
+async function loadTplGoadFields(goad) { return goadCardApplyFields(tplGoadCard(), goad); }
 
 /**
  * Show/hide the VM + GOAD + phantom builders and render the reservation banner.
@@ -811,12 +775,13 @@ let tplTopo = null;           // live editor controller
 let tplVmView = 'canvas';
 let tplSubnetScheme = 'v1';   // from the challenge row; v1/v2 = 1 segment, v3 = 2
 
-/** GOAD lab host names, whose placement is fixed by the lab definition. */
-function tplGoadHostNames() {
-  if (!document.getElementById('tplGoadEnabled')?.checked) return null;
-  const lab = findGoadLab(document.getElementById('tplGoadVersion')?.value);
-  return lab ? lab.vms.map(v => v.name) : null;
-}
+/**
+ * The machines whose placement is fixed by the environment: the lab's own hosts
+ * PLUS the machines the ticked extensions contribute. Shared with the Designer,
+ * because an extension machine's name is a contract with the golden image and
+ * the baked agent configs — the editor's canvas must name-lock it too.
+ */
+function tplGoadHostNames() { return goadCardHostNames(tplGoadCard()); }
 
 /**
  * Mount (or remount) the canvas. Always tears the previous instance down first:
@@ -953,7 +918,16 @@ async function saveTemplate() {
     // zone, course_id on a CLE course). The server re-asserts the protected ones
     // too; this just keeps the request honest about what it is changing.
     body.spec = { ...templateEditSpec };
+    // The GOAD card is the whole truth about spec.goad, so it has to be able to
+    // say "none". Writing only on the truthy branch meant unticking the checkbox
+    // left the LOADED spec.goad on the body and the challenge stayed a GOAD one
+    // — the same one-way-ness that used to drop extensions and fixed_subnet on
+    // load. The reservation guard matters: applyTemplateEditorMode HIDES the
+    // card for a reserved lab network, so its unticked checkbox means "not
+    // rendered", not "turn GOAD off", and deleting on that reading would strip a
+    // CLE course's config for anyone who opened it to fix a typo.
     if (goad) body.spec.goad = goad;
+    else if (!templateIsReservation) delete body.spec.goad;
     if (!templateIsReservation) {
       body.spec.vms = body.vm_specs;
       body.spec.phantom_assets = templatePhantoms;
