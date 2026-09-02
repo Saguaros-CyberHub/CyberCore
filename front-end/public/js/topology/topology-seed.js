@@ -219,8 +219,16 @@
     seed.goad = {
       enabled: true,
       version: lab.key,
-      domain: 'cybersaguaros.local',
-      child_subdomain: 'tumamoc',
+      // THE LAB'S OWN NAMES, not GOAD-Light's. These were hardcoded, so seeding
+      // from any other preset stamped `cybersaguaros.local` / `tumamoc` onto a
+      // forest that has neither — and that wrong value was what got stored,
+      // because the card's fields were read-only and never refreshed. The
+      // fallbacks keep a catalog row from an older server working.
+      domain: lab.forestRoot || 'cybersaguaros.local',
+      // null, not 'tumamoc': GOAD-Mini, SCCM, NHA and DRACARYS each have exactly
+      // one domain. Inventing a child for them is how a domain nobody chose got
+      // into every spec in the first place.
+      child_subdomain: lab.childSubdomain || null,
       admin_user: 'Administrator',
       admin_password: 'vagrant',
       include_kali: !!opts.includeKali

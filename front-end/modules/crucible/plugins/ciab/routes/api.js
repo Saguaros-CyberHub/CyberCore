@@ -36,6 +36,7 @@ const profileDeployRoutes = require('./profile-deploy');
 const sectionRoutes = require('./sections');
 const sectionRosterRoutes = require('./section-roster');
 const sectionModuleRoutes = require('./section-modules');
+const incidentRoutes = require('./incidents');
 
 // The sidebar gate. GET /api/modules consults this to decide whether
 // Clinic-in-a-Box appears in the navigation at all, so a student who is on no
@@ -131,6 +132,21 @@ router.use('/api', authenticateToken, clinicApiRoutes);
 
 // CIAB-owned prefixes below the catch-all. They are reached because
 // clinicApiRoutes calls next() when none of its five routes match.
+// The blue-team board. /api/engagements is a CIAB-OWNED PREFIX, which is the
+// only reason the full chain can be applied at the mount: the bare /api mount
+// above matches every /api/* request in the application, so a gate there would
+// close CLE's routes to a student on no CIAB roster. See that block's comment.
+//
+// Instructor sub-routes carry their own requireRole INSIDE the router -- there
+// is no role gate here, so a handler that forgets one is open to every enrolled
+// student. routes/incidents.js states that per route rather than by group.
+router.use(
+  '/api/engagements/:engagementId/incidents',
+  authenticateToken, requireCiabAccess, checkSchedule,
+  (req, res, next) => { res.locals.engagementId = req.params.engagementId; next(); },
+  incidentRoutes
+);
+
 router.use('/api/progress', authenticateToken, requireCiabAccess, checkSchedule, progressRoutes);
 router.use('/api/interview', authenticateToken, requireCiabAccess, checkSchedule, interviewRoutes);
 // NOT gated: every route inside is requireRole('instructor','admin'), which is

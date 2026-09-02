@@ -23,6 +23,7 @@ const sessionRoutes = require('./sessions');
 const flagRoutes = require('./flags');
 const myCoursesRoutes = require('./my-courses');
 const courseRosterRoutes = require('./course-roster');
+const incidentRoutes = require('./incidents');
 const { requireCourseFeature } = require('../utils/course-features');
 
 // The support ticket form has to offer a student the courses they are enrolled
@@ -88,6 +89,17 @@ router.use('/api/cle/courses/:courseId/attacks', authenticateToken, (req, res, n
   res.locals.courseId = req.params.courseId;
   next();
 }, attacksRoutes);
+
+// The blue-team board, the defensive sibling of the attack console. Mounted
+// beside /attacks and, like it, NOT gated at the mount: the blue_team feature
+// gate is applied per WRITE inside the router, so a course that later disables
+// the tab keeps its students' graded submissions readable. See that file's
+// header, note 3 -- findings are graded work, and a feature checkbox must not
+// make a student's own work unreachable.
+router.use('/api/cle/courses/:courseId/incidents', authenticateToken, (req, res, next) => {
+  res.locals.courseId = req.params.courseId;
+  next();
+}, incidentRoutes);
 
 // Gated at the mount rather than in the handler so the whole router is covered
 // by one check. Unlike the attack console there is no in-flight work to strand:

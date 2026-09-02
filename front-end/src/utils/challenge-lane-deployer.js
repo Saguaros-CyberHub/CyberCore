@@ -343,14 +343,40 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
  * DNS records are emitted for pinned AND console machines (an alias has to
  * resolve to an address, and only those have one that is knowable at deploy
  * time), and are independent of `pinAllVms` — a spec that declares
- * `dns_aliases` on its console machine gets them either way. Inert for every
- * existing challenge: `dns_aliases` today exists only on catalog TEMPLATE rows,
- * which the workstation path reads; no challenge spec carries one.
+ * `dns_aliases` on its console machine gets them either way.
+ *
+ * ── Two sources of aliases, not one ─────────────────────────────────────────
+ * An earlier version of this comment claimed `dns_aliases` exists only on
+ * catalog TEMPLATE rows and so this pass was inert for every challenge. Both
+ * halves are now wrong:
+ *
+ *   spec.vms[].dns_aliases    CiAB's synthesizer writes them
+ *                             (ciab/utils/profile-to-spec.js), and the topology
+ *                             canvas persists whatever the spec carries.
+ *   extra.template.metadata   an instructor-added workstation (extraWorkstations)
+ *     .dns_aliases            is a CATALOG ROW, so its aliases live where the
+ *                             workstation path has always read them.
+ *
+ * The extras half is why `extraConsoles` exists. Extras used to get a dhcp-host
+ * line from writeLaneReservations and NO host-record at all, so an alias on an
+ * added machine was silently dropped. That is not cosmetic: the CYBR 400 sensor
+ * image bakes `ELK_HOST=elk.cybercore.lan` into its elastic-agent.yml, and the
+ * ELK box MUST ride the extras path because cloneChallengeVm never sets
+ * ciuser/cipassword — only cloneExtraWorkstation does. Without the record the
+ * agent resolves nothing, reports healthy, and ships zero events.
+ *
+ * Extras are emitted at their CONSOLE octet on the EXTERNAL base, matching
+ * writeLaneReservations' own console loop — the two must agree or the record
+ * points at an address nothing holds.
  *
  * @param {object} a
  * @param {Array}  a.specVms             resolveSpecVms output
  * @param {object} [a.goadMacs]          prepareGoadMacs output, keyed by VM name
  * @param {object} [a.consoleOctetForVm] spec-VM name -> already-allocated console octet
+ * @param {Array}  [a.extraConsoles]     [{ hostname, template, octet }] instructor-added
+ *   machines with their already-allocated console octet. DNS only — extras are
+ *   never pinned (the console allocator owns their address) and never appear in
+ *   pinnedHosts.
  * @param {Array}  [a.reserved]          octets already claimed on this lane
  * @param {boolean}[a.pinAllVms]
  * @returns {{ pinnedHosts: Array<{name,octet,subnetBase}>, dnsRecords: Array<{alias,ip}> }}
@@ -359,7 +385,7 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
  *   silently wrong.
  */
 function resolveSpecAddressing({
-  specVms = [], goadMacs = {}, consoleOctetForVm = {}, reserved = [],
+  specVms = [], goadMacs = {}, consoleOctetForVm = {}, extraConsoles = [], reserved = [],
   subnetScheme, laneSubnetBase, goadSubnetBase, pinAllVms = false,
 }) {
   const isV3 = subnetScheme === 'v3';
@@ -456,26 +482,51 @@ function resolveSpecAddressing({
 
   const dnsRecords = [];
   const claimedBy = {};
+  // ONE claim table across spec VMs and extras, not two. A spec machine named
+  // 'elk' and an added ELK workstation both claiming the alias is exactly the
+  // shape a blue-team lane produces by accident, and dnsmasq would answer with
+  // whichever host-record it happened to read first — so name both rather than
+  // publishing a coin flip.
+  const claimAlias = (alias, machineName, ip) => {
+    if (claimedBy[alias]) {
+      throw new Error(
+        `dns_alias '${alias}' is claimed by two machines on this lane ` +
+        `('${claimedBy[alias]}' and '${machineName}')`
+      );
+    }
+    claimedBy[alias] = machineName;
+    dnsRecords.push({ alias, ip });
+  };
+
   for (const vmSpec of specVms) {
     const ip = ipFor[vmSpec.name];
     if (!ip) continue;
+    // Validation goes through lane-deployer.resolveDnsAliases (see above); the
+    // spec's per-VM key is wrapped in the template shape that function reads.
     const aliases = laneDeployer.resolveDnsAliases({
       metadata: { dns_aliases: vmSpec.dns_aliases },
       template_key: vmSpec.name,
     });
-    for (const alias of aliases) {
-      // Two machines claiming one alias is a spec bug: dnsmasq would answer with
-      // whichever host-record it happened to read first, so name both rather
-      // than publishing a coin flip.
-      if (claimedBy[alias]) {
-        throw new Error(
-          `dns_alias '${alias}' is claimed by two machines on this lane ` +
-          `('${claimedBy[alias]}' and '${vmSpec.name}')`
-        );
-      }
-      claimedBy[alias] = vmSpec.name;
-      dnsRecords.push({ alias, ip });
-    }
+    for (const alias of aliases) claimAlias(alias, vmSpec.name, ip);
+  }
+
+  // Extras SECOND, so a spec VM's record keeps the address it has always had and
+  // the duplicate-alias error names the added machine as the newcomer. An extra
+  // with no aliases contributes nothing, which is what keeps every existing
+  // caller byte-identical — every one of them passes no extraConsoles at all.
+  for (const extra of extraConsoles) {
+    if (!extra || extra.octet == null) continue;
+    const name = extra.hostname || extra.name;
+    if (!name) continue;
+    // The catalog row, unwrapped — an extra's aliases live on the TEMPLATE's
+    // metadata, which is where the workstation path has always read them.
+    const aliases = laneDeployer.resolveDnsAliases({
+      metadata: (extra.template || {}).metadata,
+      template_key: name,
+    });
+    if (!aliases.length) continue;
+    const ip = `${laneSubnetBase}.${extra.octet}`;
+    for (const alias of aliases) claimAlias(alias, name, ip);
   }
 
   return { pinnedHosts, dnsRecords };
@@ -1729,10 +1780,24 @@ async function deployLaneVms(job, ctx) {
     }
   }
 
+  // Instructor-added machines, with the console octet they were just handed.
+  // DNS only: they are already reserved by the console allocator above, so they
+  // must not reach the pinning pass — but their catalog row may carry
+  // `metadata.dns_aliases`, and without this they would get a dhcp-host line and
+  // no host-record. See resolveSpecAddressing's header for why that silently
+  // breaks a baked agent that resolves `elk.cybercore.lan`.
+  const extraConsoles = consolePlan.consoles
+    .filter((c) => c.kind === 'extra')
+    .map((c) => ({
+      hostname: c.name,
+      template: c.extra && c.extra.template,
+      octet: consoleOctets[c.ref],
+    }));
+
   // Fixed addresses + stable DNS names for the rest of the environment's
   // machines. No-ops unless the caller asked for them (see resolveSpecAddressing).
   const { pinnedHosts, dnsRecords } = resolveSpecAddressing({
-    specVms, goadMacs, consoleOctetForVm: ctx._consoleOctetForVm,
+    specVms, goadMacs, consoleOctetForVm: ctx._consoleOctetForVm, extraConsoles,
     // `taken` already carries every console octet — the loop above adds each as
     // it assigns it — plus Kali's and every GOAD static.
     //

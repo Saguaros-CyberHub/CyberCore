@@ -19,9 +19,9 @@ const { test } = require('node:test');
 const assert = require('assert');
 const path = require('path');
 
-const catalog = require(path.join(
-  __dirname, '..', 'modules', 'crucible', 'plugins', 'cle', 'utils', 'loggen-catalog.js'
-));
+// E1 moved the catalog to src/incident/catalog.js and left a re-export shim at
+// the old cle/utils/loggen-catalog.js path; E2 deleted the shim.
+const catalog = require(path.join(__dirname, '..', 'src', 'incident', 'catalog.js'));
 
 test('technique and tactic ids match the validators upstream applies', () => {
   for (const t of catalog.TECHNIQUES) {

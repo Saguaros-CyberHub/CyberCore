@@ -49,6 +49,8 @@
                   aria-controls="tab-students" aria-selected="false" tabindex="-1">Students</button>
           <button class="tab" role="tab" id="tabbtn-engagements" data-tab="engagements"
                   aria-controls="tab-engagements" aria-selected="false" tabindex="-1" data-instructor-only>Engagements</button>
+          <button class="tab" role="tab" id="tabbtn-incidents" data-tab="incidents"
+                  aria-controls="tab-incidents" aria-selected="false" tabindex="-1" data-instructor-only>Incidents</button>
           <button class="tab" role="tab" id="tabbtn-reviews" data-tab="reviews"
                   aria-controls="tab-reviews" aria-selected="false" tabindex="-1">
             Review Queue <span class="pill-count" id="reviewsTabCount" hidden></span>
@@ -401,6 +403,64 @@
           </div>
 
         </div>
+
+        <!-- ============================================================ -->
+        <!-- TAB: INCIDENTS                          (Track E, phase E6)   -->
+        <!-- ------------------------------------------------------------ -->
+        <!-- Launch a synthetic incident into every environment of one     -->
+        <!-- defensive engagement, watch it land, adjudicate what the      -->
+        <!-- students recorded, release the verdicts.                      -->
+        <!--                                                               -->
+        <!-- Markup only. Every behaviour lives in                         -->
+        <!-- /ciab/js/instructor-incidents.js, and the BOARD at the bottom -->
+        <!-- is mounted there from the shared /js/blueteam/ component the  -->
+        <!-- student workspace also uses.                                  -->
+        <!--                                                               -->
+        <!-- data-instructor-only on BOTH the button and the panel: this   -->
+        <!-- screen carries verdict overrides and the release gate, and    -->
+        <!-- none of that belongs on a projector in Student View.          -->
+        <!--                                                               -->
+        <!-- The pickers live OUTSIDE #incidentLauncher so an innerHTML    -->
+        <!-- repaint of the launcher never steals the selection, the same  -->
+        <!-- rule the Modules and Students tabs follow. No `hidden` and no  -->
+        <!-- inline display on the panel itself: visibility is the .active  -->
+        <!-- class, and switchTab's classList toggle would silently lose    -->
+        <!-- to an inline style.                                           -->
+        <!-- ============================================================ -->
+        <div class="tab-content" id="tab-incidents" role="tabpanel" aria-labelledby="tabbtn-incidents" data-instructor-only>
+
+          <!-- Filled by instructor-incidents.js: no sections, or nothing loaded. -->
+          <div id="incidentNoScope" class="empty-state" style="display: none;"></div>
+
+          <div id="incidentMain" style="display: none;">
+            <div class="card" style="margin-bottom: 1rem;">
+              <div class="card-body" style="padding: 1rem;">
+                <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: flex-end;">
+                  <div style="flex: 1; min-width: 240px;">
+                    <label for="incidentSectionSelect" style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--gray-500);">Section</label>
+                    <select id="incidentSectionSelect" class="form-input" onchange="Incidents.onSectionChange()"></select>
+                  </div>
+                  <!-- Hidden outright when the section has no defensive engagement.
+                       An empty dropdown reads as a loading failure; the launcher
+                       area says what is actually missing instead. -->
+                  <div id="incidentEngagementField" style="flex: 1; min-width: 240px; display: none;">
+                    <label for="incidentEngagementSelect" style="display: block; font-size: 0.8rem; font-weight: 600; color: var(--gray-500);">Engagement</label>
+                    <select id="incidentEngagementSelect" class="form-input" onchange="Incidents.onEngagementChange()"></select>
+                  </div>
+                </div>
+                <div id="incidentScopeMeta" style="margin-top: 0.75rem; color: var(--gray-500); font-size: 0.9rem;"></div>
+              </div>
+            </div>
+
+            <!-- Mode picker, catalog, duration, environments. -->
+            <div id="incidentLauncher"></div>
+            <!-- The live run: status, abort, re-fire, and the release banner. -->
+            <div id="incidentRun"></div>
+            <!-- Where instructor-incidents.js mounts the board, staff layout. -->
+            <div id="incidentBoard"></div>
+          </div>
+        </div>
+        <!-- /TAB: INCIDENTS -->
 
       </div>
     </main>
@@ -878,5 +938,20 @@
   <script src="/ciab/js/instructor-sections.js"></script>
   <script src="/ciab/js/instructor-roster-import.js"></script>
   <script src="/ciab/js/instructor-modules.js"></script>
+
+  <!-- The shared blue-team board, then the tab that mounts it.
+       ORDER INSIDE THIS BLOCK IS LOAD-BEARING AND IS NOT ALPHABETICAL:
+       blueteam-board.js reads BlueTeamApi, BlueTeamTimeline and BlueTeamScore
+       off window when it mounts, so all three must already have registered.
+       api -> timeline -> score -> board, and instructor-incidents.js last of
+       all — it needs the board AND instructor-core.js's esc/escJs/timeAgo,
+       which are top-level consts and therefore unreadable before that file
+       runs. instructor-incidents.js detects a wrong order and says so rather
+       than rendering an empty panel; see the guard at the bottom of it. -->
+  <script src="/js/blueteam/blueteam-api.js"></script>
+  <script src="/js/blueteam/blueteam-timeline.js"></script>
+  <script src="/js/blueteam/blueteam-score.js"></script>
+  <script src="/js/blueteam/blueteam-board.js"></script>
+  <script src="/ciab/js/instructor-incidents.js"></script>
 </body>
 </html>

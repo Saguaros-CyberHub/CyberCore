@@ -21,8 +21,10 @@ const { test } = require('node:test');
 const assert = require('assert');
 const path = require('path');
 
-const P = path.join(__dirname, '..', 'modules', 'crucible', 'plugins', 'cle', 'utils');
-const runner = require(path.join(P, 'attack-runner.js'));
+// E1 moved the engine into shared core and left re-export shims at the old
+// cle/utils/ paths; E2 deleted them. src/incident/ is the one home.
+const P = path.join(__dirname, '..', 'src', 'incident');
+const runner = require(path.join(P, 'runner.js'));
 
 const RUN = '11111111-2222-3333-4444-555555555555';
 const BASE = {
@@ -307,10 +309,14 @@ test('the sweeper polls a target when its synchronized start fires', () => {
   // console shows a five-minute attack as 'scheduled' from start to finish, and
   // Started stays blank because started_at is only written when the sweeper
   // actually observes the 'running' phase.
-  const worker = require(path.join(P, 'attack-worker.js'));
+  const worker = require(path.join(P, 'worker.js'));
   const SRC = worker.dueTargets ? worker.dueTargets.toString() : '';
-  const src = SRC || require('fs').readFileSync(path.join(P, 'attack-worker.js'), 'utf8');
-  assert.ok(/JOIN cle_attack_run/.test(src),
+  const src = SRC || require('fs').readFileSync(path.join(P, 'worker.js'), 'utf8');
+  // E2 re-pointed the sweeper from cle_db.cle_attack_run to the shared
+  // cybercore_incident_run. The JOIN itself is what this asserts, not the name:
+  // without it the claim query cannot see scheduled_start_at, and a run shorter
+  // than the liveness heartbeat is never observed 'running'.
+  assert.ok(/JOIN cybercore_incident_run/.test(src),
     'the claim query must reach the run to know when the start fires');
   assert.ok(/run\.scheduled_start_at IS NOT NULL/.test(src));
   assert.ok(/FOR UPDATE OF c SKIP LOCKED/.test(src),

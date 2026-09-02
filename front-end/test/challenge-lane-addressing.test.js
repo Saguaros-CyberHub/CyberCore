@@ -126,45 +126,42 @@ test('the e1000 flip DOES reach canvas-authored challenges — it is not inert',
   assert.strictEqual(nets.net0, 'e1000,bridge=vnet1',
     'a canvas-authored Windows challenge deploys with e1000, not virtio');
 
-  // The create path still drops os_family, so a challenge authored purely
-  // through POST /create-lab is genuinely unaffected. Both statements are true
-  // at once; the mistake was generalising the second into the first.
+  // The create path used to drop os_family, so a challenge authored purely
+  // through POST /create-lab was genuinely unaffected. That is no longer true:
+  // buildSpecVm's whitelist now carries os_family (see
+  // test/challenge-spec-whitelist.test.js), because dropping it made the create
+  // and edit paths store DIFFERENT specs for the same canvas — the exact class
+  // of bug challenge-spec.js exists to close. So the flip reaches both paths,
+  // which is the correct end state: one canvas, one stored spec, one NIC model.
   const { buildSpecVm } = require(path.join(UTILS, 'challenge-spec.js'));
   const created = buildSpecVm(CANVAS_WINDOWS_VM, 0, 'k');
-  assert.ok(!('os_family' in created));
-  assert.strictEqual(resolveSpecNicModel(created), null);
+  assert.strictEqual(created.os_family, 'windows_server');
+  assert.strictEqual(resolveSpecNicModel(created), 'e1000');
 });
 
-test('the per-VM addressing keys survive neither save path — pin it before A4 relies on it', () => {
-  // The mirror image of the test above, and the direction that actually hurts.
-  // A2 made spec.vms[].dns_aliases load-bearing (it becomes a dnsmasq
-  // host-record) and A4 is due to make spec.vms[].ipOctet the contract between
-  // a profile's generated paper and its lane's real addresses. Neither survives
-  // a round-trip through the admin lab-template editor:
+test('both ipOctet and dns_aliases survive create-lab', () => {
+  // This test has been through three states, and the history is the point.
+  // It first asserted that NEITHER key survived buildSpecVm's whitelist; then
+  // that `ipOctet` did and `dns_aliases` did not — a gap recorded here rather
+  // than left to be rediscovered. Both now survive, so both halves of the
+  // Designer's SIEM shape reach the deployer from CREATE, not just from the
+  // edit path's whole-object merge.
   //
-  //   POST /create-lab          buildSpecVm's whitelist drops them (below).
-  //   PUT  /lab-templates/:id   does `nextSpec.vms = vm_specs` verbatim, so
-  //                             whatever the editor posts wins — and its UI has
-  //                             no field for either key.
-  //
-  // PROTECTED_SPEC_KEYS (lab-templates.js:363) already defends exactly this
-  // class of loss for the reservation, but it CANNOT cover these: it copies
-  // TOP-LEVEL spec keys (`nextSpec[key] = currentSpec[key]`), and both of these
-  // live inside spec.vms[] entries. So the fix, when someone makes it, belongs
-  // in buildSpecVm's whitelist and in the PUT's vms merge — not in that list.
-  //
-  // Failure mode if this is forgotten: a lane silently comes up on a pool lease
-  // instead of the address its own scan report names, and `elk` stops
-  // resolving. Nothing errors. It only shows up as an exercise that no longer
-  // makes sense.
+  // Why the pair matters together: a SIEM authored on the canvas as
+  // `{ name:'elk', role:'siem', ipOctet:24, dns_aliases:['elk'] }` needs BOTH.
+  // The octet is the address its host-record points at; the alias is the name a
+  // baked elastic-agent.yml (`ELK_HOST=elk.cybercore.lan`) actually resolves.
+  // With the alias dropped the machine still got its pinned address and its DHCP
+  // reservation but no host-record — so the sensor's agent resolved nothing
+  // while reporting perfectly healthy and shipping zero events. Silent, and
+  // invisible on the canvas that authored it.
   const { buildSpecVm } = require(path.join(UTILS, 'challenge-spec.js'));
   const out = buildSpecVm(
     { name: 'elk01', template_vmid: 1601, type: 'qemu',
       ipOctet: 85, dns_aliases: ['elk'] }, 0, 'k');
-  assert.ok(!('ipOctet' in out),
-    'if this starts passing, delete this test — A4 addressing now survives create-lab');
-  assert.ok(!('dns_aliases' in out),
-    'if this starts passing, delete this test — spec DNS now survives create-lab');
+  assert.strictEqual(out.ipOctet, 85);
+  assert.deepStrictEqual(out.dns_aliases, ['elk'],
+    'a baked agent pointed at elk.cybercore.lan needs the host-record this key produces');
 });
 
 // ── 2. NIC model from os_family ─────────────────────────────────────────────
@@ -470,4 +467,152 @@ test('rebuild replays pinned hosts from config rather than re-deriving them', ()
   assert.ok(rebuildAt > 0, 'rebuildLaneChallengeVms not found');
   assert.ok(SRC.indexOf('ctx._pinnedOctetForVm', rebuildAt) > rebuildAt,
     'rebuild must repopulate _pinnedOctetForVm so the clone keeps its pinned MAC');
+});
+
+// ── 7. dns_aliases parity for instructor-added machines (extras) ────────────
+//
+// resolveSpecAddressing built dnsRecords from specVms ONLY, so an extra
+// workstation got a dhcp-host line from writeLaneReservations and NO
+// host-record. Its aliases live on the CATALOG ROW (template.metadata), which is
+// where the workstation path has always read them — the spec path simply never
+// looked.
+//
+// Why it is not cosmetic: the CYBR 400 sensor image bakes
+// ELK_HOST=elk.cybercore.lan into its elastic-agent.yml, and the ELK box MUST
+// ride the extras path, because cloneChallengeVm never sets ciuser/cipassword —
+// only cloneExtraWorkstation does. A spec-path ELK gets {username:null,
+// password:null} in Guacamole: a lane that looks deployed and cannot be logged
+// into. So ELK is an extra, and without a host-record the sensor's agent
+// resolves nothing, reports healthy, and ships zero events. The exact silent
+// failure this file exists to prevent.
+//
+// Shape: extraConsoles is [{ hostname, template, octet }], built by the deployer
+// from consolePlan's 'extra' candidates plus the octet the console allocator
+// just handed each one.
+
+const EXTRA_ELK = {
+  hostname: 'win-elk-0',
+  template: { template_key: 'win-elk', metadata: { dns_aliases: ['elk'] } },
+  octet: 60,
+};
+
+test('an extra carrying dns_aliases gets a host-record at its console address', () => {
+  const { dnsRecords } = addressing({ specVms: [], extraConsoles: [EXTRA_ELK] });
+  // The EXTERNAL base and the console octet — the same pair writeLaneReservations'
+  // console loop emits the dhcp-host line from. If these two ever disagree the
+  // record points at an address nothing on the lane holds.
+  assert.deepStrictEqual(dnsRecords, [{ alias: 'elk', ip: '10.39.16.60' }]);
+});
+
+test('an extra alias needs no pinAllVms — it is a console, it already has an address', () => {
+  // Extras are allocated by the console allocator, never by the pinning pass, so
+  // their record is independent of pinAllVms exactly as a spec console's is.
+  for (const pinAllVms of [false, true]) {
+    const { dnsRecords, pinnedHosts } = addressing({
+      specVms: [], extraConsoles: [EXTRA_ELK], pinAllVms,
+    });
+    assert.deepStrictEqual(dnsRecords, [{ alias: 'elk', ip: '10.39.16.60' }], `pinAllVms=${pinAllVms}`);
+    assert.deepStrictEqual(pinnedHosts, [], 'an extra is never pinned — the console allocator owns it');
+  }
+});
+
+test('an extra with no aliases produces no record — byte-identical for every existing caller', () => {
+  // The back-compat assertion. Every caller in the tree today passes no
+  // extraConsoles at all, and an added workstation from the ordinary catalog
+  // carries no dns_aliases, so this pass must contribute exactly nothing.
+  const plain = { hostname: 'win11-0', template: { template_key: 'win11', metadata: {} }, octet: 61 };
+  assert.deepStrictEqual(addressing({ specVms: PROFILE_VMS, extraConsoles: [plain] }).dnsRecords, []);
+  assert.deepStrictEqual(addressing({ specVms: PROFILE_VMS, extraConsoles: [] }).dnsRecords, []);
+  assert.deepStrictEqual(addressing({ specVms: PROFILE_VMS }).dnsRecords, []);
+  // No metadata at all, and no template at all — an extra loaded from a row that
+  // predates the column must not throw.
+  assert.deepStrictEqual(
+    addressing({ extraConsoles: [{ hostname: 'a', template: {}, octet: 62 }] }).dnsRecords, []);
+  assert.deepStrictEqual(
+    addressing({ extraConsoles: [{ hostname: 'b', octet: 63 }] }).dnsRecords, []);
+});
+
+test('an extra with no allocated octet is skipped rather than publishing .undefined', () => {
+  // Defensive: a record for `10.39.16.undefined` is a malformed dnsmasq
+  // directive, and one of those stops dnsmasq starting — which takes DHCP down
+  // for the whole lane.
+  assert.deepStrictEqual(addressing({ extraConsoles: [{ ...EXTRA_ELK, octet: null }] }).dnsRecords, []);
+  assert.deepStrictEqual(addressing({ extraConsoles: [{ ...EXTRA_ELK, octet: undefined }] }).dnsRecords, []);
+  assert.deepStrictEqual(addressing({ extraConsoles: [null] }).dnsRecords, []);
+});
+
+test('a spec VM and an extra cannot both claim one alias — the throw names both', () => {
+  // One claim table across both sources, not two. This is the shape a blue-team
+  // lane produces by accident: an author adds an `elk` spec machine AND attaches
+  // the registered ELK workstation. dnsmasq would answer with whichever
+  // host-record it read first, so name both rather than publishing a coin flip.
+  assert.throws(
+    () => addressing({
+      specVms: [{ name: 'elk01', type: 'qemu', dns_aliases: ['elk'] }],
+      consoleOctetForVm: { elk01: 61 },
+      extraConsoles: [EXTRA_ELK],
+    }),
+    (err) => {
+      assert.match(err.message, /'elk' is claimed by two machines/);
+      assert.match(err.message, /elk01/, 'the spec machine must be named');
+      assert.match(err.message, /win-elk-0/, 'the added machine must be named');
+      return true;
+    });
+});
+
+test('two extras claiming one alias is the same error', () => {
+  assert.throws(
+    () => addressing({
+      extraConsoles: [EXTRA_ELK, { ...EXTRA_ELK, hostname: 'win-elk-1', octet: 61 }],
+    }),
+    /'elk' is claimed by two machines on this lane \('win-elk-0' and 'win-elk-1'\)/);
+});
+
+test('spec records come first, so an existing lane keeps the addresses it had', () => {
+  // Order is part of the output contract: dnsRecords is persisted onto the lane
+  // config and replayed verbatim by the rebuild path, so a spec machine's record
+  // must not move because an extra was added alongside it.
+  const { dnsRecords } = addressing({
+    specVms: [{ name: 'sensor', type: 'qemu', dns_aliases: ['sensor'] }],
+    pinAllVms: true,
+    extraConsoles: [EXTRA_ELK],
+  });
+  assert.deepStrictEqual(dnsRecords, [
+    { alias: 'sensor', ip: '10.39.16.80' },
+    { alias: 'elk', ip: '10.39.16.60' },
+  ]);
+});
+
+test('an extra alias is validated by the SAME resolver the workstation path uses', () => {
+  // Not a second regex. One malformed label stops dnsmasq starting, and the two
+  // deploy paths must not disagree about what a valid alias is.
+  const { dnsRecords } = addressing({
+    extraConsoles: [{
+      hostname: 'win-elk-0', octet: 60,
+      template: { template_key: 'win-elk', metadata: { dns_aliases: ['not a label', 'a.b', '', 'ELK', 'elk'] } },
+    }],
+  });
+  // lowercased, de-duplicated, and the three invalid entries dropped with a warning.
+  assert.deepStrictEqual(dnsRecords, [{ alias: 'elk', ip: '10.39.16.60' }]);
+});
+
+test('the CYBR 400 shape end to end: sensor spec VM + ELK extra, one lane', () => {
+  // Exactly what a defensive_monitoring lane emits: the loggen sensor is a spec
+  // machine in the .80-.99 pin band, the ELK box is an extra in the .60-.79
+  // console band, and both names resolve inside the lane. The sensor's baked
+  // agent asks for elk.cybercore.lan; this is the record that answers it.
+  const { pinnedHosts, dnsRecords } = addressing({
+    specVms: [
+      { name: 'web01', type: 'qemu' },
+      { name: 'sensor', type: 'qemu', role: 'sensor', dns_aliases: ['sensor'] },
+    ],
+    pinAllVms: true,
+    consoleOctetForVm: {},
+    extraConsoles: [EXTRA_ELK],
+  });
+  assert.deepStrictEqual(pinnedHosts.map(h => `${h.name}.${h.octet}`), ['web01.80', 'sensor.81']);
+  assert.deepStrictEqual(dnsRecords, [
+    { alias: 'sensor', ip: '10.39.16.81' },
+    { alias: 'elk', ip: '10.39.16.60' },
+  ]);
 });

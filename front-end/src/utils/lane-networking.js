@@ -369,6 +369,24 @@ function resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName) {
  * The qemu guard on the dmz rule is not cosmetic: the old code returned from the
  * LXC branch before ever reaching the dual-homing block, so an LXC marked 'dmz'
  * got a single external NIC. Dropping the guard would silently change that.
+ *
+ * ── THE EMPTY-NICS CONTRACT (read this with challenge-spec.normaliseNics) ────
+ * `nics: []` and an absent `nics` key mean the SAME THING here: nothing was
+ * authored, so DERIVE. `explicit.length` being 0 falls through to the derivation
+ * on purpose — that is what keeps every pre-canvas spec deploying byte-for-byte
+ * as before, and it is deliberately NOT changed.
+ *
+ * The trap that follows: a canvas detach makes `segments: []`, syncFromCanvas
+ * writes `nics: []`, buildSpecVm drops the key, and this function then re-attaches
+ * the machine to 'lan'. The canvas shows it floating and the lane deploys it
+ * connected. So this function is NOT where an author-intended detach can be
+ * expressed — an empty array cannot be made to mean both "derive" and "isolate".
+ *
+ * A machine must always have at least one NIC (no network = no DHCP lease, no
+ * Guacamole target, no vuln scripts), so the detach is refused at the editor,
+ * and a spec that nonetheless arrives with zero segments is caught loudly by
+ * topology-validate's `no-nic` error rather than silently re-attached here. A
+ * genuinely isolated host would need its own flag, not an overloaded `[]`.
  */
 function resolveVmSegments(vmSpec, { subnetScheme, isGoadVm = false } = {}) {
   const explicit = Array.isArray(vmSpec?.nics) ? vmSpec.nics.filter(n => n && n.segment) : [];

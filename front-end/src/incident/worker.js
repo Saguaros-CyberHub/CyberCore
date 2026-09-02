@@ -1,11 +1,15 @@
 /**
- * CLE Plugin — attack run reconciler (CYBR 400)
+ * Incident engine — run reconciler (CYBR 400 and CiAB, one sweeper)
  * ============================================================================
  * Background sweeper that asks the guests what actually happened and writes it
- * back to cle_attack_target. Shaped after src/utils/email-worker.js -- the only
- * durable background worker in this codebase: a setInterval whose handle is
- * unref'd so it never holds the process open, plus a module-level guard so a
- * slow sweep cannot overlap itself.
+ * back to cybercore_incident_target. Scope-agnostic by construction: it claims
+ * work by STATUS and never looks at scope_type, so a CiAB engagement's run is
+ * reconciled by the same sweep as a CLE course's, with no branch anywhere.
+ *
+ * Shaped after src/utils/email-worker.js -- the only durable background worker
+ * in this codebase: a setInterval whose handle is unref'd so it never holds the
+ * process open, plus a module-level guard so a slow sweep cannot overlap
+ * itself.
  *
  * WHY A SWEEPER AT ALL. The dispatch exec returns the moment the wrapper is
  * forked, because holding a QGA channel open for 45 minutes is exactly the
@@ -36,23 +40,13 @@
  * ============================================================================
  */
 
-// TEMPORARY, AND IT IS A LAYERING INVERSION — E2 DELETES THIS LINE.
-//
-// `query` is the CLE PLUGIN'S pool (cle_db), which is where cle_attack_run and
-// cle_attack_target still live. src/ requiring into modules/crucible/plugins/ is
-// backwards: plugins may require core, core must not require a plugin, or a
-// disabled plugin takes core down with it.
-//
-// It survives this phase ON PURPOSE. E1 is a pure relocation — every assertion
-// in the existing test suite has to pass with no edit — so the SQL keeps talking
-// to the same database it talked to yesterday. E2 swaps this for
-// `cybercoreQuery` against cybercore_incident_run / _target (see
-// src/incident/schema.js) and this require disappears with it.
-//
-// Precedent for the direction while it exists: src/server.js already requires
-// the CLE and CiAB plugins for their boot sweeps, for the same reason — the
-// plugin owns the pool and only the plugin loader can inject it.
-const { query } = require('../../modules/crucible/plugins/cle/utils/db');
+// ONE POOL, AND IT IS cybercore_db's. See the equivalent note in runner.js:
+// the CLE-pool require that lived here until E2 was a layering inversion held
+// open only while the run tables were still the CLE plugin's own
+// cle_attack_run / cle_attack_target, in cle_db. Do not reintroduce it: the
+// boot sweep for the LEGACY rows lives in the CLE plugin (routes/attacks.js
+// recoverLegacyAttackRuns) precisely so core never has to know cle_db exists.
+const { cybercoreQuery } = require('../utils/cybercore-db');
 const runner = require('./runner');
 const attackTarget = require('./target');
 const {
@@ -95,13 +89,13 @@ let running = false;
  * re-selected on the very next sweep.
  */
 async function dueTargets(limit) {
-  const r = await query(
-    `UPDATE cle_attack_target t
+  const r = await cybercoreQuery(
+    `UPDATE cybercore_incident_target t
         SET last_checked_at = NOW()
       WHERE t.target_id IN (
         SELECT c.target_id
-          FROM cle_attack_target c
-          JOIN cle_attack_run run ON run.run_id = c.run_id
+          FROM cybercore_incident_target c
+          JOIN cybercore_incident_run run ON run.run_id = c.run_id
          WHERE c.status IN ('dispatching','scheduled','running')
            AND c.node IS NOT NULL AND c.vmid IS NOT NULL
            AND (
@@ -184,16 +178,16 @@ async function checkTarget(t) {
   // it died before it could say anything.
   if (!parsed.phase) {
     if (t.status === 'dispatching' && !parsed.alive) {
-      await query(
-        `UPDATE cle_attack_target
+      await cybercoreQuery(
+        `UPDATE cybercore_incident_target
             SET status = 'failed', error = 'wrapper exited before writing any state',
                 finished_at = NOW(), last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
           WHERE target_id = $1`,
         [t.target_id]
       );
     } else {
-      await query(
-        `UPDATE cle_attack_target SET last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
+      await cybercoreQuery(
+        `UPDATE cybercore_incident_target SET last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
           WHERE target_id = $1`,
         [t.target_id]
       );
@@ -211,8 +205,8 @@ async function recordCheckFailure(t, err) {
   const failures = Number(t.check_failures || 0) + 1;
 
   if (failures >= MAX_CHECK_FAILURES && overdue) {
-    await query(
-      `UPDATE cle_attack_target
+    await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = 'unknown', check_failures = $2, last_checked_at = NOW(),
               finished_at = NOW(), error = $3, updated_at = NOW()
         WHERE target_id = $1`,
@@ -221,8 +215,8 @@ async function recordCheckFailure(t, err) {
     );
     return;
   }
-  await query(
-    `UPDATE cle_attack_target SET check_failures = $2, last_checked_at = NOW(), updated_at = NOW()
+  await cybercoreQuery(
+    `UPDATE cybercore_incident_target SET check_failures = $2, last_checked_at = NOW(), updated_at = NOW()
       WHERE target_id = $1`,
     [t.target_id, failures]
   );
@@ -240,8 +234,8 @@ async function applyPhase(t, p) {
     if (p.reason === 'notinstalled') {
       await attackTarget.invalidateLoggenCache(t.lane_id).catch(() => {});
     }
-    await query(
-      `UPDATE cle_attack_target
+    await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = 'failed', error = $2, guest_state = $3, clock_skew_s = $4,
               finished_at = NOW(), last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
         WHERE target_id = $1`,
@@ -251,8 +245,8 @@ async function applyPhase(t, p) {
   }
 
   if (p.phase === 'aborted') {
-    await query(
-      `UPDATE cle_attack_target
+    await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = 'aborted', guest_state = $2, finished_at = NOW(),
               last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
         WHERE target_id = $1`,
@@ -265,8 +259,8 @@ async function applyPhase(t, p) {
     // 124 is coreutils timeout, 137 a SIGKILL after it: the hard cap fired and
     // the run was cut off rather than finishing on its own. Worth saying so.
     const timedOut = p.rc === 124 || p.rc === 137;
-    await query(
-      `UPDATE cle_attack_target
+    await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = $2, exit_code = $3, event_count = $4, clock_skew_s = $5,
               guest_state = $6, error = $7, finished_at = NOW(),
               last_checked_at = NOW(), check_failures = 0, updated_at = NOW()
@@ -283,8 +277,8 @@ async function applyPhase(t, p) {
 
   // 'scheduled' (still sleeping until the shared start) or 'running'.
   const next = p.phase === 'running' ? 'running' : 'scheduled';
-  await query(
-    `UPDATE cle_attack_target
+  await cybercoreQuery(
+    `UPDATE cybercore_incident_target
         SET status = $2::text, clock_skew_s = $3, guest_state = $4,
             -- Both occurrences of $2 carry an explicit ::text, and they have to.
             -- Bare, the SET clause deduces $2 from the column (VARCHAR(24)) while
@@ -355,14 +349,26 @@ async function tick() {
 }
 
 /**
- * Boot recovery. See this file's header for why it is deliberately narrow:
- * only 'dispatching' is ambiguous after a restart. A 'scheduled' or 'running'
- * guest is still going and the sweeper will find it.
+ * Boot recovery over the SHARED tables. See this file's header for why it is
+ * deliberately narrow: only 'dispatching' is ambiguous after a restart. A
+ * 'scheduled' or 'running' guest is still going and the sweeper will find it.
+ *
+ * Deliberately NOT scoped. Every stranded target is stranded for the same
+ * reason — the process that was dispatching it died — regardless of whether a
+ * course or an engagement launched it, and a per-scope sweep would need a list
+ * of scopes that boot does not have.
+ *
+ * THE PRE-CUTOVER ROWS ARE SOMEBODY ELSE'S JOB, and on purpose. A run that was
+ * in flight when this deployment cut over from cle_attack_run to
+ * cybercore_incident_run has its targets in cle_db, which core cannot reach and
+ * must not learn to. That one-shot sweep is
+ * cle/routes/attacks.js recoverLegacyAttackRuns(), called from src/server.js
+ * immediately after this — see the comment there.
  */
 async function recoverAttackRuns() {
   try {
-    const r = await query(
-      `UPDATE cle_attack_target
+    const r = await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = 'unknown',
               error = 'the control plane restarted while this lane was being dispatched',
               finished_at = NOW(), updated_at = NOW()
@@ -378,9 +384,12 @@ async function recoverAttackRuns() {
     }
     // A run left 'scheduling' never got as far as inserting targets, so nothing
     // is running anywhere and it can be closed out honestly. Left in place it
-    // would also hold the per-course dispatch mutex forever.
-    const stuck = await query(
-      `UPDATE cle_attack_run
+    // would also hold that scope's dispatch mutex forever
+    // (ux_cc_incident_run_dispatching, keyed on the PAIR scope_type/scope_id),
+    // which presents to the instructor as a Launch button that 409s and never
+    // recovers.
+    const stuck = await cybercoreQuery(
+      `UPDATE cybercore_incident_run
           SET status = 'failed', error = 'the control plane restarted before dispatch began',
               finished_at = NOW()
         WHERE status = 'scheduling'`
@@ -389,8 +398,10 @@ async function recoverAttackRuns() {
       console.log(`[attack-worker] closed ${stuck.rowCount} run(s) stranded before dispatch`);
     }
   } catch (err) {
-    // The table may not exist yet on a first boot where the plugin migration
-    // has not run. Non-fatal, exactly like ensureAuditLog's failure path.
+    // ensureIncidentTables() runs immediately before this in src/server.js, but
+    // it warns rather than throwing — so a deployment whose app role cannot run
+    // DDL reaches here with no tables at all. Non-fatal, exactly like
+    // ensureAuditLog's failure path: no recovery beats no server.
     console.warn('[attack-worker] boot recovery skipped:', err.message);
   }
 }

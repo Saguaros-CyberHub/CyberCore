@@ -924,6 +924,20 @@ async function start() {
     // terms as the audit log: no ticket system beats no server.
     await require('./utils/tickets').ensureTicketTables();
 
+    // The shared incident engine's tables (cybercore_incident_run/_target).
+    //
+    // Here rather than in front-end/migrations/ for the usual reason — that
+    // directory has no runner — and here rather than in a plugin migration for a
+    // second one: a plugin migration runs against THAT PLUGIN'S own database, so
+    // neither CLE nor CiAB can create a cybercore_db table. One scope-polymorphic
+    // table serving both is the whole point; see src/incident/schema.js.
+    //
+    // Non-fatal on the same terms as the audit log and the ticket tables: a DDL
+    // permission problem must degrade to "no incident engine", not "no server".
+    // It must land BEFORE the attack worker starts below, or the worker's first
+    // sweep queries a table that does not exist yet.
+    await require('./incident/schema').ensureIncidentTables();
+
     // Drains queued mail in the background. No-ops when mail isn't configured,
     // so an offline deployment doesn't spin a pointless timer.
     require('./utils/email-worker').startEmailWorker();
@@ -997,16 +1011,42 @@ async function start() {
       console.warn(`[Boot] CLE course-lab sweep skipped: ${e.message}`);
     }
 
-    // CYBR 400 attack console. The INVERSE of recoverStrandedLanes above: an
-    // attack runs detached on the guest, so a restart here is invisible to it
-    // and 'running' targets must be left alone. Only lanes caught mid-dispatch
-    // are ambiguous. See the header of cle/utils/attack-worker.js.
+    // The shared incident engine's boot recovery. The INVERSE of
+    // recoverStrandedLanes above: an attack runs detached on the guest, so a
+    // restart here is invisible to it and 'running' targets must be left alone.
+    // Only lanes caught mid-dispatch are ambiguous. See the header of
+    // src/incident/worker.js.
     //
-    // Required from src/ because the plugin owns cle_db and its pool is only
-    // injected during moduleLoader.loadAll() above — so this must stay after
-    // it. Precedent for reaching into a plugin from src/: admin/lab-networks.js.
-    const attackWorker = require('../modules/crucible/plugins/cle/utils/attack-worker');
+    // Scope-agnostic: one sweep covers CYBR 400 courses and CiAB engagements,
+    // because cybercore_incident_target rows are claimed by STATUS and a boot
+    // has no list of scopes to iterate anyway.
+    const attackWorker = require('./incident/worker');
     await attackWorker.recoverAttackRuns();
+
+    // THE ONE-SHOT CUTOVER SWEEP, and it is deliberately a second call.
+    //
+    // A run that was in flight when this deployment cut over from cle_attack_run
+    // to cybercore_incident_run has its target rows in cle_db, which the sweep
+    // above cannot see and core must not learn to reach — that upward require is
+    // exactly what E2 removed from src/incident/. So the legacy half lives in
+    // the plugin that owns the pool, and is called here, immediately after its
+    // shared-table twin, so the two are read as the one operation they are.
+    //
+    // AFTER moduleLoader.loadAll(), and this is the reason: the CLE pool is
+    // injected during loadAll(). Hoisting this above it would hand the sweep a
+    // null pool on every boot — which it would swallow, leaving pre-cutover runs
+    // stuck at 'dispatching' forever with no error anywhere.
+    //
+    // Once every deployment has booted once on this build it is a no-op that
+    // costs two UPDATEs matching zero rows. It stays because "every deployment"
+    // includes ones restored from a backup taken before the cutover.
+    try {
+      await require('../modules/crucible/plugins/cle/routes/attacks')
+        .recoverLegacyAttackRuns();
+    } catch (e) {
+      console.warn(`[Boot] CLE legacy attack sweep skipped: ${e.message}`);
+    }
+
     attackWorker.startAttackWorker();
 
     // Sync template node locations from live Proxmox cluster

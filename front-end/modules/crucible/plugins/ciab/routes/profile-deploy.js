@@ -69,6 +69,12 @@ const { estimateDeployCost, DEFAULT_MODEL } = require('../utils/cost-estimator')
 const { provisionLaneStudents, slugForGroup } = require('../utils/profile-students');
 const laneProvision = require('../utils/lane-provision');
 const engagementProvision = require('../utils/engagement-provision');
+// E3. The blue-team slug, and the resolver that turns an engagement's stored
+// telemetry_plan into catalog rows. resolveTelemetryTemplates THROWS a named
+// 400 rather than returning null when a required image is untagged — see its
+// header for why a lane with no SIEM is the worse outcome.
+const { BLUE_TEAM_TYPE_KEY } = require('../utils/engagement-model');
+const blueteamTemplates = require('../utils/blueteam-templates');
 // G5. startBake() and buildBakeSteps() had no caller at all before the bake
 // routes below; the gate at the end of runProfileDeploy is the other half.
 const bakeOrchestrator = require('../utils/bake-orchestrator');
@@ -2264,7 +2270,9 @@ function prebakedSpecFromBake(spec, bake, opts = {}) {
  * @param {string} opts.userId             admin user_id
  * @param {number} opts.numLanes
  * @param {string} [opts.groupName]
- * @param {boolean}[opts.attackBoxes=true]
+ * @param {boolean}[opts.attackBoxes]  defaults to TRUE, except on a
+ *   defensive_monitoring engagement where it defaults to FALSE. Pass it
+ *   explicitly to override either way; pass undefined to take the default.
  * @param {string} [opts.subnetScheme]  defaults to DEFAULT_SUBNET_SCHEME ('v3');
  *   an explicit value wins, and the ENGAGEMENT's own scheme wins over both
  *   wherever the network is touched (see carvedScheme below)
@@ -2281,11 +2289,33 @@ async function runProfileDeploy(opts) {
   const {
     profileId, userId, numLanes,
     maxStudents,                                           // ← NEW: total reservation size; defaults to numLanes
-    groupName, attackBoxes = true, subnetScheme = DEFAULT_SUBNET_SCHEME,
+    groupName, subnetScheme = DEFAULT_SUBNET_SCHEME,
     assetSelection: providedSelection, vulnAppOpts = {},
     engagementType
   } = opts;
   const engagement = sanitizeEngagementType(engagementType);
+
+  // ── E3: attack boxes default to OFF on a defensive engagement ─────────
+  //
+  // AN EXPLICIT VALUE STILL WINS — this changes the DEFAULT, not the choice.
+  // An instructor who genuinely wants a Kali box on a monitoring lane (to
+  // trigger the intrusion by hand rather than through the engine) still gets
+  // one by sending attack_boxes: true.
+  //
+  // WHY IT MATTERS, AND WHY IT IS SILENT. resolveConsolePlan picks the primary
+  // console as `consoles.find(kind === 'kali')` before it considers anything
+  // else, so on a lane where Kali exists, Kali IS the console button — no
+  // error, no warning, just a student who presses Console and lands on the
+  // attacker's machine instead of the SIEM. Nothing downstream can tell that
+  // apart from a lane where Kali was wanted.
+  //
+  // `attackBoxes` is also written to ciab_profile_lane_groups.attack_boxes,
+  // which add-lanes and retry read back, so the default has to be applied here
+  // rather than at the deployer — otherwise a retried lane would quietly
+  // acquire the Kali the first deploy declined.
+  const attackBoxes = opts.attackBoxes === undefined
+    ? engagement !== BLUE_TEAM_TYPE_KEY
+    : !!opts.attackBoxes;
 
   if (!profileId) throw Object.assign(new Error('profile_id required'), { statusCode: 400 });
   if (!Number.isFinite(numLanes) || numLanes < 1 || numLanes > 100) {
@@ -2393,6 +2423,20 @@ async function runProfileDeploy(opts) {
   // days later, on a path nobody is watching.
   const carvedScheme = engagementRow.subnet_scheme || subnetScheme;
 
+  // ── E3: which images this engagement's telemetry runs on ────────────
+  //
+  // BEFORE THE SPEC IS SYNTHESIZED AND BEFORE ANYTHING IS WRITTEN, because the
+  // only useful moment to refuse is the one where nothing has been built yet.
+  // resolveTelemetryTemplates returns null for an engagement with no telemetry
+  // plan (every engagement that is not defensive_monitoring today), and THROWS
+  // a 400 naming the missing tag and the SQL that adds it when a plan asks for
+  // an image the catalog has none of. It never returns a half-resolved plan:
+  // a lane that deploys with a sensor and no SIEM looks completely healthy and
+  // has nowhere to send anything.
+  const telemetry = await blueteamTemplates.resolveTelemetryTemplates(
+    engagementRow.telemetry_plan
+  );
+
   // Idempotent read of the block the engagement already reserved. requestedMax
   // is the engagement's own size, not the caller's — max_students locks with the
   // reservation, and passing a different number here would ask the resize path
@@ -2440,6 +2484,9 @@ async function runProfileDeploy(opts) {
       // 400 on the mismatch and belongs to B2.
       subnetScheme: engagementRow.subnet_scheme || subnetScheme,
       attackBoxes,
+      // E3. null on every engagement without a telemetry plan, and null is what
+      // keeps the synthesized spec byte-identical for all of them.
+      telemetry,
       vxlanBlock: { start: VXLAN_SEARCH_MIN, end: VXLAN_SEARCH_MAX }  // placeholder, replaced by reservation
     }
   });
@@ -2633,6 +2680,11 @@ async function runProfileDeploy(opts) {
         students,
         attackBoxes,
         vulnAppInstall: spec.vuln_app_install,
+        // E3. Written onto every lane's config, which is how the incident
+        // engine's `config->>'engagement_id' = $1 AND config->>'ciab' = 'true'`
+        // discovery arm finds these lanes at all.
+        engagementId: engagementRow.engagement_id,
+        profileId,
       }).catch(err => {
         console.error(`[CIAB ProfileDeploy] V2 batch ${groupId} crashed:`, err);
         query(`UPDATE ciab_profile_lane_groups SET status='error', updated_at=NOW() WHERE id=$1`, [groupId])
@@ -2648,6 +2700,11 @@ async function runProfileDeploy(opts) {
       // have. (deploy_path is unrelated — it names the shared-deployer pipeline,
       // not a subnet scheme.)
       subnet_scheme: carvedScheme,
+      // E3. What the deploy DECIDED, not what the request asked for: the
+      // default is engagement-dependent now, so a caller that omitted the field
+      // has no other way to learn which way it went, and the audit record would
+      // otherwise state a fact about the lane that is not true of it.
+      attack_boxes: attackBoxes,
       deploy_path: 'v2',
       // Deliberately empty: under V2 the lane rows do not exist yet — the shared
       // deployer creates them as it goes. The admin UI follows the deploy through
@@ -2781,7 +2838,12 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
       numLanes: parseInt(num_lanes, 10),
       maxStudents: max_students != null ? parseInt(max_students, 10) : undefined,
       groupName: group_name,
-      attackBoxes: attack_boxes !== false,
+      // undefined, NOT `!== false`, when the body omits the field. `undefined
+      // !== false` is true, so the old expression turned "did not say" into
+      // "yes" and there was no way for an engagement-dependent default to fire
+      // — a defensive lane would have got a Kali box and, with it, a Console
+      // button pointing at the attacker's machine instead of the SIEM.
+      attackBoxes: attack_boxes === undefined ? undefined : attack_boxes !== false,
       // Explicit wins; omitted means the default. runProfileDeploy then lets the
       // ENGAGEMENT's carved scheme override both wherever the network is real.
       subnetScheme: subnet_scheme || DEFAULT_SUBNET_SCHEME,
@@ -2797,7 +2859,8 @@ router.post('/deploy', authenticateToken, adminOnly, async (req, res) => {
       metadata: {
         profile_id, num_lanes: parseInt(num_lanes, 10),
         max_students: max_students != null ? parseInt(max_students, 10) : null,
-        attack_boxes: attack_boxes !== false,
+        // What was BUILT. See runProfileDeploy's return.
+        attack_boxes: result.attack_boxes,
         // The scheme the lanes are actually BUILT at, which is the engagement's
         // carve — not `subnet_scheme || DEFAULT_SUBNET_SCHEME`, which is only
         // what was asked for and can legitimately differ from what happened.
@@ -3334,6 +3397,14 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
       students: students.map(s => ({ email: s.email, name: s.name, index: s.index })),
     });
 
+    // E3. Resolved BEFORE the detached background work, so a read failure is a
+    // 500 on this request rather than an unhandled rejection later. Best-effort
+    // by design: a group whose engagement row has since been retired must still
+    // be able to add lanes.
+    const addLanesEngagement = await engagementProvision
+      .resolveEngagement(group.profile_id, group.engagement_type)
+      .catch(() => null);
+
     // Background. Same wrapper as the first deploy — add-lanes was a second,
     // drifting copy of that pipeline before A7, and the group's VXLAN block,
     // spec and reservation are identical either way.
@@ -3352,6 +3423,15 @@ router.post('/groups/:groupId/add-lanes', authenticateToken, adminOnly, async (r
         students,
         attackBoxes: group.attack_boxes,
         vulnAppInstall: (reservation.spec && reservation.spec.vuln_app_install) || null,
+        // E3. Read through the group's own (profile, engagement) pair rather
+        // than carried on the group row, because the group predates the
+        // engagement table and has no engagement_id column. resolveEngagement
+        // is the same read the first deploy did; a null result means this group
+        // belongs to a pre-engagement reservation, and a lane with a null
+        // engagement_id is correctly invisible to the incident engine rather
+        // than wrongly attached to somebody else's engagement.
+        engagementId: addLanesEngagement ? addLanesEngagement.engagement_id : null,
+        profileId: group.profile_id,
       }).catch(err => {
         console.error(`[CIAB AddLanes] group ${groupId} add-lanes crashed: ${err.message}`);
       });
@@ -3487,6 +3567,11 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
     });
     res.status(202).json({ success: true, message: 'Retry started', lane_id: laneId, job_id: job.id });
 
+    // E3. Same read, same reason, as the add-lanes route above.
+    const retryEngagement = await engagementProvision
+      .resolveEngagement(group.profile_id, group.engagement_type)
+      .catch(() => null);
+
     // Background. The lane is destroyed and rebuilt, so it comes back under a
     // NEW lane_id — the job mirror re-keys on (group_id, lane_index).
     setImmediate(() => {
@@ -3506,6 +3591,11 @@ router.post('/groups/:groupId/retry/:laneId', authenticateToken, adminOnly, asyn
         laneIndex: job.lane_index,
         attackBoxes: group.attack_boxes,
         vulnAppInstall: (reservation.spec && reservation.spec.vuln_app_install) || null,
+        // E3. A retry builds a NEW lane row, so it has to re-state what the
+        // first deploy stamped. Without these the retried lane is the one lane
+        // in the class the incident engine cannot find.
+        engagementId: retryEngagement ? retryEngagement.engagement_id : null,
+        profileId: group.profile_id,
         // Machines whose lane-config write never landed are recorded nowhere
         // else. They go through teardownLanes' contested and ownership checks.
         extraVmIds: Array.isArray(job.vm_ids) ? job.vm_ids : [],

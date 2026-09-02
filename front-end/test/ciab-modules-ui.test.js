@@ -81,9 +81,18 @@ test('the tab is in TAB_NAMES and activateTabModule re-fetches on every visit', 
     + 'the Sections tab can change, and a co-instructor\'s reorder must not render stale');
 
   // The strip reads in the programme's own order.
+  //
+  // A PREFIX, not the whole array. This used to pin the exact six names, which
+  // made every legitimately-added tab fail a test about the Modules tab — and a
+  // test that fails on correct work is one the next author deletes rather than
+  // reads. What this tab actually depends on is that the original six are all
+  // still there AND still in this order, because that order is the order of the
+  // buttons a student-facing programme walks through. Anything appended after
+  // them is another track's tab and is none of this file's business.
   const names = core.match(/const TAB_NAMES = \[([^\]]*)\]/)[1]
-    .split(',').map((s) => s.trim().replace(/'/g, ''));
-  assert.deepStrictEqual(names, ['overview', 'sections', 'modules', 'students', 'reviews', 'documents']);
+    .split(',').map((s) => s.trim().replace(/'/g, '')).filter(Boolean);
+  const ORIGINAL = ['overview', 'sections', 'modules', 'students', 'reviews', 'documents'];
+  assert.deepStrictEqual(names.slice(0, ORIGINAL.length), ORIGINAL);
 });
 
 test('instructor-modules.js is loaded AFTER instructor-core.js, and exports itself onto window', () => {

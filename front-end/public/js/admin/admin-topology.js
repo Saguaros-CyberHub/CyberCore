@@ -11,11 +11,13 @@
 //             challenge's spec, so intended-vs-actual is one dropdown apart.
 //
 // ── What this file deliberately does NOT do ─────────────────────────────────
-// It does not touch topology-render.js, topology-editor.js or admin-challenges.js.
-// The canvas inside the Challenge Template editor modal keeps working exactly as
-// it did; this tab is additive and consumes only the public APIs:
-// CyberCoreTopology.create, CyberCoreTopologyEditor.{mount,segmentsForScheme,
-// deriveSegments,stripInternal}, and CyberCoreTopologySeed.
+// It owns no rendering. Every canvas behaviour — the context menu, the last-NIC
+// refusal, the GOAD name locks — lives in topology-editor.js/topology-render.js
+// and is therefore shared with the Challenge Template editor modal's canvas,
+// which is the point: two surfaces, one set of rules. This file consumes only
+// the public APIs: CyberCoreTopology.create,
+// CyberCoreTopologyEditor.{mount,segmentsForScheme,deriveSegments,stripInternal,
+// menuGuards}, CyberCoreTopologySeed, and goad-extensions.js's catalog pair.
 //
 // ── Naming ─────────────────────────────────────────────────────────────────
 // Classic scripts share ONE global lexical scope, so a top-level `let` that
@@ -124,11 +126,24 @@ function topoScheme() {
   return document.getElementById('topoSubnetScheme').value || 'v1';
 }
 
-/** GOAD lab host names, whose placement is fixed by the lab definition. */
+/**
+ * Names whose placement is fixed by the environment rather than by the author.
+ *
+ * The lab's own hosts, plus the machines contributed by the ticked extensions.
+ * Both are NAME CONTRACTS, not labels: prepareGoadMacs matches AD hosts by name,
+ * and an extension machine's name is what the golden image's baked agent config
+ * and (for the SIEMs) its `<name>.cybercore.lan` record are built around. A
+ * rename silently converts a domain controller into an unrecognised machine, or
+ * points every winlogbeat in the lane at a host that no longer answers.
+ *
+ * The editor turns this into `goadHosts`, which disables the name field, draws
+ * the double border, and now also disables Rename/Remove in the context menu.
+ */
 function topoGoadHostNames() {
   if (!document.getElementById('topoGoadEnabled')?.checked) return null;
   const lab = findGoadLab(document.getElementById('topoGoadVersion')?.value);
-  return lab ? lab.vms.map(v => v.name) : null;
+  const names = lab ? lab.vms.map(v => v.name) : [];
+  return names.concat(goadExtensionMachineNames(readTopoGoadExtensions()));
 }
 
 /**
@@ -152,7 +167,10 @@ function topoDesignMount() {
     subnetScheme: topoScheme(),
     network: topoNetwork,
     goadHosts: topoGoadHostNames(),
-    onChange: () => { renderTopoVmTable(true); }
+    onChange: () => { renderTopoVmTable(true); },
+    // Backs the canvas context menu's "Validate" — the same call the toolbar
+    // button makes, so there is one validate path rather than two.
+    onValidate: () => { topoDesignValidate(); }
   });
   setTopoVmView(topoVmView);
 }
@@ -351,6 +369,66 @@ function updateTopoGoadDesc() {
   if (desc) desc.textContent = (lab && lab.description) || '';
 }
 
+// ── Forest domain / child subdomain ────────────────────────────────────────
+//
+// These fields used to be readonly AND STALE: onTopoGoadVersionChange() only
+// refreshed the description and the machine list, so picking GOAD-Mini left
+// 'cybersaguaros.local' on screen while the lab's own forestRoot is
+// 'sevenkingdoms.local' — and the stale value is what got stored. Every lab but
+// GOAD-Light persisted a domain it does not have.
+//
+// They are editable now, so the fix is two-part: RESET them from the lab on a
+// version change (the lab's values are the defaults, which is what makes them
+// correct rather than merely fresh), and VALIDATE what the author types against
+// ad-domain-rules — the same rulebook the create handler runs server-side and
+// Track G's compiler mints against.
+
+/** Stamp the selected lab's own domain names into the two fields. */
+function resetTopoGoadDomainsFromLab() {
+  const lab = findGoadLab(document.getElementById('topoGoadVersion').value);
+  const domainEl = document.getElementById('topoGoadDomain');
+  const childEl = document.getElementById('topoGoadChild');
+  if (!domainEl || !childEl) return;
+  // `|| ''` on the child, not a fallback to 'tumamoc': GOAD-Mini, SCCM, NHA and
+  // DRACARYS have exactly one domain, and childSubdomain is null for them.
+  // Inventing a child for a single-domain lab is how the old hardcoded default
+  // got into every spec in the first place.
+  domainEl.value = (lab && lab.forestRoot) || 'cybersaguaros.local';
+  childEl.value = (lab && lab.childSubdomain) || '';
+  validateTopoGoadDomains();
+}
+
+/**
+ * Paint domain problems into #topoErrGoad. Returns the rule result so the
+ * create path can refuse on an error without re-deriving anything.
+ *
+ * Errors block; a reserved TLD is only a WARNING, because every lab CyberCore
+ * ships is named under .local and that name lives in the golden image's NTDS —
+ * hard-failing it would make an unedited legacy lab unauthorable.
+ */
+function validateTopoGoadDomains() {
+  const err = document.getElementById('topoErrGoad');
+  const Rules = window.CyberCoreAdDomainRules;
+  if (!document.getElementById('topoGoadEnabled')?.checked || !Rules) {
+    if (err) { err.style.display = 'none'; err.textContent = ''; err.classList.remove('is-warning'); }
+    return { errors: [], warnings: [] };
+  }
+  const result = Rules.validateGoadDomains({
+    domain: document.getElementById('topoGoadDomain').value,
+    child_subdomain: document.getElementById('topoGoadChild').value
+  });
+  if (!err) return result;
+  const lines = result.errors.length ? result.errors : result.warnings;
+  err.textContent = lines.join(' ');
+  err.style.display = lines.length ? '' : 'none';
+  // A warning must not read as a blocker — it is the state EVERY shipped lab is
+  // in, so painting it danger-red trains people to ignore the slot.
+  err.classList.toggle('is-warning', !result.errors.length && result.warnings.length > 0);
+  return result;
+}
+
+function onTopoGoadDomainInput() { validateTopoGoadDomains(); }
+
 /** Rebuild the machine list from the selected lab. User-intent only — never on load. */
 function topoRebuildFromGoadLab() {
   const lab = findGoadLab(document.getElementById('topoGoadVersion').value);
@@ -363,6 +441,17 @@ function topoRebuildFromGoadLab() {
   });
   if (!seed.ok) { Toast.error('GOAD', seed.reason); return; }
   topoVms = seed.vms;
+  // A lab change rebuilds the machine list wholesale, so the extension machines
+  // have to be re-stamped onto the fresh list — otherwise ticking elk, then
+  // switching lab, silently drops the SIEM while its checkbox stays ticked.
+  // Rendered FIRST so a selection the new lab cannot take is already unticked.
+  renderTopoGoadExtensions(readTopoGoadExtensions());
+  readTopoGoadExtensions().forEach(key => {
+    const ext = findGoadExtension(key);
+    if (!ext) return;
+    if (topoVms.some(v => String(v.name).toLowerCase() === ext.machine.toLowerCase())) return;
+    topoVms.push(buildGoadExtensionRow(ext, 600000 + topoVms.length * 10000));
+  });
   topoNetwork = null;
   document.getElementById('topoSubnetScheme').value = seed.subnet_scheme;
   onTopoSchemeChange();
@@ -375,6 +464,9 @@ async function onTopoGoadToggle() {
   document.getElementById('topoGoadConfig').style.display = enabled ? 'block' : 'none';
   if (enabled) {
     await populateTopoGoadVersions();
+    await loadGoadExtensionCatalog();
+    renderTopoGoadExtensions([]);
+    resetTopoGoadDomainsFromLab();
     topoRebuildFromGoadLab();
     Toast.info('GOAD enabled', `Machine list set to the ${document.getElementById('topoGoadVersion').value} topology`);
   } else {
@@ -388,7 +480,14 @@ async function onTopoGoadToggle() {
 
 function onTopoGoadVersionChange() {
   updateTopoGoadDesc();
-  if (document.getElementById('topoGoadEnabled').checked) topoRebuildFromGoadLab();
+  if (!document.getElementById('topoGoadEnabled').checked) return;
+  // The lab's own forest names are the defaults, so a version change RESETS
+  // both fields — this is the fix for the stale-value bug that made every lab
+  // but GOAD-Light persist a domain it does not have. An author who has already
+  // overridden them loses that override, which is the correct trade: the fields
+  // describe the lab that is now selected.
+  resetTopoGoadDomainsFromLab();
+  topoRebuildFromGoadLab();   // re-renders the extension list and re-stamps it
 }
 
 function onTopoGoadKaliToggle() {
@@ -434,6 +533,10 @@ function resetTopoGoadFields() {
   document.getElementById('topoGoadFixedInt').value = '';
   document.getElementById('topoGoadFixedExt').value = '';
   document.getElementById('topoGoadVersionDesc').textContent = '';
+  const ext = document.getElementById('topoGoadExtensions');
+  if (ext) ext.innerHTML = '';
+  const err = document.getElementById('topoErrGoad');
+  if (err) { err.style.display = 'none'; err.textContent = ''; err.classList.remove('is-warning'); }
 }
 
 /**
@@ -463,7 +566,24 @@ async function applyTopoGoadFields(goad) {
   document.getElementById('topoGoadPrebakedConfig').style.display = goad.prebaked ? 'block' : 'none';
   document.getElementById('topoGoadFixedInt').value = (goad.fixed_subnet && goad.fixed_subnet.int) || '';
   document.getElementById('topoGoadFixedExt').value = (goad.fixed_subnet && goad.fixed_subnet.ext) || '';
+
+  // A seeded spec carries its OWN domain names — possibly hand-edited, possibly
+  // stale from before this card validated anything. Show what is stored rather
+  // than what the lab would default to, for the same reason this function never
+  // calls onTopoGoadVersionChange(): a seed already has its machines, and
+  // overwriting its authored values with catalog defaults would silently rewrite
+  // the spec the author asked to open.
+  const lab = findGoadLab(select.value);
+  document.getElementById('topoGoadDomain').value =
+    goad.domain || (lab && lab.forestRoot) || 'cybersaguaros.local';
+  document.getElementById('topoGoadChild').value =
+    goad.child_subdomain || (lab && lab.childSubdomain) || '';
+
+  await loadGoadExtensionCatalog();
+  renderTopoGoadExtensions(Array.isArray(goad.extensions) ? goad.extensions : []);
+
   updateTopoGoadDesc();
+  validateTopoGoadDomains();
 }
 
 function readTopoGoadFields() {
@@ -473,11 +593,19 @@ function readTopoGoadFields() {
     version: document.getElementById('topoGoadVersion').value ||
       (_goadCatalog && _goadCatalog.default_lab) || 'GOAD-Light',
     domain: document.getElementById('topoGoadDomain').value.trim() || 'cybersaguaros.local',
-    child_subdomain: document.getElementById('topoGoadChild').value.trim() || 'tumamoc',
+    // No 'tumamoc' fallback any more. An empty child means "this lab has one
+    // domain", which is true of GOAD-Mini, SCCM, NHA and DRACARYS — inventing a
+    // child for them is exactly the hardcoded default that put a domain nobody
+    // chose into every spec.
+    child_subdomain: document.getElementById('topoGoadChild').value.trim() || null,
     admin_user: 'Administrator',
     admin_password: document.getElementById('topoGoadPassword').value || 'vagrant',
     include_kali: document.getElementById('topoGoadKali').checked
   };
+  const extensions = readTopoGoadExtensions();
+  // Written only when something is ticked, so a challenge authored without
+  // extensions posts the same body it posted before this feature existed.
+  if (extensions.length) goad.extensions = extensions;
   if (document.getElementById('topoGoadPrebaked').checked) {
     goad.prebaked = true;
     const int = document.getElementById('topoGoadFixedInt').value.trim();
@@ -485,6 +613,123 @@ function readTopoGoadFields() {
     goad.fixed_subnet = { int, ext: ext || int };
   }
   return goad;
+}
+
+// ============================================================================
+// DESIGNER — GOAD extensions
+// ============================================================================
+// `spec.goad.extensions` is a DECLARATION of what the golden images already
+// contain. CyberCore never runs GOAD's Ansible at deploy time, so ticking `elk`
+// does not install Elasticsearch — it places the machine, pins its address, and
+// records that this environment expects that stack to be on the image.
+
+/** The ticked extension keys, in catalog order. */
+function readTopoGoadExtensions() {
+  return [...document.querySelectorAll('#topoGoadExtensions input[data-ext]:checked')]
+    .map(el => el.getAttribute('data-ext'));
+}
+
+/**
+ * Rebuild the checkbox group for the selected lab.
+ *
+ * `keep` is the selection to preserve across a lab change; anything in it that
+ * the new lab cannot take is dropped, which is the only honest thing to do —
+ * ws01 has no inventory for NHA, and silently keeping it ticked would put a
+ * machine in the AD roster that makes assertGoadRoster fail every deploy.
+ *
+ * Incompatible entries are rendered DISABLED WITH THE REASON rather than
+ * hidden: "why can't I add a workstation to SCCM?" is a question the UI should
+ * answer where it is asked.
+ */
+function renderTopoGoadExtensions(keep) {
+  const host = document.getElementById('topoGoadExtensions');
+  if (!host) return;
+  const lab = findGoadLab(document.getElementById('topoGoadVersion')?.value);
+  const rows = goadExtensionsForLab(lab);
+  const wanted = new Set(keep || []);
+
+  if (!rows.length) {
+    host.innerHTML = '<p class="topo-settings-hint" style="margin:0;">Extension catalog unavailable.</p>';
+    return;
+  }
+
+  host.innerHTML = rows.map(r => {
+    const ext = r.ext;
+    const on = r.ok && wanted.has(r.key);
+    const where = ext.in_lab
+      ? `domain-joined · .${ext.ip_octet}`
+      : `spec machine · .${ext.ip_octet}`;
+    return `<label style="display:flex; gap:0.45rem; align-items:flex-start; margin:0 0 0.35rem 0;` +
+      `cursor:${r.ok ? 'pointer' : 'not-allowed'}; opacity:${r.ok ? '1' : '0.55'};">` +
+      // The key rides on data-ext and is read back from the element, never
+      // interpolated into the handler string: topoAttr encodes a quote as
+      // &#39;, which the HTML parser decodes BEFORE the JS runs and breaks the
+      // string literal. Same rule the create-status buttons follow.
+      `<input type="checkbox" data-ext="${topoAttr(r.key)}"${on ? ' checked' : ''}` +
+      `${r.ok ? '' : ' disabled'} onchange="onTopoExtensionToggle(this.dataset.ext)"` +
+      ` style="width:15px; height:15px; margin-top:0.15rem; cursor:inherit;">` +
+      `<span style="font-size:0.78rem; line-height:1.3;">` +
+      `<strong>${escHtml(ext.displayName || ext.key)}</strong>` +
+      `<span style="color:var(--text-muted);"> — ${escHtml(where)}</span><br>` +
+      `<span style="color:var(--text-muted); font-size:0.72rem;">` +
+      `${escHtml(r.ok ? (ext.description || '') : r.reason)}</span></span></label>`;
+  }).join('');
+}
+
+/**
+ * Tick / untick one extension. SURGICAL, and that is the whole point.
+ *
+ * onTopoGoadVersionChange() rebuilds the machine list WHOLESALE via fromGoadLab.
+ * That is correct for a lab change and catastrophic for an extension tick: it
+ * would throw away the canvas layout, every hand-added machine, and every
+ * template_vmid the author typed. onTopoGoadKaliToggle() is deliberately a
+ * push/splice on the SAME array the editor is holding, and this follows it
+ * exactly — mutate in place, refresh, never replace.
+ */
+function onTopoExtensionToggle(key) {
+  if (!document.getElementById('topoGoadEnabled').checked) return;
+  const ext = findGoadExtension(key);
+  if (!ext) return;
+  const on = !!document.querySelector(`#topoGoadExtensions input[data-ext="${key}"]:checked`);
+  const idx = topoVms.findIndex(v => String(v.name).toLowerCase() === ext.machine.toLowerCase());
+
+  if (on && idx === -1) {
+    // Next free offset in the 600000 + n*10000 band, so a tick cannot collide
+    // with a row the author already placed (two VMs on one offset clone to the
+    // same VMID and the second deploy fails).
+    const used = new Set(topoVms.map(v => Number(v.vm_offset)));
+    let offset = 600000;
+    while (used.has(offset)) offset += 10000;
+    // push, not concat — the editor closes over this array.
+    topoVms.push(buildGoadExtensionRow(ext, offset));
+
+    // ws01 is the right blue-team console and it costs nothing to say so: a
+    // domain-joined Windows 11 analyst box that browses to http://elk:5601,
+    // needs no bake change, and — because it is in [domain] — is itself
+    // instrumented, so the student's own activity becomes telemetry. Only
+    // claimed when NOTHING else is already primary; an author's explicit choice
+    // is never overwritten by a checkbox.
+    if (key === 'ws01' && !topoVms.some(v => v.console_role === 'primary')) {
+      topoVms[topoVms.length - 1].console_role = 'primary';
+      Toast.info('Student console', 'ws01 is now the machine students open. Change it in the property panel or the table.');
+    }
+  } else if (!on && idx !== -1) {
+    // splice, not filter — replacing the array would orphan the editor's handle.
+    if (topoVms[idx].console_role === 'primary') {
+      Toast.warning('Console cleared', `${ext.machine} was the student console — pick another machine.`);
+    }
+    topoVms.splice(idx, 1);
+  } else {
+    return;   // already in the wanted state; nothing to do and nothing to redraw
+  }
+
+  // The name lock set changed, so the editor needs the new list before it can
+  // disable the right fields.
+  if (topoDesigner) {
+    topoDesigner.setGoadHosts(topoGoadHostNames());
+    topoDesigner.refresh(topoVms);
+  }
+  renderTopoVmTable(true);
 }
 
 // ============================================================================
@@ -541,7 +786,61 @@ function renderTopoVmTable(fromCanvas) {
       <div style="margin-top: 0.5rem;">
         ${cell('Default Scripts (comma-sep slugs)', (vm.default_scripts || []).join(', '), `topoVms[${i}].default_scripts=this.value.split(',').map(s=>s.trim()).filter(Boolean)`)}
       </div>
+      ${topoConsoleCell(vm, i)}
     </div>`).join('');
+}
+
+/**
+ * The student-console radio for one table row.
+ *
+ * The canvas property panel has had this picker for a while; the table has not,
+ * so the only way to see which machine students open was to click every node in
+ * turn. A radio COLUMN answers it at a glance — the same affordance the template
+ * editor already offers (setTemplateConsolePrimary, admin-challenges.js:773) and
+ * the CLE deploy modal's `STUDENT CONSOLE` chip.
+ */
+function topoConsoleCell(vm, i) {
+  const on = vm.console_role === 'primary';
+  // GOAD's ELK is headless Ubuntu Server: no desktop, no xrdp. Making it the
+  // student console produces a lane that deploys clean and hands the student a
+  // Guacamole session that connects to nothing. Say so HERE, where the choice is
+  // made, rather than letting it be discovered after a deploy.
+  const headless = String(vm.role || '').toLowerCase() === 'siem';
+  const hint = on && headless
+    ? '<div style="font-size:0.68rem; color:var(--warning); margin-top:0.2rem;">' +
+      'A SIEM image is headless — the GOAD ELK box is Ubuntu Server with no desktop and no xrdp, so it ' +
+      'cannot ' +
+      'serve an RDP console as baked. ws01 (or Kali) is the machine an analyst actually works from; the ' +
+      'SIEM is a web app they browse to.</div>'
+    : '';
+  return '<div style="margin-top:0.5rem; display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">' +
+    `<label style="display:flex; align-items:center; gap:0.4rem; font-size:0.75rem; cursor:pointer; margin:0;">` +
+    `<input type="radio" name="topoConsolePrimary" ${on ? 'checked' : ''} ` +
+    `onclick="setTopoConsolePrimary(${i})" style="cursor:pointer;">` +
+    '<span>Student console <span style="color:var(--text-muted);">— the machine they open</span></span>' +
+    `</label>${hint}</div>`;
+}
+
+/**
+ * Exactly one machine is the student console.
+ *
+ * A radio group rendered over an array does not enforce that on the DATA — the
+ * browser only clears the other INPUTS — so the previous holder is cleared here,
+ * or a spec saves with two primaries and resolveConsolePlan throws at deploy
+ * time. Clicking the checked radio again clears the designation, which is the
+ * only way back to "no console machine". Same contract as
+ * setTemplateConsolePrimary and the canvas property panel's select.
+ */
+function setTopoConsolePrimary(idx) {
+  const wasPrimary = topoVms[idx] && topoVms[idx].console_role === 'primary';
+  topoVms.forEach((vm, i) => {
+    if (i === idx && !wasPrimary) vm.console_role = 'primary';
+    else if (vm.console_role === 'primary') delete vm.console_role;
+  });
+  // The canvas paints a '▸ student console' badge off this field, so it has to
+  // hear about a change made in the table.
+  if (topoDesigner) topoDesigner.refresh(topoVms);
+  renderTopoVmTable(true);
 }
 
 function topoAddPhantom() {
@@ -713,6 +1012,12 @@ async function topoCreateChallenge() {
   const problems = Seed.validateCreateState(state, {
     existingKeys: topoChallenges.map(t => t.challenge_key)
   });
+  // The AD naming rules, client-side. The create handler runs the SAME rulebook
+  // (src/utils/ad-domain-rules.js) and 400s on an error, so this only moves the
+  // message from a toast after the round trip into the field before it — but a
+  // domain typo otherwise costs a VXLAN reservation attempt to discover.
+  const domains = validateTopoGoadDomains();
+  domains.errors.forEach(m => problems.push({ field: 'goad', message: m }));
   if (problems.length) {
     paintTopoProblems(problems);
     Toast.warning('Not ready', problems[0].message);

@@ -18,8 +18,9 @@ const { test } = require('node:test');
 const assert = require('assert');
 const path = require('path');
 
-const P = path.join(__dirname, '..', 'modules', 'crucible', 'plugins', 'cle', 'utils');
-const target = require(path.join(P, 'attack-target.js'));
+// E1 moved the engine into shared core and left a re-export shim at the old
+// cle/utils/ path; E2 deleted the shim. This is the one home it has.
+const target = require(path.join(__dirname, '..', 'src', 'incident', 'target.js'));
 
 const TEMPLATE = { id: 'tmpl-uuid-1', template_vmid: 1006, template_key: 'cybr400-loggen-template' };
 
@@ -199,4 +200,230 @@ test('the cache write is a single jsonb_set, never a read-modify-write', () => {
   assert.ok(!/SELECT/i.test(src), 'must not read the config back first');
   const inv = target.invalidateLoggenCache.toString();
   assert.ok(!/SELECT/i.test(inv), 'invalidation must not read config back either');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// E2 — the CiAB arm
+// ════════════════════════════════════════════════════════════════════════════
+//
+// A CiAB lane reaches this resolver through the same ladder as a CYBR 400 lane,
+// but it arrives with three differences that each independently decide whether
+// the sensor is found:
+//
+//   module_key   'ciab', not 'crucible' — so the spec lookup's derived table
+//                name is `ciab_challenge`, which HAS NEVER EXISTED
+//   config       carries `loggen` already, stamped at deploy time by the
+//                blueteam post-deploy hook rather than by a previous run
+//   spec.vms[]   carries role: 'sensor', which LOGGEN_ROLES already contains
+//
+// The tests below pin one each. They matter in that order: rung 0 is what fires
+// on a healthy lane, and rung 2 is the recovery path when the stamp is lost to a
+// redeploy — which is exactly when nobody is watching.
+
+/**
+ * The lane shape CiAB's profile deploy produces: a gateway LXC, a Kali attack
+ * box, the synthetic vuln-app VM, and the sensor.
+ *
+ * TWO Linux VMs survive as candidates here (the vuln app and the sensor), which
+ * is deliberate — it is what makes rung 3 ambiguous and forces the lane to
+ * resolve on rung 0 or rung 2. A fixture with only one Linux box would pass
+ * every assertion below for the wrong reason.
+ */
+function ciabLane(extra = {}) {
+  return {
+    lane_id: 'lane-ciab-1',
+    module_key: 'ciab',
+    config: {
+      node: 'cyberhub-node-4',
+      ciab: true,
+      engagement_id: '3f1d0c9a-1111-4222-8333-444455556666',
+      challenge_key: 'ciab-acme-dental',
+      gateway_vm_id: 100077,
+      attack_box_vm_id: 700077,
+      vms: [
+        { vm_id: 600077, name: 'web', proxmox_name: 'web-s1', type: 'qemu', node: 'cyberhub-node-4' },
+        { vm_id: 600078, name: 'sensor', proxmox_name: 'sensor-s1', type: 'qemu', node: 'cyberhub-node-4' },
+      ],
+      ...extra,
+    },
+  };
+}
+
+/**
+ * Swap src/utils/cybercore-db for a stub and hand back a freshly-required
+ * target.js bound to it.
+ *
+ * loadSpecVms is the one function in this file that is NOT pure over injected
+ * lookups — it issues the query itself — so there is no seam to inject through
+ * and the module cache is the seam that exists. Restored in a finally, always:
+ * leaking a stubbed pool into the next test file in the run would be a failure
+ * nobody could trace back to here.
+ */
+function withStubbedPool(cybercoreQuery, body) {
+  const Module = require('module');
+  const dbPath = require.resolve('../src/utils/cybercore-db.js');
+  const targetPath = require.resolve('../src/incident/target.js');
+  const savedDb = require.cache[dbPath];
+  const savedTarget = require.cache[targetPath];
+
+  const stub = new Module(dbPath, null);
+  stub.filename = dbPath;
+  stub.loaded = true;
+  stub.exports = { cybercoreQuery };
+  require.cache[dbPath] = stub;
+  delete require.cache[targetPath];
+
+  const restore = () => {
+    if (savedDb) require.cache[dbPath] = savedDb; else delete require.cache[dbPath];
+    if (savedTarget) require.cache[targetPath] = savedTarget; else delete require.cache[targetPath];
+  };
+  return Promise.resolve()
+    .then(() => body(require('../src/incident/target.js')))
+    .finally(restore);
+}
+
+test('rung 0: a CiAB lane stamped at deploy time resolves with no spec and no catalog', async () => {
+  // blueteam-postdeploy.js calls cacheLoggenTarget() the moment the sensor VM
+  // exists, writing config.loggen with resolved_by:'postdeploy'. That is rung 0
+  // populated BEFORE the first run, so the very first dispatch costs no ladder
+  // at all — no catalog read, no spec read, and no guest probe.
+  //
+  // resolveLoggenTarget reports 'cache', not 'postdeploy': the stamp is a rung-0
+  // VALUE, not a rung of its own. 'postdeploy' only ever reaches
+  // cybercore_incident_target.resolved_by, whose column is VARCHAR(24) with no
+  // CHECK — which is why the sixth vocabulary word needed no DDL.
+  const lane = ciabLane({
+    loggen: {
+      vmid: 600078, node: 'cyberhub-node-4', vm_name: 'sensor',
+      resolved_by: 'postdeploy', at: new Date().toISOString(),
+    },
+  });
+  const r = await target.resolveLoggenTarget(lane, { template: null, specVms: [] });
+  assert.strictEqual(r.vmid, 600078);
+  assert.strictEqual(r.vm_name, 'sensor');
+  assert.strictEqual(r.node, 'cyberhub-node-4');
+  assert.strictEqual(r.resolved_by, 'cache');
+});
+
+test("rung 2: spec role 'sensor' resolves a CiAB lane the ladder could not otherwise call", async () => {
+  // The recovery path. A redeploy reuses lane_id while replacing every vmid, so
+  // the post-deploy stamp is stale and rung 0 correctly refuses it. Without the
+  // spec this lane is unresolvable — the vuln-app VM and the sensor are both
+  // Linux, so rung 3 is ambiguous by construction and rung 4 would probe a
+  // student's application server first.
+  //
+  // 'sensor' is already in LOGGEN_ROLES, so E2 changed no role set. What E2
+  // changed is that a CiAB lane can now LOAD a spec at all — see the
+  // crucible_challenge fallback test below.
+  const spec = [
+    { name: 'web', role: 'target', os: 'linux' },
+    { name: 'sensor', role: 'sensor', os: 'linux' },
+  ];
+  const lane = ciabLane({
+    loggen: { vmid: 999999, node: 'cyberhub-node-4', vm_name: 'ghost' },  // stale
+  });
+  const r = await target.resolveLoggenTarget(lane, { template: null, specVms: spec });
+  assert.strictEqual(r.vmid, 600078);
+  assert.strictEqual(r.resolved_by, 'spec_role');
+  assert.ok(target.LOGGEN_ROLES.has('sensor'),
+    "'sensor' must stay in LOGGEN_ROLES — it is the role CiAB's synthesizer emits");
+});
+
+test('without the spec, the same CiAB lane is refused rather than guessed at', async () => {
+  // The mirror of the test above, and the reason the crucible_challenge fallback
+  // is a correctness fix rather than an optimisation. Two Linux VMs and no spec
+  // is not "resolve to the likely one" — the other candidate is the student's
+  // vulnerable application, and firing log-generator at it would look like a
+  // successful run that produced nothing anyone could hunt.
+  const r = await target.resolveLoggenTarget(ciabLane(), { template: null, specVms: [] });
+  assert.strictEqual(r.vmid, null);
+  assert.match(r.reason, /could not identify/);
+});
+
+test('loadSpecVms falls back to crucible_challenge when the module has no table', async () => {
+  // THE FIX, exercised against a stubbed pool.
+  //
+  // `${module_key}_challenge` is a convention, not a guarantee. It holds on the
+  // CLE side (module_key 'crucible' -> crucible_challenge, which is ALSO the
+  // shared table, so the two coincided and nothing looked wrong). It does not
+  // hold for CiAB: its lanes carry module_key 'ciab' while their specs live in
+  // the shared crucible_challenge, and ciab_challenge has never existed.
+  //
+  // The old single-table version therefore threw "relation ciab_challenge does
+  // not exist" on every CiAB lane, swallowed it, and returned [] — so rung 2
+  // could never fire no matter how the spec was tagged.
+  const asked = [];
+  await withStubbedPool(async (text, params) => {
+    asked.push({ text: String(text).replace(/\s+/g, ' ').trim(), params });
+    // Exactly how Postgres answers a missing relation: an error, not an empty
+    // result. Returning [] here would let a broken implementation pass.
+    if (/FROM ciab_challenge\b/.test(text)) {
+      const err = new Error('relation "ciab_challenge" does not exist');
+      err.code = '42P01';
+      throw err;
+    }
+    if (/FROM crucible_challenge\b/.test(text)) {
+      return { rows: [{ spec: { vms: [{ name: 'sensor', role: 'sensor', os: 'linux' }] } }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  }, async (fresh) => {
+    const lane = ciabLane();
+    const vms = await fresh.loadSpecVms(lane, lane.config);
+
+    assert.deepStrictEqual(vms, [{ name: 'sensor', role: 'sensor', os: 'linux' }]);
+    assert.strictEqual(asked.length, 2, 'the module table is tried FIRST, then the shared one');
+    assert.match(asked[0].text, /FROM ciab_challenge/);
+    assert.match(asked[1].text, new RegExp(`FROM ${fresh.SHARED_CHALLENGE_TABLE}`));
+    // The lookup key is bound, never interpolated, on both attempts.
+    for (const q of asked) assert.deepStrictEqual(q.params, ['ciab-acme-dental']);
+  });
+});
+
+test('a spec found in the module table is authoritative — no second query', async () => {
+  // A HIT stops the ladder even when it declares no vms. An environment really
+  // can be a bare workstation pair, and falling through to crucible_challenge on
+  // "found it, but it was empty" would silently prefer some unrelated row that
+  // happened to share the challenge_key.
+  const asked = [];
+  await withStubbedPool(async (text) => {
+    asked.push(String(text).replace(/\s+/g, ' ').trim());
+    return { rows: [{ spec: {} }], rowCount: 1 };
+  }, async (fresh) => {
+    const lane = ciabLane();
+    assert.deepStrictEqual(await fresh.loadSpecVms(lane, lane.config), []);
+    assert.strictEqual(asked.length, 1);
+    assert.match(asked[0], /FROM ciab_challenge/);
+  });
+});
+
+test('a CLE lane still asks exactly one table, because the two coincide', async () => {
+  // The no-regression half. module_key 'crucible' derives crucible_challenge,
+  // which IS the shared table — so the fallback must dedupe rather than issue
+  // the identical query twice on every lane of every dispatch.
+  const asked = [];
+  await withStubbedPool(async (text) => {
+    asked.push(String(text).replace(/\s+/g, ' ').trim());
+    return { rows: [{ spec: { vms: [{ name: 'sensor', os: 'rocky' }] } }], rowCount: 1 };
+  }, async (fresh) => {
+    const lane = challengeLane();
+    lane.module_key = 'crucible';
+    const vms = await fresh.loadSpecVms(lane, lane.config);
+    assert.strictEqual(vms.length, 1);
+    assert.strictEqual(asked.length, 1, 'crucible_challenge must not be queried twice');
+    assert.match(asked[0], /FROM crucible_challenge/);
+  });
+});
+
+test('a lane with no challenge_key never touches the database', async () => {
+  // Workstation lanes have no challenge at all. Preserved from before E2, and
+  // worth pinning: the fallback added a second table to try, and "try both on
+  // every lane" would put two pointless round trips in front of every rung-1
+  // resolution in CYBR 400 — the most common path in the product.
+  let calls = 0;
+  await withStubbedPool(async () => { calls += 1; return { rows: [], rowCount: 0 }; },
+    async (fresh) => {
+      const lane = workstationLane();
+      assert.deepStrictEqual(await fresh.loadSpecVms(lane, lane.config), []);
+      assert.strictEqual(calls, 0);
+    });
 });

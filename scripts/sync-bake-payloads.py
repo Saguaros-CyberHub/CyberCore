@@ -8,8 +8,9 @@ import io, os, sys
 
 ROOT = 'f:/Projects/CyberCore'
 BAKE = ROOT + '/infrastructure/proxmox-templates/vm-templates/bake-cybr400-loggen-template.sh'
-EMIT = ROOT + '/front-end/modules/crucible/plugins/cle/utils/cc-emit.js'
-HOSTPB = ROOT + '/front-end/modules/crucible/plugins/cle/playbooks/host-baseline.json'
+# E1 moved the engine out of the CLE plugin into shared core (src/incident/).
+EMIT = ROOT + '/front-end/src/incident/cc-emit.js'
+HOSTPB = ROOT + '/front-end/src/incident/playbooks/host-baseline.json'
 
 BEGIN = '# ---- BEGIN GENERATED PAYLOADS (sync_bake.py) ----'
 END = '# ---- END GENERATED PAYLOADS ----'

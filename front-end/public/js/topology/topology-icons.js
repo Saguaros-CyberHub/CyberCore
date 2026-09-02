@@ -46,6 +46,14 @@
     dc:
       '<rect x="3" y="4" width="18" height="5.5" rx="1"/><path d="M6.5 6.75h.01"/>' +
       '<circle cx="8.5" cy="16.5" r="2.5"/><path d="M11 16.5h9M17.5 16.5v3M20 16.5v2.5"/>',
+    // SIEM (ELK / Wazuh): a magnifying glass over stacked log lines — the box
+    // that is READ rather than attacked. Deliberately not the server rack:
+    // `siem` and `windows_server` sitting side by side on a blue-team canvas is
+    // exactly where an author needs to see at a glance which one is the console
+    // and which one is the evidence store.
+    siem:
+      '<rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M6.5 8h7M6.5 11h4"/>' +
+      '<circle cx="14" cy="14.5" r="3"/><path d="M16.3 16.8L19 19.5"/>',
     // Lane gateway LXC: shield with a through-path.
     gateway:
       '<path d="M12 2.5l7 2.8v5.2c0 4-2.9 7.2-7 9-4.1-1.8-7-5-7-9V5.3z"/><path d="M8.5 11.5h7M12.5 8.5l3 3-3 3"/>',
@@ -72,6 +80,10 @@
     if (role === 'dmz') return 'dmz';
     if (role === 'attacker') return 'attacker';
     if (role === 'dc') return 'dc';
+    // Before this entry existed a SIEM fell through to the OS sniff and drew as
+    // a generic Linux terminal — indistinguishable from the sensor, the pivot
+    // and every other Debian box on a blue-team lane.
+    if (role === 'siem') return 'siem';
 
     var family = String(node.os_family || '').toLowerCase();
     if (GLYPHS[family]) return family;

@@ -158,6 +158,28 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
     if (Array.isArray(vm.nics) && vm.nics.length && !explicit.length) {
       add('error', 'malformed-nics', `'${name}' has a nics list with no usable segment on any entry.`, name);
     }
+    // ZERO SEGMENTS. This is the loud half of the empty-nics contract documented
+    // at challenge-spec.normaliseNics and lane-networking.resolveVmSegments: an
+    // authored `nics: []` is INDISTINGUISHABLE from an absent key everywhere
+    // downstream, so the deploy path re-derives a placement and the machine comes
+    // up ATTACHED while the canvas shows it floating. Nothing else in the stack
+    // can tell the two apart, which is precisely why it has to be caught here.
+    //
+    // An ERROR, not a warning: the spec as written cannot deploy as drawn, and
+    // the failure is invisible at deploy time. The fix is to attach the machine
+    // (a VM with no network has no DHCP lease, no Guacamole target and no vuln
+    // scripts) — not to keep the empty array.
+    //
+    // Note the deliberate overlap with malformed-nics above: `nics: [{}, null]`
+    // is both a junk list AND a machine that resolves to nothing. Two findings,
+    // two different statements, both true.
+    if (Array.isArray(vm.nics) && !explicit.length) {
+      add('error', 'no-nic',
+        `'${name}' is attached to no network segment. An empty nics list is read everywhere downstream as `
+        + `"not authored", so this machine would silently deploy attached to `
+        + `${[...segmentIds][0] || 'the lane network'} anyway. Attach it to a segment — a machine with no `
+        + `network gets no DHCP lease, no console connection and no post-clone scripts.`, name);
+    }
     for (const nic of explicit) {
       if (!segmentIds.has(String(nic.segment))) {
         add('error', 'unknown-segment',
@@ -180,6 +202,60 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
         !goadHosts.has(vm.name.toLowerCase()) && !explicit.length) {
       add('warning', 'goad-name-mismatch',
         `'${vm.name}' is not a host in this GOAD lab, so it lands on the EXTERNAL segment with no reserved IP and is never domain-joined. Rename it to match the lab, or attach it to a segment explicitly.`, name);
+    }
+  }
+
+  // ── SIEM placement ────────────────────────────────────────────────────────
+  //
+  // Both of these describe blue-team environments that LOOK correct on the
+  // canvas and are useless (or undeployable) in the lane. They are cheap to run
+  // on every spec because a topology with no `siem` machine matches neither.
+  const named = (n) => specVms.some(v => String(v.name || '').toLowerCase() === n);
+  const hasElkSiem = specVms.some(v =>
+    v.role === 'siem' && String(v.name || '').toLowerCase() === 'elk');
+
+  // GOAD's elk extension instruments `[elk_log:children] domain` — the WINDOWS
+  // domain group — and nothing else. Its inventory never touches
+  // `[linux_domain]`, so a Linux machine on an ELK-only lane ships no telemetry
+  // at all: no Sysmon equivalent, no winlogbeat, no agent. The student is asked
+  // to hunt across the environment and one host is simply not in the index.
+  //
+  // A WARNING rather than an error: the lane deploys and the rest of the hunt
+  // works. GOAD's wazuh extension DOES cover Linux
+  // (`[wazuh_agents_linux:children] linux_domain`), so adding a wazuh machine is
+  // the fix — which is why the check clears the moment one is present.
+  if (hasElkSiem && !named('wazuh')) {
+    for (const vm of specVms) {
+      if (vm.role !== 'linux') continue;
+      const name = vm.name || '(unnamed)';
+      add('warning', 'siem-blind-host',
+        `'${name}' is a Linux host on a lane whose only SIEM is ELK. GOAD's elk extension instruments the `
+        + `[domain] group only — never [linux_domain] — so this machine ships no telemetry and is a DARK BOX `
+        + `in the middle of a hunting exercise. Add a 'wazuh' machine (its extension does cover Linux), or `
+        + `drop this host.`, name);
+    }
+  }
+
+  // .50 is Kali (goad-deploy INFRA_IP_OCTETS.Kali), and the gateway bakes its
+  // RDP DNAT against exactly that value. On v3 Kali sits on the external segment
+  // while a SIEM would sit internally, so the two never meet; on v1/v2 there is
+  // ONE flat lan0 and they are the same address on the same subnet. dnsmasq
+  // refuses to start when two dhcp-host lines claim one address — which takes
+  // DHCP down for the WHOLE lane, not just these two machines.
+  //
+  // `include_kali !== false` reproduces the deploy path's own default-true test
+  // (goad-deploy.js:582, :758, :1440): a GOAD spec that never mentions Kali
+  // still gets one.
+  const kaliPresent = !!(spec?.goad?.enabled) && spec.goad.include_kali !== false;
+  if (kaliPresent && subnetScheme !== 'v3') {
+    for (const vm of specVms) {
+      if (Number(vm.ipOctet) !== goadDeploy.INFRA_IP_OCTETS.Kali) continue;
+      const name = vm.name || '(unnamed)';
+      add('error', 'siem-octet-collision',
+        `'${name}' pins IP octet .${goadDeploy.INFRA_IP_OCTETS.Kali}, which is the Kali attack box on this `
+        + `lane. A ${subnetScheme} lane has one flat subnet, so both machines claim the same address and `
+        + `dnsmasq refuses to start — taking DHCP down for every machine in the lane. Move it to a free `
+        + `octet (.24 is the conventional ELK slot), or turn Kali off.`, name);
     }
   }
 

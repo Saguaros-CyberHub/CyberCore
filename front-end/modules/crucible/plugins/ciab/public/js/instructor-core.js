@@ -18,8 +18,9 @@
  *   PART_NAMES        — canonical part labels (mirrors utils/part-definitions.js)
  *   timeAgo(iso)      — relative age for submission chips
  *
- * Per-tab modules register as window.Overview / Students / Reviews / Docs with
- * an ensureInit() that renders once from current state and subscribes once.
+ * Per-tab modules register as window.Overview / Students / Reviews / Docs /
+ * Incidents with an ensureInit() that renders once from current state and
+ * subscribes once.
  * The Sections tab keeps its original contract: Sections.load() on every visit.
  */
 /* global API, Toast, Auth, Utils, Modal */
@@ -164,7 +165,7 @@ function closeModal(id) { Modal.close(id); }
 
 // ── Tabs: hash routing + keyboard ───────────────────────────────────────────
 
-const TAB_NAMES = ['overview', 'sections', 'modules', 'students', 'reviews', 'documents'];
+const TAB_NAMES = ['overview', 'sections', 'modules', 'students', 'reviews', 'documents', 'incidents'];
 const TAB_ALIASES = { dashboard: 'overview' }; // legacy callers/bookmarks
 
 function activateTabModule(name) {
@@ -181,6 +182,17 @@ function activateTabModule(name) {
     students: window.Students,
     reviews: window.Reviews,
     documents: window.Docs,
+    // ensureInit() on EVERY visit here too, and it is not a re-fetch: the
+    // Incidents tab loads once and afterwards only resumes, because the walk
+    // that fills its two pickers crosses four endpoints and repeating it on
+    // every tab flip would make the dashboard feel broken.
+    //
+    // Resuming is the part that matters: that tab's 2s status poll stops itself
+    // when its panel stops being the active one, because activateTabModule
+    // reports an ENTRY and never a departure. The poll's own visibility check is
+    // what ends it, and this call is what restarts it. See
+    // instructor-incidents.js.
+    incidents: window.Incidents,
   }[name];
   if (mod && typeof mod.ensureInit === 'function') mod.ensureInit();
 }

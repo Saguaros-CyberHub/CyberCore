@@ -14,7 +14,9 @@ const {
   assignLaneAddressing,
   dnsLabel,
   SPEC_OCTET_MIN,
-  SPEC_OCTET_MAX
+  SPEC_OCTET_MAX,
+  SIEM_OCTETS,
+  SENSOR_VM_NAME
 } = require('../utils/profile-to-spec');
 
 let passed = 0;
@@ -488,6 +490,208 @@ test('overflowing the band fails loudly rather than half-pinning the lane', () =
   const vms = [];
   for (let i = 0; i <= capacity; i++) vms.push({ name: `h${i}`, hostname: `h${i}`, type: 'qemu' });
   assert.throws(() => assignLaneAddressing(vms), /can pin only/);
+});
+
+
+// ─── E3: telemetry machines ─────────────────────────────────────────
+// A defensive_monitoring engagement appends up to three machines nobody
+// selected. Each block below defends one property whose failure mode is a lane
+// that deploys, reports active, and is silently useless.
+
+console.log('\ntelemetry machines (E3)');
+
+// Stand-ins for what blueteam-templates.js resolves out of the catalog. The
+// synthesizer never queries anything; it is handed vmids.
+const TELEMETRY_ELASTIC = {
+  stack: 'elastic',
+  sensor: { template_vmid: 1007, template_node: 'cyberhub-node-5' },
+  elk: { template_vmid: 1800, template_node: 'cyberhub-node-5' },
+  wazuh: null,
+};
+const TELEMETRY_WAZUH = {
+  stack: 'wazuh',
+  sensor: null,                       // derived off: the sensor ships to Elastic only
+  elk: null,
+  wazuh: { template_vmid: 1801, template_node: 'cyberhub-node-5' },
+};
+const TELEMETRY_BOTH = {
+  stack: 'both',
+  sensor: { template_vmid: 1007, template_node: 'cyberhub-node-5' },
+  elk: { template_vmid: 1800, template_node: 'cyberhub-node-5' },
+  wazuh: { template_vmid: 1801, template_node: 'cyberhub-node-5' },
+};
+
+function synthWith(telemetry, assets) {
+  return synthesizeSpecFromProfile({
+    profile: profileWith(assets || [
+      { hostname: 'DC-01',  role: 'server', os: 'Windows Server 2022', services: ['445/SMB'] },
+      { hostname: 'WEB-01', role: 'server', os: 'Ubuntu Server 22.04', services: ['80/HTTP'] }
+    ]),
+    assetSelection: null,
+    vmTemplateCatalog: VM_CATALOG,
+    vulnScriptCatalog: VULN_SCRIPTS,
+    options: telemetry ? { telemetry } : {}
+  });
+}
+
+test('no telemetry option leaves the spec byte-identical', () => {
+  // The single most important property in this block: every engagement that is
+  // not defensive_monitoring must be untouched by Track E.
+  const a = synthWith(null);
+  const b = synthesizeSpecFromProfile({
+    profile: profileWith([
+      { hostname: 'DC-01',  role: 'server', os: 'Windows Server 2022', services: ['445/SMB'] },
+      { hostname: 'WEB-01', role: 'server', os: 'Ubuntu Server 22.04', services: ['80/HTTP'] }
+    ]),
+    assetSelection: null, vmTemplateCatalog: VM_CATALOG, vulnScriptCatalog: VULN_SCRIPTS,
+    options: { telemetry: null }
+  });
+  assert.deepStrictEqual(a.spec, b.spec);
+  assert.ok(!a.spec.vms.some(v => v.role === 'sensor' || v.role === 'siem'));
+});
+
+test('the sensor is appended last, takes a band octet and publishes its name', () => {
+  const { spec } = synthWith(TELEMETRY_ELASTIC);
+  const names = spec.vms.map(v => v.name);
+  assert.strictEqual(names[names.length - 1], 'elk',
+    'the SIEM is appended after the sensor, so the sensor is not last overall');
+
+  const sensor = spec.vms.find(v => v.name === SENSOR_VM_NAME);
+  assert.ok(sensor, 'expected a sensor machine');
+  assert.strictEqual(sensor.role, 'sensor',
+    "role 'sensor' is in the incident engine's LOGGEN_ROLES set — changing it breaks rung 2 of "
+    + 'the target ladder with no error anywhere');
+  assert.strictEqual(sensor.os_family, 'linux');
+  assert.strictEqual(sensor.type, 'qemu');
+  assert.strictEqual(sensor.template_vmid, 1007);
+  assert.strictEqual(sensor.synthetic, true,
+    'the sensor is not a client asset and must not appear in a document describing the client');
+  // Two selected servers took .80 and .81, so the sensor takes .82.
+  assert.strictEqual(sensor.ipOctet, SPEC_OCTET_MIN + 2);
+  assert.deepStrictEqual(sensor.dns_aliases, ['sensor']);
+});
+
+test('the sensor carries NO console_role — nothing logs into it', () => {
+  // It runs the emitter, so it holds the playbook the exercise is about
+  // finding. A console on it hands the student the answer key, and
+  // resolveConsolePlan would open it for them without anyone choosing to cheat.
+  const { spec } = synthWith(TELEMETRY_ELASTIC);
+  const sensor = spec.vms.find(v => v.name === SENSOR_VM_NAME);
+  assert.ok(!('console_role' in sensor),
+    'console_role must be ABSENT, not false — a falsy value is a value somebody can flip');
+});
+
+test('elk pins .24 and costs no band slot', () => {
+  const { spec } = synthWith(TELEMETRY_ELASTIC);
+  const elk = spec.vms.find(v => v.name === 'elk');
+  assert.ok(elk, 'expected an elk machine');
+  assert.strictEqual(elk.role, 'siem');
+  assert.strictEqual(elk.template_vmid, 1800);
+  assert.strictEqual(elk.ipOctet, SIEM_OCTETS.elk);
+  assert.strictEqual(elk.ipOctet, 24,
+    '.24 is baked into the golden image and into the sensor ELK_HOST; it cannot move');
+  assert.ok(elk.ipOctet < SPEC_OCTET_MIN,
+    'an out-of-band octet is the whole reason a SIEM does not spend a pinnable slot');
+  assert.deepStrictEqual(elk.dns_aliases, ['elk'],
+    "the sensor's baked agent resolves elk.cybercore.lan — no alias means it ships nowhere, "
+    + 'with a healthy process and no error');
+});
+
+test("a wazuh-only stack stands up no sensor, and pins .51", () => {
+  const { spec } = synthWith(TELEMETRY_WAZUH);
+  assert.ok(!spec.vms.some(v => v.role === 'sensor'),
+    'the loggen sensor ships to Elasticsearch only; deploying it here gives a machine that '
+    + 'retries forever and produces nothing');
+  const wazuh = spec.vms.find(v => v.name === 'wazuh');
+  assert.ok(wazuh);
+  assert.strictEqual(wazuh.ipOctet, SIEM_OCTETS.wazuh);
+  assert.strictEqual(wazuh.ipOctet, 51);
+  assert.deepStrictEqual(wazuh.dns_aliases, ['wazuh']);
+});
+
+test("stack 'both' stands up two SIEMs and one sensor", () => {
+  const { spec } = synthWith(TELEMETRY_BOTH);
+  const added = spec.vms.filter(v => v.synthetic).map(v => v.name);
+  assert.deepStrictEqual(added, ['sensor', 'elk', 'wazuh']);
+  assert.strictEqual(spec.vms.find(v => v.name === 'elk').ipOctet, 24);
+  assert.strictEqual(spec.vms.find(v => v.name === 'wazuh').ipOctet, 51);
+});
+
+test('telemetry machines do not renumber the client assets in front of them', () => {
+  // Order is the contract: paper already handed to a student must keep naming
+  // the address the lane actually uses.
+  const without = synthWith(null).spec.vms.map(v => [v.name, v.ipOctet]);
+  const with_ = synthWith(TELEMETRY_BOTH).spec.vms
+    .filter(v => !v.synthetic).map(v => [v.name, v.ipOctet]);
+  assert.deepStrictEqual(with_, without);
+});
+
+test('vm_offset stays on the canonical 600000 + idx*10000 sequence', () => {
+  const { spec } = synthWith(TELEMETRY_BOTH);
+  spec.spec_offsets_checked = true;
+  spec.vms.forEach((vm, i) => {
+    assert.strictEqual(vm.vm_offset, 600000 + i * 10000,
+      `${vm.name} broke the offset sequence — two machines on one offset collide as VMIDs`);
+  });
+});
+
+test('a client asset already named elk is refused BEFORE anything is built', () => {
+  // Two spec machines with one name is not a naming preference: the postDeploy
+  // hook, the vuln-app installer and the sensor stamp all match by name.
+  assert.throws(
+    () => synthWith(TELEMETRY_ELASTIC, [
+      { hostname: 'elk', role: 'server', os: 'Ubuntu Server 22.04', services: ['80/HTTP'] }
+    ]),
+    /already include one named/);
+});
+
+test('a SIEM costs no band slot, so the cap counts only band-bound machines', () => {
+  const capacity = SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1;
+  const vms = [];
+  for (let i = 0; i < capacity; i++) vms.push({ name: `h${i}`, hostname: `h${i}`, type: 'qemu' });
+  vms.push({ name: 'elk', hostname: 'elk', type: 'qemu', ipOctet: 24 });
+  assert.doesNotThrow(() => assignLaneAddressing(vms),
+    'a machine that names its own address is pinned out of band and must not spend a slot');
+  assert.strictEqual(vms[vms.length - 1].ipOctet, 24, 'the explicit octet must survive the walk');
+  assert.strictEqual(vms[0].ipOctet, SPEC_OCTET_MIN);
+});
+
+test('an out-of-band machine claims its alias FIRST, ahead of a client asset', () => {
+  // The sensor's baked agent hard-codes elk.cybercore.lan. If a client asset
+  // called 'elk' won the name, the agent would ship nowhere and report healthy.
+  const vms = [
+    { name: 'ELK', hostname: 'elk', type: 'qemu' },
+    { name: 'elk-siem', hostname: 'elk', type: 'qemu', ipOctet: 24 },
+  ];
+  assignLaneAddressing(vms);
+  assert.deepStrictEqual(vms[1].dns_aliases, ['elk'], 'the SIEM must win the contested alias');
+  assert.ok(!vms[0].dns_aliases, 'the client asset keeps its address and loses only the short name');
+});
+
+test('the cap message says WHICH machines the environment added for you', () => {
+  // An instructor who selected 20 assets and is told "a lane can pin only 20"
+  // has been handed a contradiction. The appended machines are the difference.
+  const capacity = SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1;
+  const vms = [];
+  for (let i = 0; i < capacity; i++) vms.push({ name: `h${i}`, hostname: `h${i}`, type: 'qemu' });
+  vms.push({ name: 'sensor', hostname: 'sensor', type: 'qemu', synthetic: true });
+  assert.throws(() => assignLaneAddressing(vms), (err) => {
+    assert.match(err.message, /can pin only/);
+    assert.match(err.message, /adds for you \(sensor\)/);
+    return true;
+  });
+});
+
+test('with nothing appended the cap message stays the plain one', () => {
+  const capacity = SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1;
+  const vms = [];
+  for (let i = 0; i <= capacity; i++) vms.push({ name: `h${i}`, hostname: `h${i}`, type: 'qemu' });
+  assert.throws(() => assignLaneAddressing(vms), (err) => {
+    assert.match(err.message, /can pin only/);
+    assert.ok(!/adds for you/.test(err.message),
+      'no machine was appended, so nothing may be blamed on one');
+    return true;
+  });
 });
 
 // ─── Done ───────────────────────────────────────────────────────────────────

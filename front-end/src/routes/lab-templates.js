@@ -19,6 +19,7 @@ const goadDeploy = require('../utils/goad-deploy');
 const { reserveLabNetwork, teardownLabNetwork, sanitizeZoneAbbrev } = require('../utils/lab-network-provision');
 const { validateTopology } = require('../utils/topology-validate');
 const { buildSpecVm, buildSpecNetwork } = require('../utils/challenge-spec');
+const adDomainRules = require('../utils/ad-domain-rules');
 
 const adminOnly = requireRole('admin');
 
@@ -37,6 +38,17 @@ router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
       displayName: lab.displayName,
       description: lab.description,
       forestRoot:  lab.forestRoot,
+      // The lab's own child domain LABEL, or null when it has one domain. The
+      // Designer resets both fields from these on a version change: before they
+      // were served, the card kept whatever the previous lab had left on screen
+      // and stored THAT — so every lab but GOAD-Light persisted a domain it does
+      // not have.
+      childSubdomain: lab.childSubdomain === undefined ? null : lab.childSubdomain,
+      // Which extensions may be offered for THIS lab, with the reason the rest
+      // may not. Sent per-lab rather than making the client re-derive
+      // compatibility, so there is one implementation of that rule.
+      extensions: goadDeploy.extensionsForLab(key, lab)
+        .map(e => ({ key: e.key, ok: e.ok, reason: e.reason })),
       vms: lab.vms.map(v => ({
         name:          v.name,
         role:          v.role,
@@ -51,6 +63,43 @@ router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
       Object.entries(goadDeploy.INFRA_IP_OCTETS).map(([k, octet]) => [k, goadDeploy.buildIp('192.18.0', octet)])
     ),
     infra_ip_octets: goadDeploy.INFRA_IP_OCTETS  // authoritative (last-octet only)
+  });
+});
+
+// GET /api/admin/goad/extensions — the optional machines an environment can add
+// to a lab (GOAD's own extensions/<key>/ inventories). Sits beside /goad/labs
+// and mirrors its shape deliberately: one catalog reader per table, so the
+// Designer never derives placement rules of its own.
+//
+// `ip` is illustrative for the same reason it is on /goad/labs — the real base
+// is chosen per deploy by subnet_scheme. `ip_octet` is the authoritative half.
+router.get('/goad/extensions', authenticateToken, adminOnly, (req, res) => {
+  res.json({
+    extensions: Object.values(goadDeploy.GOAD_EXTENSIONS).map(ext => ({
+      key:           ext.key,
+      displayName:   ext.displayName,
+      description:   ext.description,
+      machine:       ext.machine,
+      role:          ext.role,
+      os:            ext.os,
+      template_vmid: ext.template_vmid,
+      nic_model:     ext.nic_model,
+      ip:            goadDeploy.buildIp('192.18.0', ext.ipOctet),  // illustrative
+      ip_octet:      ext.ipOctet,                                  // authoritative
+      instruments:   ext.instruments,
+      dns_aliases:   ext.dns_aliases || [],
+      compatibility: ext.compatibility,       // null = every lab
+      // Whether the machine joins the AD forest. The Designer shows it because
+      // it is the difference between "gets a reserved IP from the GOAD layer"
+      // and "gets one from resolveSpecAddressing" — and only the second yields
+      // a resolvable <name>.cybercore.lan.
+      in_lab:        !!ext.inLab,
+      // No desktop, no xrdp: it cannot be the student's RDP console as baked.
+      headless:      !!ext.headless
+    })),
+    // Repeated here so a client that fetched only this endpoint can still refuse
+    // to place a machine on Kali's address.
+    infra_ip_octets: goadDeploy.INFRA_IP_OCTETS
   });
 });
 
@@ -519,15 +568,67 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
     // playbook). Defaults match what bake-goad-controller.sh / template 1004
     // ship with so admins can toggle this on without filling in every field.
     if (goad && goad.enabled) {
+      // Forest root + child are AUTHORED now, not read-only labels, so they get
+      // the same rulebook the Designer painted into #topoErrGoad and Track G's
+      // compiler mints against. Errors 400 with the sentence the author already
+      // saw; a reserved TLD is only a warning, because every lab CyberCore ships
+      // is named under .local and those names live in a golden image's NTDS.
+      //
+      // The defaults below are the LEGACY ones and are kept exactly as they were
+      // — a client that sends no domain at all still gets cybersaguaros.local /
+      // tumamoc, so nothing that posted before this validation existed changes
+      // shape. The per-lab defaults now come from GOAD_LABS.childSubdomain via
+      // the catalog, which is what the Designer fills the fields from.
+      const goadDomains = adDomainRules.validateGoadDomains({
+        domain:          goad.domain          || 'cybersaguaros.local',
+        child_subdomain: goad.child_subdomain === undefined ? 'tumamoc' : goad.child_subdomain
+      });
+      if (goadDomains.errors.length) {
+        return res.status(400).json({
+          error: goadDomains.errors.join(' '),
+          field: 'goad',
+          errors: goadDomains.errors,
+          warnings: goadDomains.warnings
+        });
+      }
+      goadDomains.warnings.forEach(w => pushStatus(`GOAD domain warning: ${w}`));
+
       spec.goad = {
         enabled: true,
         version:          goad.version          || 'light',
-        domain:           goad.domain           || 'cybersaguaros.local',
-        child_subdomain:  goad.child_subdomain  || 'tumamoc',
+        domain:           goadDomains.domain,
+        // Stored as the LABEL, which is the shape this field has always held and
+        // the shape ad-child_domain.yml wants. checkChild accepts a full FQDN
+        // too and reduces it, so an author who types the whole name is not
+        // punished — the spec still reads 'tumamoc'.
+        child_subdomain:  goadDomains.child_label,
         admin_user:       goad.admin_user       || 'Administrator',
         admin_password:   goad.admin_password   || 'vagrant',
         include_kali:     goad.include_kali !== false  // default true
       };
+
+      // Extensions: a DECLARATION of what the golden images already contain, not
+      // an install instruction. Resolved through the same filter the catalog
+      // endpoint serves, so an incompatible key cannot be stored — ws01 on NHA
+      // would otherwise land in the lab roster and make assertGoadRoster fail
+      // every deploy of the challenge. Written only when something survived, so
+      // a spec authored without extensions stays byte-identical to one written
+      // before they existed.
+      if (Array.isArray(goad.extensions) && goad.extensions.length) {
+        const labKey = goad.version || goadDeploy.DEFAULT_LAB;
+        // No labDef argument: resolveGoadExtensions resolves the lab through
+        // getLab itself, so this route is not a second place that indexes the
+        // lab table. An unknown version yields "everything offerable" here, and
+        // the deploy path re-filters against whatever resolveGoadLab actually
+        // falls back to — so a bad key still cannot reach the roster.
+        const resolved = goadDeploy.resolveGoadExtensions(goad.extensions, labKey);
+        if (resolved.selected.length) spec.goad.extensions = resolved.selected;
+        const dropped = goad.extensions.filter(
+          k => !resolved.selected.includes(String(k || '').trim().toLowerCase()));
+        if (dropped.length) {
+          pushStatus(`Ignored GOAD extension(s) not available for ${labKey}: ${dropped.join(', ')}`);
+        }
+      }
       // Pre-baked ("GOAD-Like") mode: clone golden images instead of running the
       // ~90-min ansible bake. fixed_subnet pins the base the images were
       // provisioned on so every lane reuses it (deployPrebakedGoadLane +

@@ -20,7 +20,9 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
 const BAKE = path.join(ROOT, 'infrastructure', 'proxmox-templates', 'vm-templates',
   'bake-cybr400-loggen-template.sh');
-const CLE = path.join(__dirname, '..', 'modules', 'crucible', 'plugins', 'cle');
+// E1 moved the engine out of the CLE plugin into shared core; the bake still
+// embeds the same two files from their new home.
+const INCIDENT = path.join(__dirname, '..', 'src', 'incident');
 
 // Normalised, because this comparison is about CONTENT.
 //
@@ -45,13 +47,13 @@ function embedded(terminator) {
 }
 
 test('the bake embeds the same cc-emit.js the tests exercise', () => {
-  const repo = fs.readFileSync(path.join(CLE, 'utils', 'cc-emit.js'), 'utf8').replace(/\n$/, '');
+  const repo = fs.readFileSync(path.join(INCIDENT, 'cc-emit.js'), 'utf8').replace(/\n$/, '');
   assert.strictEqual(embedded('CC_EMIT_EOF'), repo,
     'bake copy of cc-emit.js has drifted — run python scripts/sync-bake-payloads.py');
 });
 
 test('the bake embeds the same host-baseline.json the tests exercise', () => {
-  const repo = fs.readFileSync(path.join(CLE, 'playbooks', 'host-baseline.json'), 'utf8').replace(/\n$/, '');
+  const repo = fs.readFileSync(path.join(INCIDENT, 'playbooks', 'host-baseline.json'), 'utf8').replace(/\n$/, '');
   assert.strictEqual(embedded('HOST_PB_EOF'), repo,
     'bake copy of host-baseline.json has drifted — run python scripts/sync-bake-payloads.py');
 });
@@ -112,7 +114,7 @@ test('the bake and the catalog pin the same log-generator commit', () => {
   // both and is only caught by the runtime ref= mismatch on a deployed lane.
   const inBake = /LOGGEN_REF:-([0-9a-f]{40})/.exec(bake);
   assert.ok(inBake, 'no LOGGEN_REF default in the bake script');
-  const { LOGGEN_REF } = require(path.join(CLE, 'utils', 'loggen-catalog.js'));
+  const { LOGGEN_REF } = require(path.join(INCIDENT, 'catalog.js'));
   assert.strictEqual(inBake[1], LOGGEN_REF,
     'bake-cybr400-loggen-template.sh and loggen-catalog.js pin different commits');
 });

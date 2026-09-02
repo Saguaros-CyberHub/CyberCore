@@ -142,6 +142,13 @@
       // purpose: a console that is also broken must still read as broken, so the
       // later rule wins on a node carrying both.
       { selector: 'node[badge="console"]', style: { 'border-color': theme.success, 'border-width': 4 } },
+      // A machine on no segment. Before this rule a detached DC01 looked
+      // IDENTICAL to an attached one, which is how "detach is a silent no-op"
+      // stayed invisible long enough to ship. Dashed amber, so it reads as
+      // "unfinished" rather than "broken" — validateTopology's `no-nic` error
+      // repaints it red when the spec is actually submitted.
+      { selector: 'node[kind="vm"][!attached]', style: {
+          'border-color': theme.warning, 'border-width': 3, 'border-style': 'dashed' } },
       // Validation state. Painted from data so a re-validate is a data update,
       // not a restyle.
       { selector: 'node[severity="error"]',   style: { 'border-color': theme.danger,  'border-width': 3 } },
@@ -169,6 +176,9 @@
       { selector: 'edge[kind="uplink"]', style: { 'line-style': 'dotted', 'width': 2, 'label': '' } },
 
       { selector: ':selected', style: { 'border-color': theme.primary, 'border-width': 4 } },
+      // A NIC edge now SELECTS on tap instead of detaching (see the cxttap
+      // section below), so selection has to be visible or the tap looks dead.
+      { selector: 'edge:selected', style: { 'line-color': theme.primary, 'width': 4 } },
       { selector: '.eh-handle', style: {
           'background-color': theme.primary, 'width': 12, 'height': 12,
           'shape': 'ellipse', 'overlay-opacity': 0, 'border-width': 8,
@@ -191,6 +201,13 @@
    *   mode       'edit' | 'view'                (default 'view')
    *   onChange   fn()          structural change happened (edit only)
    *   onSelect   fn(node|null) selection changed
+   *   onContextMenu fn(ev)     right-click, edit only. ev is
+   *                            { kind:'machine'|'nic'|'segment'|'background',
+   *                              vmId?, segId?, nicIndex?, pageX, pageY,
+   *                              renderedPosition, position }.
+   *                            REPORTS ONLY — every guard lives in the editor.
+   *   onEscape   fn()          Escape pressed (an edgehandles drag in flight
+   *                            has already been cancelled by then)
    */
   function create(container, opts) {
     opts = opts || {};
@@ -219,6 +236,7 @@
     });
 
     var eh = null;
+    var onKeyDown = null;   // Escape-cancels-drag listener, removed on destroy
     var suppress = false;   // guard so programmatic rebuilds don't fire onChange
 
     function fireChange() { if (!suppress && opts.onChange) opts.onChange(); }
@@ -274,6 +292,11 @@
                    + (n.badge === 'console' ? '\n\u25b8 student console' : ''),
             role: n.role || '', locked: !!n.locked,
             severity: n.severity || '',
+            // Drives the unattached warning ring. A boolean, not a count: the
+            // stylesheet selector is [!attached] and Cytoscape treats 0 and
+            // false the same, but writing the boolean keeps the data readable
+            // in devtools when someone is asking "why is this ring amber?".
+            attached: (n.segments || []).length > 0,
             // Which machine the student's Guacamole session opens onto.
             // Deliberately NOT folded into `severity` (already used here for
             // "not running", so the two would paint the same amber and cancel
@@ -379,14 +402,75 @@
         fireChange();
       });
 
-      // Detach a NIC.
-      cy.on('tap', 'edge[kind="nic"]', function (evt) {
-        var e = evt.target;
-        var vm = findNode(e.data('vmId'));
-        if (!vm) return;
-        vm.segments = (vm.segments || []).filter(function (s) { return s !== e.data('segId'); });
-        render(false);
-        fireChange();
+      // ── Click-to-detach is RETIRED ────────────────────────────────────────
+      // `cy.on('tap', 'edge[kind="nic"]', …)` used to strip the NIC right here:
+      // one stray click, no confirmation, no undo, and — because an empty
+      // `nics: []` is indistinguishable from "not authored" everywhere
+      // downstream — the machine then deployed ATTACHED anyway while the canvas
+      // showed it floating. Detach now lives in the context menu, where it can
+      // be refused with a reason when it is the machine's last NIC.
+      //
+      // A tap on a NIC edge SELECTS it (edges are already selectable in edit
+      // mode and `edge:selected` is styled above), so the gesture still does
+      // something visible — it just no longer mutates the spec.
+
+      // Escape cancels an edgehandles drag in flight. Without it the only way
+      // out of a half-drawn NIC is to complete it onto some segment and then
+      // detach, which is precisely the accidental edit this section removes.
+      onKeyDown = function (ev) {
+        if (ev.key !== 'Escape' && ev.keyCode !== 27) return;
+        if (eh && eh.stop) { try { eh.stop(); } catch (e) { /* not drawing */ } }
+        if (opts.onEscape) opts.onEscape();
+      };
+      document.addEventListener('keydown', onKeyDown);
+
+      // ── Right-click menus ────────────────────────────────────────────────
+      // Cytoscape fires `cxttap` natively on nodes, edges and the core, so no
+      // context-menu plugin is vendored — public/vendor/ holds three files and
+      // there is no build step, and a fourth would be maintained forever for
+      // markup the editor can build in twenty lines.
+      //
+      // This layer only REPORTS the gesture. Every guard (last-NIC refusal,
+      // GOAD name locks) lives in topology-editor.js, which is the layer that
+      // knows what a machine means; the renderer knows only what was clicked.
+      var menuAt = function (kind, evt, extra) {
+        if (!opts.onContextMenu) return;
+        var oe = evt.originalEvent || {};
+        opts.onContextMenu(Object.assign({
+          kind: kind,
+          // Page coordinates, because the menu is positioned against <body> —
+          // the canvas sits inside a grid with overflow and a menu clipped by
+          // its own container is worse than no menu.
+          pageX: oe.pageX != null ? oe.pageX : (oe.clientX || 0),
+          pageY: oe.pageY != null ? oe.pageY : (oe.clientY || 0),
+          renderedPosition: evt.renderedPosition || null,
+          position: evt.position || null
+        }, extra || {}));
+      };
+
+      cy.on('cxttap', 'node[kind="vm"]', function (evt) {
+        // Select what was right-clicked, so the property panel and the menu are
+        // never talking about different machines.
+        cy.$('node:selected').unselect();
+        evt.target.select();
+        menuAt('machine', evt, { vmId: evt.target.data('vmId') });
+      });
+      cy.on('cxttap', 'edge[kind="nic"]', function (evt) {
+        menuAt('nic', evt, {
+          vmId: evt.target.data('vmId'),
+          segId: evt.target.data('segId'),
+          nicIndex: evt.target.data('nicIndex')
+        });
+      });
+      cy.on('cxttap', 'node[kind="segment"]', function (evt) {
+        menuAt('segment', evt, { segId: evt.target.data('segId') });
+      });
+      cy.on('cxttap', function (evt) {
+        // Core only — a cxttap on an element bubbles to the core too, and
+        // without this guard every machine menu would be replaced by the
+        // background menu a moment later.
+        if (evt.target !== cy) return;
+        menuAt('background', evt, {});
       });
 
       cy.on('dragfree', 'node', function (evt) {
@@ -529,6 +613,10 @@
       resize: function () { cy.resize(); cy.fit(undefined, 50); },
       destroy: function () {
         themeObserver.disconnect();
+        // The keydown listener is on `document`, so it outlives the canvas
+        // unless it is removed here — and a stale one would call stop() on a
+        // destroyed edgehandles instance on the next Escape anywhere on the page.
+        if (onKeyDown) document.removeEventListener('keydown', onKeyDown);
         if (eh && eh.destroy) eh.destroy();
         cy.destroy();
       }

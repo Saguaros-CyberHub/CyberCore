@@ -54,6 +54,58 @@
     return [isV3 ? 'ext' : 'lan'];
   }
 
+  /**
+   * THE RULE THE CONTEXT MENU EXISTS TO ENFORCE, as a pure function.
+   *
+   * A machine must keep AT LEAST ONE NIC, and a GOAD-locked host may not be
+   * renamed or removed. Both decisions live here rather than inside the menu
+   * builder so they can be tested without a browser — the menu itself is DOM
+   * and hit-testing, which this repo deliberately does not test headlessly.
+   *
+   * WHY THE LAST DETACH IS REFUSED RATHER THAN ACCEPTED. A VM with no network
+   * in this platform is useless: no DHCP lease, no Guacamole target, no
+   * post-clone scripts. Worse, "no NICs" cannot survive the round trip — an
+   * authored `nics: []` is indistinguishable from an absent key in
+   * buildSpecVm's normaliseNics, so lane-networking re-derives a placement and
+   * the machine deploys ATTACHED while the canvas shows it floating. That is
+   * the silent lie click-to-detach used to produce on a single stray click.
+   *
+   * WHY RENAME IS LOCKED. prepareGoadMacs matches AD hosts BY NAME. A rename
+   * does not rename a domain controller; it converts it into a machine the
+   * GOAD layer has never heard of — no deterministic MAC, no DHCP reservation,
+   * no WinRM wait, no secure-channel heal — and assertGoadRoster then refuses
+   * the deploy. Remove is the same statement one step on: the roster check runs
+   * in BOTH directions.
+   *
+   * @param {{name?:string, nicCount:number, locked?:boolean}} state
+   * @returns {{detach:{allowed,reason}, rename:{allowed,reason}, remove:{allowed,reason}}}
+   */
+  function menuGuards(state) {
+    state = state || {};
+    var nics = Math.max(0, Number(state.nicCount) || 0);
+    var locked = !!state.locked;
+    var name = state.name || 'this machine';
+
+    var lockReason = 'Fixed by the GOAD lab: the deploy matches AD hosts by name, so renaming or ' +
+      'removing this machine breaks its domain join. Untick the lab (or its extension) instead.';
+
+    var detachReason = null;
+    if (nics === 1) {
+      detachReason = 'This is the only network ' + name + ' has. A machine with no NIC gets no DHCP ' +
+        'lease, no console connection and no post-clone scripts — and because an empty nics list reads ' +
+        'downstream as "not authored", it would deploy attached anyway while the canvas showed it ' +
+        'floating. Use "Move to" instead.';
+    } else if (nics < 1) {
+      detachReason = name + ' is not attached to anything.';
+    }
+
+    return {
+      detach: { allowed: nics >= 2, reason: detachReason },
+      rename: { allowed: !locked, reason: locked ? lockReason : null },
+      remove: { allowed: !locked, reason: locked ? lockReason : null }
+    };
+  }
+
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -109,7 +161,10 @@
       onSelect: function (node) {
         selectedId = node ? node.id : null;
         renderPanel();
-      }
+      },
+      // The renderer reports the gesture; every guard lives in onContextMenu.
+      onContextMenu: function (ev) { onContextMenu(ev); },
+      onEscape: function () { closeMenu(); }
     });
 
     // ── vms[] ⇄ canvas ─────────────────────────────────────────────────────
@@ -250,31 +305,41 @@
       });
     }
 
-    canvasEl.addEventListener('dragover', function (ev) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; });
-    canvasEl.addEventListener('drop', function (ev) {
-      ev.preventDefault();
-      var vmid = ev.dataTransfer.getData('text/plain');
-      var tpl = catalog.find(function (t) { return String(t.template_vmid) === String(vmid); });
-      var rect = canvasEl.getBoundingClientRect();
-
+    /**
+     * Add a machine from a catalog template (or blank), at a rendered position.
+     *
+     * ONE creation path, shared by the palette drop and the background context
+     * menu's "Add machine". A second copy would be a second place to forget
+     * that a new machine must be born ON a segment — see the zero-NIC rule in
+     * the context-menu section.
+     */
+    function addFromTemplate(tpl, renderedPos) {
       // Next free offset in the 600000 + n*10000 band the table editor uses.
       var used = {};
       vms.forEach(function (v) { used[v.vm_offset] = true; });
       var offset = 600000;
       while (used[offset]) offset += 10000;
 
-      var name = tpl ? uniqueName(slug(tpl.os_name)) : uniqueName('machine');
-      topo.addNode({
-        name: name,
+      return topo.addNode({
+        name: tpl ? uniqueName(slug(tpl.os_name)) : uniqueName('machine'),
         role: '',
         os: tpl ? tpl.os_name : '',
         os_family: tpl ? tpl.os_family : '',
         template_vmid: tpl ? tpl.template_vmid : null,
         type: (tpl && tpl.provider_type) || 'qemu',
         vm_offset: offset,
-        // Drop onto the segment the pointer is over, else the default for the scheme.
+        // Born attached: the default segment for the scheme.
         segments: [scheme === 'v3' ? 'ext' : 'lan']
-      }, { x: ev.clientX - rect.left, y: ev.clientY - rect.top });
+      }, renderedPos || null);
+    }
+
+    canvasEl.addEventListener('dragover', function (ev) { ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; });
+    canvasEl.addEventListener('drop', function (ev) {
+      ev.preventDefault();
+      var vmid = ev.dataTransfer.getData('text/plain');
+      var tpl = catalog.find(function (t) { return String(t.template_vmid) === String(vmid); });
+      var rect = canvasEl.getBoundingClientRect();
+      addFromTemplate(tpl, { x: ev.clientX - rect.left, y: ev.clientY - rect.top });
     });
 
     function slug(s) {
@@ -301,7 +366,8 @@
           '<div class="topo-section-title">Machine</div>' +
           '<div class="topo-panel-empty">Select a machine to edit it.<br><br>' +
           'Drag from the palette to add one. Drag from a machine\'s edge handle to a ' +
-          'network to attach it; click a link to detach.</div>';
+          'network to attach it. Right-click anything — machine, link, network, background — ' +
+          'for what you can do to it.</div>';
         return;
       }
       var locked = isGoadVm(vm);
@@ -337,7 +403,19 @@
           '<option value="primary"' + (vm.console_role === 'primary' ? ' selected' : '') + '>Primary — what the student opens</option>' +
           '<option value="secondary"' + (vm.console_role === 'secondary' ? ' selected' : '') + '>Secondary</option>' +
         '</select>' +
-        '<div class="topo-field-hint">Publishes this machine on the lane gateway and gives it a Guacamole connection.</div></div>' +
+        '<div class="topo-field-hint">Publishes this machine on the lane gateway and gives it a Guacamole connection.</div>' +
+        // A SIEM golden image is headless Ubuntu Server: no desktop, no xrdp.
+        // Designating it produces a lane that deploys clean and hands the
+        // student a Guacamole session that connects to nothing — the exact
+        // shape of failure this codebase keeps documenting, so it is said HERE,
+        // at the moment of the choice, rather than discovered after a deploy.
+        (vm.console_role && String(vm.role || '').toLowerCase() === 'siem'
+          ? '<div class="topo-field-hint" style="color: var(--warning);">' +
+            'This is a SIEM image, and the GOAD ELK box is headless Ubuntu Server — no desktop and no ' +
+            'xrdp, so it cannot serve an RDP console as baked. Students should open ws01 (a domain-joined ' +
+            'analyst workstation, itself instrumented) or Kali, and browse to the SIEM on port 5601.</div>'
+          : '') +
+        '</div>' +
         '<div class="topo-field"><label>Console protocol</label><select data-key="console_protocol">' +
           '<option value=""' + (!vm.console_protocol ? ' selected' : '') + '>From the template catalog</option>' +
           ['rdp', 'ssh', 'vnc'].map(function (pr) {
@@ -375,6 +453,305 @@
           if (opts.onChange) opts.onChange();
         });
       });
+    }
+
+    // ── context menu ───────────────────────────────────────────────────────
+    //
+    // Built here rather than in topology-render.js because every ITEM in it is
+    // a question about meaning, not about rendering: may this machine be
+    // renamed (is it a GOAD host?), may this NIC be detached (is it the last
+    // one?), which segments is it not on yet. The renderer reports the gesture
+    // and knows none of that.
+    //
+    // ── THE RULE THIS MENU EXISTS TO ENFORCE ──────────────────────────────
+    // A machine must keep AT LEAST ONE NIC. A VM with no network in this
+    // platform is useless — no DHCP lease, no Guacamole target, no post-clone
+    // scripts — and worse, "no NICs" cannot survive the round trip: an authored
+    // `nics: []` is indistinguishable from an absent key in buildSpecVm, so
+    // lane-networking re-derives a placement and the machine deploys ATTACHED
+    // while the canvas shows it floating. So the last detach is REFUSED WITH A
+    // REASON rather than accepted and silently undone later. With one NIC the
+    // operation offered is "Move to…", which is what the author actually meant.
+
+    var menuEl = null;
+
+    function closeMenu() {
+      if (menuEl && menuEl.parentNode) menuEl.parentNode.removeChild(menuEl);
+      menuEl = null;
+      document.removeEventListener('mousedown', onDocDown, true);
+      document.removeEventListener('keydown', onMenuKey, true);
+    }
+    function onDocDown(ev) {
+      if (menuEl && menuEl.contains(ev.target)) return;
+      closeMenu();
+    }
+    function onMenuKey(ev) {
+      if (ev.key === 'Escape' || ev.keyCode === 27) closeMenu();
+    }
+
+    /**
+     * items: [{ label, disabled, reason, onClick, submenu:[…], sep:true }]
+     * A DISABLED item keeps its row and prints its reason underneath — that is
+     * the whole point of disabling Rename on a GOAD host rather than hiding it.
+     */
+    function openMenu(title, items, pageX, pageY) {
+      closeMenu();
+      var live = items.filter(Boolean);
+      menuEl = document.createElement('div');
+      menuEl.className = 'topo-ctxmenu';
+
+      var html = title ? '<div class="topo-ctxmenu-title">' + esc(title) + '</div>' : '';
+      if (!live.length) html += '<div class="topo-ctxmenu-empty">Nothing to do here.</div>';
+      live.forEach(function (it, i) {
+        if (it.sep) { html += '<div class="topo-ctxmenu-sep"></div>'; return; }
+        html += '<div class="topo-ctxmenu-item' + (it.disabled ? ' is-disabled' : '') +
+          '" data-i="' + i + '"><span>' + esc(it.label) + '</span>' +
+          (it.submenu ? '<span class="topo-ctx-caret">&#9656;</span>' : '') + '</div>';
+        if (it.disabled && it.reason) {
+          html += '<div class="topo-ctxmenu-reason">' + esc(it.reason) + '</div>';
+        }
+      });
+      menuEl.innerHTML = html;
+      document.body.appendChild(menuEl);
+
+      // Keep it on screen. Measured after insertion because the width depends
+      // on the longest label, which depends on the lab.
+      var r = menuEl.getBoundingClientRect();
+      var maxX = window.scrollX + document.documentElement.clientWidth - r.width - 8;
+      var maxY = window.scrollY + document.documentElement.clientHeight - r.height - 8;
+      menuEl.style.left = Math.max(window.scrollX + 4, Math.min(pageX, maxX)) + 'px';
+      menuEl.style.top = Math.max(window.scrollY + 4, Math.min(pageY, maxY)) + 'px';
+
+      menuEl.querySelectorAll('.topo-ctxmenu-item').forEach(function (el) {
+        el.addEventListener('click', function (ev) {
+          var it = live[Number(el.getAttribute('data-i'))];
+          if (!it || it.disabled) return;
+          if (it.submenu) {
+            // Open the submenu in place. A hover-flyout at this size is fussier
+            // to get right than a second click and buys nothing.
+            var rect = el.getBoundingClientRect();
+            openMenu(it.label, it.submenu, window.scrollX + rect.right - 4, window.scrollY + rect.top);
+            ev.stopPropagation();
+            return;
+          }
+          closeMenu();
+          it.onClick();
+        });
+      });
+
+      document.addEventListener('mousedown', onDocDown, true);
+      document.addEventListener('keydown', onMenuKey, true);
+    }
+
+    /** The segments a machine currently sits on, straight off the canvas. */
+    function segsOf(vmId) {
+      var n = topo.getNode(vmId);
+      return (n && n.segments) ? n.segments.slice() : [];
+    }
+    function segLabel(id) {
+      var s = segmentsForScheme(scheme).find(function (x) { return x.id === id; });
+      return s ? s.label : id;
+    }
+    function setSegs(vmId, next) {
+      // updateNode re-renders and fires onChange, which IS syncFromCanvas —
+      // calling it again here would run the vms[] reconciliation twice per edit.
+      topo.updateNode(vmId, { segments: next });
+    }
+
+    function vmByCanvasId(vmId) {
+      return vms.find(function (v) { return v.__topoId === vmId; }) || null;
+    }
+
+    function buildMachineMenu(ev) {
+      var vm = vmByCanvasId(ev.vmId);
+      if (!vm) return;
+      var on = segsOf(ev.vmId);
+      var all = segmentsForScheme(scheme);
+      // Every guard in this menu comes from the pure function at the top of the
+      // file, so what the UI refuses and what the tests assert are one thing.
+      var guards = menuGuards({ name: vm.name, nicCount: on.length, locked: isGoadVm(vm) });
+
+      var items = [];
+
+      items.push({
+        label: 'Move to', submenu: all.map(function (s) {
+          return {
+            label: s.label,
+            disabled: on.length === 1 && on[0] === s.id,
+            reason: 'Already its only network.',
+            onClick: function () { setSegs(ev.vmId, [s.id]); }
+          };
+        })
+      });
+
+      var free = all.filter(function (s) { return on.indexOf(s.id) === -1; });
+      items.push({
+        label: 'Attach to',
+        disabled: !free.length,
+        reason: 'Already on every segment this ' + scheme + ' lane has.',
+        submenu: free.map(function (s) {
+          return { label: s.label, onClick: function () { setSegs(ev.vmId, on.concat([s.id])); } };
+        })
+      });
+
+      // Offered ONLY at 2+ NICs. At one NIC the honest operation is "Move to…",
+      // which is above — see the rule at the top of this section.
+      items.push({
+        label: 'Detach from',
+        disabled: !guards.detach.allowed,
+        reason: guards.detach.reason,
+        submenu: on.map(function (segId) {
+          return {
+            label: segLabel(segId),
+            onClick: function () {
+              setSegs(ev.vmId, on.filter(function (s) { return s !== segId; }));
+            }
+          };
+        })
+      });
+
+      items.push({ sep: true });
+      items.push({
+        label: vm.console_role === 'primary' ? 'Clear student console' : 'Set as student console',
+        onClick: function () {
+          if (vm.console_role === 'primary') delete vm.console_role;
+          else {
+            // Exactly one primary. Same clearing the panel select and the table
+            // radio do — the canvas cannot be the one editor that lets a spec
+            // save with two, because resolveConsolePlan throws at deploy time.
+            vms.forEach(function (o) { if (o.console_role === 'primary') delete o.console_role; });
+            vm.console_role = 'primary';
+          }
+          toCanvas(false);
+          renderPanel();
+          if (opts.onChange) opts.onChange();
+        }
+      });
+
+      items.push({
+        label: 'Duplicate',
+        onClick: function () {
+          var used = {};
+          vms.forEach(function (v) { used[v.vm_offset] = true; });
+          var offset = 600000;
+          while (used[offset]) offset += 10000;
+          var src = topo.getNode(ev.vmId) || {};
+          topo.addNode({
+            name: uniqueName(slug(vm.name || 'machine')),
+            role: vm.role || '', os: vm.os || '', os_family: vm.os_family || '',
+            template_vmid: vm.template_vmid || null, type: vm.type || 'qemu',
+            vm_offset: offset,
+            // A copy that lands on no segment would be born holding the very
+            // zero-NIC state this menu refuses to create by hand.
+            segments: (src.segments && src.segments.length) ? src.segments.slice() : [all[0].id],
+            layout: src.layout ? { x: src.layout.x + 70, y: src.layout.y + 40 } : null
+          });
+        }
+      });
+
+      items.push({
+        label: 'Rename…',
+        disabled: !guards.rename.allowed,
+        reason: guards.rename.reason,
+        // window.prompt/alert rather than the app's Toast/Confirm helpers: those
+        // live in public/js/app.js, and this module is also loaded by the CLE
+        // course page, which does not include it. A shared renderer must not
+        // acquire a dependency on one page's chrome — and Confirm has no
+        // text-input variant to borrow anyway.
+        onClick: function () {
+          var next = window.prompt('New name for "' + (vm.name || '') + '"', vm.name || '');
+          if (next === null) return;
+          next = String(next).trim();
+          if (!next) return;
+          if (vms.some(function (o) { return o !== vm && String(o.name).toLowerCase() === next.toLowerCase(); })) {
+            window.alert('Another machine is already called "' + next + '".');
+            return;
+          }
+          vm.name = next;
+          toCanvas(false);
+          renderPanel();
+          if (opts.onChange) opts.onChange();
+        }
+      });
+
+      items.push({
+        label: 'Remove',
+        disabled: !guards.remove.allowed,
+        reason: guards.remove.reason,
+        onClick: function () { topo.removeNode(ev.vmId); }
+      });
+
+      items.push({ sep: true });
+      items.push({
+        label: 'Properties',
+        onClick: function () {
+          selectedId = ev.vmId;
+          renderPanel();
+          if (panelEl.scrollIntoView) panelEl.scrollIntoView({ block: 'nearest' });
+        }
+      });
+
+      openMenu(vm.name || 'Machine', items, ev.pageX, ev.pageY);
+    }
+
+    function buildNicMenu(ev) {
+      var vm = vmByCanvasId(ev.vmId);
+      if (!vm) return;
+      var on = segsOf(ev.vmId);
+      var guards = menuGuards({ name: vm.name, nicCount: on.length, locked: isGoadVm(vm) });
+      openMenu((vm.name || 'Machine') + ' \u2192 ' + segLabel(ev.segId), [
+        {
+          label: 'Detach',
+          disabled: !guards.detach.allowed,
+          reason: guards.detach.reason,
+          onClick: function () {
+            setSegs(ev.vmId, on.filter(function (s) { return s !== ev.segId; }));
+          }
+        }
+      ], ev.pageX, ev.pageY);
+    }
+
+    function buildSegmentMenu(ev) {
+      var selected = topo.cy.$('node[kind="vm"]:selected').map(function (n) { return n.data('vmId'); });
+      openMenu(segLabel(ev.segId), [
+        {
+          label: 'Attach selected machines (' + selected.length + ')',
+          disabled: !selected.length,
+          reason: 'Nothing is selected. Click a machine, or shift-click several.',
+          onClick: function () {
+            selected.forEach(function (vmId) {
+              var on = segsOf(vmId);
+              if (on.indexOf(ev.segId) === -1) topo.updateNode(vmId, { segments: on.concat([ev.segId]) });
+            });
+          }
+        },
+        { label: 'Auto-arrange', onClick: function () { topo.layout(); } }
+      ], ev.pageX, ev.pageY);
+    }
+
+    function buildBackgroundMenu(ev) {
+      var palette = catalog.slice(0, 12).map(function (t) {
+        return {
+          label: t.os_name + ' (' + t.template_vmid + ')',
+          onClick: function () { addFromTemplate(t, ev.renderedPosition); }
+        };
+      });
+      palette.push({ label: '+ Blank machine', onClick: function () { addFromTemplate(null, ev.renderedPosition); } });
+
+      openMenu('Canvas', [
+        { label: 'Add machine', submenu: palette },
+        { sep: true },
+        { label: 'Auto-arrange', onClick: function () { topo.layout(); } },
+        { label: 'Fit', onClick: function () { topo.fit(); } },
+        { label: 'Validate', onClick: function () { if (opts.onValidate) opts.onValidate(); } }
+      ], ev.pageX, ev.pageY);
+    }
+
+    function onContextMenu(ev) {
+      if (ev.kind === 'machine') return buildMachineMenu(ev);
+      if (ev.kind === 'nic') return buildNicMenu(ev);
+      if (ev.kind === 'segment') return buildSegmentMenu(ev);
+      return buildBackgroundMenu(ev);
     }
 
     // ── findings ───────────────────────────────────────────────────────────
@@ -430,7 +807,14 @@
       fit: function () { topo.fit(); },
       relayout: function () { topo.layout(); },
       resize: function () { topo.resize(); },
-      destroy: function () { topo.destroy(); if (cyEl.parentNode) cyEl.parentNode.removeChild(cyEl); }
+      destroy: function () {
+        // The menu is appended to <body>, so tearing the canvas down does not
+        // take it with it — a remount (a GOAD toggle, a seed load) would
+        // otherwise leave an orphan menu wired to a destroyed graph.
+        closeMenu();
+        topo.destroy();
+        if (cyEl.parentNode) cyEl.parentNode.removeChild(cyEl);
+      }
     };
   }
 
@@ -450,6 +834,9 @@
     mount: mount,
     segmentsForScheme: segmentsForScheme,
     deriveSegments: deriveSegments,
-    stripInternal: stripInternal
+    stripInternal: stripInternal,
+    // Exported so the last-NIC refusal and the GOAD name locks have tests that
+    // do not need a browser. See test/topology-context-menu.test.js.
+    menuGuards: menuGuards
   };
 })(window);

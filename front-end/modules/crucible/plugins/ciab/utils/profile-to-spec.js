@@ -153,6 +153,56 @@ const SPEC_OCTET_MIN = 80;
 const SPEC_OCTET_MAX = 99;
 
 /**
+ * Where E3's SIEM machines live, and the short names they answer to.
+ *
+ * MIRRORED, not imported — the same trade SPEC_OCTET_MIN/MAX above makes, and
+ * for the same reason. The authority is src/utils/goad-deploy.js
+ * GOAD_EXTENSIONS.elk.ipOctet / .wazuh.ipOctet, which also carries the
+ * load-time guard that refuses an extension octet colliding with lane
+ * infrastructure. That module requires script-executor -> proxmox + db, so
+ * importing it here would end this file's one non-negotiable property: it loads
+ * with no cluster, no database and no config/site.json, which is what lets
+ * test/ciab-engagement-model.test.js require it BARE as its purity assertion.
+ * test/ciab-blueteam.test.js asserts the two agree, so a change there fails a
+ * test here rather than silently handing out an address something else owns.
+ *
+ * WHY THESE TWO NUMBERS, SPECIFICALLY.
+ *   elk .24   NOT the .50 upstream's extensions/elk/inventory pins. On v3, .50
+ *             was free because Kali lives on the EXTERNAL segment and a SIEM
+ *             sits internally. A defensive engagement is v2 — ONE flat lan0 —
+ *             where .50 is INFRA_IP_OCTETS.Kali. Two dhcp-host lines claiming
+ *             one address make dnsmasq refuse to START, which takes DHCP down
+ *             for the whole lane, not just for the SIEM.
+ *   wazuh .51 Upstream's own octet, and free on v2 — so nothing has to be
+ *             edited in the inventory the golden image was built from.
+ *
+ * Both are OUTSIDE the .80-.99 band on purpose. A band octet is invented by
+ * this walk and moves when the asset list changes; these two are baked into
+ * images and into a sensor's ELK_HOST, so they must not move at all.
+ */
+const SIEM_OCTETS = Object.freeze({ elk: 24, wazuh: 51 });
+
+/**
+ * Which SIEM machines each telemetry stack stands up.
+ *
+ * Deliberately data rather than an if/else: 'both' is a real, supported choice
+ * (comparing two consoles against one incident is a skill), and spelling it as
+ * a union of the other two makes it impossible for the three modes to disagree
+ * about what a SIEM is.
+ */
+const SIEM_MACHINES_FOR_STACK = Object.freeze({
+  elastic: Object.freeze(['elk']),
+  wazuh: Object.freeze(['wazuh']),
+  both: Object.freeze(['elk', 'wazuh']),
+});
+
+/** The sensor's spec name, hostname and DNS label — one string, one place.
+ *  'sensor' is in the incident engine's LOGGEN_ROLES set already, so emitting
+ *  role:'sensor' makes the spec_role rung of its target ladder fire with no
+ *  change on that side. */
+const SENSOR_VM_NAME = 'sensor';
+
+/**
  * The subnet scheme a profile lane gets when the caller names none.
  *
  * WAS 'v2', AND THE FLIP IS THE POINT. v2 is one flat segment: Kali, the web
@@ -401,8 +451,20 @@ function buildSpecDns({ spec = {}, profile = null, engagementType = null } = {})
  * document that cannot be written. A band octet would be worse still — a true
  * statement about a spec field and a false one about the lane.
  *
- * Omit `dmzVmName` (every caller before v3 did) and this behaves EXACTLY as it
- * always has, down to which machine wins a contested alias.
+ * A MACHINE THAT ALREADY NAMES ITS OWN OCTET IS THE SECOND EXCEPTION, and it
+ * costs no band slot. E3's SIEM machines arrive here with `ipOctet` already set
+ * (elk .24, wazuh .51 — see SIEM_OCTETS), because those addresses are fixed by
+ * what the golden images were baked against rather than by this walk. That is
+ * not a special case invented here: resolveSpecAddressing does exactly the same
+ * thing in two passes, claiming every EXPLICIT ipOctet before handing out a
+ * single automatic one, and its own comment explains why one cursor is not
+ * enough (a late explicit .85 would otherwise be told its own address is taken,
+ * naming a conflict the author cannot see anywhere in their spec). This
+ * function mirrors that shape so the two cannot disagree about who owns .24.
+ *
+ * Omit `dmzVmName` and pass no pre-set `ipOctet` (every caller before v3 and
+ * before E3 did) and this behaves EXACTLY as it always has, down to which
+ * machine wins a contested alias.
  *
  * Mutates `vms` in place and returns it.
  *
@@ -410,52 +472,95 @@ function buildSpecDns({ spec = {}, profile = null, engagementType = null } = {})
  * @param {object} [opts]
  * @param {string|null} [opts.dmzVmName] spec name of the dual-homed DMZ host
  */
+function hasExplicitOctet(vm) {
+  return !!vm && vm.ipOctet !== undefined && vm.ipOctet !== null;
+}
+
 function assignLaneAddressing(vms, { dmzVmName = null } = {}) {
   const pinnable = vms.filter(vm =>
     (vm.type || 'qemu') !== 'lxc'
     && !(Array.isArray(vm.nics) && vm.nics.length > 1)
   );
 
+  // Only the machines that need an address INVENTED spend the band. A machine
+  // carrying its own ipOctet is pinned out of band (resolveSpecAddressing PASS 1
+  // range-checks it 2-254 and claims it before the cursor starts), so counting
+  // it here would refuse a lane the deployer can build perfectly well.
+  const explicit = pinnable.filter(hasExplicitOctet);
+  const bandBound = pinnable.filter(vm => !hasExplicitOctet(vm));
+
   const capacity = SPEC_OCTET_MAX - SPEC_OCTET_MIN + 1;
-  if (pinnable.length > capacity) {
+  if (bandBound.length > capacity) {
     // Fail here rather than let the deployer fail later, or — far worse — let a
     // partially-pinned lane deploy. Half the hosts on their documented address
     // and half on a pool lease is an environment whose own scan report is wrong
     // about it, which is the one outcome this whole synthesizer exists to avoid.
+    //
+    // THE MESSAGE NAMES THE RESERVED SLOTS ON PURPOSE. An instructor who
+    // selected twenty assets and is told "a lane can pin only 20" has been
+    // handed a contradiction. The band is spent by machines this synthesizer
+    // APPENDS as well as by the ones they picked: the standalone vuln-app host
+    // when the client has no web server of its own, and — on a defensive
+    // engagement — the telemetry sensor. The two SIEMs cost nothing here,
+    // because each names its own address. Saying which is which is the
+    // difference between "deselect an asset" and "why is this number wrong".
+    const appended = bandBound.filter(vm => vm.synthetic).map(vm => vm.name);
     throw new Error(
-      `This profile selects ${pinnable.length} deployable machines, but a lane can pin only ` +
-      `${capacity} (the .${SPEC_OCTET_MIN}-.${SPEC_OCTET_MAX} band). Deselect assets until at most ` +
-      `${capacity} remain, or split the profile across two engagements.`
+      `This profile selects ${bandBound.length} deployable machines, but a lane can pin only ` +
+      `${capacity} (the .${SPEC_OCTET_MIN}-.${SPEC_OCTET_MAX} band)` +
+      (appended.length
+        ? `, and ${appended.length} of those ${appended.length === 1 ? 'is a machine' : 'are machines'} ` +
+          `this environment adds for you (${appended.join(', ')}) rather than one you selected`
+        : '') +
+      `. Deselect assets until at most ${capacity} remain, or split the profile across two ` +
+      `engagements.`
     );
   }
 
-  // Walked in SPEC ORDER over every machine rather than over `pinnable`, so the
-  // DMZ host takes its turn at claiming a short name in the same position it
-  // occupies in the spec. With no dmzVmName the two walks are indistinguishable:
-  // a machine that is not pinnable `continue`s before it can claim anything, and
-  // the band cursor advances only for pinnable machines, in the same order.
-  const pinnableSet = new Set(pinnable);
   const claimedAlias = new Map();
-  let octet = SPEC_OCTET_MIN;
-  for (const vm of vms) {
-    if (dmzVmName && vm.name === dmzVmName) vm.ipOctet = DUAL_HOMED_OCTET;
-    else if (pinnableSet.has(vm)) vm.ipOctet = octet++;
-    else continue;
-
+  // The deployer THROWS when two machines claim one alias, which would fail the
+  // whole batch over a convenience name. First claimant wins; the loser keeps
+  // its pinned address and simply has no short name.
+  const claimAlias = (vm) => {
     const alias = dnsLabel(vm.hostname || vm.name);
-    if (!alias) continue;
-    // The deployer THROWS when two machines claim one alias, which would fail
-    // the whole batch over a convenience name. First claimant wins; the loser
-    // keeps its pinned address and simply has no short name.
+    if (!alias) return;
     if (claimedAlias.has(alias)) {
       console.warn(
         `[profile-to-spec] '${vm.name}' wanted DNS alias '${alias}' but '${claimedAlias.get(alias)}' ` +
         `already claimed it — deploying without a short name for this host`
       );
-      continue;
+      return;
     }
     claimedAlias.set(alias, vm.name);
     vm.dns_aliases = [alias];
+  };
+
+  // PASS 1 — machines that name their own address, claiming their aliases
+  // FIRST. The order is not cosmetic: the sensor's baked agent hard-codes
+  // ELK_HOST=elk.cybercore.lan, so if a selected client asset happened to be
+  // called `elk` and claimed the name ahead of the SIEM, the agent would ship
+  // nowhere — healthy process, no error, no events. Losing a short name is
+  // survivable for a client asset and fatal for the SIEM, so the SIEM wins.
+  // (synthesizeSpecFromProfile refuses that collision outright before it gets
+  // here; this ordering is the second line of defence, for a hand-built spec
+  // that never went through it.)
+  for (const vm of explicit) claimAlias(vm);
+
+  // PASS 2 — walked in SPEC ORDER over every machine rather than over
+  // `bandBound`, so the DMZ host takes its turn at claiming a short name in the
+  // same position it occupies in the spec. With no dmzVmName and no explicit
+  // octets the two walks are indistinguishable from the single walk this
+  // replaced: a machine that is not band-bound `continue`s before it can claim
+  // anything, and the cursor advances only for band-bound machines, in order.
+  const bandSet = new Set(bandBound);
+  let octet = SPEC_OCTET_MIN;
+  for (const vm of vms) {
+    if (hasExplicitOctet(vm)) continue;          // addressed and claimed in PASS 1
+    if (dmzVmName && vm.name === dmzVmName) vm.ipOctet = DUAL_HOMED_OCTET;
+    else if (bandSet.has(vm)) vm.ipOctet = octet++;
+    else continue;
+
+    claimAlias(vm);
   }
 
   return vms;
@@ -545,6 +650,141 @@ function applyV3Topology(vms, dmzVmName) {
   return vms;
 }
 
+// ─── E3: telemetry machines ──────────────────────────────────────
+/**
+ * Refuse a spec whose client assets already occupy a telemetry machine's name.
+ *
+ * A spec is a set of machines keyed by `name`, and two machines with one name
+ * is not a naming preference — the deployer matches deployedVMs by name in the
+ * postDeploy hook, the vuln-app installer targets by name, and the incident
+ * engine's sensor stamp finds its VM by name. A duplicate silently makes all
+ * three point at whichever one they saw first.
+ *
+ * A THROW HERE IS THE GOOD OUTCOME. runProfileDeploy calls this before anything
+ * is written, so an instructor gets a message naming the asset to rename or
+ * deselect, on a screen, before a single clone. The alternative is a lane that
+ * deploys, reports active, and has a SIEM the sensor cannot find.
+ */
+function assertTelemetryNamesFree(vms, wanted) {
+  const taken = new Map();
+  for (const vm of vms) taken.set(String(vm.name || '').toLowerCase(), vm.name);
+  for (const name of wanted) {
+    const hit = taken.get(name.toLowerCase());
+    if (hit !== undefined) {
+      throw new Error(
+        `This environment stands up a machine called '${name}', but the client's selected assets ` +
+        `already include one named '${hit}'. Two machines cannot share a name: the deploy matches ` +
+        `by name when it installs content and when it records where the sensor landed, so one of ` +
+        `them would silently be used for both. Rename or deselect that asset.`
+      );
+    }
+  }
+}
+
+/**
+ * Append the sensor and the SIEM(s) a defensive engagement runs on.
+ *
+ * CALLED AFTER THE VULN-APP VM AND BEFORE assignLaneAddressing, which is what
+ * gives the sensor a band octet and its `sensor` short name for free, and lets
+ * the two SIEMs claim their own aliases in PASS 1.
+ *
+ * ── THE SENSOR HAS NO console_role, AND THAT IS THE POINT ──────────────────
+ * Nothing logs into the sensor. It runs the synthetic emitter, which means it
+ * holds the playbook the whole exercise is about finding. Designating it a
+ * console would put a Guacamole session on the one machine carrying the answer
+ * key, and the student would not even have to cheat on purpose to see it —
+ * resolveConsolePlan would simply open it for them. Omitting the key is the
+ * whole control; there is nothing else stopping this.
+ *
+ * ── THE SIEMs ARE ORDINARY SPEC VMs, AND THEY STAY OUT OF GOAD_LABS ────────
+ * Being ABSENT from goadMacs is exactly what keeps them inside
+ * resolveSpecAddressing, and resolveSpecAddressing is the only source of the
+ * `host-record` line that makes `elk.cybercore.lan` resolve inside the lane
+ * (challenge-lane-deployer.js). Adding either machine to a GOAD lab roster
+ * would give it a deterministic MAC and a dhcp-host line and take its
+ * host-record away — after which the sensor's baked ELK_HOST resolves to
+ * nothing, ships nowhere, and reports itself perfectly healthy.
+ *
+ * Mutates `vms` in place. Returns the names it appended, in spec order.
+ *
+ * @param {Array} vms                    the spec's machines, so far
+ * @param {object} telemetry             see synthesizeSpecFromProfile options
+ * @param {object} opts
+ * @param {string} opts.templateNode     fallback node for a catalog row with none
+ */
+function appendTelemetryMachines(vms, telemetry, { templateNode }) {
+  const stack = String((telemetry && telemetry.stack) || '').trim().toLowerCase();
+  const siemKeys = SIEM_MACHINES_FOR_STACK[stack] || [];
+  // `sensor` is DERIVED on the engagement (stack !== 'wazuh'), never authored —
+  // engagement-model.js validateTelemetryPlan owns that derivation. Here we only
+  // ask whether a resolved template came with it: blueteam-templates.js returns
+  // null for a stack that does not run one, and a NAMED 400 rather than null
+  // when it should have run one and the catalog row is missing.
+  const wantSensor = !!(telemetry && telemetry.sensor);
+
+  const appended = [];
+  const wantedNames = [];
+  if (wantSensor) wantedNames.push(SENSOR_VM_NAME);
+  for (const key of siemKeys) wantedNames.push(key);
+  if (wantedNames.length === 0) return appended;
+
+  assertTelemetryNamesFree(vms, wantedNames);
+
+  const push = (vm) => {
+    // The canonical offset formula, computed from the CURRENT length exactly as
+    // every other push in this file does, so appending a telemetry machine
+    // cannot renumber one that is already there.
+    vms.push({ ...vm, vm_offset: 600000 + vms.length * 10000 });
+    appended.push(vm.name);
+  };
+
+  if (wantSensor) {
+    const t = telemetry.sensor;
+    push({
+      name: SENSOR_VM_NAME,
+      hostname: SENSOR_VM_NAME,
+      template_vmid: t.template_vmid,
+      template_node: t.template_node || templateNode,
+      type: 'qemu',
+      role: 'sensor',
+      os_family: 'linux',
+      os_version: null,
+      services: [],
+      post_clone_scripts: [],
+      // Not one of the client's assets. The asset register, the scan report and
+      // the risk assessment all read the spec, and a machine the CLIENT does
+      // not own must not appear in a document describing the client.
+      synthetic: true,
+      // NO console_role. See the header.
+    });
+  }
+
+  for (const key of siemKeys) {
+    const t = telemetry[key];
+    if (!t) continue;                 // resolver refuses rather than returns null
+    push({
+      name: key,
+      hostname: key,
+      template_vmid: t.template_vmid,
+      template_node: t.template_node || templateNode,
+      type: 'qemu',
+      // 'siem' matches GOAD_EXTENSIONS' own role for these two machines, so the
+      // Designer's topology view and this synthesizer describe one thing.
+      role: 'siem',
+      os_family: 'linux',
+      os_version: null,
+      services: [],
+      post_clone_scripts: [],
+      synthetic: true,
+      // Explicit and out of band: honoured by resolveSpecAddressing PASS 1,
+      // which range-checks it 2-254. See SIEM_OCTETS for why these two numbers.
+      ipOctet: SIEM_OCTETS[key],
+    });
+  }
+
+  return appended;
+}
+
 // ─── Main synthesizer ──────────────────────────────────────────────────────
 /**
  * @param {object} args
@@ -562,6 +802,19 @@ function applyV3Topology(vms, dmzVmName) {
  * @param {string} [args.options.templateNode='cyberhub-node-5']
  * @param {string} [args.options.engagementType]  slug; decides only whether the
  *                                            AD forwarder is published (buildSpecDns)
+ * @param {object} [args.options.telemetry]   E3. Absent on every engagement that
+ *   is not defensive_monitoring, and absent is the ONLY thing that keeps a lane
+ *   byte-identical to what it was before Track E. Shape, all resolved by
+ *   utils/blueteam-templates.js from cybercore_template_catalog:
+ *     { stack:'elastic'|'wazuh'|'both',
+ *       sensor: {template_vmid, template_node}|null,   // null unless the plan
+ *                                                      // derived sensor:true
+ *       elk:    {template_vmid, template_node}|null,
+ *       wazuh:  {template_vmid, template_node}|null }
+ *   The machines are appended AFTER the vuln-app VM and BEFORE addressing, so
+ *   the sensor takes a band octet and its own short name exactly like any other
+ *   machine, and the two SIEMs keep the fixed octets their images were baked
+ *   against.
  * @returns {{
  *   spec: {
  *     vxlan_block: {start, end},
@@ -592,6 +845,10 @@ function synthesizeSpecFromProfile({
   // internal) is the publishing branch, so today it changes nothing: no spec
   // carries an AD domain for it to withhold.
   const engagementType = options.engagementType || null;
+  // E3. Null on every other engagement type, and that is what makes this whole
+  // change inert for them: appendTelemetryMachines is never called, no machine
+  // is added, and the octet walk is the walk it always was.
+  const telemetry = options.telemetry || null;
 
   const assets = Array.isArray(profile && profile.assets) ? profile.assets : [];
   const selected = assets.filter(a => isIncluded(a, assetSelection));
@@ -798,6 +1055,18 @@ function synthesizeSpecFromProfile({
     }
   }
 
+  // ─── E3: the telemetry machines ────────────────────────────────
+  // AFTER the vuln-app VM so the environment's own content is placed first and
+  // the sensor lands after it in the band, and BEFORE addressing so the sensor
+  // is addressed like any other machine rather than by a second rule.
+  //
+  // Not gated on engagementType. The decision "does this engagement carry
+  // telemetry" is made once, on the engagement's telemetry_plan, and arrives
+  // here already resolved down to template ids — so this file never has to know
+  // which slug means blue team, and a locally defined slug that wants a SIEM
+  // gets one by passing the option.
+  if (telemetry) appendTelemetryMachines(vms, telemetry, { templateNode });
+
   // ─── v3 topology ──────────────────────────────────────────────────────────
   // Before addressing, because it is what DECIDES the addressing: the machine
   // that gets two NICs is the machine assignLaneAddressing must keep out of the
@@ -848,6 +1117,15 @@ module.exports = {
   dnsLabel,
   SPEC_OCTET_MIN,
   SPEC_OCTET_MAX,
+  // E3. Exported for the same reason the band is: each is MIRRORED from an
+  // authority this file cannot import without losing its load-with-nothing
+  // property, so the agreement is asserted by a test that can afford to load
+  // both. SIEM_OCTETS mirrors src/utils/goad-deploy.js GOAD_EXTENSIONS.
+  SIEM_OCTETS,
+  SIEM_MACHINES_FOR_STACK,
+  SENSOR_VM_NAME,
+  appendTelemetryMachines,
+  assertTelemetryNamesFree,
   // Exported for the same reason resolveSpecAddressing and resolveLaneDnsExtras
   // are exported from the deployer: each encodes a rule whose failure mode is a
   // lane that deploys, reports active and is silently wrong — a dropped web

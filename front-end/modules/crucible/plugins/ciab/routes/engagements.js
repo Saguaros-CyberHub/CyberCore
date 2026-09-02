@@ -73,6 +73,10 @@ const {
   // B3. The registry now declares which types the PLATFORM owns, and this file
   // asks it in three places rather than comparing against a literal 'bake'.
   isSystemEngagementType,
+  // E3. The stack vocabulary a screen renders as a picker, and the one scheme a
+  // defensive engagement may be carved at — both read from the registry rather
+  // than spelled here, so a screen and the validator cannot disagree.
+  TELEMETRY_STACKS, BLUE_TEAM_TYPE_KEY, BLUE_TEAM_SUBNET_SCHEME,
 } = require('../utils/engagement-model');
 
 const instructorOnly = requireRole('instructor', 'admin');
@@ -401,6 +405,14 @@ router.get('/types', instructorOnly, (req, res) => {
     // point; what is withheld is the ability to ask for a NEW one.
     res.json({
       types: Object.values(ENGAGEMENT_TYPES).filter(t => !t.system).map(t => ({ ...t })),
+      // E3. What a telemetry-stack picker offers, and the constraint the create
+      // form has to apply when the defensive type is chosen. Sent alongside the
+      // types rather than from a second route because they are one decision:
+      // choosing defensive_monitoring is what makes the stack picker relevant
+      // AND what forces the subnet scheme.
+      telemetry_stacks: [...TELEMETRY_STACKS],
+      telemetry_type: BLUE_TEAM_TYPE_KEY,
+      telemetry_subnet_scheme: BLUE_TEAM_SUBNET_SCHEME,
     });
   } catch (err) {
     sendErr(res, err);
@@ -808,6 +820,73 @@ router.patch('/:engagementId', instructorOnly, async (req, res) => {
     });
 
     res.json({ engagement: project(updated, isAdmin(req)), warnings });
+  } catch (err) {
+    sendErr(res, err);
+  }
+});
+
+/**
+ * PUT /api/instructor/engagements/:engagementId/telemetry
+ *   { stack: 'elastic'|'wazuh'|'both', scenario_id?, *_template_key?, ... }
+ *   or {} to stand up no telemetry at all.
+ *
+ * ── WHY THIS IS NOT PART OF THE PATCH ROUTE ABOVE ──────────────────────────
+ *
+ * telemetry_plan is not one of the seven B1_EDITABLE_FIELDS and is deliberately
+ * not a MODEL_FIELD, so updateEngagementModel could never write it: MODEL_FIELDS
+ * is the SET-clause list that writer builds its UPDATE from, and a test pins it
+ * to exactly the columns migration 011 adds. This column is 017's.
+ *
+ * The better reason is that it is not instructor prose. Its `sensor` key is
+ * DERIVED from `stack` — the loggen sensor ships to Elasticsearch only, so
+ * `wazuh + sensor` is a machine that boots, looks healthy, retries forever and
+ * produces nothing — and a general-purpose PATCH that echoed a stored plan
+ * back would be able to set it. setEngagementTelemetryPlan re-derives on every
+ * write, and this route is the only way in.
+ *
+ * PUT, not PATCH: the plan is replaced whole. There is no partial telemetry
+ * plan — a stack with half its template keys from a previous decision is a
+ * lane built from images nobody chose.
+ *
+ * WARNINGS ARE RETURNED, NOT SWALLOWED. 'a wazuh-only environment has no
+ * synthetic floor' is exactly the kind of thing an instructor should read
+ * BEFORE class rather than discover during it.
+ */
+router.put('/:engagementId/telemetry', instructorOnly, async (req, res) => {
+  try {
+    const body = req.body || {};
+    // The plan is the body's `telemetry_plan` when it sends one, and otherwise
+    // the body itself — both shapes are natural for a screen, and guessing
+    // wrong stores {} silently, which reads as "the save did nothing".
+    const plan = Object.prototype.hasOwnProperty.call(body, 'telemetry_plan')
+      ? body.telemetry_plan : body;
+
+    const { engagement, warnings } = await engagementProvision.setEngagementTelemetryPlan(
+      req.params.engagementId, plan, { actingUserId: req.user.userId }
+    );
+
+    // AUDIT: NAMES AND COUNTS ONLY, the same discipline the PATCH route above
+    // documents at length. A telemetry plan holds no secret today, and the way
+    // to keep that true is to never establish the habit of dumping it.
+    audit.log({
+      req,
+      action: 'profile_engagement.telemetry_set',
+      source: 'ciab',
+      target: {
+        type: 'engagement', id: req.params.engagementId,
+        label: engagementDisplayName(engagement),
+      },
+      metadata: {
+        profile_id: engagement.profile_id,
+        engagement_type: engagement.engagement_type,
+        subnet_scheme: engagement.subnet_scheme,
+        stack: engagement.telemetry_plan.stack || null,
+        sensor: engagement.telemetry_plan.sensor === true,
+        warnings: warnings.map(w => w.code),
+      },
+    });
+
+    res.json({ engagement: project(engagement, isAdmin(req)), warnings });
   } catch (err) {
     sendErr(res, err);
   }

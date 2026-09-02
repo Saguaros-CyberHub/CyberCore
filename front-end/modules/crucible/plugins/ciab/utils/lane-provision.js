@@ -45,6 +45,18 @@ const challengeLaneDeployer = require('../../../../../src/utils/challenge-lane-d
 const { installVulnAppOnVM } = require('./vuln-app-install');
 const { ensureVulnImage } = require('./vuln-app-builder');
 const laneReseed = require('./lane-reseed');
+// E3. chainPostDeploy is the composer; the sensor stamp is what makes the
+// incident engine's target ladder hit rung 0 on the first run. Both are inert
+// on an engagement with no telemetry: makeSensorStampPostDeploy returns null
+// when the spec declares no sensor, and chainPostDeploy of one hook IS that
+// hook, so an offensive lane composes to exactly what it composed to before.
+const blueteamPostDeploy = require('./blueteam-postdeploy');
+// E7. Where the CLIENT'S OWN benign floor comes from. floorForEngagement() is
+// best-effort by design and returns null for every ordinary "there is no floor
+// here" state — an offensive engagement, a client with no threat scenarios, an
+// engagement whose scenario has not been chosen yet — which composes to no hook
+// at all and leaves the lane exactly as it was before this phase.
+const scenarioSource = require('./scenario-source');
 
 const MODULE_KEY = 'ciab';
 const LOG = '[CIAB Lane]';
@@ -410,11 +422,17 @@ async function mirrorLaneJob({ groupId, laneId, vxlanId, laneIndex, status, node
  * @param {boolean}[a.attackBoxes=true]
  * @param {object} [a.vulnAppInstall]   spec.vuln_app_install, or null
  * @param {Array}  [a.instructorEmails]
+ * @param {string} [a.engagementId]     E3: stamped on every lane's config
+ * @param {string} [a.profileId]        E3: stamped on every lane's config
  * @returns {Promise<{progressId, provisioned, failed}>}
  */
 async function provisionProfileLanes({
   groupId, groupName, groupSlug, challenge, students,
   attackBoxes = true, vulnAppInstall = null, instructorEmails = [],
+  // E3. Both are written onto every lane's config and nowhere else. See the
+  // laneConfig block below for why they are what lets the incident engine find
+  // a CiAB lane at all.
+  engagementId = null, profileId = null,
 }) {
   if (!groupId) throw new Error('provisionProfileLanes: groupId is required');
   if (!challenge) throw new Error('provisionProfileLanes: challenge is required');
@@ -455,6 +473,41 @@ async function provisionProfileLanes({
   // — see lane-reseed.js. `records` is drained after the deploy returns.
   const reseed = laneReseed.makeReseedPostDeploy({ logTag: `${LOG}[${groupName || groupId}]` });
 
+  // E3. Same drain-afterwards shape as the reseed above, and for the same
+  // reason: the deployer writes each lane's config WHOLE after the hook runs,
+  // so a stamp made inside the hook does not survive. `records` is drained
+  // below, once the deploy has returned.
+  const sensorStampRecords = new Map();
+  const sensorStamp = blueteamPostDeploy.makeSensorStampPostDeploy(spec, {
+    records: sensorStampRecords,
+    logTag: `${LOG}[${groupName || groupId}]`,
+  });
+
+  // ── E7: THE FLOOR SWAP ────────────────────────────────────────────────────
+  //
+  // The baked sensor image ships a GENERIC benign floor — web-01, db-01,
+  // ws-042. A CiAB client's estate is DC01, FILE01, HMI-01. Leave the generic
+  // floor in place and every event the incident emits names a machine ordinary
+  // traffic never mentions, so one terms aggregation on `loggen.source.host` in
+  // Discover ends the exercise — and every part of it reviews as working.
+  //
+  // Compiled ONCE for the batch, not per lane: the floor describes the CLIENT,
+  // so it is identical on every environment of an engagement.
+  //
+  // Awaited BEFORE the deploy rather than inside the hook, so a client profile
+  // that cannot produce a floor is one log line here instead of one per lane.
+  const clientFloor = await scenarioSource.floorForEngagement(engagementId, {
+    logTag: `${LOG}[${groupName || groupId}]`,
+  });
+  const floorSwap = blueteamPostDeploy.makeFloorSwapPostDeploy(spec, {
+    floor: clientFloor ? clientFloor.floor : null,
+    logTag: `${LOG}[${groupName || groupId}]`,
+  });
+  if (clientFloor) {
+    console.log(`${LOG}[${groupName || groupId}] publishing the client's own benign floor `
+      + `(scenario ${clientFloor.scenarioId}) onto every sensor`);
+  }
+
   const result = await challengeLaneDeployer.deployChallengeLanes({
     users: students.map(s => ({ id: s.id, email: s.email })),
     challenge,
@@ -470,10 +523,24 @@ async function provisionProfileLanes({
     // is silent rather than loud.
     vulnScripts: vulnScriptsFromSpec(spec),
 
-    postDeploy: makeProfilePostDeploy({
-      vulnAppInstall: resolvedVulnApp,
-      reseedHook: reseed.hook,
-    }),
+    // CHAINED, not merged into makeProfilePostDeploy. The vuln-app install is a
+    // Docker pull over the lane's one iptables hole and fails for reasons that
+    // have nothing to do with telemetry; chainPostDeploy runs each function in
+    // its own try, so a throw there cannot skip the sensor stamp. With no
+    // sensor in the spec the second entry is null and this IS the first hook.
+    postDeploy: blueteamPostDeploy.chainPostDeploy(
+      makeProfilePostDeploy({
+        vulnAppInstall: resolvedVulnApp,
+        reseedHook: reseed.hook,
+      }),
+      sensorStamp,
+      // AFTER the stamp, and that ordering is deliberate rather than
+      // incidental: chainPostDeploy runs every hook in its own try, so the
+      // order does not decide whether one runs — but the stamp is the cheap
+      // one-statement write that makes the environment findable at all, and it
+      // should land before a 30KB guest exec that can take a while.
+      floorSwap,
+    ),
 
     // Batch-wide only: laneConfig is spread verbatim into every lane's config,
     // so nothing per-student belongs here. Student identity is already on the
@@ -482,6 +549,27 @@ async function provisionProfileLanes({
       ciab: true,
       profile_lane_group: true,
       group_id: groupId,
+      // ── E3: how anything outside this plugin FINDS a CiAB lane. ──────────
+      //
+      // The incident engine discovers a scope's lanes by querying
+      // cybercore_lane.config: a course lane is `config->>'course_id' = $1`,
+      // and a CiAB lane is `config->>'engagement_id' = $1 AND
+      // config->>'ciab' = 'true'`. Without these two keys the second arm
+      // matches nothing, and a defensive engagement deploys a sensor and a
+      // SIEM that no run can ever be aimed at.
+      //
+      // NO ALLOWLIST EDIT IS NEEDED, and that is worth stating because there IS
+      // an allowlist and it is easy to assume this must be in it.
+      // LANE_CONFIG_PASSTHROUGH_KEYS belongs to lane-deployer.js's WORKSTATION
+      // path; challenge-lane-deployer spreads `laneConfig` VERBATIM into the
+      // active config it writes. These keys arrive intact with no change on
+      // that side.
+      //
+      // Both are null on a group deployed before engagements existed, which is
+      // exactly right: `config->>'engagement_id'` is then SQL NULL and the
+      // discovery query does not match it, rather than matching it wrongly.
+      engagement_id: engagementId || null,
+      profile_id: profileId || null,
     },
     namePrefix: laneNamePrefix(groupSlug),
     guacParent: 'ROOT',
@@ -494,6 +582,8 @@ async function provisionProfileLanes({
   // The deployer has now written each lane's config whole, so this is the first
   // moment a reseed record can survive being written. See applyReseedRecords.
   await applyReseedRecords(reseed.records);
+  // Same moment, same reason. See makeSensorStampPostDeploy's header.
+  await blueteamPostDeploy.applySensorStamps(sensorStampRecords);
 
   // Mirror outcomes. Authoritative pass — the hook cannot run for a lane that
   // failed before it, and a failed lane still needs a row the UI can show.
@@ -557,6 +647,11 @@ async function provisionProfileLanes({
 async function retryProfileLane({
   groupId, groupName, groupSlug, challenge, laneId, user, laneIndex,
   attackBoxes = true, vulnAppInstall = null, extraVmIds = [],
+  // E3. A retry produces a NEW lane row, so it has to re-state everything the
+  // first deploy stamped on the old one. Omitting them here would leave exactly
+  // one lane in a class invisible to the incident engine — the one that was
+  // already having a bad day, which is the hardest kind of gap to notice.
+  engagementId = null, profileId = null,
 }) {
   if (!laneId) throw new Error('retryProfileLane: laneId is required');
   if (!user || !user.id) throw new Error('retryProfileLane: user is required');
@@ -606,6 +701,24 @@ async function retryProfileLane({
   // per-lane reseed the first deploy did — the rebuilt machines are clones of
   // the same golden images and carry the same baked values.
   const reseed = laneReseed.makeReseedPostDeploy({ logTag: `${LOG}[retry]` });
+  const sensorStampRecords = new Map();
+  const sensorStamp = blueteamPostDeploy.makeSensorStampPostDeploy(spec, {
+    records: sensorStampRecords,
+    logTag: `${LOG}[retry]`,
+  });
+
+  // E7. A retried environment is a fresh clone of the same golden image, so it
+  // comes back carrying the GENERIC baked floor. Rebuilding one lane without
+  // this would put a single environment on a different vocabulary from the rest
+  // of the engagement — and the student sitting at it would be the only one who
+  // could end the hunt with one aggregation.
+  const clientFloor = await scenarioSource.floorForEngagement(engagementId, {
+    logTag: `${LOG}[retry]`,
+  });
+  const floorSwap = blueteamPostDeploy.makeFloorSwapPostDeploy(spec, {
+    floor: clientFloor ? clientFloor.floor : null,
+    logTag: `${LOG}[retry]`,
+  });
 
   const result = await challengeLaneDeployer.deployChallengeLanes({
     users: [{ id: user.id, email: user.email }],
@@ -614,11 +727,24 @@ async function retryProfileLane({
     attackBoxes,
     pinAllVms: true,
     vulnScripts: vulnScriptsFromSpec(spec),
-    postDeploy: makeProfilePostDeploy({
-      vulnAppInstall: resolvedVulnApp,
-      reseedHook: reseed.hook,
-    }),
-    laneConfig: { ciab: true, profile_lane_group: true, group_id: groupId },
+    postDeploy: blueteamPostDeploy.chainPostDeploy(
+      makeProfilePostDeploy({
+        vulnAppInstall: resolvedVulnApp,
+        reseedHook: reseed.hook,
+      }),
+      sensorStamp,
+      floorSwap,
+    ),
+    // Must stay in step with provisionProfileLanes' laneConfig, key for key.
+    // A retried lane that is missing engagement_id is a lane the incident
+    // engine's discovery query does not return.
+    laneConfig: {
+      ciab: true,
+      profile_lane_group: true,
+      group_id: groupId,
+      engagement_id: engagementId || null,
+      profile_id: profileId || null,
+    },
     namePrefix: laneNamePrefix(groupSlug),
     guacParent: 'ROOT',
     description: `CIAB profile deploy: ${groupName || groupId} (retry)`,
@@ -627,6 +753,7 @@ async function retryProfileLane({
   });
 
   await applyReseedRecords(reseed.records);
+  await blueteamPostDeploy.applySensorStamps(sensorStampRecords);
 
   const fresh = (result.provisioned || [])[0];
   const failed = (result.failed || [])[0];

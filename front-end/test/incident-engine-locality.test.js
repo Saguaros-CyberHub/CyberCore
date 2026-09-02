@@ -35,11 +35,12 @@
  * there" without a live Proxmox cluster.
  *
  * WHAT IS DELIBERATELY ALLOWED
- * One-line re-export shims at the old cle/utils/ paths. E1 leaves them so the
- * strangler does not have to land in one commit; E2 re-points the CLE routes and
- * deletes them. A shim contains none of the forbidden tokens, so it passes this
- * gate for free — and if someone ever pastes an implementation back into one,
- * that is precisely the case this file is here to fail.
+ * One-line re-export shims at the old cle/utils/ paths. E1 left them so the
+ * strangler did not have to land in one commit; E2 re-pointed the CLE routes and
+ * DELETED them, which is the destination state the shim test below now records
+ * rather than enforces. A shim contains none of the forbidden tokens, so it
+ * passed this gate for free — and if one ever comes back carrying an
+ * implementation, that is precisely the case this file is here to fail.
  *
  * Run: node --test front-end/test/incident-engine-locality.test.js  (or npm test)
  */
@@ -251,27 +252,53 @@ test('the incident tables carry no cross-database foreign key, and the mutex is 
   }
 });
 
-test('src/incident/ never requires upward into a plugin, except the one E2 removes', () => {
-  // Core must not depend on a module that can be disabled. One exception exists
-  // right now and it is named, not tolerated silently: runner.js and worker.js
-  // still take the CLE pool, because E1 is a pure relocation and the SQL has to
-  // keep talking to the same database it talked to yesterday. E2 swaps it for
-  // cybercoreQuery and this allowance goes with it.
+test('src/incident/ never requires upward into a plugin — no exceptions left', () => {
+  // Core must not depend on a module that can be disabled. E1 held ONE exception
+  // open and named it: runner.js and worker.js took the CLE pool, because the
+  // run tables were still cle_attack_run / cle_attack_target in cle_db and a
+  // pure relocation had to keep talking to the same database.
   //
-  // Pinning the exception rather than the absence is what stops a THIRD upward
-  // require appearing under cover of the second.
-  const ALLOWED = new Set(['src/incident/runner.js', 'src/incident/worker.js']);
-  const offenders = [];
-  for (const f of walk(INCIDENT)) {
-    const code = codeOnly(fs.readFileSync(f.full, 'utf8'));
-    if (!/require\(['"][^'"]*modules\/crucible\/plugins\//.test(code)) continue;
-    if (ALLOWED.has(f.rel)) {
-      assert.match(code, /modules\/crucible\/plugins\/cle\/utils\/db/,
-        `${f.rel} may only reach into the plugin for its database pool (E2 removes it)`);
-      continue;
-    }
-    offenders.push(f.rel);
-  }
+  // E2 closed it. Both files now write cybercore_incident_run / _target through
+  // cybercoreQuery, and the allowance is GONE rather than narrowed — which is
+  // the state worth pinning, because a re-introduced require would arrive
+  // looking exactly like the one that used to be legitimate.
+  //
+  // The pre-cutover rows still need a sweep and it still needs the CLE pool.
+  // That sweep lives in the PLUGIN (cle/routes/attacks.js
+  // recoverLegacyAttackRuns) and src/server.js calls it — a plugin requiring
+  // core, plus a boot sequence that already reaches into CiAB and CLE the same
+  // way. Neither direction is this file's concern; what it forbids is
+  // src/incident/ reaching upward.
+  const offenders = walk(INCIDENT)
+    .filter((f) => /require\(['"][^'"]*modules\/crucible\/plugins\//
+      .test(codeOnly(fs.readFileSync(f.full, 'utf8'))))
+    .map((f) => f.rel);
   assert.deepStrictEqual(offenders, [],
     'core must not require into a plugin:\n  ' + offenders.join('\n  '));
+});
+
+test('the shared incident tables are the only run tables src/incident/ writes', () => {
+  // The rename half of E2, pinned as source text because there is no database in
+  // this suite to observe it against.
+  //
+  // A LEFTOVER cle_attack_* statement in core is the worst possible outcome of a
+  // partial re-point: cybercoreQuery would run it against cybercore_db, where
+  // those tables do not exist, so the statement throws — and every throw on this
+  // path is already swallowed (dispatch catches per lane, the sweeper catches
+  // per target, boot recovery catches the lot). The result is an attack that
+  // dispatches and is never reconciled, with one warning line to show for it.
+  const offenders = [];
+  for (const f of walk(INCIDENT)) {
+    if (!/\.js$/.test(f.rel)) continue;
+    const code = codeOnly(fs.readFileSync(f.full, 'utf8'));
+    if (/\bcle_attack_(run|target)\b/.test(code)) offenders.push(f.rel);
+  }
+  assert.deepStrictEqual(offenders, [],
+    'src/incident/ must not name the legacy CLE tables:\n  ' + offenders.join('\n  '));
+
+  for (const name of ['runner.js', 'worker.js']) {
+    const src = fs.readFileSync(path.join(INCIDENT, name), 'utf8');
+    assert.match(src, /cybercore_incident_target/, `${name} must write the shared target table`);
+    assert.match(src, /cybercore_incident_run/, `${name} must write the shared run table`);
+  }
 });

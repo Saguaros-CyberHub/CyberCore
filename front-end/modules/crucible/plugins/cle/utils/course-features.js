@@ -57,6 +57,21 @@ const COURSE_FEATURES = [
     // Only CYBR 400 has the loggen sensor image the console dispatches to.
     defaultFor: (code) => normalizeCode(code).startsWith('CYBR400'),
   },
+  {
+    key: 'blue_team',
+    label: 'Blue Team Board',
+    optional: true,
+    // The defensive half of the same course. Same default as the Attack
+    // Console and for the same reason: CYBR 400 is the course whose lanes carry
+    // a sensor and a SIEM, so it is the only one where a board has anything to
+    // grade. A course without them would show a tab whose every run is empty.
+    //
+    // Separate from attack_console rather than folded into it, because the two
+    // are read by different people: an instructor can run the console while the
+    // board stays closed, which is exactly the state a class is in between the
+    // launch and the debrief.
+    defaultFor: (code) => normalizeCode(code).startsWith('CYBR400'),
+  },
 ];
 
 const OPTIONAL_FEATURES = COURSE_FEATURES.filter((f) => f.optional);

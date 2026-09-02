@@ -243,6 +243,23 @@ const CHAINS = [
 const TECHNIQUE_RE = /^T\d{4}(\.\d{3})?$/;
 const TACTIC_RE = /^TA\d{4}$/;
 
+/**
+ * A scenario id, and it is NOT one of upstream's.
+ *
+ * It lives here beside the other two because it is validated for the same
+ * reason and at the same points, but it comes from somewhere else entirely: a
+ * client profile's `threat_profile.scenarios[].scenario_id`, written by the
+ * profile generator ('TS-001') and never checked by anything on the way in. So
+ * there is no catalog to test membership against — shape is the whole
+ * validation, and it is a REFUSAL rather than a sanitize because the value
+ * reaches a root shell inside a student's VM as the wrapper's fifth argument.
+ *
+ * The 64-character ceiling is cybercore_incident_run.scenario_id's own
+ * VARCHAR(64), restated rather than invented, so a value that passes here
+ * cannot fail the INSERT.
+ */
+const SCENARIO_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
 const _techniqueById = new Map(TECHNIQUES.map((t) => [t.id, t]));
 const _tacticById = new Map(TACTICS.map((t) => [t.id, t]));
 const _chainByKey = new Map(CHAINS.map((c) => [c.key, c]));
@@ -362,6 +379,7 @@ module.exports = {
   CHAINS,
   TECHNIQUE_RE,
   TACTIC_RE,
+  SCENARIO_ID_RE,
   findTechnique,
   findTactic,
   findChain,

@@ -1,5 +1,11 @@
 /**
- * CLE Plugin — dispatch log-generator attacks into every lane (CYBR 400)
+ * Incident engine — dispatch log-generator attacks into every lane in a SCOPE
+ * ============================================================================
+ * A "scope" is whatever owns a set of student lanes. There are two: a CLE course
+ * (CYBR 400) and a CiAB engagement. They are discovered by different keys in
+ * cybercore_lane.config and by nothing else — see findScopeLanes() — and from
+ * the moment the lane list exists this file cannot tell them apart, which is the
+ * entire point of the generalization.
  * ============================================================================
  * Owns the guest-side contract: the wrapper script, the commands that stage,
  * inspect and abort it, and the validation of everything interpolated into them.
@@ -31,7 +37,10 @@ const {
   agentShellExec,
   pollExecStatus,
 } = require('../utils/script-executor');
-const { formatDuration, findTechnique, findTactic, findChain, TECHNIQUE_RE, TACTIC_RE } = require('./catalog');
+const {
+  formatDuration, findTechnique, findTactic, findChain,
+  TECHNIQUE_RE, TACTIC_RE, SCENARIO_ID_RE,
+} = require('./catalog');
 
 /** Where the wrapper and its per-run state live on the guest. */
 const GUEST_BASE = '/opt/cybercore';
@@ -154,6 +163,23 @@ const PLAYBOOKS = (() => {
  */
 function playbookFor(selection) {
   if (!selection) return null;
+  // A COMPILED playbook travels ON the selection, and is checked FIRST.
+  //
+  // Scenario mode (E4/E7) has no file to look up: scenario-compiler.js builds
+  // the playbook per run out of ONE client's estate, and the route hands it
+  // down through the engine adapter's resolveSelection. Looking in PLAYBOOKS
+  // first would mean a client whose scenario_id happened to collide with a
+  // technique filename silently ran the shipped playbook instead of their own.
+  //
+  // Returned as TEXT because that is what this function's callers already
+  // expect — buildDispatchCommand base64s it straight into the guest, and
+  // engines/synthetic.js's compileAnswerKey parses it back. An object is
+  // serialised here rather than at each call site.
+  if (selection.playbook) {
+    return typeof selection.playbook === 'string'
+      ? selection.playbook
+      : JSON.stringify(selection.playbook);
+  }
   if (selection.mode === 'chain') return PLAYBOOKS.get(`chain-${selection.arg}`) || null;
   if (selection.mode === 'technique') return PLAYBOOKS.get(selection.arg) || null;
   return null;
@@ -237,12 +263,28 @@ function buildDispatchCommand(args) {
   const capSeconds = assertInt(args.capSeconds, 'capSeconds', { min: 60, max: 86400 });
 
   const mode = String(args.mode);
-  if (!['technique', 'tactic', 'chain'].includes(mode)) throw new Error(`unknown mode: ${mode}`);
+  if (!['technique', 'tactic', 'chain', 'scenario'].includes(mode)) {
+    throw new Error(`unknown mode: ${mode}`);
+  }
 
   const arg = String(args.arg || '');
   assertNoNewline(arg, 'arg');
   if (mode === 'chain') {
     if (!findChain(arg)) throw new Error(`unknown attack chain: ${JSON.stringify(arg)}`);
+  } else if (mode === 'scenario') {
+    // A scenario id cannot be checked against a catalog -- it is the CLIENT's
+    // string, out of their own threat profile -- so shape is the whole
+    // validation, and it is refused rather than sanitized because it lands in
+    // the wrapper's fifth argv slot inside a root shell.
+    if (!SCENARIO_ID_RE.test(arg)) throw new Error(`invalid scenario id: ${JSON.stringify(arg)}`);
+    // The playbook is what MAKES it a scenario run. Without one the wrapper
+    // derives wrapperMode from the file's absence, falls through to the
+    // keyword generator with an argument that means nothing to it, and reports
+    // a completed run that generated no incident -- the exact silent success
+    // the mode was withheld for until E4.
+    if (!args.playbookJson) {
+      throw new Error('scenario dispatch requires a compiled playbook; refusing to dispatch one without');
+    }
   } else {
     const re = mode === 'technique' ? TECHNIQUE_RE : TACTIC_RE;
     if (!re.test(arg)) throw new Error(`invalid ${mode} id: ${JSON.stringify(arg)}`);
@@ -396,24 +438,23 @@ function parseGuestState(stdout) {
 
 const { cybercoreQuery } = require('../utils/cybercore-db');
 const { proxmoxAPI } = require('../utils/proxmox');
-// TEMPORARY, AND IT IS A LAYERING INVERSION — E2 DELETES THIS LINE.
-//
-// `query` is the CLE PLUGIN'S pool (cle_db), which is where cle_attack_run and
-// cle_attack_target still live. src/ requiring into modules/crucible/plugins/ is
-// backwards: plugins may require core, core must not require a plugin, or a
-// disabled plugin takes core down with it.
-//
-// It survives this phase ON PURPOSE. E1 is a pure relocation — every assertion
-// in the existing test suite has to pass with no edit — so the SQL keeps talking
-// to the same database it talked to yesterday. E2 swaps this for
-// `cybercoreQuery` against cybercore_incident_run / _target (see
-// src/incident/schema.js) and this require disappears with it.
-//
-// Precedent for the direction while it exists: src/server.js already requires
-// the CLE and CiAB plugins for their boot sweeps, for the same reason — the
-// plugin owns the pool and only the plugin loader can inject it.
-const { query } = require('../../modules/crucible/plugins/cle/utils/db');
 const { getSchedulingConfig } = require('../utils/site-config');
+
+// ONE POOL, AND IT IS cybercore_db's.
+//
+// Until E2 this file reached UPWARD into modules/crucible/plugins/cle/utils/db
+// for the CLE pool, because the run and target tables were the plugin's own
+// cle_attack_run / cle_attack_target, in cle_db. That was a layering inversion
+// held open on purpose while the strangler was in flight, and it is gone:
+// everything below
+// writes cybercore_incident_run / cybercore_incident_target through
+// cybercoreQuery (src/incident/schema.js owns the DDL).
+//
+// Do not reintroduce a plugin require here. Core must not depend on a module
+// that can be disabled, and there is no longer any reason to: cybercore_db is
+// the one database BOTH plugins can already reach, which is why the shared
+// tables live in it. test/incident-engine-locality.test.js fails the build if a
+// require into modules/crucible/plugins/ reappears anywhere under src/incident/.
 
 /**
  * Lazily required. src/utils/batch-deployer calls getSchedulingConfig() at
@@ -435,27 +476,97 @@ function dispatchConcurrency() {
 }
 const attackTarget = require('./target');
 
+// ---------------------------------------------------------------------------
+// Scope polymorphism
+// ---------------------------------------------------------------------------
+
 /**
- * Every active lane belonging to a course, with its owner's email.
+ * The two things that can own a set of student lanes.
+ *
+ * Mirrors cybercore_incident_run.scope_type's CHECK exactly. Kept as a frozen
+ * list rather than derived from the schema string so the two have to be edited
+ * together deliberately — a third scope is a code change in four places, not a
+ * migration.
+ */
+const SCOPE_TYPES = Object.freeze(['course', 'engagement']);
+
+/**
+ * How a scope's lanes are recognised in cybercore_lane.config.
+ *
+ * THIS IS THE ONLY PLACE THE TWO CALLERS DIFFER, and the difference is one SQL
+ * fragment each:
+ *
+ *   course      config->>'course_id' = $1
+ *   engagement  config->>'engagement_id' = $1 AND config->>'ciab' = 'true'
+ *
+ * The engagement arm carries the SECOND predicate for a reason that is not
+ * belt-and-braces. `engagement_id` is a generic-sounding key in a free-form
+ * JSONB column that several deployers write; `ciab: true` is the marker
+ * lane-provision.js stamps on a CiAB profile lane and nothing else does. Without
+ * it, any future feature that happened to record an `engagement_id` on a lane
+ * would silently be swept into a CiAB instructor's dispatch — and an incident
+ * dispatched at a lane nobody meant to include is not a visible failure, it is
+ * an extra student getting an attack.
+ *
+ * Interpolated, not bound, because a predicate cannot be a parameter. It is safe
+ * BY CONSTRUCTION: this returns one of two literal strings chosen by a switch,
+ * and an unrecognised scopeType throws rather than falling through to something
+ * permissive. The scope's IDENTIFIER is always $1, always bound.
+ *
+ * Exported (via scopeLanesSql) so test/incident-scope.test.js can assert the two
+ * arms never collapse into the same statement — which is the failure that would
+ * hand one scope's lanes to the other's instructor.
+ */
+function scopeLanePredicate(scopeType) {
+  switch (scopeType) {
+    case 'course':
+      return `l.config->>'course_id' = $1`;
+    case 'engagement':
+      return `l.config->>'engagement_id' = $1 AND l.config->>'ciab' = 'true'`;
+    default:
+      throw new Error(
+        `unknown incident scope type ${JSON.stringify(scopeType)}; `
+        + `expected one of ${SCOPE_TYPES.join(', ')}`
+      );
+  }
+}
+
+/**
+ * The lane-discovery statement for one scope. Pure, so it is assertable.
+ *
+ * SELECT, JOIN and ORDER BY are IDENTICAL across scopes on purpose: everything
+ * downstream — the per-user collapse, the resolver ladder, the target rows —
+ * reads the same columns in the same order whichever caller asked.
  *
  * Deliberately NOT filtered to `config->>'material_id' IS NULL` the way
  * vuln-lab-provision.findCourseLanes() is. That filter separates a student's
  * workstation lane from their vulnerable-lab lane, but CYBR 400's sensor pair
  * can legitimately arrive by either route depending on how the instructor
  * deployed it. Resolving both and skipping the one without a sensor is honest;
- * guessing the wrong route silently targets nothing.
+ * guessing the wrong route silently targets nothing. It stays absent for the
+ * engagement arm too, and for a stronger reason: a CiAB profile lane IS the
+ * student's one lane for that engagement, so there is nothing to disambiguate
+ * and a material_id filter could only ever exclude the lane we are looking for.
  */
-async function findCourseLanes(courseId) {
-  const r = await cybercoreQuery(
-    `SELECT l.lane_id, l.user_id, l.name, l.status, l.module_key, l.config,
+function scopeLanesSql(scopeType) {
+  return `SELECT l.lane_id, l.user_id, l.name, l.status, l.module_key, l.config,
             u.email AS student_email, u.first_name, u.last_name
        FROM cybercore_lane l
        JOIN cybercore_user u ON u.user_id = l.user_id
-      WHERE l.config->>'course_id' = $1
+      WHERE ${scopeLanePredicate(scopeType)}
         AND l.status = 'active'
-      ORDER BY u.email, l.created_at DESC`,
-    [courseId]
-  );
+      ORDER BY u.email, l.created_at DESC`;
+}
+
+/**
+ * Every active lane belonging to a scope, with its owner's email.
+ *
+ * @param {object} scope
+ * @param {'course'|'engagement'} scope.scopeType
+ * @param {string} scope.scopeId  course_id or engagement_id — always bound as $1
+ */
+async function findScopeLanes({ scopeType, scopeId } = {}) {
+  const r = await cybercoreQuery(scopeLanesSql(scopeType), [scopeId]);
   return r.rows;
 }
 
@@ -483,18 +594,26 @@ async function loadPowerStates() {
 }
 
 /**
- * Resolve every lane in a course to its sensor VM.
+ * Resolve every lane in a scope to its sensor VM.
  *
  * One catalog + spec lookup is shared across lanes rather than repeated per
  * lane. Lanes are then collapsed per student: a student holding both a
  * workstation lane and a lab lane must be attacked once, on whichever lane
  * actually carries the sensor.
  *
+ * THE PER-USER COLLAPSE IS CORRECT FOR BOTH SCOPES, and it is worth saying why
+ * rather than leaving it to look like a CLE detail that survived. A CYBR 400
+ * student can hold two lanes (a workstation lane and a vulnerable-lab lane) and
+ * only one of them carries the sensor. A CiAB student holds exactly ONE lane per
+ * engagement, so the collapse is a no-op there — it cannot drop a lane that
+ * matters, and leaving it in means one code path instead of two.
+ *
+ * @param {object} scope  {scopeType, scopeId} — see findScopeLanes()
  * @returns {Promise<Array>} one entry per STUDENT, resolvable or not
  */
-async function resolveCourseTargets(courseId, { probe = null } = {}) {
+async function resolveScopeTargets(scope, { probe = null } = {}) {
   const [lanes, template, power] = await Promise.all([
-    findCourseLanes(courseId),
+    findScopeLanes(scope),
     attackTarget.loadLoggenTemplate().catch(() => null),
     loadPowerStates(),
   ]);
@@ -574,7 +693,7 @@ function makeGuestProbe(api = proxmoxAPI) {
  *
  * Runs detached from the HTTP request (the route has already returned 202), but
  * unlike every other background job in this codebase its state is durable: the
- * cle_attack_target rows are the record, not an in-memory registry, so a
+ * cybercore_incident_target rows are the record, not an in-memory registry, so a
  * restart mid-dispatch loses at most the rows still marked 'dispatching' —
  * which recoverAttackRuns() then marks 'unknown' rather than inventing an
  * outcome for.
@@ -584,8 +703,8 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
   const lead = leadSecondsFor(dispatchable.length);
   const startEpoch = Math.floor(Date.now() / 1000) + lead;
 
-  await query(
-    `UPDATE cle_attack_run
+  await cybercoreQuery(
+    `UPDATE cybercore_incident_run
         SET lead_seconds = $2, scheduled_start_at = to_timestamp($3), status = 'dispatching'
       WHERE run_id = $1`,
     [runId, lead, startEpoch]
@@ -602,8 +721,8 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
     // than skipping a student who would otherwise get nothing.
     const late = relDelay < 5;
 
-    await query(
-      `UPDATE cle_attack_target
+    await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = 'dispatching', dispatched_at = NOW(), late = $3, updated_at = NOW()
         WHERE run_id = $1 AND lane_id = $2`,
       [runId, t.lane_id, late]
@@ -682,8 +801,8 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       // empty-state check, which only fires while status is 'dispatching' --
       // so a wrapper that never started would sit at 'scheduled' forever
       // instead of being failed with a real reason.
-      await query(
-        `UPDATE cle_attack_target
+      await cybercoreQuery(
+        `UPDATE cybercore_incident_target
             SET status = CASE WHEN status = 'dispatching' AND $4::boolean
                               THEN 'scheduled' ELSE status END,
                 expected_finish_at = to_timestamp($3), error = NULL, updated_at = NOW()
@@ -711,8 +830,8 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
       // clock_skew_s already populated by the sweeper on the same row.
       //
       // So: only fail a target that is still sitting where dispatch left it.
-      const r = await query(
-        `UPDATE cle_attack_target
+      const r = await cybercoreQuery(
+        `UPDATE cybercore_incident_target
             SET status = 'failed', error = $3, finished_at = NOW(), updated_at = NOW()
           WHERE run_id = $1 AND lane_id = $2
             AND status = 'dispatching'`,
@@ -739,7 +858,7 @@ async function dispatchRun({ runId, selection, targets, api = proxmoxAPI }) {
  * The run only becomes terminal once no target is still in flight.
  */
 async function finalizeRunStatus(runId) {
-  const r = await query(
+  const r = await cybercoreQuery(
     `SELECT
         COUNT(*)                                                          AS total,
         COUNT(*) FILTER (WHERE status IN ('dispatching','scheduled','running')) AS live,
@@ -747,13 +866,13 @@ async function finalizeRunStatus(runId) {
         COUNT(*) FILTER (WHERE status IN ('failed','unknown'))            AS bad,
         COUNT(*) FILTER (WHERE status = 'skipped')                        AS skipped,
         COUNT(*) FILTER (WHERE status = 'aborted')                        AS aborted
-       FROM cle_attack_target WHERE run_id = $1`,
+       FROM cybercore_incident_target WHERE run_id = $1`,
     [runId]
   );
   const s = r.rows[0] || {};
   const n = (v) => Number(v || 0);
   if (n(s.live) > 0) {
-    await query(`UPDATE cle_attack_run SET status = 'running' WHERE run_id = $1 AND status <> 'aborted'`, [runId]);
+    await cybercoreQuery(`UPDATE cybercore_incident_run SET status = 'running' WHERE run_id = $1 AND status <> 'aborted'`, [runId]);
     return 'running';
   }
   let status = 'completed';
@@ -761,8 +880,8 @@ async function finalizeRunStatus(runId) {
   else if (n(s.completed) === 0 && n(s.bad) > 0) status = 'failed';
   else if (n(s.bad) > 0 || n(s.skipped) > 0) status = 'partial';
 
-  await query(
-    `UPDATE cle_attack_run SET status = $2, finished_at = COALESCE(finished_at, NOW()) WHERE run_id = $1`,
+  await cybercoreQuery(
+    `UPDATE cybercore_incident_run SET status = $2, finished_at = COALESCE(finished_at, NOW()) WHERE run_id = $1`,
     [runId, status]
   );
   return status;
@@ -780,8 +899,8 @@ async function finalizeRunStatus(runId) {
  * course's next dispatch on a lane nobody can fix.
  */
 async function abortRun(runId, api = proxmoxAPI) {
-  const r = await query(
-    `SELECT lane_id, node, vmid FROM cle_attack_target
+  const r = await cybercoreQuery(
+    `SELECT lane_id, node, vmid FROM cybercore_incident_target
       WHERE run_id = $1 AND status IN ('dispatching','scheduled','running')`,
     [runId]
   );
@@ -797,14 +916,14 @@ async function abortRun(runId, api = proxmoxAPI) {
     }
   }, { concurrency: dispatchConcurrency() });
 
-  await query(
-    `UPDATE cle_attack_target
+  await cybercoreQuery(
+    `UPDATE cybercore_incident_target
         SET status = 'aborted', finished_at = NOW(), updated_at = NOW()
       WHERE run_id = $1 AND status IN ('dispatching','scheduled','running')`,
     [runId]
   );
-  await query(
-    `UPDATE cle_attack_run SET status = 'aborted', finished_at = COALESCE(finished_at, NOW()) WHERE run_id = $1`,
+  await cybercoreQuery(
+    `UPDATE cybercore_incident_run SET status = 'aborted', finished_at = COALESCE(finished_at, NOW()) WHERE run_id = $1`,
     [runId]
   );
   return { aborted: live.length };
@@ -820,10 +939,10 @@ async function abortRun(runId, api = proxmoxAPI) {
  * which is the usual case ("three lanes were asleep, fire those three").
  */
 async function retryTargets({ runId, laneIds = null, selection, api = proxmoxAPI }) {
-  const r = await query(
+  const r = await cybercoreQuery(
     laneIds && laneIds.length
-      ? `SELECT * FROM cle_attack_target WHERE run_id = $1 AND lane_id = ANY($2::uuid[])`
-      : `SELECT * FROM cle_attack_target WHERE run_id = $1 AND status IN ('failed','skipped','unknown')`,
+      ? `SELECT * FROM cybercore_incident_target WHERE run_id = $1 AND lane_id = ANY($2::uuid[])`
+      : `SELECT * FROM cybercore_incident_target WHERE run_id = $1 AND status IN ('failed','skipped','unknown')`,
     laneIds && laneIds.length ? [runId, laneIds] : [runId]
   );
   if (r.rows.length === 0) return { retried: 0 };
@@ -831,16 +950,27 @@ async function retryTargets({ runId, laneIds = null, selection, api = proxmoxAPI
   // Re-resolve rather than reusing the stored vmid: the usual reason a lane was
   // skipped is that it had no identifiable sensor, and a lane repaired since
   // then needs the ladder run again.
-  const fresh = await resolveCourseTargets(
-    (await query(`SELECT course_id FROM cle_attack_run WHERE run_id = $1`, [runId])).rows[0].course_id,
+  //
+  // The SCOPE is read back off the run row rather than passed in, because a
+  // retry arrives from a route that only knows a run id. Both columns are read
+  // together: scope_id alone is not an identity — a course id and an engagement
+  // id are both UUIDs from the same space, which is the same reasoning that
+  // makes the dispatch mutex the PAIR (see src/incident/schema.js).
+  const scopeRow = (await cybercoreQuery(
+    `SELECT scope_type, scope_id FROM cybercore_incident_run WHERE run_id = $1`,
+    [runId]
+  )).rows[0];
+  if (!scopeRow) throw new Error(`incident run ${runId} no longer exists`);
+  const fresh = await resolveScopeTargets(
+    { scopeType: scopeRow.scope_type, scopeId: scopeRow.scope_id },
     { probe: makeGuestProbe(api) }
   );
   const wanted = new Set(r.rows.map((t) => t.lane_id));
   const targets = fresh.filter((t) => wanted.has(t.lane_id));
 
   for (const t of targets) {
-    await query(
-      `UPDATE cle_attack_target
+    await cybercoreQuery(
+      `UPDATE cybercore_incident_target
           SET status = $3, node = $4, vmid = $5, vm_name = $6, resolved_by = $7,
               skip_reason = $8, late = TRUE, attempt = attempt + 1,
               error = NULL, exit_code = NULL, event_count = NULL,
@@ -852,7 +982,7 @@ async function retryTargets({ runId, laneIds = null, selection, api = proxmoxAPI
     );
   }
 
-  await query(`UPDATE cle_attack_run SET status = 'dispatching', finished_at = NULL WHERE run_id = $1`, [runId]);
+  await cybercoreQuery(`UPDATE cybercore_incident_run SET status = 'dispatching', finished_at = NULL WHERE run_id = $1`, [runId]);
   const result = await dispatchRun({ runId, selection, targets, api });
   return { retried: targets.filter((t) => t.resolvable).length, ...result };
 }
@@ -866,9 +996,12 @@ module.exports = {
   parseGuestState,
   leadSecondsFor,
   // discovery + orchestration
-  findCourseLanes,
+  SCOPE_TYPES,
+  scopeLanePredicate,
+  scopeLanesSql,
+  findScopeLanes,
   loadPowerStates,
-  resolveCourseTargets,
+  resolveScopeTargets,
   makeGuestProbe,
   dispatchRun,
   finalizeRunStatus,

@@ -55,6 +55,11 @@ const {
 const {
   engagementModelFromRow, validateEngagementPlan, describeEngagementType,
   MODEL_FIELDS, JSONB_MODEL_FIELDS, AUTHORABLE_FIELDS, BAKE_TYPE_KEY,
+  // E3: telemetry_plan is migration 017's column, so it is deliberately NOT in
+  // MODEL_FIELDS (which a test pins to exactly the columns 011 adds) and has its
+  // own reader and its own writer here. See engagement-model.js's export note.
+  telemetryPlanFromRow, validateTelemetryPlan,
+  BLUE_TEAM_TYPE_KEY, BLUE_TEAM_SUBNET_SCHEME,
 } = require('./engagement-model');
 // ─── B3: the staging engagement cannot be pulled out from under a bake ───────
 // TWO NAMES ONLY — the status vocabulary and the per-client read — from the
@@ -161,6 +166,17 @@ function rowToEngagement(row) {
     // list and diffs it against this function's output, so the omission fails
     // a test rather than a demo.
     ...engagementModelFromRow(row),
+    // ── E3: the telemetry plan. ─────────────────────────────────────────────
+    // Projected by hand rather than through engagementModelFromRow because it
+    // is not a MODEL_FIELD: MODEL_FIELDS is the SET-clause list
+    // updateEngagementModel builds its UPDATE from, and a test pins it to
+    // exactly the columns migration 011 adds. This column is 017's.
+    //
+    // telemetryPlanFromRow is TOTAL: a row from a database where 017 has not
+    // run yet, and every row adoptExistingReservation INSERTed with its fixed
+    // 8-column list, reads back as {} rather than undefined — so widening this
+    // projection is a no-op for every existing caller.
+    telemetry_plan: telemetryPlanFromRow(row),
     retired_at: row.retired_at,
     updated_by: row.updated_by,
   };
@@ -425,6 +441,129 @@ async function updateEngagementModel(engagementId, patch, {
   return rowToEngagement(res.rows[0]);
 }
 
+// ─── E3: the telemetry plan writer ──────────────────────────────────────────
+
+/**
+ * Write ciab_engagement.telemetry_plan, and ONLY that column.
+ *
+ * WHY THIS IS NOT updateEngagementModel. That writer builds its SET list over
+ * MODEL_FIELDS, which a test pins to exactly the columns migration 011 adds —
+ * telemetry_plan is 017's, so adding it there would fail that test rather than
+ * pass this one. The deeper reason is that telemetry_plan is not instructor
+ * prose: its `sensor` key is DERIVED, and a generic patch route that echoed a
+ * stored plan straight back would be able to set it to a value the validator
+ * exists to make unauthorable. One narrow writer that re-derives on every write
+ * is the shape that cannot go wrong.
+ *
+ * The column is `NOT NULL DEFAULT '{}'::jsonb`, so `{}` is a legal value that
+ * means "this engagement stands up no telemetry" — clearing is a write, not a
+ * NULL.
+ *
+ * @throws {Error & {status:400}} when the plan does not validate
+ * @throws {Error & {status:404}} when the engagement is gone
+ */
+async function setEngagementTelemetryPlan(engagementId, plan, { actingUserId = null } = {}) {
+  if (!engagementId) throw Object.assign(new Error('engagementId is required'), { status: 400 });
+
+  const existing = await getEngagementById(engagementId);
+  if (!existing) throw Object.assign(new Error('Engagement not found'), { status: 404 });
+
+  const report = validateTelemetryPlan(plan, { engagementType: existing.engagement_type });
+  if (report.errors.length) {
+    const first = report.errors[0];
+    throw Object.assign(new Error(`${first.path}: ${first.message}`), {
+      status: 400,
+      code: 'TELEMETRY_PLAN_INVALID',
+      errors: report.errors,
+      warnings: report.warnings,
+    });
+  }
+
+  // ::jsonb on FIRST reference. Postgres fixes a parameter's type where it is
+  // first used, and test/sql-param-typing.test.js scans every .js under src/
+  // and modules/ for an uncast parameter in a NULL test — the same discipline
+  // updateEngagementModel's own comment records.
+  const res = await query(
+    `UPDATE ciab_engagement
+        SET telemetry_plan = $2::jsonb, updated_by = $3, updated_at = now()
+      WHERE engagement_id = $1
+      RETURNING *`,
+    [engagementId, JSON.stringify(report.value), actingUserId]
+  );
+  if (res.rows.length === 0) {
+    throw Object.assign(new Error('Engagement not found'), { status: 404 });
+  }
+  return { engagement: rowToEngagement(res.rows[0]), warnings: report.warnings };
+}
+
+/**
+ * Record WHICH threat scenario this engagement's telemetry is built around.
+ *
+ * ── WHY THE LAUNCHER WRITES TO A DEPLOY-TIME COLUMN ────────────────────────
+ * The benign floor on every sensor in an engagement is compiled from a scenario
+ * (utils/scenario-source.js), and so is the intrusion. They are two halves of
+ * ONE compilation: the attack playbook's pools are a clone of the floor's, which
+ * is what makes "no closed-vocabulary field separates the incident from ordinary
+ * traffic" true by construction rather than by review.
+ *
+ * That only holds if both halves name the SAME scenario. The floor is published
+ * at deploy time and the attack is chosen at launch time, days apart, so one of
+ * them has to be written down — and the launch is the moment an instructor
+ * actually decides. Recording it here means the next deploy, the next add-lanes
+ * and the next lane retry all rebuild the floor the incident was written for,
+ * instead of whichever scenario happened to be first in the profile.
+ *
+ * ── WHY IT MERGES INSTEAD OF WRITING THE PLAN ──────────────────────────────
+ * telemetry_plan also holds `stack`, the resolved template keys and
+ * floor_seeded_at. A writer that sent {scenario_id} alone would blank the
+ * images this engagement's lanes were built from, and the next redeploy would
+ * silently land on different ones. So: read, merge one key, write through
+ * setEngagementTelemetryPlan — which re-derives `sensor` and re-validates, so
+ * this cannot introduce a plan the validator exists to make unauthorable.
+ *
+ * ── WHY IT NEVER THROWS ────────────────────────────────────────────────────
+ * It returns a reason instead. The incident has already been dispatched by the
+ * time this runs; failing the launch over a bookkeeping write would abort a
+ * live exercise to protect the next one. The honest states it reports:
+ *
+ *   'no-plan'    the engagement stands up no telemetry (plan is {}, the column
+ *                default). Writing {scenario_id} would fail validation —
+ *                TELEMETRY_STACK_REQUIRED — and inventing a stack here would
+ *                deploy a SIEM nobody asked for on the next build.
+ *   'unchanged'  it already names this scenario.
+ *
+ * @param {string} engagementId
+ * @param {string} scenarioId
+ * @returns {Promise<{written: boolean, reason?: string, warnings?: Array}>}
+ */
+async function recordTelemetryScenario(engagementId, scenarioId, { actingUserId = null } = {}) {
+  const id = String(scenarioId == null ? '' : scenarioId).trim();
+  if (!engagementId || !id) return { written: false, reason: 'no-scenario' };
+
+  try {
+    const existing = await getEngagementById(engagementId);
+    if (!existing) return { written: false, reason: 'no-such-engagement' };
+
+    // rowToEngagement projects telemetry_plan through telemetryPlanFromRow,
+    // which answers {} for a plan with no recognised stack — exactly the
+    // 'no-plan' case below, and the reason this reads the projection rather
+    // than the raw column.
+    const plan = existing.telemetry_plan;
+    if (!plan || !plan.stack) return { written: false, reason: 'no-plan' };
+    if (String(plan.scenario_id || '') === id) return { written: false, reason: 'unchanged' };
+
+    const { warnings } = await setEngagementTelemetryPlan(
+      engagementId,
+      { ...plan, scenario_id: id },
+      { actingUserId }
+    );
+    return { written: true, warnings };
+  } catch (err) {
+    console.warn(`${LOG} could not record scenario ${id} on engagement ${engagementId}: ${err.message}`);
+    return { written: false, reason: 'error' };
+  }
+}
+
 // ─── The deploy gate ────────────────────────────────────────────────────────
 
 /**
@@ -480,6 +619,44 @@ function assertEngagementDeployable(engagement, { profileId, engagementType }) {
     err.code = 'ENGAGEMENT_INCONSISTENT';
     throw err;
   }
+
+  // ── E3: a defensive engagement on a block carved at the wrong scheme ──────
+  //
+  // THE SECOND HALF OF ONE RULE. validateEngagementPlan raises
+  // DEFENSIVE_REQUIRES_V2 as a 400 at AUTHORING time, which is where the
+  // mistake is still free to fix. This is the same rule at DEPLOY time, and it
+  // is a 409 rather than a 400 because by now it is not a bad request — it is a
+  // conflict with a network that already exists and cannot be changed.
+  //
+  // A BLOCK CANNOT BE RE-CARVED, and that is the whole reason this check exists
+  // separately. A v2 block holds ONE VNet per lane; a v3 block holds TWO, the
+  // second at tag + V3_INTERNAL_TAG_OFFSET. Rewriting the row's scheme does not
+  // create or destroy a VNet — it only makes the row LIE about what was carved,
+  // after which the deploy cables lanes onto bridges that exist on no node and
+  // the environment comes up unreachable. Migration 016's header has the full
+  // account, and it is why the remedy named below is a NEW engagement rather
+  // than an edit to this one.
+  //
+  // engagement.subnet_scheme is NOT NULL on the table, so the only way this is
+  // absent is a hand-built object in a test — in which case there is nothing to
+  // contradict and nothing to refuse.
+  const deployingType = engagementType || engagement.engagement_type;
+  if (deployingType === BLUE_TEAM_TYPE_KEY
+      && engagement.subnet_scheme
+      && engagement.subnet_scheme !== BLUE_TEAM_SUBNET_SCHEME) {
+    const err = new Error(
+      `This engagement's network was carved at ${engagement.subnet_scheme}, but a ` +
+      `'${BLUE_TEAM_TYPE_KEY}' engagement must be ${BLUE_TEAM_SUBNET_SCHEME}. On ` +
+      `${engagement.subnet_scheme} the student's console and the SIEM sit on different segments ` +
+      `with forwarding between them dropped, so the environment would come up with nothing to ` +
+      `look at. A block that has been carved cannot be re-carved — create a ` +
+      `${BLUE_TEAM_SUBNET_SCHEME} engagement for this client instead.`
+    );
+    err.status = 409;
+    err.code = 'ENGAGEMENT_SCHEME_NOT_V2';
+    throw err;
+  }
+
   return engagement;
 }
 
@@ -882,6 +1059,11 @@ module.exports = {
   assertEngagementDeployable,
   // Track B0: the model writer B1's PATCH route calls.
   updateEngagementModel,
+  // E3: the ONE writer for 017's column. Narrow on purpose — see its header.
+  setEngagementTelemetryPlan,
+  // E7: the launcher's merge-one-key writer on top of it, so the benign floor
+  // and the intrusion are compiled from the same scenario. Never throws.
+  recordTelemetryScenario,
   // Exported so a test can assert it projects every column the migration adds —
   // SELECT * hides the omission, because the database really does return them.
   rowToEngagement,

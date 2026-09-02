@@ -100,6 +100,9 @@ const GOAD_LABS = {
     displayName:  'GOAD-Light (3 Win VMs, 2 domains)',
     description:  'Lighter GOAD without Essos forest. Recommended starter.',
     forestRoot:   'cybersaguaros.local',
+    // ad/GOAD-Light/data/config.json declares tumamoc.cybersaguaros.local as the
+    // second domain — a CHILD (strict suffix of the root), not a trusted peer.
+    childSubdomain: 'tumamoc',
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
       { name: 'DC02',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 11, nic_model: 'e1000' },
@@ -110,6 +113,11 @@ const GOAD_LABS = {
     displayName:  'GOAD — full (5 Win VMs, 3 domains, 2 forests)',
     description:  'Full GOAD lab with cross-forest scenarios (Essos). Heaviest variant.',
     forestRoot:   'sevenkingdoms.local',
+    // north.sevenkingdoms.local in ad/GOAD/data/config.json. essos.local is the
+    // THIRD domain and is deliberately NOT recorded here: it is a separate forest
+    // reached by a trust, not a child, and ad-child_domain.yml only ever builds
+    // the `<label>.<parent>` shape.
+    childSubdomain: 'north',
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
       { name: 'DC02',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 11, nic_model: 'e1000' },
@@ -122,6 +130,7 @@ const GOAD_LABS = {
     displayName:  'GOAD-Mini (1 Win VM, single domain)',
     description:  'Minimal AD lab — just DC01. Fastest to deploy (~10 min).',
     forestRoot:   'sevenkingdoms.local',
+    childSubdomain: null,      // one domain, one DC — there is no child to name
     vms: [
       { name: 'DC01', role: 'dc', os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' }
     ]
@@ -137,6 +146,12 @@ const GOAD_LABS = {
     // /api/lab-templates hands the topology seed, so every NHA artifact named a
     // domain the lane does not have.
     forestRoot:   'ninja.hack',
+    // NULL, and this is the interesting one. NHA's second domain is
+    // academy.ninja.lan, which is NOT a suffix of ninja.hack — so it is a TRUST
+    // partner, not a child, and describing it as a child_subdomain would make
+    // ad-child_domain.yml derive a parent domain ('ninja.lan') that does not
+    // exist in lab.domains and kill the play. See ad-domain-rules.assertChild.
+    childSubdomain: null,
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
       { name: 'DC02',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 11, nic_model: 'e1000' },
@@ -149,6 +164,7 @@ const GOAD_LABS = {
     displayName:  'SCCM Lab (3 Win servers + 1 workstation)',
     description:  'SCCM/MECM lab with PXE, client deployment. Long runtime (~60 min).',
     forestRoot:   'sccm.lab',
+    childSubdomain: null,      // every SCCM host is in sccm.lab
     vms: [
       { name: 'DC01',  role: 'dc',          os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 40, nic_model: 'e1000' },
       { name: 'SRV01', role: 'member',      os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 41, nic_model: 'e1000' },
@@ -160,6 +176,7 @@ const GOAD_LABS = {
     displayName:  'DRACARYS (2 Win + 1 Linux VM)',
     description:  'Mixed Win+Linux lab. LX01 uses Ubuntu template (VMID 1003).',
     forestRoot:   'dracarys.lab',
+    childSubdomain: null,      // single domain
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
       { name: 'SRV01', role: 'member', os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 11, nic_model: 'e1000' },
@@ -183,6 +200,230 @@ const INFRA_IP_OCTETS = {
   // was reachable at .20. .50 is what every enforcing path uses.
   Kali:       50
 };
+
+// ============================================================================
+// GOAD EXTENSIONS — optional machines an authored environment can add to a lab
+// ============================================================================
+// Upstream GOAD ships these under GOAD-main/extensions/<key>/ as extra Ansible
+// inventories layered on top of a lab. CyberCore never runs GOAD's Ansible at
+// deploy time (golden images, or one bake on a staging lab), so
+// `spec.goad.extensions` here is a DECLARATION OF WHAT THE IMAGES ALREADY
+// CONTAIN — it places the machine and pins its address; it does not install
+// anything.
+//
+// Mirrors GOAD_LABS deliberately, field for field, so the same two readers
+// work: getExtension(key) is the catalog reader ("what does CyberCore ship?")
+// and resolveGoadLab(spec) is the deploy-time reader, which folds the `inLab`
+// extensions into the lab roster.
+//
+// ── The two placements, and why the difference matters ──────────────────────
+// `inLab: true`  the machine joins the AD forest, so it MUST appear in the lab
+//                roster: prepareGoadMacs matches BY NAME, and only a roster
+//                member gets a deterministic MAC + DHCP reservation, gets
+//                restarted onto that reservation, gets polled for WinRM, and
+//                gets the post-clone secure-channel heal.
+// `inLab: false` an ordinary pinnable spec VM. Being ABSENT from goadMacs is
+//                the whole point — resolveSpecAddressing skips a machine only
+//                when goadMacs[name] exists, and that function is the only
+//                source of the `host-record` that makes `elk.cybercore.lan`
+//                resolve (challenge-lane-deployer.js:307).
+//
+// ── `instruments` reads two ways, on purpose ────────────────────────────────
+// For a SIEM it is the inventory groups that stack COLLECTS from; for a member
+// machine it is the group it JOINS. That is what makes "is this host dark?"
+// computable in one expression: a machine whose group appears in no selected
+// SIEM's instruments ships no telemetry at all. topology-validate's
+// `siem-blind-host` is the rendering of exactly that — lx01 is [linux_domain],
+// elk covers [domain] only, wazuh covers both.
+const GOAD_EXTENSIONS = {
+  elk: {
+    key:            'elk',
+    displayName:    'ELK — Elasticsearch + Kibana (SIEM)',
+    description:    'Headless Ubuntu SIEM. Sysmon + winlogbeat ship to it from every Windows domain machine.',
+    machine:        'elk',
+    // .24, NOT the .50 that upstream's extensions/elk/inventory pins. On v3 .50
+    // was free because Kali lives on the EXTERNAL segment while a SIEM sits
+    // internally; on v1/v2 there is ONE flat lan0 and .50 is
+    // INFRA_IP_OCTETS.Kali. Two dhcp-host lines claiming one address make
+    // dnsmasq refuse to start, which takes DHCP down for the WHOLE lane.
+    // .24 is free in every lab we ship.
+    ipOctet:        24,
+    role:           'siem',
+    os:             'Ubuntu Server (headless)',
+    template_vmid:  null,        // the golden ELK image, registered per site
+    nic_model:      'virtio',
+    instruments:    ['domain'],
+    dns_aliases:    ['elk'],
+    compatibility:  null,        // null = every lab
+    inLab:          false,
+    // No desktop and no xrdp in GOAD's elk role, so it cannot BE an RDP console.
+    // The Designer surfaces this rather than letting an author discover it after
+    // a deploy hands the student a black screen.
+    headless:       true
+  },
+  wazuh: {
+    key:            'wazuh',
+    displayName:    'Wazuh — manager + SCA/FIM (SIEM)',
+    description:    'All-in-one Wazuh manager. Agents on Windows AND Linux domain machines; CIS benchmarks out of the box.',
+    machine:        'wazuh',
+    // Upstream's own octet, and free on v2 — so no inventory edit is needed.
+    ipOctet:        51,
+    role:           'siem',
+    os:             'Ubuntu Server (headless)',
+    template_vmid:  null,
+    nic_model:      'virtio',
+    instruments:    ['domain', 'linux_domain'],
+    dns_aliases:    ['wazuh'],
+    compatibility:  null,
+    inLab:          false,
+    headless:       true
+  },
+  ws01: {
+    key:            'ws01',
+    displayName:    'ws01 — analyst workstation (Windows 11)',
+    description:    'Domain-joined Windows 11 client. The cheapest way to make an intrusion cross hosts.',
+    machine:        'ws01',
+    ipOctet:        31,
+    role:           'workstation',
+    os:             'Windows 11',
+    template_vmid:  1002,
+    nic_model:      'e1000',
+    // It JOINS [domain] — upstream's extensions/ws01/inventory puts it there,
+    // which is exactly the group [elk_log:children] instruments, so it arrives
+    // instrumented with no extra work.
+    instruments:    ['domain'],
+    // Upstream declares compatibility: ["GOAD","GOAD-Light","GOAD-Mini"]. SCCM
+    // already ships its own WS01, and NHA/DRACARYS have no ws01 inventory.
+    compatibility:  ['GOAD', 'GOAD-Light', 'GOAD-Mini'],
+    // IN the roster: domain-joined, so it needs the deterministic MAC, the
+    // reserved IP, the DHCP-renew restart and the secure-channel heal.
+    inLab:          true,
+    headless:       false
+  },
+  lx01: {
+    key:            'lx01',
+    displayName:    'lx01 — Linux domain member',
+    description:    'Ubuntu joined to the domain. Covered by Wazuh only — the elk extension never touches [linux_domain].',
+    machine:        'lx01',
+    ipOctet:        32,
+    role:           'linux',
+    os:             'Ubuntu',
+    template_vmid:  1003,
+    nic_model:      'virtio',
+    instruments:    ['linux_domain'],
+    compatibility:  null,
+    inLab:          false,
+    headless:       true
+  }
+};
+
+// Load-time guard, not a test-only one: an extension octet that collides with
+// lane infrastructure is a lane-wide DHCP outage (dnsmasq refuses to start on a
+// duplicate dhcp-host), and the collision would otherwise surface for the first
+// time on a real deploy. Cheap enough to pay on every require.
+for (const [extKey, ext] of Object.entries(GOAD_EXTENSIONS)) {
+  for (const [infra, octet] of Object.entries(INFRA_IP_OCTETS)) {
+    if (ext.ipOctet === octet) {
+      throw new Error(
+        `GOAD_EXTENSIONS.${extKey} claims ipOctet ${octet}, which is the lane ${infra}. ` +
+        'On v1/v2 there is one flat subnet, so the two would be the same address.'
+      );
+    }
+  }
+}
+
+/** Catalog reader: a BUILT-IN extension by key, or null. */
+function getExtension(key) {
+  return GOAD_EXTENSIONS[String(key || '').toLowerCase()] || null;
+}
+
+/**
+ * Which extensions may be offered for a lab, and why the rest may not.
+ *
+ * Three independent reasons to exclude one, each of which otherwise produces a
+ * lane that looks authored and does not work:
+ *   compatibility   upstream declares which labs the extension's inventory can
+ *                   layer onto (ws01 has none for NHA/SCCM/DRACARYS).
+ *   name collision  the lab already ships a host with that name — two machines
+ *                   with one name means the second silently takes the first's
+ *                   address (assertValidLabDef's own rule, one level up).
+ *   octet collision same address, same subnet, dnsmasq down for the lane.
+ *
+ * @returns {Array<{key, ext, ok, reason}>} every extension, annotated — the UI
+ *          shows the disabled ones WITH the reason rather than hiding them.
+ */
+function extensionsForLab(labName, labDef) {
+  // getLab, not GOAD_LABS[labName]: the lab table has exactly two legal readers
+  // (getLab for the catalog, resolveGoadLab for a deploy) and a source-text gate
+  // in ciab-goad-lab-registration.test.js enforces it. It throws on an unknown
+  // name; an unknown lab here just means "offer everything", which is what a
+  // spec-supplied lab with no catalog entry should get.
+  let lab = labDef || null;
+  if (!lab) { try { lab = getLab(labName); } catch (e) { lab = null; } }
+  const labVms = (lab && Array.isArray(lab.vms)) ? lab.vms : [];
+  const takenNames = new Set(labVms.map(v => String(v.name).toLowerCase()));
+  const takenOctets = new Map(labVms.map(v => [v.ipOctet, v.name]));
+
+  return Object.values(GOAD_EXTENSIONS).map(ext => {
+    if (Array.isArray(ext.compatibility) && !ext.compatibility.includes(labName)) {
+      return { key: ext.key, ext, ok: false,
+        reason: `Upstream declares ${ext.key} compatible with ${ext.compatibility.join(', ')} only.` };
+    }
+    if (takenNames.has(ext.machine.toLowerCase())) {
+      return { key: ext.key, ext, ok: false,
+        reason: `${labName} already ships a host named ${ext.machine}.` };
+    }
+    if (takenOctets.has(ext.ipOctet)) {
+      return { key: ext.key, ext, ok: false,
+        reason: `.${ext.ipOctet} is already ${takenOctets.get(ext.ipOctet)} in ${labName}.` };
+    }
+    return { key: ext.key, ext, ok: true, reason: null };
+  });
+}
+
+/**
+ * The extensions a spec actually selected, split by placement.
+ *
+ * Unknown or incompatible keys are DROPPED rather than thrown on: `extensions`
+ * is authored in a UI against a catalog that can move under an existing
+ * challenge row, and a spec saved last term must still deploy. The Designer is
+ * where a bad key is caught, while it is still an author's problem.
+ *
+ * @returns {{ selected: string[], inLab: object[], external: Set<string> }}
+ *          inLab    — lab-roster entries, shaped like a GOAD_LABS vms[] row
+ *          external — lowercased machine names that are ordinary spec VMs, so
+ *                     assertGoadRoster knows they are not strays
+ */
+function resolveGoadExtensions(extensions, labName, labDef) {
+  const wanted = Array.isArray(extensions) ? extensions : [];
+  const allowed = new Map(
+    extensionsForLab(labName, labDef).filter(e => e.ok).map(e => [e.key, e.ext])
+  );
+  const selected = [];
+  const inLab = [];
+  const external = new Set();
+  for (const raw of wanted) {
+    const ext = allowed.get(String(raw || '').trim().toLowerCase());
+    if (!ext || selected.includes(ext.key)) continue;
+    selected.push(ext.key);
+    if (ext.inLab) {
+      inLab.push({
+        name:          ext.machine,
+        role:          ext.role,
+        os:            ext.os,
+        template_vmid: ext.template_vmid,
+        ipOctet:       ext.ipOctet,
+        nic_model:     ext.nic_model,
+        // So a reader of a composed roster can tell which hosts came from the
+        // lab table and which the author added.
+        extension:     ext.key
+      });
+    } else {
+      external.add(ext.machine.toLowerCase());
+    }
+  }
+  return { selected, inLab, external };
+}
 
 // Per-role resource defaults applied to Windows VM clones at deploy time.
 // Template VMID 1004 ships with whatever it was baked at; admin.js calls
@@ -389,7 +630,32 @@ function resolveGoadLab(specArg) {
     console.warn(`[GOAD] Unknown lab version '${labName}' — falling back to ${DEFAULT_LAB}`);
   }
   const labDef = lab || GOAD_LABS[DEFAULT_LAB];
-  return { labName, labDef, fromSpec: !!supplied };
+
+  // Fold in the extension machines that JOIN THE FOREST (ws01 today). They have
+  // to be part of the roster the rest of this module reads, because every AD
+  // affordance downstream is keyed on lab membership by NAME: the deterministic
+  // MAC, the DHCP reservation, the stop/start that renews onto it, the WinRM
+  // wait, and the pre-baked secure-channel heal. A domain-joined host outside
+  // the roster gets none of those and comes up on a random pool lease.
+  //
+  // A spec with no `extensions` gets baseDef BY IDENTITY — same object, same
+  // vms array — so every lane authored before this existed resolves exactly what
+  // it resolved before. That matters more than it looks: assertGoadRoster checks
+  // BOTH directions, so an extra roster entry that spec.vms does not carry is a
+  // hard deploy failure, and quietly widening the roster for existing specs
+  // would break every GOAD lane in flight.
+  //
+  // The line above is pinned by a source-text gate in
+  // test/ciab-engagement-model.test.js (B0-107): CiAB's compiler mirrors this
+  // membership decision offline, so `const labDef = lab || GOAD_LABS[DEFAULT_LAB];`
+  // is read as text and must stay spelled exactly that way. The composition
+  // below is therefore additive rather than a rewrite of it.
+  const ext = resolveGoadExtensions(spec.goad.extensions, labName, labDef);
+  const composed = ext.inLab.length
+    ? { ...labDef, vms: [...labDef.vms, ...ext.inLab] }
+    : labDef;
+
+  return { labName, labDef: composed, fromSpec: !!supplied, extensions: ext };
 }
 
 /**
@@ -412,13 +678,23 @@ function resolveGoadLab(specArg) {
  * playbook runs against a forest missing a DC — which surfaces hours later as
  * replication failures rather than as a deploy error.
  */
-function assertGoadRoster(spec, labName, labDef, fromSpec) {
+function assertGoadRoster(spec, labName, labDef, fromSpec, externalNames) {
   const declared = new Map(labDef.vms.map(v => [v.name.toLowerCase(), v.name]));
+  // Extension machines that are NOT in the forest (elk, wazuh, lx01) are
+  // ordinary spec VMs by design — see GOAD_EXTENSIONS' `inLab: false`. They
+  // would otherwise read as strays here: isGoadManagedVm only exempts
+  // EXTERNAL_ROLES, explicit nics[] and containers, and role 'linux' is a
+  // legitimate LAB role (DRACARYS ships LX01), so it cannot be exempted
+  // wholesale without punching a hole in the roster check for a real lab host.
+  // The exemption is therefore per-spec — it applies only to a machine the spec
+  // itself declared as an extension.
+  const exempt = externalNames || new Set();
   const managed = new Map();
   const strays = [];
   for (const vm of spec.vms) {
     if (!isGoadManagedVm(vm)) continue;
     const key = vm.name.toLowerCase();
+    if (exempt.has(key)) continue;
     managed.set(key, vm.name);
     if (!declared.has(key)) strays.push(vm.name);
   }
@@ -504,13 +780,13 @@ function prepareGoadMacs(spec, vxlanId, laneSubnetBase) {
   if (!spec?.goad?.enabled) return {};
   if (!Array.isArray(spec.vms)) return {};
 
-  const { labName, labDef, fromSpec } = resolveGoadLab(spec);
+  const { labName, labDef, fromSpec, extensions } = resolveGoadLab(spec);
 
   const byName = Object.fromEntries(labDef.vms.map(v => [v.name.toLowerCase(), v]));
 
   // THE HARD ERROR. Before this line existed the loop below silently skipped
   // any name it could not match, and the lane came up wrong without a word.
-  assertGoadRoster(spec, labName, labDef, fromSpec);
+  assertGoadRoster(spec, labName, labDef, fromSpec, extensions && extensions.external);
 
   const out = {};
   for (const vm of spec.vms) {
@@ -1609,8 +1885,19 @@ async function deployPrebakedGoadLane({
     .filter(v => v.type === 'qemu')
     .map(v => ({ ...v, labVm: labDef.vms.find(lv => lv.name.toLowerCase() === String(v.name).toLowerCase()) }))
     .filter(v => v.labVm && v.labVm.role !== 'linux');
-  const dcs     = tagged.filter(v => v.labVm.role === 'dc');
-  const members = tagged.filter(v => v.labVm.role === 'member');
+  const dcs = tagged.filter(v => v.labVm.role === 'dc');
+  // 'workstation' rides the SAME repair as 'member', and leaving it out is a
+  // silent bug rather than a missing feature. The heal in step 5 is not about
+  // what a box does in the lab — it is about what a GOLDEN-IMAGE CLONE does to
+  // machine identity: the clone resets VM-GenerationID, Netlogon tries to
+  // establish the secure channel before the DCs have finished settling, fails,
+  // and backs off into a broken state. Any domain-joined Windows clone needs
+  // that nudge. Before ws01 existed as an extension the split was exhaustive
+  // (every non-linux lab host was a dc or a member), so this filter was correct
+  // by accident; adding a workstation to the roster is what makes it wrong.
+  // A workstation left un-healed boots, looks fine, and cannot authenticate.
+  const HEAL_ROLES = ['member', 'workstation'];
+  const members = tagged.filter(v => HEAL_ROLES.includes(v.labVm.role));
 
   // Run a PowerShell one-liner inside a Windows clone via the guest agent.
   const winPS = async (vm, script, timeoutMs = 120000) => {
@@ -1690,7 +1977,7 @@ async function deployPrebakedGoadLane({
     }
   }
 
-  console.log(`[GOAD] prebaked: lane ${lane.lane_id} heal complete (${dcs.length} DC, ${members.length} member)`);
+  console.log(`[GOAD] prebaked: lane ${lane.lane_id} heal complete (${dcs.length} DC, ${members.length} member/workstation)`);
   return { prebaked: true, dcCount: dcs.length, memberCount: members.length };
 }
 
@@ -1724,6 +2011,13 @@ module.exports = {
   // Lab catalog (also surfaced via API endpoint for the admin UI)
   GOAD_LABS,
   DEFAULT_LAB,
+  // Extension catalog + its three readers. Same split as the lab table: a
+  // catalog reader for "what do we ship", a per-lab filter for "what may this
+  // environment use", and a spec resolver for "what did this one select".
+  GOAD_EXTENSIONS,
+  getExtension,
+  extensionsForLab,
+  resolveGoadExtensions,
   // The single deploy-time lab reader, plus the two rules it enforces. Exported
   // so a caller outside this module can ask "what lab is this spec, really?"
   // without re-deriving the precedence — and so the guard has tests.

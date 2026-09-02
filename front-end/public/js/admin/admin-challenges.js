@@ -841,7 +841,11 @@ function tplTopoMount() {
     subnetScheme: tplSubnetScheme,
     network: templateNetwork,
     goadHosts: tplGoadHostNames(),
-    onChange: () => { renderTemplateVMs(true); }
+    onChange: () => { renderTemplateVMs(true); },
+    // The canvas context menu's "Validate". The template editor modal has no
+    // validate button of its own, so this is wired to the same endpoint the
+    // Designer uses rather than left dead.
+    onValidate: () => { if (typeof tplTopoValidate === 'function') tplTopoValidate(); }
   });
   setTplVmView(tplVmView);
 }

@@ -265,6 +265,11 @@ test('B1a-R5: every route carries its own requireRole, with the exact split', ()
     'POST /adopt': 'adminOnly',
     'POST /:engagementId/reprovision': 'adminOnly',
     'POST /:engagementId/retire': 'adminOnly',
+    // Track E (E3). instructorOnly, and that is the same call PATCH makes:
+    // choosing which SIEM an environment runs is authoring, not capacity. It
+    // carves nothing, spends no VXLAN id, and setEngagementTelemetryPlan
+    // re-derives the one field an instructor must not author.
+    'PUT /:engagementId/telemetry': 'instructorOnly',
   };
 
   const seen = {};
@@ -272,7 +277,7 @@ test('B1a-R5: every route carries its own requireRole, with the exact split', ()
 
   assert.deepStrictEqual(
     Object.keys(seen).sort(), Object.keys(expected).sort(),
-    'the B1a route surface is exactly these eight routes'
+    "the engagement route surface is exactly these routes — B1a's eight plus E3's telemetry writer"
   );
   for (const key of Object.keys(expected)) {
     assert.strictEqual(seen[key], expected[key], `${key} must be ${expected[key]}`);

@@ -303,6 +303,51 @@
     .toggle-switch input:checked + .toggle-slider { background:#48bb78; }
     .toggle-switch input:checked + .toggle-slider::before { transform:translateX(18px); }
     .toggle-switch input:disabled + .toggle-slider { opacity:.5; cursor:not-allowed; }
+
+    /* ── Topology canvas context menu ──────────────────────────────────────
+       Cytoscape fires `cxttap` natively on nodes, edges and the core, so the
+       menu is plain absolutely-positioned HTML built by topology-editor.js.
+       public/vendor/ holds only cytoscape, edgehandles and lodash and there is
+       NO BUILD STEP, so vendoring a context-menu plugin would add a third-party
+       file to maintain for markup this size.
+
+       Positioned against <body> rather than the canvas: the canvas is inside a
+       CSS grid with overflow, and a menu clipped by its own container is worse
+       than no menu. z-index sits above the modal layer for the same reason —
+       the challenge-editor canvas lives inside one. */
+    .topo-ctxmenu {
+      position:absolute; z-index:11000; min-width:190px; max-width:280px;
+      padding:0.25rem; border-radius:8px;
+      background:var(--bg-card, #fff); color:var(--text-primary, #111);
+      border:1px solid var(--border-color, #d1d5db);
+      box-shadow:0 8px 28px rgba(0,0,0,0.22);
+      font-size:0.78rem; user-select:none;
+    }
+    .topo-ctxmenu-title {
+      padding:0.3rem 0.5rem 0.35rem; font-size:0.68rem; font-weight:700;
+      letter-spacing:0.04em; text-transform:uppercase;
+      color:var(--text-muted, #6b7280);
+      border-bottom:1px solid var(--border-color, #e5e7eb); margin-bottom:0.2rem;
+    }
+    .topo-ctxmenu-item {
+      display:flex; align-items:center; justify-content:space-between; gap:0.5rem;
+      padding:0.32rem 0.5rem; border-radius:5px; cursor:pointer; line-height:1.25;
+    }
+    .topo-ctxmenu-item:hover:not(.is-disabled) { background:var(--bg-card-hover, #f3f4f6); }
+    /* A disabled item keeps its ROW and shows why — the whole point of
+       disabling Rename on a GOAD host is to say that renaming it would break
+       the domain join, which a hidden item cannot say. */
+    .topo-ctxmenu-item.is-disabled { cursor:not-allowed; opacity:0.5; }
+    .topo-ctxmenu-item .topo-ctx-caret { color:var(--text-muted, #6b7280); font-size:0.7rem; }
+    .topo-ctxmenu-reason {
+      padding:0 0.5rem 0.35rem 0.5rem; margin:-0.15rem 0 0.2rem;
+      font-size:0.68rem; line-height:1.3; color:var(--text-muted, #6b7280);
+    }
+    .topo-ctxmenu-sep { height:1px; margin:0.25rem 0.35rem; background:var(--border-color, #e5e7eb); }
+    .topo-ctxmenu-empty { padding:0.3rem 0.5rem; color:var(--text-muted, #6b7280); }
+    /* A warning that is the state every shipped GOAD lab is already in must not
+       read as a blocker, or the slot gets ignored. */
+    .topo-field-error.is-warning { color:var(--warning, #f59e0b); }
   </style>
 </head>
 <body>
@@ -906,16 +951,17 @@
                     </select>
                   </div>
                   <div>
-                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">Forest Domain (read-only)</label>
-                    <input type="text" id="topoGoadDomain" value="cybersaguaros.local" readonly
-                           title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)"
-                           style="width:100%; padding:0.35rem; font-size:0.8rem; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-card-hover); color:var(--text-muted); cursor:not-allowed;">
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);" for="topoGoadDomain">Forest Domain</label>
+                    <input type="text" id="topoGoadDomain" value="cybersaguaros.local" oninput="onTopoGoadDomainInput()"
+                           title="Resets to the selected lab's own forest root when you change the GOAD version. A pre-baked lane cannot rename its forest — the domain lives in NTDS inside the golden image — so editing this only takes effect on a lane that runs the playbook."
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
                   </div>
                   <div>
-                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);">Child Subdomain (read-only)</label>
-                    <input type="text" id="topoGoadChild" value="tumamoc" readonly
-                           title="Set by the re-themed GOAD fork (ad/GOAD-Light/data/config.json)"
-                           style="width:100%; padding:0.35rem; font-size:0.8rem; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-card-hover); color:var(--text-muted); cursor:not-allowed;">
+                    <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);" for="topoGoadChild">Child Subdomain</label>
+                    <input type="text" id="topoGoadChild" value="tumamoc" oninput="onTopoGoadDomainInput()"
+                           placeholder="none"
+                           title="A single label, e.g. tumamoc — the child is always <label>.<forest domain>. Leave blank for a single-domain lab (GOAD-Mini, SCCM, NHA, DRACARYS)."
+                           style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
                   </div>
                 </div>
                 <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; align-items: end;">
@@ -953,6 +999,17 @@
                     the base the image's AD/DNS was provisioned on. Forces <strong>v3</strong>.
                   </p>
                 </div>
+                <div style="margin-top:0.6rem; padding-top:0.6rem; border-top:1px dashed #f6ad55;">
+                  <label style="font-size:0.7rem; font-weight:600; color:var(--text-secondary); display:block; margin-bottom:0.3rem;">
+                    Extensions
+                  </label>
+                  <div id="topoGoadExtensions"></div>
+                  <p class="topo-settings-hint">
+                    Upstream GOAD extensions. CyberCore never runs GOAD&#39;s Ansible at deploy time, so ticking one
+                    is a <strong>declaration of what the golden images already contain</strong> — it places the
+                    machine and pins its address. Ticking is surgical: nothing else on the canvas is disturbed.
+                  </p>
+                </div>
                 <p class="topo-settings-hint" id="topoGoadVersionDesc"></p>
                 <div class="topo-field-error" id="topoErrGoad" style="display:none;"></div>
               </div>
@@ -962,7 +1019,7 @@
               <button class="btn btn-sm btn-outline" id="topoViewCanvasBtn" onclick="setTopoVmView('canvas')">Canvas</button>
               <button class="btn btn-sm btn-outline" id="topoViewTableBtn"  onclick="setTopoVmView('table')">Table</button>
               <span class="topo-spacer"></span>
-              <span class="topo-hint">Drag a template in · drag from a machine to a network to attach · click a link to detach</span>
+              <span class="topo-hint">Drag a template in · drag from a machine to a network to attach · right-click anything for its menu</span>
               <button class="btn btn-sm btn-outline" onclick="topoDesignRelayout()" title="Re-arrange automatically">Auto-arrange</button>
               <button class="btn btn-sm btn-outline" onclick="topoDesignValidate()">Validate</button>
               <button class="btn btn-sm btn-outline" onclick="topoDesignExport()">Export</button>
@@ -1918,7 +1975,7 @@ msmith@arizona.edu, Mark, Smith"
         <button class="btn btn-sm btn-outline" id="tplViewCanvasBtn" onclick="setTplVmView('canvas')">Canvas</button>
         <button class="btn btn-sm btn-outline" id="tplViewTableBtn" onclick="setTplVmView('table')">Table</button>
         <span class="topo-spacer"></span>
-        <span class="topo-hint" id="tplTopoHint">Drag a template in · drag from a machine to a network to attach · click a link to detach</span>
+        <span class="topo-hint" id="tplTopoHint">Drag a template in · drag from a machine to a network to attach · right-click anything for its menu</span>
         <button class="btn btn-sm btn-outline" onclick="tplTopoRelayout()" title="Re-arrange automatically">Auto-arrange</button>
         <button class="btn btn-sm btn-outline" onclick="tplTopoValidate()">Validate</button>
         <button class="btn btn-sm btn-outline" onclick="tplTopoExport()">Export</button>
@@ -2074,6 +2131,10 @@ msmith@arizona.edu, Mark, Smith"
   <script src="/vendor/lodash.min.js"></script>
   <script src="/vendor/cytoscape.min.js"></script>
   <script src="/vendor/cytoscape-edgehandles.js"></script>
+  <!-- Loaded before the editor: topology-editor.js reads
+       window.CyberCoreAdDomainRules at call time, not load time, but keeping the
+       rulebook first means a console error here is unambiguous. -->
+  <script src="/js/topology/ad-domain-rules.js"></script>
   <script src="/js/topology/topology-icons.js"></script>
   <script src="/js/topology/topology-render.js"></script>
   <script src="/js/topology/topology-editor.js"></script>
@@ -2090,7 +2151,10 @@ msmith@arizona.edu, Mark, Smith"
   <script src="/js/admin/admin-crucible-events.js"></script>
   <script src="/js/admin/admin-settings.js"></script>
   <!-- After admin-challenges.js: the Topology tab reuses its GOAD catalog
-       helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml. -->
+       helpers (loadGoadCatalog, findGoadLab), difficultyLabel and escHtml.
+       goad-extensions.js is the same pair for the extension catalog and must
+       precede admin-topology.js, which calls into it. -->
+  <script src="/js/admin/goad-extensions.js"></script>
   <script src="/js/admin/admin-topology.js"></script>
   <script src="/js/admin/admin-broadcast.js"></script>
   <script src="/js/admin/admin-tickets.js"></script>

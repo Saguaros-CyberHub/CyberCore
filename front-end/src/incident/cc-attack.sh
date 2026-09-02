@@ -2,7 +2,7 @@
 # ============================================================================
 # cc-attack.sh — CyberCore CYBR 400 attack wrapper
 # ----------------------------------------------------------------------------
-# Staged onto the lane's log-generator host by cle/utils/attack-runner.js on
+# Staged onto the lane's log-generator host by src/incident/runner.js on
 # every dispatch, so a guest can never be running a stale copy of this logic.
 # Do not edit on the guest; edit here.
 #

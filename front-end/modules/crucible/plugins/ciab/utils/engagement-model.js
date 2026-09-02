@@ -182,6 +182,69 @@ const DEFAULT_TYPE_KEY = 'default';
  */
 const BAKE_TYPE_KEY = 'bake';
 
+/**
+ * The BLUE-TEAM engagement: the student is inside the client's environment
+ * watching it, not attacking it.
+ *
+ * WHY IT IS A REGISTRY KEY AND NOT A DB CHECK VALUE. Same reason every other
+ * key here is: engagement_type is deliberately unconstrained at the database
+ * (B0-9 pins that), because createEngagement sanitizes rather than rejects and
+ * a CHECK would turn every off-vocabulary slug into an unhandled 500. Adding a
+ * slug therefore needs NO migration at all — describeEngagementType is total,
+ * and this entry only replaces the conservative fallback descriptor with a
+ * truthful one.
+ *
+ * POSTURE. (internal, credentialed): the team is placed inside the segment on
+ * day one holding an account, because a defender who has to break in first is
+ * not defending. That pair is what nicsForPlacement and the compile already
+ * read, so nothing else in this file needs to know the type exists.
+ *
+ * THE SLUG IS FROZEN. It is baked into the reservation key
+ * ciab-profile-<id8>-<slug> (lane-reservation.js:113-117) and therefore into
+ * the name of a carved VXLAN block. Renaming it later orphans that block
+ * permanently — the allocator only ever climbs and never re-uses. Display
+ * aliases below exist precisely so a nicer spelling never needs a rename.
+ */
+const BLUE_TEAM_TYPE_KEY = 'defensive_monitoring';
+
+/**
+ * The ONE subnet scheme a defensive_monitoring engagement may be carved at.
+ *
+ * WHY v2, WHEN R1 MADE v3 THE DEFAULT EVERYWHERE ELSE. v3 is two segments
+ * behind one gateway with ext0 <-> int0 DROPped in FORWARD (the v3 gateway bake
+ * installs CYBERCORE-SEG), and installConsoleDnat is called once per gateway
+ * with lanIface = ext0 on v3. So on v3 the student's console sits on ext while
+ * the SIEM, the sensor and every profile asset the SIEM is supposed to be
+ * watching sit on int — and the console cannot reach Kibana at all. That is not
+ * a rule the exercise wants to teach; it is the exercise failing to open.
+ *
+ * On v2 there is ONE flat lan0. The SIEM, the sensor and every profile asset
+ * share a segment, the console reaches the SIEM by name, and the whole
+ * ext0/int0 console question simply does not arise. One flavour, one rule.
+ *
+ * The offensive tracks keep v3 for exactly the reason R1 gave: the network has
+ * to ENFORCE the pivot rather than the worksheet asking for it. A blue-team
+ * lane has no pivot to enforce.
+ */
+const BLUE_TEAM_SUBNET_SCHEME = 'v2';
+
+/**
+ * Which SIEM(s) a defensive engagement stands up. Stored on
+ * ciab_engagement.telemetry_plan.stack (migration 017), NOT as a CHECK
+ * constraint — same doctrine as engagement_type, and for the same reason: the
+ * JS validator runs first and produces a field-level 400, where a CHECK would
+ * raise 23514 and render as an unhandled 500.
+ *
+ * 'both' is legitimate (comparing two consoles against one incident is a real
+ * skill) but it is roughly 25% more RAM on an already-heavy lane, so it is an
+ * explicit opt-in and never a default.
+ */
+const TELEMETRY_STACKS = Object.freeze(['elastic', 'wazuh', 'both']);
+
+/** The stack an engagement gets when a caller names none. */
+const DEFAULT_TELEMETRY_STACK = 'elastic';
+
+
 /** Which side of the perimeter the team starts on. Stored, defaulted, queried,
  *  and mirrored by a named CHECK in the B0 guards migration. */
 const PERSPECTIVES = Object.freeze(['internal', 'external']);
@@ -473,6 +536,21 @@ const ENGAGEMENT_TYPES = deepFreeze({
     summary: 'The original single-engagement shape: the whole environment, no issued accounts.',
     system: false,
   },
+  // ── The defensive counterpart. See BLUE_TEAM_TYPE_KEY above. ─────────────
+  //
+  // Vocabulary check before you edit this entry: Section / Module / Client /
+  // Engagement / Environment. The neighbouring plugin's words (course,
+  // material, challenge) are banned in a label or a summary, and a test scans
+  // both strings for them.
+  [BLUE_TEAM_TYPE_KEY]: {
+    key: BLUE_TEAM_TYPE_KEY,
+    label: 'Defensive — monitoring',
+    perspective: 'internal',
+    credential_posture: 'credentialed',
+    summary: 'The team watches the client environment from inside it, with a sensor and a SIEM '
+           + 'placed alongside the assets, and accounts handed over on day one.',
+    system: false,
+  },
   // ── SYSTEM-OWNED. Created by the platform, never by an operator. ──────────
   //
   // A bake carves this one-slot block for itself (see BAKE_TYPE_KEY) and builds
@@ -520,6 +598,13 @@ const ENGAGEMENT_TYPE_ALIASES = deepFreeze({
   'internal-credentialed': 'internal_credentialed',
   externalblackbox: 'external_blackbox',
   'external-blackbox': 'external_blackbox',
+  // The two spellings a human types and the sanitizer mangles.
+  // sanitizeEngagementType DELETES disallowed characters, so 'Defensive
+  // Monitoring' arrives as 'defensivemonitoring' and is stored that way
+  // forever — the reservation key is already carved from it. This map puts the
+  // readable label back on the screen WITHOUT touching the stored slug.
+  defensivemonitoring: BLUE_TEAM_TYPE_KEY,
+  'defensive-monitoring': BLUE_TEAM_TYPE_KEY,
 });
 
 // ─── Type descriptors ───────────────────────────────────────────────────────
@@ -1364,6 +1449,131 @@ function normalizeAuthoredFields(raw) {
   return Array.from(seen).sort();
 }
 
+// ─── telemetry_plan ─────────────────────────────────────────────────────────
+
+/**
+ * Validate ciab_engagement.telemetry_plan (migration 017), and DERIVE the one
+ * field an instructor must never author.
+ *
+ * WHAT IT HOLDS
+ *   stack                'elastic' | 'wazuh' | 'both'   — which SIEM(s) deploy
+ *   sensor               boolean, DERIVED (see below)   — deploy the loggen box
+ *   scenario_id          which compiled scenario feeds the lane, or null
+ *   sensor_template_key  catalog template_key overrides, or null. Recorded so a
+ *   elk_template_key     lane can be re-deployed onto the SAME images months
+ *   wazuh_template_key   later even if the tagged rows moved on
+ *   floor_seeded_at      when the benign floor was last seeded, or null
+ *
+ * WHY sensor IS DERIVED AND NOT AUTHORED. The synthetic-telemetry sensor ships
+ * to Elasticsearch and nothing else: its baked agent points at
+ * elk.cybercore.lan and Beats/Elastic Agent cannot ship to Wazuh's indexer at
+ * all (it is OpenSearch 2.x, and the compatibility override that used to make
+ * that work was removed in OpenSearch 2.0). So `stack:'wazuh', sensor:true` is
+ * not a preference, it is a machine that boots, looks healthy, retries forever
+ * and produces no events anywhere — the exact silent failure this plugin keeps
+ * closing. Deriving it makes the impossible combination unauthorable.
+ *
+ * THE CONSEQUENCE, STATED HONESTLY: a wazuh-only engagement has no synthetic
+ * haystack, therefore no false-positive floor, therefore triage on that lane is
+ * "find the only thing in the index". That is a real teaching limitation and a
+ * warning names it rather than leaving it to be discovered in class.
+ *
+ * NEVER THROWS. Same contract as every other validator here — the route turns
+ * `errors` into a 400.
+ *
+ * @param {*} raw
+ * @param {{engagementType?:string}} [opts]
+ * @returns {{errors:Array, warnings:Array, value:object}}
+ */
+function validateTelemetryPlan(raw, opts) {
+  const options = opts || {};
+  const errors = [];
+  const warnings = [];
+
+  if (!isPlainObject(raw)) {
+    pushProblem(errors, 'telemetry_plan', 'TELEMETRY_PLAN_NOT_OBJECT',
+      'telemetry_plan must be an object — {stack, scenario_id, ...} — or {} for none.');
+    return { errors, warnings, value: {} };
+  }
+
+  // An empty object is the column DEFAULT and means "this engagement stands up
+  // no telemetry". It is legal and produces nothing, so an ordinary offensive
+  // engagement patching an unrelated field is never told about a SIEM.
+  if (Object.keys(raw).length === 0) return { errors, warnings, value: {} };
+
+  const value = {};
+
+  const stack = String(raw.stack === null || raw.stack === undefined ? '' : raw.stack)
+    .trim().toLowerCase();
+  if (!stack) {
+    pushProblem(errors, 'telemetry_plan.stack', 'TELEMETRY_STACK_REQUIRED',
+      `A telemetry plan must name a stack: ${TELEMETRY_STACKS.join(', ')}. ` +
+      'Send {} to stand up no telemetry at all.');
+  } else if (!TELEMETRY_STACKS.includes(stack)) {
+    pushProblem(errors, 'telemetry_plan.stack', 'TELEMETRY_STACK_UNKNOWN',
+      `telemetry_plan.stack '${raw.stack}' is not one of ${TELEMETRY_STACKS.join(', ')}.`);
+  } else {
+    value.stack = stack;
+  }
+
+  // DERIVED, ALWAYS — even when the caller sent one, and even when the stack
+  // did not validate (in which case there is no stack to derive from and the
+  // key is simply absent, which is what the 400 is already about).
+  if (value.stack) {
+    value.sensor = value.stack !== 'wazuh';
+
+    if (raw.sensor === true && value.sensor === false) {
+      pushProblem(warnings, 'telemetry_plan.sensor', 'TELEMETRY_SENSOR_NOT_AVAILABLE',
+        "This engagement asked for the synthetic sensor on a Wazuh-only stack. The sensor ships to " +
+        'Elasticsearch only, so it is not deployed. Without it the environment has no synthetic ' +
+        'background volume, and everything in the index is part of the incident.');
+    } else if (value.sensor === false) {
+      pushProblem(warnings, 'telemetry_plan.sensor', 'TELEMETRY_NO_SYNTHETIC_FLOOR',
+        'A Wazuh-only environment has no synthetic background volume, so every event in the index ' +
+        'belongs to the incident. Choose elastic or both if the students are meant to separate ' +
+        'signal from noise.');
+    }
+  }
+
+  // Free-form pointers. Trimmed, length-capped and never invented: a null here
+  // means "resolve it from the catalog at deploy time", which is the normal case.
+  for (const key of ['scenario_id', 'sensor_template_key', 'elk_template_key',
+    'wazuh_template_key', 'floor_seeded_at']) {
+    if (!Object.prototype.hasOwnProperty.call(raw, key)) continue;
+    value[key] = trimOrNull(raw[key], 200);
+  }
+
+  // A telemetry plan on a type that is not the defensive one is a WARNING, not
+  // an error: a locally defined slug is entitled to be a blue-team engagement
+  // of its own, and describeEngagementType answering known:false is exactly the
+  // case the registry's total fallback exists to allow.
+  const descriptor = describeEngagementType(options.engagementType);
+  if (descriptor.known && descriptor.key !== BLUE_TEAM_TYPE_KEY) {
+    pushProblem(warnings, 'telemetry_plan', 'TELEMETRY_PLAN_ON_OTHER_TYPE',
+      `Engagement type '${descriptor.key}' does not stand up a sensor or a SIEM, so this telemetry ` +
+      `plan is stored but never acted on. Use '${BLUE_TEAM_TYPE_KEY}' if these lanes are meant to ` +
+      'carry monitoring.');
+  }
+
+  return { errors, warnings, value };
+}
+
+/**
+ * Project ciab_engagement.telemetry_plan off a raw SELECT * row.
+ *
+ * TOTAL, like engagementModelFromRow: a row from a database where migration 017
+ * has not run yet — or a row adoptExistingReservation INSERTed with its fixed
+ * 8-column list — reads back as {}, never as undefined. `sensor` is re-derived
+ * on the way out rather than trusted from the column, so a hand-edited row
+ * cannot resurrect the impossible combination the validator refuses.
+ */
+function telemetryPlanFromRow(row) {
+  const r = isPlainObject(row) ? row : {};
+  const plan = parseJsonColumn(r.telemetry_plan, {});
+  if (!isPlainObject(plan) || !TELEMETRY_STACKS.includes(plan.stack)) return {};
+  return { ...plan, sensor: plan.stack !== 'wazuh' };
+}
+
 // ─── The top-level validator ────────────────────────────────────────────────
 
 /**
@@ -1382,6 +1592,9 @@ function normalizeAuthoredFields(raw) {
  *
  * @param {object} patch
  * @param {{engagementType?:string, knownVmNames?:string[], subnetScheme?:string|null}} [opts]
+ *   subnetScheme is the scheme the engagement's VXLAN block was actually CARVED
+ *   at, not the one a request body asked for — the defensive rule below is only
+ *   meaningful against the carve.
  * @returns {{valid:boolean, errors:Array, warnings:Array, value:object}}
  */
 function validateEngagementPlan(patch, opts) {
@@ -1534,6 +1747,53 @@ function validateEngagementPlan(patch, opts) {
     absorb('exposure_plan', validateExposurePlan(patch.exposure_plan, { knownVmNames, subnetScheme }));
   }
   if (has('objectives')) absorb('objectives', validateObjectives(patch.objectives));
+
+  // ── telemetry_plan, and the scheme a defensive engagement demands ─────────
+  if (has('telemetry_plan')) {
+    const report = validateTelemetryPlan(patch.telemetry_plan, { engagementType });
+    for (const e of report.errors) errors.push(e);
+    for (const w of report.warnings) warnings.push(w);
+    value.telemetry_plan = report.value;
+  }
+
+  // A DEFENSIVE ENGAGEMENT IS v2, AND THIS IS THE ONLY PLACE THAT SAYS SO.
+  //
+  // DELIBERATELY NOT A DB CHECK. Migration 011's header explains why: every
+  // plugin migration re-runs on EVERY boot as one implicit transaction whose
+  // only failure handler is console.error, so widening or adding a constraint
+  // on a column that already holds live rows is the one genuinely unsafe
+  // operation available here — it would fail validation against an existing
+  // row, silently revert its whole file, and keep doing so forever while the
+  // server starts normally. The JS validator runs first, always, and produces
+  // the field-level 400 the route already knows how to render.
+  //
+  // WHY v2 AT ALL: see BLUE_TEAM_SUBNET_SCHEME. On v3 the console sits on ext0
+  // and the SIEM on int0 with ext0 <-> int0 DROPped in FORWARD, so the student
+  // cannot reach the console they are being graded in. On v2 there is one flat
+  // lan0 — SIEM, sensor and every profile asset on one segment — and the whole
+  // question disappears.
+  //
+  // The scheme is read from the patch when the caller sent one and from the
+  // CARVE otherwise, because those are the two moments this can be wrong: a
+  // create that names v3, and a type change onto a block that was already
+  // carved at v3. The second is the dangerous one, and it is why
+  // assertEngagementDeployable refuses it again at 409 — a carved block cannot
+  // be re-carved, so by deploy time this is no longer a correctable mistake.
+  const effectiveScheme = has('subnet_scheme')
+    ? trimOrNull(patch.subnet_scheme, 8)
+    : subnetScheme;
+  if (descriptor.key === BLUE_TEAM_TYPE_KEY && effectiveScheme
+      && effectiveScheme !== BLUE_TEAM_SUBNET_SCHEME) {
+    errors.push({
+      path: 'subnet_scheme',
+      code: 'DEFENSIVE_REQUIRES_V2',
+      message: `A '${BLUE_TEAM_TYPE_KEY}' engagement must be ${BLUE_TEAM_SUBNET_SCHEME}, but this one ` +
+        `is ${effectiveScheme}. On ${effectiveScheme} the student's console and the SIEM sit on ` +
+        'different segments with forwarding between them dropped, so the environment comes up with ' +
+        `nothing to look at. Create a ${BLUE_TEAM_SUBNET_SCHEME} engagement for this work — a block ` +
+        'that has already been carved cannot be re-carved.',
+    });
+  }
 
   // ── bookkeeping columns ───────────────────────────────────────────────────
   if (has('authored_fields')) {
@@ -1704,6 +1964,14 @@ module.exports = {
   // so routes/profile-deploy.js's BAKE_ENGAGEMENT_TYPE and this registry can be
   // proved identical by a test rather than by two people remembering.
   BAKE_TYPE_KEY,
+  // The blue-team slug and the one scheme it may be carved at. Exported for the
+  // same reason BAKE_TYPE_KEY is: routes/profile-deploy.js and lane-provision.js
+  // both branch on this slug, and a second spelling of it in either of them is a
+  // branch that silently stops firing.
+  BLUE_TEAM_TYPE_KEY,
+  BLUE_TEAM_SUBNET_SCHEME,
+  TELEMETRY_STACKS,
+  DEFAULT_TELEMETRY_STACK,
   // Descriptors
   describeEngagementType,
   isSystemEngagementType,
@@ -1723,10 +1991,19 @@ module.exports = {
   validateExposurePlan,
   validateObjectives,
   validateAssetSelection,
+  validateTelemetryPlan,
   normalizeAuthoredFields,
   // Top level
   validateEngagementPlan,
   assertValidEngagementPlan,
   engagementModelFromRow,
+  // NOT part of engagementModelFromRow, and NOT in MODEL_FIELDS — deliberately.
+  // MODEL_FIELDS is the SET-clause list updateEngagementModel builds its UPDATE
+  // from, and it is pinned by a test to exactly the columns migration 011 adds;
+  // telemetry_plan is 017's. It also is not instructor prose: `sensor` is
+  // derived, so a generic PATCH that echoed a stored plan back would be able to
+  // set it. It gets its own reader here and its own writer in
+  // engagement-provision.js.
+  telemetryPlanFromRow,
   mergeProposal,
 };

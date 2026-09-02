@@ -447,6 +447,7 @@
                  string for the attack console. -->
             <div class="detail-tab" data-feature="flags" onclick="switchDetailTab('flags', this)">🚩 Flags</div>
             <div class="detail-tab" data-feature="attack_console" onclick="switchDetailTab('attack-console', this)">🎯 Attack Console</div>
+            <div class="detail-tab" data-feature="blue_team" onclick="switchDetailTab('blue-team', this)">🛡️ Blue Team Board</div>
           </div>
 
           <!-- Overview Tab -->
@@ -523,6 +524,23 @@
                to pay every time any course is opened. -->
           <div class="detail-tab-pane" id="attack-console-pane">
             <div id="attackConsoleContent">
+              <p style="color: var(--text-secondary);">Loading…</p>
+            </div>
+          </div>
+
+          <!-- CYBR 400 Blue Team Board — the defensive half of the same course.
+               The panel is drawn by /cle/js/blue-team.js on first show, which
+               only picks a run and hands it to the shared board in
+               /js/blueteam/*.js.
+
+               ONE PANE FOR BOTH AUDIENCES. Which of the two layouts appears is
+               decided by the server: GET .../incidents returns a `tier` scoped
+               to THIS course, and the board renders the tier it was given
+               rather than anything the page believes about the viewer. There is
+               deliberately no student/staff branch in this markup — a branch
+               here would be a second, weaker copy of that decision. -->
+          <div class="detail-tab-pane" id="blue-team-pane">
+            <div id="blueTeamContent">
               <p style="color: var(--text-secondary);">Loading…</p>
             </div>
           </div>
@@ -1193,6 +1211,18 @@
     const COURSE_FEATURES = [
       { key: 'flags',          label: '&#128681; Flags',          hint: 'Per-student capture-the-flag board and sharing report.', codePrefix: 'CYBR480' },
       { key: 'attack_console', label: '&#127919; Attack Console', hint: 'Fire MITRE log-generator runs into every student lane at once.', codePrefix: 'CYBR400' },
+      // Separate from the console above, because the two are read at different
+      // moments: the console fires the incident, the board grades what was
+      // found afterwards. A course can sit with the console on and the board
+      // still closed, which is where a class lives between launch and debrief.
+      //
+      // AND IT MUST BE LISTED HERE, not only in course-features.js: the edit
+      // modal PUTs readFeatureCheckboxes(), which enumerates the boxes this
+      // array rendered, and routes/courses.js writes it with
+      // `features = COALESCE($6::jsonb, features)` — a whole-object replace. A
+      // key with no checkbox is therefore DROPPED from the stored row on the
+      // next save, silently reverting the course to the per-code default.
+      { key: 'blue_team',      label: '&#128737; Blue Team Board', hint: 'Students record what they found while hunting an incident; you grade and release it.', codePrefix: 'CYBR400' },
     ];
 
     /** Same normalisation the server and migration 007 use: punctuation out, upcased. */
@@ -1389,6 +1419,10 @@
      */
     function cancelCoursePollers() {
       if (window.CleAttack) CleAttack.cancelPolling();
+      // The board keeps its own /status poll while a run is in flight, inside
+      // the shared component — this tears the mounted board down, timer and
+      // all, rather than leaving it writing into a pane the next course owns.
+      if (window.CleBlueTeam) CleBlueTeam.cancelPolling();
       clearTimeout(_vmRefreshTimer);
       clearTimeout(_provisionProgressTimer);
       clearTimeout(_labRefreshTimer);
@@ -1440,6 +1474,10 @@
         // holding the PREVIOUS course's id. The expensive work is in load(),
         // which is reachable only by showing a tab this course does not have.
         if (window.CleAttack) CleAttack.reset(courseId);
+        // Same reason, and called even when the tab is hidden: reset() drops
+        // the previous course's runs and its mounted board without issuing a
+        // request. The run list is fetched on first show, in switchDetailTab.
+        if (window.CleBlueTeam) CleBlueTeam.reset(courseId);
       } catch (e) {
         toast('Error loading course: ' + e.message, true);
       }
@@ -1495,6 +1533,10 @@
       // lane's sensor VM against the Proxmox cluster, so it loads on first show
       // instead of on every course open.
       if (tabName === 'attack-console' && window.CleAttack) CleAttack.onShow();
+      // Same contract for the board: its first show is what fetches the run
+      // list. Nothing here measures a container the way the topology canvas
+      // does, so a pane that is already visible needs no second pass.
+      if (tabName === 'blue-team' && window.CleBlueTeam) CleBlueTeam.onShow();
     }
 
     function buildInstructorFilter() {
@@ -5681,5 +5723,24 @@
   <script src="/js/topology/topology-render.js"></script>
   <script src="/js/topology/topology-editor.js"></script>
   <script src="/js/topology/topology-seed.js"></script>
+
+  <!-- Blue Team Board. Core assets, served from public/ by the same plain
+       express.static as the topology files above, and loaded verbatim by the
+       Clinic-in-a-Box pages too — one board, two products, and the ONLY
+       difference between them is the collection URL passed to mount().
+
+       ORDER IS THE CONTRACT. Each file publishes exactly one global and
+       blueteam-board.js consumes the other three, so api → timeline → score →
+       board. There is no bundler here to sort it out.
+
+       /cle/js/blue-team.js comes last of all: it needs BlueTeamBoard, and it
+       also needs the inline block's currentCourseId and escHtml.
+       test/blueteam-mount.test.js pins both this order and the base URL it
+       mounts with against the route routes/api.js actually registers. -->
+  <script src="/js/blueteam/blueteam-api.js"></script>
+  <script src="/js/blueteam/blueteam-timeline.js"></script>
+  <script src="/js/blueteam/blueteam-score.js"></script>
+  <script src="/js/blueteam/blueteam-board.js"></script>
+  <script src="/cle/js/blue-team.js"></script>
 </body>
 </html>

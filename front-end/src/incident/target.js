@@ -1,9 +1,13 @@
 /**
- * CLE Plugin — locate the log-generator host inside a lane (CYBR 400)
+ * Incident engine — locate the log-generator host inside a lane
  * ============================================================================
  * The Attack Console fires one command per lane, at exactly one VM: the Rocky
  * sensor running log-generator. Finding it is the hardest part of the feature,
  * because lane config does not record template identity.
+ *
+ * Shared by both callers since E2: a CYBR 400 course lane and a CiAB engagement
+ * lane run the SAME ladder. Where they differ is which rung answers, and the
+ * CiAB-specific notes are inline at rung 0 and in loadSpecVms().
  *
  * challenge-lane-deployer.js writes `config.vms[] = {vm_id, name, proxmox_name,
  * type, node}` and nothing else -- no template_id, no os. Workstation lanes
@@ -12,11 +16,24 @@
  *
  * The ladder, most authoritative first, stopping at the first hit:
  *
- *   0 cache      lane.config.loggen, written by a previous run
+ *   0 cache      lane.config.loggen, written by a previous run OR stamped at
+ *                deploy time -- see 'postdeploy' below
  *   1 template   catalog row tagged role_hints @> {loggen} -> spec -> lane
  *   2 spec_role  spec.vms[].role names it explicitly
  *   3 sole_linux exactly one non-infrastructure Linux VM is left
  *   4 probe      ask the guest whether log-generator is installed
+ *
+ * THE resolved_by VOCABULARY IS SIX VALUES, NOT FIVE.
+ *
+ * `cache|template|spec_role|sole_linux|probe|postdeploy` -- the sixth is written
+ * by CiAB's blueteam-postdeploy hook, which calls cacheLoggenTarget() the moment
+ * the sensor VM is created and so populates rung 0 BEFORE the first run. It is a
+ * value of rung 0, not a rung of its own: resolveLoggenTarget() returns
+ * 'cache' when it reads the stamp back, and the 'postdeploy' string only ever
+ * reaches the target row through cybercore_incident_target.resolved_by.
+ * That column is VARCHAR(24) with NO CHECK (see src/incident/schema.js), so the
+ * sixth value needed no DDL -- which is exactly why the vocabulary lives in
+ * comments and must be kept accurate here and there.
  *
  * WHICH RUNG ACTUALLY FIRES DEPENDS ON HOW THE LANE WAS BUILT.
  *
@@ -80,6 +97,16 @@ async function loadLoggenTemplate() {
 }
 
 /**
+ * Where a challenge spec lives when the module has no table of its own.
+ *
+ * crucible_challenge is the SHARED spec table in cybercore_db: `challenge_key
+ * TEXT UNIQUE` plus `spec JSONB` (migrations/007_cybercore_tables.sql:19). Every
+ * environment a lane can be built from is registered here unless its module
+ * declared a private table.
+ */
+const SHARED_CHALLENGE_TABLE = 'crucible_challenge';
+
+/**
  * The challenge spec behind a lane, or [] when there isn't one.
  *
  * Table name is derived from module_key with the same sanitising pattern
@@ -87,25 +114,75 @@ async function loadLoggenTemplate() {
  * from the DB rather than a request, but it is interpolated, so it is stripped
  * to [a-z0-9_] regardless. A miss is not an error: workstation lanes have no
  * challenge at all and resolve on rung 1 or 3 instead.
+ *
+ * WHY THERE IS A SECOND TABLE TO TRY, AND WHY IT IS NOT OPTIONAL
+ * ----------------------------------------------------------------------------
+ * `${module_key}_challenge` is a CONVENTION, not a guarantee. It holds for the
+ * CLE side (module_key 'crucible' -> crucible_challenge, which is also the
+ * shared table, so the two coincide and nothing looked wrong for a year). It
+ * does NOT hold for CiAB: its lanes carry `module_key = 'ciab'`
+ * (lane-provision.js MODULE_KEY) while their specs are registered in the SHARED
+ * crucible_challenge, and `ciab_challenge` has never existed.
+ *
+ * The old single-table version therefore threw "relation ciab_challenge does not
+ * exist" on EVERY CiAB lane, swallowed it, and returned []. That is the silent
+ * failure this file's header warns about, one level up: with no spec, rung 2
+ * (spec_role) cannot fire even though LOGGEN_ROLES already contains 'sensor' and
+ * CiAB's synthesizer emits exactly that role -- so a lane with an unambiguously
+ * tagged sensor fell through to rung 3 or 4 and, on a lane holding a SIEM as
+ * well, resolved to nothing at all.
+ *
+ * So: try the module's own table, then the shared one. A MISS falls through to
+ * the next table; a HIT is authoritative even if its spec declares no vms (an
+ * environment really can be a bare workstation pair). A THROW -- which is what a
+ * table that does not exist looks like from here -- also falls through.
+ *
+ * ONLY THE LAST ATTEMPT'S FAILURE IS WARNED ABOUT, and an earlier one that a
+ * later table then ANSWERED is forgotten. "relation ciab_challenge does not
+ * exist" is the expected shape of the first attempt on every single CiAB lane;
+ * logging it once per lane per dispatch would bury the case that matters -- the
+ * shared table itself being unreadable, which is the only outcome here that
+ * genuinely costs the resolver a rung. A clean miss on the last table is not
+ * warned about at all: "no spec" is a legitimate answer (workstation lanes give
+ * it every time) and rungs 1, 3 and 4 exist precisely for it.
+ *
+ * `config.challenge_key` is written verbatim by challenge-lane-deployer.js when
+ * it seals the lane's active config, on both the CLE and the CiAB path, so the
+ * lookup key is the same for both.
  */
 async function loadSpecVms(lane, config) {
-  const moduleKey = lane.module_key || config.module;
-  if (!moduleKey || !config.challenge_key) return [];
-  try {
-    const table = `${String(moduleKey).replace(/[^a-z0-9_]/gi, '')}_challenge`;
-    const r = await cybercoreQuery(
-      `SELECT spec FROM ${table} WHERE challenge_key = $1`,
-      [config.challenge_key]
-    );
-    if (!r.rows.length) return [];
-    const spec = typeof r.rows[0].spec === 'string'
-      ? JSON.parse(r.rows[0].spec)
-      : (r.rows[0].spec || {});
-    return Array.isArray(spec.vms) ? spec.vms : [];
-  } catch (err) {
-    console.warn(`[AttackTarget] could not load challenge spec for lane ${lane.lane_id}: ${err.message}`);
-    return [];
+  if (!config.challenge_key) return [];
+
+  const moduleKey = String(lane.module_key || config.module || '').replace(/[^a-z0-9_]/gi, '');
+  const tables = [];
+  if (moduleKey) tables.push(`${moduleKey}_challenge`);
+  if (!tables.includes(SHARED_CHALLENGE_TABLE)) tables.push(SHARED_CHALLENGE_TABLE);
+
+  let lastErr = null;
+  for (const table of tables) {
+    try {
+      const r = await cybercoreQuery(
+        `SELECT spec FROM ${table} WHERE challenge_key = $1`,
+        [config.challenge_key]
+      );
+      // This table answered, so nothing an earlier one said is still news.
+      lastErr = null;
+      if (!r.rows.length) continue;
+      const spec = typeof r.rows[0].spec === 'string'
+        ? JSON.parse(r.rows[0].spec)
+        : (r.rows[0].spec || {});
+      return Array.isArray(spec.vms) ? spec.vms : [];
+    } catch (err) {
+      lastErr = err;
+    }
   }
+  if (lastErr) {
+    console.warn(
+      `[AttackTarget] could not load challenge spec for lane ${lane.lane_id} `
+      + `(tried ${tables.join(', ')}): ${lastErr.message}`
+    );
+  }
+  return [];
 }
 
 /**
@@ -324,4 +401,5 @@ module.exports = {
   laneCandidates,
   LOGGEN_ROLES,
   LOGGEN_MARKER,
+  SHARED_CHALLENGE_TABLE,
 };

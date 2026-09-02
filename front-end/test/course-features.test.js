@@ -43,21 +43,21 @@ const {
 test('CYBR 480 defaults to Flags only', () => {
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CYBR-480-7W1-1', features: null }),
-    { flags: true, attack_console: false }
+    { flags: true, attack_console: false, blue_team: false }
   );
 });
 
 test('CYBR 400 defaults to Attack Console only', () => {
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CYBR-400-1', features: null }),
-    { flags: false, attack_console: true }
+    { flags: false, attack_console: true, blue_team: true }
   );
 });
 
 test('an unrelated course defaults to neither', () => {
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CD101-01', features: null }),
-    { flags: false, attack_console: false }
+    { flags: false, attack_console: false, blue_team: false }
   );
 });
 
@@ -65,12 +65,12 @@ test('a missing or absent code is not a crash and enables nothing', () => {
   for (const code of [null, undefined, '']) {
     assert.deepStrictEqual(
       resolveFeatures({ code, features: null }),
-      { flags: false, attack_console: false },
+      { flags: false, attack_console: false, blue_team: false },
       `code=${JSON.stringify(code)}`
     );
   }
-  assert.deepStrictEqual(resolveFeatures({}), { flags: false, attack_console: false });
-  assert.deepStrictEqual(resolveFeatures(null), { flags: false, attack_console: false });
+  assert.deepStrictEqual(resolveFeatures({}), { flags: false, attack_console: false, blue_team: false });
+  assert.deepStrictEqual(resolveFeatures(null), { flags: false, attack_console: false, blue_team: false });
 });
 
 test('code matching ignores punctuation and case, like the SQL backfill', () => {
@@ -96,14 +96,14 @@ test('normalizeCode strips punctuation and upcases', () => {
 test('an explicit false on a CYBR 480 course overrides the code default', () => {
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CYBR-480-7W1-1', features: { flags: false } }),
-    { flags: false, attack_console: false }
+    { flags: false, attack_console: false, blue_team: false }
   );
 });
 
 test('an explicit true on a course the code would not match is honoured', () => {
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CD101-01', features: { attack_console: true } }),
-    { flags: false, attack_console: true }
+    { flags: false, attack_console: true, blue_team: false }
   );
 });
 
@@ -118,13 +118,13 @@ test('a partially configured row defaults only the keys it does not carry', () =
   // Only attack_console is stored, so flags still falls back to the code.
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CYBR-480-7W1-1', features: { attack_console: true } }),
-    { flags: true, attack_console: true }
+    { flags: true, attack_console: true, blue_team: false }
   );
   // The UI never actually stores a partial row: readFeatureCheckboxes() sends
   // every key, so an unchecked box arrives as an explicit false.
   assert.deepStrictEqual(
     resolveFeatures({ code: 'CYBR-480-7W1-1', features: { flags: false, attack_console: false } }),
-    { flags: false, attack_console: false }
+    { flags: false, attack_console: false, blue_team: false }
   );
 });
 
@@ -176,11 +176,11 @@ test('sanitize returns null for anything unusable, so COALESCE means unchanged',
 
 test('defaultFeaturesForCode matches what the migration backfills', () => {
   assert.deepStrictEqual(defaultFeaturesForCode('CYBR-480-7W1-1'),
-    { flags: true, attack_console: false });
+    { flags: true, attack_console: false, blue_team: false });
   assert.deepStrictEqual(defaultFeaturesForCode('CYBR-400-1'),
-    { flags: false, attack_console: true });
+    { flags: false, attack_console: true, blue_team: true });
   assert.deepStrictEqual(defaultFeaturesForCode(null),
-    { flags: false, attack_console: false });
+    { flags: false, attack_console: false, blue_team: false });
 });
 
 test('isFeatureEnabled is the gate the routes use', () => {
@@ -197,8 +197,8 @@ test('attachFeatures replaces the raw column in place, on every row', () => {
     { course_id: 'b', code: 'CYBR-400-1', features: { attack_console: false } },
   ];
   attachFeatures(rows);
-  assert.deepStrictEqual(rows[0].features, { flags: true, attack_console: false });
-  assert.deepStrictEqual(rows[1].features, { flags: false, attack_console: false });
+  assert.deepStrictEqual(rows[0].features, { flags: true, attack_console: false, blue_team: false });
+  assert.deepStrictEqual(rows[1].features, { flags: false, attack_console: false, blue_team: true });
   assert.doesNotThrow(() => attachFeatures(undefined));
 });
 
@@ -215,7 +215,7 @@ test('every optional feature carries a defaultFor, every mandatory one does not'
     if (f.optional) assert.strictEqual(typeof f.defaultFor, 'function', `${f.key} needs defaultFor`);
     else assert.strictEqual(f.defaultFor, undefined, `${f.key} is mandatory and must not default`);
   }
-  assert.deepStrictEqual(OPTIONAL_KEYS, ['flags', 'attack_console']);
+  assert.deepStrictEqual(OPTIONAL_KEYS, ['flags', 'attack_console', 'blue_team']);
 });
 
 test('feature keys are unique', () => {

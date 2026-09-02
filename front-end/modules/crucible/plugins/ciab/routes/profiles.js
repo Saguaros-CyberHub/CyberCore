@@ -569,7 +569,11 @@ router.post('/generate-and-deploy', authenticateToken, adminOnly, async (req, re
       userId: req.user.userId,
       numLanes: parseInt(num_lanes, 10),
       groupName: group_name,
-      attackBoxes: attack_boxes !== false,
+      // undefined when the body omits it, so runProfileDeploy's
+      // engagement-dependent default can fire. `attack_boxes !== false` would
+      // resolve an omitted field to true and silently give a defensive
+      // engagement a Kali box, which then wins the console.
+      attackBoxes: attack_boxes === undefined ? undefined : attack_boxes !== false,
       subnetScheme: subnet_scheme || DEFAULT_SUBNET_SCHEME,
       assetSelection: asset_selection,
       vulnAppOpts: vuln_app || {},

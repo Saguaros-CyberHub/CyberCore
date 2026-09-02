@@ -1684,6 +1684,162 @@
     [data-theme="dark"] .workspace-main span[style*="color:#64748b"] {
       color: #7882a4 !important;
     }
+
+    /* ============================================================================
+       INCIDENT BOARD — Track E
+       ============================================================================
+       The blue-team board is a PANEL beside the eight deliverables, not a ninth
+       one. Hunting and writing up are the same sitting: a student flips between
+       "what did the sensors show" and "what am I claiming in Part 4" every few
+       minutes, and a second browser tab loses that thread.
+
+       IT IS SHOWN BY TOGGLING A CLASS ON .workspace-main, never by writing inline
+       display styles onto #noProfileState / #workspaceContent. workspace.js owns
+       those two inline styles — loadProfile() and showEmptyState() write them —
+       so a second writer would restore a stale value the moment a student
+       switched profile with the panel open. The !important below is the whole
+       trick: an important author rule beats a non-important INLINE style, so this
+       panel can hide them while workspace.js keeps deciding, underneath and
+       untouched, which of the two is the right one to come back to.
+       ============================================================================ */
+    .incident-nav {
+      padding: 0.75rem;
+      border-top: 1px solid var(--gray-200);
+    }
+
+    .incident-nav-title {
+      font-size: 0.75rem;
+      font-weight: 600;
+      color: var(--gray-500);
+      text-transform: uppercase;
+      margin-bottom: 0.5rem;
+    }
+
+    .incident-nav-btn {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      width: 100%;
+      padding: 0.875rem;
+      border: 2px solid transparent;
+      border-radius: var(--border-radius);
+      background: var(--gray-100);
+      color: var(--gray-800);
+      font: inherit;
+      font-weight: 600;
+      text-align: left;
+      cursor: pointer;
+      transition: var(--transition);
+    }
+
+    .incident-nav-btn:hover { background: var(--gray-200); }
+
+    .incident-nav-btn.active {
+      background: rgba(30, 82, 136, 0.12);
+      border-color: var(--primary);
+    }
+
+    #incidentPanel { display: none; padding: 1.5rem; }
+
+    .workspace-main.incident-open > #incidentPanel { display: block; }
+    .workspace-main.incident-open > #noProfileState,
+    .workspace-main.incident-open > #workspaceContent { display: none !important; }
+
+    .incident-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .incident-head h2 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      color: var(--gray-800);
+    }
+
+    .incident-sub {
+      margin-top: 0.25rem;
+      font-size: 0.85rem;
+      color: var(--gray-500);
+    }
+
+    .incident-picker {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.625rem;
+      margin-bottom: 1rem;
+    }
+
+    .incident-picker label {
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      color: var(--gray-500);
+    }
+
+    .incident-picker select {
+      min-width: 18rem;
+      padding: 0.5rem;
+      border: 1px solid var(--gray-300);
+      border-radius: var(--border-radius);
+      background: var(--bg-card, white);
+      color: var(--text-primary);
+      font: inherit;
+    }
+
+    /* The release banner. Two states, and the LOCKED one is the important one:
+       a page that quietly shows a few rows and no verdicts reads as broken, and
+       a student who thinks the page is broken stops trusting it. It says which
+       state it is in, in words, in both directions. */
+    .incident-banner {
+      margin-bottom: 1rem;
+      padding: 0.875rem 1rem;
+      border: 1px solid transparent;
+      border-radius: var(--border-radius);
+      font-size: 0.9rem;
+      line-height: 1.55;
+      color: var(--text-primary);
+    }
+
+    .incident-banner p { margin: 0.5rem 0 0; color: var(--text-secondary); }
+
+    .incident-banner-locked {
+      background: rgba(245, 158, 11, 0.12);
+      border-color: rgba(245, 158, 11, 0.35);
+    }
+
+    .incident-banner-released {
+      background: rgba(79, 145, 83, 0.12);
+      border-color: rgba(79, 145, 83, 0.35);
+    }
+
+    .incident-note {
+      margin-bottom: 1rem;
+      padding: 1.25rem;
+      border: 1px solid var(--gray-200);
+      border-radius: var(--border-radius);
+      background: var(--bg-card, white);
+      color: var(--text-secondary);
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+
+    .incident-note strong { color: var(--text-primary); }
+    .incident-note p { margin: 0.5rem 0 0; }
+
+    /* [hidden] is a USER-AGENT rule, and a user-agent rule loses to any author
+       declaration of display — .incident-picker sets display:flex, so it would
+       stay on screen with the attribute set and nothing would look wrong in the
+       stylesheet. State the override once, here, instead of remembering it at
+       every toggle site in workspace-incident.js. */
+    .incident-nav[hidden],
+    .incident-picker[hidden],
+    .incident-banner[hidden],
+    .incident-note[hidden] { display: none !important; }
   </style>
 </head>
 <body>
@@ -1731,6 +1887,20 @@
               <!-- Parts will be populated dynamically -->
             </div>
 
+
+            <!-- Incident Board entry. It sits BETWEEN the parts list and the
+                 progress summary so it reads as a companion to the eight parts
+                 rather than a ninth one: the board is not a graded deliverable
+                 and has no progress row, so counting it in "0 / 8 completed"
+                 would be wrong in both directions. -->
+            <div class="incident-nav" id="incidentNav">
+              <div class="incident-nav-title">Live Environment</div>
+              <button type="button" class="incident-nav-btn" id="incidentNavBtn"
+                      aria-expanded="false" aria-controls="incidentPanel">
+                <span aria-hidden="true">🛡️</span>
+                <span>Incident Board</span>
+              </button>
+            </div>
             <div class="progress-summary" id="progressSummary">
               <div class="progress-summary-title">Overall Progress</div>
               <div class="progress-bar-wrapper">
@@ -1778,6 +1948,38 @@
               <div class="workspace-content" id="workspaceBody">
                 <!-- Content loaded dynamically based on selected part -->
               </div>
+            </div>
+
+            <!-- ============================================================
+                 INCIDENT BOARD PANEL
+                 A sibling of #noProfileState and #workspaceContent, shown by
+                 .workspace-main.incident-open. Everything inside is filled by
+                 /ciab/js/workspace-incident.js, which mounts the shared board
+                 into #incidentMount.
+
+                 #incidentBanner is NOT decoration. Before an instructor
+                 releases an incident a student sees their own submissions and
+                 nothing else — no verdicts, and no count of what is left to
+                 find, because the count is itself the hint. This element is
+                 where the page says that out loud instead of looking broken.
+                 ============================================================ -->
+            <div id="incidentPanel">
+              <div class="incident-head">
+                <div>
+                  <h2>Incident Board</h2>
+                  <div class="incident-sub" id="incidentSub">Record what you concluded while hunting in your environment.</div>
+                </div>
+                <button type="button" class="btn btn-outline" id="incidentCloseBtn">← Back to deliverables</button>
+              </div>
+
+              <div class="incident-picker" id="incidentPicker" hidden>
+                <label for="incidentRunSelect">Incident</label>
+                <select id="incidentRunSelect"></select>
+              </div>
+
+              <div class="incident-banner" id="incidentBanner" hidden></div>
+              <div class="incident-note" id="incidentNote" hidden></div>
+              <div id="incidentMount"></div>
             </div>
           </div>
         </div>
@@ -1834,5 +2036,15 @@
   <script src="/ciab/js/ciab-api.js"></script>
   <script src="/js/layout.js"></script>
   <script src="/ciab/js/workspace.js"></script>
+
+  <!-- The blue-team board (Track E). LOAD ORDER IS LOAD-BEARING: each of these
+       four files is an IIFE that assigns exactly one global, and blueteam-board.js
+       reads BlueTeamApi, BlueTeamTimeline and BlueTeamScore off window at mount
+       time. api → timeline → score → board, then the page that mounts it. -->
+  <script src="/js/blueteam/blueteam-api.js"></script>
+  <script src="/js/blueteam/blueteam-timeline.js"></script>
+  <script src="/js/blueteam/blueteam-score.js"></script>
+  <script src="/js/blueteam/blueteam-board.js"></script>
+  <script src="/ciab/js/workspace-incident.js"></script>
 </body>
 </html>

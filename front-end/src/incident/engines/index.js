@@ -178,10 +178,27 @@ function registeredEngines() {
 // in the same session. Until then this is the contract and the registry, and
 // engineFor('synthetic') resolving is what the locality test can assert.
 //
-// 'caldera' is NOT registered and must not be until E9 ships an adapter — the
-// value being legal in the DB CHECK is exactly what makes it safe to leave a
-// key with no implementation: the row is writable, and engineFor() refuses it
-// loudly rather than dispatching it wrong.
+// 'caldera' IS NOW IMPLEMENTED — src/incident/engines/caldera.js — AND IS STILL
+// NOT REGISTERED. That is a decision, not an oversight, and it has two reasons:
+//
+//   1. registeredEngines() exists to feed an engine picker ("Used by routes to
+//      render the engine picker", above). It has no caller yet. The moment E8's
+//      console grows one, registering here would make a C2 that has never
+//      spoken to a real server selectable by an instructor with no further edit
+//      and no review. Leaving the key unregistered means adding Caldera to a UI
+//      is a deliberate act in THIS file.
+//   2. bake-caldera-server.sh's hand-off block states the same rule from the
+//      other side — E8 must pass first, because standing a real C2 on top of an
+//      unproven pipeline gives every failure two candidate causes.
+//
+// So engineFor('caldera') still throws, exactly as
+// test/incident-engine-locality.test.js asserts. Wiring it at E9-ship time is
+// one line:  registerEngine(require('./caldera'));
+//
+// The adapter is exported unregistered so tests (and a future dispatcher) can
+// reach it by name without going through the registry. Requiring it is
+// side-effect free: it pulls in the pure compiler and the HTTP client, neither
+// of which touches the network, the database or config/site.json at load.
 try {
   registerEngine(require('./synthetic'));
 } catch (err) {
@@ -197,4 +214,19 @@ module.exports = {
   registeredEngines,
   UnknownIncidentEngineError,
   ENGINE_METHODS,
+  /**
+   * The Caldera adapter, DELIBERATELY OUTSIDE THE REGISTRY.
+   *
+   * A getter rather than a plain property so requiring this module stays as
+   * cheap as it was: anything that wants to know which engines exist requires
+   * index.js, and none of those callers should pay for a compiler and an HTTP
+   * client they will not use.
+   *
+   * Reaching an engine through this export is NOT a substitute for registering
+   * it — engineFor() is what a run row is dispatched through, and it still
+   * refuses 'caldera'. See the registration block above.
+   */
+  get calderaEngineUnregistered() {
+    return require('./caldera');
+  },
 };
