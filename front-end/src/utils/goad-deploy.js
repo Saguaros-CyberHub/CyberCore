@@ -205,11 +205,31 @@ const INFRA_IP_OCTETS = {
 // GOAD EXTENSIONS — optional machines an authored environment can add to a lab
 // ============================================================================
 // Upstream GOAD ships these under GOAD-main/extensions/<key>/ as extra Ansible
-// inventories layered on top of a lab. CyberCore never runs GOAD's Ansible at
-// deploy time (golden images, or one bake on a staging lab), so
-// `spec.goad.extensions` here is a DECLARATION OF WHAT THE IMAGES ALREADY
-// CONTAIN — it places the machine and pins its address; it does not install
-// anything.
+// inventories layered on top of a lab, installed with `install_extension <key>`
+// once the lab is up. CyberCore does the same thing, in the lane, at deploy
+// time: runGoadPlaybook hands the selected keys to /opt/goad-light/run.sh as its
+// optional 5th argument, and the controller layers each extension's rendered
+// inventory on top of the lab's and runs extensions/<key>/ansible/install.yml.
+// That is upstream's whole run_extension() — inventory layering plus one
+// playbook run (GOAD-main/goad/provisioner/ansible/ansible.py:76) — and it maps
+// one-for-one onto run.sh's existing `INV_FLAGS="-i A -i B"` + playbook loop.
+//
+// SO A TICKED EXTENSION REALLY DOES INSTALL. This comment used to say the
+// opposite ("a DECLARATION OF WHAT THE IMAGES ALREADY CONTAIN … it does not
+// install anything"), which described a prebaked-SIEM design that has been
+// replaced. elk and wazuh now clone a PLAIN Ubuntu base and GOAD's own Ansible
+// builds the stack on it in the lane.
+//
+// It can, because a deployed lane HAS internet — see the correction on the
+// mssql fixes in runGoadPlaybook. bake-lane-gateway-v3.sh MASQUERADEs both lane
+// subnets out wan0 ("internet uplink (NAT)") and ACCEPTs `-i ext0 -o wan0` and
+// `-i int0 -o wan0` in FORWARD; the only DROPs are scoped `-d 100.100.0.0/16`,
+// which contains traffic to the LAB BACKBONE, not to the internet.
+//
+// THE ONE EXCEPTION IS A PRE-BAKED LANE. spec.goad.prebaked clones golden images
+// and runs no Ansible at all — no controller, no run.sh — so an extension ticked
+// there would place its machine and install nothing on it. That combination is
+// refused outright: see assertGoadExtensionsRunnable.
 //
 // Mirrors GOAD_LABS deliberately, field for field, so the same two readers
 // work: getExtension(key) is the catalog reader ("what does CyberCore ship?")
@@ -250,7 +270,20 @@ const GOAD_EXTENSIONS = {
     ipOctet:        24,
     role:           'siem',
     os:             'Ubuntu Server (headless)',
-    template_vmid:  null,        // the golden ELK image, registered per site
+    // 1011 is the GENERIC Ubuntu 22.04 base — it carries no SIEM at all. The
+    // trailing comment here used to read "the golden ELK image, registered per
+    // site", which described a design that has been replaced: there is no
+    // prebaked ELK image any more, and nothing is registered per site. One plain
+    // image serves elk, wazuh and (probably, unverified) lx01, because
+    // extensions/elk/ansible/install.yml builds Elasticsearch + Kibana on it in
+    // the lane and pushes Sysmon + winlogbeat to every host in [domain].
+    //
+    // Upstream's extensions/elk/inventory pins this box at {{ip_range}}.50; the
+    // .24 above is CyberCore's. run.sh rewrites the octet in the same sed pass
+    // that already substitutes {{ip_range}}, so the vendored upstream file stays
+    // pristine and the lane-addressing decision stays in the one place that owns
+    // lane addressing.
+    template_vmid:  1011,
     nic_model:      'virtio',
     instruments:    ['domain'],
     dns_aliases:    ['elk'],
@@ -267,10 +300,16 @@ const GOAD_EXTENSIONS = {
     description:    'All-in-one Wazuh manager. Agents on Windows AND Linux domain machines; CIS benchmarks out of the box.',
     machine:        'wazuh',
     // Upstream's own octet, and free on v2 — so no inventory edit is needed.
+    // (elk's .24 is the exception, and run.sh's render pass is where it is made.)
     ipOctet:        51,
     role:           'siem',
     os:             'Ubuntu Server (headless)',
-    template_vmid:  null,
+    // The SAME generic Ubuntu 22.04 base as elk — nothing about the image is
+    // wazuh-specific. extensions/wazuh/ansible installs the manager in-lane and
+    // pushes agents to [domain] AND [linux_domain]. Was null, which is what
+    // produced the Designer's "has no template VMID, so there is nothing to
+    // clone" and made the extension unusable.
+    template_vmid:  1011,
     nic_model:      'virtio',
     instruments:    ['domain', 'linux_domain'],
     dns_aliases:    ['wazuh'],
@@ -286,7 +325,13 @@ const GOAD_EXTENSIONS = {
     ipOctet:        31,
     role:           'workstation',
     os:             'Windows 11',
-    template_vmid:  1002,
+    // 1006, NOT 1002. The Windows 11 template on this cluster is 1006. The bake
+    // script (infrastructure/proxmox-templates/vm-templates/bake-win-client-template.sh)
+    // still defaults FINAL_VMID to 1002 for Win11-25H2-Workstation — that default
+    // has drifted away from the cluster, and the cluster is what a clone actually
+    // reads. A wrong VMID here does not fail loudly: it clones whatever else lives
+    // at that id, or nothing.
+    template_vmid:  1006,
     nic_model:      'e1000',
     // It JOINS [domain] — upstream's extensions/ws01/inventory puts it there,
     // which is exactly the group [elk_log:children] instruments, so it arrives
@@ -308,6 +353,11 @@ const GOAD_EXTENSIONS = {
     ipOctet:        32,
     role:           'linux',
     os:             'Ubuntu',
+    // UNVERIFIED against the cluster. 1003 is inherited from GOAD_LABS.DRACARYS's
+    // LX01 row and nobody has confirmed what sits there today. 1011 — the generic
+    // Ubuntu 22.04 base elk and wazuh now clone — is exactly the box lx01 wants,
+    // so these two may well be the same image. Not changed on a guess: cloning
+    // the wrong template is silent, and one unverified number is better than two.
     template_vmid:  1003,
     nic_model:      'virtio',
     instruments:    ['linux_domain'],

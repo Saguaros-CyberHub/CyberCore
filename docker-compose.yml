@@ -111,7 +111,27 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRES_IN: 7d
       SESSION_SECRET: ${SESSION_SECRET}
-      COOKIE_SECURE: "false"
+      # Marks the session cookie Secure, so the browser sends it back ONLY over
+      # https. True by default, and that default is correct here: public traffic
+      # arrives through the Cloudflare tunnel, which terminates TLS at the edge,
+      # so the BROWSER always sees https regardless of what the origin hop
+      # between cloudflared and caddy looks like.
+      #
+      # THE ONE CASE THAT FORCES false, stated so the trade is visible: this
+      # stack also answers plain HTTP on the `http://:80` site block in
+      # config/caddy/Caddyfile, for lane gateways and lane VMs. Those are MACHINE
+      # callers — bearer tokens and signed token URLs, never a cookie session —
+      # so a Secure cookie costs them nothing. A HUMAN on that path is the
+      # problem: browse the app by raw IP over http:// and the browser silently
+      # declines to send a Secure cookie, so the login POST returns 200, the
+      # redirect lands back on /login, and NOTHING is logged anywhere because
+      # nothing failed. If operators sign in over http://<lab-ip>, set
+      # COOKIE_SECURE=false in .env and accept that the session cookie then
+      # crosses that network in clear text.
+      #
+      # src/routes/auth.js sessionCookieOptions() compares === 'true', so any
+      # value that is not exactly "true" is false.
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
       # Widens the session cookie to subdomains. REQUIRED for the Caldera
       # authoring console: it is served on its own hostname (its SPA requests
       # /api/v2/* from the origin root, so it cannot live under a path), and a
@@ -166,6 +186,54 @@ services:
       # service name, because the authoring instance moved from a Proxmox VM into
       # the `caldera` container below — the executor Calderas are still VMs.
       CALDERA_AUTHORING_UPSTREAM: ${CALDERA_AUTHORING_UPSTREAM:-caldera:8888}
+      # WHERE THE INSTRUCTOR'S BROWSER GOES, which is NOT where Caddy dials.
+      # The line above is a container-to-container address on cybercore-net; it
+      # is unresolvable from a browser and must never be rendered as a link.
+      # This one is the console's own PUBLIC hostname, and it is the value
+      # GET /api/caldera-authoring/status hands the UI as `console_url`.
+      #
+      # THE SAME .env ENTRY THE caddy SERVICE READS, deliberately, for the same
+      # reason CALDERA_SSO_SECRET and CALDERA_API_KEY_RED are named twice: Caddy
+      # opens its two `import caldera_gate` site blocks on this hostname, and a
+      # link built from any other source could point at a host Caddy has no site
+      # block for. One value, two consumers, no way to set half of it.
+      #
+      # OMITTING IT HERE IS SILENT AND IT WAS OMITTED. src/routes/caldera-
+      # authoring.js consoleConfig() reads exactly this variable and, unset,
+      # answers url:null / console_configured:false — which is honest but wrong
+      # on a deployment where the console is up and working, because both
+      # instructor surfaces then render "Attack authoring is not set up. An
+      # administrator needs to set CALDERA_HOST" at an administrator who already
+      # has. Nothing errors, nothing is logged, and the console stays
+      # undiscoverable. That is the exact dead end this whole surface was built
+      # to prevent, arriving from the one direction it could not see.
+      #
+      # NO DEFAULT, unlike the caddy service's `:-caldera.localhost`, and the
+      # asymmetry is intentional. Caddy needs SOME hostname to open a site block
+      # on or it fails to start; the app needs the TRUTH or it must say it does
+      # not know. A default here would make console_configured permanently true
+      # and turn "nobody set the hostname" into a link to caldera.localhost —
+      # a confidently wrong address, which is worse than an honest null.
+      CALDERA_HOST: ${CALDERA_HOST:-}
+      # THE READ-BACK CREDENTIAL, and it is the SAME SECRET as the caldera
+      # service's CALDERA_API_KEY_RED below — one .env entry, deliberately
+      # reaching both services, exactly like CALDERA_SSO_SECRET above.
+      #
+      # src/incident/caldera/authoring.js calls Caldera's v2 API to read an
+      # authored adversary back out. It resolves its key from
+      # CALDERA_AUTHORING_API_KEY_FILE (preferred — a root-owned 0600 mount,
+      # re-read per call so a rotation lands on the next click) or from this
+      # variable. With NEITHER set it does not throw: resolveApiKey() returns
+      # detail:'not_set' and the surface renders a calm "not configured", which
+      # is why a missing key here has been costing a feature rather than raising
+      # an error.
+      #
+      # KEEP THE TWO IDENTICAL. It is one credential seen from two sides: the
+      # app presents it as the API key on its own requests, while Caddy injects
+      # the very same value as Caldera's `KEY` header on the proxied console. A
+      # MISMATCH IS QUIET — the console keeps working, because that path uses
+      # Caddy's copy — and shows up only as 401s on the app's API calls.
+      CALDERA_AUTHORING_API_KEY: ${CALDERA_API_KEY_RED:-}
       # Proxmox
       PROXMOX_API_URL: ${PROXMOX_API_URL}
       PROXMOX_TOKEN_ID: ${PROXMOX_TOKEN_ID}
@@ -282,6 +350,37 @@ services:
       - ./front-end/profiles:/app/profiles:rw
       - ./front-end/vuln-assets:/app/vuln-assets:ro
       - ./logs:/app/logs:rw
+      # THE APP'S OWN CODE, BIND-MOUNTED OVER THE IMAGE LAYER.
+      #
+      # Everything else about this service is recreate-cheap — an `environment:`
+      # edit is live after `docker compose up -d app`, no build. front-end/src
+      # and front-end/public were NOT: the Dockerfile bakes them in with
+      # `COPY . .`, so a container recreated from a stale image serves stale code
+      # while the corrected file sits right there in the working tree. That
+      # asymmetry cost real debugging time twice in one night — a fixed
+      # admin-topology.js on disk while the container kept rendering the GOAD
+      # "Extensions" checkboxes as nothing, and a COOKIE_DOMAIN fix that looked
+      # inert because `printenv` in the container showed the NEW value while the
+      # code reading it was still the OLD image layer. Two root causes, one
+      # symptom: "I changed it and nothing happened."
+      #
+      # Read-only, matching ./front-end/vuln-assets above: nothing in the
+      # container has any business writing back into the working tree.
+      #
+      # THE CAVEAT THIS DOES NOT REMOVE. Node caches every module it require()s,
+      # so a change under src/ is NOT live until the process restarts:
+      #     docker compose restart app
+      # public/ is read off disk per request, so that half is live immediately.
+      # This removes the REBUILD from the loop, not the restart.
+      #
+      # AND DO NOT MOUNT /app/node_modules. It is image-provided — `npm ci
+      # --omit=dev` runs in a layer BEFORE the source copy — and the host tree
+      # is a different install (devDependencies, host-built native bindings).
+      # Mounting ./front-end over /app wholesale, or adding a node_modules line
+      # here, shadows that layer and the container exits on its first require().
+      # Mount the two source directories and nothing else.
+      - ./front-end/public:/app/public:ro
+      - ./front-end/src:/app/src:ro
       # Built vuln-app image tarballs, served over HTTP to lane web VMs.
       - ./front-end/vuln-builds:/app/vuln-builds:rw
       # DooD — the CIAB vuln-app builder runs `docker build` + `docker save`
@@ -431,11 +530,22 @@ services:
       # attribution note in conf/local.yml.
       CALDERA_SSO_USER: cybercore
       CALDERA_SSO_GROUP: red
-      # Optional. Unset means the entrypoint generates an ephemeral v2 API key
-      # per start, which is correct today because nothing consumes it yet
-      # (engineFor('caldera') still throws). Pin it when the engine adapter in
-      # src/incident/caldera/client.js is finally wired up.
+      # REQUIRED, not optional — this comment used to say otherwise and the code
+      # moved underneath it. CALDERA_API_KEY_RED is what actually authenticates
+      # the console: Caddy injects it as Caldera's `KEY` header and
+      # auth_svc.check_permissions() short-circuits on it for every route. The
+      # entrypoint now REFUSES TO START when it is unset or under 32 characters
+      # (infrastructure/caldera/entrypoint.sh), because an ephemeral key would
+      # leave Caddy presenting one this container has never heard of — which is
+      # the failure that cost hours the first time.
+      #
+      # The app reads the same value as CALDERA_AUTHORING_API_KEY above. Three
+      # services, ONE .env entry: caldera trusts it, caddy presents it, the app
+      # calls the API with it.
+      #   openssl rand -hex 32
       CALDERA_API_KEY_RED: ${CALDERA_API_KEY_RED:-}
+      # Still genuinely optional: nothing presents a blue key, so an ephemeral
+      # per-start value is harmless.
       CALDERA_API_KEY_BLUE: ${CALDERA_API_KEY_BLUE:-}
       # Optional. The entrypoint generates these once and keeps them inside the
       # data volume; set them only to hold them in your own secret store. They

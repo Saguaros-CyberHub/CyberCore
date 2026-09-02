@@ -26,6 +26,15 @@
  * repository still green, because the app is answering exactly as designed and
  * nobody is asking it.
  *
+ * And there is a THIRD place, added when the console moved off /caldera onto
+ * its own hostname: the ADDRESS a UI renders. /status used to answer
+ * `path: '/caldera'` and nothing else, and a UI that linked it now sends an
+ * instructor through a 302 at best. §2b pins the replacement — `console_url`,
+ * built from the same CALDERA_HOST that config/caddy/Caddyfile opens its site
+ * blocks on — and pins the NULL case just as hard, because "authoring is not
+ * set up" is something a UI must be able to render and a fabricated URL is
+ * worse than no URL.
+ *
  * So §3 parses the Caddyfile into its site blocks and asserts, per block, that
  * the caldera route exists AND carries forward_auth AND that its `uri` is the
  * very path front-end/src/server.js mounts. That last one is not pedantry: a
@@ -310,6 +319,177 @@ test('a malformed upstream is a configuration report, not a 500', async () => {
     assert.strictEqual(body.configured, false);
     assert.strictEqual(body.detail, 'malformed_upstream');
   });
+});
+
+// ---------------------------------------------------------------------------
+// §2b console_url — the one address a UI is allowed to render
+//
+// The console is NOT on /caldera any more. It sits at the ROOT of its own
+// hostname, because Caldera's magma UI is a Vue SPA that bootstraps from
+// GET /api/v2/config/main at the ORIGIN ROOT and therefore cannot live under a
+// subpath at all. config/caddy/Caddyfile opens two {$CALDERA_HOST} site blocks
+// for it and docker-compose.yml feeds that variable; these tests hold /status
+// to the SAME variable, so the app and the proxy cannot come to name two
+// different places.
+// ---------------------------------------------------------------------------
+
+/**
+ * Run `fn` with CALDERA_HOST set to `value` (or deleted when null).
+ *
+ * Save-and-restore rather than assign-and-forget, exactly as withUpstream()
+ * does: consoleConfig() reads the variable at CALL time, npm test shares one
+ * process across every suite, and a leaked CALDERA_HOST would silently change
+ * what /status answers for whatever runs next.
+ */
+function withConsoleHost(value, fn) {
+  const prev = process.env.CALDERA_HOST;
+  if (value == null) delete process.env.CALDERA_HOST;
+  else process.env.CALDERA_HOST = value;
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      if (prev === undefined) delete process.env.CALDERA_HOST;
+      else process.env.CALDERA_HOST = prev;
+    });
+}
+
+/**
+ * /status as an instructor, parsed.
+ *
+ * The probe is stubbed to a 401 — the realistic answer from a Caldera that is
+ * up, since this probe carries no credential — so these tests exercise the
+ * payload and never the network.
+ */
+async function statusBody() {
+  PROBE = async () => ({ status: 401 });
+  const { status, text } = await asBrowser(STATUS, INSTRUCTOR);
+  assert.strictEqual(status, 200);
+  return JSON.parse(text);
+}
+
+test('console_url is built from CALDERA_HOST — the hostname Caddy serves the console on', async () => {
+  await withUpstream('caldera:8888', () => withConsoleHost('caldera.lab.test', async () => {
+    const body = await statusBody();
+    assert.strictEqual(body.console_url, 'https://caldera.lab.test/');
+    assert.strictEqual(body.console_configured, true);
+    assert.strictEqual(body.console_detail, null);
+
+    // THE TWO ADDRESSES ARE NOT THE SAME ADDRESS, and this is the whole reason
+    // console_url exists as a separate field. `upstream` is where CADDY dials,
+    // container to container on cybercore-net; it is not resolvable from a
+    // browser, and rendering it as a link is the bug this guards against.
+    assert.strictEqual(body.upstream, 'caldera:8888');
+    assert.ok(!body.console_url.includes('caldera:8888'),
+      'console_url must not be the container-to-container upstream');
+  }));
+});
+
+test('console_url ends in exactly ONE slash, whatever the operator typed', async () => {
+  // A doubled slash is a different origin to some clients and an ugly link to
+  // every human, and an operator who pastes the hostname out of a browser bar
+  // brings a trailing slash with them.
+  for (const [given, expected] of [
+    ['caldera.lab.test', 'https://caldera.lab.test/'],
+    ['caldera.lab.test/', 'https://caldera.lab.test/'],
+    ['caldera.lab.test///', 'https://caldera.lab.test/'],
+    ['https://caldera.lab.test/', 'https://caldera.lab.test/'],
+    // A scheme the operator wrote is honoured, and a port survives.
+    ['http://caldera.lab.test:8888', 'http://caldera.lab.test:8888/'],
+  ]) {
+    await withConsoleHost(given, async () => {
+      const body = await statusBody();
+      assert.strictEqual(body.console_url, expected, `CALDERA_HOST=${given}`);
+      assert.ok(body.console_url.endsWith('/') && !body.console_url.endsWith('//'),
+        'exactly one trailing slash');
+    });
+  }
+});
+
+test('console_url is NULL when CALDERA_HOST is unset — a UI says "not set up", it does not guess', async () => {
+  await withUpstream('caldera:8888', () => withConsoleHost(null, async () => {
+    const body = await statusBody();
+    assert.strictEqual(body.console_url, null,
+      'null, not a fabricated URL — a confidently wrong link is worse than none');
+    assert.strictEqual(body.console_configured, false);
+    assert.strictEqual(body.console_detail, 'not_configured',
+      'the same word authoringConfig() uses, so a UI learns one vocabulary');
+
+    // The unset case must not be papered over by falling back to the request's
+    // own hostname or to the legacy subpath: either manufactures a plausible
+    // link to a host Caddy has no site block for.
+    const raw = JSON.stringify(body);
+    assert.ok(!raw.includes('127.0.0.1') && !raw.includes('localhost'),
+      'console_url must not fall back to the host the request happened to arrive on');
+  }));
+});
+
+test('a malformed CALDERA_HOST is a configuration report, not a 500 and not a broken link', async () => {
+  await withConsoleHost('::::nonsense', async () => {
+    const body = await statusBody();
+    assert.strictEqual(body.console_url, null);
+    assert.strictEqual(body.console_configured, false);
+    assert.strictEqual(body.console_detail, 'malformed_host',
+      'distinct from not_configured — "you typed garbage" and "you typed nothing" are different fixes');
+  });
+});
+
+test('LEGACY: `path` is still emitted, and is still the old subpath — never the console', async () => {
+  // Kept for callers written before console_url existed, and honest: the main
+  // site still 302s /caldera* onto the console host, so those callers are not
+  // broken. But it is not an address any more and nothing may conflate the two.
+  await withConsoleHost('caldera.lab.test', async () => {
+    const body = await statusBody();
+    assert.strictEqual(body.path, calderaAuthoring.PUBLIC_PATH);
+    assert.strictEqual(body.path, '/caldera');
+    assert.notStrictEqual(body.path, body.console_url);
+    assert.ok(!body.console_url.endsWith('/caldera/'),
+      'the console is at the ROOT of its own host — under a subpath the SPA 404s its own bootstrap');
+  });
+  // And it survives the unconfigured case, which is all a legacy caller gets.
+  await withConsoleHost(null, async () => {
+    assert.strictEqual((await statusBody()).path, '/caldera');
+  });
+});
+
+test('the console address is instructor/admin-only — a student learns neither host', async () => {
+  await withUpstream('caldera:8888', () => withConsoleHost('caldera.lab.test', async () => {
+    // An admin gets the same answer an instructor does.
+    PROBE = async () => ({ status: 401 });
+    const admin = JSON.parse((await asBrowser(STATUS, ADMIN)).text);
+    assert.strictEqual(admin.console_url, 'https://caldera.lab.test/');
+
+    for (const who of [null, STUDENT]) {
+      const { status, text } = await asBrowser(STATUS, who);
+      assert.ok(status === 401 || status === 403, `expected a deny, got ${status}`);
+      // /status is NOT wrapped in statusOnly — only the forward_auth gate is —
+      // so requireRole's body legitimately names the role vocabulary here. What
+      // it must never carry is the TOPOLOGY: the console hostname, the
+      // container-to-container upstream, or the fields that hold them.
+      for (const leak of ['caldera.lab.test', 'caldera:8888', 'console_url', 'upstream', 'https://']) {
+        assert.ok(!text.includes(leak),
+          `a ${who ? 'student' : 'anonymous'} deny leaked ${leak}`);
+      }
+    }
+  }));
+});
+
+test('consoleConfig() reads CALDERA_HOST and nothing else', async () => {
+  // Driven directly with an injected env, the way the module already allows for
+  // authoringConfig(). This proves the resolver does not quietly reach for the
+  // CONTAINER address when the public hostname is missing — which would publish
+  // an unroutable link that looks perfectly valid in a UI.
+  const { consoleConfig } = calderaAuthoring;
+  assert.deepStrictEqual(
+    consoleConfig({
+      CALDERA_AUTHORING_UPSTREAM: 'caldera:8888',
+      CALDERA_AUTHORING_URL: 'http://caldera:8888',
+    }),
+    { configured: false, url: null, malformed: false }
+  );
+  assert.strictEqual(consoleConfig({ CALDERA_HOST: '   ' }).url, null,
+    'whitespace is not a hostname');
+  assert.strictEqual(consoleConfig({ CALDERA_HOST: 'caldera.lab.test' }).url,
+    'https://caldera.lab.test/');
 });
 
 // ---------------------------------------------------------------------------

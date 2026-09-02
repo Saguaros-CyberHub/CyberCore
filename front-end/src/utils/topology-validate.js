@@ -91,13 +91,58 @@ function findVmOffsetCollision(specVms) {
 
 // ── per-VM findings, for the canvas ──────────────────────────────────────────
 
-/** Which GOAD lab hosts this spec's lab definition declares, lowercased. */
+/**
+ * The machine names this spec's GOAD layer accounts for, split the same way the
+ * deploy path splits them.
+ *
+ * ROUTED THROUGH resolveGoadLab, NOT GOAD_LABS[version]. That is the whole
+ * point: `spec.goad.extensions` changes the roster, and reading the raw lab
+ * table gets an answer the deploy path does not agree with. The symptom was two
+ * permanent false positives on any environment with extensions ticked — ws01
+ * and elk both reported as strays that "land on the EXTERNAL segment with no
+ * reserved IP", while resolveGoadLab was composing ws01 into the roster and
+ * marking elk external by design. A validator that disagrees with the deployer
+ * is worse than no validator: it trains an author to ignore the findings panel.
+ *
+ * Two sets, because the two placements fail differently and only one of them is
+ * a GOAD host:
+ *   roster    in the AD forest. Gets the deterministic MAC, the DHCP
+ *             reservation, the WinRM wait and the secure-channel heal. This is
+ *             the set `isGoadVm` means.
+ *   external  an ordinary pinnable spec VM (elk, wazuh, lx01). Deliberately
+ *             ABSENT from goadMacs so resolveSpecAddressing still sees it —
+ *             which is the only source of its host-record. Not a stray, so it
+ *             must not draw the name-mismatch warning, but not a GOAD VM
+ *             either, so it must not claim internal placement on v3.
+ *
+ * @returns {{roster: Set<string>, external: Set<string>}|null} null when the
+ *          spec has no GOAD layer, which is what disables every GOAD check.
+ */
 function goadHostNames(spec) {
   if (!spec?.goad?.enabled) return null;
-  const labName = spec.goad.version || goadDeploy.DEFAULT_LAB;
-  const labDef = goadDeploy.GOAD_LABS[labName] || goadDeploy.GOAD_LABS[goadDeploy.DEFAULT_LAB];
+  let resolved;
+  // resolveGoadLab throws on a malformed spec-supplied goad.lab (assertValidLabDef).
+  // That is correct for a deploy and wrong here: the author is mid-edit and the
+  // canvas must still render its other findings. Degrade to "no GOAD roster",
+  // which suppresses the GOAD-specific checks rather than blanking the panel.
+  try { resolved = goadDeploy.resolveGoadLab(spec); } catch (e) { return null; }
+  const labDef = resolved?.labDef;
   if (!labDef) return null;
-  return new Set(labDef.vms.map(v => v.name.toLowerCase()));
+  // Machine name → catalog entry, for the extensions this spec actually
+  // selected. Keyed on the MACHINE rather than the extension key because the
+  // findings loop only ever has a vm.name in hand; they happen to be equal for
+  // everything shipped today, and relying on that would break silently the
+  // first time an extension contributes a differently-named box.
+  const extMachines = new Map();
+  for (const key of (resolved.extensions?.selected || [])) {
+    const ext = goadDeploy.getExtension(key);
+    if (ext) extMachines.set(String(ext.machine).toLowerCase(), ext);
+  }
+  return {
+    roster: new Set((labDef.vms || []).map(v => String(v.name).toLowerCase())),
+    external: resolved.extensions?.external || new Set(),
+    extMachines,
+  };
 }
 
 /**
@@ -138,7 +183,25 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
     }
 
     if (!vm.template_vmid && !spec.template_vmid) {
-      add('error', 'missing-template', `'${name}' has no template VMID, so there is nothing to clone.`, name);
+      // An extension machine whose CATALOG entry also carries no VMID is not an
+      // authoring slip — it is the elk/wazuh golden images, which are registered
+      // per site rather than shipped with the code, so the catalog cannot name a
+      // number that is true everywhere. Say that, because the generic message
+      // ("nothing to clone") reads as a bug in the extension and sends the
+      // author looking in the wrong place. Ticking an extension NEVER installs
+      // anything: CyberCore does not run GOAD's Ansible at deploy time, so the
+      // image must already contain the stack.
+      const ext = goadHosts?.extMachines?.get(String(vm.name || '').toLowerCase());
+      if (ext && !ext.template_vmid) {
+        add('error', 'missing-template',
+          `'${name}' comes from the ${ext.key} extension, whose golden image is registered per site — so the `
+          + `catalog ships no VMID for it and you have to pick one. Bake the ${ext.os || 'image'} once with the `
+          + `${ext.key} stack on it, register it in the template catalog, then set it as this machine's `
+          + `template. Ticking an extension places the machine and pins its address; it never installs `
+          + `anything, because GOAD's Ansible does not run at deploy time.`, name);
+      } else {
+        add('error', 'missing-template', `'${name}' has no template VMID, so there is nothing to clone.`, name);
+      }
     } else if (catalogVmids && vm.template_vmid && !catalogVmids.has(Number(vm.template_vmid))) {
       add('warning', 'template-not-in-catalog',
         `Template ${vm.template_vmid} for '${name}' is not in the template catalog. It may still exist in Proxmox, but nothing verifies it.`, name);
@@ -198,8 +261,16 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
     // it warns about the Kali row that the template editor adds to every GOAD
     // challenge by default — harmless in a log, but this one is shown to a human
     // on the canvas, where a permanent false positive trains people to ignore it.
+    // Extension machines are exempt in BOTH directions, and for two different
+    // reasons. An `inLab` extension (ws01) is already in `roster` above, because
+    // resolveGoadLab composed it in — so it never reaches here. An `external`
+    // one (elk, wazuh, lx01) genuinely is not a GOAD host, but it is not a
+    // stray either: it carries an explicit ipOctet and dns_aliases, and
+    // resolveSpecAddressing pins it precisely BECAUSE goadMacs does not name it.
+    // Warning about it would be advising the author to undo the design.
     if (goadHosts && vm.name && !EXTERNAL_ROLES.has(vm.role) &&
-        !goadHosts.has(vm.name.toLowerCase()) && !explicit.length) {
+        !goadHosts.roster.has(vm.name.toLowerCase()) &&
+        !goadHosts.external.has(vm.name.toLowerCase()) && !explicit.length) {
       add('warning', 'goad-name-mismatch',
         `'${vm.name}' is not a host in this GOAD lab, so it lands on the EXTERNAL segment with no reserved IP and is never domain-joined. Rename it to match the lab, or attach it to a segment explicitly.`, name);
     }
@@ -263,7 +334,9 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
   if (subnetScheme === 'v3' && specVms.length) {
     const placement = specVms.map(vm => resolveVmSegments(vm, {
       subnetScheme,
-      isGoadVm: !!(goadHosts && vm.name && goadHosts.has(vm.name.toLowerCase())),
+      // `roster` only. An external extension is placed as an ordinary spec VM,
+      // which is exactly what isGoadVm: false means to resolveVmSegments.
+      isGoadVm: !!(goadHosts && vm.name && goadHosts.roster.has(vm.name.toLowerCase())),
     }));
 
     if (!placement.some(segs => segs.includes('int'))) {

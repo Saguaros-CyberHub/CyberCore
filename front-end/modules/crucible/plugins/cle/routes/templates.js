@@ -180,7 +180,14 @@ function buildTopologyPayload(spec, subnetScheme) {
     network: (spec && spec.network) || null,
     // goadHostNames returns NULL for a non-GOAD environment, not an empty Set —
     // and Array.from(null) throws, which took the whole endpoint down with it.
-    goad_host_names: Array.from(goadHostNames(spec || {}) || []),
+    //
+    // `.roster`, and only the roster: this feeds the deploy modal's "placement
+    // fixed by the GOAD lab" name-lock, which is exactly lab membership. The
+    // sibling `.external` set (elk, wazuh, lx01) is pinned by the SPEC's own
+    // ipOctet rather than by the lab, so it does not belong under this name.
+    // Optional-chained because a shape change here degrades to an empty
+    // name-lock, which silently un-locks every host in the modal.
+    goad_host_names: Array.from(goadHostNames(spec || {})?.roster || []),
     vms: vms.map(v => ({
       name:             v.name,
       role:             v.role || null,

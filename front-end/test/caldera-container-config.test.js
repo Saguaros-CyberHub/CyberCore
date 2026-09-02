@@ -792,3 +792,134 @@ test('the entrypoint fails closed on a missing or short signing key', () => {
     'the entrypoint appears to supply a fallback CALDERA_SSO_SECRET — there must never be a default'
   );
 });
+
+// ---------------------------------------------------------------------------
+// §4 The wiring between the three services — where the app gets its answers
+// ---------------------------------------------------------------------------
+//
+// §1 pins the secrets that reach BOTH sides. This section pins the two values
+// that must reach THREE, and the pair of bind mounts that must not reach one
+// directory more than they were meant to.
+//
+// Every assertion here was written after the thing it asserts had already gone
+// wrong. They are cheap; the failures they catch are not, because all three are
+// SILENT — nothing throws, nothing is logged, and the symptom reaches a screen
+// as a calm, confident, wrong sentence.
+
+test('CALDERA_HOST reaches the APP too, not just Caddy', () => {
+  // THIS SHIPPED BROKEN ONCE. The variable was given to the caddy service —
+  // which needs it to open its two `import caldera_gate` site blocks — and to
+  // nothing else. src/routes/caldera-authoring.js consoleConfig() reads exactly
+  // this name out of the APP's environment, so on a deployment where the console
+  // was up, published and working, GET /api/caldera-authoring/status answered
+  // console_url:null / console_configured:false and BOTH instructor surfaces
+  // rendered "Attack authoring is not set up. An administrator needs to set
+  // CALDERA_HOST" — at an administrator who already had.
+  //
+  // Nothing errored. The console simply stayed undiscoverable, which is the
+  // exact failure that endpoint exists to prevent, arriving from the one
+  // direction it cannot see: it can tell that CALDERA_HOST is unset, and it
+  // cannot tell that it is unset ONLY HERE.
+  const appLines = blockUnder(composeService('app'), 'environment', 4, 'app service');
+  const caddyLines = blockUnder(composeService('caddy'), 'environment', 4, 'caddy service');
+
+  assert.ok(
+    directKeys(appLines, 6).includes('CALDERA_HOST'),
+    'the app service does not receive CALDERA_HOST, so /api/caldera-authoring/status '
+    + 'answers console_url:null and every instructor is told authoring is not set up'
+  );
+  assert.ok(
+    directKeys(caddyLines, 6).includes('CALDERA_HOST'),
+    'caddy cannot open the console site blocks without CALDERA_HOST'
+  );
+
+  // ONE .env ENTRY, TWO CONSUMERS. A literal on either side is a second source
+  // of truth for one hostname, and the two drift the day the console is
+  // renamed: the link the app renders would then name a host Caddy has no site
+  // block for, which is a dead link that looks entirely plausible.
+  for (const [where, lines] of [['app', appLines], ['caddy', caddyLines]]) {
+    const v = scalarAt(lines, 'CALDERA_HOST', 6);
+    assert.match(
+      v, /^\$\{CALDERA_HOST(:-[^}]*)?\}$/,
+      `${where}: CALDERA_HOST must be interpolated from the environment, got ${v}`
+    );
+  }
+
+  // AND THE APP TAKES NO DEFAULT, while caddy may. The asymmetry is the point:
+  // caddy needs SOME hostname or it fails to start, but a default in the app
+  // makes console_configured permanently true and turns "nobody set the
+  // hostname" into a link to a host that does not exist. A confidently wrong
+  // address is worse than an honest null — the same trade DEFAULT_UPSTREAM
+  // makes, for the same reason, in the same file.
+  assert.strictEqual(
+    scalarAt(appLines, 'CALDERA_HOST', 6), '${CALDERA_HOST:-}',
+    'the app must NOT be given a fallback hostname: a default makes '
+    + 'console_configured permanently true and ships a dead link'
+  );
+});
+
+test('the app API key and the KEY Caddy injects are the SAME .env entry', () => {
+  // One credential seen from three sides: the caldera container TRUSTS it, caddy
+  // PRESENTS it as Caldera's `KEY` header, and the app AUTHENTICATES its own v2
+  // API calls with it. A mismatch is quiet in the worst way — the console keeps
+  // working, because that path uses Caddy's copy — and surfaces only as 401s on
+  // the read-back, which the UI renders as a calm "not configured".
+  const app = blockUnder(composeService('app'), 'environment', 4, 'app service');
+  const caddy = blockUnder(composeService('caddy'), 'environment', 4, 'caddy service');
+  const caldera = blockUnder(composeService('caldera'), 'environment', 4, 'caldera service');
+
+  // The app's variable has a DIFFERENT NAME and must carry the SAME VALUE, which
+  // is why this asserts on the interpolation and not on the key name: only the
+  // right-hand side proves the two cannot drift.
+  assert.strictEqual(
+    scalarAt(app, 'CALDERA_AUTHORING_API_KEY', 6), '${CALDERA_API_KEY_RED:-}',
+    'the app must read the SAME .env entry Caddy injects — a second variable is a '
+    + 'second value, and the mismatch shows up only as 401s nobody attributes to it'
+  );
+  assert.strictEqual(scalarAt(caddy, 'CALDERA_API_KEY_RED', 6), '${CALDERA_API_KEY_RED:-}');
+  assert.strictEqual(scalarAt(caldera, 'CALDERA_API_KEY_RED', 6), '${CALDERA_API_KEY_RED:-}');
+});
+
+test('the app source bind mounts do NOT shadow the image node_modules', () => {
+  // THE RISKIEST LINES IN THE COMPOSE FILE. ./front-end/src and
+  // ./front-end/public are mounted over the image layer so a code fix is live
+  // after a restart instead of a rebuild. The failure mode next door is total:
+  // /app/node_modules is IMAGE-PROVIDED (`npm ci --omit=dev` runs in a layer
+  // BEFORE the source copy) and the host tree is a different install — devDeps,
+  // host-built native bindings. Mount ./front-end over /app wholesale, or add a
+  // node_modules line, and the container exits on its first require(), with the
+  // whole app down and the cause reading like a code error.
+  const vols = sequenceUnder(composeService('app'), 'volumes', 4, 'app service');
+  const targets = vols.map((v) => v.split(':')[1]).filter(Boolean);
+
+  assert.ok(
+    !targets.includes('/app/node_modules'),
+    'a bind mount over /app/node_modules replaces the production install with the '
+    + 'host dev tree — the container will not start'
+  );
+  assert.ok(
+    !targets.includes('/app'),
+    'mounting the host tree over /app wholesale buries node_modules with everything else'
+  );
+
+  // READ-ONLY, both of them, matching ./front-end/vuln-assets. Nothing in the
+  // container has any business writing back into the working tree, and a
+  // container that can is one that can rewrite the source a developer is editing.
+  for (const want of ['/app/src', '/app/public']) {
+    const line = vols.find((v) => v.split(':')[1] === want);
+    assert.ok(line, `the app service no longer mounts ${want}; a fix on disk will not be served`);
+    assert.ok(line.endsWith(':ro'), `${want} must be mounted read-only, got: ${line}`);
+  }
+
+  // The host paths have to be the ones that actually exist. A typo here does NOT
+  // fail the deploy — Docker creates a missing bind source as an empty directory
+  // — and the app then serves an empty /app/src, which is a blank site nobody
+  // traces back to a compose file.
+  for (const want of ['/app/src', '/app/public']) {
+    const src = vols.find((v) => v.split(':')[1] === want).split(':')[0];
+    assert.ok(
+      fs.existsSync(path.join(REPO, src)),
+      `${src} does not exist in the repository; Docker would create it empty and serve nothing`
+    );
+  }
+});

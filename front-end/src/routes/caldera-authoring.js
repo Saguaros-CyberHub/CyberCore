@@ -4,19 +4,27 @@
  * ============================================================================
  *
  * ############################################################################
- * # THIS FILE HAS NEVER TALKED TO A REAL CALDERA SERVER.                     #
+ * # THIS FILE HOLDS NO CALDERA CREDENTIAL AND NEVER AUTHENTICATES TO ONE.    #
  * #                                                                          #
- * # There is no Caldera anywhere in this repository and none on any cluster. #
- * # The only request this file can make is a liveness GET at the authoring    #
- * # instance's root, and even that has never been answered by a real one.     #
+ * # There IS a real Caldera now — the `caldera` compose service, built from   #
+ * # infrastructure/caldera/ and served on its own hostname — so the older     #
+ * # "no Caldera anywhere in this repository" banner that stood here is gone.  #
+ * # What has NOT changed is this file's reach into it: the only request made  #
+ * # from here is an unauthenticated liveness GET at the instance's root.      #
  * # Read /status's `reachable` as "something accepted a TCP connection and    #
- * # spoke HTTP", never as "Caldera is healthy".                               #
+ * # spoke HTTP" — never as "Caldera is healthy", and never as "an instructor  #
+ * # can log in". What actually logs the console in is Caldera's own KEY       #
+ * # header, injected by Caddy AFTER the gate below says yes, and this file    #
+ * # never sees that value.                                                    #
  * ############################################################################
  *
  * WHAT THIS ROUTER IS FOR
  * ----------------------------------------------------------------------------
- * There is ONE standalone Caldera "authoring" instance, on a VM outside every
- * lane, with NO agents and NO implants and no agent contact configured.
+ * There is ONE standalone Caldera "authoring" instance — the `caldera` compose
+ * service on cybercore-net, outside every lane, with NO agents and NO implants
+ * and no agent contact configured. (It used to be a Proxmox VM on the lab
+ * network; several comments in this file said so long after it moved, which is
+ * why the sentence you are reading names the service.)
  * Instructors open its real web UI to BUILD adversaries; CyberCore later reads
  * an adversary back out and replicates it into each lane's own lane-local
  * Caldera at launch time. Nothing inside a lane ever talks to the authoring
@@ -37,9 +45,27 @@
  *
  * What Caddy cannot do is answer "is this browser an instructor on THIS
  * platform". So the split is: CADDY PROXIES, THE APP AUTHORIZES. Caddy's
- * forward_auth turns every request for /caldera/* into a subrequest against
+ * forward_auth turns a request into a subrequest against
  * GET /api/caldera-authoring/authorize, and forwards the original request to
- * the authoring VM only if that subrequest answered 2xx.
+ * the authoring instance only if that subrequest answered 2xx.
+ *
+ * ON ITS OWN HOSTNAME, NOT A SUBPATH. It WAS `handle_path /caldera*` on the
+ * main site, and that could not be made to work: Caldera's magma UI is a Vue
+ * SPA that bootstraps by calling GET /api/v2/config/main at the ORIGIN ROOT,
+ * so it uses the default base for the one call that would have told it a
+ * different base — under /caldera/ the shell loaded and the SPA then 404'd its
+ * own API, rendering a login form that looked like an auth failure and was not.
+ * So config/caddy/Caddyfile now serves the console from TWO site blocks on
+ * {$CALDERA_HOST} (one per scheme, because a Cloudflare tunnel may deliver
+ * either), each of which does nothing but `import caldera_gate` — the snippet
+ * that strips client-supplied identity headers, runs the forward_auth above,
+ * and only then injects Caldera's KEY and proxies. The gate therefore covers
+ * EVERY request to that host: page, asset, XHR and websocket upgrade alike.
+ *
+ * The main site keeps `redir /caldera* https://{$CALDERA_HOST}/ 302` so links
+ * printed before the move do not dead-end. That redirect is the ONLY thing
+ * PUBLIC_PATH still describes — see its docblock, and see consoleConfig() for
+ * where the console actually is.
  *
  * WHY CYBERCORE OWNS THE AUTHZ AT ALL
  * ----------------------------------------------------------------------------
@@ -72,8 +98,17 @@
  * ----------------------------------------------------------------------------
  * The gate used to answer with a status and nothing else. It now also mints a
  * SIGNED, SINGLE-USE, 60-SECOND token into the X-CyberCore-Auth response
- * header, which Caddy's `copy_headers` carries onto the proxied request so the
- * authoring instance can log the instructor in without a shared password.
+ * header, which Caddy's `copy_headers` carries onto the proxied request.
+ *
+ * READ WHAT CONSUMES IT, HONESTLY: right now, nothing does.
+ * infrastructure/caldera/conf/local.yml sets `auth.login.handler.module:
+ * default`, because Caldera never calls a custom login handler on a browser
+ * page load — check_permissions() short-circuits on the KEY header and returns
+ * before the handler is reached. So the token is currently belt, not braces:
+ * the KEY header injected by the gate is what logs the console in. The mint is
+ * kept, and kept MANDATORY, for the reason in the next paragraph — a 2xx with
+ * no header is the whole of the Caddy advisory — and so that a future handler
+ * has an identity to attach an instructor to without a shared password.
  *
  * IDENTITY IS NEVER PUT IN A PLAIN HEADER. Caddy advisory GHSA-7r4p-vjf4-gxv4:
  * `copy_headers` does not strip the CLIENT's copy of a copied header, so if
@@ -106,8 +141,11 @@
  * And note what is deliberately absent: THIS APP HOLDS NO CALDERA CREDENTIAL AT
  * ALL. It does not forge a Caldera session, does not log in on an instructor's
  * behalf, and never puts a credential in a URL, a redirect, or anything the
- * client can see. The instructor types the shared red password into Caldera's
- * own login form. There is therefore nothing here to leak. If a future phase
+ * client can see. (Nor does the instructor: Caddy injects CALDERA_API_KEY_RED
+ * as the KEY header on the already-approved request, so the console opens with
+ * no login form at all — an earlier revision of this comment said the
+ * instructor typed a shared password, which has not been true since the gate
+ * started injecting KEY.) There is therefore nothing here to leak. If a future phase
  * genuinely needs the app to hold one (to READ an adversary back out over the
  * API, say — that is the engine adapter's API key, not this UI password), it
  * arrives as a root-owned 0600 FILE the way bake-caldera-server.sh delivers
@@ -134,20 +172,48 @@ const sso = require('../utils/caldera-sso');
 const AUTHORING_ROLES = Object.freeze(['instructor', 'admin']);
 
 /**
- * The public path Caddy mounts the console on. Must match the handle in BOTH
- * site blocks of config/caddy/Caddyfile; test/caldera-authoring-access.test.js
- * cross-checks the two so a rename cannot land in one place only.
+ * LEGACY — the subpath the console USED to be mounted on.
+ *
+ * IT IS NOT A MOUNT POINT ANY MORE. config/caddy/Caddyfile's public site holds
+ * exactly one thing at this path now, `redir /caldera* https://{$CALDERA_HOST}/
+ * 302`, so an old link lands on the console's own hostname instead of a 404.
+ * The console itself is at consoleConfig().url; see the header for why a
+ * subpath could not work at all.
+ *
+ * The constant survives the move because it is still LOAD-BEARING in two
+ * places, and deleting it would break both:
+ *
+ *   1. It is the `path` claim minted into every SSO token below.
+ *      utils/caldera-sso.js requires an absolute path (BAD_PATH otherwise) and
+ *      test/caldera-sso.test.js verifies tokens against '/caldera', so this
+ *      value is half of a signed contract, not decoration.
+ *   2. /status still reports it as `path` for callers written before
+ *      console_url existed. NEW UI MUST LINK console_url — `path` only gets a
+ *      reader as far as the 302.
  */
 const PUBLIC_PATH = '/caldera';
 
 /**
- * Where the authoring VM lives when the operator has not said.
+ * Where to look when the operator has not said — a SENTINEL, deliberately not
+ * the truth.
  *
- * A NAME, never an address: the authoring instance is a VM on the lab network,
- * not a compose service, so there is no `caldera:8888` service name to use and
- * no IP that survives a rebuild. `configured` below is false whenever this
- * default is in play, which is what lets the UI say "authoring is not set up"
- * instead of sending an instructor to a dead link.
+ * THE TRUTH IS `caldera:8888`. The authoring instance is a compose SERVICE now
+ * (`caldera` in docker-compose.yml, built from infrastructure/caldera/, on
+ * cybercore-net), and compose passes exactly that string as
+ * CALDERA_AUTHORING_UPSTREAM to both this app and Caddy. It moved there from a
+ * Proxmox VM on the lab network, and the comment that stood here said the
+ * opposite — "not a compose service, so there is no `caldera:8888` service
+ * name to use" — long after the move.
+ *
+ * SO WHY IS THE DEFAULT NOT `caldera:8888`? Because `configured` below means
+ * "an operator set the variable", and a default that happened to be RIGHT
+ * would make it permanently true. /status could then never answer "authoring
+ * is not set up"; a deployment that simply forgot the variable would be told
+ * the box is unreachable and sent hunting a network fault instead of setting
+ * one env var. So the default stays an obviously-unreal name — nothing
+ * resolves it, and probeReachable() is never pointed at it (see the /status
+ * handler's not-configured branch). Changing it to a real address would
+ * silently destroy that distinction.
  */
 const DEFAULT_UPSTREAM = 'caldera-authoring.cybercore.lan:8888';
 
@@ -174,7 +240,7 @@ const PROBE_TIMEOUT_MS = Number(process.env.CALDERA_AUTHORING_PROBE_TIMEOUT_MS) 
  * is what config/caddy/Caddyfile substitutes into its reverse_proxy, and it is
  * accepted here as a bare host:port so a deployment sets it once.
  * CALDERA_AUTHORING_URL wins when both are set, for a deployment that fronts the
- * VM with TLS and needs a scheme.
+ * instance with TLS and needs a scheme.
  */
 function authoringConfig(env) {
   const e = env || process.env;
@@ -195,6 +261,65 @@ function authoringConfig(env) {
     return { configured: false, baseUrl: null, upstream: null, malformed: configured };
   }
   return { configured, baseUrl, upstream, malformed: false };
+}
+
+/**
+ * WHERE THE INSTRUCTOR'S BROWSER ACTUALLY GOES.
+ *
+ * Two different addresses fell out of the hostname move and they must not be
+ * confused, which is why this is a second function rather than another field on
+ * authoringConfig():
+ *
+ *   CALDERA_AUTHORING_UPSTREAM  is where CADDY dials, container to container on
+ *                               cybercore-net (`caldera:8888`). It is not
+ *                               resolvable from a browser and must never be
+ *                               rendered as a link.
+ *   CALDERA_HOST                is where the BROWSER goes — the console's own
+ *                               public hostname, the one config/caddy/Caddyfile
+ *                               opens its two `import caldera_gate` site blocks
+ *                               on. THIS is the link.
+ *
+ * READING THE SAME VARIABLE CADDY READS is the whole point: docker-compose.yml
+ * hands CALDERA_HOST to Caddy, and one value with two consumers cannot drift
+ * the way a literal in this file would. (The app service must be given the
+ * variable too, or this correctly answers null — see the unset case below.)
+ *
+ * https UNLESS THE OPERATOR WROTE A SCHEME. The Caddyfile's own redirect
+ * hard-codes https://, and the plain-http site block exists only because a
+ * Cloudflare tunnel may deliver either scheme to this container; the
+ * browser-facing URL is https. A value that already carries a scheme is
+ * honoured, for the same reason CALDERA_AUTHORING_URL is honoured above.
+ *
+ * UNSET IS A FIRST-CLASS ANSWER, and the shape is authoringConfig()'s on
+ * purpose — configured:false plus a malformed flag, no second vocabulary. No
+ * CALDERA_HOST means url:null, which is what lets a UI render "authoring is not
+ * set up" instead of a link to nowhere. Note what is NOT done here: this does
+ * not fall back to req.hostname or to PUBLIC_PATH. Either would manufacture a
+ * plausible URL for a host Caddy has no site block for, and a confidently wrong
+ * link is worse than an honest null — it is the exact dead link the /status
+ * endpoint exists to prevent.
+ *
+ * Read at CALL time, for the same reason authoringConfig() is.
+ */
+function consoleConfig(env) {
+  const e = env || process.env;
+  const raw = String(e.CALDERA_HOST || '').trim();
+  if (!raw) return { configured: false, url: null, malformed: false };
+
+  const withScheme = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  let origin;
+  try {
+    origin = new URL(withScheme).origin;
+  } catch (_) {
+    // A malformed value is a configuration error, not a crash. Same call as
+    // authoringConfig() makes: report it, let /status say so.
+    return { configured: false, url: null, malformed: true };
+  }
+  // ORIGIN, then exactly one slash. url.origin is scheme://host[:port] with no
+  // trailing slash and no path, so this cannot produce '//' (two slashes is a
+  // different origin to some clients and an ugly link to every human) and
+  // cannot carry a stray path a magma SPA would then bootstrap from.
+  return { configured: true, url: `${origin}/`, malformed: false };
 }
 
 /**
@@ -244,8 +369,8 @@ async function probeReachable(baseUrl, fetchImpl) {
  * THIS IS THE POINT OF THE WHOLE ENDPOINT. Caddy's forward_auth treats the
  * subrequest's STATUS as the decision and, on a non-2xx, copies that response
  * STRAIGHT TO THE CLIENT. So whatever authenticateToken and requireRole would
- * have written lands in the browser of whoever probed /caldera — and what they
- * write is informative by design:
+ * have written lands in the browser of whoever probed the console host — and
+ * what they write is informative by design:
  *
  *     { "error": "Access denied. Insufficient permissions.",
  *       "requiredRoles": ["instructor","admin"], "userRole": "student" }
@@ -383,11 +508,29 @@ function createCalderaAuthoringRouter(deps) {
   );
 
   /**
-   * GET /api/caldera-authoring/status — is authoring set up, and is it up?
+   * GET /api/caldera-authoring/status — where is authoring, is it set up, and
+   * is it up?
    *
-   * So a UI can render "authoring is not set up" or "authoring is unreachable"
-   * instead of sending an instructor to a dead link and letting them conclude
-   * the platform is broken.
+   * So a UI can render a WORKING LINK, or "authoring is not set up", or
+   * "authoring is unreachable" — instead of sending an instructor somewhere
+   * dead and letting them conclude the platform is broken.
+   *
+   * THE LINK IS `console_url`, NOT `path`. This endpoint used to answer with
+   * `path: '/caldera'` and nothing else, which stopped being an address the day
+   * the console moved to its own hostname: following it now costs a 302 at best
+   * and, on any deployment whose main site drops that redirect, 404s. `path` is
+   * still emitted because removing a field breaks callers written against it
+   * and the redirect does still work — but it is LEGACY, and a UI that renders
+   * it instead of console_url is rendering the old address.
+   *
+   * THE TWO "configured" FLAGS ARE INDEPENDENT, and that is not redundancy —
+   * they are two different variables that fail in two different ways:
+   *   configured / upstream           CALDERA_AUTHORING_UPSTREAM: whether CADDY
+   *                                   can reach the container at all.
+   *   console_configured / console_url  CALDERA_HOST: whether there is a public
+   *                                   hostname to send a BROWSER to.
+   * A deployment can have either without the other, and a UI needs to tell
+   * "nobody configured the console's hostname" from "the box is down".
    *
    * Instructor-gated like the console itself. It is a small internal-topology
    * disclosure (one lab hostname and port) and staff are the audience for it;
@@ -397,7 +540,7 @@ function createCalderaAuthoringRouter(deps) {
    * NOTE that this path ends in /status, which server.js's
    * RATE_LIMIT_SKIP_PATTERNS already exempts from the abuse limiter (it was
    * written for lane status polls). So a staff account can call this in a loop
-   * and make the app dial the authoring VM each time. Accepted: the address is
+   * and make the app dial the authoring container each time. Accepted: the address is
    * fixed by the environment and cannot be steered by the caller — this is not
    * an SSRF seam — the deadline is PROBE_TIMEOUT_MS, and the caller has already
    * proven they are an instructor or admin.
@@ -408,8 +551,25 @@ function createCalderaAuthoringRouter(deps) {
     requireRole(...AUTHORING_ROLES),
     async (req, res) => {
       const cfg = authoringConfig();
+      const con = consoleConfig();
       const base = {
-        // The path Caddy serves the console on, so a UI never hard-codes it.
+        // WHERE TO SEND THE INSTRUCTOR — the only field a UI should turn into a
+        // link. null when CALDERA_HOST is unset, which is a renderable answer
+        // ("authoring is not set up"), never a dead link. See consoleConfig().
+        console_url: con.url,
+        // Said plainly, so a UI does not have to infer it from a null: false
+        // means nobody has told this deployment where the console is published.
+        console_configured: con.configured,
+        // The same vocabulary the upstream's `detail` uses, for the same reason
+        // — an operator must be able to tell "unset" from "garbage", because
+        // the fixes are different.
+        console_detail: con.configured
+          ? null
+          : (con.malformed ? 'malformed_host' : 'not_configured'),
+        // LEGACY. NOT where the console lives — see the docblock above. The
+        // main site keeps a 302 from this path to console_url so old links do
+        // not dead-end, and this is still the SSO token's `path` claim, which
+        // is why the constant survives. New UI links console_url.
         path: PUBLIC_PATH,
         configured: cfg.configured,
         upstream: cfg.upstream,
@@ -441,9 +601,19 @@ function createCalderaAuthoringRouter(deps) {
  * THE NONCE BURN — POST /api/caldera/redeem
  * ============================================================================
  *
- * WHO CALLS THIS. The Caldera CONTAINER, once, from inside cybercore-net, as
- * step 6 of infrastructure/caldera/login_handler.py's verification. NOT a
- * browser. Nothing in public/js/ calls it and nothing should.
+ * WHO CALLS THIS. In the design: the Caldera CONTAINER, once, from inside
+ * cybercore-net, as step 6 of infrastructure/caldera/login_handler.py's
+ * verification. NOT a browser — nothing in public/js/ calls it and nothing
+ * should.
+ *
+ * IN THE DEPLOYMENT AS IT STANDS: nobody. conf/local.yml sets
+ * `auth.login.handler.module: default`, because Caldera never reaches a custom
+ * login handler on a browser page load — check_permissions() short-circuits on
+ * the KEY header Caddy injects and returns first. So this endpoint is live,
+ * correct and currently unexercised. It is kept rather than deleted because the
+ * token it burns is still minted on every allow (removing the burn would make
+ * that token replayable the moment a handler is wired back up), and because
+ * deleting a half of a two-sided contract is how the other half rots.
  *
  * WHY IT EXISTS AT ALL. A 60-second token is still replayable for 60 seconds,
  * and the one place that could remember "this jti has been spent" is not the
@@ -583,6 +753,9 @@ module.exports = createCalderaAuthoringRouter();
 // for the test, which builds its own router with an injected transport.
 module.exports.createCalderaAuthoringRouter = createCalderaAuthoringRouter;
 module.exports.authoringConfig = authoringConfig;
+// Where a BROWSER goes, as opposed to where Caddy dials. Exported for the test
+// and for any caller that needs the link without a round trip to /status.
+module.exports.consoleConfig = consoleConfig;
 module.exports.AUTHORING_ROLES = AUTHORING_ROLES;
 module.exports.PUBLIC_PATH = PUBLIC_PATH;
 module.exports.MOUNT_PATH = '/api/caldera-authoring';

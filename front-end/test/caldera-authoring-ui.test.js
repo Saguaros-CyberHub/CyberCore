@@ -1001,8 +1001,16 @@ test('E9-U6: the CLE twin renders the summary and the link, in that one answer',
   html = h.dom.document.getElementById('blueTeamContent').innerHTML;
   assert.match(html, /3 Windows machines and 1 Linux machine/);
   assert.match(html, /href="\/caldera\/"/);
+  // Filtered to the course's own incidents collection. The mount ALSO probes
+  // /api/caldera-authoring/status on load — a platform question, answered by a
+  // different router, and unscripted in this harness on purpose — and what this
+  // assertion is about is the ORDER OF THE TWO CALLS THAT TOUCH THE CONSOLE'S
+  // FACT SOURCE. Widening it to every fetch would make it fail for a reason it
+  // was never written to catch.
   assert.deepStrictEqual(
-    h.fetches.map((f) => `${f.method} ${f.url.split('/incidents')[1]}`),
+    h.fetches
+      .filter((f) => /\/incidents\//.test(f.url))
+      .map((f) => `${f.method} ${f.url.split('/incidents')[1]}`),
     ['POST /authoring/fact-source', 'GET /authoring/adversaries']
   );
 });

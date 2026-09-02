@@ -75,9 +75,83 @@ test('findGoadHostMismatch: role dmz is deliberately external and never reported
     findGoadHostMismatch(GOAD_SPEC, [vm('DC01'), vm('web01', { role: 'dmz' })]), null);
 });
 
-test('goadHostNames: null unless GOAD is enabled, lowercased set otherwise', () => {
+test('goadHostNames: null unless GOAD is enabled, lowercased sets otherwise', () => {
   assert.strictEqual(goadHostNames({}), null);
-  assert.deepStrictEqual([...goadHostNames(GOAD_SPEC)].sort(), ['dc01', 'dc02', 'srv02']);
+  const g = goadHostNames(GOAD_SPEC);
+  assert.deepStrictEqual([...g.roster].sort(), ['dc01', 'dc02', 'srv02']);
+  assert.deepStrictEqual([...g.external], []);
+});
+
+// ── extensions: the validator must agree with resolveGoadLab ─────────────────
+//
+// These pin the bug that made the findings panel lie on every environment with
+// extensions ticked. goadHostNames used to read GOAD_LABS[version] directly,
+// which knows nothing about spec.goad.extensions, so the deploy path and the
+// validator disagreed about two machines at once — and the validator's advice
+// ("rename it to match the lab") would have BROKEN a correctly authored spec.
+
+test('goadHostNames: an inLab extension joins the roster, an external one does not', () => {
+  const g = goadHostNames({
+    ...GOAD_SPEC,
+    goad: { ...GOAD_SPEC.goad, version: 'GOAD-Light', extensions: ['ws01', 'elk'] },
+  });
+  // ws01 is domain-joined, so resolveGoadLab composes it into the lab roster —
+  // that membership is what earns it the deterministic MAC and the heal.
+  assert.ok(g.roster.has('ws01'), [...g.roster].join(','));
+  // elk is deliberately NOT a GOAD host: being absent from goadMacs is the only
+  // reason resolveSpecAddressing still sees it and emits its host-record.
+  assert.ok(!g.roster.has('elk'));
+  assert.ok(g.external.has('elk'));
+});
+
+test('extension machines draw no goad-name-mismatch warning', () => {
+  const r = validateTopology({
+    spec: { ...GOAD_SPEC, goad: { ...GOAD_SPEC.goad, version: 'GOAD-Light', extensions: ['ws01', 'elk'] } },
+    subnetScheme: 'v2',
+    specVms: [
+      vm('DC01', { vm_offset: 600000 }),
+      vm('ws01', { vm_offset: 610000, role: 'workstation', template_vmid: 1002 }),
+      vm('elk',  { vm_offset: 620000, role: 'siem', template_vmid: 9001, ipOctet: 24 }),
+    ],
+  });
+  assert.ok(!r.findings.some(f => f.code === 'goad-name-mismatch'),
+    JSON.stringify(r.findings.filter(f => f.code === 'goad-name-mismatch'), null, 2));
+});
+
+test('an UNTICKED extension machine is still a stray — the exemption is per-spec', () => {
+  // The exemption comes from what this spec SELECTED, never from the catalog at
+  // large. A machine named `elk` on a lane with no elk extension really is
+  // unaddressed, and saying so is the whole value of the check.
+  const r = validateTopology({
+    spec: GOAD_SPEC,
+    subnetScheme: 'v2',
+    specVms: [vm('DC01', { vm_offset: 600000 }), vm('elk', { vm_offset: 610000, role: 'siem' })],
+  });
+  assert.ok(r.warnings.some(f => f.code === 'goad-name-mismatch' && f.vm === 'elk'));
+});
+
+test('missing-template on an extension explains that the image is registered per site', () => {
+  const r = validateTopology({
+    spec: { ...GOAD_SPEC, goad: { ...GOAD_SPEC.goad, version: 'GOAD-Light', extensions: ['elk'] } },
+    subnetScheme: 'v2',
+    specVms: [vm('elk', { vm_offset: 600000, role: 'siem', template_vmid: null, ipOctet: 24 })],
+  });
+  const f = r.errors.find(x => x.code === 'missing-template' && x.vm === 'elk');
+  assert.ok(f, JSON.stringify(r.errors, null, 2));
+  // It must say WHERE the VMID comes from and that ticking installs nothing —
+  // the generic "nothing to clone" sent an author looking for a broken catalog.
+  assert.match(f.message, /registered per site/);
+  assert.match(f.message, /never installs anything/);
+});
+
+test('missing-template stays generic for an ordinary machine', () => {
+  const r = validateTopology({
+    spec: {}, subnetScheme: 'v1',
+    specVms: [vm('box01', { vm_offset: 600000, template_vmid: null })],
+  });
+  const f = r.errors.find(x => x.code === 'missing-template');
+  assert.ok(f);
+  assert.match(f.message, /nothing to clone/);
 });
 
 // ── 2. validateTopology ──────────────────────────────────────────────────────

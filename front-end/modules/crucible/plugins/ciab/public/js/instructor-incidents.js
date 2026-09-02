@@ -29,6 +29,9 @@
  *                                                       the link to it
  *   GET  /api/engagements/:id/incidents/authoring/adversaries
  *                                                       what that console holds
+ *   GET  /api/caldera-authoring/status                  is that console set up
+ *                                                       on this platform at all,
+ *                                                       and is it answering
  *   GET  /api/engagements/:id/incidents/:runId/status   the 2s poll
  *   POST /api/engagements/:id/incidents/:runId/abort    stop it
  *   POST /api/engagements/:id/incidents/:runId/retry    re-fire what missed
@@ -84,6 +87,29 @@
  * The server refuses one by name if it ever arrives, and the engine registry
  * refuses the whole engine. That is deliberate and it is explained on the
  * screen rather than expressed as a disabled button nobody can interpret.
+ *
+ * ── TWO AUTHORING PANELS, AND WHY THEY ARE NOT ONE ──────────────────────────
+ * The panel described above answers a question about ONE Engagement: were THESE
+ * machines pushed to the console, and what are they called there. The panel at
+ * the top of the tab answers a question about the PLATFORM: has anybody stood
+ * that console up, and is it answering right now.
+ *
+ * Those are different questions with different audiences and, critically,
+ * different lifetimes. The platform one has an answer before an Engagement is
+ * picked, before a Section exists, and while the launcher is not on screen at
+ * all — and the person who most needs to hear "the console was never set up" is
+ * exactly the instructor who has nothing selected yet. Folding the two together
+ * would tell that person nothing.
+ *
+ * The address in the link is ALWAYS the one the payload carries and is never
+ * written here. That console has already moved once, from a path on this site
+ * to its own hostname; a link built from a constant in a browser file outlives
+ * the deployment that made it true, and the failure is a 404 an instructor
+ * reports as "the platform is broken". `console_url` is the address, and
+ * `path` is a LEGACY CONSTANT the server emits on every deployment whether or
+ * not one is set up — see consoleAvailability() for the one case in which
+ * reading it is still correct, and for why reading it in any other is how a
+ * dead link gets shipped.
  *
  * ── WHY THE POLL TARGET ENDS IN /status ─────────────────────────────────────
  * src/server.js exempts GETs matching /\/status$/ from the global API rate
@@ -207,6 +233,12 @@
     //   unavailable it cannot be done, and `reason` says why
     authoring: null,
     adversaries: null,
+
+    // The AUTHORING CONSOLE's own availability, which is a platform fact and
+    // not an Engagement one — so it is deliberately NOT part of blankAuthoring()
+    // and is not cleared when the instructor switches Section or Engagement.
+    // null until the first probe answers; see refreshAuthoringConsole().
+    authoringConsole: null,
   };
 
   /** The authoring panel's whole state, freshly blank. */
@@ -709,6 +741,187 @@
     renderPicker();
     renderTargets();
     renderAuthoring();
+  }
+
+  // ── Is the authoring console there at all? ────────────────────────────────
+
+  /**
+   * The status endpoint, WITHOUT the /api prefix that API.request adds.
+   *
+   * Not under scopePath(): this one is not addressed by Engagement and answers
+   * before one is chosen. It is instructor/admin-only on the server and it DIALS
+   * THE MACHINE, with a short deadline there, which is the whole reason the
+   * probe below is fired beside load() instead of inside it.
+   */
+  const CONSOLE_STATUS_PATH = '/caldera-authoring/status';
+
+  /**
+   * One /status answer, reduced to the one state this panel can draw.
+   *
+   * TWO INDEPENDENT "CONFIGURED" FLAGS, because the server has two variables
+   * that fail in two different ways and a link needs both:
+   *
+   *   console_configured / console_url  CALDERA_HOST — the console's own public
+   *                                     hostname, which is where a BROWSER goes.
+   *   configured / upstream             CALDERA_AUTHORING_UPSTREAM — where the
+   *                                     proxy dials, container to container. Not
+   *                                     resolvable from a browser and never
+   *                                     rendered.
+   *
+   * Either can be set without the other, and with either missing the link is
+   * dead — so both must hold before one is offered.
+   *
+   * `path` IS LEGACY AND IS A CONSTANT ON THE SERVER. It is '/caldera' on every
+   * deployment, set up or not, and it only works because the main site keeps a
+   * 302 from it to console_url. So it is read ONLY when the answer predates
+   * console_configured entirely: on a server that sends that field, a null
+   * console_url means there is no hostname to redirect TO, and following `path`
+   * there is the dead link this whole panel exists to prevent. Reading it on the
+   * older shape is what keeps this file working whichever way round the two
+   * halves of this feature were deployed.
+   */
+  function consoleAvailability(payload) {
+    if (!payload) return { state: 'error', url: null };
+
+    const hasConsoleFlag = typeof payload.console_configured === 'boolean';
+    // `!== false` rather than truthiness: a field an older server omits is not
+    // a field it denied.
+    const proxied = payload.configured !== false;
+    const published = hasConsoleFlag ? payload.console_configured : true;
+    const raw = payload.console_url || (hasConsoleFlag ? null : payload.path);
+    const url = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+
+    // NOT SET UP. Reported apart from "did not answer" because the two send an
+    // administrator to opposite places: one is a variable nobody has set, the
+    // other is a machine that is down, and hunting a network fault for the
+    // first wastes an afternoon.
+    if (!proxied || !published || !url) return { state: 'unset', url: null };
+
+    // Strictly `=== true`. `reachable` is null when nothing was probed, and a
+    // truthiness test would read that as up.
+    if (payload.reachable !== true) return { state: 'down', url: null };
+    return { state: 'ready', url };
+  }
+
+  /**
+   * Ask whether the console is set up, and whether it answered.
+   *
+   * NEVER REJECTS, and never raises a toast. Every outcome is a state this panel
+   * can draw, including the one where the viewer is not allowed to ask.
+   *
+   * A 403 IS AN ANSWER, NOT A FAILURE. The endpoint is staff-only, so a viewer
+   * it refuses is shown NOTHING &mdash; no panel, no heading, no explanation. A
+   * red toast reading "Access denied" would announce the existence of a surface
+   * they may not have, and it would announce it on a tab where they can do
+   * nothing about it.
+   */
+  async function refreshAuthoringConsole() {
+    S.authoringConsole = { state: 'probing', url: null };
+    renderAuthoringConsole();
+
+    let payload;
+    try {
+      payload = await API.request(CONSOLE_STATUS_PATH);
+    } catch (err) {
+      const status = err && err.status;
+      S.authoringConsole = {
+        state: (status === 401 || status === 403) ? 'hidden' : 'error',
+        url: null,
+      };
+      renderAuthoringConsole();
+      return;
+    }
+
+    S.authoringConsole = consoleAvailability(payload);
+    renderAuthoringConsole();
+  }
+
+  /**
+   * Draw it &mdash; or draw nothing, which is a real branch and not a fallthrough.
+   *
+   * THE LINK EXISTS ON EXACTLY ONE BRANCH: configured AND answering. A link to a
+   * console that is not there is worse than no link at all, because an
+   * instructor who follows it concludes the platform is broken and stops; a
+   * sentence naming what is wrong is something they can hand to an
+   * administrator.
+   *
+   * target="_blank" is not decoration either. The console is a SEPARATE ORIGIN
+   * on its own hostname, so a same-tab navigation throws away whatever is open
+   * here &mdash; a run mid-adjudication included &mdash; and the browser's Back
+   * button lands on a freshly booted tab that has forgotten every selection.
+   * rel="noopener noreferrer" goes with it as always.
+   */
+  function renderAuthoringConsole() {
+    const box = el('incidentAuthoringConsole');
+    if (!box) return;
+    const c = S.authoringConsole || { state: 'idle', url: null };
+
+    // Nothing before the first answer, and nothing at all for a viewer the
+    // endpoint refused. An empty container is the honest rendering of "nobody
+    // has told us there is a console".
+    if (c.state === 'idle' || c.state === 'hidden') { box.innerHTML = ''; return; }
+
+    const head = '<div class="card" style="margin-bottom:1rem;">'
+      + '<div class="card-header"><span class="card-title">&#128736;&#65039; Authoring console</span></div>'
+      + '<div class="card-body">';
+    const tail = '</div></div>';
+    const again = '<button class="btn btn-outline btn-sm"'
+      + ' onclick="Incidents.refreshAuthoringConsole()">Check again</button>';
+
+    if (c.state === 'probing') {
+      box.innerHTML = head
+        + '<p class="text-muted" style="margin:0; font-size:0.9rem;">'
+        + 'Checking whether the attack authoring console is up&hellip;</p>'
+        + tail;
+      return;
+    }
+
+    if (c.state === 'ready') {
+      box.innerHTML = head
+        + '<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.9rem;">'
+        + 'Adversaries are built in a shared console that sits outside every Environment and runs '
+        + 'nothing. It opens in a new tab: it is a separate site with its own sign-in, and a '
+        + 'same-tab jump would throw away whatever you have open here.</p>'
+        + `<a class="btn btn-primary btn-sm" href="${esc(c.url)}"
+              target="_blank" rel="noopener noreferrer">Open the authoring console &#8599;</a>`
+        + tail;
+      return;
+    }
+
+    if (c.state === 'down') {
+      box.innerHTML = head
+        + '<p style="margin:0 0 0.5rem; font-weight:600;">The authoring console is not responding.</p>'
+        + '<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.88rem;">'
+        + 'It is set up on this platform, but nothing answered when CyberCore tried it just now. '
+        + 'The machine may be powered off, or the network path from this server to it may be '
+        + 'down. An administrator can bring it back &mdash; nothing on this screen needs '
+        + 'changing.</p>'
+        + again + tail;
+      return;
+    }
+
+    if (c.state === 'unset') {
+      box.innerHTML = head
+        + '<p style="margin:0 0 0.5rem; font-weight:600;">Attack authoring is not set up.</p>'
+        + '<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.88rem;">'
+        + 'The authoring console is published on its own hostname, and this platform has not been '
+        + 'told what that hostname is. An administrator needs to set <code>CALDERA_HOST</code> and '
+        + 'add the tunnel route that reaches it, then restart the proxy. Until then there is '
+        + 'nothing here to open.</p>'
+        + tail;
+      return;
+    }
+
+    // 'error' &mdash; the check itself failed, which is not the same claim as
+    // "the console is down" and must not be dressed up as one.
+    box.innerHTML = head
+      + '<p style="margin:0 0 0.5rem; font-weight:600;">'
+      + 'CyberCore could not check the authoring console.</p>'
+      + '<p class="text-muted" style="margin:0 0 0.75rem; font-size:0.88rem;">'
+      + 'The check itself failed, so whether the console is up is unknown &mdash; and an address '
+      + 'nobody has confirmed is not offered as a link. Try again in a moment; if it keeps '
+      + 'failing, an administrator can find the reason in the application log.</p>'
+      + again + tail;
   }
 
   // ── Attack authoring ──────────────────────────────────────────────────────
@@ -1468,6 +1681,13 @@
   function ensureInit() {
     if (!S.booted) {
       S.booted = true;
+      // BESIDE load(), not inside it, and deliberately not awaited. The status
+      // endpoint dials the authoring machine and waits up to three seconds for
+      // it; three seconds of an empty Incidents tab, spent deciding whether one
+      // link is drawn, is a tab an instructor reports as broken. It never
+      // rejects — every outcome is a state it draws — so the catch is belt
+      // and braces against a future edit that makes it throw before its own try.
+      refreshAuthoringConsole().catch(() => {});
       load().catch((err) => {
         console.error('[instructor-incidents] load failed:', err);
         emptyState('&#9888;&#65039;', 'Incidents did not load',
@@ -1489,6 +1709,9 @@
     retry,
     authorAttacks,
     loadAdversaries,
+    // Exposed for the "Check again" button on the console panel, and so a test
+    // can await the probe rather than guess at a number of ticks.
+    refreshAuthoringConsole,
     /**
      * Remember which adversary the instructor is looking at.
      *

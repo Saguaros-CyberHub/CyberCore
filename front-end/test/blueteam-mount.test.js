@@ -22,6 +22,11 @@
  *      request 404s — and the board renders a 404 identically to "no incidents
  *      yet", which is the failure nobody reports as a bug.
  *
+ *      There are TWO such literals now: that base, and the platform's
+ *      /api/caldera-authoring/status, which the mount reads to decide whether
+ *      it may offer a link to the authoring console at all. Both are checked
+ *      against the path the server registers, and a third would fail.
+ *
  *   3. THE MOUNT DOES NOT REACH INTO THE ATTACK CONSOLE. They are separate
  *      features with separate flags precisely so a course can run one without
  *      the other; a require-by-global from the board side would couple them
@@ -141,13 +146,26 @@ test('the base URL the mount uses is the route routes/api.js registers', () => {
     `blue-team.js must build its base from '${expected}' to match the registered route`
   );
 
-  // ONE url, and only one. Every quoted /api/ literal in the file has to be
-  // that base — a second endpoint assembled by hand is how the two drift.
+  // EVERY quoted /api/ literal in the file has to be one this test has checked
+  // against a route the server actually registers. The rule used to read "one
+  // literal, and only one", which was the same rule with only one endpoint to
+  // apply it to; the mount now also asks the PLATFORM whether the attack
+  // authoring console exists, which is not addressed by course and cannot be
+  // built out of the base above.
+  //
+  // The second entry is pinned the same way as the first — read out of
+  // src/routes/caldera-authoring.js rather than restated here — so a mount path
+  // that moves fails this test instead of silently 404ing behind a panel whose
+  // failure copy reads exactly like "the console is down".
+  const statusPath = `${require('../src/routes/caldera-authoring').MOUNT_PATH}/status`;
+  assert.strictEqual(statusPath, '/api/caldera-authoring/status');
+
   const literals = js.match(/'\/api\/[^']*'/g) || [];
   assert.deepStrictEqual(
-    [...new Set(literals)],
-    [`'${expected}'`],
-    'blue-team.js should contain exactly one /api/ literal: the incidents base'
+    [...new Set(literals)].sort(),
+    [`'${statusPath}'`, `'${expected}'`].sort(),
+    'blue-team.js may contain exactly two /api/ literals: the incidents base and '
+    + 'the authoring-console status endpoint. A third is an endpoint nothing has checked.'
   );
 });
 

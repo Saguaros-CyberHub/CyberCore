@@ -429,6 +429,17 @@
         <!-- ============================================================ -->
         <div class="tab-content" id="tab-incidents" role="tabpanel" aria-labelledby="tabbtn-incidents" data-instructor-only>
 
+          <!-- Is the attack authoring console set up on this platform, and is
+               it answering? Filled by instructor-incidents.js from
+               GET /api/caldera-authoring/status, asynchronously, and left
+               EMPTY until that answers - so nothing here delays the tab.
+
+               OUTSIDE #incidentMain deliberately. That block is hidden until
+               a Section with a defensive Engagement is loaded, and the person
+               who most needs to be told the console was never set up is
+               exactly the one who has nothing selected yet. -->
+          <div id="incidentAuthoringConsole"></div>
+
           <!-- Filled by instructor-incidents.js: no sections, or nothing loaded. -->
           <div id="incidentNoScope" class="empty-state" style="display: none;"></div>
 

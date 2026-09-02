@@ -66,6 +66,26 @@
  * parameter, and the engine registry refuses the engine outright. The panel says
  * so in a sentence rather than greying a control out.
  *
+ * ── AND A SECOND, SEPARATE PANEL: IS THE CONSOLE THERE AT ALL? ─────────────
+ * "Author attacks" answers a question about THIS course: were its machines
+ * pushed to the console, and what are they called there. GET
+ * /api/caldera-authoring/status answers a question about the PLATFORM: has
+ * anybody stood that console up, and is it answering right now.
+ *
+ * The second question has an answer before this course has deployed anything,
+ * and the instructor who most needs to hear "it was never set up" is exactly
+ * the one who has not pressed the button yet — so it is its own panel with its
+ * own copy, drawn above the other one and gated on the same staff tier.
+ *
+ * THE ADDRESS COMES OFF THE PAYLOAD AND IS NEVER WRITTEN HERE. That console has
+ * already moved once, from a path on this site to its own hostname; a link
+ * assembled from a constant in a browser file outlives the deployment that made
+ * it true, and the result is a 404 an instructor reports as a broken platform.
+ * `console_url` is the address; `path` is a LEGACY CONSTANT the server emits on
+ * every deployment whether or not one is set up. consoleAvailability() below
+ * says which of the two may be read, when, and why reading the wrong one is how
+ * a dead link gets shipped.
+ *
  * ── WHAT THE RUN PICKER MAY SAY ─────────────────────────────────────────────
  * The label is built from whatever fields the payload actually carries.
  * src/incident/projection.js strips technique_id / tactic_id / chain_key /
@@ -97,11 +117,36 @@
    */
   var BASE_PATH = '/api/cle/courses/{courseId}/incidents';
 
+  /**
+   * The PLATFORM's authoring-console endpoint — the second and last /api/
+   * literal in this file, and the only one not addressed by course.
+   *
+   * test/blueteam-mount.test.js pins the whole set: the rule there is not "one
+   * literal" for its own sake, it is that every /api/ string in this file is
+   * one a test has checked against the route the server actually registers. A
+   * third one added without touching that list fails the suite, which is the
+   * point.
+   */
+  var STATUS_PATH = '/api/caldera-authoring/status';
+
   var loadedForCourse = null;   // which course the panel below was drawn for
   var tier = null;              // 'staff' | 'student', as the SERVER reported it
   var runs = [];
   var board = null;             // the BlueTeamBoard.mount() handle, or null
   var authoring = null;         // the attack-authoring panel's state; see below
+  // The console's own availability: null, or { state, url }. A PLATFORM fact
+  // rather than a course one, so it is not part of blankAuthoring() and is not
+  // re-asked when the instructor presses Author attacks.
+  //   probing  the status request is in flight
+  //   ready    configured and answering; `url` is safe to link
+  //   down     configured and did NOT answer — no link on this branch
+  //   unset    nobody has told this platform where the console is
+  //   error    the check itself failed, which is a different claim from "down"
+  //   hidden   the endpoint refused this viewer; draw nothing whatsoever
+  var consoleStatus = null;
+  // The "you may not ask" answer, as an object nobody else can produce. See
+  // refreshConsoleStatus().
+  var REFUSED = {};
   var mountedRunId = null;      // which run the board is showing, so a re-render keeps it
 
   /**
@@ -288,6 +333,165 @@
   }
 
   /**
+   * One /status answer, reduced to the one state the panel can draw.
+   *
+   * TWO INDEPENDENT "CONFIGURED" FLAGS, because the server has two variables
+   * that fail in two different ways and a link needs both:
+   *
+   *   console_configured / console_url  CALDERA_HOST - the console's own public
+   *                                     hostname, where a BROWSER goes.
+   *   configured / upstream             CALDERA_AUTHORING_UPSTREAM - where the
+   *                                     proxy dials, container to container.
+   *                                     Not resolvable from a browser and never
+   *                                     rendered.
+   *
+   * Either can be set without the other, and with either missing the link is
+   * dead, so both must hold before one is offered.
+   *
+   * `path` IS LEGACY AND IS A SERVER-SIDE CONSTANT: '/caldera' on every
+   * deployment, set up or not, working only because the main site keeps a 302
+   * from it to console_url. It is therefore read ONLY when the answer predates
+   * console_configured altogether - on a server that sends that field, a null
+   * console_url means there is no hostname to redirect TO. Reading it on the
+   * older shape is what keeps this file correct whichever way round the two
+   * halves of this feature were deployed.
+   */
+  function consoleAvailability(payload) {
+    if (!payload) return { state: 'error', url: null };
+
+    var hasConsoleFlag = typeof payload.console_configured === 'boolean';
+    // '!== false' rather than truthiness: a field an older server omits is not
+    // a field it denied.
+    var proxied = payload.configured !== false;
+    var published = hasConsoleFlag ? payload.console_configured : true;
+    var raw = payload.console_url || (hasConsoleFlag ? null : payload.path);
+    var url = typeof raw === 'string' && raw.trim() ? raw.trim() : null;
+
+    // Reported apart from "did not answer" because the two send an
+    // administrator to opposite places: one is a variable nobody set, the other
+    // is a machine that is down.
+    if (!proxied || !published || !url) return { state: 'unset', url: null };
+    // Strictly === true: `reachable` is null when nothing was probed, and a
+    // truthiness test would read that as up.
+    if (payload.reachable !== true) return { state: 'down', url: null };
+    return { state: 'ready', url: url };
+  }
+
+  /**
+   * Ask whether the authoring console is set up, and whether it answered.
+   *
+   * NEVER REJECTS. Every outcome is a state the panel below can draw, including
+   * the two that draw nothing at all.
+   *
+   * A STUDENT NEVER ASKS. The tier is the SERVER's word, resolved per request
+   * against THIS course, and a viewer who is a student here is not merely
+   * hidden from the panel — no request is made on their behalf either. The
+   * endpoint would refuse them anyway (it is instructor/admin-only and answers
+   * 403), and that refusal is handled as "there is no authoring surface for
+   * you" rather than as an error: a red banner reading "Access denied" on a
+   * course board would announce a surface they cannot have and cannot act on.
+   */
+  function refreshConsoleStatus() {
+    if (tier !== 'staff') { consoleStatus = null; return Promise.resolve(); }
+    consoleStatus = { state: 'probing', url: null };
+    var headers = {};
+    var token = null;
+    try { token = localStorage.getItem('token'); } catch (e) { token = null; }
+    if (token) headers.Authorization = 'Bearer ' + token;
+    return fetch(STATUS_PATH, { method: 'GET', credentials: 'include', headers: headers })
+      .then(function (res) {
+        // Not an error. See above. Signalled by REFUSED's own identity rather
+        // than by a flag on an object: a flag would be a key the payload could
+        // one day carry for its own reasons, and this comparison cannot be
+        // fooled by one.
+        if (res.status === 401 || res.status === 403) return REFUSED;
+        if (!res.ok) throw new Error('status ' + res.status);
+        return res.json();
+      })
+      .then(function (payload) {
+        if (payload === REFUSED) { consoleStatus = { state: 'hidden', url: null }; return; }
+        consoleStatus = consoleAvailability(payload);
+      })
+      .catch(function () { consoleStatus = { state: 'error', url: null }; })
+      .then(function () { renderShell(); });
+  }
+
+  /**
+   * The console panel, or nothing.
+   *
+   * THE LINK IS ON EXACTLY ONE BRANCH: configured AND answering. A link to a
+   * console that is not there is worse than none — the instructor follows it,
+   * gets a browser error, and concludes the platform is broken — whereas a
+   * sentence naming what is wrong is something they can hand to an
+   * administrator.
+   *
+   * target="_blank" is load-bearing, not habit: the console is a SEPARATE
+   * ORIGIN on its own hostname, so a same-tab navigation discards this page
+   * along with the incident being graded on it.
+   *
+   * NO INTERNAL ADDRESS IS EVER PRINTED. The not-set-up copy names the variable
+   * an administrator must set, which is what they can act on; the host and port
+   * of a lab machine is not.
+   */
+  function consoleStatusHtml() {
+    if (tier !== 'staff') return '';
+    var c = consoleStatus;
+    if (!c || c.state === 'hidden') return '';
+
+    var head = '<div class="info-box" style="margin-bottom:1rem;">'
+      + '<h4 style="margin:0 0 0.5rem;">Authoring console</h4>';
+    var tail = '</div>';
+    var again = '<button type="button" class="btn btn-secondary" '
+      + 'id="blueTeamConsoleRecheck">Check again</button>';
+
+    if (c.state === 'probing') {
+      return head + '<p style="font-size:0.9rem;">Checking whether the attack authoring '
+        + 'console is up&hellip;</p>' + tail;
+    }
+
+    if (c.state === 'ready') {
+      return head
+        + '<p style="font-size:0.9rem;">Adversaries are built in a shared console that sits '
+        + 'outside every lane and runs nothing. It opens in a new tab: it is a separate site '
+        + 'with its own sign-in, and a same-tab jump would throw away the course you have open '
+        + 'here.</p>'
+        + '<a class="btn btn-primary" href="' + escHtml(c.url) + '" target="_blank"'
+        + ' rel="noopener noreferrer">Open the authoring console &#8599;</a>'
+        + tail;
+    }
+
+    if (c.state === 'down') {
+      return head
+        + '<p style="font-weight:600; margin:0 0 0.4rem;">The authoring console is not '
+        + 'responding.</p>'
+        + '<p style="font-size:0.88rem;">It is set up on this platform, but nothing answered '
+        + 'when CyberCore tried it just now. The machine may be powered off, or the network path '
+        + 'from this server to it may be down. An administrator can bring it back &mdash; '
+        + 'nothing about this course needs changing.</p>'
+        + again + tail;
+    }
+
+    if (c.state === 'unset') {
+      return head
+        + '<p style="font-weight:600; margin:0 0 0.4rem;">Attack authoring is not set up.</p>'
+        + '<p style="font-size:0.88rem;">The authoring console is published on its own hostname, '
+        + 'and this platform has not been told what that hostname is. An administrator needs to '
+        + 'set <code>CALDERA_HOST</code> and add the tunnel route that reaches it, then restart '
+        + 'the proxy. Until then there is nothing here to open.</p>'
+        + tail;
+    }
+
+    return head
+      + '<p style="font-weight:600; margin:0 0 0.4rem;">CyberCore could not check the authoring '
+      + 'console.</p>'
+      + '<p style="font-size:0.88rem;">The check itself failed, so whether the console is up is '
+      + 'unknown &mdash; and an address nobody has confirmed is not offered as a link. Try again '
+      + 'in a moment; if it keeps failing, an administrator can find the reason in the '
+      + 'application log.</p>'
+      + again + tail;
+  }
+
+  /**
    * The authoring panel, or NOTHING AT ALL for a student.
    *
    * The tier is the SERVER's, read off the run-list payload — see the header. A
@@ -370,6 +574,9 @@
     // and then await the result, instead of guessing at a number of ticks.
     var prepare = document.getElementById('blueTeamAuthorBtn');
     if (prepare) prepare.addEventListener('click', function () { return authorAttacks(); });
+
+    var recheck = document.getElementById('blueTeamConsoleRecheck');
+    if (recheck) recheck.addEventListener('click', function () { return refreshConsoleStatus(); });
 
     var refresh = document.getElementById('blueTeamAdversaryRefresh');
     if (refresh) refresh.addEventListener('click', function () { return loadAdversaries(); });
@@ -460,7 +667,7 @@
     // The authoring panel is drawn WHETHER OR NOT a run exists: an instructor
     // prepares the console before the first launch, which is precisely when
     // this course has no runs at all. It returns '' for a student.
-    var authoringMarkup = authoringHtml();
+    var authoringMarkup = consoleStatusHtml() + authoringHtml();
 
     if (!runs.length) {
       box.innerHTML = authoringMarkup
@@ -560,6 +767,12 @@
         if (!authoring) authoring = blankAuthoring();
         loadedForCourse = courseId;
         renderShell();
+        // NOT AWAITED, and deliberately after the first paint. The status
+        // endpoint dials the authoring machine and waits up to three seconds
+        // for it; holding the board back for that would make a tab that is
+        // otherwise ready look broken. refreshConsoleStatus() re-renders on its
+        // own when it lands, and never rejects.
+        refreshConsoleStatus();
       })
       .catch(function (err) {
         if (courseId !== currentCourseId) return;
@@ -596,6 +809,11 @@
     // about the last one is wrong here. Blanked rather than refreshed:
     // refreshing writes to a server every instructor shares, and nobody asked.
     authoring = null;
+    // Not because the answer changes per course — it does not — but because
+    // `tier` is about to be re-resolved against a course this viewer may only
+    // be enrolled in, and a panel left on screen from the last one would be a
+    // staff surface drawn for a student.
+    consoleStatus = null;
     mountedRunId = null;
     var box = root();
     if (box) box.innerHTML = '<p style="color:var(--text-secondary);">Loading…</p>';
@@ -621,6 +839,10 @@
     // Exposed for test/caldera-authoring-ui.test.js, which drives this file in a
     // sandbox to prove a student is rendered NOTHING of the panel. A getter, so
     // the test reads the same markup the shell writes rather than a copy of it.
-    authoringHtml: authoringHtml
+    authoringHtml: authoringHtml,
+    // Same reason: the test drives the probe and reads the markup the shell
+    // writes, rather than a copy of either.
+    refreshConsoleStatus: refreshConsoleStatus,
+    consoleStatusHtml: consoleStatusHtml
   };
 })();
