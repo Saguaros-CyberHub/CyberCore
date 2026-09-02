@@ -148,8 +148,27 @@ RUN find /src/caldera -maxdepth 4 -name '.git' -prune -exec rm -rf {} +
 # build hermetic — no config, no database, no network calls from the app itself —
 # and leaves the node_modules tree behind in a stage that is thrown away.
 FROM node:20-bookworm-slim AS magma
-COPY --from=source /src/caldera/plugins/magma /magma
-WORKDIR /magma
+# BUILD IT WHERE UPSTREAM PUTS IT. Copying plugins/magma to a bare /magma and
+# building there fails, and the failure is spectacularly indirect:
+#
+#   ✓ 46 modules transformed.
+#   [vite:build-import-analysis] Set maximum size exceeded
+#   file: /magma/src/views/PluginView.vue
+#   RangeError: Set maximum size exceeded
+#       at ReaderSync.walkSync ... ProviderSync.api        (fast-glob)
+#
+# PluginView.vue resolves its sibling plugins with a dynamic glob relative to
+# its own location. Upstream that location is caldera/plugins/magma, so the
+# glob's parent is plugins/ and the walk is small. At a bare /magma the parent
+# is the CONTAINER ROOT, so fast-glob walks /proc, /sys and /dev — whose
+# symlink loops and synthetic entries are effectively unbounded — until the Set
+# backing the visited-paths check exceeds V8's ~16.7M element ceiling.
+#
+# So the tree layout is a build input, not a convenience. Copy the whole source
+# and build in place. It costs a little build time in a stage that is thrown
+# away, and it costs nothing in the final image.
+COPY --from=source /src/caldera /src/caldera
+WORKDIR /src/caldera/plugins/magma
 # Node's default old-space ceiling is ~2 GB, and magma's `vite build` exceeds it:
 # the first build of 5.3.0 died at 1915.8 MB with
 #   FATAL ERROR: CALL_AND_RETRY_LAST Allocation failed - JavaScript heap out of memory
@@ -220,7 +239,7 @@ COPY --from=deps /opt/venv /opt/venv
 
 COPY --from=source --chown=caldera:caldera /src/caldera /usr/src/app
 # The compiled UI, dropped in where the plugin expects to find it.
-COPY --from=magma  --chown=caldera:caldera /magma/dist /usr/src/app/plugins/magma/dist
+COPY --from=magma  --chown=caldera:caldera /src/caldera/plugins/magma/dist /usr/src/app/plugins/magma/dist
 
 WORKDIR /usr/src/app
 
@@ -295,7 +314,12 @@ CMD ["python", "server.py", "--environment", "local"]
 #        MAGMA_HEAP_MB (default 4096) in stage 2. THE BUILD HOST MUST HAVE THAT
 #        MUCH FREE RAM — if it does not, the same OOM returns and the fix is
 #        more memory on the builder, not a smaller number here.
-#     b) Wrong Node major — if npm itself refuses, check what magma's
+#     b) "Set maximum size exceeded" from fast-glob — OBSERVED AND FIXED. It
+#        means magma is being built OUTSIDE the caldera tree, so PluginView.vue's
+#        sibling-plugin glob escapes into / and walks /proc and /sys. Stage 2
+#        copies the whole source and builds in place for exactly this reason; do
+#        not "simplify" it back to copying plugins/magma alone.
+#     c) Wrong Node major — if npm itself refuses, check what magma's
 #        package.json asks for and change the `node:20-bookworm-slim` base.
 #     Either way a magma that fails to build yields a server with a working API
 #     and a blank page, which reads like a proxy problem and is not.
