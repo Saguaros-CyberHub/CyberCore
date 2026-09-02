@@ -197,9 +197,25 @@ ARG MAGMA_HEAP_MB=4096
 ENV NODE_OPTIONS="--max-old-space-size=${MAGMA_HEAP_MB}"
 # `npm ci` when a lockfile is present (reproducible), `npm install` otherwise —
 # older magma tags do not ship package-lock.json.
+# THE SUBPATH IS A BUILD INPUT. Caddy serves this under /caldera on the main
+# site, and vite bakes `base` into index.html at BUILD time: without it magma
+# emits root-absolute asset URLs (/assets/index-*.js), the browser requests them
+# at the site root, they miss `handle_path /caldera/*`, fall through to the
+# CyberCore app and 404. The HTML loads, no JS does, and you get a WHITE PAGE
+# with no error anywhere in the server logs — which reads like a proxy fault and
+# is not one. Observed on the first working deploy.
+#
+# `npm run build -- --base=...` forwards the flag through the npm script to vite,
+# whose CLI value wins over anything in vite.config. Paired with
+# app.frontend.api_base_url in conf/local.yml, which does the same job for the
+# API calls the bundle makes at runtime — BOTH are required, and they must agree.
+#
+# If this ever moves to its own hostname, set CALDERA_BASE_PATH=/ and clear
+# api_base_url; serving at an origin root is what upstream assumes.
+ARG CALDERA_BASE_PATH=/caldera/
 RUN if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; \
     else npm install --no-audit --no-fund; fi \
- && npm run build \
+ && npm run build -- --base="${CALDERA_BASE_PATH}" \
  && rm -rf node_modules
 
 # =============================================================================
