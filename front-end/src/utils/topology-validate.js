@@ -47,19 +47,38 @@ const EXTERNAL_ROLES = new Set(['dmz', 'attacker']);
  */
 function findGoadHostMismatch(spec, specVms) {
   if (!spec?.goad?.enabled) return null;
-  const labName = spec.goad.version || goadDeploy.DEFAULT_LAB;
-  const labDef = goadDeploy.GOAD_LABS[labName] || goadDeploy.GOAD_LABS[goadDeploy.DEFAULT_LAB];
-  if (!labDef) return null;
 
-  const known = new Set(labDef.vms.map(v => v.name.toLowerCase()));
+  // EXTENSION-AWARE, via goadHostNames -> resolveGoadLab. This function used to
+  // index GOAD_LABS[version] directly, which knows nothing about
+  // spec.goad.extensions, so it reported ws01 and elk as strays on any
+  // environment with extensions ticked — in the CLE deploy picker, right where
+  // an instructor is deciding whether to commit a cohort. Its advice ("rename
+  // them to match the lab") would have BROKEN a correctly authored spec.
+  //
+  // This is the SECOND reader that had the bug; validateTopology's was fixed
+  // first and this one was missed. Both now go through one resolver, which is
+  // the point: a validator that disagrees with the deployer is worse than no
+  // validator.
+  const goadHosts = goadHostNames(spec);
+  if (!goadHosts) return null;
+
+  const labName = spec.goad.version || goadDeploy.DEFAULT_LAB;
+  const resolvedName = labName in goadDeploy.GOAD_LABS ? labName : goadDeploy.DEFAULT_LAB;
+
   const unmatched = specVms
-    .filter(v => v.name && v.role !== 'dmz' && !known.has(String(v.name).toLowerCase()))
+    .filter(v => v.name
+      && v.role !== 'dmz'
+      && !goadHosts.roster.has(String(v.name).toLowerCase())
+      // An `external` extension (elk, wazuh, lx01) is not a GOAD host and is not
+      // meant to be one: it is an ordinary pinnable spec VM whose absence from
+      // goadMacs is exactly what earns it a reservation and a host-record.
+      && !goadHosts.external.has(String(v.name).toLowerCase()))
     .map(v => v.name);
   if (unmatched.length === 0) return null;
 
   return `${unmatched.join(', ')} ${unmatched.length === 1 ? 'is' : 'are'} not part of the `
-       + `'${labName in goadDeploy.GOAD_LABS ? labName : goadDeploy.DEFAULT_LAB}' GOAD lab, which defines `
-       + `${labDef.vms.map(v => v.name).join(', ')}. Unmatched hosts deploy to the EXTERNAL segment with `
+       + `'${resolvedName}' GOAD lab, which defines `
+       + `${goadHosts.rosterNames.join(', ')}. Unmatched hosts deploy to the EXTERNAL segment with `
        + `no reserved IP and are not domain-healed. Rename them to match the lab, or mark them "role": "dmz" `
        + `if they are meant to sit outside the AD network.`;
 }
@@ -144,6 +163,11 @@ function goadHostNames(spec) {
   }
   return {
     roster: new Set((labDef.vms || []).map(v => String(v.name).toLowerCase())),
+    // The same names in the case the lab actually declares them. `roster` is
+    // lowercased because it exists to be MATCHED against; these exist to be
+    // SHOWN to a human, and telling an author their lab defines 'dc01' when
+    // every other surface calls it DC01 is a small, avoidable confusion.
+    rosterNames: (labDef.vms || []).map(v => String(v.name)),
     external: resolved.extensions?.external || new Set(),
     extMachines,
     selected: resolved.extensions?.selected || [],

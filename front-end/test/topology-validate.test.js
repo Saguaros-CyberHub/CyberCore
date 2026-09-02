@@ -75,6 +75,53 @@ test('findGoadHostMismatch: role dmz is deliberately external and never reported
     findGoadHostMismatch(GOAD_SPEC, [vm('DC01'), vm('web01', { role: 'dmz' })]), null);
 });
 
+// THE CLE DEPLOY PICKER REGRESSION. This is the surface an instructor sees right
+// before committing a cohort, and it was telling them their correctly authored
+// environment was broken: "elk, ws01 are not part of the 'GOAD-Mini' GOAD lab".
+// Same root cause as validateTopology's -- reading GOAD_LABS[version] directly
+// instead of resolveGoadLab -- but a SECOND reader, fixed later than the first.
+// The advice it gave ("rename them to match the lab") would have broken the spec.
+
+test('findGoadHostMismatch: ticked extensions are not strays', () => {
+  const spec = { goad: { enabled: true, version: 'GOAD-Mini', extensions: ['elk', 'ws01'] } };
+  const out = findGoadHostMismatch(spec, [
+    vm('DC01'),
+    vm('ws01', { role: 'workstation' }),   // inLab -> composed into the roster
+    vm('elk',  { role: 'siem' }),          // external -> deliberately not a GOAD host
+  ]);
+  assert.strictEqual(out, null, out || '');
+});
+
+test('findGoadHostMismatch: an UNTICKED extension machine is still reported', () => {
+  // The exemption comes from what the spec SELECTED, never from the catalog at
+  // large -- an `elk` on a lane with no elk extension really is unaddressed.
+  const out = findGoadHostMismatch(
+    { goad: { enabled: true, version: 'GOAD-Mini' } },
+    [vm('DC01'), vm('elk', { role: 'siem' })]);
+  assert.match(out || '', /^elk is not part of the 'GOAD-Mini' GOAD lab/);
+});
+
+test('findGoadHostMismatch: the roster it names keeps the lab own casing', () => {
+  // `roster` is lowercased because it exists to be matched against; a human
+  // reading "this lab defines dc01" when every other surface says DC01 is a
+  // small avoidable confusion, so the message uses rosterNames.
+  const out = findGoadHostMismatch(
+    { goad: { enabled: true, version: 'GOAD-Mini' } }, [vm('stray')]);
+  // NOTE: no backslash-b in this pattern. Written through a generator it becomes a
+  // literal BACKSPACE (0x08) and the regex then matches nothing -- it cost a red
+  // test here already. A plain includes() says the same thing and cannot rot.
+  assert.ok((out || '').includes('which defines DC01.'), out || '');
+  assert.ok(!/which defines dc01/.test(out || ''), out || '');
+});
+
+test('findGoadHostMismatch: a ticked inLab extension JOINS the named roster', () => {
+  const out = findGoadHostMismatch(
+    { goad: { enabled: true, version: 'GOAD-Mini', extensions: ['ws01'] } },
+    [vm('stray')]);
+  assert.match(out || '', /which defines DC01, ws01/,
+    'the roster the message names must be the COMPOSED one the deployer uses');
+});
+
 test('goadHostNames: null unless GOAD is enabled, lowercased sets otherwise', () => {
   assert.strictEqual(goadHostNames({}), null);
   const g = goadHostNames(GOAD_SPEC);
