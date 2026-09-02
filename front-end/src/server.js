@@ -971,6 +971,21 @@ async function start() {
     // sweep queries a table that does not exist yet.
     await require('./incident/schema').ensureIncidentTables();
 
+    // The AGENT half of a ticked elk/wazuh extension: the two vuln_scripts rows
+    // (goad-elk-agent, goad-wazuh-agent) that goad-agent-attach.js attaches to
+    // every Windows roster host. Seeded here, and not from front-end/migrations/,
+    // for the usual reason — that directory has no runner — and not from the CiAB
+    // plugin's migrations either, because the row bodies are 185 KB PowerShell
+    // files read off disk and an already-run .sql cannot re-seed an edited one.
+    //
+    // AFTER moduleLoader.loadAll(): the CiAB plugin migration is what CREATES
+    // vuln_scripts in clinic_db, and BEFORE anything can deploy a lane, because
+    // an unseeded slug is the silent failure this whole feature exists to avoid
+    // (runVulnScripts selects WHERE slug = ANY($1) AND is_active = true, so it
+    // installs nothing and logs nothing). Non-fatal on the same terms as the
+    // audit log: no seeded agent scripts beats no server.
+    await require('./utils/goad-agent-scripts').ensureGoadAgentScripts();
+
     // Drains queued mail in the background. No-ops when mail isn't configured,
     // so an offline deployment doesn't spin a pointless timer.
     require('./utils/email-worker').startEmailWorker();

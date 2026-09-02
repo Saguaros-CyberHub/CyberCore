@@ -130,7 +130,14 @@ test('an UNTICKED extension machine is still a stray — the exemption is per-sp
   assert.ok(r.warnings.some(f => f.code === 'goad-name-mismatch' && f.vm === 'elk'));
 });
 
-test('missing-template on an extension explains that the image is registered per site', () => {
+test('missing-template on an extension names the catalog VMID and says what that image is', () => {
+  // WHAT CHANGED AND WHY. This assertion used to demand the words "registered per
+  // site" and "never installs anything" — the prebaked-SIEM design, where elk was
+  // a golden image each site baked and ticking the extension installed nothing.
+  // That design is gone: elk and wazuh clone ONE generic Ubuntu base and GOAD's
+  // own extensions/<key>/ansible builds the stack in the lane at deploy time. The
+  // old wording is now a falsehood, so the test that pinned it had to move with
+  // the message rather than keep it alive.
   const r = validateTopology({
     spec: { ...GOAD_SPEC, goad: { ...GOAD_SPEC.goad, version: 'GOAD-Light', extensions: ['elk'] } },
     subnetScheme: 'v2',
@@ -138,10 +145,114 @@ test('missing-template on an extension explains that the image is registered per
   });
   const f = r.errors.find(x => x.code === 'missing-template' && x.vm === 'elk');
   assert.ok(f, JSON.stringify(r.errors, null, 2));
-  // It must say WHERE the VMID comes from and that ticking installs nothing —
-  // the generic "nothing to clone" sent an author looking for a broken catalog.
-  assert.match(f.message, /registered per site/);
-  assert.match(f.message, /never installs anything/);
+  // It must name the VMID the catalog already knows — the generic "nothing to
+  // clone" sent an author looking for a broken catalog instead of a blank field.
+  assert.match(f.message, /template 1011/);
+  // …and it must say the image is PLAIN, or an author bakes a SIEM nobody needs.
+  assert.match(f.message, /plain/i);
+  assert.match(f.message, /install_extension elk/);
+  assert.ok(!/never installs anything/.test(f.message),
+    'the message must not carry the replaced design forward');
+});
+
+// ── extensions on a pre-baked lane ──────────────────────────────────────────
+//
+// THE ONE COMBINATION THAT DEPLOYS GREEN AND DOES NOTHING. Extensions are
+// installed by /opt/goad-light/run.sh, which only a LIVE lane ever runs — a
+// pre-baked lane clones golden images and heals secure channels, and
+// challenge-lane-deployer's liveGoadController is literally
+// `enabled && !prebaked`. So a ticked extension on a pre-baked environment does every
+// visible thing (clone, address, DNS record, console) and the one that matters
+// not at all, and the lane still reports active.
+
+test('prebaked-extension: an extension still on the PLAIN base is an ERROR', () => {
+  const r = validateTopology({
+    spec: {
+      goad: {
+        enabled: true, version: 'GOAD-Light', prebaked: true,
+        fixed_subnet: { int: '10.9.9', ext: '10.9.9' },
+        extensions: ['elk'],
+      },
+    },
+    subnetScheme: 'v2',
+    specVms: [
+      vm('DC01', { vm_offset: 600000, role: 'dc' }),
+      vm('elk', { vm_offset: 610000, role: 'siem', template_vmid: 1011, ipOctet: 24 }),
+    ],
+  });
+  const f = r.errors.find(x => x.code === 'prebaked-extension');
+  assert.ok(f, 'expected a prebaked-extension error: ' + JSON.stringify(r.findings, null, 2));
+  // It has to name BOTH halves of the pair, because either one alone is fine and
+  // an author reading only "elk is wrong" would go looking at the elk machine.
+  assert.match(f.message, /'elk'/);
+  assert.match(f.message, /spec\.goad\.prebaked/);
+  assert.match(f.message, /run\.sh/);
+  // Badged on the offending node, so the canvas can point at it.
+  assert.strictEqual(f.vm, 'elk');
+});
+
+test('prebaked-extension: a SEALED template clears it — pre-baked is the destination', () => {
+  // The rule is not "is this lane pre-baked". Once the stack is sealed into a
+  // golden image (seal-goad-elk-template.sh -> 1012), pre-baked is exactly the
+  // mode you want, and nothing needs to install because the image carries it.
+  const r = validateTopology({
+    spec: {
+      goad: {
+        enabled: true, version: 'GOAD-Light', prebaked: true,
+        fixed_subnet: { int: '10.9.9', ext: '10.9.9' },
+        extensions: ['elk'],
+      },
+    },
+    subnetScheme: 'v2',
+    specVms: [
+      vm('DC01', { vm_offset: 600000, role: 'dc' }),
+      vm('elk', { vm_offset: 610000, role: 'siem', template_vmid: 1012, ipOctet: 24 }),
+    ],
+  });
+  assert.ok(!r.findings.some(f => f.code === 'prebaked-extension'),
+    'a sealed image must not be reported: ' + JSON.stringify(r.findings, null, 2));
+});
+
+test('prebaked-extension reports one finding per ticked extension', () => {
+  const r = validateTopology({
+    spec: {
+      goad: {
+        enabled: true, version: 'GOAD-Light', prebaked: true,
+        extensions: ['elk', 'wazuh'],
+      },
+    },
+    subnetScheme: 'v2',
+    specVms: [vm('DC01', { vm_offset: 600000, role: 'dc' })],
+  });
+  const found = r.errors.filter(x => x.code === 'prebaked-extension');
+  assert.strictEqual(found.length, 2, JSON.stringify(r.errors, null, 2));
+  assert.deepStrictEqual(found.map(f => f.vm), [null, null],
+    'an extension can be ticked before its machine row exists; a finding pinned to a node that is not on '
+    + 'the canvas renders nowhere, so it stays a whole-topology finding until the row appears');
+});
+
+test('a LIVE lane with the same extensions draws no prebaked-extension finding', () => {
+  // Live is the default and the mode that installs. The check must fire on the
+  // PAIR and never on the extension alone, or it becomes a permanent false
+  // positive on the normal path — which trains authors to ignore the panel.
+  const r = validateTopology({
+    spec: { ...GOAD_SPEC, goad: { ...GOAD_SPEC.goad, extensions: ['elk', 'wazuh'] } },
+    subnetScheme: 'v2',
+    specVms: [
+      vm('DC01', { vm_offset: 600000, role: 'dc' }),
+      vm('elk', { vm_offset: 610000, role: 'siem', template_vmid: 1011, ipOctet: 24 }),
+    ],
+  });
+  assert.ok(!has(r, 'prebaked-extension'), JSON.stringify(r.findings, null, 2));
+});
+
+test('a pre-baked lane with NO extensions draws no prebaked-extension finding', () => {
+  const r = validateTopology({
+    spec: { goad: { enabled: true, version: 'GOAD-Light', prebaked: true } },
+    subnetScheme: 'v2',
+    specVms: [vm('DC01', { vm_offset: 600000, role: 'dc' })],
+  });
+  assert.ok(!has(r, 'prebaked-extension'), JSON.stringify(r.findings, null, 2));
 });
 
 test('missing-template stays generic for an ordinary machine', () => {

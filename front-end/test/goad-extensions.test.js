@@ -78,7 +78,9 @@ test('the four entries carry the placement the plan specifies', () => {
 
   assert.strictEqual(GOAD_EXTENSIONS.ws01.ipOctet, 31);
   assert.strictEqual(GOAD_EXTENSIONS.ws01.role, 'workstation');
-  assert.strictEqual(GOAD_EXTENSIONS.ws01.template_vmid, 1002);
+  // 1006, not 1002: the Windows 11 template on this cluster. bake-win-client-template.sh
+  // still defaults FINAL_VMID to 1002 and that default has drifted — the cluster wins.
+  assert.strictEqual(GOAD_EXTENSIONS.ws01.template_vmid, 1006);
 
   assert.strictEqual(GOAD_EXTENSIONS.lx01.ipOctet, 32);
   assert.strictEqual(GOAD_EXTENSIONS.lx01.role, 'linux');
@@ -188,7 +190,7 @@ test('a roster ws01 carries everything prepareGoadMacs needs from a lab row', ()
   assert.strictEqual(ws.role, 'workstation');
   assert.ok(ROLE_RESOURCES[ws.role],
     'role must be one of ROLE_RESOURCES or assertValidLabDef rejects a spec-supplied copy of this roster');
-  assert.strictEqual(ws.template_vmid, 1002);
+  assert.strictEqual(ws.template_vmid, 1006);
   assert.ok(ws.nic_model, 'a Windows guest on virtio has no driver and never DHCPs');
 });
 
@@ -218,7 +220,7 @@ test('an external extension machine is not a stray, so the roster check lets it 
     goad: { enabled: true, version: 'GOAD-Mini', extensions: ['elk', 'ws01'] },
     vms: [
       { name: 'DC01', template_vmid: 1004, type: 'qemu', role: 'dc' },
-      { name: 'ws01', template_vmid: 1002, type: 'qemu', role: 'workstation' },
+      { name: 'ws01', template_vmid: 1006, type: 'qemu', role: 'workstation' },
       { name: 'elk', template_vmid: 9001, type: 'qemu', role: 'siem', ipOctet: 24 },
     ],
   };
@@ -327,7 +329,7 @@ test('an external extension row carries its pinned octet; an in-lab one does not
   assert.strictEqual(ws01.ipOctet, undefined,
     'ws01 is addressed by the GOAD layer from the lab roster; an ipOctet here would be dead data that '
     + 'reads as authoritative');
-  assert.strictEqual(ws01.template_vmid, 1002);
+  assert.strictEqual(ws01.template_vmid, 1006);
 });
 
 test('the row is a canvas row: name, role, type and a vm_offset the caller chose', () => {
@@ -337,7 +339,11 @@ test('the row is a canvas row: name, role, type and a vm_offset the caller chose
   assert.strictEqual(row.role, 'siem');
   assert.strictEqual(row.type, 'qemu');
   assert.strictEqual(row.vm_offset, 640000);
-  assert.strictEqual(row.template_vmid, null, 'a per-site golden image — the author supplies the VMID');
+  assert.strictEqual(row.template_vmid, 1011,
+    'the generic Ubuntu 22.04 base. It was null while the SIEMs were meant to be per-site golden images, '
+    + 'which is exactly what produced the Designer error "has no template VMID, so there is nothing to '
+    + 'clone" and made the extension unusable. The stack is installed in-lane by GOAD\'s own Ansible now, '
+    + 'so one plain image serves every site');
 });
 
 test('goadExtensionsForLab honours the ok/reason the server computed', () => {
@@ -517,4 +523,292 @@ test('the extension machine names are name-locked, exactly like the lab hosts', 
   vm.runInContext('__locked = JSON.stringify(topoGoadHostNames());', sandbox);
   assert.strictEqual(sandbox.__locked, '["DC01","DC02","SRV02","elk","ws01"]',
     'the names are a contract with the golden images and the baked agent configs, not labels');
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// 6. THE INSTALL PATH
+// ════════════════════════════════════════════════════════════════════════════
+//
+// Everything above is about PLACING an extension machine. This section is about
+// the other half — whether anything is ever installed on it.
+//
+// Upstream installs an extension with `install_extension <key>`, which is
+// nothing more than inventory layering plus one playbook run
+// (GOAD-main/goad/provisioner/ansible/ansible.py:76 run_extension). CyberCore
+// does the same in-lane: runGoadPlaybook hands the resolved keys to
+// /opt/goad-light/run.sh as an OPTIONAL 5th argument, and run.sh renders that
+// extension's inventory, layers it on the lab's, and runs
+// extensions/<key>/ansible/install.yml.
+//
+// Two things have to hold for that to be safe, and both are pinned below:
+//   · a lane that selected nothing must send the command line it has always
+//     sent, because the controller is a BAKED TEMPLATE and every lane in flight
+//     is running the run.sh it was baked with;
+//   · a PRE-BAKED lane must never accept an extension at all — it runs no
+//     Ansible, so the machine would be placed and nothing installed on it.
+
+test('every extension names a template VMID — a null is the Designer error, not a placeholder', () => {
+  for (const [key, ext] of Object.entries(GOAD_EXTENSIONS)) {
+    assert.ok(Number.isInteger(ext.template_vmid) && ext.template_vmid > 0,
+      key + '.template_vmid is ' + JSON.stringify(ext.template_vmid) + '. A null here is not "unset, fill '
+      + 'it in later" — it is the literal cause of validateTopology\'s "has no template VMID, so there is '
+      + 'nothing to clone", which is what made elk and wazuh impossible to tick.');
+  }
+  // The two SIEMs share ONE image on purpose. It is a PLAIN Ubuntu 22.04 base
+  // with no stack on it; extensions/<key>/ansible builds Elasticsearch or the
+  // Wazuh manager on it in the lane. That replaced a design in which each site
+  // baked and registered its own golden SIEM image.
+  assert.strictEqual(GOAD_EXTENSIONS.elk.template_vmid, 1011);
+  assert.strictEqual(GOAD_EXTENSIONS.wazuh.template_vmid, 1011,
+    'wazuh clones the same generic base as elk — nothing about the image is wazuh-specific');
+});
+
+test('both Windows 11 rows in this module name the same template', () => {
+  // The bug this pins: GOAD_EXTENSIONS.ws01 and GOAD_LABS.SCCM's WS01 are both
+  // 'Windows 11' and both carried 1002 — the bake script's FINAL_VMID default,
+  // which has drifted from the cluster (1006). Two sites, one stale number, and
+  // a wrong template_vmid clones silently rather than failing.
+  const sccmWs = GOAD_LABS.SCCM.vms.find(v => v.name.toLowerCase() === 'ws01');
+  assert.strictEqual(sccmWs.os, 'Windows 11');
+  assert.strictEqual(sccmWs.template_vmid, 1006);
+  assert.strictEqual(GOAD_EXTENSIONS.ws01.template_vmid, sccmWs.template_vmid,
+    'the ws01 extension and SCCM\'s own WS01 are the same operating system, so they must be the same image');
+});
+
+// ── the run.sh command line ─────────────────────────────────────────────────
+//
+// HOW THIS IS CAPTURED WITHOUT A CLUSTER OR A 15-SECOND WAIT. runGoadPlaybook
+// makes three guest-exec calls: two best-effort mssql pre-patches, each wrapped
+// in a try/catch that only console.warns, and then the run.sh launch, which is
+// NOT wrapped. A fake proxmoxAPI that refuses the patches never reaches
+// pollExecStatus (which uses script-executor's OWN proxmoxAPI, not the injected
+// one, and would poll a host that does not exist); throwing a sentinel on the
+// run.sh exec captures the command and unwinds the function before its
+// 15-second sentinel poll ever starts.
+
+const RUNSH_VMS = [
+  { name: 'DC01',  template_vmid: 1004, type: 'qemu', role: 'dc' },
+  { name: 'DC02',  template_vmid: 1004, type: 'qemu', role: 'dc' },
+  { name: 'SRV02', template_vmid: 1004, type: 'qemu', role: 'member' },
+];
+const runShSpec = (goadExtra = {}) => ({
+  goad: { enabled: true, version: 'GOAD-Light', ...goadExtra },
+  vms: RUNSH_VMS.map(v => ({ ...v })),
+});
+
+// `capable` models the controller's extension capability marker
+// (/opt/goad-light/.cc-extension-install). Default true, because that is the
+// controller a current bake produces; pass false to model a lane cloned from a
+// template baked before extension support existed.
+async function captureRunSh(spec, { capable = true } = {}) {
+  let captured = null;
+  const realWarn = console.warn;
+  console.warn = () => {};
+  let probePid = 0;
+  const probeAnswers = new Map();
+  const proxmoxAPI = async (method, url, body) => {
+    // The capability probe polls exec-status with the INJECTED client, so the
+    // harness has to answer that too. If this ever starts throwing "unexpected
+    // call", the probe has been changed to bypass the injection seam again.
+    if (method === 'GET' && /\/agent\/exec-status\?pid=(\d+)$/.test(url)) {
+      const pid = Number(url.match(/pid=(\d+)$/)[1]);
+      return { exited: 1, exitcode: 0, 'out-data': probeAnswers.get(pid) ?? '' };
+    }
+    if (method !== 'POST' || !/\/agent\/exec$/.test(url)) {
+      throw new Error('unexpected call: ' + method + ' ' + url);
+    }
+    const argv = String(body).split('&').map(p => decodeURIComponent(p.replace(/^command=/, '')));
+    const last = argv[argv.length - 1];
+    if (last.includes('.cc-extension-install')) {
+      probeAnswers.set(++probePid, capable ? 'yes\n' : 'no\n');
+      return { pid: probePid };
+    }
+    if (last.includes('/opt/goad-light/run.sh')) {
+      captured = last;
+      throw new Error('__CAPTURED__');
+    }
+    throw new Error('__PATCH_REFUSED__');   // best-effort mssql patches; only warn
+  };
+  try {
+    await goad.runGoadPlaybook({
+      controllerVmId: 999, bestNode: 'pve1', spec, vxlanId: 4242,
+      laneSubnetBase: '10.9.9', extSubnetBase: '10.9.9', proxmoxAPI,
+    });
+    throw new Error('runGoadPlaybook finished without ever launching run.sh');
+  } catch (err) {
+    if (err.message !== '__CAPTURED__') throw err;
+  } finally {
+    console.warn = realWarn;
+  }
+  return captured;
+}
+
+test('THE 5TH ARGUMENT: the selected extension keys reach run.sh, comma-joined and quoted', async () => {
+  const cmd = await captureRunSh(runShSpec({ extensions: ['elk', 'wazuh'] }));
+  assert.match(cmd,
+    /\/opt\/goad-light\/run\.sh 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' 'elk,wazuh' > \/var\/log\/goad-run-4242\.log/,
+    'the keys must arrive as one quoted 5th argument, after the four that were always there:\n' + cmd);
+});
+
+// ── the capability gate ─────────────────────────────────────────────────────
+//
+// THE ONLY SILENT FAILURE IN THIS FEATURE, and it needs no bug — only someone
+// forgetting to re-bake the controller template. An older run.sh binds $1..$4
+// and never reads $5, so the extensions argument is inert: the forest builds,
+// run.sh exits 0, the lane reports active, and there is no SIEM anywhere. Every
+// other failure here is loud. This one hands a student an empty Kibana.
+
+test('a controller with no capability marker REFUSES rather than deploying green', async () => {
+  await assert.rejects(
+    () => captureRunSh(runShSpec({ extensions: ['elk'] }), { capable: false }),
+    (err) => {
+      assert.ok(!/__CAPTURED__/.test(err.message),
+        'run.sh must NOT be launched when the controller cannot install extensions');
+      assert.match(err.message, /\.cc-extension-install/);
+      assert.match(err.message, /re-bake/i);
+      assert.match(err.message, /1700/, 'the refusal must name the template to re-bake');
+      return true;
+    });
+});
+
+test('the capability probe does not run when no extension is selected', async () => {
+  // A lane that ticks nothing must not gain a new way to fail. Modelled by
+  // asserting the four-argument command still gets through with capable:false —
+  // if the probe ran unconditionally, this would refuse.
+  const cmd = await captureRunSh(runShSpec(), { capable: false });
+  assert.match(cmd, /run\.sh 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' >/);
+});
+
+test('the order the spec ticked them in is the order run.sh installs them in', async () => {
+  const cmd = await captureRunSh(runShSpec({ extensions: ['wazuh', 'elk'] }));
+  assert.ok(cmd.includes("'wazuh,elk'"),
+    'extension order is install order, so it must survive the trip: ' + cmd);
+});
+
+test('a key this lab cannot take never reaches the controller', async () => {
+  // resolveGoadExtensions has already dropped it — unknown and incompatible keys
+  // are dropped rather than thrown on, because a spec saved last term must still
+  // deploy against a catalog that has moved. run.sh must never be handed a key
+  // whose inventory would fight the lab's.
+  const cmd = await captureRunSh(runShSpec({ extensions: ['elk', 'nonesuch'] }));
+  assert.ok(cmd.includes("'elk'"), cmd);
+  assert.ok(!cmd.includes('nonesuch'), 'an unknown key leaked through to run.sh: ' + cmd);
+});
+
+test('NO extensions means the command line every in-flight lane already runs', async () => {
+  const absent  = await captureRunSh(runShSpec());                       // no key at all
+  const empty   = await captureRunSh(runShSpec({ extensions: [] }));     // key, empty list
+  const dropped = await captureRunSh(runShSpec({ extensions: ['nonesuch'] }));
+
+  assert.strictEqual(absent, empty, 'an empty list must behave exactly like no list');
+  assert.strictEqual(absent, dropped, 'a selection that resolves to nothing is a selection of nothing');
+
+  // FOUR arguments, then the redirect. No trailing '', no trailing space.
+  assert.match(absent,
+    /\/opt\/goad-light\/run\.sh 'GOAD-Light' '[^']*' 'vagrant' 'vagrant' > \/var\/log\/goad-run-4242\.log 2>&1;/,
+    'the four-argument form must be untouched:\n' + absent);
+  assert.ok(!absent.includes("'vagrant' ''"),
+    'the argument is OMITTED, not passed empty. The controller is a baked template and cannot be '
+    + 'renegotiated: an empty 5th argument is still a 5th argument — $# becomes 5, and anything an older '
+    + 'run.sh echoes from "$@" into the lane log changes with it. Omission makes "byte-identical to today" '
+    + 'true by construction rather than by an assumption about a script on the other side of the boundary.');
+});
+
+// ── the prebaked fork ───────────────────────────────────────────────────────
+
+const prebakedSpec = (extensions) => ({
+  goad: {
+    enabled: true, version: 'GOAD-Light', prebaked: true,
+    fixed_subnet: { int: '10.9.9', ext: '10.9.9' },
+    ...(extensions ? { extensions } : {}),
+  },
+  vms: RUNSH_VMS.map(v => ({ ...v })),
+});
+
+test('THE PREBAKED FORK: an extension on a pre-baked lane is refused before anything clones', () => {
+  // A pre-baked lane runs NO Ansible: deployPrebakedGoadLane clones golden images
+  // and heals secure channels, and challenge-lane-deployer's liveGoadController
+  // is literally `enabled && !prebaked`, so run.sh never executes. elk would
+  // be cloned, addressed, given a DNS record and a console, with no Elasticsearch
+  // on it — and the lane would report ACTIVE.
+  assert.throws(() => prepareGoadMacs(prebakedSpec(['elk']), 4242, '10.9.9'), (err) => {
+    assert.match(err.message, /elk/, 'the message must name the extension');
+    assert.match(err.message, /spec\.goad\.prebaked/, 'and the flag, spelled the way the spec spells it');
+    assert.match(err.message, /run\.sh/, 'and say what it is that does not run');
+    assert.match(err.message, /report active/i, 'and why it would otherwise pass unnoticed');
+    return true;
+  });
+});
+
+test('the refusal names every UNBAKED extension, not just the first', () => {
+  assert.throws(() => prepareGoadMacs(prebakedSpec(['elk', 'wazuh']), 4242, '10.9.9'),
+    /elk, wazuh/);
+});
+
+// -- the point of sealing: pre-baked + a sealed image is the STEADY STATE -----
+//
+// An earlier revision refused pre-baked + extensions outright. That was wrong,
+// and wrong in the direction that blocks the intended workflow: install the
+// extension once against a staging lab, seal the result into a golden template
+// (seal-goad-elk-template.sh -> 1012, seal-goad-wazuh-template.sh -> 1013), then
+// clone that forever. At that point nothing needs to install, because the image
+// already carries the stack -- and pre-baked is the entire reason for sealing.
+//
+// So the rule is not "is this lane pre-baked" but "does this machine clone an
+// image that has the stack on it". These pin both halves of that.
+
+const sealedPrebakedSpec = (vmid) => ({
+  goad: {
+    enabled: true, version: 'GOAD-Light', prebaked: true,
+    fixed_subnet: { int: '10.9.9', ext: '10.9.9' },
+    extensions: ['elk'],
+  },
+  vms: [...RUNSH_VMS.map(v => ({ ...v })),
+        { name: 'elk', role: 'siem', template_vmid: vmid, ipOctet: 24 }],
+});
+
+test('pre-baked + a SEALED elk template is allowed -- that is what sealing is for', () => {
+  assert.doesNotThrow(() => prepareGoadMacs(sealedPrebakedSpec(1012), 4242, '10.9.9'));
+});
+
+test('pre-baked + the PLAIN Ubuntu base is still refused, and says which image', () => {
+  assert.throws(() => prepareGoadMacs(sealedPrebakedSpec(goad.PLAIN_BASE_TEMPLATE_VMID), 4242, '10.9.9'),
+    (err) => {
+      assert.match(err.message, /generic Ubuntu base/,
+        'it must say WHICH image is the problem, not just that one is');
+      assert.match(err.message, /seal/i, 'and point at the remedy that keeps pre-baked');
+      return true;
+    });
+});
+
+test('the plain base is a NAMED constant, so the two enforcers cannot drift apart', () => {
+  // goad-deploy enforces at deploy time and topology-validate at author time.
+  // A second literal 1011 in either would be a rule that silently disagrees with
+  // itself the day the base image is re-numbered.
+  assert.strictEqual(goad.PLAIN_BASE_TEMPLATE_VMID, 1011);
+  assert.strictEqual(GOAD_EXTENSIONS.elk.template_vmid, goad.PLAIN_BASE_TEMPLATE_VMID);
+  assert.strictEqual(GOAD_EXTENSIONS.wazuh.template_vmid, goad.PLAIN_BASE_TEMPLATE_VMID);
+});
+
+test('a pre-baked lane with NO extensions is completely untouched', () => {
+  // The prebaked path predates extensions and must keep working exactly as it
+  // did — this guard may only ever fire on the pair.
+  const macs = prepareGoadMacs(prebakedSpec(null), 4242, '10.9.9');
+  assert.deepStrictEqual(Object.keys(macs).sort(), ['DC01', 'DC02', 'SRV02']);
+  assert.strictEqual(macs.DC01.static_ip, '10.9.9.10');
+});
+
+test('a LIVE lane with the same extensions is fine — live is the mode that installs', () => {
+  const macs = prepareGoadMacs(runShSpec({ extensions: ['elk', 'wazuh'] }), 4242, '10.9.9');
+  assert.deepStrictEqual(Object.keys(macs).sort(), ['DC01', 'DC02', 'SRV02'],
+    'the SIEMs stay out of goadMacs; that absence is what earns them a host-record');
+});
+
+test('assertGoadExtensionsRunnable fires on the PAIR and on nothing else', () => {
+  const f = goad.assertGoadExtensionsRunnable;
+  assert.doesNotThrow(() => f({ goad: { prebaked: true } }, []),        'prebaked, nothing ticked');
+  assert.doesNotThrow(() => f({ goad: { prebaked: true } }, undefined), 'prebaked, no list at all');
+  assert.doesNotThrow(() => f({ goad: { enabled: true } }, ['elk']),    'live lane, extension ticked');
+  assert.doesNotThrow(() => f({}, ['elk']),                             'not a GOAD spec at all');
+  assert.throws(() => f({ goad: { prebaked: true } }, ['elk']), /generic Ubuntu base/);
 });

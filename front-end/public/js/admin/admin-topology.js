@@ -618,10 +618,19 @@ function readTopoGoadFields() {
 // ============================================================================
 // DESIGNER — GOAD extensions
 // ============================================================================
-// `spec.goad.extensions` is a DECLARATION of what the golden images already
-// contain. CyberCore never runs GOAD's Ansible at deploy time, so ticking `elk`
-// does not install Elasticsearch — it places the machine, pins its address, and
-// records that this environment expects that stack to be on the image.
+// `spec.goad.extensions` is a REQUEST TO INSTALL. On a LIVE lane the ticked keys
+// are handed to the controller's run.sh as its 5th argument; it layers each
+// extension's rendered inventory on top of the lab's and runs
+// extensions/<key>/ansible/install.yml — upstream's `install_extension <key>`,
+// verbatim. So ticking `elk` places the machine, pins its address, AND installs
+// Elasticsearch + Kibana on it, with Sysmon and winlogbeat pushed to every host
+// in [domain]. (This comment used to claim the opposite — that extensions were a
+// declaration of what a golden image already contained. That design is gone.)
+//
+// The ONE exception is a pre-baked environment (#topoGoadPrebaked): it clones
+// golden images and runs no Ansible at all, so nothing would be installed. That
+// combination is refused — topology-validate reports `prebaked-extension` on the
+// canvas, and goad-deploy.assertGoadExtensionsRunnable throws before any clone.
 
 /** The ticked extension keys, in catalog order. */
 function readTopoGoadExtensions() {

@@ -66,6 +66,13 @@ const goadDeploy = require('./goad-deploy');
 const laneDeployer = require('./lane-deployer');
 const laneWan = require('./lane-wan-allocator');
 const nodeSsh = require('./node-ssh');
+// The AGENT half of a ticked elk/wazuh extension. Derived here rather than
+// stored on the spec, and this file is where it is derived because this is the
+// ONE deploy every caller shares — see goad-agent-attach.js for the full
+// argument and for why a template bake was the wrong answer.
+const {
+  attachGoadAgentScripts, withGoadAgentVulnScripts,
+} = require('./goad-agent-attach');
 const {
   V3_INTERNAL_TAG_OFFSET,
   ATTACK_BOX_VMID_OFFSET,
@@ -2356,7 +2363,13 @@ async function deployChallengeLanesInner({
   }
   if (!challenge) throw new Error('deployChallengeLanes: challenge is required');
 
-  const spec = parseSpec(challenge.spec);
+  // SIEM agents are attached to the IN-MEMORY spec, never written back to the
+  // challenge row. A stored spec's `extensions` is edited after the fact, and a
+  // slug persisted from a deploy that ticked elk would keep installing
+  // winlogbeat long after the elk box stopped being part of the environment.
+  // Returns the SAME object when no SIEM extension is selected, so every
+  // non-blue-team deploy is byte-identical to what it was before.
+  const spec = attachGoadAgentScripts(parseSpec(challenge.spec));
   const subnetScheme = challenge.subnet_scheme || 'v1';
   const resolvedModule = moduleKey || challenge.module_key || 'crucible';
   const challengeKey = challenge.challenge_key;
@@ -2571,11 +2584,21 @@ async function deployChallengeLanesInner({
   const concurrency = getSchedulingConfig().max_concurrent_lanes;
   const cloneSem = createCloneSemaphore();
 
+  // runVulnScripts reads THIS list and never looks at spec.vms[].post_clone_scripts,
+  // so the spec attach above is what downstream readers of ctx.spec see and this
+  // is what actually installs anything. De-duplicated on (vm_name, script_slug):
+  // CiAB's vulnScriptsFromSpec may already have produced the same entries from an
+  // attached spec, and one host must not install the same agent twice. Null stays
+  // null when there is nothing to add — deployLaneVms branches on length, and an
+  // empty array would start writing a deployment_vuln_selections row for every
+  // scriptless lane.
+  const laneVulnScripts = withGoadAgentVulnScripts(vulnScripts, spec);
+
   const ctx = {
     spec, subnetScheme, moduleKey: resolvedModule, challengeKey,
     attackBoxes, consoleVm, extraWorkstations, extraSpecs,
     pinAllVms, postDeploy,
-    vulnScripts, laneConfig, guacParent, instructorEmails,
+    vulnScripts: laneVulnScripts, laneConfig, guacParent, instructorEmails,
     description, progress, logTag, cloneSem, templateNodeByVmid,
   };
 
@@ -2998,7 +3021,14 @@ async function rebuildLaneChallengeVms({
     }
 
     // Vulnerability scripts are per-machine, and a fresh clone has none of them.
-    const scripts = (cfg.vuln_scripts || []).filter(
+    // The SIEM agents are in exactly that class: a rebuilt DC comes back with no
+    // Sysmon, no winlogbeat and no wazuh-agent, and it would go dark in a console
+    // the rest of the lane is still reporting to — one host missing from a SIEM
+    // is far harder to notice than an empty one. Re-derived from the spec rather
+    // than replayed from cfg.vuln_scripts, for the same reason it is derived at
+    // deploy: config written by an older deploy would reinstate a stack this
+    // environment may no longer have.
+    const scripts = withGoadAgentVulnScripts(cfg.vuln_scripts || [], spec).filter(
       sc => rebuilt.some(v => v.name === sc.vm_name));
     if (scripts.length) {
       try {

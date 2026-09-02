@@ -115,8 +115,12 @@ function findVmOffsetCollision(specVms) {
  *             must not draw the name-mismatch warning, but not a GOAD VM
  *             either, so it must not claim internal placement on v3.
  *
- * @returns {{roster: Set<string>, external: Set<string>}|null} null when the
- *          spec has no GOAD layer, which is what disables every GOAD check.
+ * @returns {{roster: Set<string>, external: Set<string>, extMachines: Map,
+ *            selected: string[]}|null} null when the spec has no GOAD layer,
+ *          which is what disables every GOAD check. `selected` is the resolved
+ *          extension KEYS (not machine names) — the prebaked check reports keys,
+ *          because "untick elk" is the action and `elk` is what the author
+ *          ticked.
  */
 function goadHostNames(spec) {
   if (!spec?.goad?.enabled) return null;
@@ -142,6 +146,7 @@ function goadHostNames(spec) {
     roster: new Set((labDef.vms || []).map(v => String(v.name).toLowerCase())),
     external: resolved.extensions?.external || new Set(),
     extMachines,
+    selected: resolved.extensions?.selected || [],
   };
 }
 
@@ -183,22 +188,29 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
     }
 
     if (!vm.template_vmid && !spec.template_vmid) {
-      // An extension machine whose CATALOG entry also carries no VMID is not an
-      // authoring slip — it is the elk/wazuh golden images, which are registered
-      // per site rather than shipped with the code, so the catalog cannot name a
-      // number that is true everywhere. Say that, because the generic message
-      // ("nothing to clone") reads as a bug in the extension and sends the
-      // author looking in the wrong place. Ticking an extension NEVER installs
-      // anything: CyberCore does not run GOAD's Ansible at deploy time, so the
-      // image must already contain the stack.
+      // An extension machine gets a message of its own, because the generic one
+      // ("nothing to clone") reads as a bug in the extension and sends the author
+      // looking in the wrong place. It names the VMID the catalog already knows,
+      // and says what that image is and is not — a PLAIN base image, with the
+      // stack installed in-lane by GOAD's own extension Ansible at deploy time.
+      //
+      // This used to say the opposite: that the image was a per-site golden ELK
+      // and that ticking an extension "never installs anything". That described
+      // the prebaked-SIEM design, which has been replaced — elk and wazuh now
+      // clone a generic Ubuntu base and run.sh installs the stack on the lane.
       const ext = goadHosts?.extMachines?.get(String(vm.name || '').toLowerCase());
-      if (ext && !ext.template_vmid) {
+      if (ext && ext.template_vmid) {
         add('error', 'missing-template',
-          `'${name}' comes from the ${ext.key} extension, whose golden image is registered per site — so the `
-          + `catalog ships no VMID for it and you have to pick one. Bake the ${ext.os || 'image'} once with the `
-          + `${ext.key} stack on it, register it in the template catalog, then set it as this machine's `
-          + `template. Ticking an extension places the machine and pins its address; it never installs `
-          + `anything, because GOAD's Ansible does not run at deploy time.`, name);
+          `'${name}' comes from the ${ext.key} extension, whose image is template ${ext.template_vmid} — a plain `
+          + `${ext.os || 'base image'} with none of the stack on it. Set it as this machine's template. The `
+          + `${ext.key} stack itself is installed IN THE LANE at deploy time by GOAD's own `
+          + `extensions/${ext.key}/ansible, exactly the way upstream's 'install_extension ${ext.key}' does — so `
+          + `the image does not need to carry it, and the lane needs the internet egress it has.`, name);
+      } else if (ext) {
+        add('error', 'missing-template',
+          `'${name}' comes from the ${ext.key} extension, which ships no template VMID of its own — so you have `
+          + `to pick one. Any plain ${ext.os || 'base image'} will do: GOAD's extensions/${ext.key}/ansible `
+          + `installs the stack in the lane at deploy time, so nothing has to be baked into the image.`, name);
       } else {
         add('error', 'missing-template', `'${name}' has no template VMID, so there is nothing to clone.`, name);
       }
@@ -273,6 +285,54 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
         !goadHosts.external.has(vm.name.toLowerCase()) && !explicit.length) {
       add('warning', 'goad-name-mismatch',
         `'${vm.name}' is not a host in this GOAD lab, so it lands on the EXTERNAL segment with no reserved IP and is never domain-joined. Rename it to match the lab, or attach it to a segment explicitly.`, name);
+    }
+  }
+
+  // ── extensions on a PRE-BAKED lane ────────────────────────────────────────
+  //
+  // THE ONE COMBINATION THAT DEPLOYS GREEN AND DOES NOTHING. There are two GOAD
+  // modes and only the live one runs Ansible: a live lane stands a controller and
+  // runs /opt/goad-light/run.sh, which is the only thing anywhere that executes
+  // an extension's install.yml. A pre-baked lane (spec.goad.prebaked) clones
+  // golden images and heals their secure channels — no controller, no run.sh.
+  //
+  // So on a pre-baked lane every ticked extension does all the VISIBLE work and
+  // none of the real work: the machine is cloned, addressed, given a DNS record
+  // and a console, and nothing is installed on it. The author sees elk on the
+  // canvas, the deploy reports active, and a student opens an empty Kibana. That
+  // is the exact silent-success failure this codebase keeps documenting, so it is
+  // an ERROR — the spec as authored cannot do what it says.
+  //
+  // Stated ONE machine at a time so the canvas can badge the offending node, and
+  // anchored to the machine only when it is actually on the canvas: an extension
+  // can be ticked before its row exists, and a finding pinned to a node that is
+  // not there renders nowhere.
+  //
+  // goad-deploy.assertGoadExtensionsRunnable is the same rule at deploy time, for
+  // the specs that never pass through this canvas (the CiAB compiler writes them
+  // directly). Author-time here, deploy-time there; neither is redundant.
+  if (goadHosts && spec?.goad?.prebaked && goadHosts.selected.length) {
+    for (const key of goadHosts.selected) {
+      const ext = goadDeploy.getExtension(key);
+      const machine = String(ext ? ext.machine : key).toLowerCase();
+      const row = specVms.find(v => String(v.name || '').toLowerCase() === machine);
+      // Pre-baked + extensions is the INTENDED steady state once the images are
+      // sealed, so the flag alone is not the problem. Exactly one shape is: a
+      // machine still cloning the generic Ubuntu base, which carries no stack and
+      // has no Ansible coming to install one. See goad-deploy's twin for the full
+      // reasoning; this is the author-time half of the same rule.
+      const vmid = Number(row?.template_vmid || ext?.template_vmid || spec.template_vmid || 0);
+      if (vmid && vmid !== goadDeploy.PLAIN_BASE_TEMPLATE_VMID) continue;
+      add('error', 'prebaked-extension',
+        `The '${key}' extension is ticked on a pre-baked environment (spec.goad.prebaked), but `
+        + `'${ext ? ext.machine : key}' ${vmid ? `still clones template ${vmid}, the generic Ubuntu base` : 'has no template'} `
+        + `— an image with no ${key} on it. A pre-baked lane clones golden images and runs NO Ansible: no `
+        + `controller is deployed, so run.sh — the only thing that ever installs an extension — never `
+        + `executes, and nothing would install it. The machine would be cloned, addressed and given a console with `
+        + `nothing on it, and the lane would still report active. Point it at a sealed template that already `
+        + `carries the stack, or clear the pre-baked flag so the lab is provisioned live and the extension `
+        + `installs in-lane.`,
+        row ? (row.name || '(unnamed)') : null);
     }
   }
 

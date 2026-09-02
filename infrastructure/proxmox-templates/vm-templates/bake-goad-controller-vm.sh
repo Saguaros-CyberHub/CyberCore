@@ -51,6 +51,29 @@
 # destroy 1700 and clone the frozen copy back onto that id — has to destroy the
 # live target while lanes may be mid-clone, and it is not undoable if the
 # "known good" copy turns out not to be.
+#
+# ----------------------------------------------------------------------------
+# CHANGING run.sh REQUIRES A RE-BAKE. THERE IS NO HOT PATCH.
+# ----------------------------------------------------------------------------
+# /opt/goad-light/run.sh is not a tracked file that a deploy copies out. It
+# exists ONLY as the cloud-init write_files heredoc below, so the ONLY way it
+# reaches a lane is by being baked into template 1700 and full-cloned. Editing
+# run.sh in this script changes NOTHING until you re-bake, and every lane
+# deployed before that re-bake keeps the run.sh it was cloned with, forever.
+#
+# That asymmetry is why each capability run.sh gains also gets a marker file
+# (.cc-per-lab-playbooks, .cc-extension-install): the orchestrator has to be
+# able to ask an ALREADY-DEPLOYED controller what it understands, because the
+# answer differs per lane depending on when that lane was cloned.
+#
+# So a run.sh change is a full template turn, and the freeze comes FIRST --
+# once 1700 is purged the old run.sh is unrecoverable:
+#     qm clone 1700 1701 --name goad-controller-template-frozen --full --storage vmpool
+#     qm template 1701
+#     qm set 1701 --description "FROZEN <date>: last known-good GOAD controller"
+#     qm destroy 1700 --purge && ./bake-goad-controller-vm.sh
+# and if the new one misbehaves, CONTROLLER_TEMPLATE_VMID = 1701 in
+# front-end/src/utils/goad-deploy.js, then restart the node process.
 # ============================================================================
 set -euo pipefail
 
@@ -267,6 +290,16 @@ packages:
   - python3-netaddr
   - krb5-user
   - openssh-server
+  # sshpass: upstream lists it as a prerequisite for install_extension.
+  # CyberCore does not depend on it -- the extension servers are reached with
+  # the controller's OWN ed25519 key (see the /root/.ssh/id_ed25519 entry in
+  # write_files, and the EXT_SSH_KEY block in run.sh). It is installed anyway
+  # because ansible's ssh connection plugin hard-fails with "you must install
+  # the sshpass program" the instant ANY host resolves a non-empty
+  # ansible_password under connection=ssh, and a future extension shipping a
+  # password-based inventory would otherwise die at the last step of a
+  # 90-minute deploy, on a missing 200KB package.
+  - sshpass
   - git
   - curl
   - jq
@@ -734,6 +767,44 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       path=ad/<LAB>/playbooks.yml
       shapes=bare list, or a mapping keyed by <LAB> with a default fallback
 
+  # ----- Capability marker: this run.sh accepts a 5th EXTENSIONS argument -----
+  # Same job as the marker above, for a different capability, and for the same
+  # reason: run.sh only reaches a lane by being baked into template 1700, so
+  # "does this controller install extensions?" is a per-lane question whose
+  # answer was fixed at clone time. A lane cloned from the previous template
+  # IGNORES a 5th argument -- it binds \$1..\$4 and never looks further. That is
+  # deliberate (an older controller must not break on a longer argv) and it is
+  # exactly why the orchestrator cannot infer support from a run that exited 0:
+  # an extension that was never installed looks identical to one that was,
+  # right up until an instructor opens Kibana in front of a class.
+  #
+  # The fallback test for a controller baked before this file existed is a grep
+  # of run.sh for a line carrying EXTENSIONS, which our EXTENSIONS= binding
+  # satisfies. That is a COINCIDENCE OF SPELLING, not a contract: rename the
+  # variable and the probe answers 'no' forever after, silently, in the
+  # safe-looking direction. This file is the contract, and its presence is the
+  # whole assertion.
+  #
+  # Presence is VERIFIED, not asserted: a runcmd at the end of this bake
+  # DELETES this file if /opt/goad/extensions/<key>/ did not actually land in
+  # the image, so the marker can never claim a capability the tree cannot
+  # deliver.
+  - path: /opt/goad-light/.cc-extension-install
+    permissions: '0644'
+    content: |
+      # Presence of this file asserts the capability; the content is
+      # informational. See run.sh, section 'GOAD extensions'.
+      capability=install_extension_argv5
+      argv=run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]
+      extensions=comma-separated keys in install order, e.g. elk or elk,wazuh
+      absent_or_empty=byte-identical to a controller with no extension support
+      inventory=/var/lib/goad-run/inventory_ext_<key> from extensions/<key>/inventory
+      playbook=/opt/goad/extensions/<key>/ansible/install.yml, run from that dir
+      elk_octet=24
+      unknown_key=hard failure, before the lab chain starts
+      exit_2=lab chain succeeded and at least one extension playbook failed
+      available=see /opt/goad-light/extensions-available.txt
+
   - path: /opt/goad-light/run.sh
     permissions: '0755'
     content: |
@@ -758,20 +829,34 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       #   - We do NOT patch config.json. Per-host local_admin_password and
       #     per-domain domain_password come from upstream's data verbatim.
       #
-      # Usage: run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD
+      # Usage: run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]
       #   HOST_MAP        = "name|ip|mac,name|ip|mac,..." (pipe-separated triples)
       #   INITIAL_USER    = bake-time Administrator user, typically 'Administrator'
       #   INITIAL_PASSWORD= bake-time Administrator password from the Win template
+      #   EXTENSIONS      = OPTIONAL. Comma-separated GOAD extension keys, in the
+      #                     order they should be installed: "elk", "wazuh",
+      #                     "elk,wazuh". ABSENT OR EMPTY MUST BEHAVE EXACTLY AS
+      #                     IT DID BEFORE EXTENSIONS EXISTED -- every lane in
+      #                     flight depends on that, and an OLDER controller
+      #                     handed a 5th argument simply ignores it rather than
+      #                     breaking, which is the other half of the same
+      #                     contract.
       set -e
       if [ \$# -lt 4 ]; then
-        echo "Usage: \$0 LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD"
+        echo "Usage: \$0 LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]"
         echo "  LAB              — GOAD-Light | GOAD | GOAD-Mini | NHA | SCCM | DRACARYS"
         echo "  HOST_MAP         — comma-separated 'name|ip|mac' triples"
         echo "  INITIAL_USER     — bake-time Win template admin user (typically 'Administrator')"
         echo "  INITIAL_PASSWORD — bake-time Win template admin password"
+        echo "  EXTENSIONS       — optional: elk | wazuh | elk,wazuh (empty = none)"
         exit 1
       fi
       LAB="\$1"; HOST_MAP="\$2"; INITIAL_USER="\$3"; INITIAL_PASSWORD="\$4"
+      # The 5th argument, and the only optional one. Written \${5:-} rather than
+      # \$5 so it is empty-not-unset however the shell was invoked, and so a
+      # future 'set -u' cannot turn every four-argument call -- which is every
+      # caller alive today -- into an instant failure.
+      EXTENSIONS="\${5:-}"
 
       GOAD_ROOT=/opt/goad
       LAB_ROOT="\$GOAD_ROOT/ad/\$LAB"
@@ -787,6 +872,56 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       #   extra_vars.yml  this lab's own overlay    (see 'extra-vars overlay')
       LAB_PLAYBOOKS_YML="\$LAB_ROOT/playbooks.yml"
       LAB_EXTRA_VARS="\$LAB_ROOT/extra_vars.yml"
+
+      # ---------- GOAD extensions: addressing and reachability ----------
+      # Upstream's flow is 'install_extension <name>' against a lab that is
+      # already installed: add one Linux server, layer that extension's
+      # inventory on top of the lab's, run extensions/<name>/ansible/install.yml.
+      # See goad/provisioner/ansible/ansible.py, run_extension() -- inventory
+      # layering plus one playbook run, and nothing else. What follows is that
+      # same thing expressed in the -i flags this script already builds.
+      #
+      # WHY THE ELK OCTET MOVES. extensions/elk/inventory pins
+      # elk ansible_host={{ip_range}}.50. On v3 that was free, because Kali
+      # lives on the EXTERNAL segment while a SIEM sits internally, so the two
+      # addresses were never on one wire. On v1/v2 there is ONE flat lan0 and
+      # .50 is the Kali box (INFRA_IP_OCTETS.Kali in
+      # front-end/src/utils/goad-deploy.js). Two dhcp-host lines claiming one
+      # address make dnsmasq REFUSE TO START, which takes DHCP down for the
+      # WHOLE lane -- not just those two machines. So CyberCore places elk at
+      # .24, which is free in every lab we ship and is exactly what
+      # GOAD_EXTENSIONS.elk.ipOctet already declares on the orchestrator side.
+      # THE TWO HALVES MUST AGREE: the octet below decides where ansible looks,
+      # goad-deploy.js decides where the machine actually is, and nothing
+      # cross-checks them at runtime -- a mismatch is a silent connection
+      # timeout at the end of a 90-minute deploy.
+      #
+      # The rewrite happens when the extension inventory is RENDERED (below),
+      # inside the same sed pass that substitutes {{ip_range}}. That keeps the
+      # vendored upstream file pristine and puts the CyberCore-specific choice
+      # in the one place that already owns lane addressing.
+      EXT_ELK_OCTET=24
+      EXT_ELK_UPSTREAM_OCTET=50
+      # wazuh keeps upstream's own .51: free on v1/v2, so nothing to rewrite.
+      #
+      # HOW THE EXTENSION SERVER IS REACHED. Its inventory line says
+      # ansible_connection=ssh and carries no credentials at all -- upstream
+      # supplies those from its global inventory. Ours come from
+      # inventory_overrides, the same file every other connection variable in
+      # this script lives in. Key-based, never a password: the controller's own
+      # /root/.ssh/id_ed25519, the same key prep.sh uses for the
+      # controller-to-gateway link, whose public half the Linux base image
+      # carries in authorized_keys.
+      # Both are env-overridable so a differently-baked image (a cloud-init
+      # account that is not root, a second key) can be accommodated WITHOUT a
+      # controller re-bake -- which is otherwise the only way to change
+      # anything in this file.
+      EXT_SSH_USER="\${EXT_SSH_USER:-root}"
+      EXT_SSH_KEY="\${EXT_SSH_KEY:-/root/.ssh/id_ed25519}"
+      # Validated keys, filled in by the rendering loop below and read by the
+      # install loop at the very end. Empty for every run that passes no 5th
+      # argument, which is every lane in flight today.
+      EXT_KEYS=""
 
       # Land any pushed tree for this lab BEFORE the existence check below —
       # a generated lab does not exist in the image, it arrives in the inbox.
@@ -877,6 +1012,112 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       [localhost]
       localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
       OVR
+
+      # ---------- Render each requested extension's inventory ----------
+      # One file per extension, \$RUNTIME/inventory_ext_<key>, produced by the
+      # SAME sed that produced inventory_proxmox above. Rendering happens HERE,
+      # before a single playbook runs, so an unknown or incomplete extension
+      # key fails in the first seconds of a deploy rather than ninety minutes
+      # later, with the forest built and only the SIEM left to do.
+      if [ -n "\$EXTENSIONS" ]; then
+        echo "==> Extensions requested: \$EXTENSIONS"
+        for ext in \$(echo "\$EXTENSIONS" | tr ',' ' '); do
+          # The key indexes a path, so a name with a slash escapes the
+          # extensions tree. Rejected here rather than at either join, so
+          # there is one guard to read (same shape as extract-lab.sh's).
+          case "\$ext" in
+            .|*/*|*..*)
+              echo "ERROR: refusing unsafe extension key '\$ext'" >&2
+              exit 1
+              ;;
+          esac
+          EXT_DIR="\$GOAD_ROOT/extensions/\$ext"
+          EXT_INV_SRC="\$EXT_DIR/inventory"
+          EXT_PLAYBOOK="\$EXT_DIR/ansible/install.yml"
+          # An unknown key FAILS LOUDLY. The alternative -- skip it, carry on --
+          # returns a green deploy for a lane that has no SIEM in it, and
+          # nobody finds out until an instructor opens Kibana.
+          if [ ! -d "\$EXT_DIR" ]; then
+            echo "ERROR: extension '\$ext' has no directory at \$EXT_DIR" >&2
+            echo "  Extensions present in this image:" >&2
+            ls "\$GOAD_ROOT/extensions" 2>/dev/null | sed 's/^/    /' >&2
+            exit 1
+          fi
+          if [ ! -f "\$EXT_INV_SRC" ] || [ ! -f "\$EXT_PLAYBOOK" ]; then
+            echo "ERROR: extension '\$ext' is incomplete; both of these are required:" >&2
+            echo "         \$EXT_INV_SRC" >&2
+            echo "         \$EXT_PLAYBOOK" >&2
+            exit 1
+          fi
+          # Upstream renders extension inventories through Jinja, not sed:
+          # extensions/ws01 and extensions/exchange carry {% if %} blocks that
+          # branch on provider_name. sed passes those lines through verbatim
+          # and ansible's ini parser then chokes on them, minutes into a run,
+          # with an error that names neither this file nor that one. Refuse
+          # instead. elk, wazuh, lx01 and guacamole are plain.
+          if grep -q '{%' "\$EXT_INV_SRC"; then
+            echo "ERROR: extension '\$ext' inventory uses Jinja control blocks;" >&2
+            echo "       this renderer substitutes {{ip_range}} only." >&2
+            exit 1
+          fi
+          # The octet rewrite rides in the SAME sed as a FIRST expression that
+          # matches the PLACEHOLDER form, so it lands before {{ip_range}} is
+          # substituted and the second expression stays byte-identical to the
+          # lab one. For every other extension it is a no-op expression rather
+          # than a second sed, so there is exactly one renderer to keep true.
+          EXT_SED_OCTET='s|^||'
+          if [ "\$ext" = "elk" ]; then
+            EXT_SED_OCTET="s|{{ip_range}}\.\${EXT_ELK_UPSTREAM_OCTET}|{{ip_range}}.\${EXT_ELK_OCTET}|g"
+          fi
+          sed -e "\$EXT_SED_OCTET" -e "s|{{ip_range}}|\${IP_RANGE}|g" \\
+            "\$EXT_INV_SRC" > "\$RUNTIME/inventory_ext_\$ext"
+          echo "==> Rendered extension inventory: \$RUNTIME/inventory_ext_\$ext"
+          grep -E 'ansible_host=' "\$RUNTIME/inventory_ext_\$ext" | sed 's/^/    /' || true
+          # ---------- Connection variables for this extension's server ----
+          # Appended to inventory_overrides -- the file layered LAST, which is
+          # what stands in for upstream's global inventory. GROUP-scoped, never
+          # [all:vars]: 'all' is the least specific group ansible knows, so a
+          # <key>_server block beats the WinRM block above it for the SIEM host
+          # while leaving every Windows host untouched. No extension requested
+          # means the group is never created and this file stays byte-for-byte
+          # what it has always been.
+          #
+          # ansible_port is the one that bites. [all:vars] pins 5985 for WinRM,
+          # and without an override ansible would open an SSH connection to
+          # port 5985 on the SIEM and sit there until the connect timeout.
+          # ansible_password is emptied for the same class of reason: a
+          # non-empty password under connection=ssh makes ansible shell out to
+          # sshpass instead of using the key.
+          #
+          # ansible_ssh_common_args MATCHES the extension inventory's own
+          # host-level value rather than fighting it. A host var outranks a
+          # group var, so upstream's '-o StrictHostKeyChecking=no' wins here no
+          # matter what this line says; saying the same thing keeps the two
+          # readable together, saying something else would look effective and
+          # quietly not be.
+          {
+            echo ""
+            echo "# ---- \$ext extension server, appended by run.sh ----"
+            echo "[\${ext}_server:vars]"
+            echo "ansible_connection=ssh"
+            echo "ansible_user=\${EXT_SSH_USER}"
+            echo "ansible_password="
+            echo "ansible_port=22"
+            echo "ansible_ssh_private_key_file=\${EXT_SSH_KEY}"
+            echo "ansible_python_interpreter=/usr/bin/python3"
+            echo "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
+          } >> "\$RUNTIME/inventory_overrides"
+          # elk and wazuh both declare [<key>_server]. Anything that does not
+          # would silently inherit the Windows WinRM credentials from
+          # [all:vars] and fail on the SIEM host with a WinRM error, which
+          # points at the wrong machine entirely.
+          if ! grep -q "^\[\${ext}_server\]" "\$RUNTIME/inventory_ext_\$ext"; then
+            echo "WARNING: extension '\$ext' declares no [\${ext}_server] group, so its"
+            echo "         server keeps the Windows WinRM defaults and will not connect."
+          fi
+          EXT_KEYS="\$EXT_KEYS \$ext"
+        done
+      fi
 
       export ANSIBLE_CONFIG=\$ANSIBLE_DIR/ansible.cfg
       export LANG=C.UTF-8
@@ -1319,6 +1560,90 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       echo " \$LAB provisioning complete."
       echo "================================================================="
 
+      # ---------- GOAD extensions ----------
+      # Reached ONLY if the lab chain above succeeded. run.sh runs under
+      # 'set -e' and every playbook in that loop is unguarded, so a failed AD
+      # build has already exited non-zero and nothing below ever runs. That
+      # ordering is upstream's too: install_extension is a command you give a
+      # lab that is already installed.
+      #
+      # THE INVENTORY LAYERING IS UPSTREAM'S, IN UPSTREAM'S ORDER
+      # (goad/provisioner/ansible/ansible.py, run_extension):
+      #     lab inventory                     data/inventory + inventory_proxmox
+      #     every OTHER requested extension's inventory
+      #     THIS extension's inventory        last of the extensions
+      #     the global inventory              ours: inventory_overrides
+      # The order IS the mechanism. Later files win on a conflict, so this
+      # extension's own host lines beat any other extension's, and the global
+      # overrides beat everything -- which is what lets ONE file carry both the
+      # WinRM credentials the agent roles need on the Windows hosts and the SSH
+      # credentials the server role needs on the SIEM.
+      #
+      # FAILURE POLICY, and it is a real decision, not a default:
+      #   A lane whose forest built but whose SIEM did not is still a usable
+      #   lane for red-team work, and destroying ninety minutes of AD because
+      #   winlogbeat would not install would be its own kind of wrong. But
+      #   REPORTING SUCCESS for it is worse: what was ordered was a blue-team
+      #   environment, and "green deploy, nothing actually planted" is this
+      #   pipeline's dominant and most expensive failure mode -- the instructor
+      #   discovers it in front of a class, with no telemetry and no error to
+      #   point at.
+      #   So the run FAILS -- with exit code 2 rather than 1, and only after
+      #   every requested extension has been attempted.
+      #   The distinct code is the point. 1 means "no forest" (set -e, above);
+      #   2 means "forest is up, the SIEM is not", and a caller can act on that
+      #   difference: re-run just the extension against a lane that is
+      #   otherwise finished, or hand it over red-team-only, instead of tearing
+      #   it down. Attempting all of them means one summary tells the whole
+      #   story rather than the first casualty hiding the second.
+      EXT_FAILED=""
+      EXT_INSTALLED=""
+      for ext in \$EXT_KEYS; do
+        EXT_INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox"
+        for other in \$EXT_KEYS; do
+          if [ "\$other" != "\$ext" ]; then
+            EXT_INV_FLAGS="\$EXT_INV_FLAGS -i \$RUNTIME/inventory_ext_\$other"
+          fi
+        done
+        EXT_INV_FLAGS="\$EXT_INV_FLAGS -i \$RUNTIME/inventory_ext_\$ext -i \$RUNTIME/inventory_overrides"
+        echo ""
+        echo "================================================================="
+        echo " EXTENSION '\$ext': installing"
+        echo "   playbook:  \$GOAD_ROOT/extensions/\$ext/ansible/install.yml"
+        echo "   inventory: \$EXT_INV_FLAGS"
+        echo "================================================================="
+        # cd into the extension's ansible/ directory because upstream passes
+        # playbook_path there, and the roles install.yml names (elk,
+        # logs_windows, wazuh_manager, wazuh_agent, wazuh_agent_linux) live in
+        # ITS roles/, not in /opt/goad/ansible/roles. A subshell, so the
+        # working directory the rest of this script assumes is untouched.
+        # ANSIBLE_CONFIG is exported as an absolute path, so it survives the cd.
+        if ( cd "\$GOAD_ROOT/extensions/\$ext/ansible" && \\
+             ansible-playbook \$EXT_INV_FLAGS install.yml \\
+               --extra-vars "@\$RUNTIME/extra_vars.yml" ); then
+          echo "<<< EXTENSION '\$ext': INSTALLED"
+          EXT_INSTALLED="\$EXT_INSTALLED \$ext"
+        else
+          echo "!!! EXTENSION '\$ext': FAILED. The lab itself is built and usable;"
+          echo "!!!   this lane has no working '\$ext' telemetry."
+          EXT_FAILED="\$EXT_FAILED \$ext"
+        fi
+      done
+
+      if [ -n "\$EXT_KEYS" ]; then
+        echo "================================================================="
+        echo " \$LAB extensions summary"
+        echo "   requested:\$EXT_KEYS"
+        echo "   installed:\$EXT_INSTALLED"
+        echo "   failed:   \$EXT_FAILED"
+        echo "================================================================="
+      fi
+      if [ -n "\$EXT_FAILED" ]; then
+        echo "ERROR: the '\$LAB' forest is built, but these extensions did not install:\$EXT_FAILED" >&2
+        echo "       Exit 2 = lab OK, extension failed. Exit 1 = the lab chain itself failed." >&2
+        exit 2
+      fi
+
   - path: /opt/goad-light/README.md
     content: |
       # GOAD Controller (VM, upstream-backed)
@@ -1351,6 +1676,18 @@ runcmd:
   - bash -c 'set -e; git init -q /opt/goad; cd /opt/goad; git remote add origin "$GOAD_REPO"; git fetch -q --depth 1 origin "$GOAD_REF"; git checkout -q FETCH_HEAD'
   - bash -c 'cd /opt/goad/ansible && export LANG=C.UTF-8 LC_ALL=C.UTF-8 && ansible-galaxy install -r requirements.yml'
   - bash -c 'cd /opt/goad && git log -1 --oneline > /opt/goad-light/upstream-commit.txt'
+  # ----- Extension trees: verified, not assumed -----
+  # /opt/goad is a FULL checkout of GOAD_REF (git init + fetch + checkout
+  # FETCH_HEAD, above) -- not sparse, not filtered -- so extensions/ arrives
+  # with everything else and nothing has to fetch it separately. Confirmed at
+  # bake time anyway, because a GOAD_REPO override or a future ref could drop
+  # it and the failure would otherwise surface at the end of a 90-minute
+  # deploy. extensions-available.txt is the list for a human; and if either
+  # extension CyberCore actually drives is missing, the capability marker is
+  # DELETED, so the orchestrator reads 'no extension support' rather than an
+  # assertion it has no way to check.
+  - bash -c 'ls -1 /opt/goad/extensions 2>/dev/null | sort > /opt/goad-light/extensions-available.txt || true'
+  - bash -c 'for e in elk wazuh; do if [ ! -f /opt/goad/extensions/\$e/ansible/install.yml ] || [ ! -f /opt/goad/extensions/\$e/inventory ]; then echo "WARNING - extension \$e did not land in /opt/goad, dropping the extension capability marker"; rm -f /opt/goad-light/.cc-extension-install; fi; done'
   - [ apt-get, clean ]
   - bash -c 'rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /root/.cache 2>/dev/null || true'
   - [ touch, /var/lib/cloud/instance/bake-complete ]
@@ -1519,6 +1856,28 @@ echo "                 qm start 9994 && sleep 60"
 echo "  Inspect:       qm guest exec 9994 -- /bin/sh -c 'ls /opt/goad /opt/goad-light'"
 echo "  Sanity:        qm guest exec 9994 -- /bin/sh -c 'cat /opt/goad-light/upstream-commit.txt'"
 echo "  Cleanup test:  qm stop 9994 && qm destroy 9994 --purge"
+echo "-------------------------------------------------------------------"
+echo "  EXTENSIONS:    run.sh now takes an OPTIONAL 5th argument:"
+echo "                 run.sh LAB HOST_MAP INITIAL_USER INITIAL_PASSWORD [EXTENSIONS]"
+echo "                 EXTENSIONS = comma-separated keys in install order,"
+echo "                 e.g. 'elk' or 'elk,wazuh'. Absent or empty behaves"
+echo "                 exactly as it did before extensions existed."
+echo "                 elk is placed at .24, NOT upstream's .50 (that is Kali"
+echo "                 on a flat v1/v2 lane, and a duplicate dhcp-host stops"
+echo "                 dnsmasq for the WHOLE lane). Must match"
+echo "                 GOAD_EXTENSIONS.elk.ipOctet in goad-deploy.js."
+echo "                 Exit 2 = forest built, an extension playbook failed."
+echo "  Verify:        qm guest exec 9994 -- /bin/sh -c 'cat /opt/goad-light/.cc-extension-install /opt/goad-light/extensions-available.txt'"
+echo "-------------------------------------------------------------------"
+echo "  RE-BAKE IS THE ONLY WAY TO SHIP A run.sh CHANGE."
+echo "  /opt/goad-light/run.sh exists only inside this script's cloud-init"
+echo "  heredoc, so editing it here changes NOTHING until template $VMID is"
+echo "  rebuilt, and every lane already deployed keeps the run.sh it was"
+echo "  cloned with. FREEZE FIRST -- once $VMID is purged it is unrecoverable:"
+echo "    qm clone $VMID $ROLLBACK_TEMPLATE_VMID --name goad-controller-template-frozen --full --storage $STORAGE"
+echo "    qm template $ROLLBACK_TEMPLATE_VMID"
+echo "    qm set $ROLLBACK_TEMPLATE_VMID --description \"FROZEN \$(date +%F): last known-good GOAD controller\""
+echo "    qm destroy $VMID --purge && ./bake-goad-controller-vm.sh"
 echo "-------------------------------------------------------------------"
 echo "  ROLLBACK:      front-end/src/utils/goad-deploy.js"
 echo "                 const CONTROLLER_TEMPLATE_VMID = $VMID;  ->  = $ROLLBACK_TEMPLATE_VMID;"

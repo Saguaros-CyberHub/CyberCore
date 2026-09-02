@@ -92,9 +92,14 @@ function buildGoadExtensionRow(ext, offset) {
     name: ext.machine,
     role: ext.role,
     os: ext.os || '',
-    // null for the SIEM images: they are registered per site, so the author
-    // supplies the golden-image VMID. validateCreateState blocks Create until
-    // every machine has one, which is the right place to notice.
+    // The catalog names an image for every extension now. The SIEMs were `null`
+    // here while they were meant to be per-site golden images the author supplied
+    // — which is exactly what produced "has no template VMID, so there is nothing
+    // to clone" on a freshly ticked elk. They clone a PLAIN Ubuntu base today and
+    // GOAD's extension Ansible installs the stack in the lane. The `|| null`
+    // stays: a catalog row from an older server may still carry nothing, and
+    // validateCreateState blocks Create until every machine has a VMID, which is
+    // the right place to notice.
     template_vmid: ext.template_vmid || null,
     type: 'qemu',
     vm_offset: offset,

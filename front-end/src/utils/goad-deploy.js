@@ -64,6 +64,17 @@ async function agentExecArgv(node, vmId, argv, proxmoxAPI) {
 // git-clones upstream GOAD on first boot via cloud-init).
 const CONTROLLER_TEMPLATE_VMID = 1700;
 
+// The GENERIC Ubuntu 22.04 image (bake-ubuntu-lab-template.sh). It carries no
+// SIEM: it is the box GOAD's extension Ansible INSTALLS onto, in-lane, on a live
+// lane. Named rather than spelled 1011 in four places because it is the pivot of
+// the pre-baked rule below — a machine still pointing here on a pre-baked lane is
+// the one combination that deploys green and does nothing.
+//
+// The sealed counterparts (seal-goad-elk-template.sh -> 1012,
+// seal-goad-wazuh-template.sh -> 1013) DO carry the stack, which is exactly why
+// pointing at one of them makes a pre-baked lane legitimate.
+const PLAIN_BASE_TEMPLATE_VMID = 1011;
+
 // Lane subnet — provided per-deploy by the caller (admin.js v1: '192.18.0'
 // shared, v2: '10.<vxh>.<vxl>' unique per lane, v3: the INTERNAL segment's
 // '10.<vxh|0x80>.<vxl>' — GOAD always lives on the internal subnet in v3).
@@ -169,7 +180,11 @@ const GOAD_LABS = {
       { name: 'DC01',  role: 'dc',          os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 40, nic_model: 'e1000' },
       { name: 'SRV01', role: 'member',      os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 41, nic_model: 'e1000' },
       { name: 'SRV02', role: 'member',      os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 42, nic_model: 'e1000' },
-      { name: 'WS01',  role: 'workstation', os: 'Windows 11',          template_vmid: 1002, ipOctet: 43, nic_model: 'e1000' }
+      // 1006 is the Windows 11 template on this cluster. Was 1002 — the same
+      // stale number GOAD_EXTENSIONS.ws01 carried, from the bake script's drifted
+      // FINAL_VMID default. Both Windows 11 rows in this file must name the same
+      // image, or SCCM's own WS01 and the ws01 extension clone different OSes.
+      { name: 'WS01',  role: 'workstation', os: 'Windows 11',          template_vmid: 1006, ipOctet: 43, nic_model: 'e1000' }
     ]
   },
   'DRACARYS': {
@@ -775,6 +790,95 @@ function assertGoadRoster(spec, labName, labDef, fromSpec, externalNames) {
 }
 
 /**
+ * REFUSE a pre-baked lane that selected an extension.
+ *
+ * THE FORK THIS GUARDS. There are two GOAD deploy modes and only one of them
+ * runs Ansible:
+ *
+ *   live (default)   deployController → waitForWinRM → runGoadPlaybook, which
+ *                    runs /opt/goad-light/run.sh — and run.sh is the ONLY thing
+ *                    that ever executes an extension's install.yml.
+ *   prebaked         deployPrebakedGoadLane clones golden images and heals their
+ *                    secure channels. No controller is started at all
+ *                    (challenge-lane-deployer's liveGoadController is literally
+ *                    `enabled && !prebaked`), so run.sh never runs.
+ *
+ * So on a pre-baked lane a ticked extension does every visible thing and the one
+ * invisible thing not at all: the machine is cloned, given a deterministic MAC,
+ * a reserved address, a DNS record and a console — and nothing is installed on
+ * it. elk comes up as a bare Ubuntu box with no Elasticsearch listening; wazuh
+ * the same; ws01 boots as an un-joined workstation. The lane reports ACTIVE. The
+ * first person to find out is a student clicking through to an empty Kibana.
+ *
+ * That is precisely the silent-success shape assertGoadRoster exists to prevent,
+ * so it is refused the same way and at the same funnel: prepareGoadMacs, which
+ * both deploy modes call before anything is cloned. The Designer catches it
+ * earlier — topology-validate's `prebaked-extension` error, at authoring time —
+ * but a spec can reach a deploy without ever passing through the canvas (the
+ * CiAB compiler writes specs directly), so the canvas cannot be the only gate.
+ *
+ * @param {object} spec       the challenge spec (reads spec.goad.prebaked)
+ * @param {string[]} selected resolveGoadLab(spec).extensions.selected — already
+ *                            filtered to the keys this lab can actually take
+ */
+function assertGoadExtensionsRunnable(spec, selected) {
+  if (!spec?.goad?.prebaked) return;
+  const keys = Array.isArray(selected) ? selected : [];
+  if (keys.length === 0) return;
+
+  // PRE-BAKED + EXTENSIONS IS THE INTENDED STEADY STATE, NOT AN ERROR.
+  //
+  // An earlier revision refused this combination outright, reasoning that a
+  // pre-baked lane runs no Ansible so nothing could install the stack. True, and
+  // it misses the point: the operational plan is to run the extension install
+  // ONCE against a staging lab, seal the result into golden templates
+  // (seal-goad-elk-template.sh, seal-goad-wazuh-template.sh), and clone those
+  // forever. At that point nothing NEEDS to install — the image already carries
+  // it, and pre-baked is the whole reason for sealing.
+  //
+  // So the question is not "is this lane pre-baked" but "does this extension's
+  // machine clone an image that already has the stack on it". Exactly one answer
+  // is wrong: still pointing at PLAIN_BASE_TEMPLATE_VMID, the generic Ubuntu box
+  // with nothing installed. That is the silent-success case — cloned, addressed,
+  // given a console and a DNS record, carrying nothing.
+  //
+  // A machine with NO template at all is also refused: 'nothing to clone' is a
+  // different failure, but it is not one to discover on a pre-baked lane.
+  const specVms = Array.isArray(spec.vms) ? spec.vms : [];
+  const unbaked = [];
+  for (const key of keys) {
+    const ext = getExtension(key);
+    const machine = String(ext ? ext.machine : key).toLowerCase();
+    const row = specVms.find(v => String(v.name || '').toLowerCase() === machine);
+    // Precedence matches the deploy path: the spec row's own template wins, then
+    // the catalog default, then the spec-wide fallback.
+    const vmid = Number(row?.template_vmid || ext?.template_vmid || spec.template_vmid || 0);
+    if (!vmid || vmid === PLAIN_BASE_TEMPLATE_VMID) unbaked.push({ key, ext, vmid });
+  }
+  if (unbaked.length === 0) return;
+
+  const list = unbaked.map(u => u.key).join(', ');
+  const one = unbaked.length === 1;
+  throw new Error(
+    `GOAD extension${one ? '' : 's'} ${list} ${one ? 'is' : 'are'} selected on a PRE-BAKED lane ` +
+    `(spec.goad.prebaked), but ${one ? 'its machine still clones' : 'their machines still clone'} an image ` +
+    `with no stack on it: ` +
+    unbaked.map(u => `${u.ext ? u.ext.machine : u.key} -> ` +
+      (u.vmid ? `template ${u.vmid}, the generic Ubuntu base` : 'no template at all')).join('; ') +
+    '. A pre-baked lane clones golden images and runs NO Ansible — no controller is deployed and ' +
+    "/opt/goad-light/run.sh, the only thing that ever runs an extension's install.yml, never executes. " +
+    `So ${one ? 'that machine' : 'those machines'} would be cloned, addressed, given a DNS record and a ` +
+    `console, have nothing installed, and the lane would still report active. ` +
+    'Remedy — pick one: (1) point the machine at a SEALED template that already carries the stack ' +
+    '(seal-goad-elk-template.sh produces one, seal-goad-wazuh-template.sh the other) — this is the ' +
+    'intended steady state, and pre-baked plus a sealed image is fully supported; (2) clear ' +
+    `spec.goad.prebaked so the lab is provisioned live and run.sh installs ${list} in-lane, which is how ` +
+    `you produce the image to seal in the first place; or (3) drop ${list} from spec.goad.extensions. ` +
+    'Refusing to deploy.'
+  );
+}
+
+/**
  * Build a deterministic locally-administered MAC from an IP last octet.
  * Format: 02:00:CC:HH:LL:RR
  *   02      — locally-administered (and unicast)
@@ -837,6 +941,12 @@ function prepareGoadMacs(spec, vxlanId, laneSubnetBase) {
   // THE HARD ERROR. Before this line existed the loop below silently skipped
   // any name it could not match, and the lane came up wrong without a word.
   assertGoadRoster(spec, labName, labDef, fromSpec, extensions && extensions.external);
+
+  // THE OTHER HARD ERROR, and it belongs here for the same reason: this function
+  // is the one funnel BOTH deploy modes pass through before a single clone, so a
+  // pre-baked lane that ticked an extension is stopped here rather than finishing
+  // green with an empty SIEM on it.
+  assertGoadExtensionsRunnable(spec, extensions && extensions.selected);
 
   const out = {};
   for (const vm of spec.vms) {
@@ -1060,7 +1170,15 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   const kaliBase = extSubnetBase || laneSubnetBase;
   // labName, not labDef: run.sh takes the upstream ad/<name>/ playbook chain by
   // name. A spec-supplied goad.lab changes addressing, not which chain runs.
-  const { labName } = resolveGoadLab(spec);
+  //
+  // `extensions.selected` comes from the SAME resolve on purpose. It is already
+  // the set this lab can actually take — resolveGoadExtensions has dropped every
+  // key that is incompatible with the lab, collides with a lab host's name or
+  // octet, or is a duplicate, and drops unknown keys rather than throwing (a spec
+  // saved last term must still deploy against a catalog that has moved). So
+  // nothing downstream has to re-derive compatibility, and run.sh is never handed
+  // a key whose inventory would fight the lab's.
+  const { labName, extensions } = resolveGoadLab(spec);
   // initialUser / initialPass: the account run.sh's preflight uses for the first
   // WinRM connection. Default to vagrant/vagrant — the local-admin account GOAD
   // bakes, which (unlike the built-in Administrator) stays ENABLED through
@@ -1110,21 +1228,130 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   const donePath = `/var/log/goad-done-${vxlanId}.txt`;
   const sq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
+  // THE 5TH ARGUMENT: the extension keys, comma-joined, in the order they are to
+  // be installed. run.sh renders each one's inventory (substituting {{ip_range}}
+  // and rewriting elk's .50 to CyberCore's .24 in the same sed pass that already
+  // produces inventory_proxmox), layers it on the lab's, and runs
+  // extensions/<key>/ansible/install.yml — upstream's run_extension(), which is
+  // inventory layering plus one playbook run and nothing else.
+  //
+  // OMITTED — not passed as '' — when nothing is selected. Both spellings work
+  // against a run.sh that reads `"${5:-}"`, but omission makes "an empty
+  // selection behaves exactly like today" true BY CONSTRUCTION rather than by an
+  // assumption about a script we do not control on this side of the boundary.
+  // The controller is a BAKED TEMPLATE: every lane already in flight is running
+  // the run.sh it was baked with, and there is no negotiation. An older run.sh
+  // may check its own arity (`[ $# -lt 4 ]`), may echo "$@" into the log, may run
+  // under `set -u`. A lane with no extensions must hand it a command line it has
+  // already proved it handles — byte-identical to the four-argument one that has
+  // always been sent. A lane WITH extensions is opting into the new contract, and
+  // an older controller that ignores a 5th argument degrades to "lab installs,
+  // extensions do not" rather than breaking the lab.
+  const extArg = (extensions?.selected || []).length
+    ? ` ${sq(extensions.selected.join(','))}`
+    : '';
+
+  // ---- Capability gate: does THIS controller understand argv[5]? ----------
+  //
+  // THE ONLY SILENT FAILURE LEFT IN THIS FEATURE, and it needs no bug — only a
+  // forgotten step. The controller is a BAKED TEMPLATE (CONTROLLER_TEMPLATE_VMID).
+  // A lane cloned from a template baked before extension support runs a run.sh
+  // that binds $1..$4 and never reads $5. Hand it a fifth argument and it is
+  // inert: the AD forest builds, run.sh exits 0, the lane reports active, and
+  // there is no SIEM and no error anywhere. Every OTHER failure in this feature
+  // is loud; this one deploys green and hands a student an empty Kibana.
+  //
+  // So ask before assuming. The controller bake writes
+  // /opt/goad-light/.cc-extension-install and a firstboot runcmd DELETES it again
+  // if extensions/{elk,wazuh}/ansible/install.yml did not actually land — so the
+  // marker means "this controller can install extensions", not merely "this
+  // template is recent". Same shape as goad-lab-push's per-lab-playbooks probe.
+  //
+  // Only runs when extensions are selected, so a lane that ticks none never pays
+  // the round trip and never gains a new way to fail.
+  if (extArg) {
+    const selectedList = extensions.selected.join(', ');
+    let markerPresent = false;
+    try {
+      // agentExecArgv + the INJECTED proxmoxAPI, not script-executor's
+      // agentShellExec/pollExecStatus. Those close over script-executor's own
+      // module-level client, so a caller that injected a proxmoxAPI — every test
+      // in this file, and any future dry-run path — would find this one probe,
+      // alone, still talking to the real cluster. runGoadPlaybook takes
+      // proxmoxAPI as a parameter for exactly this reason; a new call inside it
+      // that ignores the parameter quietly breaks the seam for everyone.
+      const { pid } = await agentExecArgv(bestNode, controllerVmId,
+        ['/bin/sh', '-c', 'test -f /opt/goad-light/.cc-extension-install && echo yes || echo no'],
+        proxmoxAPI);
+      const deadline = Date.now() + 60000;
+      let st = null;
+      while (Date.now() < deadline) {
+        st = await proxmoxAPI('GET',
+          `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/agent/exec-status?pid=${pid}`);
+        if (st?.exited) break;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      if (!st?.exited) throw new Error('capability probe did not exit within 60s');
+      markerPresent = /\byes\b/.test(String(st['out-data'] ?? st.outData ?? ''));
+    } catch (err) {
+      // A probe that cannot run is NOT permission to proceed. The whole point is
+      // that the failure it guards against is invisible, so an unreadable answer
+      // has to be treated as the bad answer.
+      throw new Error(
+        `GOAD extensions (${selectedList}) were selected, but the controller capability probe failed: `
+        + `${err.message}. Cannot confirm this controller's run.sh understands the extensions argument, and `
+        + 'proceeding would risk a lane that reports active with nothing installed. Refusing to deploy.'
+      );
+    }
+    if (!markerPresent) {
+      throw new Error(
+        `GOAD extensions (${selectedList}) were selected, but this lane's controller does not support them: `
+        + '/opt/goad-light/.cc-extension-install is absent, so its /opt/goad-light/run.sh reads only four '
+        + 'arguments and would IGNORE the extensions list entirely. The forest would build, the deploy would '
+        + 'report success, and the lane would have no SIEM and no error. '
+        + `Remedy: re-bake the GOAD controller template (VMID ${CONTROLLER_TEMPLATE_VMID}) with the current `
+        + 'infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh, then redeploy. '
+        + `Or untick ${selectedList} to deploy the lab without them. Refusing to deploy.`
+      );
+    }
+    console.log(`[GOAD] controller ${controllerVmId} supports extensions — installing ${selectedList}`);
+  }
+
   // Outer detach: nohup ignores SIGHUP, setsid creates new session, &
   // backgrounds, </dev/null </dev/null 2>&1 close inherited fds so the
   // wrapper bash QGA started can exit cleanly without dragging children.
   // Inner sh -c runs the playbook + records exit code atomically.
-  const innerCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)} > ${logPath} 2>&1; echo \\$? > ${donePath}`;
+  const innerCmd = `/opt/goad-light/run.sh ${sq(labName)} ${sq(hostMap)} ${sq(initialUser)} ${sq(initialPass)}${extArg} > ${logPath} 2>&1; echo \\$? > ${donePath}`;
   const wrappedCmd = `rm -f ${donePath}; nohup setsid sh -c "${innerCmd}" </dev/null >/dev/null 2>&1 &`;
 
   // ---- mssql offline-install fix (strip FULLTEXT) -----------------------
   // GOAD's mssql role renders sql_conf.ini with FEATURES=SQLENGINE,FULLTEXT.
   // Full-Text Search is NOT in Express *Core* media (SQLEXPR_x64_ENU.exe) — only
   // in *Advanced* (SQLEXPRADV). srv02 installs from the engine-only Core media we
-  // stage offline in template 1004, and the lane has no internet, so the SSEI
-  // bootstrapper hangs forever assembling media (extracts RulesEng, never reaches
-  // setup.exe / Detail.txt) trying to fetch the missing FullText component — the
-  // 2h watchdog then kills the run. GOAD doesn't use full-text search. The
+  // stage offline in template 1004, so the SSEI bootstrapper goes looking for the
+  // FullText component that media does not carry and hangs forever assembling
+  // media (extracts RulesEng, never reaches setup.exe / Detail.txt) — the 2h
+  // watchdog then kills the run.
+  //
+  // ── CORRECTION. This comment used to say "and the lane has no internet". THAT
+  // IS FALSE, it was the load-bearing premise of a later design, and it cost a
+  // rewrite. A deployed lane has FULL internet egress. From
+  // infrastructure/proxmox-templates/sdn-templates/bake-lane-gateway-v3.sh:
+  //   · wan0 is the "internet uplink (NAT)" (line 13)
+  //   · iptables -t nat -A POSTROUTING -s "$NET" -o wan0 -j MASQUERADE (~line 387),
+  //     for BOTH lane subnets
+  //   · iptables -A FORWARD -i ext0 -o wan0 -j ACCEPT  and  -i int0 -o wan0
+  //     -j ACCEPT (lines 254-255)
+  // What IS contained is the LAB BACKBONE: the only DROPs (CYBERCORE-LAB-DROP,
+  // lines 343-344) are scoped `-d 100.100.0.0/16`, so a lane cannot reach other
+  // lanes or the orchestrator — it can reach the internet all day. That is
+  // precisely why runGoadPlaybook can hand run.sh a list of extensions to install
+  // in-lane at all.
+  //
+  // The fix below is still right; only its stated reason was wrong. GOAD doesn't
+  // use full-text search, and letting the SSEI go and fetch it turns a local
+  // install into a slow, retry-prone online one inside a 2h budget shared with
+  // the whole playbook. Determinism, not darkness. The
   // ansible roles live under /opt/goad (the orchestration scripts are the only
   // thing under /opt/goad-light), so patch the role config there before the
   // playbook renders it. Covers MSSQL_2019 + MSSQL_2022 templates, and strips
@@ -1143,8 +1370,17 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   // The role's "Install the database" runs sql_installer.exe (the SQL SSEI
   // bootstrapper) with /MEDIAPATH. The SSEI is an ONLINE downloader: /MEDIAPATH
   // expects the SSEI's *own* downloaded media tree, not the standalone SQLEXPR
-  // self-extractor we stage, so it phones home, the lane has no internet, and it
-  // hangs until the 2h watchdog (confirmed 2026-06-15). Fix, proven end-to-end on
+  // self-extractor we stage, so it rejects the layout, falls back to phoning
+  // home, and hangs there until the 2h watchdog (confirmed 2026-06-15).
+  //
+  // NOT because "the lane has no internet" — that clause was here and is FALSE;
+  // see the correction on the FULLTEXT fix above. bake-lane-gateway-v3.sh
+  // MASQUERADEs both lane subnets out wan0 and ACCEPTs ext0→wan0 and int0→wan0 in
+  // FORWARD; the only DROPs are `-d 100.100.0.0/16`, which contains the LAB
+  // BACKBONE, not the internet. The lane can reach Microsoft fine. The problem is
+  // that doing so means several hundred MB over a per-lane NAT, retried silently
+  // when it stalls, inside a 2h budget the whole playbook shares — while the
+  // media is already sitting on the disk. Fix, proven end-to-end on
   // srv02 (SETUP_EXIT=0): extract the SQLEXPR media once (/q /x:) and run the
   // extracted setup.exe with /QUIET — fully offline. Drop /HIDEPROGRESSBAR and
   // /MEDIAPATH: both are SSEI-only flags that real setup.exe rejects ("the setting
@@ -2072,6 +2308,9 @@ module.exports = {
   // so a caller outside this module can ask "what lab is this spec, really?"
   // without re-deriving the precedence — and so the guard has tests.
   resolveGoadLab,
+  // The prebaked/extension fork, exported so the Designer's validator and this
+  // module state the same rule from one definition rather than two that drift.
+  assertGoadExtensionsRunnable,
   isGoadManagedVm,
   EXTERNAL_ROLES,
   INFRA_IP_OCTETS,
@@ -2079,5 +2318,9 @@ module.exports = {
   buildIp,
   getLab,
   getVmResources,
-  CONTROLLER_TEMPLATE_VMID
+  CONTROLLER_TEMPLATE_VMID,
+  // Exported so topology-validate's author-time twin of the pre-baked rule tests
+  // against the same number this module enforces at deploy time, rather than a
+  // second literal that can drift out of agreement with it.
+  PLAIN_BASE_TEMPLATE_VMID
 };
