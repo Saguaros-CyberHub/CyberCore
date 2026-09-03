@@ -346,6 +346,92 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
   # outer YAML block scalar doesn't choke on column-0 Python lines. The
   # 'content: |' block stripped by 6 spaces gives Python source at column 0
   # — correct for module-level statements.
+  - path: /opt/goad-light/render-inventory.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # Render a GOAD inventory template THE WAY UPSTREAM DOES.
+      #
+      # WHY THIS EXISTS. run.sh used to render extension inventories with sed,
+      # substituting {{ip_range}} and nothing else. That is enough for elk,
+      # wazuh, lx01 and guacamole, whose inventories are plain -- and wrong for
+      # ws01 and exchange, which carry Jinja CONTROL BLOCKS:
+      #
+      #     {% if provider_name == 'aws' or provider_name == 'azure' %}
+      #     ws01 ansible_host={{ip_range}}.31 ... ansible_user=ansible ...
+      #     {% else %}
+      #     ws01 ansible_host={{ip_range}}.31 dns_domain=dc01 dict_key=ws01
+      #     {% endif %}
+      #
+      # sed passes those {% %} lines through verbatim and ansible's ini parser
+      # chokes on them minutes into a run. run.sh previously REFUSED rather than
+      # emit that, which was honest but made ws01 undeployable.
+      #
+      # goad/instance.py:302 renders every inventory through Jinja with exactly
+      # three variables -- lab_name, ip_range, provider_name -- so that is what
+      # this does. jinja2 is a hard dependency of ansible-core, which is already
+      # on this controller, so nothing new is installed.
+      #
+      # provider_name is 'proxmox': not one upstream ships (its providers/ tree
+      # has vmware/virtualbox/aws/azure/ludus), which is exactly right -- every
+      # {% if %} in these templates tests FOR aws/azure, so an unknown provider
+      # deterministically takes the else branch, which is the bare-metal shape
+      # CyberCore wants.
+      import os, sys, argparse
+      try:
+          from jinja2 import Environment, FileSystemLoader
+      except ImportError:
+          sys.stderr.write('render-inventory: jinja2 missing. It ships with '
+                           'ansible-core; if that is gone, so is the whole run.\n')
+          raise SystemExit(1)
+
+      ap = argparse.ArgumentParser()
+      ap.add_argument('src')
+      ap.add_argument('dst')
+      ap.add_argument('--lab', required=True)
+      ap.add_argument('--ip-range', required=True)
+      ap.add_argument('--provider', default='proxmox')
+      # "50:24" -- upstream octet to CyberCore octet, applied to ansible_host=
+      # only. Kept as an ARGUMENT rather than a rule in here so the one place
+      # that knows why elk moves off .50 stays run.sh, next to the lane
+      # addressing it belongs to.
+      ap.add_argument('--rewrite-octet', default='')
+      a = ap.parse_args()
+
+      src = os.path.abspath(a.src)
+      env = Environment(loader=FileSystemLoader(os.path.dirname(src)),
+                        keep_trailing_newline=True)
+      out = env.get_template(os.path.basename(src)).render(
+          lab_name=a.lab, ip_range=a.ip_range, provider_name=a.provider)
+
+      if a.rewrite_octet:
+          frm, to = a.rewrite_octet.split(':', 1)
+          old = 'ansible_host=' + a.ip_range + '.' + frm
+          new = 'ansible_host=' + a.ip_range + '.' + to
+          # Hard-fail rather than silently skip. If upstream ever moves elk off
+          # .50, a quiet no-op here puts two machines on one address and dnsmasq
+          # refuses to start -- DHCP down for the whole lane.
+          if old not in out:
+              sys.stderr.write('render-inventory: expected "%s" in the rendered '
+                               '%s and it is not there. Upstream may have changed '
+                               'the octet; check extensions/*/inventory.\n'
+                               % (old, a.src))
+              raise SystemExit(1)
+          out = out.replace(old, new)
+
+      # Nothing unrendered may reach ansible's ini parser. This is the check the
+      # old sed renderer could not make, and it is why the refusal it replaced
+      # existed at all.
+      if '{%' in out or '{{' in out:
+          sys.stderr.write('render-inventory: unrendered Jinja remains in %s -- '
+                           'it may reference a variable upstream passes that we '
+                           'do not (we pass lab_name, ip_range, provider_name).\n'
+                           % a.src)
+          raise SystemExit(1)
+
+      with open(a.dst, 'w') as fh:
+          fh.write(out)
+
   - path: /opt/goad-light/patch-mssql.py
     permissions: '0755'
     content: |
@@ -1049,28 +1135,33 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
             echo "         \$EXT_PLAYBOOK" >&2
             exit 1
           fi
-          # Upstream renders extension inventories through Jinja, not sed:
+          # RENDERED WITH JINJA, NOT SED -- see /opt/goad-light/render-inventory.py.
           # extensions/ws01 and extensions/exchange carry {% if %} blocks that
-          # branch on provider_name. sed passes those lines through verbatim
-          # and ansible's ini parser then chokes on them, minutes into a run,
-          # with an error that names neither this file nor that one. Refuse
-          # instead. elk, wazuh, lx01 and guacamole are plain.
-          if grep -q '{%' "\$EXT_INV_SRC"; then
-            echo "ERROR: extension '\$ext' inventory uses Jinja control blocks;" >&2
-            echo "       this renderer substitutes {{ip_range}} only." >&2
+          # branch on provider_name, and sed passed those through verbatim for
+          # ansible's ini parser to choke on minutes later. An earlier revision
+          # REFUSED any inventory containing '{%', which was honest and made
+          # ws01 undeployable ("extension 'ws01' inventory uses Jinja control
+          # blocks"). goad/instance.py:302 renders these with exactly
+          # lab_name / ip_range / provider_name, so we do the same.
+          #
+          # The elk octet rewrite moved into the renderer as an explicit
+          # argument. It can no longer ride a sed on the {{ip_range}} PLACEHOLDER
+          # because Jinja substitutes that before we ever see the text -- so the
+          # renderer matches the rendered 'ansible_host=<ip_range>.50' and fails
+          # loudly if it is absent, rather than no-oping its way to two machines
+          # on one address.
+          EXT_OCTET_ARG=""
+          if [ "\$ext" = "elk" ]; then
+            EXT_OCTET_ARG="--rewrite-octet \${EXT_ELK_UPSTREAM_OCTET}:\${EXT_ELK_OCTET}"
+          fi
+          if ! python3 /opt/goad-light/render-inventory.py \\
+                 "\$EXT_INV_SRC" "\$RUNTIME/inventory_ext_\$ext" \\
+                 --lab "\$LAB" --ip-range "\${IP_RANGE}" --provider proxmox \\
+                 \$EXT_OCTET_ARG; then
+            echo "ERROR: could not render the inventory for extension '\$ext'." >&2
+            echo "       Source: \$EXT_INV_SRC" >&2
             exit 1
           fi
-          # The octet rewrite rides in the SAME sed as a FIRST expression that
-          # matches the PLACEHOLDER form, so it lands before {{ip_range}} is
-          # substituted and the second expression stays byte-identical to the
-          # lab one. For every other extension it is a no-op expression rather
-          # than a second sed, so there is exactly one renderer to keep true.
-          EXT_SED_OCTET='s|^||'
-          if [ "\$ext" = "elk" ]; then
-            EXT_SED_OCTET="s|{{ip_range}}\.\${EXT_ELK_UPSTREAM_OCTET}|{{ip_range}}.\${EXT_ELK_OCTET}|g"
-          fi
-          sed -e "\$EXT_SED_OCTET" -e "s|{{ip_range}}|\${IP_RANGE}|g" \\
-            "\$EXT_INV_SRC" > "\$RUNTIME/inventory_ext_\$ext"
           echo "==> Rendered extension inventory: \$RUNTIME/inventory_ext_\$ext"
           grep -E 'ansible_host=' "\$RUNTIME/inventory_ext_\$ext" | sed 's/^/    /' || true
           # ---------- Connection variables for this extension's server ----
@@ -1489,9 +1580,78 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
             delay: 12
             changed_when: false
       PFN
+      # ---------- Which initial credential actually opens WinRM? ----------
+      # preflight-vagrant.yml (further down) SETS vagrant's password to
+      # BootstrapPwd!1. That makes run.sh NON-IDEMPOTENT in the worst way: any
+      # deploy that reached that play and then failed LATER leaves every Windows
+      # VM holding a password INITIAL_PASSWORD no longer matches, so a retry
+      # against those same VMs can never authenticate again. The symptom is
+      # "ntlm: the specified credentials were rejected by the server" on an
+      # account that plainly exists, is enabled, and sits on a host whose
+      # sysprep GeneralizationState is 7. Observed on a real lane, and the lane
+      # was unrecoverable without re-cloning every Windows VM by hand.
+      #
+      # So ask rather than assume. Try the bake-time credential first (the
+      # fresh-clone case), then the bootstrap one (the retry case), and keep
+      # trying both while the hosts finish booting -- a host that is not up yet
+      # rejects BOTH, which is indistinguishable from a wrong password except
+      # by waiting.
+      BOOTSTRAP_PASSWORD="BootstrapPwd!1"
+      probe_pw() {
+        # printf, never sed: a password may contain |, & or a backslash, all of
+        # which are live in a sed replacement and none of which are live here.
+        printf '%s
+'           '[all:vars]'           "ansible_user=\${INITIAL_USER}"           "ansible_password=\$1"           'ansible_connection=winrm'           'ansible_port=5985'           'ansible_winrm_scheme=http'           'ansible_winrm_transport=ntlm'           'ansible_winrm_server_cert_validation=ignore'           'ansible_winrm_operation_timeout_sec=60'           'ansible_winrm_read_timeout_sec=70'           ''           '[localhost]'           'localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3'           > "\$RUNTIME/inventory_probe"
+        ansible -i "\$LAB_DATA/inventory" -i "\$RUNTIME/inventory_proxmox"                 -i "\$RUNTIME/inventory_probe" domain -m win_ping >/dev/null 2>&1
+      }
+      echo "==> Probing which initial WinRM credential the lane actually accepts..."
+      CRED_DEADLINE=\$(( \$(date +%s) + \${CRED_PROBE_TIMEOUT:-600} ))
+      CRED_OK=""
+      CRED_WHICH=""
+      while [ "\$(date +%s)" -lt "\$CRED_DEADLINE" ]; do
+        if probe_pw "\$INITIAL_PASSWORD"; then
+          CRED_OK="\$INITIAL_PASSWORD"; CRED_WHICH="bake-time (fresh clone)"; break
+        fi
+        if probe_pw "\$BOOTSTRAP_PASSWORD"; then
+          CRED_OK="\$BOOTSTRAP_PASSWORD"; CRED_WHICH="bootstrap (this lane was provisioned before)"; break
+        fi
+        echo "    ... neither credential works yet; hosts may still be booting"
+        sleep 15
+      done
+      rm -f "\$RUNTIME/inventory_probe"
+      if [ -z "\$CRED_OK" ]; then
+        echo "ERROR: no initial WinRM credential worked within \${CRED_PROBE_TIMEOUT:-600}s." >&2
+        echo "       Tried \${INITIAL_USER} with the bake-time password and with the" >&2
+        echo "       bootstrap password. Either the hosts never finished booting, or the" >&2
+        echo "       account was changed by something other than this script." >&2
+        echo "       Check on a Windows host:" >&2
+        echo "         Get-LocalUser \${INITIAL_USER} | fl Name,Enabled,PasswordLastSet" >&2
+        echo "         (Get-ItemProperty 'HKLM:\SYSTEM\Setup\Status\SysprepStatus').GeneralizationState" >&2
+        echo "       Exit 1 = no forest." >&2
+        exit 1
+      fi
+      echo "==> Initial credential accepted: \${INITIAL_USER} / \$CRED_WHICH"
+
+      # Rewrite the initial inventory with the credential that actually works.
+      # Regenerated in full rather than patched, so there is one shape of this
+      # file and not a patched variant that drifts from the original.
+      printf '%s
+'         '[all:vars]'         "ansible_user=\${INITIAL_USER}"         "ansible_password=\${CRED_OK}"         'ansible_connection=winrm'         'ansible_port=5985'         'ansible_winrm_scheme=http'         'ansible_winrm_transport=ntlm'         'ansible_winrm_server_cert_validation=ignore'         'ansible_winrm_operation_timeout_sec=400'         'ansible_winrm_read_timeout_sec=500'         ''         '[localhost]'         'localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3'         > "\$RUNTIME/inventory_overrides_initial"
+
       echo ""
       echo ">>>>>>>>>>>>>>>>>>>>>> preflight-network.yml <<<<<<<<<<<<<<<<<<<<<<"
-      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-network.yml" --extra-vars "@\$RUNTIME/extra_vars.yml"
+      # EXIT 1 EXPLICITLY, not whatever ansible returned. ansible-playbook
+      # exits 2 for "one or more hosts failed" and 3 for "unreachable" --
+      # and under set -e those codes became run.sh's OWN exit code, which
+      # COLLIDES with the exit 2 this script uses to mean "forest built, an
+      # extension failed". A lane that died here, before a single AD play
+      # ran, reported exit 2 and the orchestrator read it as a good forest
+      # with a bad SIEM. Observed on a real deploy. 1 = no forest, always.
+      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-network.yml" --extra-vars "@\$RUNTIME/extra_vars.yml" || {
+        echo "ERROR: preflight-network.yml failed -- the lab chain never started." >&2
+        echo "       Exit 1 = no forest. (Exit 2 means the forest built and an extension did not.)" >&2
+        exit 1
+      }
 
       # Preflight #1: create the 'vagrant' scaffolding user on every Windows
       # host. This connects via the bake-time Administrator account (the only
@@ -1523,7 +1683,11 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       PFV
       echo ""
       echo ">>>>>>>>>>>>>>>>>>>>>> preflight-vagrant.yml <<<<<<<<<<<<<<<<<<<<<<"
-      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-vagrant.yml" --extra-vars "@\$RUNTIME/extra_vars.yml"
+      ansible-playbook \$INV_FLAGS_INITIAL "\$RUNTIME/preflight-vagrant.yml" --extra-vars "@\$RUNTIME/extra_vars.yml" || {
+        echo "ERROR: preflight-vagrant.yml failed -- the scaffolding user was not created," >&2
+        echo "       so every play after this one would fail to authenticate. Exit 1 = no forest." >&2
+        exit 1
+      }
 
       # Preflight #2: ensure DNS Server feature is installed on every DC.
       # Upstream's child_domain role assumes Get-DnsServerForwarder is available
@@ -1553,7 +1717,10 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       for pb in \$PLAYBOOKS; do
         echo ""
         echo ">>>>>>>>>>>>>>>>>>>>>> \$pb <<<<<<<<<<<<<<<<<<<<<<"
-        ansible-playbook \$INV_FLAGS "\$pb" --extra-vars "@\$RUNTIME/extra_vars.yml"
+        ansible-playbook \$INV_FLAGS "\$pb" --extra-vars "@\$RUNTIME/extra_vars.yml" || {
+          echo "ERROR: lab chain failed at \$pb. Exit 1 = no forest." >&2
+          exit 1
+        }
       done
 
       echo "================================================================="
