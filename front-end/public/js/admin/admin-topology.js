@@ -734,7 +734,13 @@ function goadCardReadFields(card) {
     // child for them is exactly the hardcoded default that put a domain nobody
     // chose into every spec.
     child_subdomain: goadCardEl(card, 'Child').value.trim() || null,
-    admin_user: 'Administrator',
+    // 'vagrant', not 'Administrator': the built-in Administrator does NOT stay enabled through
+    // sysprep /generalize /oobe, and the Windows template bakes vagrant/vagrant in
+    // Administrators precisely so there is an account that survives. goad-deploy.js has always
+    // defaulted initialUser to 'vagrant' for this reason -- but this line wrote 'Administrator'
+    // into every spec, so that default never applied and every lane authored here handed run.sh
+    // an account that cannot log in.
+    admin_user: 'vagrant',
     admin_password: goadCardEl(card, 'Password').value || 'vagrant',
     include_kali: goadCardEl(card, 'Kali').checked
   };

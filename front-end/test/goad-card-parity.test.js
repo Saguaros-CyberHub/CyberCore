@@ -520,6 +520,42 @@ test('a single-domain lab stores NO child, rather than inventing tumamoc', () =>
     + 'would not let anyone correct it');
 });
 
+// WHY admin_user IS 'vagrant' AND MUST STAY THAT WAY.
+//
+// It was 'Administrator' in four places -- lab-templates.js's create default,
+// admin-challenges.js, admin-topology.js and topology-seed.js -- and that is the
+// built-in account, which sysprep /generalize /oobe DISABLES. The Windows
+// template bakes vagrant/vagrant into Administrators precisely so that one
+// account survives generalization, and goad-deploy.js has always defaulted
+// initialUser to 'vagrant' with a comment saying so. Every UI wrote
+// 'Administrator' over the top of that default, so the default never once
+// applied and run.sh was handed an account that cannot log in. A real lane died
+// on it: "ntlm: the specified credentials were rejected by the server", after
+// 300s of wait_for_connection, on a host whose sysprep GeneralizationState was 7
+// and whose vagrant account was present and Enabled.
+test('admin_user is the account that survives sysprep, not the built-in one', () => {
+  // Source-text, across every writer, because the value has to be right in all
+  // four or the one that is wrong is the one that authors the next spec.
+  const WRITERS = {
+    'admin-topology.js':  TOPO_SRC,
+    'admin-challenges.js': CHAL_SRC,
+    'topology-seed.js':   fs.readFileSync(path.join(PUBLIC, 'js', 'topology', 'topology-seed.js'), 'utf8'),
+    'lab-templates.js':   fs.readFileSync(path.join(ROOT, 'src', 'routes', 'lab-templates.js'), 'utf8'),
+  };
+  for (const [name, src] of Object.entries(WRITERS)) {
+    const assigns = [...src.matchAll(/admin_user:\s*(?:[\w.]+\s*\|\|\s*)?'([^']+)'/g)].map(m => m[1]);
+    assert.ok(assigns.length, `${name}: no admin_user assignment found — did it move?`);
+    for (const who of assigns) {
+      assert.strictEqual(who, 'vagrant',
+        `${name} writes admin_user: '${who}'. 'Administrator' is DISABLED by sysprep `
+        + '/generalize /oobe; the Windows template bakes vagrant/vagrant into Administrators '
+        + 'so that one account survives. Change this back and every GOAD lane dies in preflight '
+        + "with 'the specified credentials were rejected by the server', on an account that "
+        + 'exists and reads as fine.');
+    }
+  }
+});
+
 test('THE ROUND TRIP: what an existing spec stores is what the card shows and saves back', async () => {
   const h = loadEditor();
   const stored = {
@@ -527,7 +563,7 @@ test('THE ROUND TRIP: what an existing spec stores is what the card shows and sa
     version: 'GOAD-Mini',
     domain: 'north.example.org',
     child_subdomain: null,
-    admin_user: 'Administrator',
+    admin_user: 'vagrant',
     admin_password: 'vagrant',
     include_kali: false,
     extensions: ['elk', 'ws01'],
@@ -655,7 +691,7 @@ function mergeSpec({ currentSpec, spec, vm_specs, phantom_assets }) {
 test('PUT /lab-templates/:id keeps the new goad keys — it merges the spec, it does not whitelist it', () => {
   const goad = {
     enabled: true, version: 'GOAD-Light', domain: 'cybersaguaros.local',
-    child_subdomain: 'tumamoc', admin_user: 'Administrator', admin_password: 'vagrant',
+    child_subdomain: 'tumamoc', admin_user: 'vagrant', admin_password: 'vagrant',
     include_kali: true, extensions: ['elk'], prebaked: true,
     fixed_subnet: { int: '10.167.161', ext: '10.39.161' },
   };

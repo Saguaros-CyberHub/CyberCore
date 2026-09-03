@@ -1596,47 +1596,99 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # trying both while the hosts finish booting -- a host that is not up yet
       # rejects BOTH, which is indistinguishable from a wrong password except
       # by waiting.
+      # CANDIDATE ACCOUNTS, not just passwords. The first cut of this probe tried
+      # three passwords against ONE user and missed the actual cause: the spec
+      # names 'Administrator', and the built-in Administrator does NOT stay enabled
+      # through sysprep /generalize /oobe. That is precisely why goad-deploy.js
+      # defaults initialUser to 'vagrant' -- but three separate UIs hardcode
+      # admin_user: 'Administrator' into every spec they write, so that default has
+      # never once applied and the probe was handed an account that cannot log in.
+      #
+      # Order is deliberate: what the spec asked for FIRST, so a deliberate override
+      # that IS correct still wins; then the account the Windows template actually
+      # bakes and keeps enabled; then that same account after preflight-vagrant has
+      # rotated its password, which is the retry-on-a-used-lane case.
+      #
+      # Pairs are passed as two arguments rather than a delimited string: a password
+      # containing the delimiter would split in the wrong place, and that is the kind
+      # of bug that only ever shows up on the one password that has it.
       BOOTSTRAP_PASSWORD="BootstrapPwd!1"
-      probe_pw() {
-        # printf, never sed: a password may contain |, & or a backslash, all of
-        # which are live in a sed replacement and none of which are live here.
-        printf '%s
-'           '[all:vars]'           "ansible_user=\${INITIAL_USER}"           "ansible_password=\$1"           'ansible_connection=winrm'           'ansible_port=5985'           'ansible_winrm_scheme=http'           'ansible_winrm_transport=ntlm'           'ansible_winrm_server_cert_validation=ignore'           'ansible_winrm_operation_timeout_sec=60'           'ansible_winrm_read_timeout_sec=70'           ''           '[localhost]'           'localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3'           > "\$RUNTIME/inventory_probe"
-        ansible -i "\$LAB_DATA/inventory" -i "\$RUNTIME/inventory_proxmox"                 -i "\$RUNTIME/inventory_probe" domain -m win_ping >/dev/null 2>&1
+      probe_pw() {   # \$1 = user, \$2 = password
+        # Heredoc body and terminator at the BASE indent: cloud-init dedents this
+        # block scalar by 6, so 6 becomes column 0 -- where a heredoc terminator
+        # must be. At 8 it lands at column 2 and PROBE never terminates.
+        cat > "\${RUNTIME}/inventory_probe" <<PROBE
+      [all:vars]
+      ansible_user=\$1
+      ansible_password=\$2
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=60
+      ansible_winrm_read_timeout_sec=70
+
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      PROBE
+        ansible -i "\${LAB_DATA}/inventory" -i "\${RUNTIME}/inventory_proxmox" -i "\${RUNTIME}/inventory_probe" domain -m win_ping >/dev/null 2>&1
       }
-      echo "==> Probing which initial WinRM credential the lane actually accepts..."
+      CRED_USER=""; CRED_PW=""; CRED_WHICH=""
+      try_all_creds() {
+        if probe_pw "\${INITIAL_USER}" "\${INITIAL_PASSWORD}"; then
+          CRED_USER="\${INITIAL_USER}"; CRED_PW="\${INITIAL_PASSWORD}"
+          CRED_WHICH="the account this spec asked for"; return 0
+        fi
+        if probe_pw vagrant vagrant; then
+          CRED_USER=vagrant; CRED_PW=vagrant
+          CRED_WHICH="the template baked local admin (spec named \${INITIAL_USER}, which sysprep disables)"; return 0
+        fi
+        if probe_pw vagrant "\${BOOTSTRAP_PASSWORD}"; then
+          CRED_USER=vagrant; CRED_PW="\${BOOTSTRAP_PASSWORD}"
+          CRED_WHICH="vagrant, rotated by a previous run on this lane"; return 0
+        fi
+        return 1
+      }
+      echo "==> Probing which initial WinRM account the lane actually accepts..."
       CRED_DEADLINE=\$(( \$(date +%s) + \${CRED_PROBE_TIMEOUT:-600} ))
-      CRED_OK=""
-      CRED_WHICH=""
-      while [ "\$(date +%s)" -lt "\$CRED_DEADLINE" ]; do
-        if probe_pw "\$INITIAL_PASSWORD"; then
-          CRED_OK="\$INITIAL_PASSWORD"; CRED_WHICH="bake-time (fresh clone)"; break
-        fi
-        if probe_pw "\$BOOTSTRAP_PASSWORD"; then
-          CRED_OK="\$BOOTSTRAP_PASSWORD"; CRED_WHICH="bootstrap (this lane was provisioned before)"; break
-        fi
-        echo "    ... neither credential works yet; hosts may still be booting"
+      while [ "\$(date +%s)" -lt "\${CRED_DEADLINE}" ]; do
+        if try_all_creds; then break; fi
+        echo "    ... no account works yet; hosts may still be booting"
         sleep 15
       done
-      rm -f "\$RUNTIME/inventory_probe"
-      if [ -z "\$CRED_OK" ]; then
-        echo "ERROR: no initial WinRM credential worked within \${CRED_PROBE_TIMEOUT:-600}s." >&2
-        echo "       Tried \${INITIAL_USER} with the bake-time password and with the" >&2
-        echo "       bootstrap password. Either the hosts never finished booting, or the" >&2
-        echo "       account was changed by something other than this script." >&2
-        echo "       Check on a Windows host:" >&2
-        echo "         Get-LocalUser \${INITIAL_USER} | fl Name,Enabled,PasswordLastSet" >&2
-        echo "         (Get-ItemProperty 'HKLM:\SYSTEM\Setup\Status\SysprepStatus').GeneralizationState" >&2
+      rm -f "\${RUNTIME}/inventory_probe"
+      if [ -z "\${CRED_USER}" ]; then
+        echo "ERROR: no initial WinRM account worked within \${CRED_PROBE_TIMEOUT:-600}s." >&2
+        echo "       Tried, in order:" >&2
+        echo "         \${INITIAL_USER} / the bake-time password from the spec" >&2
+        echo "         vagrant / vagrant           (what the Windows template bakes)" >&2
+        echo "         vagrant / the bootstrap password (set by a previous run)" >&2
+        echo "       On a Windows host, check BOTH accounts -- the built-in" >&2
+        echo "       Administrator is commonly DISABLED by sysprep /generalize /oobe:" >&2
+        echo "         Get-LocalUser | fl Name,Enabled,PasswordLastSet" >&2
+        echo "         (Get-ItemProperty 'HKLM:SYSTEM/Setup/Status/SysprepStatus').GeneralizationState" >&2
         echo "       Exit 1 = no forest." >&2
         exit 1
       fi
-      echo "==> Initial credential accepted: \${INITIAL_USER} / \$CRED_WHICH"
+      echo "==> Initial credential accepted: \${CRED_USER} -- \${CRED_WHICH}"
 
-      # Rewrite the initial inventory with the credential that actually works.
-      # Regenerated in full rather than patched, so there is one shape of this
-      # file and not a patched variant that drifts from the original.
-      printf '%s
-'         '[all:vars]'         "ansible_user=\${INITIAL_USER}"         "ansible_password=\${CRED_OK}"         'ansible_connection=winrm'         'ansible_port=5985'         'ansible_winrm_scheme=http'         'ansible_winrm_transport=ntlm'         'ansible_winrm_server_cert_validation=ignore'         'ansible_winrm_operation_timeout_sec=400'         'ansible_winrm_read_timeout_sec=500'         ''         '[localhost]'         'localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3'         > "\$RUNTIME/inventory_overrides_initial"
+      # Rewrite the initial inventory with the account that actually works.
+      cat > "\${RUNTIME}/inventory_overrides_initial" <<INITOK
+      [all:vars]
+      ansible_user=\${CRED_USER}
+      ansible_password=\${CRED_PW}
+      ansible_connection=winrm
+      ansible_port=5985
+      ansible_winrm_scheme=http
+      ansible_winrm_transport=ntlm
+      ansible_winrm_server_cert_validation=ignore
+      ansible_winrm_operation_timeout_sec=400
+      ansible_winrm_read_timeout_sec=500
+
+      [localhost]
+      localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
+      INITOK
 
       echo ""
       echo ">>>>>>>>>>>>>>>>>>>>>> preflight-network.yml <<<<<<<<<<<<<<<<<<<<<<"

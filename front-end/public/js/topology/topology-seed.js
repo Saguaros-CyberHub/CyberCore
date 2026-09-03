@@ -231,7 +231,14 @@
       // one domain. Inventing a child for them is how a domain nobody chose got
       // into every spec in the first place.
       child_subdomain: lab.childSubdomain || null,
-      admin_user: 'Administrator',
+      // 'vagrant', not 'Administrator'. The built-in Administrator does not stay
+      // enabled through sysprep /generalize /oobe; the Windows template bakes
+      // vagrant/vagrant into Administrators precisely so an account survives it.
+      // goad-deploy.js has always defaulted initialUser to 'vagrant' for that
+      // reason -- and every seed here wrote 'Administrator' over the top of it,
+      // so run.sh was handed an account that cannot log in and the lane died in
+      // preflight with 'the specified credentials were rejected by the server'.
+      admin_user: 'vagrant',
       admin_password: 'vagrant',
       include_kali: !!opts.includeKali
     };
