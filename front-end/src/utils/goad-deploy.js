@@ -78,17 +78,19 @@ const GOAD_BOOTSTRAP_ACCOUNT_PS = [
   "$ErrorActionPreference='Stop'",
   `$u='${GOAD_BOOTSTRAP_ACCOUNT_USER}'`,
   `$p=ConvertTo-SecureString '${GOAD_BOOTSTRAP_ACCOUNT_PASSWORD}' -AsPlainText -Force`,
-  // A promoted DC has no local SAM: Get-LocalUser throws rather than returning
+  // A promoted DC has no local SAM: Get-LocalUser THROWS rather than returning
   // null. Say so and exit 0 -- the domain account is what run.sh will use.
   "try { $null = Get-LocalUser -ErrorAction Stop } catch { 'no local SAM (domain controller) - skipped'; exit 0 }",
   "$e = Get-LocalUser -Name $u -ErrorAction SilentlyContinue",
-  "if ($e) { Set-LocalUser -Name $u -Password $p -PasswordNeverExpires $true; Enable-LocalUser -Name $u }",
-  "else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires | Out-Null }",
-  "if (-not (Get-LocalGroupMember -Group 'Administrators' -Member $u -ErrorAction SilentlyContinue)) {",
-  "  Add-LocalGroupMember -Group 'Administrators' -Member $u",
-  "}",
+  // if/else MUST stay on ONE line and these lines MUST be joined with newlines,
+  // never with '; '. A semicolon between the closing brace and `else` TERMINATES
+  // the if-statement, so PowerShell then reads `else` as a command name:
+  //   else : The term 'else' is not recognized as the name of a cmdlet...
+  // Cost a real deploy. Both hosts reported it, both seeds no-opped.
+  "if ($e) { Set-LocalUser -Name $u -Password $p -PasswordNeverExpires $true; Enable-LocalUser -Name $u } else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires | Out-Null }",
+  "if (-not (Get-LocalGroupMember -Group 'Administrators' -Member $u -ErrorAction SilentlyContinue)) { Add-LocalGroupMember -Group 'Administrators' -Member $u }",
   "if ($e) { 'reset existing ' + $u } else { 'created ' + $u }",
-].join('; ');
+].join(String.fromCharCode(10));
 
 // Template VMID for the GOAD ansible controller (Debian 13 VM with
 // qemu-guest-agent, baked from infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh —
