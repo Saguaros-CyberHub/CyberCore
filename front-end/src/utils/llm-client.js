@@ -511,9 +511,6 @@ function repairAndParseJson(rawText) {
   // failure mode — they emit "foo\nbar" as a literal newline instead of \n).
   repaired = escapeRawControlCharsInsideStrings(repaired);
 
-  // Insert commas the model forgot between adjacent values.
-  repaired = insertMissingCommas(repaired);
-
   // Balance brackets — if the JSON was truncated, close all open structures.
   repaired = closeUnbalancedStructures(repaired);
 
@@ -545,74 +542,26 @@ function escapeRawControlCharsInsideStrings(s) {
   return out;
 }
 
-/**
- * Insert a comma where two JSON values sit adjacent with only whitespace between.
- *
- * Observed in production on a profile-generation run: the model emitted
- *
- *     "PCI scope and card-processing workflow"
- *     "History of attempted wire fraud incidents"]}]}
- *
- * — a complete, non-truncated document with one comma missing between two array
- * elements. Every other repair in this file targets a different failure (fences,
- * trailing commas, raw control characters, truncation), so this one document
- * failed the whole 82-second generation and returned a 500.
- *
- * The rule is deliberately narrow: outside a string, a comma is required exactly
- * when a value-ENDING token is followed by a value-STARTING token. That cannot
- * match after '{', ':' or ',' (none are value-enders), so object keys, key-value
- * separators and correctly-punctuated lists are all left alone.
- */
-function insertMissingCommas(s) {
-  // A value can end with: a closing quote, ] , } , or the last char of a number
-  // or of true/false/null.
-  const ENDS_VALUE = (ch) => ch === '"' || ch === ']' || ch === '}'
-    || /[0-9eE]/.test(ch) || /[elsu]/.test(ch);   // true / false / null tails
-  // A value can start with: an opening quote, [ , { , a sign/digit, or t/f/n.
-  const STARTS_VALUE = (ch) => ch === '"' || ch === '[' || ch === '{'
-    || ch === '-' || /[0-9]/.test(ch) || ch === 't' || ch === 'f' || ch === 'n';
-
-  let out = '';
-  let inString = false;
-  let escape = false;
-  let lastValueEnd = -1;        // index in `out` just past the last value-ender
-
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (inString) {
-      out += ch;
-      if (escape) { escape = false; continue; }
-      if (ch === '\\') { escape = true; continue; }
-      if (ch === '"') { inString = false; lastValueEnd = out.length; }
-      continue;
-    }
-    if (ch === '"') {
-      // Opening quote. If a value just ended with only whitespace since, the
-      // model dropped a comma between them.
-      if (lastValueEnd >= 0 && out.slice(lastValueEnd).trim() === '') {
-        out = out.slice(0, lastValueEnd) + ',' + out.slice(lastValueEnd);
-      }
-      out += ch;
-      inString = true;
-      lastValueEnd = -1;
-      continue;
-    }
-    if (/\s/.test(ch)) { out += ch; continue; }
-
-    if (lastValueEnd >= 0 && STARTS_VALUE(ch) && out.slice(lastValueEnd).trim() === '') {
-      out = out.slice(0, lastValueEnd) + ',' + out.slice(lastValueEnd);
-      lastValueEnd = -1;
-    }
-    out += ch;
-    // ':' and ',' and openers reset the tracker — nothing may follow them with a
-    // comma inserted. Closers and literal tails mark a value boundary.
-    if (ch === ']' || ch === '}') lastValueEnd = out.length;
-    else if (ch === ':' || ch === ',' || ch === '{' || ch === '[') lastValueEnd = -1;
-    else if (ENDS_VALUE(ch)) lastValueEnd = out.length;
-    else lastValueEnd = -1;
-  }
-  return out;
-}
+// NOTE — there is deliberately NO "insert a missing comma" repair here.
+//
+// One was added on 2026-09-04 to handle what looked like a model dropping a
+// comma between two array elements. It was the wrong diagnosis: the comma had
+// been DELETED by closeUnbalancedStructures below (see the lastNonSpace note in
+// it), and the model's output was fine. The speculative repair then shipped a
+// far worse bug of its own — it treated each digit as a complete value, so
+// every multi-digit number was rewritten mid-token:
+//
+//     {"employee_count": 45}   ->   {"employee_count": 4,5}
+//     {"a": 1234}              ->   {"a": 1,2,3,4}
+//
+// which broke every profile generation until it was removed. A repair that
+// corrupts valid input is worse than no repair: it converts a recoverable
+// document into an unrecoverable one AND reports the failure as the model's.
+//
+// If a genuine model-emitted missing comma is ever OBSERVED in a log, add the
+// strategy back — but tokenise properly (a number is one value, not one value
+// per digit) and test multi-digit numbers, decimals, exponents and negatives
+// before trusting it.
 
 function closeUnbalancedStructures(s) {
   const stack = [];
@@ -766,7 +715,6 @@ module.exports = {
   _setClientForTest,
   _internals: {
     escapeRawControlCharsInsideStrings,
-    insertMissingCommas,
     closeUnbalancedStructures
   }
 };
