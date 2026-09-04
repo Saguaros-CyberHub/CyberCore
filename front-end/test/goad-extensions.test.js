@@ -491,7 +491,24 @@ test('a tick claims a free vm_offset rather than colliding with a placed machine
     'two VMs on one offset clone to the same VMID and the second deploy fails');
 });
 
-test('ticking ws01 defaults the student console to it, but never steals an explicit one', () => {
+test('ticking ws01 never claims the student console — a roster machine cannot be one', () => {
+  // REGRESSION, from a lane that deployed with DC01, elk and ws01 all Running
+  // and nothing a student could reach. This toggle used to set
+  // console_role: 'primary' on ws01 whenever nothing else claimed it, on the
+  // reasoning that a domain-joined Windows analyst box is the natural
+  // blue-team console. It is — but the deploy path cannot build one:
+  //
+  //   - resolveConsolePlan tags it kind 'spec', and challenge-lane-deployer
+  //     resolves real credentials only for kind 'kali' and kind 'extra', so the
+  //     Guacamole connection is created with username and password null.
+  //   - in_lab machines carry no ipOctet (GOAD addresses them), so the console
+  //     allocator draws one from the .60-.79 band while cloneChallengeVm lets
+  //     the GOAD MAC win and the machine boots at its lab octet. The DNAT and
+  //     the connection point at an address nothing answers.
+  //
+  // And it outranked Kali silently: resolveConsolePlan tests
+  // `specPrimaries.length === 1` BEFORE it tests attackBoxes, so ticking ws01
+  // took the console away from a Kali box that would have worked.
   const { sandbox, checked } = loadDesigner();
   vm.runInContext(`
     topoVms.length = 0;
@@ -499,10 +516,12 @@ test('ticking ws01 defaults the student console to it, but never steals an expli
   `, sandbox);
   checked.add('ws01');
   vm.runInContext('onTopoExtensionToggle("ws01"); __role = topoVms[1].console_role;', sandbox);
-  assert.strictEqual(sandbox.__role, 'primary',
-    'a domain-joined Windows analyst box is the right blue-team console: no bake change, and because it '
-    + 'is in [domain] it is itself instrumented');
+  assert.strictEqual(sandbox.__role, undefined,
+    'ws01 is a TARGET that makes an intrusion cross hosts, instrumented for free by '
+    + '[elk_log:children] domain. The console belongs to Kali or an added workstation.');
 
+  // Unchanged and still load-bearing: an explicit choice elsewhere is never
+  // touched by a checkbox.
   const second = loadDesigner();
   vm.runInContext(`
     topoVms.length = 0;

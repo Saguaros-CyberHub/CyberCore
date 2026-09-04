@@ -857,16 +857,36 @@ function goadCardToggleExtension(card, key) {
     // push, not concat — the editor closes over this array.
     vms.push(buildGoadExtensionRow(ext, goadCardFreeOffset(vms)));
 
-    // ws01 is the right blue-team console and it costs nothing to say so: a
-    // domain-joined Windows 11 analyst box that browses to http://elk:5601,
-    // needs no bake change, and — because it is in [domain] — is itself
-    // instrumented, so the student's own activity becomes telemetry. Only
-    // claimed when NOTHING else is already primary; an author's explicit choice
-    // is never overwritten by a checkbox.
-    if (key === 'ws01' && !vms.some(v => v.console_role === 'primary')) {
-      vms[vms.length - 1].console_role = 'primary';
-      Toast.info('Student console', 'ws01 is now the machine students open. Change it in the property panel or the table.');
-    }
+    // ws01 DELIBERATELY DOES NOT CLAIM THE CONSOLE, and this used to.
+    //
+    // It reads like the right blue-team console — a domain-joined Windows 11
+    // analyst box that browses to http://elk:5601 and, being in [domain], is
+    // itself instrumented. But a ROSTER machine cannot currently BE a working
+    // console, for two independent reasons in the deploy path:
+    //
+    //   1. Credentials. resolveConsolePlan tags it kind 'spec', and
+    //      challenge-lane-deployer only ever resolves real credentials for
+    //      kind 'kali' and kind 'extra'. A spec console is handed
+    //      { username: null, password: null } — a Guacamole connection that
+    //      exists, looks deployed, and cannot be logged into.
+    //   2. Address. An in_lab machine carries no ipOctet on purpose (GOAD
+    //      addresses it), so the console allocator sees NaN and hands it one
+    //      from the .60-.79 console band — while cloneChallengeVm lets the GOAD
+    //      MAC win and the machine actually boots at its lab octet (.31). The
+    //      console DNAT and the Guac connection then both point at an address
+    //      nothing answers.
+    //
+    // Claiming primary here ALSO silently outranked Kali: resolveConsolePlan
+    // tests `specPrimaries.length === 1` BEFORE it tests attackBoxes, so a
+    // ticked ws01 took the console away from a Kali box that would have worked.
+    // The observed result was a lane whose every machine ran and which no
+    // student could reach.
+    //
+    // So ws01 is what upstream means by it — a TARGET that makes an intrusion
+    // cross hosts, instrumented for free by [elk_log:children] domain. Leave the
+    // console to Kali or an added workstation. An author may still set
+    // console_role by hand in the property panel; validateTopology reports
+    // goad-host-console when they do, rather than this file deciding for them.
   } else if (!on && idx !== -1) {
     // splice, not filter — replacing the array would orphan the editor's handle.
     if (vms[idx].console_role === 'primary') {

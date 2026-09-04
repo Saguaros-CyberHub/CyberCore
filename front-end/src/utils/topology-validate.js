@@ -414,6 +414,60 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
     }
   }
 
+  // ── student console ───────────────────────────────────────────────────────
+  // Both findings here come from ONE deployed lane that had every machine
+  // Running and nothing a student could reach.
+  //
+  // A GOAD ROSTER MACHINE CANNOT BE A WORKING CONSOLE, for two independent
+  // reasons in the deploy path:
+  //
+  //   1. resolveConsolePlan tags it kind 'spec', and challenge-lane-deployer
+  //      resolves real credentials only for kind 'kali' and kind 'extra'. A
+  //      spec console is handed { username: null, password: null } — a
+  //      Guacamole connection that exists, looks deployed, and cannot be
+  //      logged into.
+  //   2. The address disagrees with itself. An in_lab extension machine
+  //      carries no ipOctet on purpose (GOAD addresses it), so the console
+  //      allocator sees NaN and draws one from the .60-.79 console band, while
+  //      cloneChallengeVm lets the GOAD MAC win and the machine boots at its
+  //      lab octet. The console DNAT and the Guac connection then both point at
+  //      an address nothing answers.
+  //
+  // A roster machine that DOES pin its lab octet fails differently and loudly:
+  // the allocator throws 'already taken on this lane', because goadMacs claimed
+  // that octet first. Either way it is not a console.
+  const consoleVms = specVms.filter(vm =>
+    vm.console_role === 'primary' || vm.console_role === 'secondary');
+
+  for (const vm of consoleVms) {
+    if (!(goadHosts && vm.name && goadHosts.roster.has(vm.name.toLowerCase()))) continue;
+    const name = vm.name || '(unnamed)';
+    add('error', 'goad-host-console',
+      `'${name}' is a GOAD lab host, so it cannot be the student console. The deploy path resolves real `
+      + `credentials only for Kali and for added workstations, so a lab host gets a Guacamole connection `
+      + `with no username or password; and its console address is drawn from the .60-.79 band while GOAD `
+      + `boots it at its own lab octet, so the connection points at an address nothing answers. Leave it as `
+      + `a target — it is still instrumented — and make Kali or an added workstation the console.`, name);
+  }
+
+  // Nothing to open. Two deliberate limits on when this fires:
+  //
+  //   WARNING, not error — workstations added at deploy time
+  //   (extraWorkstations) are not part of the spec, so this function cannot see
+  //   a console the caller is about to supply.
+  //
+  //   GOAD LANES ONLY — on a GOAD lane Kali is the default console, so turning
+  //   it off and designating nothing is the actual mistake. A plain challenge
+  //   normally gets its console from an added workstation, so firing there
+  //   would flag almost every non-GOAD spec, and a finding that cries wolf on
+  //   ordinary input trains authors to ignore the whole panel.
+  if (spec?.goad?.enabled && specVms.length && !kaliPresent && !consoleVms.length) {
+    add('warning', 'no-student-console',
+      'No machine here is marked as a student console and Kali is off, so this lane deploys with every '
+      + 'machine running and no way in. Tick Include Kali, or set a machine\'s console role to Primary. '
+      + '(Workstations added at deploy time are not visible to this check.)');
+  }
+
   // ── whole-topology ────────────────────────────────────────────────────────
   if (subnetScheme === 'v3' && specVms.length) {
     const placement = specVms.map(vm => resolveVmSegments(vm, {

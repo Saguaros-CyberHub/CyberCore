@@ -645,3 +645,75 @@ test('the three new codes stay silent on a plain, sound topology', () => {
     assert.ok(!has(r, code), `${code} fired on a sound spec: ${codes(r)}`);
   }
 });
+
+// ── student console: the lane where everything ran and nothing was reachable ─
+
+const GOAD_MINI_WS01 = {
+  goad: { enabled: true, version: 'GOAD-Mini', extensions: ['elk', 'ws01'] },
+};
+
+test('goad-host-console: a GOAD roster machine cannot be the student console', () => {
+  // The authored shape that produced the incident: GOAD-Mini + elk + ws01, Kali
+  // off, ws01 marked primary. Every machine deployed Running; the Guacamole
+  // connection carried no credentials and pointed at a console-band address
+  // while GOAD booted ws01 at its lab octet.
+  const r = validateTopology({
+    spec: { ...GOAD_MINI_WS01, goad: { ...GOAD_MINI_WS01.goad, include_kali: false } },
+    subnetScheme: 'v2',
+    specVms: [
+      vm('DC01'),
+      ELK({ ipOctet: 24, vm_offset: 610000 }),
+      vm('ws01', { role: 'workstation', vm_offset: 620000, console_role: 'primary' }),
+    ],
+  });
+  const f = r.errors.find(x => x.code === 'goad-host-console');
+  assert.ok(f, codes(r));
+  assert.strictEqual(f.vm, 'ws01');
+  assert.match(f.message, /no username or password/);
+  assert.match(f.message, /Leave it as a target/);
+});
+
+test('goad-host-console: an EXTERNAL extension is exempt — it is an ordinary spec VM', () => {
+  // elk is placed by resolveSpecAddressing like any pinnable machine, so its
+  // explicit ipOctet is honoured and the address half of the bug cannot apply.
+  // It is a poor console for its own reason (headless Ubuntu), which is not
+  // this rule's business.
+  const r = validateTopology({
+    spec: GOAD_MINI_WS01, subnetScheme: 'v2',
+    specVms: [vm('DC01'), ELK({ ipOctet: 24, vm_offset: 610000, console_role: 'primary' })],
+  });
+  assert.ok(!has(r, 'goad-host-console'), codes(r));
+});
+
+test('no-student-console: Kali off and nothing designated is a warning', () => {
+  const r = validateTopology({
+    spec: { goad: { enabled: true, version: 'GOAD-Mini', include_kali: false } },
+    subnetScheme: 'v2',
+    specVms: [vm('DC01')],
+  });
+  const f = r.warnings.find(x => x.code === 'no-student-console');
+  assert.ok(f, codes(r));
+  assert.match(f.message, /no way in/);
+});
+
+test('no-student-console: silent when Kali is on, or when a machine is designated', () => {
+  // include_kali defaults TRUE, matching the deploy path — so an unedited GOAD
+  // spec already has a console and must not be flagged.
+  assert.ok(!has(validateTopology({
+    spec: { goad: { enabled: true, version: 'GOAD-Mini' } },
+    subnetScheme: 'v2', specVms: [vm('DC01')],
+  }), 'no-student-console'));
+
+  assert.ok(!has(validateTopology({
+    spec: { goad: { enabled: true, version: 'GOAD-Mini', include_kali: false } },
+    subnetScheme: 'v2',
+    specVms: [vm('DC01'), vm('analyst', { vm_offset: 610000, console_role: 'primary' })],
+  }), 'no-student-console'));
+});
+
+test('no-student-console: never fires on a non-GOAD challenge', () => {
+  // A plain lane gets its console from a deploy-time added workstation, which
+  // the spec cannot see. Firing here would flag nearly every non-GOAD spec.
+  const r = validateTopology({ subnetScheme: 'v2', specVms: [vm('web01')] });
+  assert.ok(!has(r, 'no-student-console'), codes(r));
+});
