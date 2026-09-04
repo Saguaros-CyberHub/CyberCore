@@ -142,6 +142,60 @@ test('a truncated nested document is closed', () => {
   assert.deepStrictEqual(repairAndParseJson('{"a":{"b":["one","two"').a.b, ['one', 'two']);
 });
 
+// ── Failure 3: truncation part-way through a construct ───────────────────
+
+test('truncation right after an object opens is salvaged, not closed into junk', () => {
+  // 2026-09-04 02:09, threat branch: "Expected \':\' after property name at
+  // position 10368". The response ended `... }, { "` — an object had opened and
+  // a property name had begun. Closing the brackets produced `{ ""}`: an object
+  // holding a property name with no value. Structurally balanced, still invalid.
+  //
+  // The fix rewinds to the last boundary that actually parses, so the
+  // incomplete element is dropped rather than half-built.
+  const out = repairAndParseJson('{"chain":[{"a":"one"},\n          { "');
+  assert.deepStrictEqual(out.chain, [{ a: 'one' }]);
+});
+
+test('an incomplete element is DROPPED, not emitted as an empty object', () => {
+  // Salvage prefers keeping as much as possible, but not to the point of
+  // inventing a member. `[{...}, {` must not become `[{...}, {}]` — a junk
+  // entry in a MITRE attack chain reads as a real step to every downstream
+  // validator, whereas a shorter list is honestly shorter.
+  const out = repairAndParseJson('{"chain":[{"step":1},{"step":2},\n   {"');
+  assert.deepStrictEqual(out.chain, [{ step: 1 }, { step: 2 }]);
+  for (const el of out.chain) {
+    assert.ok(Object.keys(el).length > 0, 'salvage emitted an empty element');
+  }
+});
+
+test('truncation after a colon is salvaged', () => {
+  assert.deepStrictEqual(repairAndParseJson('{"a":{"b":1,"c":'), { a: { b: 1 } });
+});
+
+test('truncation part-way through a key is salvaged', () => {
+  assert.deepStrictEqual(repairAndParseJson('{"a":1,"partialke'), { a: 1 });
+});
+
+test('truncation part-way through a number keeps the digits it got', () => {
+  // A bare number has no closing character, so the boundary has to come from
+  // the delimiter before it. Getting this wrong is what made the earlier
+  // digit-splitting bug possible, so it is pinned explicitly.
+  assert.deepStrictEqual(repairAndParseJson('{"a":1,"b":123'), { a: 1, b: 123 });
+});
+
+test('salvage never runs on input that already parses', () => {
+  // The ladder is a last resort inside the failure path. If it ever ran on
+  // healthy input it could silently shorten a complete document.
+  const full = { chain: [{ step: 1 }, { step: 2 }, { step: 3 }], n: 45 };
+  assert.deepStrictEqual(repairAndParseJson(JSON.stringify(full)), full);
+});
+
+test('salvageByRewind reports failure rather than inventing a value', () => {
+  // Returns null (not undefined, not {}) when nothing parses, so the caller can
+  // distinguish "salvaged the literal null" from "could not salvage".
+  assert.strictEqual(llm._internals.salvageByRewind('not json at all >>> ###'), null);
+});
+
 // ── The guard that keeps this file honest ───────────────────────────────────
 
 test('no repair strategy rewrites a number', () => {

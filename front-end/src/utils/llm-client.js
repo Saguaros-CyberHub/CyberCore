@@ -512,9 +512,21 @@ function repairAndParseJson(rawText) {
   repaired = escapeRawControlCharsInsideStrings(repaired);
 
   // Balance brackets — if the JSON was truncated, close all open structures.
-  repaired = closeUnbalancedStructures(repaired);
+  const beforeClose = repaired;
+  repaired = closeUnbalancedStructures(beforeClose);
 
   try { return JSON.parse(repaired); } catch (err) {
+    // Closing the brackets is only enough when truncation happened at a clean
+    // boundary. Cut mid-construct it produces something structurally balanced
+    // and still invalid — e.g. a document that ended `... }, { "` closes to
+    // `... }, { ""}`, an object holding a property name with no value:
+    //   Expected ':' after property name in JSON at position 10368
+    // Observed on a threat-branch run. So fall back to rewinding: drop the
+    // incomplete tail and re-close at the last boundary that actually parses.
+    // Losing the final element beats losing the entire generation.
+    const salvaged = salvageByRewind(beforeClose);
+    if (salvaged) return salvaged.value;
+
     const snippet = repaired.length > 400 ? repaired.slice(0, 200) + '\n…\n' + repaired.slice(-200) : repaired;
     throw new Error(`JSON parse failed after repair: ${err.message}\nRepaired snippet:\n${snippet}`);
   }
@@ -540,6 +552,65 @@ function escapeRawControlCharsInsideStrings(s) {
     }
   }
   return out;
+}
+
+/**
+ * Last resort for a truncated document: walk structural boundaries backwards,
+ * cutting the incomplete tail, until one of them closes into valid JSON.
+ *
+ * A boundary is a point where a value has just finished — the character after a
+ * closing brace, bracket, or string quote. Cutting at one that turns out to be a
+ * KEY's closing quote simply fails to parse and the walk continues, so no
+ * special-casing is needed to tell keys from values.
+ *
+ * Returns { value } on success and null if nothing parses, so a caller can tell
+ * a successful salvage of the literal value `null` from total failure.
+ */
+function salvageByRewind(s) {
+  const cuts = [];
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) { escape = false; continue; }
+    if (inString) {
+      if (ch === '\\') escape = true;
+      else if (ch === '"') { inString = false; cuts.push(i + 1); }
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '}' || ch === ']') { cuts.push(i + 1); continue; }
+    // A delimiter means whatever preceded it was a complete token — including a
+    // bare number or literal, which has no closing character of its own. Cutting
+    // BEFORE the delimiter is what rescues a document truncated after a colon
+    // (`{"b":1,"c":`) or part-way through a key (`{"a":1,"partialke`).
+    // Over-generating candidates is safe: each is validated by JSON.parse, so a
+    // bad cut costs one failed attempt and nothing else.
+    if (ch === ',' || /\s/.test(ch)) {
+      // ...but only when a value actually precedes it. Cutting just after an
+      // opener or a colon closes into an EMPTY container — salvaging
+      // `[{...}, {` as `[{...}, {}]` puts a junk element in the array, which is
+      // worse than dropping the incomplete one: downstream validators then see
+      // a malformed entry instead of a shorter list.
+      let j = i - 1;
+      while (j >= 0 && /\s/.test(s[j])) j--;
+      const prev = j >= 0 ? s[j] : '';
+      if (prev && prev !== '{' && prev !== '[' && prev !== ':' && prev !== ',') {
+        cuts.push(i);
+      }
+    }
+  }
+
+  // Latest boundary first — keep as much of the response as possible. Bounded so
+  // a pathological document cannot turn one failed parse into thousands.
+  const MAX_ATTEMPTS = 400;
+  let tried = 0;
+  for (let k = cuts.length - 1; k >= 0 && tried < MAX_ATTEMPTS; k--, tried++) {
+    try {
+      return { value: JSON.parse(closeUnbalancedStructures(s.slice(0, cuts[k]))) };
+    } catch (_) { /* this boundary does not close cleanly; try an earlier one */ }
+  }
+  return null;
 }
 
 // NOTE — there is deliberately NO "insert a missing comma" repair here.
@@ -624,7 +695,25 @@ function closeUnbalancedStructures(s) {
  */
 async function generateJson(opts) {
   const result = await generate(opts);
-  const value = repairAndParseJson(result.text);
+  let value;
+  try {
+    value = repairAndParseJson(result.text);
+  } catch (err) {
+    // Without this, a parse failure says only what the repaired text looked
+    // like — and every diagnosis becomes an inference from 200 characters.
+    // stop_reason settles the question a snippet cannot: 'max_tokens' means the
+    // ceiling truncated it, 'end_turn' means the model finished and the defect
+    // is in what it produced.
+    const raw = result.raw || {};
+    const usage = result.usage || {};
+    err.message += `\n  [context] model=${resolveModel(opts.model)}`
+      + ` stop_reason=${raw.stop_reason || 'unknown'}`
+      + ` max_tokens=${opts.max_tokens || DEFAULT_MAX_TOKENS}`
+      + ` output_tokens=${usage.output_tokens != null ? usage.output_tokens : '?'}`
+      + ` raw_chars=${(result.text || '').length}`
+      + `${opts.label ? ` label=${opts.label}` : ''}`;
+    throw err;
+  }
   if (opts.validate) opts.validate(value);
   return { value, raw: result.raw, usage: result.usage, latencyMs: result.latencyMs };
 }
@@ -715,6 +804,7 @@ module.exports = {
   _setClientForTest,
   _internals: {
     escapeRawControlCharsInsideStrings,
+    salvageByRewind,
     closeUnbalancedStructures
   }
 };
