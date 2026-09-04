@@ -149,7 +149,7 @@ services:
       # Anthropic API — all AI generation (profile gen, policy gen, examples,
       # chat, interview, vuln-app). See front-end/src/utils/llm-client.js.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
-      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-4-5}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-claude-sonnet-5}
       LLM_MAX_CONCURRENT: ${LLM_MAX_CONCURRENT:-6}
       # The bottom-right chat bubble only. Off by default; the key above still
       # drives profile / policy / interview / vuln-app generation either way.

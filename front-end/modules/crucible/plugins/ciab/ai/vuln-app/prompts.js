@@ -52,9 +52,13 @@ OUTPUT FORMAT — strict JSON only, no markdown fences:
 
 HARD CONSTRAINTS — every design MUST:
 1. Theme the entire app to the client company (industry, name, plausible internal-tool purpose). NOT generic DVWA.
-2. Have 4–7 pages total, with at least 2 public-facing and at least 1 admin-only.
-   (Fewer pages = faster generation + fits inside Tier-1 LLM rate limits. Make each
-   page do MORE rather than cramming everything into 10 thin pages.)
+2. Have 6–10 pages total, with at least 2 public-facing and at least 1 admin-only.
+   Make each page do MORE rather than padding the count with thin stubs.
+   (The old cap here was 4–7, justified by "fits inside Tier-1 LLM rate limits" —
+   an assumption about a model this pipeline no longer uses. It also contradicted
+   this module's own header, which promises 5–10 pages. Page count costs one
+   additional call each, run at CIAB_VULN_APP_FILE_CONCURRENCY at a time, so more
+   pages means a longer build, not a burstier one.)
 2a. ALWAYS include the language's manifest file as the FIRST entry in page_inventory:
     - Node.js → 'package.json' (purpose: 'npm dependencies + start script')
     - Python → 'requirements.txt' (purpose: 'pip dependencies pinned')
@@ -375,7 +379,12 @@ HARD CONSTRAINTS:
      </main>
    DO NOT add aside elements or sidebar divs to login pages — base.css hides
    them with display:none because they always end up as broken narrow columns.
-9. Length: aim for 60-250 lines per file. Pages should feel like real pages (headers, forms, error handling), not minimal demos.
+9. Length: aim for 150-600 lines per file. Pages should feel like real production
+   pages — headers, nav, forms, validation, error handling, empty states, and
+   enough seeded data to look lived-in — not minimal demos.
+   (This said 60-250, which is roughly 3-4K output tokens. That, not the API
+   ceiling, was what actually kept generated apps thin: the per-file cap is now
+   32K tokens and files were never getting close to the old one.)
 10. Security: no destructive code (no rm -rf, no fork bombs). No real backdoors beyond what the attack chain describes. No outbound public-internet calls.
 11. MODULE EXPORTS — every file the main app imports MUST export the thing
     the app expects to receive. The CIAB builder smoke-tests the image by

@@ -27,27 +27,76 @@ const { detectMissingRelativeImports } = require('../../utils/vuln-app-builder')
 
 // Override the global concurrency cap for the file-gen fan-out specifically.
 // Each file call emits up to ~4K output tokens; with the global cap at 6 and
-// Tier-1 Sonnet at 8K out/min, an 8-file fan-out blows through the budget in
-// the first ~15 seconds and the rest get 429'd. Default 2 keeps us within
-// Tier-1 limits; admins on higher tiers can bump this via env var.
+// How many file-generation calls run at once.
+//
+// The old justification here cited "Tier-1 Sonnet at 8K out/min". That number
+// described Sonnet 4.5 on a tier this code no longer necessarily runs under, and
+// Opus 5 draws from its OWN rate-limit bucket, separate from the Opus 4.x pool —
+// so a limit once observed elsewhere says nothing about this path. Nothing in
+// the repo records the org's actual tier, so treat 2 as a deliberately
+// conservative default, not a measured ceiling.
+//
+// Raising it is the throughput lever and it is safe to try: llm-client honours
+// the retry-after header on a 429 (rather than guessing with exponential
+// backoff), and any file that still fails is retried serially below. Raise it
+// via CIAB_VULN_APP_FILE_CONCURRENCY and watch the logs for 429s. Note it
+// multiplies with the per-file ceiling below — concurrency 4 at 32K tokens is
+// 128K of output in flight.
 const VULN_APP_FILE_CONCURRENCY = parseInt(process.env.CIAB_VULN_APP_FILE_CONCURRENCY, 10) || 2;
-// 4096 was truncating files mid-line. 8192 is Sonnet's default ceiling and
-// fits even the larger pages (auth + dashboard with inline CSS). Override
-// via env if you start hitting it again.
-const VULN_APP_FILE_MAX_TOKENS  = parseInt(process.env.CIAB_VULN_APP_FILE_MAX_TOKENS,  10) || 8192;
-// Retries are serial (no fan-out budget pressure), so give a flagged-truncated
-// page a bigger ceiling — re-running at the same 8192 cap just truncates again
-// and the page gets dropped. Sonnet 4.5 allows far more output than this.
-const VULN_APP_FILE_RETRY_MAX_TOKENS = parseInt(process.env.CIAB_VULN_APP_FILE_RETRY_MAX_TOKENS, 10) || 16384;
+//
+// PER-FLOW MODEL. CIAB splits its AI work across model tiers deliberately:
+// profile generation runs on the llm-client default (Sonnet 5), the vuln-app
+// build runs on Opus 5 because writing a coherent multi-file vulnerable app is
+// the hardest thing CIAB asks a model to do, and interview turns run on Haiku
+// 4.5 because they are short, high-volume and latency-sensitive.
+// An explicit llmModel from the admin UI still wins over this default.
+const VULN_APP_MODEL = process.env.CIAB_VULN_APP_MODEL || 'claude-opus-5';
+// Per-file RUNAWAY GUARD. Not a size setting — do not tune it for output quality.
+//
+// max_tokens is a hard cut the model cannot see. It does not shape the response;
+// it only truncates one mid-sentence. What actually decides how big a generated
+// file is is the prompt (prompts.js: "aim for 150-600 lines per file"), and this
+// number should sit far enough above that to be unreachable in normal operation.
+// It is currently ~3x the largest legitimate file, so it should never fire.
+//
+// It is also not free to raise, even though billing is on tokens actually
+// produced: the ONE case where this value is load-bearing is a degenerate
+// generation that loops until something stops it, and this is the only thing
+// that does — interpretResult() below detects truncation, but only after the
+// tokens are spent. At Opus 5 output rates ($25/1M) one runaway file costs
+// ~$0.80 here and ~$3.30 if this were set to the model's 128K maximum, times
+// every page in the fan-out, times the retries.
+//
+// So: high enough to never bind, low enough to bound the bad case. Raising it
+// buys no quality; the prompt does that.
+//
+// (llm-client streams anything above LLM_STREAM_ABOVE_TOKENS=16000, which is
+// what makes a ceiling this size viable at all — a non-streaming request this
+// long hits the HTTP timeout first.)
+const VULN_APP_FILE_MAX_TOKENS  = parseInt(process.env.CIAB_VULN_APP_FILE_MAX_TOKENS,  10) || 32768;
+// A truncated page is retried with more room, because re-running at the same cap
+// just truncates again and the page gets dropped. Note the tension with the
+// guard above: if a file hit 32K it is more likely looping than genuinely large,
+// and this hands it twice the rope. Two attempts, serial, then the page is
+// abandoned — that bound is what keeps the tension acceptable.
+const VULN_APP_FILE_RETRY_MAX_TOKENS = parseInt(process.env.CIAB_VULN_APP_FILE_RETRY_MAX_TOKENS, 10) || 65536;
+
+// Reasoning effort for vuln-app generation. This is the single most demanding
+// thing CIAB asks a model to do — a coherent multi-file web app with working,
+// deliberately exploitable flaws — and 'xhigh' is the recommended setting for
+// coding and agentic work on Opus 5. Dropped automatically by llm-client on any
+// model that does not accept it, so an admin override to Haiku still runs.
+const VULN_APP_EFFORT = process.env.CIAB_VULN_APP_EFFORT || 'xhigh';
 
 // ─── Stage 1: design the app ───────────────────────────────────────────────
 
 async function designConcept({ profile, webServer, deliveryMode, llmModel, difficulty = 'easy' }) {
   const { value, usage, latencyMs } = await llm.generateJson({
-    model: llmModel,
+    model: llmModel || VULN_APP_MODEL,
     system: llm.cachedSystem(CONCEPT_SYSTEM_PROMPT),
     messages: [{ role: 'user', content: buildConceptUserPrompt({ profile, webServer, deliveryMode, difficulty }) }],
-    max_tokens: 8192,
+    max_tokens: 16384,
+    effort: VULN_APP_EFFORT,
     temperature: 0.8,           // higher to encourage variety across companies
     label: `vuln-app:concept:${profile.id?.slice(0,8) || 'na'}:${difficulty}`
   });
@@ -145,12 +194,13 @@ async function generateAllFiles({ concept, llmModel, profileIdShort }) {
   if (pages.length === 0) return { files: [], totalUsage: {}, fileErrors: [] };
 
   const buildOpts = (pageSpec, attemptLabel = '', maxTokens = VULN_APP_FILE_MAX_TOKENS) => ({
-    model: llmModel,
+    model: llmModel || VULN_APP_MODEL,
     // Cache the file-gen system prompt across all N calls — big input savings
     // since each call also includes the same `concept` JSON in the user prompt.
     system: llm.cachedSystem(FILE_GEN_SYSTEM_PROMPT),
     messages: [{ role: 'user', content: buildFileUserPrompt({ concept, pageSpec }) }],
     max_tokens: maxTokens,
+    effort: VULN_APP_EFFORT,
     temperature: 0.6,
     label: `vuln-app:file:${pageSpec.path.replace(/[^a-z0-9]/gi, '_').slice(0, 20)}:${profileIdShort}${attemptLabel}`
   });
@@ -406,13 +456,14 @@ CMD ["node", "server.js"]
 
 async function generateInstall({ concept, deliveryMode, sourceTreeFileList, llmModel, profileIdShort }) {
   const { value, usage } = await llm.generateJson({
-    model: llmModel,
+    model: llmModel || VULN_APP_MODEL,
     system: llm.cachedSystem(INSTALL_SYSTEM_PROMPT),
     messages: [{
       role: 'user',
       content: buildInstallUserPrompt({ concept, deliveryMode, sourceTreeFileList })
     }],
-    max_tokens: 4096,
+    max_tokens: 8192,
+    effort: VULN_APP_EFFORT,
     temperature: 0.5,
     label: `vuln-app:install:${profileIdShort}`
   });
@@ -573,6 +624,7 @@ async function generateVulnApp({ profile, webServer, deliveryMode, llmModel, dif
 }
 
 module.exports = {
+  VULN_APP_MODEL,
   generateVulnApp,
   designConcept,
   generateAllFiles,

@@ -11,26 +11,34 @@
  *
  * Frontend mirrors these constants in a tiny inline object (no shared bundler
  * yet). If you change values here, update generator.html and
- * admin-profile-lanes.js to match.
+ * instructor-documents.js to match — ciab-model-pricing.test.js fails if the
+ * three copies disagree, which is the only thing keeping them honest.
  */
 
 // ─── Pricing tables (USD per 1M tokens) ────────────────────────────────────
 const MODEL_PRICING = {
-  // Anthropic — published rates
-  'claude-opus-4-7':           { input: 15.00, output: 75.00, label: 'Claude Opus 4.7',           provider: 'anthropic' },
-  'claude-sonnet-4-6':         { input:  3.00, output: 15.00, label: 'Claude Sonnet 4.6',         provider: 'anthropic' },
-  'claude-sonnet-4-5':         { input:  3.00, output: 15.00, label: 'Claude Sonnet 4.5',         provider: 'anthropic' },
-  'claude-haiku-4-5':          { input:  0.80, output:  4.00, label: 'Claude Haiku 4.5',          provider: 'anthropic' },
-  // Google — published rates
-  'gemini-2.5-flash':          { input:  0.15, output:  0.60, label: 'Gemini 2.5 Flash',          provider: 'google' },
-  'gemini-2.5-pro':            { input:  1.25, output: 10.00, label: 'Gemini 2.5 Pro',            provider: 'google' },
-  // Local / Ollama — no marginal cost
-  'qwen3:14b':                 { input: 0, output: 0, label: 'Qwen 3.0 14B',         provider: 'ollama' },
-  'qwen2.5:7b-instruct':       { input: 0, output: 0, label: 'Qwen 2.5 7B',          provider: 'ollama' },
-  'llama3.2':                  { input: 0, output: 0, label: 'Llama 3.2',            provider: 'ollama' }
+  // Anthropic — published rates.
+  // claude-opus-4-7 was carried here at $15.00/$75.00, which overstated the
+  // real rate by 3x and made every Opus cost preview wrong in the expensive
+  // direction. Opus-tier is $5.00/$25.00.
+  'claude-opus-5':             { input:  5.00, output: 25.00, label: 'Claude Opus 5',            provider: 'anthropic' },
+  'claude-opus-4-8':           { input:  5.00, output: 25.00, label: 'Claude Opus 4.8',          provider: 'anthropic' },
+  'claude-opus-4-7':           { input:  5.00, output: 25.00, label: 'Claude Opus 4.7',          provider: 'anthropic' },
+  'claude-sonnet-5':           { input:  2.00, output: 10.00, label: 'Claude Sonnet 5',          provider: 'anthropic' },
+  'claude-sonnet-4-6':         { input:  3.00, output: 15.00, label: 'Claude Sonnet 4.6',        provider: 'anthropic' },
+  'claude-haiku-4-5':          { input:  1.00, output:  5.00, label: 'Claude Haiku 4.5',         provider: 'anthropic' }
 };
 
-const DEFAULT_MODEL = 'claude-sonnet-4-5';
+// Anthropic only, on purpose. Google and Ollama entries used to sit here and in
+// four picker UIs, but no such provider was ever wired up: llm-client.js talks
+// to @anthropic-ai/sdk and nothing else, so choosing one of them sent e.g.
+// 'gemini-2.5-flash' to the Anthropic API as a model id and 404'd. They were
+// priced, selectable, and non-functional. Re-adding a provider means adding a
+// client, not a row here.
+
+// Must track llm-client.js DEFAULT_MODEL, or the preview prices a different
+// model than the one the run actually uses.
+const DEFAULT_MODEL = 'claude-sonnet-5';
 
 // ─── Measured token usage (rounded UP from real runs) ──────────────────────
 // Source: Anthropic console req IDs req_011CbLJ* (profile-only) and

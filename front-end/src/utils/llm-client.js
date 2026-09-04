@@ -6,7 +6,7 @@
  *     reusable context blocks — Anthropic caches for 5 min; ~90% input cost
  *     drop on cache hits.
  *   - model selector honoring the existing UI's `llmModel` field; defaults to
- *     claude-sonnet-4-5.
+ *     claude-sonnet-5.
  *   - concurrency limiter so 4-stage parallel profile gen doesn't exceed
  *     Anthropic's per-minute rate cap.
  *   - JSON repair (truncated strings, unbalanced braces, raw newlines inside
@@ -23,8 +23,24 @@ const Anthropic = require('@anthropic-ai/sdk');
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
-const DEFAULT_MODEL = process.env.LLM_DEFAULT_MODEL || 'claude-sonnet-4-5';
-const DEFAULT_MAX_TOKENS = parseInt(process.env.LLM_DEFAULT_MAX_TOKENS, 10) || 4096;
+const DEFAULT_MODEL = process.env.LLM_DEFAULT_MODEL || 'claude-sonnet-5';
+const DEFAULT_MAX_TOKENS = parseInt(process.env.LLM_DEFAULT_MAX_TOKENS, 10) || 8192;
+
+// Above this many max_tokens, send the request as a STREAM.
+//
+// Current models allow up to 128K output tokens (64K on Haiku 4.5), but a
+// non-streaming request has to produce the whole response inside one HTTP
+// response, and a long generation hits the SDK's request timeout before the
+// model finishes. Anthropic's guidance is ~16000 for non-streaming and ~64000
+// for streaming. Streaming does not change the result — finalMessage() returns
+// the same assembled Message object, with the same usage and stop_reason — it
+// just keeps the connection fed while the model works.
+//
+// A threshold rather than "always stream" deliberately: every small call in
+// CIAB (interview turns at 256 tokens, chat at 768) keeps the exact request
+// path it has today, so this change can only affect calls that were already
+// near the wall.
+const STREAM_ABOVE_TOKENS = parseInt(process.env.LLM_STREAM_ABOVE_TOKENS, 10) || 16000;
 const DEFAULT_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS, 10) || 10 * 60 * 1000; // 10 min — long prompts can run
 const DEFAULT_CONCURRENCY = parseInt(process.env.LLM_MAX_CONCURRENT, 10) || 6;
 const DEFAULT_MAX_RETRIES = parseInt(process.env.LLM_MAX_RETRIES, 10) || 3;
@@ -42,22 +58,87 @@ const DEFAULT_QUEUE_WAIT_MS = parseInt(process.env.LLM_QUEUE_WAIT_MS, 10) || DEF
 // joining the queue only delays a failure the caller could be told about now.
 const DEFAULT_MAX_QUEUE = parseInt(process.env.LLM_MAX_QUEUE, 10) || 128;
 
-// Map UI-friendly aliases to actual model IDs. Easy to add more later.
+// Map UI-friendly aliases to actual model IDs.
+//
+// The unqualified names ('claude-opus') deliberately track the CURRENT model of
+// that tier, so a caller that asked for "opus" keeps getting opus as the family
+// moves on. The versioned ids map to themselves.
 const MODEL_ALIASES = {
-  'claude-sonnet':      'claude-sonnet-4-5',
-  'claude-sonnet-4':    'claude-sonnet-4-5',
-  'claude-sonnet-4-5':  'claude-sonnet-4-5',
+  'claude-sonnet':      'claude-sonnet-5',
+  'claude-sonnet-5':    'claude-sonnet-5',
   'claude-sonnet-4-6':  'claude-sonnet-4-6',
-  'claude-opus':        'claude-opus-4-1',
-  'claude-opus-4':      'claude-opus-4-1',
-  'claude-opus-4-1':    'claude-opus-4-1',
+  'claude-opus':        'claude-opus-5',
+  'claude-opus-5':      'claude-opus-5',
+  'claude-opus-4-8':    'claude-opus-4-8',
+  'claude-opus-4-7':    'claude-opus-4-7',
+  'claude-opus-4-6':    'claude-opus-4-6',
   'claude-haiku':       'claude-haiku-4-5',
-  'claude-haiku-4-5':   'claude-haiku-4-5'
+  'claude-haiku-4-5':   'claude-haiku-4-5',
+  'claude-fable-5':     'claude-fable-5'
 };
+
+// Superseded ids that are still sitting in stored rows and saved UI selections
+// (ciab_profile_lane_groups, generator form state, anything that persisted a
+// model name). Resolved forward to the current model of the same tier rather
+// than passed through, so an old row cannot quietly pin a run to a model that
+// has moved on — and logged, because silently running a different model than
+// the one a record names is its own kind of wrong.
+const LEGACY_MODEL_ALIASES = {
+  'claude-sonnet-4':    'claude-sonnet-5',
+  'claude-sonnet-4-5':  'claude-sonnet-5',
+  'claude-opus-4':      'claude-opus-5',
+  'claude-opus-4-1':    'claude-opus-5'
+};
+
+// Sampling parameters were REMOVED from these models: sending temperature,
+// top_p or top_k returns HTTP 400, it does not degrade gracefully. Every CIAB
+// AI flow passes a temperature (profile generation leans on 0.9 for variety),
+// so without this set, moving onto any current model would 400 every call.
+//
+// Kept as an explicit deny-list rather than an allow-list: an unknown model id
+// — in practice a model released after this list was written — keeps whatever
+// the caller passed, which is the safe direction for a parameter that is valid
+// on most models. Add to this set when a model drops sampling support.
+const MODELS_WITHOUT_SAMPLING_PARAMS = new Set([
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-5'
+]);
 
 function resolveModel(model) {
   if (!model) return DEFAULT_MODEL;
+  const forwarded = LEGACY_MODEL_ALIASES[model];
+  if (forwarded) {
+    console.warn(`[LLM] '${model}' is superseded — running '${forwarded}' instead`);
+    return forwarded;
+  }
   return MODEL_ALIASES[model] || model;
+}
+
+/** Whether this model still accepts temperature / top_p / top_k. */
+function acceptsSamplingParams(model) {
+  return !MODELS_WITHOUT_SAMPLING_PARAMS.has(model);
+}
+
+// Effort is the inverse case to sampling: an ALLOW-list, because it is the newer
+// models that support it and an older one errors on it. Opus 5 supports the full
+// ladder (low|medium|high|xhigh|max); Sonnet 5 and Opus 4.7/4.8 support the same
+// five; Haiku 4.5 and anything older do not take the parameter at all.
+const MODELS_WITH_EFFORT = new Set([
+  'claude-fable-5',
+  'claude-mythos-5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-opus-4-7',
+  'claude-sonnet-5'
+]);
+
+/** Whether this model accepts output_config.effort. */
+function acceptsEffort(model) {
+  return MODELS_WITH_EFFORT.has(model);
 }
 
 // ─── Client (lazy singleton — created on first call) ──────────────────────
@@ -77,8 +158,17 @@ function getClient() {
   return _client;
 }
 
+// One warning per model per process, not per call: a profile build alone makes
+// four calls and this would otherwise bury the log it is meant to stand out in.
+const _warnedSamplingDrop = new Set();
+const _warnedEffortDrop = new Set();
+
 // For tests: lets a test swap in a mock client.
-function _setClientForTest(client) { _client = client; }
+function _setClientForTest(client) {
+  _client = client;
+  _warnedSamplingDrop.clear();
+  _warnedEffortDrop.clear();
+}
 
 // Can this deployment talk to an LLM at all? getClient() throws without a key,
 // so callers that would rather degrade than fail (the global chat widget hides
@@ -236,18 +326,47 @@ function logUsage(meta, usage, latencyMs) {
   if (usage.cache_creation_input_tokens) parts.push(`cache_create=${usage.cache_creation_input_tokens}`);
   if (usage.cache_read_input_tokens)     parts.push(`cache_read=${usage.cache_read_input_tokens}`);
   parts.push(`latency=${latencyMs}ms`);
+  if (meta.streamed) parts.push(`streamed`);
   if (meta.label) parts.unshift(`[${meta.label}]`);
   console.log(`[LLM] ${parts.join(' ')}`);
+}
+
+/**
+ * Seconds (or an HTTP-date) from a 429/503 `retry-after` header, in ms.
+ *
+ * The SDK surfaces response headers differently depending on how the error was
+ * raised, so check the shapes rather than assuming one. Returns null when the
+ * header is absent or unparseable, which is the signal to fall back to
+ * exponential backoff.
+ */
+function parseRetryAfterMs(err) {
+  const headers = err && (err.headers || (err.response && err.response.headers));
+  if (!headers) return null;
+  const raw = typeof headers.get === 'function'
+    ? headers.get('retry-after')
+    : (headers['retry-after'] || headers['Retry-After']);
+  if (raw == null) return null;
+
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+
+  const when = Date.parse(raw);           // HTTP-date form
+  if (!Number.isNaN(when)) {
+    const delta = when - Date.now();
+    return delta > 0 ? delta : 0;
+  }
+  return null;
 }
 
 // ─── Core generate() ───────────────────────────────────────────────────────
 /**
  * @param {object} opts
- * @param {string} [opts.model]               'claude-sonnet-4-5' (default) or alias
+ * @param {string} [opts.model]               'claude-sonnet-5' (default) or alias
  * @param {Array|string} opts.system          system prompt (string or content blocks)
  * @param {Array} opts.messages               [{role, content}] — content can be string or blocks
  * @param {number} [opts.max_tokens]
- * @param {number} [opts.temperature]
+ * @param {number} [opts.temperature]        dropped on models that reject it
+ * @param {string} [opts.effort]              low|medium|high|xhigh|max (newer models only)
  * @param {string} [opts.label]               appears in usage log
  * @param {number} [opts.maxRetries]          override DEFAULT_MAX_RETRIES
  * @param {AbortSignal} [opts.signal]
@@ -269,18 +388,54 @@ async function generate(opts = {}) {
     messages: opts.messages
   };
   if (opts.system != null) params.system = opts.system;
-  if (opts.temperature != null) params.temperature = opts.temperature;
+  // Dropped, not forwarded, on models that removed sampling: they answer a
+  // temperature with HTTP 400 rather than ignoring it. Done here so the ~12
+  // call sites that pass one (every CIAB AI flow, plus the admin generator's
+  // temperature slider) keep working unchanged across a mixed model list.
+  if (opts.temperature != null) {
+    if (acceptsSamplingParams(model)) {
+      params.temperature = opts.temperature;
+    } else if (!_warnedSamplingDrop.has(model)) {
+      _warnedSamplingDrop.add(model);
+      console.warn(
+        `[LLM] ${model} does not accept temperature — dropping it. ` +
+        `Output variety on this model comes from prompt content (seed + flavor anchors), ` +
+        `not sampling.`);
+    }
+  }
   if (opts.stop_sequences) params.stop_sequences = opts.stop_sequences;
+  // Reasoning effort. Goes INSIDE output_config, not top-level. Omitted unless a
+  // caller asks, so every existing flow keeps the server default ("high").
+  // 'xhigh' is the recommended setting for coding and agentic work on Opus 5 /
+  // Sonnet 5; 'max' trades more tokens for correctness. Older models
+  // (Haiku 4.5, Sonnet 4.5) reject it, hence the same deny-list treatment as
+  // sampling: an unknown model keeps whatever the caller asked for.
+  if (opts.effort) {
+    if (acceptsEffort(model)) {
+      params.output_config = { ...(params.output_config || {}), effort: opts.effort };
+    } else if (!_warnedEffortDrop.has(model)) {
+      _warnedEffortDrop.add(model);
+      console.warn(`[LLM] ${model} does not accept output_config.effort — dropping it.`);
+    }
+  }
+
+  const useStream = max_tokens > STREAM_ABOVE_TOKENS;
 
   let lastErr;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const startedAt = Date.now();
     try {
-      const response = await _globalSem.run(() =>
-        getClient().messages.create(params, opts.signal ? { signal: opts.signal } : undefined)
-      );
+      const reqOpts = opts.signal ? { signal: opts.signal } : undefined;
+      // finalMessage() resolves to the same Message shape create() returns —
+      // content blocks, usage, stop_reason — so everything below this line, and
+      // every caller reading .raw / .usage / .text, is unchanged either way.
+      const response = await _globalSem.run(() => (
+        useStream
+          ? getClient().messages.stream(params, reqOpts).finalMessage()
+          : getClient().messages.create(params, reqOpts)
+      ));
       const latencyMs = Date.now() - startedAt;
-      logUsage({ model, label }, response.usage, latencyMs);
+      logUsage({ model, label, streamed: useStream }, response.usage, latencyMs);
 
       // Extract text from content blocks (we don't use tool_use here — that's a future feature)
       const text = (response.content || [])
@@ -302,7 +457,15 @@ async function generate(opts = {}) {
 
       const labelPrefix = label ? `[${label}] ` : '';
       if (willRetry) {
-        const delayMs = Math.min(30_000, 1000 * Math.pow(2, attempt) + Math.random() * 500);
+        // A 429 carries retry-after telling us exactly how long the bucket needs.
+        // Blind exponential backoff either undershoots it (immediate second 429,
+        // one retry burned for nothing) or overshoots by tens of seconds. Honour
+        // it when present and fall back to exponential-with-jitter otherwise.
+        // Capped so a pathological header cannot park a request for minutes.
+        const retryAfterMs = parseRetryAfterMs(err);
+        const delayMs = retryAfterMs != null
+          ? Math.min(60_000, retryAfterMs + Math.random() * 250)
+          : Math.min(30_000, 1000 * Math.pow(2, attempt) + Math.random() * 500);
         console.warn(`[LLM] ${labelPrefix}attempt ${attempt + 1}/${maxRetries + 1} failed (${status || err.name}): ${err.message} — retrying in ${Math.round(delayMs)}ms`);
         await new Promise(r => setTimeout(r, delayMs));
       } else {
@@ -501,10 +664,17 @@ module.exports = {
   isConfigured,
   repairAndParseJson,
   resolveModel,
+  acceptsSamplingParams,
+  acceptsEffort,
   createSemaphore,
   getConcurrencyStats,
   DEFAULT_MODEL,
+  DEFAULT_MAX_TOKENS,
+  STREAM_ABOVE_TOKENS,
   MODEL_ALIASES,
+  LEGACY_MODEL_ALIASES,
+  MODELS_WITHOUT_SAMPLING_PARAMS,
+  MODELS_WITH_EFFORT,
   // Test hooks
   _setClientForTest,
   _internals: {

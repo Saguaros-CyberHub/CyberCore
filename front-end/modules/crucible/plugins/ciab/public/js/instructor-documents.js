@@ -16,12 +16,9 @@
 // Prices are $ per million tokens.
 
 const AI_MODEL_INFO = {
-  'claude-sonnet-4-5': { label: 'Claude Sonnet 4.5', input: 3.00, output: 15.00, provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
-  'claude-haiku-4-5': { label: 'Claude Haiku 4.5', input: 0.80, output: 4.00, provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
-  'gemini-2.5-flash': { label: 'Gemini 2.5 Flash', input: 0.15, output: 0.60, provider: 'google', providerLabel: 'Google (Gemini)' },
-  'gemini-2.5-pro': { label: 'Gemini 2.5 Pro', input: 1.25, output: 10.00, provider: 'google', providerLabel: 'Google (Gemini)' },
-  'qwen3:14b': { label: 'Qwen 3.0 14B', input: 0, output: 0, provider: 'ollama', providerLabel: 'Local (Ollama)' },
-  'llama3.2': { label: 'Llama 3.2', input: 0, output: 0, provider: 'ollama', providerLabel: 'Local (Ollama)' },
+  'claude-opus-5': { label: 'Claude Opus 5', input: 5.00, output: 25.00, provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
+  'claude-sonnet-5': { label: 'Claude Sonnet 5', input: 2.00, output: 10.00, provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
+  'claude-haiku-4-5': { label: 'Claude Haiku 4.5', input: 1.00, output: 5.00, provider: 'anthropic', providerLabel: 'Anthropic (Claude)' },
 };
 
 const DOC_ICONS = { nessus: '🔍', zap: '🕷️', nmap: '🔌', policies: '📋' };
@@ -119,7 +116,6 @@ const Docs = {
 
   formatCost(modelId, inputTokens, outputTokens) {
     const info = AI_MODEL_INFO[modelId] || { input: 0, output: 0, provider: 'unknown' };
-    if (info.provider === 'ollama') return { text: 'Free (local)', color: 'var(--success)' };
     const total = (inputTokens / 1_000_000) * info.input + (outputTokens / 1_000_000) * info.output;
     if (total < 0.01) return { text: '< $0.01', color: 'var(--success)' };
     return {
@@ -131,9 +127,6 @@ const Docs = {
   updateCostEstimate() {
     const modelId = this.getSelectedModel();
     const info = AI_MODEL_INFO[modelId] || {};
-
-    const providerEl = document.getElementById('instructorProviderLabel');
-    if (providerEl) providerEl.textContent = info.providerLabel || modelId;
 
     // Examples: 8 parts × ~1.5K in + ~9K out each. The .cost-chip class owns
     // the pill background; only the text color signals the price band.
@@ -150,10 +143,7 @@ const Docs = {
 
     const costEl = document.getElementById('instructorCostEstimate');
     const contextEl = document.getElementById('instructorCostContext');
-    if (info.provider === 'ollama') {
-      if (costEl) { costEl.textContent = 'Free'; costEl.style.color = 'var(--success)'; }
-      if (contextEl) contextEl.textContent = 'Runs locally — no API cost';
-    } else {
+    {
       const totalCost = this.formatCost(modelId, 19500, 84500); // examples + policies
       if (costEl) { costEl.textContent = totalCost.text; costEl.style.color = totalCost.color; }
       if (contextEl) contextEl.textContent = 'examples + policies';

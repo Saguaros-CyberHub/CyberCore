@@ -289,14 +289,21 @@
                 <div>
                   <label>LLM model</label>
                   <select id="gen-llm-model">
-                    <option value="claude-sonnet-4-5">Claude Sonnet 4.5 (recommended)</option>
+                    <option value="claude-sonnet-5">Claude Sonnet 5 (recommended)</option>
                     <option value="claude-haiku-4-5">Claude Haiku 4.5 (faster/cheaper)</option>
-                    <option value="claude-opus-4-1">Claude Opus 4.1 (highest quality)</option>
+                    <option value="claude-opus-5">Claude Opus 5 (highest quality)</option>
                   </select>
                 </div>
                 <div>
                   <label>Temperature (0.0 – 1.0)</label>
                   <input type="number" id="gen-temperature" value="0.7" min="0" max="1" step="0.1" />
+                  <!-- Sonnet 5 and Opus 5 removed sampling parameters; sending one is a
+                       hard 400, so llm-client drops it for those models. Only Haiku 4.5
+                       still honours this field. Variety on the newer models comes from
+                       the per-run seed and flavour anchors in the prompt. -->
+                  <small style="color: var(--text-muted); font-size: 0.72rem;">
+                    Applies to Haiku 4.5 only — Sonnet&nbsp;5 and Opus&nbsp;5 ignore it.
+                  </small>
                 </div>
                 <div>
                   <label>Custom seed (reproducible runs)</label>

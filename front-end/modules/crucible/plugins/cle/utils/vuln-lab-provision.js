@@ -32,6 +32,9 @@ const { getDefaultTemplateNode } = require('../../../../../src/utils/site-config
 const { resolveLaneNetworking } = require('../../../../../src/utils/lane-networking');
 const laneDeployer = require('../../../../../src/utils/lane-deployer');
 const challengeLaneDeployer = require('../../../../../src/utils/challenge-lane-deployer');
+// The one reader of the inLab/external extension split -- see
+// hasExternalGoadExtension below.
+const goadDeploy = require('../../../../../src/utils/goad-deploy');
 const attachedModules = require('../../../../../src/utils/attached-modules');
 const flagManager = require('../../../../../src/utils/flag-manager');
 const laneProvision = require('./lane-provision');
@@ -360,6 +363,31 @@ async function findCourseLanes(userIds, courseId) {
   return byUser;
 }
 
+/**
+ * Does this environment place a GOAD extension machine that is NOT part of the
+ * AD roster -- elk, wazuh or lx01?
+ *
+ * resolveGoadLab is the one reader of that split (goad-deploy.js): `inLab`
+ * extensions are composed into the lab roster and addressed by the GOAD layer;
+ * everything else lands in `extensions.external` and is an ordinary spec VM.
+ * Asking it here rather than re-deriving the rule keeps one implementation, and
+ * it throws on a malformed spec-supplied goad.lab -- which is correct for a
+ * deploy, but not a reason to refuse to deploy a lane that has no extensions at
+ * all, so a throw degrades to false.
+ */
+function hasExternalGoadExtension(challenge) {
+  try {
+    const spec = typeof challenge?.spec === 'string'
+      ? JSON.parse(challenge.spec)
+      : (challenge?.spec || {});
+    if (!spec?.goad?.enabled) return false;
+    const resolved = goadDeploy.resolveGoadLab(spec);
+    return (resolved?.extensions?.external?.size || 0) > 0;
+  } catch (e) {
+    return false;
+  }
+}
+
 // ── mode: lane ───────────────────────────────────────────────────────────────
 
 /**
@@ -379,6 +407,28 @@ async function deployLabLanes({
     attackBoxes,
     consoleVm,
     extraWorkstations,
+    // PIN EVERY SPEC MACHINE WHEN THIS ENVIRONMENT USES AN EXTERNAL GOAD
+    // EXTENSION -- elk, wazuh or lx01.
+    //
+    // Those three are NOT in the GOAD lab roster (inLab: false), so they get no
+    // deterministic MAC from prepareGoadMacs. They are ordinary spec VMs whose
+    // addresses come from resolveSpecAddressing -- and that pass is gated on
+    // pinAllVms (challenge-lane-deployer.js:402). Without it elk declares
+    // ipOctet 24 and receives a POOL LEASE instead: no reservation, no
+    // host-record, no elk.cybercore.lan.
+    //
+    // Nothing errors. The lane builds, the forest builds, and then the
+    // controller's run.sh -- which renders elk's inventory at <base>.24 because
+    // that is where the catalog says it lives -- opens an ssh connection to an
+    // address nothing answers on:
+    //     ssh: connect to host 10.39.136.24 port 22: No route to host
+    // ninety minutes in, with everything else working. Observed on a real lane.
+    //
+    // SCOPED, not switched on for every CLE lane. pinAllVms changes addressing
+    // for ordinary spec machines too, and turning that on globally would move
+    // hosts under courses already running. An environment that declares no
+    // external extension deploys byte-identically to how it always has.
+    pinAllVms: hasExternalGoadExtension(challenge),
     // config.course_id is how EVERY CLE read path finds these lanes again —
     // the VM list, the flag board, teardown. material_id ties them to the
     // specific lab assignment so one course can run several at once.

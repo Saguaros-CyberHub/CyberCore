@@ -370,6 +370,8 @@ router.get('/stakeholders/:profileId', authenticateToken, async (req, res) => {
 // AI RESPONSE GENERATION — inline Claude
 // ============================================================================
 const llm = require('../../../../../src/utils/llm-client');
+// See the note at the generate() call below for why this tier.
+const INTERVIEW_MODEL = process.env.CIAB_INTERVIEW_MODEL || 'claude-haiku-4-5';
 
 async function generateResponse(respondent, allStakeholders, orgContext, transcript, userMessage) {
   const conversationHistory = transcript.slice(-10).map(t => ({
@@ -383,6 +385,14 @@ async function generateResponse(respondent, allStakeholders, orgContext, transcr
 
   try {
     const { text } = await llm.generate({
+      // Haiku 4.5: interview turns are 2-3 sentences, high-volume and the one
+      // place in CIAB where a student is waiting on the response. It is also
+      // the cheapest current model ($1/$5 per 1M) and one of the few that still
+      // accepts `temperature`, so the 0.7 below still shapes these replies --
+      // on Sonnet 5 / Opus 5 llm-client drops it (see MODELS_WITHOUT_SAMPLING_PARAMS).
+      // If stakeholder answers start reading flat or off-persona, this one
+      // constant is the thing to change.
+      model: INTERVIEW_MODEL,
       // The system prompt embeds respondent-specific data — only the rule
       // boilerplate is reusable for caching, and we'd need to refactor
       // buildSystemPrompt to split static/dynamic to use cachedSystem. For

@@ -17,7 +17,7 @@
 const { pool, query } = require('./db');
 const { isWebServer } = require('./profile-to-spec');
 const llm = require('../../../../../src/utils/llm-client');
-const { generateVulnApp: generateVulnAppMultistage } = require('../ai/vuln-app');
+const { generateVulnApp: generateVulnAppMultistage, VULN_APP_MODEL } = require('../ai/vuln-app');
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -97,7 +97,17 @@ async function getOrGenerateVulnApp({ profile, llmModel, preferMode = 'docker', 
       generated.dockerfile || null,
       JSON.stringify(generated.source_tree || {}),
       generated.install_script,
-      source.startsWith('claude') ? (llmModel || llm.DEFAULT_MODEL) : null,
+      // The model that ACTUALLY generated this app. The multistage builder falls
+      // back to VULN_APP_MODEL (Opus 5), not to llm-client's global default, so
+      // recording llm.DEFAULT_MODEL here would file every cached app under a
+      // model that never ran.
+      //
+      // Nothing reads this column back today — the answer-key query in
+      // routes/instructor.js:88 selects profile_id, generation_meta,
+      // delivery_mode and created_at only. It is provenance: the record of which
+      // model produced a cached app, for when one turns out to be bad and you
+      // need to know what to re-run it on.
+      source.startsWith('claude') ? (llmModel || VULN_APP_MODEL) : null,
       // Persist the chosen difficulty alongside the other metadata so the
       // cache lookup above can find the right row, and the answer-key UI
       // can display it.

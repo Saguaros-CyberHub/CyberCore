@@ -1605,14 +1605,9 @@ async function showGenerateChallengeProfileModal(laneId, laneName) {
         <label>AI Model</label>
         <select id="chalProfileModel" onchange="updateChalProfileCost()">
           <optgroup label="Cloud APIs">
-            <option value="gemini-2.5-flash" selected>Gemini 2.5 Flash (Recommended)</option>
-            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-            <option value="claude-sonnet-4-5">Claude Sonnet 4.5</option>
+            <option value="claude-sonnet-5" selected>Claude Sonnet 5 (Recommended)</option>
+            <option value="claude-opus-5">Claude Opus 5</option>
             <option value="claude-haiku-4-5">Claude Haiku 4.5</option>
-          </optgroup>
-          <optgroup label="Local (Ollama)">
-            <option value="qwen3:14b">Qwen 3.0 14B</option>
-            <option value="llama3.2">Llama 3.2</option>
           </optgroup>
         </select>
       </div>
@@ -1633,17 +1628,13 @@ async function showGenerateChallengeProfileModal(laneId, laneName) {
 
 // ─── AI Model Cost Estimation (shared across modals) ───
 const AI_MODEL_INFO = {
-  'claude-sonnet-4-5':   { label: 'Claude Sonnet 4.5',  input: 3.00,  output: 15.00, provider: 'anthropic' },
-  'claude-haiku-4-5':    { label: 'Claude Haiku 4.5',   input: 0.80,  output: 4.00,  provider: 'anthropic' },
-  'gemini-2.5-flash':    { label: 'Gemini 2.5 Flash',   input: 0.15,  output: 0.60,  provider: 'google' },
-  'gemini-2.5-pro':      { label: 'Gemini 2.5 Pro',     input: 1.25,  output: 10.00, provider: 'google' },
-  'qwen3:14b':           { label: 'Qwen 3.0 14B',       input: 0,     output: 0,     provider: 'ollama' },
-  'llama3.2':            { label: 'Llama 3.2',           input: 0,     output: 0,     provider: 'ollama' }
+  'claude-opus-5':       { label: 'Claude Opus 5',      input: 5.00,  output: 25.00, provider: 'anthropic' },
+  'claude-sonnet-5':     { label: 'Claude Sonnet 5',    input: 2.00,  output: 10.00, provider: 'anthropic' },
+  'claude-haiku-4-5':    { label: 'Claude Haiku 4.5',   input: 1.00,  output: 5.00,  provider: 'anthropic' }
 };
 
 function estimateCost(modelId, inputTokens, outputTokens) {
   const info = AI_MODEL_INFO[modelId] || { input: 0, output: 0, provider: 'unknown' };
-  if (info.provider === 'ollama') return { text: 'Free (local)', color: '#38a169' };
   const total = (inputTokens / 1_000_000) * info.input + (outputTokens / 1_000_000) * info.output;
   if (total < 0.01) return { text: '< $0.01', color: '#38a169' };
   return {

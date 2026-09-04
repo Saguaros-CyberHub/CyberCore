@@ -1043,10 +1043,15 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
 
       # Two override files for two phases:
       #
-      #   inventory_overrides_initial — used ONLY for preflight-vagrant.yml.
-      #     Connects as the bake-time Administrator account to create the
-      #     vagrant scaffolding user. After that one play, this inventory is
-      #     never used again.
+      #   inventory_overrides_initial — used ONLY by the two preflights
+      #     (preflight-network.yml, then preflight-vagrant.yml), which fix
+      #     routes/DNS and create the vagrant scaffolding user. After those two
+      #     plays this inventory is never used again.
+      #     THE VERSION WRITTEN HERE IS A PLACEHOLDER. It is overwritten in full,
+      #     before its first use, by the per-host credential probe further down —
+      #     which is where the accounts actually come from, because one lane can
+      #     hold two Windows templates with different baked credentials. Kept
+      #     here so the file exists no matter which path the script takes.
       #
       #   inventory_overrides — used for everything else (preflight-dns +
       #     full upstream chain). Connects as vagrant/vagrant. The vagrant
@@ -1186,25 +1191,43 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
           # matter what this line says; saying the same thing keeps the two
           # readable together, saying something else would look effective and
           # quietly not be.
-          {
-            echo ""
-            echo "# ---- \$ext extension server, appended by run.sh ----"
-            echo "[\${ext}_server:vars]"
-            echo "ansible_connection=ssh"
-            echo "ansible_user=\${EXT_SSH_USER}"
-            echo "ansible_password="
-            echo "ansible_port=22"
-            echo "ansible_ssh_private_key_file=\${EXT_SSH_KEY}"
-            echo "ansible_python_interpreter=/usr/bin/python3"
-            echo "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
-          } >> "\$RUNTIME/inventory_overrides"
-          # elk and wazuh both declare [<key>_server]. Anything that does not
-          # would silently inherit the Windows WinRM credentials from
-          # [all:vars] and fail on the SIEM host with a WinRM error, which
-          # points at the wrong machine entirely.
-          if ! grep -q "^\[\${ext}_server\]" "\$RUNTIME/inventory_ext_\$ext"; then
-            echo "WARNING: extension '\$ext' declares no [\${ext}_server] group, so its"
-            echo "         server keeps the Windows WinRM defaults and will not connect."
+          # GUARDED, and this guard is the whole point rather than a nicety.
+          #
+          # A [<group>:vars] section for a group that is not defined IN THE SAME FILE is
+          # a HARD PARSE ERROR for ansible's ini plugin -- not a warning, not a skipped
+          # section. It rejects the entire file:
+          #
+          #   Failed to parse inventory: Section [ws01_server:vars] not valid for
+          #   undefined group 'ws01_server'.
+          #   Unable to parse /var/lib/goad-run/inventory_overrides as an inventory source
+          #
+          # inventory_overrides is the file carrying the WinRM credentials, the
+          # force_dns_server / dns_server / two_adapters vars the GOAD roles read, and
+          # the [localhost] carve-out. Losing it costs EVERY host all of them -- and
+          # the run keeps going, because data/inventory still parses, so the damage is
+          # silent. Seen on a real lane: the whole chain ran with those vars absent.
+          #
+          # elk and wazuh declare [elk_server] / [wazuh_server]. ws01 and lx01 do NOT:
+          # they are domain MEMBERS, reached over WinRM like every other Windows host,
+          # and they need no ssh override at all. So the block is written only when the
+          # group it configures actually exists.
+          if grep -q "^\[\${ext}_server\]" "\$RUNTIME/inventory_ext_\$ext"; then
+            {
+              echo ""
+              echo "# ---- \$ext extension server, appended by run.sh ----"
+              echo "[\${ext}_server:vars]"
+              echo "ansible_connection=ssh"
+              echo "ansible_user=\${EXT_SSH_USER}"
+              echo "ansible_password="
+              echo "ansible_port=22"
+              echo "ansible_ssh_private_key_file=\${EXT_SSH_KEY}"
+              echo "ansible_python_interpreter=/usr/bin/python3"
+              echo "ansible_ssh_common_args=-o StrictHostKeyChecking=no"
+            } >> "\$RUNTIME/inventory_overrides"
+            echo "    [\${ext}_server] ssh overrides appended to inventory_overrides"
+          else
+            echo "    \$ext declares no [\${ext}_server] group -- no ssh overrides needed"
+            echo "    (a domain member reached over WinRM, not a Linux server)"
           fi
           EXT_KEYS="\$EXT_KEYS \$ext"
         done
@@ -1353,7 +1376,57 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         } >> "\$RUNTIME/extra_vars.yml"
       fi
 
-      INV_FLAGS_INITIAL="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides_initial"
+      # ---------- Inventory flag sets ----------
+      # THE PREFLIGHTS SEE THE EXTENSION INVENTORIES. THE LAB CHAIN DOES NOT.
+      # That asymmetry is the whole point of this block; both halves are argued
+      # below because each one looks like a bug from the other's side.
+
+      # Every rendered extension inventory, in the order the keys were requested.
+      # Empty string when no 5th argument was passed -- which is every lane in
+      # flight today -- so the two flag strings below stay byte-identical to what
+      # they have always been for those lanes.
+      INV_EXT_FLAGS=""
+      for ext in \$EXT_KEYS; do
+        INV_EXT_FLAGS="\$INV_EXT_FLAGS -i \$RUNTIME/inventory_ext_\$ext"
+      done
+
+      # Hosts only, no credential overlay at all. The credential probe below
+      # layers its own single-candidate overlay on top of this, one candidate at
+      # a time, so it must NOT inherit a set of credentials from anywhere else.
+      INV_FLAGS_HOSTS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox\$INV_EXT_FLAGS"
+
+      # The two preflights. INCLUDES the extension inventories, and must.
+      # extensions/ws01/inventory is the ONLY place ws01 exists -- it is in no
+      # lab inventory and in no provider inventory. Without these flags ws01 is
+      # not a member of 'domain', so preflight-network.yml never clears its
+      # stale baked default route or repoints its baked 8.8.8.8 DNS, and
+      # preflight-vagrant.yml never creates the 'vagrant' account on it. The
+      # extension install at the end then connects as vagrant/BootstrapPwd!1 to
+      # a host where that account does not exist and reports "ntlm: the
+      # specified credentials were rejected by the server". Observed on a real
+      # GOAD-Mini lane, ninety minutes into a deploy, with the forest built.
+      # inventory_overrides_initial stays LAST: it carries per-host credentials
+      # as host vars, and the last source to set a host var wins.
+      INV_FLAGS_INITIAL="\$INV_FLAGS_HOSTS -i \$RUNTIME/inventory_overrides_initial"
+
+      # The lab chain. DELIBERATELY WITHOUT the extension inventories.
+      # DO NOT "FIX" THIS BY ADDING \$INV_EXT_FLAGS. It is not an oversight, and
+      # the cost of finding that out is a built forest.
+      #
+      # ws01's host data -- lab.hosts['ws01'], and with it hostname, domain,
+      # local_admin_password, local_groups -- lives in the EXTENSION's own
+      # extensions/ws01/data/config.json. It is merged into 'lab' by a play
+      # INSIDE extensions/ws01/ansible/install.yml ("Read local config file",
+      # lab|combine(lab_extension, recursive=True)). The lab chain never runs
+      # that merge. So the moment ws01 is a member of 'domain' for a LAB play --
+      # and every ad-*.yml play targets 'domain' or a child of it -- that play
+      # evaluates lab.hosts[dict_key] for ws01, finds it undefined, and fails,
+      # after the forest is already built.
+      #
+      # The preflights are safe from exactly that, and only because they touch
+      # NO lab data: they fix routes and DNS and create one local user, and
+      # neither file references 'lab' anywhere. Read both before deciding this
+      # line is wrong.
       INV_FLAGS="-i \$LAB_DATA/inventory -i \$RUNTIME/inventory_proxmox -i \$RUNTIME/inventory_overrides"
 
       # ---------- Patch upstream's mssql role: broken win_template + bad path ----
@@ -1580,7 +1653,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
             delay: 12
             changed_when: false
       PFN
-      # ---------- Which initial credential actually opens WinRM? ----------
+      # ---------- Which initial credential does EACH Windows host accept? -----
       # preflight-vagrant.yml (further down) SETS vagrant's password to
       # BootstrapPwd!1. That makes run.sh NON-IDEMPOTENT in the worst way: any
       # deploy that reached that play and then failed LATER leaves every Windows
@@ -1591,36 +1664,100 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # sysprep GeneralizationState is 7. Observed on a real lane, and the lane
       # was unrecoverable without re-cloning every Windows VM by hand.
       #
-      # So ask rather than assume. Try the bake-time credential first (the
-      # fresh-clone case), then the bootstrap one (the retry case), and keep
-      # trying both while the hosts finish booting -- a host that is not up yet
-      # rejects BOTH, which is indistinguishable from a wrong password except
-      # by waiting.
-      # CANDIDATE ACCOUNTS, not just passwords. The first cut of this probe tried
-      # three passwords against ONE user and missed the actual cause: the spec
-      # names 'Administrator', and the built-in Administrator does NOT stay enabled
-      # through sysprep /generalize /oobe. That is precisely why goad-deploy.js
-      # defaults initialUser to 'vagrant' -- but three separate UIs hardcode
-      # admin_user: 'Administrator' into every spec they write, so that default has
-      # never once applied and the probe was handed an account that cannot log in.
+      # So ask rather than assume -- and ask PER HOST, because ONE LANE CAN HOLD
+      # TWO WINDOWS TEMPLATES WITH DIFFERENT BAKED ACCOUNTS:
       #
-      # Order is deliberate: what the spec asked for FIRST, so a deliberate override
-      # that IS correct still wins; then the account the Windows template actually
-      # bakes and keeps enabled; then that same account after preflight-vagrant has
-      # rotated its password, which is the retry-on-a-used-lane case.
+      #   template 1004  Windows Server 2019 -- every dc*/srv* host.
+      #                  Administrator/vagrant AND vagrant/vagrant, both baked.
+      #                  (bake-win-server-template.sh, "Default credentials
+      #                   baked in")
+      #   template 1006  Windows 11 -- the ws01 extension's workstation.
+      #                  Administrator/CyberCore!Bake1 only, plus a
+      #                  cloudbase-init account named 'Admin' whose password is
+      #                  injected per clone and is therefore NOT probeable.
+      #                  THERE IS NO vagrant ACCOUNT ON IT AT ALL: the string
+      #                  'vagrant' does not appear anywhere in
+      #                  bake-win-client-template.sh.
+      #                  (that script's ADMIN_PASSWORD default, its
+      #                   Autounattend AdministratorPassword, and its
+      #                   cloudbase-init conf)
       #
-      # Pairs are passed as two arguments rather than a delimited string: a password
-      # containing the delimiter would split in the wrong place, and that is the kind
-      # of bug that only ever shows up on the one password that has it.
+      # THE PREVIOUS PROBE COULD NOT COPE WITH THAT, structurally. It wrote ONE
+      # [all:vars] block and pinged the whole 'domain' group, and
+      # 'ansible ... -m win_ping' exits non-zero if ANY host fails. With two
+      # templates in one lane no single credential can satisfy it, so the probe
+      # burned its entire timeout and then refused to start the chain. Per-host
+      # credentials are REQUIRED here, not a nicety.
+      #
+      # CANDIDATE ACCOUNTS, not just passwords. An earlier cut tried three
+      # passwords against ONE user and missed the actual cause: the spec names
+      # 'Administrator', and the built-in Administrator does NOT stay enabled
+      # through sysprep /generalize /oobe on the SERVER template. That is
+      # precisely why goad-deploy.js defaults initialUser to 'vagrant' -- but
+      # three separate UIs hardcode admin_user: 'Administrator' into every spec
+      # they write, so that default has never once applied.
+      #
+      # Order is deliberate:
+      #   1. what the spec asked for, so a deliberate override that IS correct
+      #      still wins;
+      #   2. the account template 1004 bakes and keeps enabled;
+      #   3. that same account after preflight-vagrant rotated its password --
+      #      the retry-on-a-used-lane case;
+      #   4. template 1006's baked Administrator, which is the only thing ws01
+      #      has. Last because it is the narrowest: exactly one host per lane.
+      #
+      # Pairs are passed as TWO ARGUMENTS, never a delimited string: a password
+      # containing the delimiter would split in the wrong place, and that is the
+      # kind of bug that only ever shows up on the one password that has it.
       BOOTSTRAP_PASSWORD="BootstrapPwd!1"
-      probe_pw() {   # \$1 = user, \$2 = password
+      # A bake-time constant of a DIFFERENT template than the one INITIAL_PASSWORD
+      # describes, so it gets its own env override rather than riding on argv:
+      # bake-win-client-template.sh itself reads ADMIN_PASSWORD from the
+      # environment, so someone will re-bake 1006 with another password, and that
+      # must not require a controller re-bake to say so.
+      WIN_CLIENT_INITIAL_PASSWORD="\${WIN_CLIENT_INITIAL_PASSWORD:-CyberCore!Bake1}"
+
+      # ---------- Enumerate the Windows hosts to authenticate to --------------
+      # 'ansible <pattern> --list-hosts' rather than 'ansible-inventory --list':
+      # both resolve the pattern through the identical inventory-merge path, but
+      # --list-hosts answers exactly the question being asked ("which hosts does
+      # 'domain' contain?"), one name per line, with no JSON and therefore no jq
+      # or python in the middle of the one step that has to work before anything
+      # else can. It short-circuits before any module runs, so it connects to
+      # nothing. Output is a "  hosts (N):" header followed by indented names,
+      # hence the '1d' and the whitespace strip.
+      #
+      # INV_FLAGS_HOSTS carries the extension inventories -- see the block where
+      # it is built. ws01 exists in no other inventory, so without them this list
+      # silently omits the one host whose credentials differ from every other
+      # host's, which is the entire bug this section exists to fix.
+      ansible \$INV_FLAGS_HOSTS domain --list-hosts \\
+        > "\$RUNTIME/.domain_hosts.out" 2> "\$RUNTIME/.domain_hosts.err" || true
+      WIN_HOSTS="\$(sed -e '1d' -e 's/[[:space:]]//g' "\$RUNTIME/.domain_hosts.out" | grep -v '^\$' || true)"
+      if [ -z "\$WIN_HOSTS" ]; then
+        # HARD FAILURE. An empty 'domain' does not mean "small lab"; every lab we
+        # ship has Windows hosts in it. It means the inventories did not merge --
+        # and ansible's ini plugin rejects a WHOLE SOURCE on one bad line, so a
+        # single typo in one file removes every host in it. Every play below
+        # targets 'domain' or a child of it, so continuing buys nothing but a
+        # less legible failure later.
+        echo "ERROR: the 'domain' group resolved to ZERO hosts." >&2
+        echo "       Inventories consulted:\$INV_FLAGS_HOSTS" >&2
+        echo "       ansible said:" >&2
+        sed 's/^/         /' "\$RUNTIME/.domain_hosts.err" >&2 || true
+        echo "       Exit 1 = no forest." >&2
+        exit 1
+      fi
+      echo "==> Windows hosts to authenticate:" \$WIN_HOSTS
+
+      probe_host_pw() {   # \$1 = host, \$2 = user, \$3 = password
         # Heredoc body and terminator at the BASE indent: cloud-init dedents this
         # block scalar by 6, so 6 becomes column 0 -- where a heredoc terminator
         # must be. At 8 it lands at column 2 and PROBE never terminates.
         cat > "\${RUNTIME}/inventory_probe" <<PROBE
       [all:vars]
-      ansible_user=\$1
-      ansible_password=\$2
+      ansible_user=\$2
+      ansible_password=\$3
       ansible_connection=winrm
       ansible_port=5985
       ansible_winrm_scheme=http
@@ -1632,52 +1769,138 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       [localhost]
       localhost ansible_connection=local ansible_python_interpreter=/usr/bin/python3
       PROBE
-        ansible -i "\${LAB_DATA}/inventory" -i "\${RUNTIME}/inventory_proxmox" -i "\${RUNTIME}/inventory_probe" domain -m win_ping >/dev/null 2>&1
+        # ONE host, not the group: a failure here must mean "this host rejected
+        # this credential" and nothing else.
+        ansible \$INV_FLAGS_HOSTS -i "\${RUNTIME}/inventory_probe" "\$1" -m win_ping >/dev/null 2>&1
       }
+
+      # On success appends the host's ini line to .cred_host_lines and a
+      # password-free line to .cred_report, and returns 0. Returns 1 if no
+      # candidate worked, which for a host that has not finished booting is
+      # indistinguishable from wrong credentials except by waiting -- hence the
+      # retry loop below.
       CRED_USER=""; CRED_PW=""; CRED_WHICH=""
-      try_all_creds() {
-        if probe_pw "\${INITIAL_USER}" "\${INITIAL_PASSWORD}"; then
+      resolve_host_creds() {   # \$1 = host
+        CRED_USER=""; CRED_PW=""; CRED_WHICH=""
+        if probe_host_pw "\$1" "\${INITIAL_USER}" "\${INITIAL_PASSWORD}"; then
           CRED_USER="\${INITIAL_USER}"; CRED_PW="\${INITIAL_PASSWORD}"
-          CRED_WHICH="the account this spec asked for"; return 0
-        fi
-        if probe_pw vagrant vagrant; then
+          CRED_WHICH="\${INITIAL_USER} (the account this spec asked for)"
+        elif probe_host_pw "\$1" vagrant vagrant; then
           CRED_USER=vagrant; CRED_PW=vagrant
-          CRED_WHICH="the template baked local admin (spec named \${INITIAL_USER}, which sysprep disables)"; return 0
-        fi
-        if probe_pw vagrant "\${BOOTSTRAP_PASSWORD}"; then
+          CRED_WHICH="vagrant (template 1004 baked local admin)"
+        elif probe_host_pw "\$1" vagrant "\${BOOTSTRAP_PASSWORD}"; then
           CRED_USER=vagrant; CRED_PW="\${BOOTSTRAP_PASSWORD}"
-          CRED_WHICH="vagrant, rotated by a previous run on this lane"; return 0
+          CRED_WHICH="vagrant (rotated by a previous run on this lane)"
+        elif probe_host_pw "\$1" Administrator "\${WIN_CLIENT_INITIAL_PASSWORD}"; then
+          CRED_USER=Administrator; CRED_PW="\${WIN_CLIENT_INITIAL_PASSWORD}"
+          CRED_WHICH="Administrator (template 1006 / Windows 11 baked admin)"
+        else
+          return 1
         fi
-        return 1
+        # bash's builtin echo does not interpret backslash escapes without -e, so
+        # a password containing one lands verbatim, which is what the ini needs.
+        echo "\$1 ansible_user=\$CRED_USER ansible_password=\$CRED_PW" >> "\$RUNTIME/.cred_host_lines"
+        echo "\$1: \$CRED_WHICH" >> "\$RUNTIME/.cred_report"
+        return 0
       }
-      echo "==> Probing which initial WinRM account the lane actually accepts..."
+
+      echo "==> Probing which initial WinRM account each host accepts..."
+      : > "\$RUNTIME/.cred_host_lines"
+      : > "\$RUNTIME/.cred_report"
       CRED_DEADLINE=\$(( \$(date +%s) + \${CRED_PROBE_TIMEOUT:-600} ))
-      while [ "\$(date +%s)" -lt "\${CRED_DEADLINE}" ]; do
-        if try_all_creds; then break; fi
-        echo "    ... no account works yet; hosts may still be booting"
+      CRED_PENDING="\$WIN_HOSTS"
+      CRED_FIRST_ROUND=1
+      while [ -n "\$CRED_PENDING" ]; do
+        CRED_STILL=""
+        for h in \$CRED_PENDING; do
+          # The deadline is checked per host, not only per round, so a lane where
+          # every connection hangs cannot overrun CRED_PROBE_TIMEOUT by
+          # hosts x candidates x connect-timeout. The first round is exempt so
+          # every host is tried at least once and is named accurately below.
+          if [ "\$CRED_FIRST_ROUND" != "1" ] && [ "\$(date +%s)" -ge "\${CRED_DEADLINE}" ]; then
+            CRED_STILL="\$CRED_STILL \$h"
+            continue
+          fi
+          if resolve_host_creds "\$h"; then
+            echo "    \$h: \$CRED_WHICH"
+          else
+            CRED_STILL="\$CRED_STILL \$h"
+          fi
+        done
+        CRED_FIRST_ROUND=0
+        CRED_PENDING="\$(echo \$CRED_STILL)"
+        if [ -z "\$CRED_PENDING" ]; then
+          break
+        fi
+        if [ "\$(date +%s)" -ge "\${CRED_DEADLINE}" ]; then
+          break
+        fi
+        echo "    ... no account works yet for:\$CRED_PENDING (they may still be booting)"
         sleep 15
       done
       rm -f "\${RUNTIME}/inventory_probe"
-      if [ -z "\${CRED_USER}" ]; then
-        echo "ERROR: no initial WinRM account worked within \${CRED_PROBE_TIMEOUT:-600}s." >&2
-        echo "       Tried, in order:" >&2
+
+      if [ -n "\$CRED_PENDING" ]; then
+        # ABORT ON ONE UNRESOLVED HOST, and here is the argument for it.
+        #
+        # Continuing is tempting: the other hosts authenticated, so the forest
+        # would probably build. But it would not survive. preflight-network.yml
+        # targets 'domain' and its FIRST task is wait_for_connection, so an
+        # unauthenticated member fails that play and run.sh exits 1 anyway --
+        # only minutes later, and saying "unreachable" instead of printing the
+        # credential matrix below. And if the host were merely skipped, the
+        # failure would move to the extension install ninety minutes in, with the
+        # forest built and the real cause a screen of ansible output away. A
+        # partial success that proceeds silently is the exact failure mode this
+        # whole script is arranged against, so: exit 1 = no forest, while the
+        # evidence is still on screen.
+        echo "ERROR: no initial WinRM account worked within \${CRED_PROBE_TIMEOUT:-600}s for:" >&2
+        for h in \$CRED_PENDING; do
+          echo "         \$h" >&2
+        done
+        echo "       Tried on each of those, in this order:" >&2
         echo "         \${INITIAL_USER} / the bake-time password from the spec" >&2
-        echo "         vagrant / vagrant           (what the Windows template bakes)" >&2
-        echo "         vagrant / the bootstrap password (set by a previous run)" >&2
-        echo "       On a Windows host, check BOTH accounts -- the built-in" >&2
+        echo "         vagrant / vagrant                 (template 1004, Windows Server)" >&2
+        echo "         vagrant / the bootstrap password  (set by a previous run here)" >&2
+        echo "         Administrator / WIN_CLIENT_INITIAL_PASSWORD (template 1006, Windows 11)" >&2
+        if [ -s "\$RUNTIME/.cred_report" ]; then
+          echo "       These hosts DID resolve, so this is a per-host credential" >&2
+          echo "       problem and not a lane-wide outage:" >&2
+          sed 's/^/         /' "\$RUNTIME/.cred_report" >&2
+        else
+          echo "       NO host resolved, which points at the lane rather than at any" >&2
+          echo "       one account: gateway, DHCP reservations, or WinRM never started." >&2
+        fi
+        echo "       On a Windows host, check the accounts -- the built-in" >&2
         echo "       Administrator is commonly DISABLED by sysprep /generalize /oobe:" >&2
         echo "         Get-LocalUser | fl Name,Enabled,PasswordLastSet" >&2
         echo "         (Get-ItemProperty 'HKLM:SYSTEM/Setup/Status/SysprepStatus').GeneralizationState" >&2
+        echo "       A Windows 11 host (ws01) has no vagrant account by design; if that" >&2
+        echo "       is the host listed, 1006 was re-baked with a different password --" >&2
+        echo "       set WIN_CLIENT_INITIAL_PASSWORD in run.sh's environment." >&2
         echo "       Exit 1 = no forest." >&2
         exit 1
       fi
-      echo "==> Initial credential accepted: \${CRED_USER} -- \${CRED_WHICH}"
+      echo "==> Initial credentials resolved for every Windows host:"
+      sed 's/^/    /' "\$RUNTIME/.cred_report"
 
-      # Rewrite the initial inventory with the account that actually works.
-      cat > "\${RUNTIME}/inventory_overrides_initial" <<INITOK
+      # Rewrite the initial inventory with PER-HOST accounts.
+      #
+      # ORDER IN THIS FILE MATTERS TWICE OVER:
+      #   1. The bare host lines must come BEFORE the first section header.
+      #      Inside a '[x:vars]' section ansible's ini plugin reads every line as
+      #      key=value, and 'ws01 ansible_user=Administrator' is not one -- it
+      #      rejects the entire source, taking every host in it with it.
+      #   2. This file is the LAST -i in INV_FLAGS_INITIAL and these are HOST
+      #      vars, so they outrank the [all:vars] block beneath them and anything
+      #      the lab, provider or extension inventories set.
+      # Only the credentials are per host; the connection settings are shared and
+      # stay in [all:vars], where one edit still reaches every host.
+      cat "\$RUNTIME/.cred_host_lines" > "\${RUNTIME}/inventory_overrides_initial"
+      # Quoted terminator: nothing in this body needs run-time expansion any more
+      # now that the credentials sit above it.
+      cat >> "\${RUNTIME}/inventory_overrides_initial" <<'INITOK'
       [all:vars]
-      ansible_user=\${CRED_USER}
-      ansible_password=\${CRED_PW}
       ansible_connection=winrm
       ansible_port=5985
       ansible_winrm_scheme=http
@@ -1831,13 +2054,31 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         echo "   playbook:  \$GOAD_ROOT/extensions/\$ext/ansible/install.yml"
         echo "   inventory: \$EXT_INV_FLAGS"
         echo "================================================================="
-        # cd into the extension's ansible/ directory because upstream passes
-        # playbook_path there, and the roles install.yml names (elk,
-        # logs_windows, wazuh_manager, wazuh_agent, wazuh_agent_linux) live in
-        # ITS roles/, not in /opt/goad/ansible/roles. A subshell, so the
-        # working directory the rest of this script assumes is untouched.
-        # ANSIBLE_CONFIG is exported as an absolute path, so it survives the cd.
+        # ROLES PATH IS SET EXPLICITLY, and it has to be. Upstream runs each
+        # extension playbook with the extension directory as cwd, and the extensions
+        # split into two shapes that need OPPOSITE things:
+        #
+        #   elk, wazuh          ship their own roles/ and NO ansible.cfg
+        #   ws01, lx01, guacamole  ship NO roles/ and their own ansible.cfg, whose
+        #                       whole content is "roles_path = ./roles:../../../ansible/roles"
+        #                       -- i.e. they borrow common, settings/*, commonwkstn
+        #                       from the MAIN GOAD tree
+        #   exchange            ships both
+        #
+        # run.sh exports ANSIBLE_CONFIG as an absolute path to the MAIN ansible.cfg,
+        # and a previous revision of this comment called surviving the cd a feature.
+        # It is the bug: ANSIBLE_CONFIG outranks the cwd ansible.cfg, so the extension
+        # cfg never loads -- and the main cfg has no roles_path line at all. ws01 then
+        # died on its first role with
+        #   the role 'common' was not found in /opt/goad/extensions/ws01/ansible/roles:...
+        # after the forest had already built. Observed on a real lane.
+        #
+        # ANSIBLE_ROLES_PATH is an env var, so it outranks every cfg, and the UNION
+        # below is correct for all six shapes at once -- no cfg discovery, no cwd
+        # subtleties, nothing that changes when an extension adds or drops a roles/.
+        EXT_ROLES="\$GOAD_ROOT/extensions/\$ext/ansible/roles:\$GOAD_ROOT/ansible/roles"
         if ( cd "\$GOAD_ROOT/extensions/\$ext/ansible" && \\
+             ANSIBLE_ROLES_PATH="\$EXT_ROLES" \\
              ansible-playbook \$EXT_INV_FLAGS install.yml \\
                --extra-vars "@\$RUNTIME/extra_vars.yml" ); then
           echo "<<< EXTENSION '\$ext': INSTALLED"
