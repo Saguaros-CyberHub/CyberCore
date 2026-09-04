@@ -85,6 +85,21 @@ else
   command -v npm >/dev/null 2>&1 || { say "refused nonpm ref=$REF"; exit 0; }
 fi
 
+# Reap BEFORE measuring, not after the run.
+#
+# These same two lines used to live only at the end of the script, after a
+# successful run. That ordering deadlocks: once a long-running sensor drifts
+# under the floor below, every dispatch refuses at the check and exits, so the
+# cleanup that would free the space is gated behind having the space. The lane
+# then refuses forever and the only symptom is "refused nospace" on a box whose
+# disk nothing is actively filling. Observed on a sensor that had simply been up
+# a while.
+#
+# Cheap enough to run unconditionally: two find(1) passes over a directory the
+# agent is already scanning on every harvest.
+find "$LG/logs" -type f -name '*.json*' -mtime +7 -delete 2>/dev/null || true
+find "$BASE/runs" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
+
 FREE=$(df -Pk "$LG" 2>/dev/null | awk 'NR==2{print $4}')
 case "$FREE" in ''|*[!0-9]*) FREE=0 ;; esac
 if [ "$FREE" -lt 2097152 ]; then say "refused nospace free_kb=$FREE ref=$REF"; exit 0; fi
@@ -201,7 +216,9 @@ fi
 say "done rc=$RC end=$(date +%s) lines=$LINES src=$SRC skew=$SKEW fb=$FB ref=$REF"
 
 # ELK ingestion never deletes what it reads, so without this the attack tree
-# grows without bound across a semester.
+# grows without bound across a semester. Deliberately duplicated from the
+# pre-flight reap above: this one catches what a long run produced since, and
+# the pre-flight one is what stops the refusal deadlock. Both are idempotent.
 find "$LG/logs" -type f -name '*.json*' -mtime +7 -delete 2>/dev/null || true
 find "$BASE/runs" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} + 2>/dev/null || true
 exit 0

@@ -390,7 +390,6 @@ if [ "$SZ" -ge "$MAX" ]; then
   # unit, so an unguarded call here would silently resurrect the baseline
   # on every rotation after it was retired.
   systemctl is-active --quiet loggen-baseline && systemctl restart loggen-baseline
-  find "$DIR" -maxdepth 1 -name 'logs-*.json' -mmin "+$GRACE_MIN" -delete 2>/dev/null || true
 fi
 
 # The benign host stream, written by cc-emit.js --daemon. Nothing else covers
@@ -409,9 +408,27 @@ if [ -f "$H" ]; then
   case "$HSZ" in ''|*[!0-9]*) HSZ=0 ;; esac
   if [ "$HSZ" -ge "$MAX" ]; then
     mv "$H" "$DIR/host-$(date +%s).json"
-    find "$DIR" -maxdepth 1 -name 'host-*.json' -mmin "+$GRACE_MIN" -delete 2>/dev/null || true
   fi
 fi
+
+# Reap UNCONDITIONALLY, outside both size checks.
+#
+# These two lines used to sit inside the `if size >= MAX` blocks above, so an
+# already-rotated file was only cleaned up when the NEXT rotation happened. That
+# is a cleanup gated behind an event that may never come: once the live file sits
+# below the threshold, nothing reaps, and every previously rotated file stays
+# forever.
+#
+# Measured on a lane after eight days: 17 rotated files, 4.6 GB, on a 10 GB disk
+# -- while host.json itself was only 157 MB and therefore never triggered another
+# rotation to trip the cleanup. The attack wrapper then refused every run with
+# "nospace" on a box that nothing was actively filling.
+#
+# It went unnoticed for as long as it did because the benign baseline used to
+# produce ~35 MB/day. At the current ~800 MB/day it fills a 10 GB root in under a
+# week, which is the difference between a latent bug and a weekly outage.
+find "$DIR" -maxdepth 1 -name 'logs-*.json' -mmin "+$GRACE_MIN" -delete 2>/dev/null || true
+find "$DIR" -maxdepth 1 -name 'host-*.json' -mmin "+$GRACE_MIN" -delete 2>/dev/null || true
 exit 0
 LOGGEN_ROTATE_EOF
 sh -n "$ROTATE_TMP" || { echo "ERROR: loggen-rotate.sh failed syntax check" >&2; exit 1; }
@@ -3599,6 +3616,26 @@ runcmd:
   # ---- DNS first: everything below needs the internet ----
   - [ sh, -c, 'rm -f /etc/resolv.conf; printf "nameserver ${BAKE_DNS}\n" > /etc/resolv.conf' ]
 
+  # ---- Claim the disk this script already paid for ----
+  #
+  # `qm resize scsi0 +12G` further down grows the BLOCK DEVICE, and nothing in
+  # the guest ever claimed it. cloud-init's own growpart handles a plain
+  # partition but does not traverse LVM, and 1001 is LVM (rl-root) -- so every
+  # lane ran a 10 GB filesystem on a 22 GB disk, and the template was SEALED
+  # that way, so every clone inherited it.
+  #
+  # Measured on a deployed lane: 10G total, 92% full, the attack wrapper
+  # refusing every run with "nospace". Grown in place it returned 22G at 23%
+  # used. The twelve gigabytes had been sitting there the whole time.
+  #
+  # Four steps because LVM needs all four -- partition, physical volume, logical
+  # volume, filesystem -- and each is a no-op once done, so this is safe to
+  # re-run and safe if a future base image already grows itself.
+  - [ sh, -c, 'growpart /dev/sda 2 2>/dev/null || true' ]
+  - [ sh, -c, 'pvresize /dev/sda2 2>/dev/null || true' ]
+  - [ sh, -c, 'lvextend -l +100%FREE /dev/mapper/rl-root 2>/dev/null || true' ]
+  - [ sh, -c, 'xfs_growfs / 2>/dev/null || resize2fs /dev/mapper/rl-root 2>/dev/null || true' ]
+
   # ---- Base packages. coreutils gives timeout, util-linux gives setsid; the
   #      attack wrapper refuses to launch without setsid because abort could
   #      not then reach the process group. ----
@@ -3718,6 +3755,7 @@ runcmd:
   - [ sh, -c, 'node --check /opt/cybercore/cc-emit.js >/dev/null 2>&1 && echo "CC_EMIT_PARSES=yes" >> /etc/cybercore-bake.env || echo "CC_EMIT_PARSES=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'test -s /opt/cybercore/host-baseline.json && grep -q nominal_seconds /opt/cybercore/host-baseline.json && echo "HOST_PB=yes" >> /etc/cybercore-bake.env || echo "HOST_PB=no" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'systemctl is-enabled cc-hostbase >/dev/null 2>&1 && echo "HOSTBASE_SERVICE=yes" >> /etc/cybercore-bake.env || echo "HOSTBASE_SERVICE=no" >> /etc/cybercore-bake.env' ]
+  - [ sh, -c, 'df -Pk / | awk "NR==2{print \\"ROOT_FS_KB=\\" \$2}" >> /etc/cybercore-bake.env' ]
   - [ sh, -c, 'echo "BAKE_COMPLETE=yes" >> /etc/cybercore-bake.env' ]
 CLOUDINIT
 echo "==> Appended runcmd"
@@ -3828,6 +3866,22 @@ if [ -n "$MISSING" ]; then
   echo "    ERROR: required binary missing on the image: $MISSING" >&2
   echo "           setsid in particular is mandatory — without it the attack wrapper" >&2
   echo "           cannot be process-group-leader and abort cannot stop a run." >&2
+  FAIL=1
+fi
+
+ROOT_KB=$(marker ROOT_FS_KB)
+printf '    %-22s %s
+' "ROOT_FS_KB:" "${ROOT_KB:-unset}"
+case "$ROOT_KB" in ''|*[!0-9]*) ROOT_KB=0 ;; esac
+# The disk is grown by +12G above, so a correctly-claimed root is ~22G. Anything
+# under 15G means growpart/pvresize/lvextend/xfs_growfs did not take and the
+# template would be sealed with a 10G filesystem on a 22G disk -- which is
+# exactly how every lane ended up refusing attack runs with "nospace" after a
+# week. Catching it here costs one check; catching it later costs thirty lanes.
+if [ "$ROOT_KB" -lt 15728640 ]; then
+  echo "    ERROR: root filesystem is only ${ROOT_KB}KB -- the +12G resize was not claimed inside the guest." >&2
+  echo "           Check growpart/pvresize/lvextend/xfs_growfs in runcmd; the device is LVM (rl-root)," >&2
+  echo "           and cloud-init's own growpart does not traverse LVM." >&2
   FAIL=1
 fi
 

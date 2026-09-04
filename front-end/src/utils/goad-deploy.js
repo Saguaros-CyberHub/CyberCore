@@ -59,6 +59,37 @@ async function agentExecArgv(node, vmId, argv, proxmoxAPI) {
   return { pid: result.pid };
 }
 
+/**
+ * Ensure the WinRM bootstrap account exists on a Windows lane VM.
+ *
+ * Idempotent by construction: it resets the password and re-enables on every
+ * run rather than branching on "is it already right", because a half-configured
+ * account (present but disabled, or present with a stale password) is exactly
+ * the state a retried lane lands in, and it looks identical to a good one.
+ *
+ * The password MUST match inventory_overrides in the controller's run.sh --
+ * these are the credentials every play after preflight-vagrant connects with.
+ * Windows local policy needs 8+ chars, 3 of 4 character classes, and rejects a
+ * password containing the username, which is why it is not 'vagrant'.
+ */
+const GOAD_BOOTSTRAP_ACCOUNT_USER = 'vagrant';
+const GOAD_BOOTSTRAP_ACCOUNT_PASSWORD = 'BootstrapPwd!1';
+const GOAD_BOOTSTRAP_ACCOUNT_PS = [
+  "$ErrorActionPreference='Stop'",
+  `$u='${GOAD_BOOTSTRAP_ACCOUNT_USER}'`,
+  `$p=ConvertTo-SecureString '${GOAD_BOOTSTRAP_ACCOUNT_PASSWORD}' -AsPlainText -Force`,
+  // A promoted DC has no local SAM: Get-LocalUser throws rather than returning
+  // null. Say so and exit 0 -- the domain account is what run.sh will use.
+  "try { $null = Get-LocalUser -ErrorAction Stop } catch { 'no local SAM (domain controller) - skipped'; exit 0 }",
+  "$e = Get-LocalUser -Name $u -ErrorAction SilentlyContinue",
+  "if ($e) { Set-LocalUser -Name $u -Password $p -PasswordNeverExpires $true; Enable-LocalUser -Name $u }",
+  "else { New-LocalUser -Name $u -Password $p -PasswordNeverExpires -AccountNeverExpires | Out-Null }",
+  "if (-not (Get-LocalGroupMember -Group 'Administrators' -Member $u -ErrorAction SilentlyContinue)) {",
+  "  Add-LocalGroupMember -Group 'Administrators' -Member $u",
+  "}",
+  "if ($e) { 'reset existing ' + $u } else { 'created ' + $u }",
+].join('; ');
+
 // Template VMID for the GOAD ansible controller (Debian 13 VM with
 // qemu-guest-agent, baked from infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh —
 // git-clones upstream GOAD on first boot via cloud-init).
@@ -2048,6 +2079,69 @@ async function deployGoadLane({
   if (winrmIPs.length > 0) {
     await waitForWinRM({ controllerVmId, bestNode, vmIPs: winrmIPs, proxmoxAPI });
     console.log(`[GOAD] WinRM up on ${winrmIPs.length} Windows VM(s)`);
+  }
+
+  // 3b. SEED THE BOOTSTRAP ACCOUNT ON EVERY WINDOWS VM, OVER THE GUEST AGENT.
+  //
+  //     run.sh's first act is to find a WinRM account that works. On a lane
+  //     built only from template 1004 it always does, because that template
+  //     bakes vagrant/vagrant. Template 1006 (Windows 11, the ws01 extension
+  //     machine) bakes NOTHING USABLE:
+  //
+  //       Administrator   Enabled False   -- sysprep /generalize /oobe disables
+  //                                          it, which is the whole reason 1004
+  //                                          bakes a second account
+  //       cactus-user     Enabled True    -- the packer BUILD account. Its
+  //                                          password is reset at first boot by
+  //                                          cloudbase-init with
+  //                                          inject_user_password=true, and a
+  //                                          GOAD spec VM is cloned WITHOUT
+  //                                          ciuser/cipassword (see
+  //                                          challenge-lane-deployer.js:372 --
+  //                                          only cloneExtraWorkstation sets
+  //                                          them), so nothing is injected and
+  //                                          the password is random.
+  //
+  //     So the only enabled account on ws01 has a password nobody holds, not
+  //     even us. Observed on a real lane: run.sh tried all four candidates for
+  //     600s and refused, correctly, with "dc01: vagrant" resolved beside it.
+  //
+  //     THE CYCLE THIS BREAKS. preflight-vagrant.yml creates exactly the account
+  //     we need -- but it is an ansible play, so it needs WinRM auth to get in,
+  //     which is the thing that does not exist. The guest agent needs no
+  //     credentials at all, and it demonstrably works on these hosts: the vuln
+  //     script path writes 180KB+ to ws01 through it on this very deploy.
+  //
+  //     BEST-EFFORT, NOT A GATE. On a 1004 host this is a no-op (vagrant is
+  //     already there), so a failure here must not fail a lane that would
+  //     otherwise work. run.sh's per-host probe is the real gate and it names
+  //     the host it could not open -- a far better error than anything this
+  //     could throw.
+  //
+  //     ORDER: after the DHCP restart and waitForWinRM, so the VM is settled and
+  //     the guest agent is answering; before run.sh, which is what needs it.
+  if (winVMs.length > 0) {
+    console.log(`[GOAD] Seeding bootstrap account on ${winVMs.length} Windows VM(s)...`);
+    for (const vm of winVMs) {
+      try {
+        const { pid } = await agentExecArgv(vm.node, vm.vm_id,
+          ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', GOAD_BOOTSTRAP_ACCOUNT_PS],
+          proxmoxAPI);
+        const r = await pollExecStatus(vm.node, vm.vm_id, pid, 120000);
+        const out = String(r?.['out-data'] ?? r?.outData ?? '').trim();
+        if (r?.exited && r.exitcode === 0) {
+          console.log(`[GOAD]   ${vm.name}: ${out || 'seeded'}`);
+        } else {
+          console.warn(`[GOAD]   ${vm.name}: bootstrap seed exit ${r?.exitcode} — ${out || r?.stderr || 'no output'}`);
+        }
+      } catch (err) {
+        // A domain CONTROLLER has no local SAM once promoted, so Get-LocalUser
+        // throws there. That is fine and expected on a re-run against a built
+        // lane: the account already exists in the domain and run.sh's probe
+        // will find it.
+        console.warn(`[GOAD]   ${vm.name}: bootstrap seed failed — ${err.message}`);
+      }
+    }
   }
 
   // 4. Run the playbook
