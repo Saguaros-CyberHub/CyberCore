@@ -110,7 +110,7 @@ GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
 # goad_ref field must equal this SHA. Moving this pin means re-vendoring that
 # manifest in the same commit, or the validator built on it describes a GOAD the
 # controller no longer runs.
-GOAD_REF="${GOAD_REF:-00e9b63eb1e82f16780943f5d237d5529fd4a1a9}"
+GOAD_REF="${GOAD_REF:-4c9a49ea0413631f0e86adc67662aa021b4498d4}"
 MEMORY=2048
 CORES=2
 DISK_GB=10
@@ -431,6 +431,105 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
 
       with open(a.dst, 'w') as fh:
           fh.write(out)
+
+  - path: /opt/goad-light/patch-winlogbeat.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      # THE SAME BUG patch-mssql.py exists for, in a second role.
+      #
+      # roles/logs_windows renders winlogbeat.yml with win_template. On
+      # ansible-core 2.20+ win_template SILENTLY DOES NOT RENDER JINJA -- the
+      # placeholders reach the target verbatim, the beat refuses to start, and the
+      # whole elk extension is reported failed on its very last task:
+      #
+      #   Invalid host param set: {{ hostvars['elk'].ansible_host }}:9200
+      #   invalid character "{" in host name
+      #
+      # Observed on a real lane AFTER the ELK server installed cleanly
+      # (elk: ok=18 changed=16 failed=0), so only the Windows agent config was
+      # wrong -- and that was enough to fail the extension.
+      #
+      # Fix, identical to the mssql one: render with the LINUX template module on
+      # the controller, delegate_to localhost, then win_copy to Windows.
+      #
+      # LINE-BASED, NOT A REGEX, AND src/dest ARE COPIED VERBATIM. dest holds
+      # Windows path separators inside a YAML scalar, and this file reaches the
+      # guest through a cloud-init heredoc; every retyped backslash would pass
+      # through two more rounds of escaping. Copying the lines means the escaping
+      # stays whatever upstream already made work, and this script needs no
+      # escape sequence of its own.
+      import sys
+
+      path = sys.argv[1]
+      text = open(path).read()
+      MARK = 'cybercore-winlogbeat-render'
+      if MARK in text:
+          sys.stderr.write('  patch-winlogbeat: already patched (skip)' + chr(10))
+          raise SystemExit(0)
+
+      lines = text.split(chr(10))
+      start = -1
+      for i, ln in enumerate(lines):
+          if ln.strip() == '- name: Configure winlogbeat':
+              start = i
+              break
+      if start < 0:
+          sys.stderr.write('  patch-winlogbeat: task not found -- upstream may have fixed or renamed it. Left alone.' + chr(10))
+          raise SystemExit(0)
+
+      indent = lines[start][:len(lines[start]) - len(lines[start].lstrip())]
+      src_line = None
+      dest_line = None
+      notify_line = None
+      end = start
+      for j in range(start + 1, len(lines)):
+          st = lines[j].strip()
+          if st.startswith('- name:'):
+              break
+          if st and not lines[j].startswith(indent + ' '):
+              break
+          end = j
+          if st.startswith('src:'):
+              src_line = st[len('src:'):].strip()
+          elif st.startswith('dest:'):
+              dest_line = st[len('dest:'):].strip()
+          elif st.startswith('notify:'):
+              # Carried onto the win_copy task below. Without it the beat keeps
+              # running with the config it had before this task rewrote it.
+              notify_line = st
+
+      if not src_line or not dest_line:
+          sys.stderr.write('  patch-winlogbeat: task has no src/dest -- left alone.' + chr(10))
+          raise SystemExit(0)
+
+      # Per-host staging path: the role runs against every host in [domain] at
+      # once, so one shared filename would race.
+      staged = chr(34) + "/tmp/winlogbeat.yml.{{ inventory_hostname }}" + chr(34)
+
+      new = [
+          indent + '- name: Configure winlogbeat (' + MARK + ' - rendered on the controller)',
+          indent + '  ansible.builtin.template:',
+          indent + '    src: ' + src_line,
+          indent + '    dest: ' + staged,
+          indent + '  delegate_to: localhost',
+          indent + '',
+          indent + '- name: Copy rendered winlogbeat config to windows',
+          indent + '  ansible.windows.win_copy:',
+          indent + '    src: ' + staged,
+          indent + '    dest: ' + dest_line,
+          indent + '    force: yes',
+      ]
+      if notify_line:
+          new.append(indent + '  ' + notify_line)
+
+      lines[start:end + 1] = new
+      # newline='' so Python's text-mode translation cannot rewrite the whole
+      # file to CRLF. Moot on this controller (Linux), but this script is also
+      # the way the vendored copy is prepared for a push upstream, and there it
+      # turned a 5-line change into a 67-line whole-file diff.
+      open(path, 'w', newline='').write(chr(10).join(lines))
+      sys.stderr.write('  patch-winlogbeat: win_template -> template(delegate_to localhost) + win_copy in ' + path + chr(10))
 
   - path: /opt/goad-light/patch-mssql.py
     permissions: '0755'
@@ -2076,6 +2175,17 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
         # ANSIBLE_ROLES_PATH is an env var, so it outranks every cfg, and the UNION
         # below is correct for all six shapes at once -- no cfg discovery, no cwd
         # subtleties, nothing that changes when an extension adds or drops a roles/.
+        # Patch this extension's own roles BEFORE running its playbook.
+        # roles/logs_windows ships a win_template task that does not render on
+        # ansible-core 2.20+, exactly like upstream mssql -- see
+        # /opt/goad-light/patch-winlogbeat.py. Idempotent, and a no-op for any
+        # extension that does not ship that role.
+        EXT_WLB="\$GOAD_ROOT/extensions/\$ext/ansible/roles/logs_windows/tasks/winlogbeat.yml"
+        if [ -f "\$EXT_WLB" ]; then
+          echo "    patching logs_windows: win_template does not render on ansible-core 2.20+"
+          python3 /opt/goad-light/patch-winlogbeat.py "\$EXT_WLB" || \\
+            echo "WARNING: patch-winlogbeat failed; winlogbeat.yml may ship unrendered Jinja"
+        fi
         EXT_ROLES="\$GOAD_ROOT/extensions/\$ext/ansible/roles:\$GOAD_ROOT/ansible/roles"
         if ( cd "\$GOAD_ROOT/extensions/\$ext/ansible" && \\
              ANSIBLE_ROLES_PATH="\$EXT_ROLES" \\
