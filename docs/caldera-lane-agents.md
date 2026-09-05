@@ -39,8 +39,12 @@ receive it. The central image now includes Sandcat and Go and needs a rebuild:
 
 ```sh
 docker compose build app caldera
-docker compose up -d app caldera caddy
+docker compose up -d --force-recreate app caldera caddy
 ```
+
+Recreation ensures Caddy reads the updated agent routes and remounts its
+configuration file after a Git update. An app-only restart, or `up -d` with
+an unchanged Caddy service, can leave the previous console-only gate running.
 
 Route the hostname through the existing Caddy service. A tunnel or upstream
 authentication proxy must let `/agent/*` reach Caddy without a browser login or
@@ -58,6 +62,23 @@ tested through installation and check-in.
 
 ## Status and troubleshooting
 
+- **Download returns 401:** the request may still be reaching the console login
+  gate. With the updated repository on the server, refresh just Caddy:
+
+  ```sh
+  docker compose up -d --no-deps --force-recreate caddy
+  ```
+
+  Then retry **Install Agent**. To check the public routing without an agent
+  credential, use this deliberately invalid path:
+
+  ```sh
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://caldera.saguaroscyberhub.org/agent/not-a-token/file/download
+  ```
+
+  The updated Caddy route returns **404** for that malformed path. If it still
+  returns **401**, check that the hostname's tunnel reaches this Caddy service
+  and that an upstream login policy is not intercepting `/agent/*`.
 - **Guest agent unavailable:** start/install the QEMU guest agent in the VM.
 - **Download failed:** check DNS, HTTPS routing, certificate trust and proxy access.
 - **Started but no check-in:** check guest logs and outbound HTTPS. A script's
