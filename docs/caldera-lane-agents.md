@@ -23,6 +23,31 @@ named process with local logs. Repeating the install restarts only that managed
 agent. It does not install a startup service; after reboot, use **Install Agent**
 again. Supported guest architectures are amd64 and arm64.
 
+On Windows, installation uses `Set-MpPreference` to turn off Microsoft Defender
+real-time monitoring, behavior monitoring, downloaded-file scanning, script
+scanning, block-at-first-seen and potentially unwanted application blocking on
+the selected lab VM. It also uses `Add-MpPreference` to exclude only the managed
+agent folder while preserving existing exclusions. It verifies the preferences,
+effective real-time protection state and folder exclusion before downloading.
+The changes remain after installation, including a failed download; the dialog
+states this behavior before installation. Already configured settings are left
+alone. If Defender management commands are absent, the installer continues with
+the download. A policy block or unverifiable Defender state stops installation
+with an explanatory error. Other security products and application-control
+policies require their own management controls.
+
+To re-enable these Defender protections afterward, run elevated PowerShell on
+the VM and remove the exact agent folder exclusion shown in the install output:
+
+```powershell
+Set-MpPreference -DisableRealtimeMonitoring $false -DisableBehaviorMonitoring $false -DisableIOAVProtection $false -DisableScriptScanning $false -DisableBlockAtFirstSeen $false -PUAProtection Enabled
+Remove-MpPreference -ExclusionPath '<agent folder shown in the install output>'
+```
+
+Windows or managed policy may re-enable protection independently, which can block
+the agent again. See Microsoft's
+[Defender PowerShell reference](https://learn.microsoft.com/en-us/powershell/module/defender/set-mppreference).
+
 ## Deployment
 
 Set the existing environment values on the deployment:
@@ -79,8 +104,34 @@ tested through installation and check-in.
   The updated Caddy route returns **404** for that malformed path. If it still
   returns **401**, check that the hostname's tunnel reaches this Caddy service
   and that an upstream login policy is not intercepting `/agent/*`.
+- **Install Agent download returns 404:** if the agent route is working, an older
+  Caldera image may still be running without Sandcat. Updating only the app or
+  Caddy does not rebuild Caldera. From the updated repository on the server:
+
+  ```sh
+  docker compose build caldera
+  docker compose up -d --no-deps --force-recreate caldera
+  ```
+
+  Wait for Caldera to report **All systems ready**, then retry **Install Agent**.
+  If the download still fails, inspect `docker compose logs --since 5m caldera`
+  immediately after the attempt. Caldera also returns 404 when payload compilation
+  fails; recent download/build errors are more useful than old startup warnings.
 - **Guest agent unavailable:** start/install the QEMU guest agent in the VM.
 - **Download failed:** check DNS, HTTPS routing, certificate trust and proxy access.
+- **Could not turn off Microsoft Defender protections:** check the
+  target VM's Tamper Protection and managed policy. The installer verifies the
+  effective real-time state, scanning preferences and exact folder exclusion,
+  and stops before downloading if a change was rejected or silently ignored.
+- **Windows security software blocked Sandcat:** Windows errors 225/226 (including
+  an `OpenRead` error saying the file contains a virus or potentially unwanted
+  software) indicate an endpoint security block. On the target VM, review
+  **Windows Security > Virus & threat protection > Protection history**, or the
+  installed security product's console. Match the detection to the attempted
+  Sandcat download under `%ProgramData%\CyberCore\Caldera\<group>\<agent ID>\`.
+  Allow the intended agent under the lab's approved endpoint policy, then retry
+  **Install Agent** to download it again. For Defender, see Microsoft's
+  [Protection History guidance](https://support.microsoft.com/en-us/windows/security/windows-security/protection-history-in-the-windows-security-app).
 - **Started but no check-in:** check guest logs and outbound HTTPS. A script's
 successful exit alone is not reported as a connected agent.
 - **Interrupted install:** after five minutes the job can be retried. Agent jobs
@@ -90,8 +141,8 @@ successful exit alone is not reported as a connected agent.
 Linux files are under `/opt/CyberCore/Caldera/<group>/<agent ID>/`.
 Windows files are under `%ProgramData%\CyberCore\Caldera\<group>\<agent ID>\`.
 The executable is named `mitre-sandcat` or `mitre-sandcat.exe`; logs are beside it.
-Guest security software may prevent the executable from starting; the installer
-does not change security software settings.
+Other endpoint security controls may still prevent the executable from starting
+after Defender real-time protection is turned off.
 
 Each VM receives a random capability; CyberCore stores its hash. Reinstalling
 that VM rotates its capability without changing other VMs' credentials. Active

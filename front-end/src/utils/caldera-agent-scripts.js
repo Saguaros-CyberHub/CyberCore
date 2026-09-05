@@ -126,6 +126,56 @@ try {
   $stderrLog = Join-Path $agentDir 'agent.stderr.log'
   $lockPath = Join-Path $agentDir 'install.lock'
   $installLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+  $defenderCommands = @('Get-MpComputerStatus', 'Get-MpPreference', 'Set-MpPreference', 'Add-MpPreference')
+  $missingDefenderCommands = @($defenderCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+  if ($missingDefenderCommands.Count -eq 0) {
+    try {
+      $defenderSettings = @{
+        DisableRealtimeMonitoring = $true
+        DisableBehaviorMonitoring = $true
+        DisableIOAVProtection = $true
+        DisableScriptScanning = $true
+        DisableBlockAtFirstSeen = $true
+        PUAProtection = 0
+      }
+      $defenderSettingsMatch = {
+        param($preferences)
+        foreach ($setting in $defenderSettings.Keys) {
+          $actual = $preferences.$setting
+          if ($null -eq $actual -or $actual -ne $defenderSettings[$setting]) { return $false }
+          if ($defenderSettings[$setting] -is [bool] -and $actual -isnot [bool]) { return $false }
+        }
+        return $true
+      }
+      $defenderStatus = Get-MpComputerStatus -ErrorAction Stop
+      if ($defenderStatus.RealTimeProtectionEnabled -isnot [bool]) { throw 'Defender did not report its real-time protection state.' }
+      $defenderPreferences = Get-MpPreference -ErrorAction Stop
+      if ($defenderStatus.RealTimeProtectionEnabled -or -not (& $defenderSettingsMatch $defenderPreferences)) {
+        Write-Output 'CyberCore Caldera: turning off Microsoft Defender scanning and blocking settings on this lab VM'
+        Set-MpPreference @defenderSettings -ErrorAction Stop
+      }
+      if ($defenderPreferences.ExclusionPath -notcontains $agentDir) {
+        Add-MpPreference -ExclusionPath $agentDir -ErrorAction Stop
+      }
+      $defenderReady = $false
+      for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        if ($attempt -gt 0) { Start-Sleep -Seconds 1 }
+        $defenderStatus = Get-MpComputerStatus -ErrorAction Stop
+        $defenderPreferences = Get-MpPreference -ErrorAction Stop
+        if ($defenderStatus.RealTimeProtectionEnabled -is [bool] -and -not $defenderStatus.RealTimeProtectionEnabled -and
+            (& $defenderSettingsMatch $defenderPreferences) -and $defenderPreferences.ExclusionPath -contains $agentDir) {
+          $defenderReady = $true
+          break
+        }
+      }
+      if (-not $defenderReady) { throw 'Defender scanning settings or the agent folder exclusion could not be verified.' }
+      Write-Output ('CyberCore Caldera: Defender scanning and blocking settings are off; excluded agent folder: ' + $agentDir)
+    } catch {
+      throw ('Could not turn off Microsoft Defender protections for the Caldera lab agent. Check Tamper Protection or managed policy on this VM. ' + $_.Exception.Message)
+    }
+  } else {
+    Write-Output 'CyberCore Caldera: Microsoft Defender management commands are unavailable; continuing without changing security settings'
+  }
   $download = Join-Path $agentDir ('mitre-sandcat-' + [Guid]::NewGuid().ToString('N') + '.download')
   Write-Output 'CyberCore Caldera: downloading MITRE Sandcat'
   $headers = @{ 'platform' = 'windows'; 'file' = 'sandcat.go'; 'architecture' = $architecture }
@@ -159,7 +209,21 @@ try {
   Write-Output ('CyberCore Caldera: MITRE Sandcat started; logs: ' + $agentDir)
   Write-Output ('CYBERCORE_CALDERA_STARTED:' + $paw)
 } catch {
-  [Console]::Error.WriteLine('CyberCore Caldera: ' + $_.Exception.Message)
+  $exception = $_.Exception
+  $message = $exception.Message
+  while ($exception) {
+    # ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED, including PowerShell's wrapped IO errors.
+    $blockedBySecurity = $exception.HResult -eq -2147024671 -or $exception.HResult -eq -2147024670
+    if ($exception -is [ComponentModel.Win32Exception]) {
+      $blockedBySecurity = $blockedBySecurity -or $exception.NativeErrorCode -eq 225 -or $exception.NativeErrorCode -eq 226
+    }
+    if ($blockedBySecurity) {
+      $message = 'Windows security software blocked MITRE Sandcat as malware or potentially unwanted software. Review Windows Security > Virus & threat protection > Protection history (or your endpoint security console) on this VM. Allow this lab agent under your approved lab policy, then retry Install Agent. Agent folder: ' + $agentDir
+      break
+    }
+    $exception = $exception.InnerException
+  }
+  [Console]::Error.WriteLine('CyberCore Caldera: ' + $message)
   exit 1
 } finally {
   if ($download -and (Test-Path -LiteralPath $download)) { Remove-Item -LiteralPath $download -Force -ErrorAction SilentlyContinue }

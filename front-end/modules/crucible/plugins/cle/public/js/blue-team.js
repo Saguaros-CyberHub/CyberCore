@@ -812,6 +812,7 @@
               <option value="linux">Linux</option>
             </select>
             <p id="laneCalderaPlatformHint" style="color: var(--gray-500); font-size: 0.8rem;"></p>
+            <p style="color: var(--gray-500); font-size: 0.8rem;">Windows installation disables Defender scanning and blocking settings and excludes this agent's folder. These changes remain on the target VM.</p>
           </div>
           <button id="laneCalderaInstall" type="submit" class="btn btn-primary" disabled>Install Agent</button>
           <button id="laneCalderaRefresh" type="button" class="btn btn-secondary">Refresh status</button>
