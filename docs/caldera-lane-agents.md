@@ -23,17 +23,21 @@ named process with local logs. Repeating the install restarts only that managed
 agent. It does not install a startup service; after reboot, use **Install Agent**
 again. Supported guest architectures are amd64 and arm64.
 
-On Windows, installation uses `Set-MpPreference` to turn off Microsoft Defender
+On Windows, installation uses `Set-MpPreference` to request turning off Microsoft Defender
 real-time monitoring, behavior monitoring, downloaded-file scanning, script
 scanning, block-at-first-seen and potentially unwanted application blocking on
 the selected lab VM. It also uses `Add-MpPreference` to exclude only the managed
-agent folder while preserving existing exclusions. It verifies the preferences,
+agent folder while preserving existing exclusions. It reads back the preferences,
 effective real-time protection state and folder exclusion before downloading.
-The changes remain after installation, including a failed download; the dialog
+When some protections remain enabled but the exact agent folder exclusion is
+present, installation continues with a notice listing the remaining settings and
+Tamper Protection state. It still requires the agent to download, start and check
+in to Caldera before reporting success. Applied changes remain after installation,
+including a failed download; the dialog
 states this behavior before installation. Already configured settings are left
 alone. If Defender management commands are absent, the installer continues with
-the download. A policy block or unverifiable Defender state stops installation
-with an explanatory error. Other security products and application-control
+the download. Command errors, an unverifiable real-time state or an unverified
+agent folder exclusion stop installation with an explanatory error. Other security products and application-control
 policies require their own management controls.
 
 To re-enable these Defender protections afterward, run elevated PowerShell on
@@ -122,7 +126,12 @@ tested through installation and check-in.
 - **Could not turn off Microsoft Defender protections:** check the
   target VM's Tamper Protection and managed policy. The installer verifies the
   effective real-time state, scanning preferences and exact folder exclusion,
-  and stops before downloading if a change was rejected or silently ignored.
+  and names any settings that could not be verified. It proceeds with an
+  installation notice when the exact agent folder exclusion is present and the
+  real-time state is known, even if Tamper Protection keeps other protections on.
+  A configured folder exclusion can allow the agent through antivirus scanning;
+  other endpoint controls can still block it. See Microsoft's
+  [exclusion scope documentation](https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-antivirus-exclusions-configure).
 - **Windows security software blocked Sandcat:** Windows errors 225/226 (including
   an `OpenRead` error saying the file contains a virus or potentially unwanted
   software) indicate an endpoint security block. On the target VM, review

@@ -339,6 +339,34 @@ test('script success is distinct from a Caldera check-in; unsafe console URLs an
   h.api.closeCalderaAgents();
 });
 
+for (const status of ['completed', 'failed']) {
+  test(`the modal escapes installation notices on ${status} jobs and preserves check-in confirmation`, async () => {
+    const h = harness();
+    const data = fixture();
+    data.lanes[0].job = { status, vm_id: 101, message: 'Guest execution finished',
+      warnings: ['Tamper Protection remains on; using verified folder exclusion.', '<img src=x onerror="bad"> & policy', null, ''] };
+    h.setStatus(data);
+    await h.open();
+    const html = h.el('laneCalderaJob').innerHTML;
+    assert.match(html, /Installation notice/);
+    assert.match(html, /Tamper Protection remains on; using verified folder exclusion/);
+    assert.match(html, /&lt;img src=x onerror=&quot;bad&quot;&gt; &amp; policy/);
+    assert.doesNotMatch(html, /<img|Caldera confirmed check-in/);
+    assert.ok(html.indexOf('Guest execution finished') < html.indexOf('Installation notice'));
+    assert.match(h.el('laneCalderaModal').innerHTML, /attempts to disable Defender/);
+    assert.match(h.el('laneCalderaModal').innerHTML, /verified folder exclusion if some protections remain on/);
+    if (status === 'completed') {
+      assert.match(html, /No check-in has been confirmed/);
+      data.lanes[0].job.agent = { paw: 'agent-one', host: 'LAB-VM' };
+      h.setStatus(data);
+      await h.tick(5000);
+      assert.match(h.el('laneCalderaJob').innerHTML, /Caldera confirmed check-in: LAB-VM/);
+      assert.match(h.el('laneCalderaJob').innerHTML, /Installation notice/);
+    } else assert.match(html, /Installation failed/);
+    h.api.closeCalderaAgents();
+  });
+}
+
 test('an unavailable status request can be retried and repeated failures pause automatic polling', async () => {
   const h = harness();
   h.setStatusHandler(async () => { throw new Error('Caldera connection refused'); });

@@ -812,7 +812,7 @@
               <option value="linux">Linux</option>
             </select>
             <p id="laneCalderaPlatformHint" style="color: var(--gray-500); font-size: 0.8rem;"></p>
-            <p style="color: var(--gray-500); font-size: 0.8rem;">Windows installation disables Defender scanning and blocking settings and excludes this agent's folder. These changes remain on the target VM.</p>
+            <p style="color: var(--gray-500); font-size: 0.8rem;">Windows installation attempts to disable Defender scanning and blocking settings and exclude this agent's folder. It proceeds with a verified folder exclusion if some protections remain on. Applied changes remain on the target VM.</p>
           </div>
           <button id="laneCalderaInstall" type="submit" class="btn btn-primary" disabled>Install Agent</button>
           <button id="laneCalderaRefresh" type="button" class="btn btn-secondary">Refresh status</button>
@@ -947,6 +947,8 @@
       const label = job.status === 'failed' ? 'Installation failed' : job.status === 'completed' ? 'Install script finished' : 'Installing agent';
       jobHtml = `<strong>${label}${job.vm_id ? ` on VM ${escHtml(String(job.vm_id))}` : ''}</strong>
         <p style="white-space: pre-wrap;">${escHtml(job.error || job.message || '')}</p>`;
+      const warnings = Array.isArray(job.warnings) ? job.warnings.filter(warning => typeof warning === 'string' && warning.trim()).slice(0, 5) : [];
+      if (warnings.length) jobHtml += `<div style="color: #b7791f;"><strong>Installation notice</strong>${warnings.map(warning => `<p style="white-space: pre-wrap;">${escHtml(warning.slice(0, 1000))}</p>`).join('')}</div>`;
       if (job.agent?.paw) jobHtml += `<p style="color: #38a169;">Caldera confirmed check-in: ${escHtml(job.agent.host || job.agent.paw)}.</p>`;
       else if (job.status === 'completed') jobHtml += '<p>No check-in has been confirmed for this installation yet. Check the VM can reach the agent server and refresh status.</p>';
     }

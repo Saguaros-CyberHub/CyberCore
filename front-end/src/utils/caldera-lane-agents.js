@@ -77,6 +77,17 @@ function currentJob(job, now) {
   return job || null;
 }
 
+function installationWarnings(stdout, token) {
+  const warnings = [];
+  for (const match of String(stdout || '').matchAll(/^CYBERCORE_CALDERA_WARNING:([^\r\n]*)/gm)) {
+    const warning = match[1].replaceAll(token, '[redacted]')
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim().slice(0, 1000);
+    if (warning && !warnings.includes(warning)) warnings.push(warning);
+    if (warnings.length === 5) break;
+  }
+  return warnings;
+}
+
 function defaultSettings() {
   const { consoleConfig, authoringConfig } = require('../routes/caldera-authoring');
   const { resolveTarget } = require('../incident/caldera/authoring');
@@ -187,6 +198,8 @@ function createService(deps = {}) {
         : await exec.proxmoxFormPOST(`/api2/json/nodes/${live.node}/qemu/${target.vm_id}/agent/exec`, argv.map(arg => ['command', arg]));
       if (!started?.pid) throw failure(502, 'Guest execution did not return a process ID.');
       const result = await exec.pollExecStatus(live.node, target.vm_id, started.pid, 120000);
+      const warnings = installationWarnings(result.stdout, token);
+      if (warnings.length) job.warnings = warnings;
       if (!result.exited || result.exitcode !== 0 || !result.stdout.includes(`CYBERCORE_CALDERA_STARTED:${job.paw}`)) {
         const detail = String(result.stderr || result.stdout || 'Guest execution timed out.').replaceAll(token, '[redacted]').slice(-900);
         throw failure(502, `Agent installation failed. ${detail}`);

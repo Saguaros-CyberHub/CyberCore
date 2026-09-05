@@ -130,7 +130,7 @@ try {
   $missingDefenderCommands = @($defenderCommands | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
   if ($missingDefenderCommands.Count -eq 0) {
     try {
-      $defenderSettings = @{
+      $defenderSettings = [ordered]@{
         DisableRealtimeMonitoring = $true
         DisableBehaviorMonitoring = $true
         DisableIOAVProtection = $true
@@ -168,8 +168,32 @@ try {
           break
         }
       }
-      if (-not $defenderReady) { throw 'Defender scanning settings or the agent folder exclusion could not be verified.' }
-      Write-Output ('CyberCore Caldera: Defender scanning and blocking settings are off; excluded agent folder: ' + $agentDir)
+      if (-not $defenderReady) {
+        $differences = @()
+        if ($defenderStatus.RealTimeProtectionEnabled -isnot [bool]) {
+          $differences += 'RealTimeProtectionEnabled=unknown'
+        } elseif ($defenderStatus.RealTimeProtectionEnabled) {
+          $differences += 'RealTimeProtectionEnabled=True'
+        }
+        foreach ($setting in $defenderSettings.Keys) {
+          $actual = $defenderPreferences.$setting
+          if ($null -eq $actual -or $actual -ne $defenderSettings[$setting] -or
+              ($defenderSettings[$setting] -is [bool] -and $actual -isnot [bool])) {
+            $actualText = if ($null -eq $actual) { 'unknown' } else { [string]$actual }
+            $differences += ($setting + '=' + $actualText)
+          }
+        }
+        $folderExcluded = $defenderPreferences.ExclusionPath -contains $agentDir
+        if (-not $folderExcluded) { $differences += 'AgentFolderExcluded=unverified' }
+        $tamperState = if ($defenderStatus.IsTamperProtected -is [bool]) { [string]$defenderStatus.IsTamperProtected } else { 'unknown' }
+        $details = 'Tamper Protection=' + $tamperState + '; ' + ($differences -join '; ')
+        if (-not $folderExcluded -or $defenderStatus.RealTimeProtectionEnabled -isnot [bool]) {
+          throw ('Defender verification failed. ' + $details)
+        }
+        Write-Output ('CYBERCORE_CALDERA_WARNING:Defender protections remain enabled or unverified. ' + $details + '. The agent folder exclusion is configured; continuing installation.')
+      } else {
+        Write-Output ('CyberCore Caldera: Defender scanning and blocking settings are off; excluded agent folder: ' + $agentDir)
+      }
     } catch {
       throw ('Could not turn off Microsoft Defender protections for the Caldera lab agent. Check Tamper Protection or managed policy on this VM. ' + $_.Exception.Message)
     }

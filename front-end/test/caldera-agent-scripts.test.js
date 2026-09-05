@@ -118,6 +118,11 @@ if ($env:CALDERA_TEST_DEFENDER -eq 'off') {
   $script:mockPreferences.PUAProtection = 0
   $script:mockPreferences.ExclusionPath += $script:mockAgentDir.ToUpperInvariant()
 }
+if ($env:CALDERA_TEST_DEFENDER -eq 'tamper_partial') {
+  $script:mockPreferences.DisableBlockAtFirstSeen = $true
+  $script:mockPreferences.PUAProtection = 0
+  $script:mockPreferences.ExclusionPath += $script:mockAgentDir
+}
 function Write-CalderaTestEvent {
   param($Event)
   [IO.File]::AppendAllText((Join-Path $env:ProgramData 'events.txt'), $Event + [Environment]::NewLine)
@@ -141,7 +146,10 @@ function Get-MpComputerStatus {
   }
   if ($env:CALDERA_TEST_DEFENDER -eq 'string_state') { return [pscustomobject]@{ RealTimeProtectionEnabled = 'False' } }
   if ($env:CALDERA_TEST_DEFENDER -eq 'delayed' -and $script:mockDisableRequested -and $script:mockStatusReads -ge 2) { $script:mockRealTimeEnabled = $false }
-  return [pscustomobject]@{ RealTimeProtectionEnabled = $script:mockRealTimeEnabled }
+  return [pscustomobject]@{
+    RealTimeProtectionEnabled = $script:mockRealTimeEnabled
+    IsTamperProtected = $env:CALDERA_TEST_DEFENDER -eq 'tamper_partial'
+  }
 }
 function Get-MpPreference {
   param($ErrorAction)
@@ -160,8 +168,8 @@ function Set-MpPreference {
   Write-CalderaTestEvent 'defender-disable'
   if ($env:CALDERA_TEST_DEFENDER -eq 'policy_error') { throw 'mock Defender policy rejected change' }
   $script:mockDisableRequested = $true
-  if ($env:CALDERA_TEST_DEFENDER -notin @('no_op', 'delayed')) { $script:mockRealTimeEnabled = $false }
-  if ($env:CALDERA_TEST_DEFENDER -notin @('no_op', 'preferences_no_op')) {
+  if ($env:CALDERA_TEST_DEFENDER -notin @('no_op', 'delayed', 'tamper_partial')) { $script:mockRealTimeEnabled = $false }
+  if ($env:CALDERA_TEST_DEFENDER -notin @('no_op', 'preferences_no_op', 'tamper_partial')) {
     foreach ($flag in @('DisableRealtimeMonitoring', 'DisableBehaviorMonitoring', 'DisableIOAVProtection', 'DisableScriptScanning', 'DisableBlockAtFirstSeen')) { $script:mockPreferences[$flag] = $true }
     $script:mockPreferences.PUAProtection = 0
   }
@@ -237,6 +245,7 @@ test('Windows prepares Defender settings and exact agent folder before downloadi
   assert.equal(preferences.PUAProtection, 0);
   assert.deepEqual(preferences.ExclusionPath, ['C:\\Unrelated\\existing-exclusion', result.agentDir]);
   assert.match(result.stdout, new RegExp('CYBERCORE_CALDERA_STARTED:' + paw));
+  assert.doesNotMatch(result.stdout, /CYBERCORE_CALDERA_WARNING:/);
 });
 
 test('Windows waits for Defender to report real-time monitoring disabled before downloading', { skip: process.platform !== 'win32' }, t => {
@@ -253,6 +262,44 @@ test('Windows leaves already configured Defender settings and case-insensitive a
   assert.equal(result.events.includes('defender-disable'), false);
   assert.equal(result.events.includes('defender-exclude-agent'), false);
   assert.ok(result.events.includes('download'));
+  assert.doesNotMatch(result.stdout, /CYBERCORE_CALDERA_WARNING:/);
+});
+
+test('Windows attempts installation with the verified exact exclusion when Tamper Protection keeps scanning enabled', { skip: process.platform !== 'win32' }, t => {
+  const result = runMockWindowsInstall(t, { defender: 'tamper_partial' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.events.filter(event => event === 'defender-disable').length, 1);
+  assert.equal(result.events.includes('defender-exclude-agent'), false);
+  assert.ok(result.events.includes('download'));
+  assert.ok(result.events.includes('launch'));
+  assert.match(result.stdout, /CYBERCORE_CALDERA_WARNING:/);
+  assert.match(result.stdout, /Tamper(?: Protection|Protected|Protection)/i);
+  assert.match(result.stdout, /RealTimeProtectionEnabled\s*=\s*True/i);
+  for (const flag of ['DisableRealtimeMonitoring', 'DisableBehaviorMonitoring', 'DisableIOAVProtection', 'DisableScriptScanning']) {
+    assert.match(result.stdout, new RegExp(flag + '\\s*=\\s*False', 'i'));
+  }
+  assert.doesNotMatch(result.stdout, /Defender scanning and blocking settings are off/);
+  assert.match(result.stdout, new RegExp('CYBERCORE_CALDERA_STARTED:' + paw));
+  const preferences = JSON.parse(fs.readFileSync(path.join(result.temporary, 'defender-at-download.json'), 'utf8'));
+  assert.equal(preferences.DisableRealtimeMonitoring, false);
+  assert.equal(preferences.DisableBehaviorMonitoring, false);
+  assert.equal(preferences.DisableIOAVProtection, false);
+  assert.equal(preferences.DisableScriptScanning, false);
+  assert.equal(preferences.DisableBlockAtFirstSeen, true);
+  assert.equal(preferences.PUAProtection, 0);
+  assert.deepEqual(preferences.ExclusionPath, ['C:\\Unrelated\\existing-exclusion', result.agentDir]);
+});
+
+test('Windows reports unapplied preferences while attempting installation in its verified excluded folder', { skip: process.platform !== 'win32' }, t => {
+  const result = runMockWindowsInstall(t, { defender: 'preferences_no_op' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /CYBERCORE_CALDERA_WARNING:/);
+  assert.match(result.stdout, /DisableRealtimeMonitoring\s*=\s*False/i);
+  assert.match(result.stdout, /PUAProtection\s*=\s*1/);
+  assert.doesNotMatch(result.stdout, /Defender scanning and blocking settings are off/);
+  assert.ok(result.events.includes('download'));
+  assert.ok(result.events.includes('launch'));
+  assert.match(result.stdout, new RegExp('CYBERCORE_CALDERA_STARTED:' + paw));
 });
 
 for (const defender of ['missing_get', 'missing_preferences', 'missing_set', 'missing_add', 'missing_both']) {
@@ -266,7 +313,7 @@ for (const defender of ['missing_get', 'missing_preferences', 'missing_set', 'mi
   });
 }
 
-for (const defender of ['policy_error', 'no_op', 'preferences_no_op', 'exclusion_no_op', 'exclusion_policy_error', 'unknown', 'string_state', 'unknown_after_disable']) {
+for (const defender of ['policy_error', 'no_op', 'exclusion_no_op', 'exclusion_policy_error', 'unknown', 'string_state', 'unknown_after_disable']) {
   test(`Windows stops before download when Defender cannot be disabled safely: ${defender}`, { skip: process.platform !== 'win32' }, t => {
     const result = runMockWindowsInstall(t, { defender });
     assert.equal(result.status, 1, result.stderr);
@@ -275,7 +322,11 @@ for (const defender of ['policy_error', 'no_op', 'preferences_no_op', 'exclusion
     if (defender === 'exclusion_policy_error') assert.match(result.stderr, /mock Defender policy rejected exclusion/);
     if (defender === 'no_op') {
       assert.ok(result.events.filter(event => event === 'defender-status').length <= 6, result.events.join(', '));
+      assert.match(result.stderr, /RealTimeProtectionEnabled=True/);
+      assert.match(result.stderr, /DisableIOAVProtection=False/);
     }
+    if (defender === 'no_op' || defender === 'exclusion_no_op') assert.match(result.stderr, /AgentFolderExcluded=unverified/);
+    if (defender === 'unknown_after_disable') assert.match(result.stderr, /RealTimeProtectionEnabled=unknown/);
     if (defender === 'unknown' || defender === 'string_state') assert.equal(result.events.includes('defender-disable'), false);
     assert.equal(result.events.includes('download'), false);
     assert.equal(result.events.includes('launch'), false);

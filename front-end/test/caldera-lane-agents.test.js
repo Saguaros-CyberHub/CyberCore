@@ -248,6 +248,48 @@ for (const [reason, result] of [
   });
 }
 
+for (const outcome of ['completed', 'guest failed', 'no check-in', 'missing startup marker']) {
+  test(`installation notices survive ${outcome} without replacing startup and check-in requirements`, async () => {
+    const h = harness({
+      agents: outcome === 'no check-in' ? () => [] : undefined,
+      result: state => ({ exited: true, exitcode: outcome === 'guest failed' ? 1 : 0,
+        stdout: `CYBERCORE_CALDERA_WARNING: Tamper Protection=True; using verified folder exclusion. /agent/${state.token}\r\n`
+          + (outcome === 'missing startup marker' ? '' : `CYBERCORE_CALDERA_STARTED:${pawFor(LANE_ID, 901)}`),
+        stderr: outcome === 'guest failed' ? 'Download blocked' : '' }),
+    });
+    await h.start(); await h.run();
+    assert.equal(h.job().status, outcome === 'completed' ? 'completed' : 'failed');
+    assert.deepEqual(h.job().warnings, ['Tamper Protection=True; using verified folder exclusion. /agent/[redacted]']);
+    if (outcome === 'guest failed') assert.match(h.job().error, /Download blocked/);
+    if (outcome === 'no check-in') assert.match(h.job().error, /no fresh Caldera check-in/);
+    if (outcome === 'missing startup marker') assert.equal(h.state.agentReads, 1);
+    const status = await h.service.status([h.state.lane]);
+    assert.deepEqual(status.lanes[0].job.warnings, h.job().warnings);
+    assert.equal(JSON.stringify({ status, sql: h.state.sql }).includes(h.state.token), false);
+  });
+}
+
+test('installation notices only accept their stdout prefix and are sanitized, deduplicated and bounded', async () => {
+  const h = harness({ result: state => ({ exited: true, exitcode: 0,
+    stdout: [
+      'Ordinary guest output',
+      'not-a-prefix CYBERCORE_CALDERA_WARNING:ignore this',
+      'CYBERCORE_CALDERA_WARNING: \t\x00 \x7f',
+      'CYBERCORE_CALDERA_WARNING: \tTamper\x00 Protection remains on.\x7f ',
+      'CYBERCORE_CALDERA_WARNING:Tamper Protection remains on.',
+      'CYBERCORE_CALDERA_WARNING:' + 'x'.repeat(970) + state.token + 'y'.repeat(100),
+      ...Array.from({ length: 7 }, (_, index) => `CYBERCORE_CALDERA_WARNING:Notice ${index}`),
+      `CYBERCORE_CALDERA_STARTED:${pawFor(LANE_ID, 901)}`,
+    ].join('\r\n'), stderr: 'CYBERCORE_CALDERA_WARNING:ignore stderr' }) });
+  await h.start(); await h.run();
+  assert.equal(h.job().status, 'completed');
+  assert.deepEqual(h.job().warnings, [
+    'Tamper Protection remains on.', 'x'.repeat(970) + '[redacted]' + 'y'.repeat(20),
+    'Notice 0', 'Notice 1', 'Notice 2',
+  ]);
+  assert.equal(JSON.stringify(h.state.sql).includes(h.state.token), false);
+});
+
 test('concurrent start requests atomically claim one job and dispatch one installer', async () => {
   const h = harness();
   h.state.lane.config.caldera_agent_access = { tokens: [{ vm_id: 902, token_hash: 'other-vm-hash' }] };
