@@ -25,6 +25,10 @@ const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
 const goadDeploy = require('../../utils/goad-deploy');
+const { withGoadAgentVulnScripts } = require('../../utils/goad-agent-attach');
+const laneDeployer = require('../../utils/lane-deployer');
+const { resolveGoadExternalPins, resolveSpecAddressing, writeLaneReservations,
+  applyPrebakedFixedSubnet, validateGoadLaneAddressing } = require('../../utils/challenge-lane-deployer');
 
 // Digests for the two remote-execution audit rows below. A hash proves what
 // ran or what was delivered without the audit table having to store it.
@@ -82,12 +86,16 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     );
     if (tplResult.rows.length === 0) return res.status(404).json({ error: 'Challenge not found' });
     const template = tplResult.rows[0];
-    const spec = typeof template.spec === 'string' ? JSON.parse(template.spec) : (template.spec || {});
+    const spec = goadDeploy.prepareGoadDeploymentSpec(
+      typeof template.spec === 'string' ? JSON.parse(template.spec) : (template.spec || {}));
     const vmSpecs = spec.vms || (spec.template_vmid ? [{ name: template.challenge_key, template_vmid: spec.template_vmid, type: 'qemu', vm_offset: 600000 }] : []);
 
     if (!vmSpecs || vmSpecs.length === 0) {
       return res.status(400).json({ error: 'Template has no VM specs defined' });
     }
+
+    const subnetScheme = template.subnet_scheme || 'v1';
+    validateGoadLaneAddressing(spec, subnetScheme);
 
     // Pre-flight resource check
     if (!confirm) {
@@ -108,8 +116,8 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     }
 
     // Build the spec object compatible with the existing deploy-lane flow
-    const subnetScheme = template.subnet_scheme || 'v1';
     const gatewayVmid = resolveGatewayVmid(challengeModule, subnetScheme, spec);
+    const gatewayTemplateNode = await findTemplateNode(gatewayVmid, getDefaultTemplateNode());
     const templateNode = await findTemplateNode(
       vmSpecs[0]?.template_vmid || spec.template_vmid,
       vmSpecs[0]?.template_node || getDefaultTemplateNode()
@@ -231,7 +239,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     if (laneWanIp) await laneWan.recordLaneWanLease({ address: laneWanIp, laneId, vxlanId });
 
     // Build selected_scripts list for tracking
-    const scriptsToRun = selected_scripts || [];
+    const scriptsToRun = withGoadAgentVulnScripts(selected_scripts, spec) || [];
     const scriptEntries = scriptsToRun.map(s => ({
       script_slug: s.script_slug,
       vm_name: s.vm_name,
@@ -267,12 +275,14 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
 
     // ---- Background deployment ----
     (async () => {
+      let goadMeta = null;
       try {
         const deployedVMs = [];
 
         // Per-lane networking. v1/v2: one subnet. v3: external + internal.
         const net = resolveLaneNetworking(subnetScheme, challengeModule, vxlanId, { wanIp: laneWanIp });
         const isV3 = subnetScheme === 'v3';
+        applyPrebakedFixedSubnet(net, isV3, spec);
         const vnetExtName = vnet.vnet;
         const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
         const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
@@ -280,12 +290,25 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
 
         // GOAD: per-lane MAC/IP lookup. No-op for non-GOAD specs.
         const goadMacs = goadDeploy.prepareGoadMacs(spec, vxlanId, goadSubnetBase);
+        const externalPins = resolveGoadExternalPins(spec);
+        const { pinnedHosts, dnsRecords } = resolveSpecAddressing({
+          specVms: vmSpecs, goadMacs, requiredIpOctets: externalPins,
+          subnetScheme, laneSubnetBase, goadSubnetBase, reserved: [1, 5, 50],
+        });
+        await cybercoreQuery(
+          `UPDATE cybercore_lane SET config = config || $2::jsonb WHERE lane_id = $1`,
+          [laneId, JSON.stringify({ node: bestNode, gateway_vm_id: 100000 + vxlanId,
+            vms: vmSpecs.map(v => ({ vm_id: (v.vm_offset || 600000) + vxlanId,
+              name: v.name, type: v.type || 'qemu', node: bestNode })) })]
+        );
 
         // Clone all VMs
         for (const vmSpec of vmSpecs) {
           const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
           const vmType = vmSpec.type || 'qemu';
           const vmTemplate = vmSpec.template_vmid;
+          const vmTemplateNode = vmTemplate
+            ? await findTemplateNode(vmTemplate, spec.template_node || getDefaultTemplateNode()) : templateNode;
           const vmName = vmSpec.name || `vm-${vmId}`;
           const isGoadVm = !!goadMacs[vmName];
           // Single owner for VM→VNet attachment: explicit spec.vms[].nics when
@@ -295,6 +318,8 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
             subnetScheme,
             bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
             goadMac: goadMacs[vmName]?.mac,
+            pinnedMac: goadMacs[vmName]?.mac || (externalPins[vmName] != null
+              ? goadDeploy.macForOctet(externalPins[vmName], vxlanId) : null),
             goadVm: goadMacs[vmName],
             isGoadVm,
           });
@@ -307,18 +332,18 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
           console.log(`[ChallengeNetwork] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
 
           if (vmType === 'lxc') {
-            const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
+            const result = await proxmoxAPI('POST', `/api2/json/nodes/${vmTemplateNode}/lxc/${vmTemplate}/clone`, {
               newid: vmId, hostname: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
               description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
             });
-            if (result) await waitForTask(templateNode, result);
+            if (result) await waitForTask(vmTemplateNode, result);
             await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, nets);
           } else {
-            const result = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
+            const result = await proxmoxAPI('POST', `/api2/json/nodes/${vmTemplateNode}/qemu/${vmTemplate}/clone`, {
               newid: vmId, name: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
               description: `Challenge Network: ${template.name}\nVM: ${vmName}\nLane: ${laneId}`,
             });
-            if (result) await waitForTask(templateNode, result);
+            if (result) await waitForTask(vmTemplateNode, result);
             if (dualHomed) {
               // v3 DMZ pivot: dual-homed (both NICs first, then cloud-init
               // static .240 on each subnet — default route via external).
@@ -347,6 +372,10 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
             }
           }
 
+          if (spec.goad?.prebaked && isGoadVm && vmType === 'qemu') {
+            const ci = await laneDeployer.findCloudInitDrive(bestNode, vmId);
+            if (ci) await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, { delete: ci });
+          }
           deployedVMs.push({
             vm_id: vmId, name: vmName, type: vmType, node: bestNode,
             role: vmSpec.role || '', os: vmSpec.os || '', services: vmSpec.services || [],
@@ -367,11 +396,11 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
           .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
         const gwHostname = `${baseHost}-b${claimSecret}`;
 
-        const gwResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+        const gwResult = await proxmoxAPI('POST', `/api2/json/nodes/${gatewayTemplateNode}/lxc/${gatewayVmid}/clone`, {
           newid: gatewayVmId, hostname: gwHostname, full: 1, target: bestNode,
           description: `Challenge Network Gateway\nTemplate: ${template.name}\nLane: ${laneId}`,
         });
-        if (gwResult) await waitForTask(templateNode, gwResult);
+        if (gwResult) await waitForTask(gatewayTemplateNode, gwResult);
         // Networking is scheme-aware:
         //   v1 → wan0 via module transit; lan0 = 192.18.0.1/24 (shared)
         //   v2 → wan0 on lab network (vmbr0); lan0 = 10.<vxh>.<vxl>.1/24 (unique)
@@ -403,6 +432,13 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
         await new Promise(r => setTimeout(r, 5000));
 
+        const writeReservations = () => writeLaneReservations({
+          gatewayVmId, node: bestNode, vxlanId, goadMacs, pinnedHosts, dnsRecords,
+          spec, subnetScheme, extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
+          liveGoadController: !spec.goad?.prebaked, laneId, logTag: '[ChallengeNetwork]',
+        });
+        if (spec.goad?.enabled) await writeReservations();
+
         // Start all challenge VMs
         for (const vm of deployedVMs) {
           const startPath = vm.type === 'lxc'
@@ -415,16 +451,42 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
 
         // GOAD provisioning (no-op for non-GOAD specs).
         if (spec.goad?.enabled) {
+          let goadError = null;
           try {
-            await goadDeploy.deployGoadLane({
+            const result = spec.goad.prebaked
+              ? await goadDeploy.deployPrebakedGoadLane({
+                lane: { lane_id: laneId }, spec, vxlanId, gatewayVmId, bestNode,
+                laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase,
+                deployedVMs, proxmoxAPI,
+              })
+              : await goadDeploy.deployGoadLane({
               lane: { lane_id: laneId },
               spec, module: challengeModule, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, laneSubnetBase: goadSubnetBase,
+              bestNode, templateNode: await findTemplateNode(goadDeploy.CONTROLLER_TEMPLATE_VMID, getDefaultTemplateNode()),
+              laneSubnetBase: goadSubnetBase,
               extSubnetBase: laneSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
+            goadMeta = result?.goadMeta || { status: 'provisioned', prebaked: true };
+            await logActivity(req, 'lane.goad_provisioned', 'lane', laneId,
+              { forest_rename: result?.goadMeta?.forest_rename || null });
           } catch (goadErr) {
             console.error(`[ChallengeNetwork] GOAD provisioning failed for lane ${laneId}: ${goadErr.message}`);
+            goadError = goadErr;
+            goadMeta = goadErr.goadMeta || { status: 'failed', error: goadErr.message };
+          } finally {
+            if (!spec.goad.prebaked) {
+              try {
+                await writeReservations();
+              } catch (reservationError) {
+                goadMeta = { ...goadMeta, status: 'failed', dhcp_error: reservationError.message };
+                goadError = goadError || reservationError;
+              }
+            }
+          }
+          if (goadError) {
+            goadError.goadMeta = goadMeta;
+            throw goadError;
           }
         }
 
@@ -491,6 +553,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
 
         // Update lane config and deployment record
         const activeConfig = JSON.stringify({
+          ...(goadMeta ? { goad: goadMeta } : {}),
           template_id: template.id,
           template_name: template.name,
           module: challengeModule,
@@ -507,7 +570,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
         });
 
         await cybercoreQuery(
-          `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+          `UPDATE cybercore_lane SET status = 'active', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
           [laneId, activeConfig]
         );
 
@@ -521,9 +584,12 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
       } catch (err) {
         console.error(`[ChallengeNetwork] Deployment failed:`, err.message);
         await cybercoreQuery(
-          `UPDATE cybercore_lane SET status = 'error', config = $2, updated_at = NOW() WHERE lane_id = $1`,
-          [laneId, JSON.stringify({ error: err.message })]
+          `UPDATE cybercore_lane SET status = 'suspended', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+          [laneId, JSON.stringify({ error: err.message,
+            ...((err.goadMeta || goadMeta) ? { goad: err.goadMeta || goadMeta } : {}) })]
         ).catch(() => {});
+        await logActivity(req, 'lane.provisioning_failed', 'lane', laneId,
+          { provisioning_status: 'failed', forest_rename: (err.goadMeta || goadMeta)?.forest_rename || null });
         await query(
           `UPDATE deployment_vuln_selections SET status = 'failed', updated_at = NOW() WHERE id = $1`,
           [deploymentId]
@@ -532,7 +598,7 @@ router.post('/deploy-lab-network', authenticateToken, adminOnly, async (req, res
     })();
 
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

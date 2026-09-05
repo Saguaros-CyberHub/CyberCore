@@ -110,7 +110,8 @@ GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
 # goad_ref field must equal this SHA. Moving this pin means re-vendoring that
 # manifest in the same commit, or the validator built on it describes a GOAD the
 # controller no longer runs.
-GOAD_REF="${GOAD_REF:-4c9a49ea0413631f0e86adc67662aa021b4498d4}"
+# Includes the existing ELK fixes and controller-side forest rename helper.
+GOAD_REF="${GOAD_REF:-0fb45a48e1865fa65054dda22f5e924eea56369c}"
 MEMORY=2048
 CORES=2
 DISK_GB=10
@@ -693,6 +694,19 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
   # their reserved IPs. Orchestrator (admin.js / goad-deploy.js) calls
   # this before waitForWinRM, then restarts the Windows VMs to force
   # fresh DHCP, then runs run.sh for the actual playbook.
+  #
+  # IT WRITES ITS OWN FILE — /etc/dnsmasq.d/goad-lane-reservations.conf — and
+  # never lane-reservations.conf. That one belongs to challenge-lane-deployer.js
+  # (writeLaneReservations), which renders the WHOLE lane before any guest boots:
+  # Kali on the external .50, an extension host such as elk on .24, the consoles,
+  # the GOAD roster, the lane's DNS. prep.sh only ever knew the GOAD roster plus
+  # the controller and Kali, so writing that path with a plain 'cat >' — a
+  # TRUNCATING overwrite — deleted every line it had never heard of. Found on a
+  # live lane the file's header read "written by /opt/goad-light/prep.sh" and it
+  # had no elk line at all, so elk kept .24 only until its next renewal — and
+  # every Windows host ships winlogbeat at a hardcoded <subnet>.24:9200. Two
+  # files that cannot overwrite each other is the fix; dnsmasq reads every *.conf
+  # in /etc/dnsmasq.d, so both sets are served.
   - path: /opt/goad-light/prep.sh
     permissions: '0755'
     content: |
@@ -717,7 +731,9 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
 
       echo "[prep.sh] Writing DHCP reservations to gateway \${GW_IP}..."
       SSH_OPTS="-i /root/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/root/.ssh/known_hosts -o ConnectTimeout=15 -o BatchMode=yes"
-      RESV_FILE="\$RUNTIME/lane-reservations.conf"
+      # Staged under the destination's own name, so an operator debugging on the
+      # controller cannot mistake it for the orchestrator's lane-reservations.conf.
+      RESV_FILE="\$RUNTIME/goad-lane-reservations.conf"
       {
         echo "# GOAD lane DHCP reservations — written by /opt/goad-light/prep.sh"
         echo "\$HOST_MAP" | tr ',' '\n' | while IFS='|' read -r hname hip hmac; do
@@ -727,15 +743,100 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       } > "\$RESV_FILE"
       cat "\$RESV_FILE"
 
-      # Push the reservations file + reload dnsmasq on the gateway. Also clear
-      # any existing leases so dynamic-DHCPed clients can't keep their old
-      # (wrong) IPs after a renewal — they'll be forced to re-request.
-      ssh \$SSH_OPTS root@\$GW_IP "
-        cat > /etc/dnsmasq.d/lane-reservations.conf
-        # Wipe stale leases so renewals can't return to dynamic IPs.
-        : > /var/lib/misc/dnsmasq.leases 2>/dev/null || true
+      # Push the reservations onto the gateway. TWO rules, both learned from live
+      # lanes, and the second is why this is more than a redirect:
+      #
+      #  1. OUR OWN FILE (see the header above), never the orchestrator's.
+      #
+      #  2. NO ADDRESS IS CLAIMED TWICE. dnsmasq refuses to start when two
+      #     dhcp-host lines claim one address — in one file or across two — and
+      #     every restart branch below ends in '|| true', so that failure is
+      #     silent and total: nothing on the lane gets a lease while the deploy
+      #     still reports success. On a challenge lane the orchestrator's table is
+      #     a SUPERSET of this one (same roster, same macForOctet MACs, same
+      #     addresses), so writing ours blind would duplicate every line of it.
+      #     Skip the ones another file already serves — matched on address and on
+      #     MAC, the rule lane-deployer.js neutralizeConflictingReservations uses
+      #     — and keep them as comments so the file records what it decided.
+      #
+      # The remote script is a SINGLE-QUOTED heredoc: nothing in it expands on the
+      # controller, so every \$ below belongs to the gateway's shell, and the
+      # reservations arrive on stdin instead of being interpolated into an ssh
+      # command line where a shell metacharacter would land in a config file.
+      ssh \$SSH_OPTS root@\$GW_IP "\$(cat <<'GWSCRIPT'
+      set -u
+      OURS=/etc/dnsmasq.d/goad-lane-reservations.conf
+      CAND=/tmp/goad-lane-reservations.cand
+      CLAIMED=/tmp/goad-lane-reservations.claimed
+      cat > "\$CAND"
+
+      # Every reservation some OTHER file already serves, normalised to
+      # ",mac,ip,name," so a whole-field match cannot half-match an address.
+      # A commented-out line is deliberately not a claim: installLaneReservations
+      # supersedes the gateway's baked entries by prefixing them with '#'.
+      #
+      # Lowercased on both sides rather than matched with grep -i, because the
+      # two writers spell MAC hex in whatever case they were handed and 'grep -iF'
+      # is not portable — the combination aborts outright on some builds.
+      : > "\$CLAIMED"
+      for f in /etc/dnsmasq.conf /etc/dnsmasq.d/*.conf; do
+        [ -f "\$f" ] || continue
+        [ "\$f" = "\$OURS" ] && continue
+        sed -n 's/^[[:space:]]*dhcp-host=/,/p' "\$f" | sed 's/\$/,/' | tr 'A-Z' 'a-z' >> "\$CLAIMED"
+      done
+
+      {
+        echo "# GOAD lane DHCP reservations - written by /opt/goad-light/prep.sh"
+        echo "# lane-reservations.conf belongs to the orchestrator and is never"
+        echo "# written from here. A reservation another drop-in already serves is"
+        echo "# kept as a comment: two dhcp-host lines claiming one address stop"
+        echo "# dnsmasq, and that takes DHCP down for the whole lane."
+        while IFS= read -r line; do
+          case "\$line" in
+            dhcp-host=*) ;;
+            *) continue ;;
+          esac
+          hmac="\$(echo "\$line" | cut -d= -f2- | cut -d, -f1 | tr 'A-Z' 'a-z')"
+          hip="\$(echo "\$line" | cut -d, -f2)"
+          if grep -qF ",\$hip," "\$CLAIMED" || grep -qF ",\$hmac," "\$CLAIMED"; then
+            echo "# served by another dnsmasq.d file: \$line"
+          else
+            echo "\$line"
+          fi
+        done < "\$CAND"
+      } > "\$OURS"
+      cat "\$OURS"
+
+      # Wipe stale leases so a renewal cannot hand a guest back the dynamic
+      # address it grabbed before any reservation existed. The orchestrator
+      # restarts the Windows VMs immediately after this call for the same reason.
+      : > /var/lib/misc/dnsmasq.leases 2>/dev/null || true
+      rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
+
+      # Prove dnsmasq is serving rather than assume it — the restart above cannot
+      # report failure. If it is down, the file we just wrote is the only thing
+      # that changed, so take it back out: the lane keeps whatever reservations it
+      # already had, which is strictly better than no DHCP at all.
+      if pgrep dnsmasq >/dev/null 2>&1 || pidof dnsmasq >/dev/null 2>&1; then
+        echo "[prep.sh/gw] dnsmasq is serving; \$OURS installed"
+      else
+        echo "[prep.sh/gw] dnsmasq did NOT come back — removing \$OURS"
+        dnsmasq --test 2>&1 | head -5
+        rm -f "\$OURS"
         rc-service dnsmasq restart 2>/dev/null || /etc/init.d/dnsmasq restart 2>/dev/null || systemctl restart dnsmasq 2>/dev/null || true
-      " < "\$RESV_FILE"
+        if pgrep dnsmasq >/dev/null 2>&1 || pidof dnsmasq >/dev/null 2>&1; then
+          echo "[prep.sh/gw] dnsmasq recovered without our file"
+        else
+          rm -f "\$CAND" "\$CLAIMED"
+          echo "[prep.sh/gw] FATAL: this lane has no DHCP server. Every guest will"
+          echo "[prep.sh/gw] sit without an address and waitForWinRM would time out"
+          echo "[prep.sh/gw] thirty minutes from now with nothing naming the cause."
+          exit 1
+        fi
+      fi
+      rm -f "\$CAND" "\$CLAIMED"
+      GWSCRIPT
+      )" < "\$RESV_FILE"
       echo "[prep.sh] Reservations applied."
 
   # ----- Receiving directory for pushed lab trees -----
@@ -989,6 +1090,42 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       unknown_key=hard failure, before the lab chain starts
       exit_2=lab chain succeeded and at least one extension playbook failed
       available=see /opt/goad-light/extensions-available.txt
+
+  # The lane HOST_MAP owns extension IPs; the main inventory base is internal on v3.
+  - path: /opt/goad-light/apply-host-map.py
+    permissions: '0755'
+    content: |
+      import ipaddress
+      import re
+      import sys
+      from pathlib import Path
+
+      inventory = Path(sys.argv[1])
+      addresses = {}
+      for triple in sys.argv[2].split(','):
+          fields = triple.split('|')
+          if len(fields) != 3:
+              raise SystemExit('Invalid HOST_MAP triple')
+          name, address, _ = fields
+          if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+              raise SystemExit('Invalid HOST_MAP hostname')
+          ipaddress.IPv4Address(address)
+          addresses[name.lower()] = address
+
+      count = 0
+      def replace(match):
+          global count
+          name = match.group(1).lower()
+          if name not in addresses:
+              return match.group(0)
+          count += 1
+          return match.group(1) + match.group(2) + addresses[name]
+
+      original = inventory.read_text()
+      updated = re.sub(r'(?m)^([A-Za-z0-9_-]+)([^\r\n]*?\bansible_host=)(\S+)', replace, original)
+      if not count:
+          raise SystemExit('Extension inventory has no host matching HOST_MAP')
+      inventory.write_text(updated)
 
   - path: /opt/goad-light/run.sh
     permissions: '0755'
@@ -1266,6 +1403,7 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
             echo "       Source: \$EXT_INV_SRC" >&2
             exit 1
           fi
+          python3 /opt/goad-light/apply-host-map.py "\$RUNTIME/inventory_ext_\$ext" "\$HOST_MAP"
           echo "==> Rendered extension inventory: \$RUNTIME/inventory_ext_\$ext"
           grep -E 'ansible_host=' "\$RUNTIME/inventory_ext_\$ext" | sed 's/^/    /' || true
           # ---------- Connection variables for this extension's server ----

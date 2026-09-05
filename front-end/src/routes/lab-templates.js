@@ -9,6 +9,7 @@
  */
 
 const express = require('express');
+const { isDeepStrictEqual } = require('node:util');
 const router = express.Router();
 const { query } = require('../utils/db');
 const { cybercoreQuery } = require('../utils/cybercore-db');
@@ -17,9 +18,12 @@ const { getDefaultTemplateNode } = require('../utils/site-config');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 const goadDeploy = require('../utils/goad-deploy');
 const { reserveLabNetwork, teardownLabNetwork, sanitizeZoneAbbrev } = require('../utils/lab-network-provision');
-const { validateTopology } = require('../utils/topology-validate');
+const {
+  validateTopology, findForestRenameRefusals, goadLabDomains, goadLabRebrandable,
+} = require('../utils/topology-validate');
 const { buildSpecVm, buildSpecNetwork } = require('../utils/challenge-spec');
 const adDomainRules = require('../utils/ad-domain-rules');
+const goadRebrand = require('../utils/goad-lab-rebrand');
 
 const adminOnly = requireRole('admin');
 
@@ -44,6 +48,10 @@ router.get('/goad/labs', authenticateToken, adminOnly, (req, res) => {
       // and stored THAT — so every lab but GOAD-Light persisted a domain it does
       // not have.
       childSubdomain: lab.childSubdomain === undefined ? null : lab.childSubdomain,
+      // The compiler's manifest metadata determines supported identities.
+      // No GOAD source tree is required on the web server for this catalog.
+      domains:     goadLabDomains(lab),
+      rebrandable: goadLabRebrandable(key, lab),
       // Which extensions may be offered for THIS lab, with the reason the rest
       // may not. Sent per-lab rather than making the client re-derive
       // compatibility, so there is one implementation of that rule.
@@ -305,6 +313,40 @@ router.get('/vuln-scripts-categories', authenticateToken, adminOnly, async (req,
 // CHALLENGE MANAGEMENT (crucible_challenge in cybercore_db)
 // ============================================================================
 
+/**
+ * The same spec with `goad.generated_lab.files` replaced by a count.
+ *
+ * `files` is a whole rewritten GOAD lab tree — every config.json, inventory and
+ * template the controller is handed, tens of kilobytes per challenge — and it is
+ * read at DEPLOY time by resolveGeneratedLab, never by anything holding a list
+ * row. GET /lab-templates returns the full spec for EVERY active challenge and
+ * the Designer calls it three times per create, so the tree was being serialized
+ * and shipped a dozen times over to render a table of names and VM counts.
+ *
+ * Returns the caller's object BY IDENTITY when there is nothing to strip, which
+ * is what lets the list route keep every other row byte-identical to what it has
+ * always returned.
+ */
+function withoutGeneratedLabFiles(spec) {
+  const goad = spec && typeof spec === 'object' ? spec.goad : null;
+  const gen = goad && typeof goad === 'object' ? goad.generated_lab : null;
+  if (!gen || typeof gen !== 'object' || !gen.files) return spec;
+  const { files, ...rest } = gen;
+  return {
+    ...spec,
+    goad: {
+      ...goad,
+      // file_count, not the paths: the list caller only needs to know a tree is
+      // there. Both shapes normalizeFiles accepts are counted — an array of
+      // { path, content } and a path -> content map.
+      generated_lab: {
+        ...rest,
+        file_count: Array.isArray(files) ? files.length : Object.keys(files).length,
+      },
+    },
+  };
+}
+
 // GET /api/admin/lab-templates — list challenges as "templates"
 router.get('/lab-templates', authenticateToken, adminOnly, async (req, res) => {
   try {
@@ -320,8 +362,13 @@ router.get('/lab-templates', authenticateToken, adminOnly, async (req, res) => {
     // Enrich with VM count from spec
     const rows = result.rows.map(r => {
       const spec = typeof r.spec === 'string' ? JSON.parse(r.spec) : (r.spec || {});
+      const lean = withoutGeneratedLabFiles(spec);
       return {
         ...r,
+        // Only when something was actually stripped, so a row with no generated
+        // lab is byte-identical to what this route has always returned — spec
+        // included, in whatever shape the driver handed it over.
+        ...(lean === spec ? {} : { spec: lean }),
         vm_count: (spec.vms || []).length || (spec.template_vmid ? 1 : 0),
         phantom_count: (spec.phantom_assets || []).length,
         vxlan_block: spec.vxlan_block || null
@@ -411,10 +458,38 @@ function toDifficultyInt(value) {
 // means tearing the lab down and re-creating it, not editing a JSON field.
 const PROTECTED_SPEC_KEYS = ['vxlan_block', 'zone', 'cle', 'course_id'];
 
+// Compilers own these definitions. An ordinary editor may round-trip them or
+// omit them, but cannot replace them with an arbitrary controller payload.
+function preserveCompiledGoad(current, incoming) {
+  const next = { ...incoming };
+  for (const key of ['lab', 'generated_lab', 'rename_plan']) {
+    if (Object.hasOwn(incoming, key)
+        && !isDeepStrictEqual(incoming[key], current?.[key])) {
+      throw new Error(`goad.${key} is server-owned; regenerate the environment to replace it.`);
+    }
+    if (Object.hasOwn(current || {}, key)) next[key] = current[key];
+    else delete next[key];
+  }
+  if (current?.lab || current?.generated_lab || current?.rename_plan) {
+    // A compiled tree and its authored identity must travel together. Keeping
+    // the tree while accepting a different version/domain is also corruption.
+    for (const key of ['version', 'domain', 'child_subdomain', 'prebaked']) {
+      if (Object.hasOwn(incoming, key)
+          && !isDeepStrictEqual(incoming[key] ?? null, current[key] ?? null)) {
+        throw new Error(`goad.${key} belongs to the compiled environment; regenerate it to change this field.`);
+      }
+      if (Object.hasOwn(current, key)) next[key] = current[key];
+    }
+  }
+  if (next.rename_forest !== true) delete next.rename_forest;
+  return next;
+}
+
 // PUT /api/admin/lab-templates/:id — update challenge spec (add VMs, phantom assets, vuln defaults)
 router.put('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) => {
   try {
-    const { name, description, difficulty, spec, vm_specs, phantom_assets } = req.body;
+    const { name, description, difficulty, vm_specs, phantom_assets } = req.body;
+    let spec = req.body.spec;
 
     const existing = await cybercoreQuery(
       `SELECT spec FROM crucible_challenge WHERE challenge_id = $1`, [req.params.id]
@@ -424,6 +499,36 @@ router.put('/lab-templates/:id', authenticateToken, adminOnly, async (req, res) 
     const currentSpec = typeof existing.rows[0].spec === 'string'
       ? JSON.parse(existing.rows[0].spec || '{}')
       : (existing.rows[0].spec || {});
+
+    if (spec && Object.hasOwn(spec, 'goad') && spec.goad === null
+        && (currentSpec.goad?.lab || currentSpec.goad?.generated_lab || currentSpec.goad?.rename_plan)) {
+      const disabled = { ...currentSpec.goad, enabled: false };
+      delete disabled.rename_forest;
+      spec = { ...spec, goad: disabled };
+    }
+    // ── the goad guard, and it runs BEFORE the merge on purpose ─────────────
+    if (spec && Object.hasOwn(spec, 'goad') && spec.goad && typeof spec.goad === 'object') {
+      try {
+        spec = { ...spec, goad: preserveCompiledGoad(currentSpec.goad, spec.goad) };
+      } catch (error) {
+        return res.status(400).json({ error: error.message, field: 'goad' });
+      }
+      const renameRefusals = findForestRenameRefusals({ ...currentSpec, ...spec })
+        .filter(f => f.severity === 'error');
+      if (renameRefusals.length) {
+        return res.status(400).json({
+          error: renameRefusals.map(f => f.message).join(' '), field: 'goad',
+          errors: renameRefusals.map(f => f.message), findings: renameRefusals
+        });
+      }
+      if (spec.goad.rename_forest === true) {
+        const identity = goadRebrand.describeRebrand({ ...currentSpec, ...spec });
+        if (identity.willRebrand) {
+          spec.goad = { ...spec.goad, version: identity.baseLab,
+            domain: identity.domain, child_subdomain: identity.childSubdomain };
+        }
+      }
+    }
 
     // Merge rather than replace. `vm_specs`/`phantom_assets` are accepted as
     // top-level aliases because that is the shape the template editor posts;
@@ -490,6 +595,27 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       template_vmid, vms: vmsList, max_lanes, module, challenge_type,
       goad, subnet_scheme, network, phantom_assets
     } = req.body;
+
+    const suppliedDefinition = goad
+      && ['lab', 'generated_lab', 'rename_plan'].find(key => Object.hasOwn(goad, key));
+    if (suppliedDefinition) {
+      return res.status(400).json({
+        error: `goad.${suppliedDefinition} is server-owned. Edit the original compiled environment or regenerate it; author the forest fields to create a new stock lab.`,
+        field: 'goad'
+      });
+    }
+
+    // Validate the authored request before legacy defaults or extension filters
+    // can hide an invalid explicit opt-in. Only plan metadata is prepared here;
+    // the controller reads and transforms its own GOAD checkout at deploy.
+    const rawRenameRefusals = findForestRenameRefusals({ goad, vms: vmsList })
+      .filter(f => f.severity === 'error');
+    if (rawRenameRefusals.length) {
+      return res.status(400).json({
+        error: rawRenameRefusals.map(f => f.message).join(' '), field: 'goad',
+        errors: rawRenameRefusals.map(f => f.message), findings: rawRenameRefusals
+      });
+    }
 
     if (!name || !challenge_key || !max_lanes) {
       return res.status(400).json({
@@ -581,7 +707,8 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
       // the catalog, which is what the Designer fills the fields from.
       const goadDomains = adDomainRules.validateGoadDomains({
         domain:          goad.domain          || 'cybersaguaros.local',
-        child_subdomain: goad.child_subdomain === undefined ? 'tumamoc' : goad.child_subdomain
+        child_subdomain: goad.child_subdomain === undefined
+          ? (goad.rename_forest === true ? null : 'tumamoc') : goad.child_subdomain
       });
       if (goadDomains.errors.length) {
         return res.status(400).json({
@@ -612,6 +739,12 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
         admin_password:   goad.admin_password   || 'vagrant',
         include_kali:     goad.include_kali !== false  // default true
       };
+      if (goad.rename_forest === true) {
+        const identity = goadRebrand.describeRebrand({ goad });
+        spec.goad.version = identity.baseLab;
+        spec.goad.domain = identity.domain;
+        spec.goad.child_subdomain = identity.childSubdomain;
+      }
 
       // Extensions: a DECLARATION of what the golden images already contain, not
       // an install instruction. Resolved through the same filter the catalog
@@ -647,6 +780,35 @@ router.post('/create-lab', authenticateToken, adminOnly, async (req, res) => {
             ext: String(goad.fixed_subnet.ext || goad.fixed_subnet.int).trim()
           };
         }
+      }
+
+      // Forest rename: WRITTEN ONLY WHEN TRUE, the same rule extensions and
+      // prebaked follow above, and for a stronger reason than byte-identity.
+      // The create route defaults every GOAD spec to cybersaguaros.local /
+      // tumamoc whatever lab it names, so `domain !== forestRoot` is true for
+      // essentially every spec already stored — a derived trigger would
+      // recompile all of them into a forest nobody chose. A key that is absent
+      // from every stored row cannot be produced by an edit, which is the whole
+      // migration story.
+      //
+      // Placed after extensions and prebaked because the refusals are about the
+      // ASSEMBLED spec: which extensions survived the compatibility filter, and
+      // whether this is a pre-baked lane at all.
+      if (goad.rename_forest === true) {
+        spec.goad.rename_forest = true;
+      }
+      // Self-gating — it returns nothing at all unless rename_forest is true —
+      // so it runs on every GOAD create and costs nothing on the ones that do
+      // not ask for a rename. Errors only: a future rename finding that merely
+      // warns must not start 400ing a save that works.
+      const renameRefusals = findForestRenameRefusals(spec).filter(f => f.severity === 'error');
+      if (renameRefusals.length) {
+        return res.status(400).json({
+          error: renameRefusals.map(f => f.message).join(' '),
+          field: 'goad',
+          errors: renameRefusals.map(f => f.message),
+          findings: renameRefusals
+        });
       }
     }
 

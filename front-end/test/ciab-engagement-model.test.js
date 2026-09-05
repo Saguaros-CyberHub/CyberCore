@@ -2989,7 +2989,9 @@ test('B0-107: isGoadVm is decided OFFLINE, and the lab table cannot drift', () =
   for (const [re, why] of [
     [/if \(!spec\?\.goad\?\.enabled\) return \{\};/, 'nothing is a lab host unless goad.enabled'],
     [/if \(!Array\.isArray\(spec\.vms\)\) return \{\};/, 'and unless spec.vms is an array'],
-    [/const labName = spec\.goad\.version \|\| DEFAULT_LAB;/, 'the lab is goad.version, defaulted'],
+    [/const labName = canonicalGoadLabName\(spec\.goad\.version \|\| DEFAULT_LAB\);/, 'the lab is goad.version, canonicalized and defaulted'],
+    [/const supplied = spec\.goad\.lab;/, 'a compiled lab supplies its own roster'],
+    [/const lab = supplied \|\| GOAD_LABS\[labName\];/, 'the supplied roster precedes the built-in lab'],
     [/const labDef = lab \|\| GOAD_LABS\[DEFAULT_LAB\];/, 'an UNKNOWN version falls back, it does not fail'],
     [/const byName = Object\.fromEntries\(labDef\.vms\.map\(v => \[v\.name\.toLowerCase\(\), v\]\)\);/,
       'matching is on name.toLowerCase(), with no trim'],
@@ -3055,6 +3057,67 @@ test('B0-107: isGoadVm is decided OFFLINE, and the lab table cannot drift', () =
     + `${TRACK_B} (B0)`);
   assert.ok(/const goadSubnetBase = isV3 \? net\.lanInt\.base3 : net\.lan\.base3;/.test(deployer),
     `Internal on v3, the one flat lane otherwise — which is what segment_for_address reports. ${TRACK_B} (B0)`);
+});
+
+test('B0-107b: engagement addresses follow the real resolver for aliases, compiled labs and WS01', () => {
+  // Run the actual catalog/resolver source with only validation and logging
+  // replaced. Every fixture is valid; this exercises membership without loading
+  // the deployer's network dependencies into the pure engagement compiler.
+  const source = read(GOAD_DEPLOY_REL);
+  const declarations = ['GOAD_LABS', 'GOAD_EXTENSIONS'].map(name => {
+    const match = source.match(new RegExp(`const ${name} = \\{[\\s\\S]*?\\r?\\n\\};`));
+    assert.ok(match, `${name} must remain readable for the parity contract`);
+    return match[0];
+  });
+  const canonical = rawFn(read('src/utils/goad-lab-rebrand.js'), 'canonicalGoadLabName');
+  const functions = ['getLab', 'extensionsForLab', 'resolveGoadExtensions', 'resolveGoadLab'].map(name => {
+    const fn = rawFn(source, name);
+    assert.ok(fn, `${name} must remain readable for the parity contract`);
+    return fn;
+  });
+  assert.ok(canonical);
+  const authority = new Function(`
+    const str = value => value == null ? '' : String(value);
+    const DEFAULT_LAB = 'GOAD-Light';
+    const assertValidLabDef = () => {};
+    const console = { warn() {} };
+    ${declarations.join('\n')}
+    ${canonical}
+    ${functions.join('\n')}
+    return { resolve: resolveGoadLab, extensions: GOAD_EXTENSIONS };
+  `)();
+  const extensionMirror = Object.fromEntries(Object.values(authority.extensions)
+    .filter(ext => ext.inLab)
+    .map(ext => [ext.key, { name: ext.machine, ipOctet: ext.ipOctet, compatibility: ext.compatibility }]));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(PLAN.GOAD_LAB_EXTENSIONS)), extensionMirror);
+
+  const compiled = (vms, baseLab) => ({ forestRoot: 'cy400test.org', vms, ...(baseLab ? { baseLab } : {}) });
+  const custom = { name: 'AUTH01', role: 'dc', os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 60 };
+  const selections = [[], ['ws01'], [' WS01 ', 'ws01', 'elk', 'lx01', 'unknown']];
+  const versions = ['GOAD-Mini', 'mini', ' goad-mini ', 'light', 'GOAD-Light', 'GOAD', 'full', 'goad', 'NHA', 'SCCM', 'DRACARYS', 'unknown', undefined];
+  const fixtures = versions.flatMap(version => selections.map(extensions => ({ enabled: true, version, extensions })));
+  fixtures.push(
+    { enabled: true, version: 'CC-MINI-CUSTOM', lab: compiled([custom], 'GOAD-Mini'), extensions: ['ws01', 'elk'] },
+    { enabled: true, version: 'CIAB-custom', lab: compiled([custom]), extensions: ['ws01'] },
+    { enabled: true, version: 'CC-MINI-CONFLICT', lab: compiled([{ ...custom, ipOctet: 31 }], 'GOAD-Mini'), extensions: ['ws01'] },
+    { enabled: true, version: 'CC-MINI-WS', lab: compiled([{ ...custom, name: 'ws01', ipOctet: 61 }], 'GOAD-Mini'), extensions: ['ws01'] }
+  );
+  const candidates = ['DC01', 'DC02', 'DC03', 'SRV01', 'SRV02', 'SRV03', 'AUTH01', 'ws01', 'WS01', 'lx01', 'elk', ' DC01'];
+  for (const options of fixtures) {
+    const spec = { goad: options, vms: candidates.map(name => ({ name })) };
+    const roster = authority.resolve(spec).labDef.vms;
+    for (const name of candidates) {
+      const vm = roster.find(host => host.name.toLowerCase() === name.toLowerCase());
+      assert.strictEqual(PLAN.goadLabOctet(spec, name), vm?.ipOctet ?? null,
+        `${JSON.stringify(options)} / ${name} must match the actual deployed roster`);
+    }
+  }
+  assert.strictEqual(PLAN.goadLabOctet({ goad: { enabled: true, version: 'mini' }, vms: [] }, 'DC02'), null);
+  assert.strictEqual(PLAN.goadLabOctet({ goad: { enabled: true, version: 'full' }, vms: [] }, 'DC03'), 12);
+  const invalidGenerated = { goad: { enabled: true, version: 'CC-absent', generated_lab: {} }, vms: [{ name: 'DC01' }] };
+  assert.throws(() => authority.resolve(invalidGenerated), /cannot fall back/);
+  assert.strictEqual(PLAN.goadLabOctet(invalidGenerated, 'DC01'), null, 'refused identities must not acquire invented Light addresses');
+  assert.strictEqual((read(PLAN_REL).match(/require\(/g) || []).length, 5);
 });
 
 /** A v3 external engagement whose spec is an AD lab. */

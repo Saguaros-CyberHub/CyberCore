@@ -1,0 +1,93 @@
+{
+  "schema_version": 2,
+  "lab": "GOAD-Light",
+  "chain": [
+    "build.yml",
+    "ad-servers.yml",
+    "ad-parent_domain.yml",
+    "ad-child_domain.yml",
+    "wait5m.yml",
+    "ad-members.yml",
+    "ad-trusts.yml",
+    "ad-data.yml",
+    "ad-gmsa.yml",
+    "laps.yml",
+    "ad-relations.yml",
+    "adcs.yml",
+    "ad-acl.yml",
+    "servers.yml",
+    "security.yml",
+    "vulnerabilities.yml"
+  ],
+  "lab_definition": {
+    "displayName": "GOAD-Light (3 Win VMs, 2 domains)",
+    "description": "Lighter GOAD without Essos forest. Recommended starter.",
+    "forestRoot": "cybersaguaros.local",
+    "domains": [
+      "cybersaguaros.local",
+      "tumamoc.cybersaguaros.local"
+    ],
+    "childSubdomain": "tumamoc",
+    "vms": [
+      {
+        "name": "DC01",
+        "role": "dc",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 10,
+        "nic_model": "e1000"
+      },
+      {
+        "name": "DC02",
+        "role": "dc",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 11,
+        "nic_model": "e1000"
+      },
+      {
+        "name": "SRV02",
+        "role": "member",
+        "os": "Windows Server 2019",
+        "template_vmid": 1004,
+        "ipOctet": 22,
+        "nic_model": "e1000"
+      }
+    ]
+  },
+  "stock": {
+    "forest_root": "cybersaguaros.local",
+    "netbios": "CYBERSAGUAROS",
+    "first_label": "cybersaguaros",
+    "hosts": {
+      "dc01": {
+        "hostname": "TUC-DC01",
+        "roster_name": "DC01",
+        "domain": "cybersaguaros.local"
+      },
+      "dc02": {
+        "hostname": "TUC-DC02",
+        "roster_name": "DC02",
+        "domain": "tumamoc.cybersaguaros.local"
+      },
+      "srv02": {
+        "hostname": "TUC-SRV02",
+        "roster_name": "SRV02",
+        "domain": "tumamoc.cybersaguaros.local"
+      }
+    },
+    "domains": {
+      "tumamoc.cybersaguaros.local": {
+        "netbios": "TUMAMOC",
+        "dc": "dc02",
+        "kind": "child"
+      },
+      "cybersaguaros.local": {
+        "netbios": "CYBERSAGUAROS",
+        "dc": "dc01",
+        "kind": "root"
+      }
+    }
+  },
+  "controller_recipe": "GOAD-Light"
+}

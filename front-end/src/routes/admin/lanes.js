@@ -20,6 +20,9 @@ const { waitForGuestAgent, executeScriptsOnVM, getVMIPs } = require('../../utils
 const { plantFlagsForLane } = require('../../utils/flag-manager');
 const { selectBestNode } = require('../../utils/node-selector');
 const goadDeploy = require('../../utils/goad-deploy');
+const { withGoadAgentVulnScripts } = require('../../utils/goad-agent-attach');
+const { resolveGoadExternalPins, resolveSpecAddressing, writeLaneReservations,
+  applyPrebakedFixedSubnet, validateGoadLaneAddressing } = require('../../utils/challenge-lane-deployer');
 const tailscale = require('../../utils/tailscale');
 const attachedModules = require('../../utils/attached-modules');
 const { guacAPI } = require('../../utils/guacamole');
@@ -121,8 +124,11 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
       return res.status(404).json({ error: `Challenge '${challenge_key}' not found or not active` });
     }
     const challenge = challengeResult.rows[0];
-    const spec = typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec;
+    const spec = goadDeploy.prepareGoadDeploymentSpec(
+      typeof challenge.spec === 'string' ? JSON.parse(challenge.spec) : challenge.spec);
+    const laneScripts = withGoadAgentVulnScripts(selectedVulnScripts, spec);
     const subnetScheme = challenge.subnet_scheme || 'v1';
+    validateGoadLaneAddressing(spec, subnetScheme);
 
     const specVmCount = (spec.vms || []).length || 1;
     if (!confirm) {
@@ -180,6 +186,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
     const templateVmid = spec.template_vmid || 1600;
     const gatewayVmid = resolveGatewayVmid(module, subnetScheme, spec);
+    const gatewayTemplateNode = await findTemplateNode(gatewayVmid, getDefaultTemplateNode());
     const templateNode = await findTemplateNode(templateVmid, spec.template_node || getDefaultTemplateNode());
     console.log(`[Deploy] subnet_scheme=${subnetScheme} → gateway template=${gatewayVmid}`);
     const bestNodeInfo = await selectBestNode();
@@ -227,9 +234,11 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
     logActivity(req, 'deploy_lane', 'lane', lane.lane_id, { challenge_key, module, vxlan_id: vxlanId, user_id });
 
     (async () => {
+      let goadMeta = null;
       try {
         const net = resolveLaneNetworking(subnetScheme, module, vxlanId, { wanIp: laneWanIp });
         const isV3 = subnetScheme === 'v3';
+        applyPrebakedFixedSubnet(net, isV3, spec);
         const vnetExtName = vnet.vnet;
         const vnetIntName = isV3 ? vnetInt.vnet : vnet.vnet;
         const laneSubnetBase = isV3 ? net.lanExt.base3 : net.lan.base3;
@@ -239,11 +248,23 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
         const vmSpecs = spec.vms || [{ name: challenge_key, template_vmid: templateVmid, type: 'qemu', vm_offset: 600000 }];
         const deployedVMs = [];
+        const externalPins = resolveGoadExternalPins(spec);
+        const { pinnedHosts, dnsRecords } = resolveSpecAddressing({
+          specVms: vmSpecs, goadMacs, requiredIpOctets: externalPins,
+          subnetScheme, laneSubnetBase, goadSubnetBase, reserved: [1, 5, 50],
+        });
+        await cybercoreQuery(
+          `UPDATE cybercore_lane SET config = config || $2::jsonb WHERE lane_id = $1`,
+          [lane.lane_id, JSON.stringify({ node: bestNode, gateway_vm_id: 100000 + vxlanId,
+            vms: vmSpecs.map(v => ({ vm_id: (v.vm_offset || 600000) + vxlanId,
+              name: v.name || challenge_key, type: v.type || 'qemu', node: bestNode })) })]
+        );
 
         for (const vmSpec of vmSpecs) {
           const vmId = (vmSpec.vm_offset || 600000) + vxlanId;
           const vmType = vmSpec.type || 'qemu';
           const vmTemplate = vmSpec.template_vmid || templateVmid;
+          const vmTemplateNode = await findTemplateNode(vmTemplate, spec.template_node || getDefaultTemplateNode());
           const vmName = vmSpec.name || challenge_key;
           const isGoadVm = !!goadMacs[vmName];
           // Single owner for VM→VNet attachment: explicit spec.vms[].nics when
@@ -253,6 +274,8 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             subnetScheme,
             bridges: resolveSegmentBridges(subnetScheme, vnetExtName, vnetIntName),
             goadMac: goadMacs[vmName]?.mac,
+            pinnedMac: goadMacs[vmName]?.mac || (externalPins[vmName] != null
+              ? goadDeploy.macForOctet(externalPins[vmName], vxlanId) : null),
             goadVm: goadMacs[vmName],
             isGoadVm,
           });
@@ -260,20 +283,20 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           console.log(`[Deploy] Cloning ${vmType} template ${vmTemplate} → ${vmId} (${vmName})`);
 
           if (vmType === 'lxc') {
-            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${vmTemplate}/clone`, {
+            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${vmTemplateNode}/lxc/${vmTemplate}/clone`, {
               newid: vmId, hostname: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
               description: `Challenge: ${challenge_key}\nVM: ${vmName}\nLane: ${lane.lane_id}`,
               pool: `${module}-pool`
             });
-            if (cloneResult) await waitForTask(templateNode, cloneResult);
+            if (cloneResult) await waitForTask(vmTemplateNode, cloneResult);
             await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${vmId}/config`, nets);
           } else {
-            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/qemu/${vmTemplate}/clone`, {
+            const cloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${vmTemplateNode}/qemu/${vmTemplate}/clone`, {
               newid: vmId, name: `${laneName}-${vmName}`.replace(/[^a-z0-9-]/gi, '-').substring(0, 63).toLowerCase(), full: 1, target: bestNode,
               description: `Challenge: ${challenge_key}\nVM: ${vmName}\nLane: ${lane.lane_id}`,
               pool: `${module}-pool`
             });
-            if (cloneResult) await waitForTask(templateNode, cloneResult);
+            if (cloneResult) await waitForTask(vmTemplateNode, cloneResult);
 
             if (dualHomed) {
               await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, nets);
@@ -300,6 +323,10 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
             }
           }
 
+          if (spec.goad?.prebaked && isGoadVm && vmType === 'qemu') {
+            const ci = await laneDeployer.findCloudInitDrive(bestNode, vmId);
+            if (ci) await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/qemu/${vmId}/config`, { delete: ci });
+          }
           deployedVMs.push({ vm_id: vmId, name: vmName, type: vmType, node: bestNode });
         }
 
@@ -315,7 +342,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           .replace(/[^a-z0-9-]/g, '-').replace(/-+$/g, '');
         const gwHostname = `${baseHost}-b${claimSecret}`;
 
-        const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${templateNode}/lxc/${gatewayVmid}/clone`, {
+        const gwCloneResult = await proxmoxAPI('POST', `/api2/json/nodes/${gatewayTemplateNode}/lxc/${gatewayVmid}/clone`, {
           newid: gatewayVmId,
           hostname: gwHostname,
           full: 1,
@@ -324,7 +351,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           pool: `${module}-pool`
         });
 
-        if (gwCloneResult) await waitForTask(templateNode, gwCloneResult);
+        if (gwCloneResult) await waitForTask(gatewayTemplateNode, gwCloneResult);
 
         if (isV3) {
           await proxmoxAPI('PUT', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/config`, {
@@ -350,6 +377,12 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
         await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/lxc/${gatewayVmId}/status/start`);
         await new Promise(r => setTimeout(r, 5000));
+        const writeReservations = () => writeLaneReservations({
+          gatewayVmId, node: bestNode, vxlanId, goadMacs, pinnedHosts, dnsRecords,
+          spec, subnetScheme, extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
+          liveGoadController: !spec.goad?.prebaked, laneId: lane.lane_id, logTag: '[Deploy]',
+        });
+        if (spec.goad?.enabled) await writeReservations();
 
         for (const vm of deployedVMs) {
           const startPath = vm.type === 'lxc'
@@ -359,22 +392,48 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
         }
 
         if (spec.goad?.enabled) {
+          let goadError = null;
           try {
-            await goadDeploy.deployGoadLane({
+            const result = spec.goad.prebaked
+              ? await goadDeploy.deployPrebakedGoadLane({
+                lane, spec, vxlanId, gatewayVmId, bestNode,
+                laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase,
+                deployedVMs, proxmoxAPI,
+              })
+              : await goadDeploy.deployGoadLane({
               lane, spec, module, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
-              bestNode, templateNode, laneSubnetBase: goadSubnetBase,
+              bestNode, templateNode: await findTemplateNode(goadDeploy.CONTROLLER_TEMPLATE_VMID, getDefaultTemplateNode()),
+              laneSubnetBase: goadSubnetBase,
               extSubnetBase: laneSubnetBase, deployedVMs,
               proxmoxAPI, waitForTask, query: cybercoreQuery
             });
+            goadMeta = result?.goadMeta || { status: 'provisioned', prebaked: true };
+            await logActivity(req, 'lane.goad_provisioned', 'lane', lane.lane_id,
+              { forest_rename: result?.goadMeta?.forest_rename || null });
           } catch (goadErr) {
             console.error(`[GOAD] Provisioning failed for lane ${lane.lane_id}:`, goadErr.message);
+            goadError = goadErr;
+            goadMeta = goadErr.goadMeta || { status: 'failed', error: goadErr.message };
+          } finally {
+            if (!spec.goad.prebaked) {
+              try {
+                await writeReservations();
+              } catch (reservationError) {
+                goadMeta = { ...goadMeta, status: 'failed', dhcp_error: reservationError.message };
+                goadError = goadError || reservationError;
+              }
+            }
+          }
+          if (goadError) {
+            goadError.goadMeta = goadMeta;
+            throw goadError;
           }
         }
 
-        if (selectedVulnScripts && selectedVulnScripts.length > 0) {
-          console.log(`[Deploy] Running ${selectedVulnScripts.length} vuln scripts on lane ${lane.lane_id}...`);
+        if (laneScripts && laneScripts.length > 0) {
+          console.log(`[Deploy] Running ${laneScripts.length} vuln scripts on lane ${lane.lane_id}...`);
 
-          const scriptEntries = selectedVulnScripts.map(s => ({
+          const scriptEntries = laneScripts.map(s => ({
             script_slug: s.script_slug,
             vm_name: s.vm_name || deployedVMs[0]?.name || 'default',
             status: 'pending',
@@ -397,7 +456,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
               console.error(`[Deploy] Guest agent not responding on ${vm.name} — skipping scripts`);
               continue;
             }
-            const vmScriptSlugs = selectedVulnScripts
+            const vmScriptSlugs = laneScripts
               .filter(s => (s.vm_name || deployedVMs[0]?.name) === vm.name)
               .map(s => s.script_slug);
             if (vmScriptSlugs.length > 0) {
@@ -441,6 +500,7 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
 
         const primaryVm = deployedVMs[0];
         const activeConfig = JSON.stringify({
+          ...(goadMeta ? { goad: goadMeta } : {}),
           challenge_vm_id: primaryVm?.vm_id,
           gateway_vm_id: gatewayVmId,
           node: bestNode,
@@ -456,21 +516,24 @@ router.post('/deploy-lane', authenticateToken, adminOnly, async (req, res) => {
           } : {})
         });
         await cybercoreQuery(
-          `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+          `UPDATE cybercore_lane SET status = 'active', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
           [lane.lane_id, activeConfig]
         );
         console.log(`Lane ${lane.lane_id} deployed successfully (VXLAN ${vxlanId}, ${deployedVMs.length} VMs)`);
       } catch (err) {
         console.error(`Lane ${lane.lane_id} deployment failed:`, err.message);
         await cybercoreQuery(
-          `UPDATE cybercore_lane SET status = 'error', config = $2, updated_at = NOW() WHERE lane_id = $1`,
-          [lane.lane_id, JSON.stringify({ error: err.message })]
+          `UPDATE cybercore_lane SET status = 'suspended', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+          [lane.lane_id, JSON.stringify({ error: err.message,
+            ...((err.goadMeta || goadMeta) ? { goad: err.goadMeta || goadMeta } : {}) })]
         ).catch(() => {});
+        await logActivity(req, 'lane.provisioning_failed', 'lane', lane.lane_id,
+          { provisioning_status: 'failed', forest_rename: (err.goadMeta || goadMeta)?.forest_rename || null });
       }
     })();
 
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: error.message });
   }
 });
 

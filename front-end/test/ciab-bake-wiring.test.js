@@ -323,15 +323,16 @@ test('the playbook still receives exactly the arguments it always did', async ()
   assert.strictEqual(seen.proxmoxAPI, args.proxmoxAPI);
 });
 
-test('a built-in lane writes the lane row it wrote before any of this existed', async () => {
+test('a built-in lane records controller ownership and cleanup without delivery or probe keys', async () => {
   await goad.deployGoadLane(laneArgs(builtInSpec(), {
     runPlaybook: async () => ({ exited: true, exitcode: 0 }),
   }));
   const written = laneConfigWrite();
   assert.deepStrictEqual(Object.keys(written).sort(),
-    ['controller_vmid', 'error', 'provisioned_at', 'status'],
+    ['controller_clone_attempted', 'controller_node', 'controller_stop', 'controller_vmid', 'error', 'provisioned_at', 'stage', 'status'],
     'delivery and probe keys must appear only when the thing they describe happened');
   assert.strictEqual(written.status, 'provisioned');
+  assert.strictEqual(written.controller_stop.stopped, true);
 });
 
 test('the injected defaults ARE the shipped implementations', () => {

@@ -953,7 +953,7 @@
                   <div>
                     <label style="font-size: 0.7rem; font-weight:600; color:var(--text-secondary);" for="topoGoadDomain">Forest Domain</label>
                     <input type="text" id="topoGoadDomain" value="cybersaguaros.local" oninput="onTopoGoadDomainInput()"
-                           title="Resets to the selected lab's own forest root when you change the GOAD version. A pre-baked lane cannot rename its forest — the domain lives in NTDS inside the golden image — so editing this only takes effect on a lane that runs the playbook."
+                           title="Defaults to the selected lab's stock forest. Enable Rename forest to build your authored root and child domains. Computer names remain the fixed catalog roster; compiled and pre-baked identities require regeneration."
                            style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
                   </div>
                   <div>
@@ -963,6 +963,23 @@
                            title="A single label, e.g. tumamoc — the child is always <label>.<forest domain>. Leave blank for a single-domain lab (GOAD-Mini, SCCM, NHA, DRACARYS)."
                            style="width:100%; padding:0.35rem; font-size:0.8rem; font-family:monospace; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-input); color:var(--text-primary);">
                   </div>
+                </div>
+                <!-- The rename opt-in. NOT derived from "domain !== forestRoot":
+                     the create handler defaults every GOAD spec to
+                     cybersaguaros.local, so that comparison is true for every
+                     stored spec today and would recompile all of them. Both
+                     domain fields above stay editable either way — with rename
+                     off the domain is still the record the DNS forwarder and the
+                     Caldera facts are built from. The checkbox is disabled from
+                     JS (goadCardPaintRenameHint), never by a readonly here. -->
+                <div style="margin-top: 0.5rem;">
+                  <label style="display:flex; align-items:flex-start; gap:0.5rem; cursor:pointer; margin:0;">
+                    <input type="checkbox" id="topoGoadRenameForest" onchange="onTopoGoadRenameForestToggle()"
+                           style="width:15px; height:15px; margin-top:0.15rem; cursor:pointer;">
+                    <span style="font-size:0.8rem;">Rename forest to the authored domain
+                      <span style="color:var(--text-muted);">— recompiles the lab tree and pushes it at deploy</span></span>
+                  </label>
+                  <p class="topo-settings-hint" id="topoGoadRenameHint" style="margin-top:0.25rem;"></p>
                 </div>
                 <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; align-items: end;">
                   <div>
@@ -1960,7 +1977,7 @@ msmith@arizona.edu, Mark, Smith"
             <div class="form-group" style="margin: 0;">
               <label style="font-size: 0.75rem;" for="tplGoadDomain">Forest Domain</label>
               <input type="text" id="tplGoadDomain" value="cybersaguaros.local" oninput="onTplGoadDomainInput()"
-                     title="Resets to the selected lab's own forest root when you change the GOAD version. A pre-baked lane cannot rename its forest — the domain lives in NTDS inside the golden image — so editing this only takes effect on a lane that runs the playbook."
+                     title="Defaults to the selected lab's stock forest. Enable Rename forest to build your authored root and child domains. Computer names remain the fixed catalog roster; compiled and pre-baked identities require regeneration."
                      style="font-size: 0.85rem; font-family: monospace;">
             </div>
             <div class="form-group" style="margin: 0;">
@@ -1970,6 +1987,19 @@ msmith@arizona.edu, Mark, Smith"
                      title="A single label, e.g. tumamoc — the child is always <label>.<forest domain>. Leave blank for a single-domain lab (GOAD-Mini, SCCM, NHA, DRACARYS)."
                      style="font-size: 0.85rem; font-family: monospace;">
             </div>
+          </div>
+          <!-- The rename opt-in — the Designer's twin, and the parity gate keeps
+               them twins. Disabled from JS, never with a readonly attribute:
+               the reason (unsupported transform, or pre-baked lane) is data-driven
+               and is said out loud in the hint below. -->
+          <div style="margin-top: 0.5rem;">
+            <label style="display:flex; align-items:flex-start; gap:0.5rem; cursor:pointer; margin:0;">
+              <input type="checkbox" id="tplGoadRenameForest" onchange="onTplGoadRenameForestToggle()"
+                     style="width:15px; height:15px; margin-top:0.15rem; cursor:pointer;">
+              <span style="font-size:0.8rem;">Rename forest to the authored domain
+                <span style="color:var(--gray-500);">— recompiles the lab tree and pushes it at deploy</span></span>
+            </label>
+            <p class="topo-settings-hint" id="tplGoadRenameHint" style="margin-top:0.25rem;"></p>
           </div>
           <div style="display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0.75rem; margin-top: 0.5rem; font-size: 0.85rem; align-items: end;">
             <div class="form-group" style="margin: 0;">

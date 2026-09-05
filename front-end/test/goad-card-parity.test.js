@@ -144,6 +144,36 @@ test('the fields that were missing from the editor are present on BOTH cards', (
   }
 });
 
+test('the forest-rename opt-in is on BOTH cards, with its hint slot', () => {
+  // Named individually for the same reason as the block above: a bare set
+  // comparison would say "the sets differ", and the thing that actually matters
+  // is that the surface which edits an EXISTING spec can reach the opt-in at
+  // all. Without the hint slot the checkbox is unexplained, and what it does
+  // (recompile the lab tree and push it) only becomes visible 40 minutes later
+  // on a lane.
+  for (const prefix of ['topo', 'tpl']) {
+    const block = BLOCKS[prefix];
+    assert.ok(block.includes(`id="${prefix}GoadRenameForest"`),
+      `${prefix}: no rename opt-in — spec.goad.rename_forest could be neither authored nor seen, and a `
+      + 'stored one would be invisible on the card that opened it');
+    assert.ok(block.includes(`id="${prefix}GoadRenameHint"`),
+      `${prefix}: no hint slot. It carries the migration-safety story ("unticked, the domain is a `
+      + 'RECORD…"), the reason the box is disabled, and the reserved-TLD refusal — none of which has '
+      + 'anywhere else to be said.');
+    assert.ok(new RegExp(`id="${prefix}GoadRenameForest"[^>]*onchange="on${HANDLER_PREFIX[prefix]}GoadRenameForestToggle\\(\\)"`).test(block),
+      `${prefix}: the rename opt-in does not repaint its hint when it is ticked`);
+    // The domain fields must NOT become read-only when the opt-in exists: with
+    // rename off the domain still drives the lane's DNS forwarder and Caldera's
+    // AD facts, and a pre-baked lane has to be able to record whatever its
+    // golden image was baked with. (readonlyIds pins the whole card; this names
+    // the field the opt-in is most likely to tempt someone into locking.)
+    assert.ok(!new RegExp(`id="${prefix}GoadDomain"[^>]*\\bdisabled\\b`).test(block),
+      `${prefix}: the forest domain is disabled in MARKUP. Any disabling here is data-driven — which `
+      + 'lab, and whether the lane is pre-baked — so it belongs in goadCardPaintRenameHint where the '
+      + 'reason can be shown.');
+  }
+});
+
 test('the create form\'s third card is deliberately untouched', () => {
   // #chalGoad* is the oldest and least capable surface and is explicitly out of
   // scope. Pinned so a future reader does not "finish the job" by wiring it to
@@ -167,6 +197,7 @@ const SHARED = [
   'goadCardReset', 'goadCardApplyFields', 'goadCardReadFields',
   'goadCardReadExtensions', 'goadCardRenderExtensions', 'goadCardToggleExtension',
   'goadCardHostNames',
+  'goadCardOnRenameForestToggle', 'goadCardPaintRenameHint',
 ];
 
 test('every shared card function is defined exactly ONCE across the admin scripts', () => {
@@ -187,6 +218,7 @@ test('every tplGoad* handler is a binding, not a second implementation', () => {
     onTplGoadDomainInput: 'goadCardOnDomainInput',
     onTplGoadKaliToggle: 'goadCardOnKaliToggle',
     onTplGoadPrebakedToggle: 'goadCardOnPrebakedToggle',
+    onTplGoadRenameForestToggle: 'goadCardOnRenameForestToggle',
     onTplExtensionToggle: 'goadCardToggleExtension',
     readTplGoadExtensions: 'goadCardReadExtensions',
     resetTplGoadFields: 'goadCardReset',
@@ -208,6 +240,7 @@ test('every topoGoad* handler is a binding too — the Designer is not the privi
     validateTopoGoadDomains: 'goadCardValidateDomains',
     onTopoGoadKaliToggle: 'goadCardOnKaliToggle',
     onTopoGoadPrebakedToggle: 'goadCardOnPrebakedToggle',
+    onTopoGoadRenameForestToggle: 'goadCardOnRenameForestToggle',
     onTopoExtensionToggle: 'goadCardToggleExtension',
     readTopoGoadFields: 'goadCardReadFields',
     applyTopoGoadFields: 'goadCardApplyFields',
@@ -247,7 +280,8 @@ test('the retired duplicates are gone, not merely unused', () => {
 
 const GOAD_LABS = {
   'GOAD-Light': {
-    key: 'GOAD-Light',
+    key: 'GOAD-Light', rebrandable: true,
+    domains: ['cybersaguaros.local', 'tumamoc.cybersaguaros.local'],
     displayName: 'GOAD-Light',
     description: 'three machines',
     forestRoot: 'cybersaguaros.local',
@@ -259,14 +293,33 @@ const GOAD_LABS = {
     ],
   },
   'GOAD-Mini': {
-    key: 'GOAD-Mini',
+    key: 'GOAD-Mini', rebrandable: true,
     displayName: 'GOAD-Mini',
     description: 'two machines, one domain',
     forestRoot: 'sevenkingdoms.local',
     childSubdomain: null,
+    // Served once GOAD_LABS carries it. GOAD-Mini is the one lab a forest
+    // rename is offered for, and this array is WHY — eligibility is a data
+    // predicate on the row, not a list of lab keys in the card.
+    domains: ['sevenkingdoms.local'],
     vms: [
       { name: 'DC01', role: 'dc', os: 'Windows Server 2019', template_vmid: 1004 },
       { name: 'SRV02', role: 'member', os: 'Windows Server 2019', template_vmid: 1004 },
+    ],
+  },
+  GOAD: {
+    key: 'GOAD', rebrandable: true,
+    displayName: 'GOAD',
+    description: 'the full lab',
+    forestRoot: 'sevenkingdoms.local',
+    childSubdomain: 'north',
+    domains: ['sevenkingdoms.local', 'north.sevenkingdoms.local', 'essos.local'],
+    vms: [
+      { name: 'DC01', role: 'dc', os: 'Windows Server 2019', template_vmid: 1004 },
+      { name: 'DC02', role: 'dc', os: 'Windows Server 2019', template_vmid: 1004 },
+      { name: 'DC03', role: 'dc', os: 'Windows Server 2016', template_vmid: 1004 },
+      { name: 'SRV02', role: 'member', os: 'Windows Server 2019', template_vmid: 1004 },
+      { name: 'SRV03', role: 'member', os: 'Windows Server 2019', template_vmid: 1004 },
     ],
   },
 };
@@ -297,7 +350,7 @@ const EXTENSIONS = [
  * the one place the editor now inherits the v3 pivot and the blanked
  * golden-image VMIDs, and stubbing the seeder would prove nothing about that.
  */
-function loadEditor() {
+function loadEditor(opts) {
   const extChecked = { topo: new Set(), tpl: new Set() };
 
   function input(value) {
@@ -335,6 +388,8 @@ function loadEditor() {
     tplGoadPrebakedConfig: div(),
     tplGoadFixedInt: input(''),
     tplGoadFixedExt: input(''),
+    tplGoadRenameForest: box(false),
+    tplGoadRenameHint: div(),
     tplGoadExtensions: div(),
     tplGoadVersionDesc: div(),
     tplErrGoad: div(),
@@ -342,6 +397,12 @@ function loadEditor() {
     tplPhantomList: div(),
     topoDesignVmList: null,    // renderTopoVmTable early-returns, which is fine here
   };
+  for (const [id, el] of Object.entries(els)) {
+    if (!id.startsWith('tplGoad') && id !== 'tplErrGoad') continue;
+    const target = id.replace(/^tpl/, 'topo');
+    els[target] = 'options' in el ? select(el.value)
+      : 'checked' in el ? box(el.checked) : 'value' in el ? input(el.value) : div();
+  }
 
   function extScope(sel) {
     const m = sel.match(/#(topo|tpl)GoadExtensions/);
@@ -374,12 +435,19 @@ function loadEditor() {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
 
-  for (const f of [
+  const files = [
     'public/js/topology/topology-seed.js',
     'public/js/admin/goad-extensions.js',
     'public/js/admin/admin-challenges.js',
     'public/js/admin/admin-topology.js',
-  ]) {
+  ];
+  // The AD rulebook is opt-in per test rather than always loaded: the card
+  // treats a missing window.CyberCoreAdDomainRules as "no opinion", and every
+  // test written before the rename opt-in ran that way. Only the reserved-TLD
+  // hint needs the real rules, so only that test pays for them.
+  if (opts && opts.rules) files.unshift('public/js/topology/ad-domain-rules.js');
+
+  for (const f of files) {
     vm.runInContext(fs.readFileSync(path.join(ROOT, f), 'utf8'), sandbox, { filename: f });
   }
 
@@ -507,6 +575,15 @@ test('an untouched card still posts the body it always posted', () => {
   assert.ok(!('extensions' in goad), 'nothing ticked must not write an empty array');
   assert.ok(!('prebaked' in goad));
   assert.ok(!('fixed_subnet' in goad));
+  // THE MIGRATION GUARD, and the reason rename_forest is an opt-in rather than
+  // `domain !== forestRoot`. lab-templates.js defaults every GOAD spec to
+  // cybersaguaros.local/tumamoc whatever the lab is, so that comparison is true
+  // for every stored GOAD-Mini spec that exists — a derived trigger would
+  // recompile all of them into a forest nobody chose on their next deploy. Not
+  // even `rename_forest: false` may be written: an absent key is what makes the
+  // body byte-identical to the one this card posted before the feature existed.
+  assert.ok(!('rename_forest' in goad),
+    'an untouched card must post NO rename key at all, not a false one');
 });
 
 test('a single-domain lab stores NO child, rather than inventing tumamoc', () => {
@@ -665,6 +742,164 @@ test('a non-v3 environment is TOLD its scheme cannot be changed here, not silent
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// 3b. THE FOREST-RENAME OPT-IN
+// ════════════════════════════════════════════════════════════════════════════
+//
+// THE BUG. An author typed cy400test.org into Forest Domain and the lane came up
+// as sevenkingdoms.local with a DC calling itself kingslanding. spec.goad.domain
+// was authored, validated, stored AND READ — it drives the lane's DNS forwarder
+// and Caldera's AD facts — but the AD build ignored it, so every artifact said
+// one domain and NTDS said another. rename_forest is what makes the typed domain
+// the one the forest is actually built with.
+//
+// It is an OPT-IN and not `domain !== forestRoot` because the create handler
+// defaults every GOAD spec to cybersaguaros.local/tumamoc whatever the lab is —
+// so that comparison is already true for every stored GOAD-Mini spec, and a
+// derived trigger would recompile all of them.
+
+test('THE OPT-IN ROUND TRIP: rename_forest survives load → save', async () => {
+  const h = loadEditor();
+  const stored = {
+    enabled: true,
+    version: 'GOAD-Mini',
+    domain: 'cy400test.org',
+    child_subdomain: null,
+    admin_user: 'vagrant',
+    admin_password: 'vagrant',
+    include_kali: true,
+    rename_forest: true,
+  };
+  h.sandbox.__stored = stored;
+  await vm.runInContext('loadTplGoadFields(__stored)', h.sandbox);
+
+  assert.strictEqual(h.els.tplGoadRenameForest.checked, true,
+    'a stored opt-in must come back TICKED. An author who opens the environment to change its name, '
+    + 'cannot see that it renames its forest, and saves, silently turns the rename off — which is '
+    + 'exactly the load-half bug that lost extensions and prebaked before this card was shared.');
+  assert.strictEqual(h.els.tplGoadRenameForest.disabled, false,
+    'GOAD-Mini has one domain and this lane is not pre-baked, so the box is live');
+  assert.strictEqual(h.els.tplGoadDomain.value, 'cy400test.org');
+
+  h.run('__goad = JSON.stringify(readTplGoadFields());');
+  assert.deepStrictEqual(JSON.parse(h.sandbox.__goad), stored);
+});
+
+test('the unticked hint names the stock forest the lab still builds', async () => {
+  const h = loadEditor();
+  h.sandbox.__stored = { enabled: true, version: 'GOAD-Mini', domain: 'cy400test.org' };
+  await h.run('loadTplGoadFields(__stored)');
+  assert.match(h.els.tplGoadRenameHint.textContent, /builds sevenkingdoms.local as shipped/);
+});
+
+test('renamed GOAD previews root, authored child and independent trust domain with fixed hostnames', () => {
+  const h = loadEditor({ rules: true });
+  h.els.tplGoadEnabled.checked = true;
+  h.els.tplGoadVersion.value = 'GOAD';
+  h.els.tplGoadDomain.value = 'cy400test.org';
+  h.els.tplGoadChild.value = 'research';
+  h.els.tplGoadRenameForest.checked = true;
+  h.run('onTplGoadRenameForestToggle();');
+  const hint = h.els.tplGoadRenameHint.textContent;
+  for (const identity of ['cy400test.org', 'research.cy400test.org', 'cy400test-partner.org']) {
+    assert.ok(hint.includes(identity), hint);
+  }
+  assert.match(hint, /fixed catalog roster/);
+  assert.match(hint, /DC01, DC02, DC03/);
+  assert.equal(h.els.tplGoadRenameForest.disabled, false);
+});
+
+test('changing to a supported multi-domain lab resets the opt-in and keeps it available', () => {
+  const h = loadEditor();
+  h.els.tplGoadEnabled.checked = true;
+  h.els.tplGoadRenameForest.checked = true;
+  h.run('templateVMs.length = 0; tplSubnetScheme = "v1";');
+  h.els.tplGoadVersion.value = 'GOAD';
+  h.run('onTplGoadVersionChange();');
+  assert.equal(h.els.tplGoadRenameForest.checked, false);
+  assert.equal(h.els.tplGoadRenameForest.disabled, false);
+  assert.equal(h.els.tplGoadChild.value, 'north');
+});
+
+test('unsupported catalog entries explain missing transforms without claiming they have multiple domains', () => {
+  const h = loadEditor();
+  h.run("_goadCatalog.labs.push({ key: 'SCCM', displayName: 'SCCM', rebrandable: false, domains: ['sccm.lab'] });");
+  h.els.tplGoadVersion.value = 'SCCM';
+  h.run('onTplGoadRenameForestToggle();');
+  assert.equal(h.els.tplGoadRenameForest.disabled, true);
+  assert.match(h.els.tplGoadRenameHint.textContent, /no supported vendored transform/);
+});
+
+test('pre-baked UNTICKS the rename and disables it, and the domain stays editable', () => {
+  const h = loadEditor();
+  h.els.tplGoadEnabled.checked = true;
+  h.els.tplGoadVersion.value = 'GOAD-Mini';
+  h.els.tplGoadRenameForest.checked = true;
+  h.run('onTplGoadRenameForestToggle();');
+
+  h.run('templateVMs.length = 0; tplSubnetScheme = "v3";');
+  h.els.tplGoadDomain.value = 'baked.example.org';
+  h.els.tplGoadPrebaked.checked = true;
+  h.run('onTplGoadPrebakedToggle();');
+
+  assert.strictEqual(h.els.tplGoadRenameForest.checked, false);
+  assert.strictEqual(h.els.tplGoadRenameForest.disabled, true,
+    'a pre-baked lane clones a golden image and runs no Ansible, so there is nothing here that could '
+    + 'rename the forest in its NTDS');
+  assert.match(h.els.tplGoadRenameHint.textContent, /pre-baked lane/);
+
+  h.run('__goad = JSON.stringify(readTplGoadFields());');
+  const goad = JSON.parse(h.sandbox.__goad);
+  assert.ok(!('rename_forest' in goad));
+  assert.strictEqual(goad.domain, 'baked.example.org',
+    'and the domain field is still authoritative: a pre-baked lane MUST be able to record whatever '
+    + 'its golden image was baked with, which is why the opt-in disables the checkbox and never the '
+    + 'domain');
+});
+
+test('ticking rename on a .local domain says so — .local only WARNS on save but REFUSES a rename', () => {
+  // The asymmetry, surfaced where it is authored. checkForestRoot only warns on
+  // a reserved TLD because every lab CyberCore ships is named under .local — but
+  // a rename mints the new tree through publicDomainOf, which refuses one
+  // outright. Without this the author gets a green card and a 400.
+  const h = loadEditor({ rules: true });
+  h.els.tplGoadEnabled.checked = true;
+  h.els.tplGoadVersion.value = 'GOAD-Mini';
+  h.els.tplGoadDomain.value = 'sevenkingdoms.local';
+  h.els.tplGoadRenameForest.checked = true;
+  h.run('onTplGoadRenameForestToggle();');
+  assert.match(h.els.tplGoadRenameHint.textContent, /reserved suffixes/);
+
+  h.els.tplGoadDomain.value = 'cy400test.org';
+  h.run('onTplGoadDomainInput();');
+  assert.ok(!/reserved suffixes/.test(h.els.tplGoadRenameHint.textContent),
+    'and it clears as the author types a mintable domain, or the warning is just decoration');
+});
+
+test('a compiled lab name is not silently rewritten to GOAD-Light on save', () => {
+  // FOUND BY THIS TEST, before the fix: the version select dropped any stored
+  // value the catalog does not list, so opening a CiAB engagement (whose
+  // spec.goad.version is the minted CIAB-… lab name the controller actually
+  // holds) and pressing Save stored version:'GOAD-Light' beside
+  // generated_lab.name:'CIAB-…'. resolveGeneratedLab then throws on every later
+  // deploy of a lane that had been working. A renamed forest mints the same
+  // shape of name (CC-GOADMINI-…), so this is now on the rename's path too.
+  const h = loadEditor();
+  const stored = {
+    enabled: true, version: 'CIAB-ACME-7f3a1b2c', domain: 'acme.example.org',
+    child_subdomain: null, admin_user: 'vagrant', admin_password: 'vagrant',
+    include_kali: true,
+  };
+  h.sandbox.__stored = stored;
+  return vm.runInContext('loadTplGoadFields(__stored)', h.sandbox).then(() => {
+    assert.strictEqual(h.els.tplGoadVersion.value, 'CIAB-ACME-7f3a1b2c',
+      'the stored lab name has to be an option, or the dropdown cannot show it');
+    h.run('__goad = JSON.stringify(readTplGoadFields());');
+    assert.deepStrictEqual(JSON.parse(h.sandbox.__goad), stored,
+      'opening an environment and saving it must not change which lab it runs');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // 4. THE FIELDS SURVIVE THE SAVE
 // ════════════════════════════════════════════════════════════════════════════
 //
@@ -719,12 +954,30 @@ test('the reserved-network keys still win over anything the editor posts', () =>
   assert.deepStrictEqual(next.goad, { enabled: true }, 'but goad is the editor\'s to write');
 });
 
-test('unticking GOAD actually clears spec.goad — except on a card that was never rendered', () => {
-  // saveTemplate merges onto the spec it LOADED, so writing goad only on the
-  // truthy branch left the old config in place and the challenge stayed a GOAD
-  // one. The reservation guard matters: applyTemplateEditorMode HIDES the card
-  // for a reserved lab network, so its unticked checkbox means "not rendered".
-  assert.match(CHAL_SRC,
-    /if \(goad\) body\.spec\.goad = goad;\s*\n\s*else if \(!templateIsReservation\) delete body\.spec\.goad;/,
-    'the card is the whole truth about spec.goad, so it has to be able to say "none"');
+test('unticking GOAD posts an explicit disable while retaining compiled metadata', () => {
+  assert.match(CHAL_SRC, /else if \(!templateIsReservation\) \{/);
+  assert.match(CHAL_SRC, /\.\.\.templateEditSpec\.goad, enabled: false/);
 });
+
+for (const prefix of ['topo', 'tpl']) {
+  test(`${prefix} card preserves compiled metadata and explicit empty child through load/save`, async () => {
+    const h = loadEditor();
+    const stored = {
+      enabled: true, version: 'CIAB-custom', domain: 'compiled.org', child_subdomain: null,
+      admin_user: 'custom-admin', admin_password: 'fixture-password', include_kali: false,
+      prebaked: true, fixed_subnet: { int: '10.1.2', ext: '10.3.4' },
+      lab: { labName: 'CIAB-custom', forestRoot: 'compiled.org', vms: [{ name: 'CUSTOMDC' }] },
+      generated_lab: { name: 'CIAB-custom', files: { 'data/config.json': '{}' } },
+    };
+    h.sandbox.__stored = stored;
+    await h.run(prefix === 'tpl' ? 'loadTplGoadFields(__stored)' : 'applyTopoGoadFields(__stored)');
+    const value = h.run(prefix === 'tpl' ? 'readTplGoadFields()' : 'readTopoGoadFields()');
+    assert.deepEqual(JSON.parse(JSON.stringify(value)), stored);
+    for (const suffix of ['Version', 'Domain', 'Child', 'Prebaked']) {
+      assert.equal(h.els[`${prefix}Goad${suffix}`].disabled, true);
+    }
+    const names = h.run(prefix === 'tpl' ? 'tplGoadHostNames()' : 'topoGoadHostNames()');
+    assert.deepEqual(JSON.parse(JSON.stringify(names)), ['CUSTOMDC']);
+    assert.match(h.els[`${prefix}GoadRenameHint`].textContent, /Regenerate it to change its identity/);
+  });
+}

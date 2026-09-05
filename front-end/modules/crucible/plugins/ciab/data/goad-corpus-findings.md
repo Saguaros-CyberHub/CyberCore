@@ -23,7 +23,7 @@ good news.
 | | |
 |---|---|
 | Fork | `https://github.com/joshmp087/GOAD.git` |
-| Pinned commit | `4c9a49ea0413631f0e86adc67662aa021b4498d4` |
+| Pinned commit | `0fb45a48e1865fa65054dda22f5e924eea56369c` |
 | Labs | DRACARYS, GOAD, GOAD-Light, GOAD-Mini, MINILAB, NHA, SCCM, TEMPLATE |
 | Validated inputs | `ad/<LAB>/data/config.json` + `ad/<LAB>/data/inventory` |
 

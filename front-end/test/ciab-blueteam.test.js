@@ -746,15 +746,12 @@ test('E3-33: a spec that declares a sensor and a lane that has none is an error'
     /nothing to aim at/, TRACK_E);
 });
 
-test('E3-34: the stamp is RE-APPLIED after the deployer writes each config whole', () => {
-  // challenge-lane-deployer builds the active config from the batch-wide
-  // laneConfig and writes it WHOLE in its final step, which runs AFTER the
-  // postDeploy hook. Anything the hook merged into config is gone by then —
-  // exactly what applyReseedRecords already exists for.
+test('E3-34: lane metadata survives final merge and sensor stamps still drain after deployment', () => {
+  // Final persistence now merges the current config so GOAD results and hook
+  // metadata survive. Keep the existing sensor drain ordered after deployment.
   const deployer = jsCode(read('src/utils/challenge-lane-deployer.js'));
-  assert.match(deployer, /UPDATE cybercore_lane SET status = 'active', config = \$2::jsonb/,
-    `If this whole-config write ever becomes a merge, the re-apply below is redundant rather than `
-    + `load-bearing — and someone should be told. ${TRACK_E}`);
+  assert.match(deployer, /UPDATE cybercore_lane SET status = \$3, config = COALESCE\(config, '\{\}'::jsonb\) \|\| \$2::jsonb/,
+    `The final write must preserve metadata recorded while provisioning. ${TRACK_E}`);
 
   const prov = jsCode(read(LANEPROV_REL));
   assert.match(prov, /applySensorStamps\(sensorStampRecords\)/,

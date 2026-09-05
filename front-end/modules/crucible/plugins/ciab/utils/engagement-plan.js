@@ -271,18 +271,18 @@ function isExternalRole(role) {
  *
  *     if (!spec?.goad?.enabled) return {};          // nothing is a GOAD VM
  *     if (!Array.isArray(spec.vms)) return {};
- *     const labName = spec.goad.version || 'GOAD-Light';
- *     const labDef  = GOAD_LABS[labName] || GOAD_LABS['GOAD-Light'];   // unknown -> default
+ *     const labName = canonicalGoadLabName(spec.goad.version || 'GOAD-Light');
+ *     const labDef  = spec.goad.lab || GOAD_LABS[labName] || GOAD_LABS['GOAD-Light'];
+ *     // Compatible selected extensions in the AD roster are then appended.
  *     byName = labDef.vms keyed by name.toLowerCase()
  *     a spec VM is a GOAD VM iff byName[vm.name.toLowerCase()] exists
  *
  * vxlanId and the subnet base affect the MAC and the IP string, never
- * membership. So membership is a pure function of (goad.enabled, goad.version,
- * vm.name) plus the lab table — and the lab table is static source text. It is
- * mirrored here rather than guessed, and a source-scan guard test asserts every
- * lab name and every VM name in it against goad-deploy.js's own GOAD_LABS text,
- * so a lab added upstream fails a test instead of silently producing a wrong
- * address.
+ * membership. Membership reads the canonical version, an optional supplied
+ * lab definition, selected roster extensions, and the VM name. The static
+ * tables are mirrored here; tests compare them and exercise the actual core
+ * resolver against this mirror so new aliases or generated identities cannot
+ * silently acquire the default lab's addresses.
  *
  * THE OCTETS ARE PART OF THE MIRROR TOO, because membership alone still leaves
  * the paper wrong. prepareGoadMacs gives each matched VM
@@ -308,6 +308,12 @@ const GOAD_LAB_VMS = Object.freeze({
   DRACARYS: Object.freeze({ dc01: 10, srv01: 11, lx01: 12 }),
 });
 
+// Only extensions that the deployer folds into the AD roster belong here.
+// External ELK, Wazuh and LX01 use ordinary lane addressing instead.
+const GOAD_LAB_EXTENSIONS = Object.freeze({
+  ws01: Object.freeze({ name: 'ws01', ipOctet: 31, compatibility: ['GOAD', 'GOAD-Light', 'GOAD-Mini'] }),
+});
+
 /**
  * The AD lab octet this VM will really be given, or null when it is not a lab
  * host — which is the same thing as `isGoadVm`, since every matched host has an
@@ -327,10 +333,38 @@ function goadLabOctet(specObj, rawName) {
   const goad = isObj(spec.goad) ? spec.goad : null;
   if (!goad || !goad.enabled) return null;
   if (!Array.isArray(spec.vms)) return null;      // prepareGoadMacs returns {} first
-  const lab = GOAD_LAB_VMS[goad.version || GOAD_DEFAULT_LAB] || GOAD_LAB_VMS[GOAD_DEFAULT_LAB];
+  const rawLab = String(goad.version || GOAD_DEFAULT_LAB).trim();
+  const labName = ({ light: 'GOAD-Light', 'goad-light': 'GOAD-Light', mini: 'GOAD-Mini',
+    'goad-mini': 'GOAD-Mini', full: 'GOAD', goad: 'GOAD' })[rawLab.toLowerCase()] || rawLab;
+  const supplied = isObj(goad.lab) ? goad.lab : null;
+  if (goad.lab && !supplied) return null;
+  let lab;
+  if (supplied) {
+    if (!Array.isArray(supplied.vms)) return null;
+    lab = Object.create(null);
+    for (const vm of supplied.vms) {
+      if (!isObj(vm) || typeof vm.name !== 'string' || !Number.isInteger(vm.ipOctet)
+        || vm.ipOctet < 2 || vm.ipOctet > 254) return null;
+      lab[vm.name.toLowerCase()] = vm.ipOctet;
+    }
+  } else {
+    lab = GOAD_LAB_VMS[labName];
+    // Invalid generated identities are refused by the deployer. Do not invent
+    // default-lab addresses for their engagement documents.
+    if (!lab && (goad.rename_forest === true || (goad.generated_lab && spec.vms.length))) return null;
+    lab = lab || GOAD_LAB_VMS[GOAD_DEFAULT_LAB];
+  }
   if (!lab || rawName == null) return null;
   const key = String(rawName).toLowerCase();
-  return Object.prototype.hasOwnProperty.call(lab, key) ? lab[key] : null;
+  if (Object.prototype.hasOwnProperty.call(lab, key)) return lab[key];
+  const compatibleLab = supplied?.baseLab || labName;
+  for (const raw of Array.isArray(goad.extensions) ? goad.extensions : []) {
+    const ext = GOAD_LAB_EXTENSIONS[String(raw || '').trim().toLowerCase()];
+    if (!ext || ext.name !== key || !ext.compatibility.includes(compatibleLab)) continue;
+    if (Object.prototype.hasOwnProperty.call(lab, ext.name) || Object.values(lab).includes(ext.ipOctet)) continue;
+    return ext.ipOctet;
+  }
+  return null;
 }
 
 /**
@@ -2980,6 +3014,7 @@ module.exports = {
   laneSegmentIds,
   goadLabOctet,
   GOAD_LAB_VMS,
+  GOAD_LAB_EXTENSIONS,
   GOAD_DEFAULT_LAB,
   // Exported so the source-scan guard can compare this mirror with
   // src/utils/topology-validate.js:25-26 without importing that file.

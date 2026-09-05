@@ -1,0 +1,6 @@
+# GOAD lab content belongs to the separate GOAD fork. Re-include only the
+# small planner metadata files excluded by the root **/data/* rule.
+!src/data/goad-base-labs/
+src/data/goad-base-labs/**
+!src/data/goad-base-labs/**/
+!src/data/goad-base-labs/**/base.json

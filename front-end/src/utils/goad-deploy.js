@@ -1,29 +1,9 @@
 /**
- * ============================================================================
- * GOAD-Light per-lane orchestration helpers
- * ============================================================================
- * When a challenge spec has `spec.goad.enabled === true`, the standard deploy
- * flow keeps doing what it always does (clone gateway + clone the 3 Windows
- * VMs from spec.vms). This module adds the GOAD-specific layers ON TOP:
- *
- *   1. prepareGoadSpec()         — decorates spec.vms with deterministic MACs
- *                                   so the gateway's DHCP server can hand out
- *                                   reserved IPs (DC01=.10, DC02=.11, etc.)
- *   2. buildLaneNet0()           — builds the net0 string for a lane VM with
- *                                   optional macaddr (used by both qemu/lxc
- *                                   clone paths in admin.js)
- *   3. writeDhcpReservations()   — pushes a per-lane reservations file into
- *                                   the gateway's dnsmasq and reloads it
- *   4. deployController()        — clones LXC template 1700 onto the lane
- *   5. waitForWinRM()            — polls 5985 on each Windows VM from inside
- *                                   the controller until they all answer
- *   6. runGoadPlaybook()          — pct exec /opt/goad-light/run.sh
- *   7. stopController()          — final shutdown so the box isn't reachable
- *                                   while students are attacking the lane
- *
- * Normal (non-GOAD) lanes are completely unaffected — none of this runs unless
- * `spec.goad?.enabled` is true.
- * ============================================================================
+ * GOAD lane preparation, addressing and controller orchestration.
+ * Preparation validates a metadata-only identity plan before allocation.
+ * Each lane's controller owns its GOAD source, compiles renamed labs locally,
+ * provisions Windows, verifies actual identities, and is stopped on every exit.
+ * Separately generated CiAB labs retain their existing tree-delivery path.
  */
 
 // QEMU guest-agent helpers for the controller VM. All exec into the
@@ -34,6 +14,10 @@ const { agentExec, agentShellExec, pollExecStatus, waitForGuestAgent } = require
 // pct exec/push into the lane gateway LXC (used by writeDhcpReservations to drop
 // the per-lane dnsmasq reservation file). Same module attached-modules.js uses.
 const nodeSsh = require('./node-ssh');
+// Core planning reads identity metadata only. GOAD source stays on the controller.
+const {
+  preflightGoadRebrand, canonicalGoadLabName, describeRebrand, listExtensionBases, RebrandError, REBRAND_CODES,
+} = require('./goad-lab-rebrand');
 
 /**
  * Run an argv-style command inside a QEMU VM via the guest agent.
@@ -139,11 +123,24 @@ function buildIp(laneSubnetBase, octet) {
 //   getLab(labName)       the catalog reader, for "what does CyberCore ship?".
 // Every inlined copy of the lookup is one more chance for a site to resolve a
 // different lab from its neighbours, and nothing throws when they disagree.
+//
+// `domains` is the FULL domain list from ad/<name>/data/config.json, root
+// first. It is here because NOTHING ELSE IN THIS TABLE CAN ANSWER "is this lab
+// single-domain", and the forest rename has to ask: a child domain is derived
+// by dropping a label (ad-child_domain.yml looks its parent up with no default)
+// and a trust partner is wired BY NAME, so renaming the root leaves both
+// pointing at a forest that no longer exists. The obvious proxy is wrong —
+// NHA declares TWO domains and carries `childSubdomain: null`, because its
+// second is a trust partner rather than a child, so a `childSubdomain === null`
+// test would have said "single domain, go ahead" for exactly the lab that
+// breaks worst. test/goad-forest-rename.test.js reads each on-disk config and
+// pins these lists against it.
 const GOAD_LABS = {
   'GOAD-Light': {
     displayName:  'GOAD-Light (3 Win VMs, 2 domains)',
     description:  'Lighter GOAD without Essos forest. Recommended starter.',
     forestRoot:   'cybersaguaros.local',
+    domains:      ['cybersaguaros.local', 'tumamoc.cybersaguaros.local'],
     // ad/GOAD-Light/data/config.json declares tumamoc.cybersaguaros.local as the
     // second domain — a CHILD (strict suffix of the root), not a trusted peer.
     childSubdomain: 'tumamoc',
@@ -157,6 +154,10 @@ const GOAD_LABS = {
     displayName:  'GOAD — full (5 Win VMs, 3 domains, 2 forests)',
     description:  'Full GOAD lab with cross-forest scenarios (Essos). Heaviest variant.',
     forestRoot:   'sevenkingdoms.local',
+    // Three domains in TWO forests: essos.local is reached by a trust, so it is
+    // in `domains` (it is a domain the lab builds) but deliberately absent from
+    // childSubdomain below.
+    domains:      ['sevenkingdoms.local', 'north.sevenkingdoms.local', 'essos.local'],
     // north.sevenkingdoms.local in ad/GOAD/data/config.json. essos.local is the
     // THIRD domain and is deliberately NOT recorded here: it is a separate forest
     // reached by a trust, not a child, and ad-child_domain.yml only ever builds
@@ -174,6 +175,8 @@ const GOAD_LABS = {
     displayName:  'GOAD-Mini (1 Win VM, single domain)',
     description:  'Minimal AD lab — just DC01. Fastest to deploy (~10 min).',
     forestRoot:   'sevenkingdoms.local',
+    // One domain, which is what makes this the lab the forest rename supports.
+    domains:      ['sevenkingdoms.local'],
     childSubdomain: null,      // one domain, one DC — there is no child to name
     vms: [
       { name: 'DC01', role: 'dc', os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' }
@@ -190,6 +193,10 @@ const GOAD_LABS = {
     // /api/lab-templates hands the topology seed, so every NHA artifact named a
     // domain the lane does not have.
     forestRoot:   'ninja.hack',
+    // TWO domains and a null childSubdomain — the pair that makes `domains`
+    // necessary rather than derivable. academy.ninja.lan is a trust partner, so
+    // it is a domain this lab builds and NOT a child of ninja.hack.
+    domains:      ['ninja.hack', 'academy.ninja.lan'],
     // NULL, and this is the interesting one. NHA's second domain is
     // academy.ninja.lan, which is NOT a suffix of ninja.hack — so it is a TRUST
     // partner, not a child, and describing it as a child_subdomain would make
@@ -208,6 +215,11 @@ const GOAD_LABS = {
     displayName:  'SCCM Lab (3 Win servers + 1 workstation)',
     description:  'SCCM/MECM lab with PXE, client deployment. Long runtime (~60 min).',
     forestRoot:   'sccm.lab',
+    // Single-domain, but NOT rebrandable today: sccm.lab's netbios_name is
+    // SCCMLAB (not the first label), it names hosts by value inside an sccm{}
+    // sub-object, and its `members` arrays carry SCCMLAB\CLIENT$. Eligibility is
+    // "a vendored base tree exists", so this lab stays out until one is.
+    domains:      ['sccm.lab'],
     childSubdomain: null,      // every SCCM host is in sccm.lab
     vms: [
       { name: 'DC01',  role: 'dc',          os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 40, nic_model: 'e1000' },
@@ -224,6 +236,11 @@ const GOAD_LABS = {
     displayName:  'DRACARYS (2 Win + 1 Linux VM)',
     description:  'Mixed Win+Linux lab. LX01 uses Ubuntu template (VMID 1003).',
     forestRoot:   'dracarys.lab',
+    // Single-domain, and its config.json is NOT strict JSON — an illegal
+    // trailing comma at line 128, which works only because ansible loads it
+    // through a YAML loader. The vendor test parses it leniently for that
+    // reason and nothing else does.
+    domains:      ['dracarys.lab'],
     childSubdomain: null,      // single domain
     vms: [
       { name: 'DC01',  role: 'dc',     os: 'Windows Server 2019', template_vmid: 1004, ipOctet: 10, nic_model: 'e1000' },
@@ -303,6 +320,24 @@ const INFRA_IP_OCTETS = {
 // SIEM's instruments ships no telemetry at all. topology-validate's
 // `siem-blind-host` is the rendering of exactly that — lx01 is [linux_domain],
 // elk covers [domain] only, wazuh covers both.
+//
+// ── `shipsLabConfig` — declared, never probed ───────────────────────────────
+// True when extensions/<key>/data/config.json exists upstream, i.e. when the
+// extension carries its own copy of the domain and hostnames. Those copies do
+// not follow a forest rename on their own: install.yml layers the extension's
+// config over the RENAMED main lab's data and then joins the two by domain
+// name, so a stale copy dies on an undefined lookup with the machine already
+// cloned and booted. So a `true` here means "the forest rename must ship a
+// rewritten config for this key or refuse the lane".
+//
+// IT IS A FLAG AND NOT AN fs.existsSync BECAUSE THE ANSWER LIVES IN A TREE THIS
+// PROCESS MAY NOT HAVE. GOAD-main/ is gitignored with zero tracked files, so a
+// probe against it returns "no config, nothing to rewrite" on every machine
+// without the checkout — silently permissive exactly where being wrong is
+// unrecoverable. That is the trap ciab/utils/goad-role-manifest.js:1-30
+// documents. What IS checked at require time, below, is the other direction:
+// every `true` must have tracked identity metadata identifying the controller
+// recipe that rewrites it. The actual lab content stays in the GOAD fork.
 const GOAD_EXTENSIONS = {
   elk: {
     key:            'elk',
@@ -337,6 +372,10 @@ const GOAD_EXTENSIONS = {
     dns_aliases:    ['elk'],
     compatibility:  null,        // null = every lab
     inLab:          false,
+    // extensions/elk/ ships NO data/config.json of its own — it reads the main
+    // lab's — so a renamed forest reaches it for free. See the flag's contract
+    // above GOAD_EXTENSIONS.
+    shipsLabConfig: false,
     // No desktop and no xrdp in GOAD's elk role, so it cannot BE an RDP console.
     // The Designer surfaces this rather than letting an author discover it after
     // a deploy hands the student a black screen.
@@ -363,6 +402,7 @@ const GOAD_EXTENSIONS = {
     dns_aliases:    ['wazuh'],
     compatibility:  null,
     inLab:          false,
+    shipsLabConfig: false,       // no data/config.json of its own, same as elk
     headless:       true
   },
   ws01: {
@@ -391,6 +431,13 @@ const GOAD_EXTENSIONS = {
     // IN the roster: domain-joined, so it needs the deterministic MAC, the
     // reserved IP, the DHCP-renew restart and the secure-channel heal.
     inLab:          true,
+    // 996 bytes of its own data/config.json, and it is the reason
+    // goad-ext-config-push.js exists: install.yml layers this file over the main
+    // lab's data as `lab_extension` and then resolves
+    // lab.domains[lab.hosts.ws01.domain].domain_password. Rename the forest and
+    // leave this file alone and that lookup is undefined — the play dies with
+    // the workstation already cloned and booted.
+    shipsLabConfig: true,
     headless:       false
   },
   lx01: {
@@ -411,6 +458,9 @@ const GOAD_EXTENSIONS = {
     instruments:    ['linux_domain'],
     compatibility:  null,
     inLab:          false,
+    // 573 bytes of its own, and one hop further than ws01: install.yml walks
+    // lab.domains[domain].dc -> lab.hosts[dc].hostname to build dc_fqdn.
+    shipsLabConfig: true,
     headless:       true
   }
 };
@@ -427,6 +477,15 @@ for (const [extKey, ext] of Object.entries(GOAD_EXTENSIONS)) {
         'On v1/v2 there is one flat subnet, so the two would be the same address.'
       );
     }
+  }
+}
+
+// Check the local identity metadata against the extension catalog without
+// requiring any GOAD checkout or controller connection during application boot.
+const extensionIdentityKeys = new Set(listExtensionBases());
+for (const [extKey, ext] of Object.entries(GOAD_EXTENSIONS)) {
+  if ((ext.shipsLabConfig === true) !== extensionIdentityKeys.has(extKey)) {
+    throw new Error(`GOAD_EXTENSIONS.${extKey}.shipsLabConfig disagrees with its core identity metadata`);
   }
 }
 
@@ -462,8 +521,20 @@ function extensionsForLab(labName, labDef) {
   const takenNames = new Set(labVms.map(v => String(v.name).toLowerCase()));
   const takenOctets = new Map(labVms.map(v => [v.ipOctet, v.name]));
 
+  // COMPATIBILITY IS ASKED OF THE BASE LAB, NOT THE DEPLOYED NAME. A forest
+  // rename mints a name of its own — CC-GOADMINI-CY400TEST-1a2b3c4d — and
+  // stamps `baseLab: 'GOAD-Mini'` on the lab definition it carries. ws01
+  // declares compatibility ['GOAD','GOAD-Light','GOAD-Mini'], so matching the
+  // minted name would drop ws01 from the roster IN SILENCE; resolveGoadLab
+  // would then compose a roster without it, spec.vms would still carry the
+  // machine, and assertGoadRoster would fail complaining about a stray host —
+  // an error naming ws01 with nothing in it about the rename that caused it.
+  // The name/octet collision checks below stay on the DEPLOYED roster, because
+  // those are about the machines this lane actually builds.
+  const compatLab = (lab && lab.baseLab) || labName;
+
   return Object.values(GOAD_EXTENSIONS).map(ext => {
-    if (Array.isArray(ext.compatibility) && !ext.compatibility.includes(labName)) {
+    if (Array.isArray(ext.compatibility) && !ext.compatibility.includes(compatLab)) {
       return { key: ext.key, ext, ok: false,
         reason: `Upstream declares ${ext.key} compatible with ${ext.compatibility.join(', ')} only.` };
     }
@@ -586,6 +657,7 @@ function getVmResources(vmDef) {
  * Anything resolving a lab FOR A DEPLOY must call resolveGoadLab(spec).
  */
 function getLab(labName) {
+  labName = canonicalGoadLabName(labName);
   const lab = GOAD_LABS[labName];
   if (!lab) {
     throw new Error(`Unknown GOAD lab '${labName}'. Known: ${Object.keys(GOAD_LABS).join(', ')}`);
@@ -720,11 +792,24 @@ function resolveGoadLab(specArg) {
   // here keeps the precedence chain below written exactly once rather than once
   // per flavour of caller — which is the entire point of this function.
   const spec = (specArg && specArg.goad) ? specArg : { goad: {} };
-  const labName = spec.goad.version || DEFAULT_LAB;
+  const labName = canonicalGoadLabName(spec.goad.version || DEFAULT_LAB);
   const supplied = spec.goad.lab;
   if (supplied) assertValidLabDef(supplied, labName);
   const lab = supplied || GOAD_LABS[labName];
   if (!lab) {
+    // Preserve unknown legacy fallback while refusing a generated/renamed lab
+    // whose roster would otherwise come from a different built-in identity.
+    const rosterAtStake = Array.isArray(specArg && specArg.vms) && specArg.vms.length > 0;
+    if (spec.goad.rename_forest === true || (spec.goad.generated_lab && rosterAtStake)) {
+      throw new Error(
+        `Unknown GOAD lab version '${labName}', and this spec cannot fall back to ${DEFAULT_LAB}: it `
+        + `${spec.goad.rename_forest === true ? 'requests a forest rename' : 'carries a generated_lab tree'}`
+        + ', so the version names the ad/<LAB> directory run.sh resolves and the playbooks.yml key it '
+        + `reads the chain from, while ${DEFAULT_LAB}'s roster would silently supply this lane's `
+        + 'addressing. Remedy: set spec.goad.version to a lab this build ships, or describe the lab '
+        + 'on the spec itself as goad.lab = { forestRoot, vms: [...] }. Known labs: '
+        + `${Object.keys(GOAD_LABS).join(', ')}.`);
+    }
     console.warn(`[GOAD] Unknown lab version '${labName}' — falling back to ${DEFAULT_LAB}`);
   }
   const labDef = lab || GOAD_LABS[DEFAULT_LAB];
@@ -911,6 +996,99 @@ function assertGoadExtensionsRunnable(spec, selected) {
   );
 }
 
+/** Validate an explicit rename request; unsupported requests never deploy stock. */
+function assertForestRenameDeployable(spec) {
+  if (spec?.goad?.rename_forest !== true) return;
+  const verdict = describeRebrand(spec);
+  if (verdict.willRebrand || verdict.code === REBRAND_CODES.ALREADY_REBRANDED) return;
+  throw new RebrandError(verdict.code, verdict.reason, { baseLab: verdict.baseLab });
+}
+
+/** Pure preparation shared by every deploy entry point, before allocation. */
+function prepareGoadDeploymentSpec(spec) {
+  if (!spec?.goad?.enabled) return spec;
+  try {
+    assertForestRenameDeployable(spec);
+    const prepared = preflightGoadRebrand(spec);
+    const { labName, labDef, fromSpec, extensions } = resolveGoadLab(prepared);
+    if (!Array.isArray(prepared.vms)) throw new Error('GOAD deployment requires spec.vms to declare the complete lab roster');
+    assertGoadRoster(prepared, labName, labDef, fromSpec, extensions.external);
+    assertGoadExtensionsRunnable(prepared, extensions.selected);
+    assertGoadExtensionsRenameSafe(prepared, extensions.selected);
+    if (prepared.goad.generated_lab) resolveGeneratedLab(prepared);
+    goadIdentityExpectations(prepared);
+    return prepared;
+  } catch (error) {
+    error.status = 400;
+    throw error;
+  }
+}
+
+/**
+ * REFUSE a renamed lane whose extension carries a domain we cannot rewrite.
+ *
+ * THE BREAK, TRACED. extensions/<key>/ansible/install.yml imports the MAIN
+ * lab's data — our renamed tree — layers the extension's own data/config.json
+ * over it as `lab_extension`, and then joins the two BY DOMAIN NAME:
+ *
+ *     member_domain:   "{{ lab.hosts[dict_key].domain }}"    still the stock root
+ *     domain_password: "{{ lab.domains[member_domain].domain_password }}"
+ *
+ * After a rename, an unchanged extension would resolve a missing domain. The
+ * controller compiler rewrites the selected extension with the main lab. This
+ * guard checks that the plan and controller recipe support that extension.
+ *
+ * It reads GOAD_EXTENSIONS[key].shipsLabConfig, never the disk under GOAD-main/
+ * — see the flag's contract above the catalog.
+ *
+ * @param {object} spec       the challenge spec
+ * @param {string[]} selected resolveGoadLab(spec).extensions.selected
+ */
+function assertGoadExtensionsRenameSafe(spec, selected) {
+  const goad = spec && spec.goad;
+  if (!goad || goad.rename_forest !== true) return;
+  const keys = Array.isArray(selected) ? selected : [];
+  if (keys.length === 0) return;
+
+  // Authored requests and our already-planned in-memory specs share this guard.
+  const verdict = describeRebrand(spec);
+  if (!verdict.willRebrand && verdict.code !== REBRAND_CODES.ALREADY_REBRANDED) return;
+
+  const carried = (goad.generated_lab && typeof goad.generated_lab === 'object')
+    ? goad.generated_lab.extension_configs
+    : null;
+
+  const unsafe = [];
+  for (const key of keys) {
+    const ext = getExtension(key);
+    if (!ext || ext.shipsLabConfig !== true) continue;
+    if (!listExtensionBases().includes(key)) {
+      unsafe.push(`${key} (no identity metadata in src/data/goad-base-labs/_extensions/${key}/)`);
+    } else if (goad.rename_plan && !goad.rename_plan.selected_extensions?.includes(key)) {
+      unsafe.push(`${key} (the rename plan does not select this extension)`);
+    } else if (goad.generated_lab && (!carried || typeof carried[key] !== 'string')) {
+      // The tree was compiled without this extension's config. Pushing it would
+      // deliver a renamed lab beside an extension config that still names the
+      // stock forest — the two-files-disagree state, arrived at from the other
+      // side.
+      unsafe.push(`${key} (the compiled lab carries no rewritten config for it)`);
+    }
+  }
+  if (unsafe.length === 0) return;
+
+  const one = unsafe.length === 1;
+  throw new RebrandError(
+    REBRAND_CODES.EXTENSION,
+    `This lane renames the forest root and selected ${one ? 'an extension' : 'extensions'} whose own `
+    + `data/config.json cannot be rewritten: ${unsafe.join('; ')}. install.yml layers that config over `
+    + 'the renamed lab and joins the two by domain name, so it would look up a domain the lab no '
+    + `longer has and die with the machine already cloned and booted. Remedy — pick one: (1) drop `
+    + `${unsafe.map(u => u.split(' ')[0]).join(', ')} from spec.goad.extensions; (2) clear the forest `
+    + 'rename and deploy the lab under its shipped domain; or (3) add matching identity metadata and controller rewrite support so the '
+    + 'rename can deliver it. Refusing to deploy.',
+    { extensions: unsafe });
+}
+
 /**
  * Build a deterministic locally-administered MAC from an IP last octet.
  * Format: 02:00:CC:HH:LL:RR
@@ -981,6 +1159,18 @@ function prepareGoadMacs(spec, vxlanId, laneSubnetBase) {
   // green with an empty SIEM on it.
   assertGoadExtensionsRunnable(spec, extensions && extensions.selected);
 
+  // Reject invalid rename plans before allocating guests. Later controller
+  // failures are retained as suspended lanes, but these require no I/O and
+  // therefore should never consume a lane's resources.
+  assertForestRenameDeployable(spec);
+  assertGoadExtensionsRenameSafe(spec, extensions && extensions.selected);
+
+  // And the generated tree's own shape, for any spec that carries one — CiAB's
+  // as much as any other generated lab. resolveGeneratedLab already runs inside
+  // deliverGeneratedLab; checking HERE rejects a name/version mismatch before
+  // allocation rather than leaving a failed, partially built lane.
+  if (spec.goad.generated_lab) resolveGeneratedLab(spec);
+
   const out = {};
   for (const vm of spec.vms) {
     if (!vm?.name) continue;
@@ -1024,6 +1214,24 @@ function buildLaneNet0(vmSpec, vnetName, mac, nicModel) {
   }
   const model = nicModel || vmSpec?.nic_model || 'virtio';
   return `${model},bridge=${vnetName}` + (macStr ? `,macaddr=${macStr}` : '');
+}
+
+/** Full reservation set needed while old controller prep/run scripts own DHCP. */
+function buildGoadHostMap(spec, vxlanId, laneSubnetBase, extSubnetBase) {
+  const macs = prepareGoadMacs(spec, vxlanId, laneSubnetBase);
+  const triples = Object.entries(macs).map(([name, info]) => `${name}|${info.static_ip}|${info.mac}`);
+  triples.push(`goad-controller|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
+  const externalBase = extSubnetBase || laneSubnetBase;
+  if (spec.goad.include_kali !== false) {
+    triples.push(`kali|${buildIp(externalBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
+  }
+  for (const key of resolveGoadLab(spec).extensions.selected) {
+    const extension = getExtension(key);
+    if (extension.inLab) continue;
+    const vm = (spec.vms || []).find(candidate => String(candidate.name).toLowerCase() === extension.machine.toLowerCase());
+    if (vm) triples.push(`${vm.name}|${buildIp(externalBase, extension.ipOctet)}|${macForOctet(extension.ipOctet, vxlanId)}`);
+  }
+  return triples.join(',');
 }
 
 /**
@@ -1195,6 +1403,76 @@ async function waitForWinRM({ controllerVmId, bestNode, vmIPs, proxmoxAPI, timeo
  * teaching value) come from upstream's config.json verbatim — we no longer
  * patch them.
  */
+const CONTROLLER_HOST_MAP_PY = String.raw`import ipaddress
+import re
+import sys
+from pathlib import Path
+
+inventory = Path(sys.argv[1])
+addresses = {}
+for triple in sys.argv[2].split(','):
+    fields = triple.split('|')
+    if len(fields) != 3:
+        raise SystemExit('Invalid HOST_MAP triple')
+    name, address, _ = fields
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', name):
+        raise SystemExit('Invalid HOST_MAP hostname')
+    ipaddress.IPv4Address(address)
+    addresses[name.lower()] = address
+
+count = 0
+def replace(match):
+    global count
+    name = match.group(1).lower()
+    if name not in addresses:
+        return match.group(0)
+    count += 1
+    return match.group(1) + match.group(2) + addresses[name]
+
+original = inventory.read_text()
+updated = re.sub(r'(?m)^([A-Za-z0-9_-]+)([^\r\n]*?\bansible_host=)(\S+)', replace, original)
+if not count:
+    raise SystemExit('Extension inventory has no host matching HOST_MAP')
+inventory.write_text(updated)
+`;
+
+/** Adapt an existing extension-capable controller to segmented lane addresses. */
+async function ensureControllerHostMap({ controllerVmId, bestNode, proxmoxAPI }) {
+  const helper = Buffer.from(CONTROLLER_HOST_MAP_PY).toString('base64');
+  const patch = String.raw`import base64, os, re, subprocess
+from pathlib import Path
+helper = Path('/opt/goad-light/apply-host-map.py')
+helper.write_bytes(base64.b64decode('${helper}'))
+runner = Path('/opt/goad-light/run.sh')
+source = runner.read_text()
+call = 'python3 /opt/goad-light/apply-host-map.py "$RUNTIME/inventory_ext_$ext" "$HOST_MAP"'
+if call not in source:
+    pattern = r'(?m)^([ \t]*)echo "==> Rendered extension inventory: \$RUNTIME/inventory_ext_\$ext"[ \t]*$'
+    matches = list(re.finditer(pattern, source))
+    if len(matches) != 1:
+        raise SystemExit('Cannot safely adapt this controller run.sh extension renderer to HOST_MAP')
+    match = matches[0]
+    updated = source[:match.start()] + match.group(1) + call + '\n' + source[match.start():]
+    temporary = runner.with_name('run.sh.cc-host-map')
+    temporary.write_text(updated)
+    os.chmod(temporary, runner.stat().st_mode)
+    subprocess.run(['bash', '-n', str(temporary)], check=True)
+    temporary.replace(runner)
+print('HOST_MAP inventory support ready')
+`;
+  const { pid } = await agentExecArgv(bestNode, controllerVmId, ['/usr/bin/python3', '-c', patch], proxmoxAPI);
+  const deadline = Date.now() + 60000;
+  let result;
+  while (Date.now() < deadline) {
+    result = await proxmoxAPI('GET', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/agent/exec-status?pid=${pid}`);
+    if (result?.exited) break;
+    await sleep(1000);
+  }
+  if (!result?.exited || result.exitcode !== 0) {
+    throw new Error(`Controller cannot prepare extension addresses from HOST_MAP: ${String(result?.['err-data'] || result?.['out-data'] || 'patch did not complete').slice(-1500)}`);
+  }
+}
+
 async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI }) {
   const goad = spec.goad || {};
   // Kali sits on the EXTERNAL segment (ext0 for v3); GOAD VMs/controller use
@@ -1220,23 +1498,7 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
   const initialUser = goad.admin_user || 'vagrant';
   const initialPass = goad.admin_password || 'vagrant';
 
-  // Build HOST_MAP as pipe-separated triples "name|ip|mac" so run.sh can
-  // parse + write DHCP reservations on the gateway from inside the lane.
-  // Includes the lab VMs, the controller itself, and Kali (if requested) —
-  // every host that needs a deterministic IP from the gateway's dnsmasq.
-  // run.sh derives GW_IP from the FIRST triple's /24 base, so any of these
-  // triples being correctly subnet-anchored is sufficient.
-  const macs = prepareGoadMacs(spec, vxlanId, laneSubnetBase);
-  const triples = [];
-  for (const [name, info] of Object.entries(macs)) {
-    triples.push(`${name}|${info.static_ip}|${info.mac}`);
-  }
-  triples.push(`goad-controller|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
-  if (goad.include_kali !== false) {
-    // Kali on the EXTERNAL segment (kaliBase), NOT laneSubnetBase (internal for v3).
-    triples.push(`kali|${buildIp(kaliBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
-  }
-  const hostMap = triples.join(',');
+  const hostMap = buildGoadHostMap(spec, vxlanId, laneSubnetBase, kaliBase);
 
   // Invoke run.sh inside the controller via qemu-guest-agent.
   //
@@ -1348,6 +1610,10 @@ async function runGoadPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSu
       );
     }
     console.log(`[GOAD] controller ${controllerVmId} supports extensions — installing ${selectedList}`);
+    if (extSubnetBase && extSubnetBase !== laneSubnetBase
+      && extensions.selected.some(key => !getExtension(key).inLab)) {
+      await ensureControllerHostMap({ controllerVmId, bestNode, proxmoxAPI });
+    }
   }
 
   // Outer detach: nohup ignores SIGHUP, setsid creates new session, &
@@ -1518,11 +1784,14 @@ print("patched mssql install task -> offline setup.exe")
  * Stop the controller after the playbook finishes (or fails). Keeps the
  * provisioning credentials off any running box during student session.
  */
-async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
+async function stopController({ controllerVmId, bestNode, proxmoxAPI, waitForTask }) {
   try {
-    await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/status/stop`);
+    const task = await proxmoxAPI('POST', `/api2/json/nodes/${bestNode}/qemu/${controllerVmId}/status/stop`);
+    if (task && waitForTask) await waitForTask(bestNode, task);
+    return { stopped: true, error: null };
   } catch (err) {
     console.warn(`[GOAD] stopController: ${err.message}`);
+    return { stopped: false, error: err.message };
   }
 }
 
@@ -1570,11 +1839,18 @@ async function stopController({ controllerVmId, bestNode, proxmoxAPI }) {
 function defaultGoadDeps() {
   /* eslint-disable global-require */
   const push     = require('../../modules/crucible/plugins/ciab/utils/goad-lab-push');
+  const extPush  = require('../../modules/crucible/plugins/ciab/utils/goad-ext-config-push');
   const probe    = require('../../modules/crucible/plugins/ciab/utils/goad-postcondition-probe');
   const validate = require('../../modules/crucible/plugins/ciab/utils/goad-lab-validate');
   /* eslint-enable global-require */
   return {
     pushLabTree:           push.pushLabTree,
+    // The extension half of the same delivery. A separate module because
+    // pushLabTree swaps a whole DIRECTORY and aiming that at extensions/<key>/
+    // would delete the ansible/, inventory and providers/ beside the config —
+    // but it reuses that module's transport, so the two cannot drift on retry
+    // semantics.
+    pushExtensionConfig:   extPush.pushExtensionConfig,
     buildExpectationSet:   probe.buildExpectationSet,
     collectLabSecrets:     probe.collectLabSecrets,
     assertNoSecrets:       probe.assertNoSecrets,
@@ -1658,10 +1934,37 @@ function resolveGeneratedLab(spec) {
       + 'fast; it fails 15-25 minutes in, on reciprocal data it cannot make consistent.');
   }
 
+  // The rewritten extension configs, keyed by extension. Absent on every CiAB
+  // engagement and on every lab that is not renamed, which is why a missing key
+  // is silence rather than a refusal. They are validated here — the same place
+  // the tree is — because each one is delivered by the SAME step, and a malformed
+  // entry found at push time is found on a live lane.
+  const extRaw = gen.extension_configs;
+  const extensionConfigs = {};
+  if (extRaw !== undefined && extRaw !== null) {
+    if (typeof extRaw !== 'object' || Array.isArray(extRaw)) {
+      throw new Error(
+        `spec.goad.generated_lab.extension_configs for '${name}' must be an object keyed by `
+        + 'extension (e.g. { ws01: "{…}" }).');
+    }
+    for (const key of Object.keys(extRaw)) {
+      const content = extRaw[key];
+      if (typeof content !== 'string' || content.trim() === '') {
+        throw new Error(
+          `spec.goad.generated_lab.extension_configs.${key} for '${name}' must be the rewritten `
+          + "config as a STRING. It is compiled at deploy and never persisted, so an empty or "
+          + 'non-string value here means the transform produced nothing for an extension it was '
+          + "asked about — and the extension's config would still name the stock forest root.");
+      }
+      extensionConfigs[key] = content;
+    }
+  }
+
   return {
     name,
     files,
     chain: gen.chain,
+    extensionConfigs,
     root: gen.root,
     runShPath: gen.runShPath,
     perLabPlaybooks: gen.perLabPlaybooks,
@@ -1670,21 +1973,82 @@ function resolveGeneratedLab(spec) {
   };
 }
 
-/**
- * Deliver a generated lab tree to the controller. Returns null — having done
- * nothing at all — for a spec that declares none.
- *
- * CALLED ONCE, as soon as the controller's guest agent answers and BEFORE the
- * Windows VMs are restarted onto their reserved IPs, i.e. at the first moment
- * anything can talk to the controller. A malformed tree then costs thirty
- * seconds; the same push placed just before run.sh costs the DHCP restart plus
- * the thirty-minute WinRM wait first.
- *
- * The transport is the SAME pair the rest of this module uses (agentShellExec +
- * pollExecStatus from script-executor), passed explicitly rather than left to
- * goad-lab-push's own lazy default — otherwise a caller who injected an exec
- * would find the push, alone, still talking to the real cluster.
- */
+/** Compile the identity plan using the GOAD fork already on the controller. */
+async function deliverControllerRename({ controllerVmId, bestNode, spec, proxmoxAPI, deps = {} }) {
+  const plan = spec?.goad?.rename_plan;
+  if (!plan) return null;
+  if (plan.lab_name !== spec.goad.version || plan.base_lab !== spec.goad.lab?.baseLab) {
+    throw new Error('GOAD rename plan does not match the selected lab identity');
+  }
+  // Only the identity plan crosses this boundary. The pinned GOAD fork and its
+  // compiler already live on the controller; the application never reads them.
+  const bootstrap = `import base64, json, os, subprocess, sys, tempfile
+from pathlib import Path
+helper = Path('/opt/goad/scripts/cybercore-rebrand.py')
+if not helper.is_file():
+    raise SystemExit('GOAD controller lacks scripts/cybercore-rebrand.py. Refresh or re-bake template 1700 from the pinned CyberCore GOAD fork before deploying a renamed forest.')
+fd, filename = tempfile.mkstemp(prefix='cybercore-rename-', suffix='.json')
+try:
+    with os.fdopen(fd, 'wb') as output:
+        output.write(base64.b64decode(sys.argv[1]))
+    result = subprocess.run([sys.executable, str(helper), '--goad-root', '/opt/goad', '--plan', filename])
+    code = result.returncode
+finally:
+    os.unlink(filename)
+sys.exit(code)
+`;
+  const { pid } = await agentExecArgv(bestNode, controllerVmId,
+    ['/usr/bin/python3', '-c', bootstrap, Buffer.from(JSON.stringify(plan)).toString('base64')], proxmoxAPI);
+  const result = await (deps.pollExecStatus || pollExecStatus)(bestNode, controllerVmId, pid, 180000);
+  const output = String(result?.['out-data'] ?? result?.outData ?? result?.stdout ?? '').trim();
+  let report = null;
+  try { report = JSON.parse(output); } catch (_) { /* failed helpers may only write stderr */ }
+  if (!result?.exited || result.exitcode !== 0 || report?.ok === false) {
+    const error = new Error(report?.error || String(result?.['err-data'] ?? result?.stderr ?? 'Controller forest rename did not complete').slice(-2000));
+    error.goadDelivery = { lab: plan.lab_name, ...(report?.delivery || { failedStep: 'controller_rename' }) };
+    throw error;
+  }
+  if (report?.lab !== plan.lab_name || !/^[a-f0-9]{64}$/i.test(report?.treeSha256 || '')) {
+    const error = new Error('Controller forest rename returned an invalid identity or content hash');
+    error.goadDelivery = { lab: plan.lab_name, failedStep: 'rename_report' };
+    throw error;
+  }
+  for (const key of resolveGoadLab(spec).extensions.selected) {
+    if (getExtension(key).shipsLabConfig !== true) continue;
+    if (!/^[a-f0-9]{64}$/i.test(report.extensionConfigs?.[key]?.sha256 || '')) {
+      const error = new Error(`Controller forest rename did not confirm rewritten config for ${key}`);
+      error.goadDelivery = { ...report, failedStep: `extension_report:${key}` };
+      throw error;
+    }
+  }
+  if (!['per-lab', 'per-lab+shared'].includes(report.chainMode)
+    || !Array.isArray(report.chain) || report.chain.length === 0
+    || report.chain.some(play => typeof play !== 'string' || !/^[A-Za-z0-9_-]+\.ya?ml$/.test(play))) {
+    const error = new Error('Controller forest rename did not confirm a valid lab playbook chain');
+    error.goadDelivery = { ...report, failedStep: 'rename_chain' };
+    throw error;
+  }
+  const expected = plan.expected_identities;
+  if (!Array.isArray(expected) || !Array.isArray(report.identities)
+    || report.identities.length !== expected.length
+    || new Set(report.identities.map(host => String(host?.name).toLowerCase())).size !== expected.length) {
+    const error = new Error('Controller forest rename returned an incomplete host roster');
+    error.goadDelivery = { ...report, failedStep: 'rename_identity' };
+    throw error;
+  }
+  for (const identity of expected) {
+    const actual = report.identities?.find(host => String(host.name).toLowerCase() === identity.name.toLowerCase());
+    if (!actual || String(actual.hostname).toLowerCase() !== identity.hostname.toLowerCase()
+      || String(actual.domain).toLowerCase() !== identity.domain.toLowerCase()) {
+      const error = new Error(`Controller forest rename disagrees with planned identity for ${identity.name}`);
+      error.goadDelivery = { ...report, failedStep: 'rename_identity' };
+      throw error;
+    }
+  }
+  return report;
+}
+
+/** Deliver a separately generated CiAB tree before any Windows provisioning. */
 async function deliverGeneratedLab({ controllerVmId, bestNode, spec, deps }) {
   const gen = resolveGeneratedLab(spec);
   if (!gen) return null;
@@ -1709,10 +2073,73 @@ async function deliverGeneratedLab({ controllerVmId, bestNode, spec, deps }) {
   if (gen.perLabPlaybooks !== undefined) opts.perLabPlaybooks = gen.perLabPlaybooks;
   if (gen.chunkSize) opts.chunkSize = gen.chunkSize;
 
-  const result = await d.pushLabTree(opts);
+  let result;
+  try {
+    result = await d.pushLabTree(opts);
+  } catch (error) {
+    error.goadDelivery = { lab: gen.name, failedStep: 'lab_tree' };
+    throw error;
+  }
   console.log(`[GOAD] ${gen.name}: ${result.skipped ? 'already at' : 'installed'} `
     + `${String(result.treeSha256).slice(0, 12)} (${result.chainMode} chain)`);
-  return result;
+
+  // ── THE EXTENSION CONFIGS, IN THIS STEP, AFTER THE TREE ───────────────────
+  //
+  // ORDER IS LOAD-BEARING TWICE OVER. The tree goes first because an extension
+  // config is a FUNCTION OF the renamed main config — install.yml joins
+  // lab_extension to lab by domain name — so the pair must never be half
+  // installed with the halves computed from different specs. And they belong in
+  // this step, not a later one, because a later step is reachable with a
+  // different spec, and that disagreement is the bug this whole path fixes,
+  // arrived at by another route.
+  //
+  // ONLY THE SELECTED EXTENSIONS. The compiled tree carries a rewritten config
+  // for every extension we have vendored, because computing them all from one
+  // transform is what makes them agree; pushing one for an extension this lane
+  // never ticked would spend ~21s rewriting a file no play will read, and would
+  // fail the lane if the controller image happened not to carry that extension.
+  const extConfigs = gen.extensionConfigs || {};
+  const wanted = Object.keys(extConfigs).sort();
+  let extensionsPushed = null;
+  if (wanted.length) {
+    const selected = new Set(resolveGoadLab(spec).extensions.selected);
+    for (const key of wanted) {
+      if (!selected.has(key)) continue;
+      // Deliberately NOT caught, exactly like the tree push above: an extension
+      // whose config never arrived still names the stock forest root, so its
+      // domain join fails against a forest that no longer has that domain —
+      // 40 minutes later, as an ansible error naming a variable.
+      let pushed;
+      try {
+        pushed = await d.pushExtensionConfig({
+        node:      bestNode,
+        vmId:      controllerVmId,
+        key,
+        content:   extConfigs[key],
+        // The same flag the tree took. Two meanings for one word across the two
+        // halves of one delivery is how a "forced" redeploy comes to refresh the
+        // lab and skip the extension.
+        force:     gen.force,
+        ...(gen.root ? { root: gen.root } : {}),
+        ...(gen.chunkSize ? { chunkSize: gen.chunkSize } : {}),
+        deps: { agentShellExec, pollExecStatus },
+      });
+      } catch (error) {
+        error.goadDelivery = { ...result, extensionConfigs: extensionsPushed || {}, failedStep: `extension:${key}` };
+        throw error;
+      }
+      console.log(`[GOAD] ${gen.name}: ${key} config `
+        + `${pushed.skipped ? 'already at' : 'installed'} ${String(pushed.sha256).slice(0, 12)}`);
+      extensionsPushed = extensionsPushed || {};
+      extensionsPushed[key] = {
+        sha256: pushed.sha256, skipped: pushed.skipped === true, dest: pushed.dest,
+      };
+    }
+  }
+  // pushLabTree's own result is returned UNTOUCHED when nothing else was
+  // delivered, so every CiAB lane — and every offline test that asserts on it —
+  // sees exactly the object it saw before extension configs existed.
+  return extensionsPushed ? { ...result, extensionConfigs: extensionsPushed } : result;
 }
 
 /**
@@ -1967,22 +2394,75 @@ function summariseVerification(v) {
   };
 }
 
-/**
- * Top-level orchestrator. Call AFTER the gateway and the 3 Windows VMs
- * (and optional Kali) have been cloned + started by the normal deploy path.
- *
- * Sequence:
- *   1. deployController  — clone VM 1700, attach to lane VNet, start
- *   2. waitForGuestAgent — qemu-agent ready before we exec anything
- *   3. waitForWinRM      — poll until each Windows VM responds on 5985
- *   4. runGoadPlaybook   — controller's run.sh writes DHCP reservations on
- *                          the gateway (SSH from inside the lane), then
- *                          executes the upstream playbook chain over WinRM
- *   5. stopController    — shut down the controller
- *
- * Throws on any unrecoverable failure. Caller is responsible for catching
- * and updating lane status accordingly.
- */
+/** Windows identities a successful controller build must produce. */
+function goadIdentityExpectations(spec) {
+  if (spec?.goad?.rename_forest !== true) return null;
+  const plan = spec.goad.rename_plan;
+  if (plan) {
+    const { labDef } = resolveGoadLab(spec);
+    if (plan.lab_name !== spec.goad.version || plan.base_lab !== spec.goad.lab?.baseLab) {
+      throw new Error('GOAD rename plan does not match the selected lab identity');
+    }
+    return labDef.vms.filter(vm => vm.role !== 'linux').map(vm => {
+      const identity = plan.expected_identities?.find(host => String(host.name).toLowerCase() === vm.name.toLowerCase());
+      if (!identity?.hostname || !identity?.domain || !spec.goad.lab.domains.includes(identity.domain)) {
+        throw new Error(`GOAD rename plan has no valid hostname/domain for ${vm.name}`);
+      }
+      return { name: vm.name, hostname: identity.hostname, domain: identity.domain };
+    });
+  }
+  throw new Error('A renamed GOAD lab requires its validated identity plan');
+}
+
+/** Read Windows identity through the guest agent without provisioning credentials. */
+async function verifyGoadIdentities({ spec, deployedVMs, proxmoxAPI, deps = {} }) {
+  const expected = goadIdentityExpectations(spec);
+  if (!expected) return { applicable: false, passed: null, checks: [] };
+  const report = { applicable: true, passed: true, checks: [] };
+  const poll = deps.pollExecStatus || pollExecStatus;
+  const pause = deps.sleep || sleep;
+  const command = "$ErrorActionPreference='Stop'; $c=Get-CimInstance Win32_ComputerSystem; "
+    + "@{hostname=$c.Name;domain=$c.Domain;joined=[bool]$c.PartOfDomain}|ConvertTo-Json -Compress";
+  for (const identity of expected) {
+    const check = { name: identity.name, expected: { hostname: identity.hostname, domain: identity.domain }, observed: null, ok: false };
+    const vm = (deployedVMs || []).find(candidate => candidate.type === 'qemu'
+      && String(candidate.name).toLowerCase() === identity.name.toLowerCase());
+    if (!vm) {
+      check.error = 'Windows VM is missing from the deployment inventory';
+    } else {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const { pid } = await agentExecArgv(vm.node, vm.vm_id,
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', command], proxmoxAPI);
+          const result = await poll(vm.node, vm.vm_id, pid, 60000);
+          if (!result?.exited || result.exitcode !== 0) throw new Error('Windows identity query did not complete successfully');
+          const raw = result['out-data'] ?? result.outData ?? result.stdout ?? '';
+          const observed = JSON.parse(String(raw).trim());
+          // Store only these facts, never an arbitrary guest-agent response.
+          check.observed = { hostname: String(observed.hostname || ''), domain: String(observed.domain || ''), joined: observed.joined === true };
+          check.ok = check.observed.joined
+            && check.observed.hostname.toLowerCase() === identity.hostname.toLowerCase()
+            && check.observed.domain.toLowerCase() === identity.domain.toLowerCase();
+          if (!check.ok) check.error = 'Windows hostname or domain membership does not match the compiled lab';
+          break;
+        } catch (_) {
+          check.error = 'Could not read Windows identity through the guest agent';
+          if (attempt < 2) await pause(5000);
+        }
+      }
+    }
+    if (!check.ok) report.passed = false;
+    report.checks.push(check);
+  }
+  if (!report.passed) {
+    const error = new Error(`GOAD identity verification failed: ${report.checks.filter(check => !check.ok).map(check => check.name).join(', ')}`);
+    error.goadIdentityVerification = report;
+    throw error;
+  }
+  return report;
+}
+
+/** Provision already-cloned lane VMs and retain cleanup ownership on failure. */
 async function deployGoadLane({
   lane, spec, module, vnet, vxlanId, gatewayVmId, bestNode, templateNode,
   laneSubnetBase, extSubnetBase, deployedVMs, proxmoxAPI, waitForTask, query,
@@ -1997,218 +2477,233 @@ async function deployGoadLane({
     throw new Error('deployGoadLane: laneSubnetBase is required (admin.js passes the lane subnet — net.lan.base3 for v1/v2, net.lanInt.base3 for v3 segmented lanes)');
   }
 
+  // Entry points plan before allocating. This also protects direct callers,
+  // and accepts the same in-memory plan without minting it again.
+  spec = prepareGoadDeploymentSpec(spec);
+
   const { labName, labDef } = resolveGoadLab(spec);
   console.log(`[GOAD] Starting ${labName} provisioning for lane ${lane.lane_id} (vxlan ${vxlanId}, subnet ${laneSubnetBase}.0/24)`);
 
-  // 1. Deploy controller (QEMU VM with qemu-guest-agent)
-  const controllerVmId = await deployController({
-    vxlanId, vnetName: vnet.vnet, bestNode, templateNode, lane, module, laneSubnetBase, proxmoxAPI, waitForTask
-  });
-  console.log(`[GOAD] Controller deployed: VMID ${controllerVmId}`);
-
-  // Wait for the controller's qemu-guest-agent to be ready before we try
-  // to exec anything inside it. Cloud-init bake in the template installs
-  // the agent and starts it on boot, but it takes ~30-60s post-power-on.
-  console.log(`[GOAD] Waiting for controller guest agent...`);
-  const agentReady = await waitForGuestAgent(bestNode, controllerVmId, 180000);
-  if (!agentReady) {
-    throw new Error(`Controller VM ${controllerVmId} guest agent never came up within 3 min`);
-  }
-
-  // 1b. GENERATED LAB DELIVERY — null, and zero calls, for every built-in lab.
-  //     Placed here rather than beside runGoadPlaybook on purpose: this is the
-  //     first instant the controller is reachable, so a tree that cannot be
-  //     built or installed fails now instead of after the DHCP restart and the
-  //     thirty-minute WinRM wait. Deliberately NOT caught — a lab that never
-  //     arrived would otherwise be provisioned as whatever ad/<version> the
-  //     controller already had, which is the silent-wrong failure this whole
-  //     path exists to avoid.
-  const delivery = await deliverGeneratedLab({ controllerVmId, bestNode, spec, deps });
-
-  // 2. Run prep.sh on the controller — writes DHCP reservations on the gateway
-  //    BEFORE the Windows VMs renew DHCP. Without this, Windows VMs sit on
-  //    whatever dynamic IPs they happened to grab at boot, and waitForWinRM
-  //    polls the wrong addresses.
-  const macs = prepareGoadMacs(spec, vxlanId, laneSubnetBase);
-  const triples = Object.entries(macs).map(([n, i]) => `${n}|${i.static_ip}|${i.mac}`);
-  triples.push(`goad-controller|${buildIp(laneSubnetBase, INFRA_IP_OCTETS.controller)}|${macForOctet(INFRA_IP_OCTETS.controller, vxlanId)}`);
-  if (spec.goad.include_kali !== false) {
-    // Kali on the EXTERNAL segment (extSubnetBase), NOT laneSubnetBase (internal for v3).
-    triples.push(`kali|${buildIp(extSubnetBase || laneSubnetBase, INFRA_IP_OCTETS.Kali)}|${macForOctet(INFRA_IP_OCTETS.Kali, vxlanId)}`);
-  }
-  const hostMap = triples.join(',');
-
-  console.log(`[GOAD] Writing DHCP reservations on gateway via prep.sh...`);
-  const { pid: prepPid } = await agentExecArgv(bestNode, controllerVmId,
-    ['/opt/goad-light/prep.sh', hostMap],
-    proxmoxAPI);
-  const prepResult = await pollExecStatus(bestNode, controllerVmId, prepPid, 60000);
-  if (!prepResult.exited || prepResult.exitcode !== 0) {
-    throw new Error(`prep.sh failed (exit ${prepResult.exitcode}): ${prepResult.stderr || prepResult.stdout}`);
-  }
-  console.log(`[GOAD] prep.sh complete — reservations active on gateway`);
-
-  // 3. Restart Windows VMs so they DHCP fresh and pick up the reserved IPs.
-  //    They were started by admin.js earlier (before reservations existed),
-  //    so they're sitting on dynamic IPs — a stop/start fixes that.
-  const winVMs = (deployedVMs || []).filter(v => {
-    if (v.type !== 'qemu') return false;
-    const labVm = labDef.vms.find(lv => lv.name === v.name);
-    return labVm && labVm.role !== 'linux';
-  });
-  if (winVMs.length > 0) {
-    console.log(`[GOAD] Restarting ${winVMs.length} Windows VM(s) to renew DHCP onto reserved IPs...`);
-    for (const vm of winVMs) {
-      try {
-        await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/stop`);
-      } catch (err) {
-        console.warn(`[GOAD] stop ${vm.vm_id} (${vm.name}): ${err.message}`);
-      }
-    }
-    await sleep(8000);  // let Proxmox finalize the stops
-    for (const vm of winVMs) {
-      await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`);
-    }
-    console.log(`[GOAD] Windows VMs restarted; waiting 60s for fresh boot + DHCP...`);
-    await sleep(60000);
-  }
-
-  // 4. Wait for WinRM on every Windows VM in this lab (skip Linux)
-  const winrmIPs = labDef.vms
-    .filter(v => v.role !== 'linux')                  // Linux VMs don't run WinRM
-    .map(v => macs[v.name]?.static_ip)
-    .filter(Boolean);
-  if (winrmIPs.length > 0) {
-    await waitForWinRM({ controllerVmId, bestNode, vmIPs: winrmIPs, proxmoxAPI });
-    console.log(`[GOAD] WinRM up on ${winrmIPs.length} Windows VM(s)`);
-  }
-
-  // 3b. SEED THE BOOTSTRAP ACCOUNT ON EVERY WINDOWS VM, OVER THE GUEST AGENT.
-  //
-  //     run.sh's first act is to find a WinRM account that works. On a lane
-  //     built only from template 1004 it always does, because that template
-  //     bakes vagrant/vagrant. Template 1006 (Windows 11, the ws01 extension
-  //     machine) bakes NOTHING USABLE:
-  //
-  //       Administrator   Enabled False   -- sysprep /generalize /oobe disables
-  //                                          it, which is the whole reason 1004
-  //                                          bakes a second account
-  //       cactus-user     Enabled True    -- the packer BUILD account. Its
-  //                                          password is reset at first boot by
-  //                                          cloudbase-init with
-  //                                          inject_user_password=true, and a
-  //                                          GOAD spec VM is cloned WITHOUT
-  //                                          ciuser/cipassword (see
-  //                                          challenge-lane-deployer.js:372 --
-  //                                          only cloneExtraWorkstation sets
-  //                                          them), so nothing is injected and
-  //                                          the password is random.
-  //
-  //     So the only enabled account on ws01 has a password nobody holds, not
-  //     even us. Observed on a real lane: run.sh tried all four candidates for
-  //     600s and refused, correctly, with "dc01: vagrant" resolved beside it.
-  //
-  //     THE CYCLE THIS BREAKS. preflight-vagrant.yml creates exactly the account
-  //     we need -- but it is an ansible play, so it needs WinRM auth to get in,
-  //     which is the thing that does not exist. The guest agent needs no
-  //     credentials at all, and it demonstrably works on these hosts: the vuln
-  //     script path writes 180KB+ to ws01 through it on this very deploy.
-  //
-  //     BEST-EFFORT, NOT A GATE. On a 1004 host this is a no-op (vagrant is
-  //     already there), so a failure here must not fail a lane that would
-  //     otherwise work. run.sh's per-host probe is the real gate and it names
-  //     the host it could not open -- a far better error than anything this
-  //     could throw.
-  //
-  //     ORDER: after the DHCP restart and waitForWinRM, so the VM is settled and
-  //     the guest agent is answering; before run.sh, which is what needs it.
-  if (winVMs.length > 0) {
-    console.log(`[GOAD] Seeding bootstrap account on ${winVMs.length} Windows VM(s)...`);
-    for (const vm of winVMs) {
-      try {
-        const { pid } = await agentExecArgv(vm.node, vm.vm_id,
-          ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', GOAD_BOOTSTRAP_ACCOUNT_PS],
-          proxmoxAPI);
-        const r = await pollExecStatus(vm.node, vm.vm_id, pid, 120000);
-        const out = String(r?.['out-data'] ?? r?.outData ?? '').trim();
-        if (r?.exited && r.exitcode === 0) {
-          console.log(`[GOAD]   ${vm.name}: ${out || 'seeded'}`);
-        } else {
-          console.warn(`[GOAD]   ${vm.name}: bootstrap seed exit ${r?.exitcode} — ${out || r?.stderr || 'no output'}`);
-        }
-      } catch (err) {
-        // A domain CONTROLLER has no local SAM once promoted, so Get-LocalUser
-        // throws there. That is fine and expected on a re-run against a built
-        // lane: the account already exists in the domain and run.sh's probe
-        // will find it.
-        console.warn(`[GOAD]   ${vm.name}: bootstrap seed failed — ${err.message}`);
-      }
-    }
-  }
-
-  // 4. Run the playbook
+  // Record clone intent before calling Proxmox: a timed-out clone can exist.
+  const controllerVmId = 200000 + vxlanId;
+  const runtime = {
+    waitForGuestAgent: deps.waitForGuestAgent || waitForGuestAgent,
+    pollExecStatus: deps.pollExecStatus || pollExecStatus,
+    waitForWinRM: deps.waitForWinRM || waitForWinRM,
+    sleep: deps.sleep || sleep,
+  };
+  let stage = 'controller_clone';
+  let delivery = null;
   let playbookResult;
+  let verification = null;
+  let identityVerification = null;
   let provisioningError = null;
-  const runPlaybook = deps.runPlaybook || runGoadPlaybook;
+  let controllerStop = null;
   try {
+    // 1. Deploy controller (QEMU VM with qemu-guest-agent)
+    await deployController({
+      vxlanId, vnetName: vnet.vnet, bestNode, templateNode, lane, module, laneSubnetBase, proxmoxAPI, waitForTask
+    });
+    console.log(`[GOAD] Controller deployed: VMID ${controllerVmId}`);
+
+    // Wait for the controller's qemu-guest-agent to be ready before we try
+    // to exec anything inside it. Cloud-init bake in the template installs
+    // the agent and starts it on boot, but it takes ~30-60s post-power-on.
+    console.log(`[GOAD] Waiting for controller guest agent...`);
+    stage = 'controller_agent';
+    const agentReady = await runtime.waitForGuestAgent(bestNode, controllerVmId, 180000);
+    if (!agentReady) {
+      throw new Error(`Controller VM ${controllerVmId} guest agent never came up within 3 min`);
+    }
+
+    // Compile on the controller before DHCP changes or Windows provisioning.
+    // CiAB's independently generated trees retain their separate delivery path.
+    stage = 'delivery';
+    delivery = await deliverControllerRename({ controllerVmId, bestNode, spec, proxmoxAPI, deps })
+      || await deliverGeneratedLab({ controllerVmId, bestNode, spec, deps });
+
+    // 2. Run prep.sh on the controller — writes DHCP reservations on the gateway
+    //    BEFORE the Windows VMs renew DHCP. Without this, Windows VMs sit on
+    //    whatever dynamic IPs they happened to grab at boot, and waitForWinRM
+    //    polls the wrong addresses.
+    stage = 'dhcp';
+    const macs = prepareGoadMacs(spec, vxlanId, laneSubnetBase);
+    const hostMap = buildGoadHostMap(spec, vxlanId, laneSubnetBase, extSubnetBase);
+
+    console.log(`[GOAD] Writing DHCP reservations on gateway via prep.sh...`);
+    const { pid: prepPid } = await agentExecArgv(bestNode, controllerVmId,
+      ['/opt/goad-light/prep.sh', hostMap],
+      proxmoxAPI);
+    const prepResult = await runtime.pollExecStatus(bestNode, controllerVmId, prepPid, 60000);
+    if (!prepResult.exited || prepResult.exitcode !== 0) {
+      throw new Error(`prep.sh failed (exit ${prepResult.exitcode}): ${prepResult.stderr || prepResult.stdout}`);
+    }
+    console.log(`[GOAD] prep.sh complete — reservations active on gateway`);
+
+    // 3. Restart Windows VMs so they DHCP fresh and pick up the reserved IPs.
+    //    They were started by admin.js earlier (before reservations existed),
+    //    so they're sitting on dynamic IPs — a stop/start fixes that.
+    const winVMs = (deployedVMs || []).filter(v => {
+      if (v.type !== 'qemu') return false;
+      const labVm = labDef.vms.find(lv => lv.name.toLowerCase() === String(v.name).toLowerCase());
+      return labVm && labVm.role !== 'linux';
+    });
+    if (winVMs.length > 0) {
+      console.log(`[GOAD] Restarting ${winVMs.length} Windows VM(s) to renew DHCP onto reserved IPs...`);
+      for (const vm of winVMs) {
+        try {
+          await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/stop`);
+        } catch (err) {
+          console.warn(`[GOAD] stop ${vm.vm_id} (${vm.name}): ${err.message}`);
+        }
+      }
+      await runtime.sleep(8000);  // let Proxmox finalize the stops
+      for (const vm of winVMs) {
+        await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/start`);
+      }
+      console.log(`[GOAD] Windows VMs restarted; waiting 60s for fresh boot + DHCP...`);
+      await runtime.sleep(60000);
+    }
+
+    // 4. Wait for WinRM on every Windows VM in this lab (skip Linux)
+    const winrmIPs = labDef.vms
+      .filter(v => v.role !== 'linux')                  // Linux VMs don't run WinRM
+      .map(v => macs[v.name]?.static_ip)
+      .filter(Boolean);
+    if (winrmIPs.length > 0) {
+      stage = 'winrm';
+      await runtime.waitForWinRM({ controllerVmId, bestNode, vmIPs: winrmIPs, proxmoxAPI });
+      console.log(`[GOAD] WinRM up on ${winrmIPs.length} Windows VM(s)`);
+    }
+
+    // 3b. SEED THE BOOTSTRAP ACCOUNT ON EVERY WINDOWS VM, OVER THE GUEST AGENT.
+    //
+    //     run.sh's first act is to find a WinRM account that works. On a lane
+    //     built only from template 1004 it always does, because that template
+    //     bakes vagrant/vagrant. Template 1006 (Windows 11, the ws01 extension
+    //     machine) bakes NOTHING USABLE:
+    //
+    //       Administrator   Enabled False   -- sysprep /generalize /oobe disables
+    //                                          it, which is the whole reason 1004
+    //                                          bakes a second account
+    //       cactus-user     Enabled True    -- the packer BUILD account. Its
+    //                                          password is reset at first boot by
+    //                                          cloudbase-init with
+    //                                          inject_user_password=true, and a
+    //                                          GOAD spec VM is cloned WITHOUT
+    //                                          ciuser/cipassword (see
+    //                                          challenge-lane-deployer.js:372 --
+    //                                          only cloneExtraWorkstation sets
+    //                                          them), so nothing is injected and
+    //                                          the password is random.
+    //
+    //     So the only enabled account on ws01 has a password nobody holds, not
+    //     even us. Observed on a real lane: run.sh tried all four candidates for
+    //     600s and refused, correctly, with "dc01: vagrant" resolved beside it.
+    //
+    //     THE CYCLE THIS BREAKS. preflight-vagrant.yml creates exactly the account
+    //     we need -- but it is an ansible play, so it needs WinRM auth to get in,
+    //     which is the thing that does not exist. The guest agent needs no
+    //     credentials at all, and it demonstrably works on these hosts: the vuln
+    //     script path writes 180KB+ to ws01 through it on this very deploy.
+    //
+    //     BEST-EFFORT, NOT A GATE. On a 1004 host this is a no-op (vagrant is
+    //     already there), so a failure here must not fail a lane that would
+    //     otherwise work. run.sh's per-host probe is the real gate and it names
+    //     the host it could not open -- a far better error than anything this
+    //     could throw.
+    //
+    //     ORDER: after the DHCP restart and waitForWinRM, so the VM is settled and
+    //     the guest agent is answering; before run.sh, which is what needs it.
+    if (winVMs.length > 0) {
+      console.log(`[GOAD] Seeding bootstrap account on ${winVMs.length} Windows VM(s)...`);
+      for (const vm of winVMs) {
+        try {
+          const { pid } = await agentExecArgv(vm.node, vm.vm_id,
+            ['powershell.exe', '-NoProfile', '-NonInteractive', '-Command', GOAD_BOOTSTRAP_ACCOUNT_PS],
+            proxmoxAPI);
+          const r = await runtime.pollExecStatus(vm.node, vm.vm_id, pid, 120000);
+          const out = String(r?.['out-data'] ?? r?.outData ?? '').trim();
+          if (r?.exited && r.exitcode === 0) {
+            console.log(`[GOAD]   ${vm.name}: ${out || 'seeded'}`);
+          } else {
+            console.warn(`[GOAD]   ${vm.name}: bootstrap seed exit ${r?.exitcode} — ${out || r?.stderr || 'no output'}`);
+          }
+        } catch (err) {
+          // A domain CONTROLLER has no local SAM once promoted, so Get-LocalUser
+          // throws there. That is fine and expected on a re-run against a built
+          // lane: the account already exists in the domain and run.sh's probe
+          // will find it.
+          console.warn(`[GOAD]   ${vm.name}: bootstrap seed failed — ${err.message}`);
+        }
+      }
+    }
+
+    stage = 'playbook';
+    const runPlaybook = deps.runPlaybook || runGoadPlaybook;
     playbookResult = await runPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI });
     console.log(`[GOAD] Playbook completed for lane ${lane.lane_id}`);
-  } catch (err) {
-    provisioningError = err.message;
-    console.error(`[GOAD] Playbook failed for lane ${lane.lane_id}: ${err.message}`);
+
+    stage = 'identity_verification';
+    identityVerification = await verifyGoadIdentities({ spec, deployedVMs, proxmoxAPI, deps: runtime });
+    stage = 'verification';
+    verification = await runLaneVerification({ controllerVmId, bestNode, spec, proxmoxAPI, deps });
+    stage = 'complete';
+  } catch (error) {
+    provisioningError = error instanceof Error ? error : new Error(String(error));
+    delivery = error.goadDelivery || delivery;
+    identityVerification = error.goadIdentityVerification || identityVerification;
+    verification = verification || {
+      ran: false, applicable: laneWantsProbe(spec), passed: null, error: null, report: null,
+      reason: stage === 'playbook'
+        ? `the playbook failed, so there is no finished forest to grade: ${provisioningError.message}`
+        : `provisioning failed during ${stage}: ${provisioningError.message}`,
+    };
+    console.error(`[GOAD] Lane ${lane.lane_id} failed during ${stage}: ${provisioningError.message}`);
+  } finally {
+    controllerStop = await stopController({ controllerVmId, bestNode, proxmoxAPI, waitForTask });
+    if (!controllerStop.stopped && !provisioningError) {
+      stage = 'controller_cleanup';
+      provisioningError = new Error(`Controller VM ${controllerVmId} could not be stopped: ${controllerStop.error}`);
+    }
   }
 
-  // 5. POST-CONDITION PROBE — after the chain, before the controller goes down
-  //    (the probe reaches the lane THROUGH the controller, over the same WinRM
-  //    connection ansible just proved, so it cannot run once the box is off).
-  //
-  //    Its report is DATA here, never a gate: runLaneVerification does not
-  //    throw, and nothing below branches the deploy on `passed`. A probe that
-  //    could abort a deploy would make a lane whose vulns are missing and a
-  //    probe that could not connect the same event, which is the precise
-  //    ambiguity the probe was built to remove. The bake orchestrator's verify
-  //    phase is what turns a report into a refusal.
-  //
-  //    Skipped when the playbook FAILED: the probe grades a finished forest, so
-  //    running it over a half-built one costs up to fifteen minutes to restate
-  //    something the exit code already said. The reason is recorded either way —
-  //    "not probed" and "probed clean" must never look alike.
-  const verification = provisioningError
-    ? {
-      ran: false,
-      applicable: laneWantsProbe(spec),
-      reason: `the playbook failed, so there is no finished forest to grade: ${provisioningError}`,
-      passed: null, error: null, report: null,
-    }
-    : await runLaneVerification({ controllerVmId, bestNode, spec, proxmoxAPI, deps });
-
-  // 6. Stop the controller (success or failure — credentials stay off the wire)
-  await stopController({ controllerVmId, bestNode, proxmoxAPI });
-  console.log(`[GOAD] Controller stopped: VMID ${controllerVmId}`);
-
-  // Persist GOAD provisioning result on the lane record (clinic_db)
+  const goadMeta = {
+    controller_vmid: controllerVmId,
+    controller_node: bestNode,
+    controller_clone_attempted: true,
+    controller_stop: controllerStop,
+    status: provisioningError ? 'failed' : 'provisioned',
+    stage,
+    error: provisioningError ? provisioningError.message : null,
+    provisioned_at: new Date().toISOString(),
+  };
+  if (delivery) {
+    goadMeta.generated_lab = {
+      lab: delivery.lab,
+      tree_sha256: delivery.treeSha256,
+      chain_mode: delivery.chainMode,
+      already_present: delivery.skipped === true,
+      ...(delivery.failedStep ? { failed_step: delivery.failedStep } : {}),
+      ...(delivery.extensionConfigs ? { extension_configs: delivery.extensionConfigs } : {}),
+    };
+  }
+  if (spec.goad.rename_forest === true) {
+    goadMeta.forest_rename = {
+      requested: true,
+      compiled: Boolean(delivery?.treeSha256 && !delivery.failedStep),
+      applied: identityVerification?.passed === true,
+      base_lab: spec.goad.lab.baseLab,
+      lab: spec.goad.version,
+      forest_root: spec.goad.lab.forestRoot,
+      domains: spec.goad.lab.domains,
+      domain_mapping: spec.goad.lab.domainMapping,
+    };
+  }
+  if (verification?.applicable) goadMeta.probe = summariseVerification(verification);
+  if (identityVerification?.applicable) goadMeta.identities = identityVerification;
   if (query) {
     try {
-      // The two new keys are added ONLY when the thing they describe actually
-      // happened, so a built-in GOAD lane writes byte-for-byte the object it
-      // wrote before delivery and probing existed.
-      const goadMeta = {
-        controller_vmid: controllerVmId,
-        status: provisioningError ? 'failed' : 'provisioned',
-        error: provisioningError,
-        provisioned_at: new Date().toISOString()
-      };
-      if (delivery) {
-        goadMeta.generated_lab = {
-          lab: delivery.lab,
-          tree_sha256: delivery.treeSha256,
-          chain_mode: delivery.chainMode,
-          already_present: delivery.skipped === true,
-        };
-      }
-      if (verification.applicable) {
-        goadMeta.probe = summariseVerification(verification);
-      }
       await query(
         `UPDATE cybercore_lane
          SET config = COALESCE(config, '{}'::jsonb) || $1::jsonb,
@@ -2220,14 +2715,14 @@ async function deployGoadLane({
       console.warn(`[GOAD] Failed to persist metadata: ${dbErr.message}`);
     }
   }
-
+  // The caller's final inventory write is authoritative. Return the same
+  // metadata even without a query function, and attach it to every failure.
   if (provisioningError) {
-    throw new Error(`GOAD provisioning failed: ${provisioningError}`);
+    provisioningError.goadMeta = goadMeta;
+    provisioningError.controllerVmId = controllerVmId;
+    throw provisioningError;
   }
-  // delivery and verification ride along for a caller that stores them whole —
-  // the bake's verify_report column is sized for the full check list, the lane
-  // row is not.
-  return { controllerVmId, playbookResult, delivery, verification };
+  return { controllerVmId, playbookResult, delivery, verification, goadMeta };
 }
 
 // Full path so QEMU guest-agent CreateProcess resolves it regardless of the
@@ -2367,10 +2862,14 @@ module.exports = {
   // High-level
   deployGoadLane,
   deployPrebakedGoadLane,
+  prepareGoadDeploymentSpec,
+  goadIdentityExpectations,
+  verifyGoadIdentities,
   // Generated labs: the delivery half and the proof half. Exported so the
   // ORDER deployGoadLane runs them in is assertable without a cluster, and so
   // the bake orchestrator can grade a report it did not itself produce.
   deliverGeneratedLab,
+  deliverControllerRename,
   runLaneVerification,
   laneWantsProbe,
   resolveGeneratedLab,
@@ -2382,11 +2881,14 @@ module.exports = {
   prepareGoadMacs,
   // Net0 string builder (called from admin.js inside the VM clone loop)
   buildLaneNet0,
+  buildGoadHostMap,
   // Lower-level pieces (exposed for testability and partial flows)
   writeDhcpReservations,
   deployController,
   waitForWinRM,
   runGoadPlaybook,
+  ensureControllerHostMap,
+  CONTROLLER_HOST_MAP_PY,
   stopController,
   macFor,
   macForOctet,
@@ -2407,6 +2909,11 @@ module.exports = {
   // The prebaked/extension fork, exported so the Designer's validator and this
   // module state the same rule from one definition rather than two that drift.
   assertGoadExtensionsRunnable,
+  // The forest-rename refusals, exported for the same reason: the canvas
+  // finding, the POST 400 and the PUT 400 must name the condition this module
+  // enforces at deploy time, from this definition rather than a second copy.
+  assertForestRenameDeployable,
+  assertGoadExtensionsRenameSafe,
   isGoadManagedVm,
   EXTERNAL_ROLES,
   INFRA_IP_OCTETS,

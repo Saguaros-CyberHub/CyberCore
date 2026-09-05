@@ -1156,6 +1156,18 @@ module.exports = {
   assertLabName,
   assertChain,
   normalizeMemberPath,
+  assertShellSafe,
+  // The transport itself, shared with goad-ext-config-push.js.
+  //
+  // Exported rather than copied because agentShellExec retries the TRANSPORT
+  // and not the WORK: "a failed call may have run, may have run twice, or may
+  // never have run" is a subtle contract, and runStep/sendBytes are where it is
+  // handled (ordered appends, empty stdout, a sha256 gate before anything is
+  // installed). A second implementation of that would drift on the first fix to
+  // either copy, and the drift would surface as a corrupt file on a live lane.
+  // No behaviour change here — these are the same functions pushLabTree calls.
+  runStep,
+  sendBytes,
   // The deterministic archive.
   buildTar,
   gzipDeterministic,

@@ -579,6 +579,7 @@ function onTplGoadDomainInput() { goadCardOnDomainInput(tplGoadCard()); }
 
 function onTplGoadKaliToggle() { goadCardOnKaliToggle(tplGoadCard()); }
 function onTplGoadPrebakedToggle() { goadCardOnPrebakedToggle(tplGoadCard()); }
+function onTplGoadRenameForestToggle() { goadCardOnRenameForestToggle(tplGoadCard()); }
 function onTplExtensionToggle(key) { goadCardToggleExtension(tplGoadCard(), key); }
 function readTplGoadExtensions() { return goadCardReadExtensions(tplGoadCard()); }
 function resetTplGoadFields() { goadCardReset(tplGoadCard()); }
@@ -933,7 +934,13 @@ async function saveTemplate() {
     // rendered", not "turn GOAD off", and deleting on that reading would strip a
     // CLE course's config for anyone who opened it to fix a typo.
     if (goad) body.spec.goad = goad;
-    else if (!templateIsReservation) delete body.spec.goad;
+    else if (!templateIsReservation) {
+      // An omitted nested key is retained by the server's top-level merge.
+      // Send an explicit disable while retaining any server-owned lab tree.
+      body.spec.goad = templateEditSpec.goad
+        ? { ...templateEditSpec.goad, enabled: false } : null;
+      if (body.spec.goad) delete body.spec.goad.rename_forest;
+    }
     if (!templateIsReservation) {
       body.spec.vms = body.vm_specs;
       body.spec.phantom_assets = templatePhantoms;

@@ -421,6 +421,8 @@ async function applyTopoSeedResult(seed) {
 // ============================================================================
 
 /** The `<prefix>Goad<suffix>` element for this card, or null. */
+const goadCardStored = Object.create(null);
+
 function goadCardEl(card, suffix) {
   return document.getElementById(card.prefix + 'Goad' + suffix);
 }
@@ -529,7 +531,105 @@ function goadCardValidateDomains(card) {
   return result;
 }
 
-function goadCardOnDomainInput(card) { goadCardValidateDomains(card); }
+function goadCardOnDomainInput(card) {
+  goadCardValidateDomains(card);
+  // The rename hint carries the reserved-TLD refusal, and that is a function of
+  // what is being typed RIGHT NOW. A green card that 400s on save is the exact
+  // failure the hint slot exists to prevent, so it repaints on every keystroke
+  // the domain takes.
+  goadCardPaintRenameHint(card);
+}
+
+// ── The forest-domain RENAME opt-in ────────────────────────────────────────
+//
+// THE BUG THIS ANSWERS. An author typed cy400test.org into the Forest Domain
+// field and the lane deployed sevenkingdoms.local with a DC that called itself
+// kingslanding. spec.goad.domain is authored, validated, reset on a version
+// change, round-tripped AND ALREADY READ — it drives the lane's DNS forwarder
+// and Caldera's AD facts — but the AD build ignored it. So every artifact said
+// one domain and NTDS said another, silently. Found live: Kibana reported
+// agent.hostname: kingslanding and the console offered "Sign in to:
+// SEVENKINGDOMS" on a lane whose spec said neither.
+//
+// WHY AN OPT-IN AND NOT `domain !== forestRoot`. The create handler defaults
+// EVERY GOAD spec to cybersaguaros.local/tumamoc regardless of which lab was
+// picked, so `domain !== forestRoot` is true for every stored GOAD-Mini spec in
+// the database today. A derived trigger would recompile all of them into a
+// forest nobody chose, on their next deploy. A key that is absent from every
+// stored row cannot do that — which is why goadCardReadFields writes
+// rename_forest ONLY when it is true, and why an untouched card posts the same
+// body it posted before this field existed.
+//
+// WHY BOTH DOMAIN FIELDS STAY EDITABLE EITHER WAY. With rename off the domain is
+// still the record the DNS forwarder and the Caldera facts are built from, and a
+// pre-baked lane MUST be able to record whatever its golden image was baked
+// with. Disabling the field would make that unauthorable. It is the CHECKBOX
+// that gets disabled, and in JS rather than in markup, because the reason is
+// data-driven — which lab, and whether this lane is pre-baked — and a disabled
+// control the author cannot be told the reason for is the thing the readonly pin
+// in goad-card-parity.test.js argues against.
+
+/**
+ * Enable or disable the rename opt-in, and say what ticking it does — or why it
+ * cannot be ticked here.
+ *
+ * Repainted from every gesture that can change the answer (the tick, a version
+ * change, the pre-baked toggle, domain input, the load path), because everything
+ * the tick changes happens 40 minutes later at deploy and this hint is the only
+ * place the author hears about it first.
+ */
+function goadCardPaintRenameHint(card) {
+  const box = goadCardEl(card, 'RenameForest');
+  const hint = goadCardEl(card, 'RenameHint');
+  const select = goadCardEl(card, 'Version');
+  const lab = findGoadLab(select && select.value);
+  const stored = goadCardStored[card.prefix];
+  const compiled = !!(stored && (stored.lab || stored.generated_lab || stored.rename_plan));
+  const prebaked = goadCardEl(card, 'Prebaked');
+  let blocked = '';
+  if (compiled) blocked = 'This compiled environment keeps its existing forest definition. Regenerate it to change its identity.';
+  else if (prebaked && prebaked.checked) blocked = 'Rename forest is unavailable on a pre-baked lane; its golden images already contain the forest.';
+  else if (!lab) blocked = 'Rename forest is unavailable: this GOAD version is not in the supported catalog.';
+  else if (lab.rebrandable !== true) blocked = `Rename forest is unavailable for ${lab.displayName || lab.key}: no supported vendored transform is available.`;
+  if (box) box.disabled = !!blocked;
+  if (!hint) return;
+  if (blocked) { hint.textContent = blocked; return; }
+  if (!box || !box.checked) {
+    hint.textContent = `The lab builds ${lab.forestRoot || 'its stock forest'} as shipped. Enable Rename forest to build the authored domain.`;
+    return;
+  }
+  const Rules = window.CyberCoreAdDomainRules;
+  const raw = goadCardEl(card, 'Domain').value.trim();
+  const domain = Rules ? Rules.publicDomainOf(raw) : raw.toLowerCase();
+  if (!domain) {
+    hint.textContent = 'Rename forest requires a valid public-shaped domain; reserved suffixes such as .local and malformed DNS names cannot be compiled.';
+    return;
+  }
+  const domains = Array.isArray(lab.domains) ? lab.domains : [];
+  const identities = [domain];
+  if (lab.childSubdomain) {
+    const child = goadCardEl(card, 'Child').value.trim() || 'corp';
+    identities.push(child.endsWith('.' + domain) ? child : `${child}.${domain}`);
+  }
+  const trust = domains.some(d => d !== lab.forestRoot && !d.endsWith('.' + lab.forestRoot));
+  if (trust) {
+    const labels = domain.split('.');
+    identities.push(`${labels[0]}-partner.${labels.slice(1).join('.')}`);
+  }
+  const names = (lab.vms || []).map(v => v.name).join(', ');
+  hint.textContent = `Build domains: ${identities.join(', ')}. Hostnames use the fixed catalog roster (${names}); the domain field does not name a computer. The controller compiles the lab tree at deploy. Save validates domain and NetBIOS identities; pre-baked images cannot be renamed.`;
+}
+
+/**
+ * The opt-in itself.
+ *
+ * A repaint and nothing else, on purpose: every consequence of the tick happens
+ * at deploy, so the hint IS the behaviour on this surface. The stored key is
+ * written by goadCardReadFields, and only when this box is checked.
+ */
+function goadCardOnRenameForestToggle(card) {
+  goadCardPaintRenameHint(card);
+}
 
 /**
  * Rebuild the machine list from the selected lab. USER INTENT ONLY — never on
@@ -576,10 +676,15 @@ async function goadCardOnToggle(card) {
   const cfg = goadCardEl(card, 'Config');
   if (cfg) cfg.style.display = enabled ? 'block' : 'none';
   if (enabled) {
+    const stored = goadCardStored[card.prefix];
+    if (stored && (stored.lab || stored.generated_lab || stored.rename_plan)) {
+      return goadCardApplyFields(card, { ...stored, enabled: true });
+    }
     await goadCardPopulateVersions(card);
     await loadGoadExtensionCatalog();
     goadCardRenderExtensions(card, []);
     goadCardResetDomainsFromLab(card);
+    goadCardPaintRenameHint(card);
     goadCardRebuildFromLab(card);
     const select = goadCardEl(card, 'Version');
     Toast.info('GOAD enabled', `Machine list set to the ${select && select.value} topology`);
@@ -588,6 +693,11 @@ async function goadCardOnToggle(card) {
     if (pb) pb.checked = false;
     const pbc = goadCardEl(card, 'PrebakedConfig');
     if (pbc) pbc.style.display = 'none';
+    // Same reasoning as the pre-baked flag: an opt-in that survives GOAD being
+    // switched off is an opt-in nobody re-chose for whatever the card becomes.
+    const rename = goadCardEl(card, 'RenameForest');
+    if (rename) rename.checked = false;
+    goadCardPaintRenameHint(card);
     goadCardValidateDomains(card);      // clears the error line with the card off
     // Only the locked-host set changes; the machines stay so turning GOAD off is
     // not a destructive act on work already on the canvas.
@@ -597,6 +707,8 @@ async function goadCardOnToggle(card) {
 }
 
 function goadCardOnVersionChange(card) {
+  if (goadCardStored[card.prefix]?.lab || goadCardStored[card.prefix]?.generated_lab || goadCardStored[card.prefix]?.rename_plan) return;
+  delete goadCardStored[card.prefix];
   goadCardUpdateDesc(card);
   if (!goadCardOn(card)) return;
   // The lab's own forest names are the defaults, so a version change RESETS
@@ -605,6 +717,15 @@ function goadCardOnVersionChange(card) {
   // overridden them loses that override, which is the correct trade: the fields
   // describe the lab that is now selected.
   goadCardResetDomainsFromLab(card);
+  // UNTICK rather than preserve. The reset above has just put the NEW lab's own
+  // stock forest root back into the field, so a rename left ticked would compile
+  // a tree byte-identical to stock under a minted lab name — 40 minutes of
+  // Ansible to build exactly what the vendored lab already builds. (And the new
+  // lab may be multi-domain, where the tick is not offered at all; the repaint
+  // is what disables it.)
+  const rename = goadCardEl(card, 'RenameForest');
+  if (rename) rename.checked = false;
+  goadCardPaintRenameHint(card);
   goadCardRebuildFromLab(card);   // re-renders the extension list and re-stamps it
 }
 
@@ -634,6 +755,13 @@ function goadCardOnPrebakedToggle(card) {
   const on = goadCardEl(card, 'Prebaked').checked;
   const pbc = goadCardEl(card, 'PrebakedConfig');
   if (pbc) pbc.style.display = on ? 'block' : 'none';
+  // A pre-baked lane runs no Ansible, so a renamed forest could not be built on
+  // it. Untick unconditionally rather than only on the way in: coming back OUT
+  // of pre-baked must not silently re-arm a rename the author never re-chose —
+  // and the repaint is what re-enables the box once it is legal again.
+  const rename = goadCardEl(card, 'RenameForest');
+  if (rename) rename.checked = false;
+  goadCardPaintRenameHint(card);
   // Pre-baked AD images carry full per-segment IPs, so they only make sense on a
   // segmented lane, and fromGoadLab forces the seed to v3 for exactly that
   // reason. The rebuild below already hands that choice to applyScheme, so this
@@ -650,6 +778,11 @@ function goadCardOnPrebakedToggle(card) {
 }
 
 function goadCardReset(card) {
+  delete goadCardStored[card.prefix];
+  for (const suffix of ['Version', 'Domain', 'Child', 'Prebaked']) {
+    const el = goadCardEl(card, suffix);
+    if (el) el.disabled = false;
+  }
   const cb = goadCardEl(card, 'Enabled');
   if (cb) cb.checked = false;
   const cfg = goadCardEl(card, 'Config');
@@ -662,6 +795,12 @@ function goadCardReset(card) {
   if (fixedInt) fixedInt.value = '';
   const fixedExt = goadCardEl(card, 'FixedExt');
   if (fixedExt) fixedExt.value = '';
+  const rename = goadCardEl(card, 'RenameForest');
+  // Re-enabled as well as unticked: the disable is a statement about the lab and
+  // the pre-baked flag that were on screen, and both have just been cleared.
+  if (rename) { rename.checked = false; rename.disabled = false; }
+  const renameHint = goadCardEl(card, 'RenameHint');
+  if (renameHint) renameHint.textContent = '';
   const desc = goadCardEl(card, 'VersionDesc');
   if (desc) desc.textContent = '';
   const ext = goadCardEl(card, 'Extensions');
@@ -687,6 +826,7 @@ function goadCardReset(card) {
  */
 async function goadCardApplyFields(card, goad) {
   if (!goad || !goad.enabled) { goadCardReset(card); return; }
+  goadCardStored[card.prefix] = JSON.parse(JSON.stringify(goad));
   goadCardEl(card, 'Enabled').checked = true;
   goadCardEl(card, 'Config').style.display = 'block';
   await goadCardPopulateVersions(card);
@@ -697,8 +837,31 @@ async function goadCardApplyFields(card, goad) {
   // is always undefined. Classic scripts share one global lexical scope, which is
   // what makes the bare reference resolve across files.
   const version = goad.version || (_goadCatalog && _goadCatalog.default_lab) || 'GOAD-Light';
-  if ([...select.options].some(o => o.value === version)) select.value = version;
+  // A STORED VERSION THE CATALOG DOES NOT LIST IS A COMPILED LAB NAME, NOT A
+  // TYPO — and dropping it silently corrupts the spec. CiAB stamps
+  // spec.goad.version with the minted lab name it pushed to the controller
+  // (CIAB-…, and now CC-GOADMINI-… for a renamed forest), which is deliberately
+  // NOT a GOAD_LABS key. This line used to leave the dropdown on whatever
+  // populateVersions had defaulted it to, so opening a CiAB engagement in the
+  // template editor and pressing Save wrote version:'GOAD-Light' next to a
+  // generated_lab.name of 'CIAB-…' — and resolveGeneratedLab then throws on
+  // every later deploy of a lane that had been working. Append it instead, so
+  // the round trip is lossless and the author can SEE that this environment is
+  // running a lab that was compiled for it.
+  if (![...select.options].some(o => o.value === version)) {
+    const label = goad.lab || goad.generated_lab || goad.rename_plan
+      ? 'compiled for this environment' : 'stored version (not in catalog)';
+    select.innerHTML += `<option value="${topoAttr(version)}">${escHtml(version)}`
+      + ` — ${label}</option>`;
+  }
+  select.value = version;
 
+  const compiled = !!(goad.lab || goad.generated_lab || goad.rename_plan);
+  for (const suffix of ['Version', 'Domain', 'Child', 'Prebaked']) {
+    const el = goadCardEl(card, suffix);
+    if (el) el.disabled = compiled;
+  }
+  goadCardEl(card, 'Password').value = goad.admin_password || 'vagrant';
   goadCardEl(card, 'Kali').checked = goad.include_kali !== false;
   const pb = goadCardEl(card, 'Prebaked');
   if (pb) pb.checked = !!goad.prebaked;
@@ -713,18 +876,32 @@ async function goadCardApplyFields(card, goad) {
   goadCardEl(card, 'Domain').value =
     goad.domain || (lab && lab.forestRoot) || 'cybersaguaros.local';
   goadCardEl(card, 'Child').value =
-    goad.child_subdomain || (lab && lab.childSubdomain) || '';
+    Object.hasOwn(goad, 'child_subdomain') ? (goad.child_subdomain || '') : ((lab && lab.childSubdomain) || '');
+
+  // `=== true` and not truthiness: the key is written only when true, so
+  // anything else in a stored row is a row that predates the opt-in.
+  const rename = goadCardEl(card, 'RenameForest');
+  if (rename) rename.checked = goad.rename_forest === true;
 
   await loadGoadExtensionCatalog();
   goadCardRenderExtensions(card, Array.isArray(goad.extensions) ? goad.extensions : []);
 
   goadCardUpdateDesc(card);
+  // Painted AFTER the domain fields, because the ticked hint reads the domain to
+  // warn about a reserved TLD. Note this can leave the box CHECKED AND DISABLED
+  // on a spec that should never have been stored (rename + pre-baked): showing
+  // what is stored is the same rule the domain fields follow, and re-writing it
+  // here would be the silent rewrite this whole card exists to stop. The save
+  // guards refuse it with a reason instead.
+  goadCardPaintRenameHint(card);
   goadCardValidateDomains(card);
 }
 
 function goadCardReadFields(card) {
   if (!goadCardOn(card)) return null;
+  const stored = goadCardStored[card.prefix] || {};
   const goad = {
+    ...JSON.parse(JSON.stringify(stored)),
     enabled: true,
     version: goadCardEl(card, 'Version').value ||
       (_goadCatalog && _goadCatalog.default_lab) || 'GOAD-Light',
@@ -740,7 +917,7 @@ function goadCardReadFields(card) {
     // defaulted initialUser to 'vagrant' for this reason -- but this line wrote 'Administrator'
     // into every spec, so that default never applied and every lane authored here handed run.sh
     // an account that cannot log in.
-    admin_user: 'vagrant',
+    admin_user: stored.admin_user || 'vagrant',
     admin_password: goadCardEl(card, 'Password').value || 'vagrant',
     include_kali: goadCardEl(card, 'Kali').checked
   };
@@ -748,6 +925,16 @@ function goadCardReadFields(card) {
   // Written only when something is ticked, so a challenge authored without
   // extensions posts the same body it posted before this feature existed.
   if (extensions.length) goad.extensions = extensions;
+  else delete goad.extensions;
+  // Same rule, and here it is load-bearing rather than tidy. The create handler
+  // defaults every GOAD spec to cybersaguaros.local/tumamoc whatever the lab is,
+  // so `domain !== forestRoot` is true for every stored spec today — a DERIVED
+  // trigger would recompile all of them into a forest nobody chose. An absent
+  // key cannot: rename_forest exists only where someone ticked the box, and an
+  // untouched card posts a byte-identical body.
+  const renameForest = goadCardEl(card, 'RenameForest');
+  if (renameForest && renameForest.checked) goad.rename_forest = true;
+  else delete goad.rename_forest;
   const prebaked = goadCardEl(card, 'Prebaked');
   if (prebaked && prebaked.checked) {
     goad.prebaked = true;
@@ -757,6 +944,9 @@ function goadCardReadFields(card) {
     // the right place for it: a pre-baked lane built on a per-lane subnet boots,
     // reports active, and is fiction. The field is authored here so it can be.
     goad.fixed_subnet = { int, ext: ext || int };
+  } else {
+    delete goad.prebaked;
+    delete goad.fixed_subnet;
   }
   return goad;
 }
@@ -924,7 +1114,8 @@ function goadCardHostNames(card) {
   if (!goadCardOn(card)) return null;
   const select = goadCardEl(card, 'Version');
   const lab = findGoadLab(select && select.value);
-  const names = lab ? lab.vms.map(v => v.name) : [];
+  const definition = goadCardStored[card.prefix]?.lab || lab;
+  const names = (definition?.vms || []).map(v => v.name);
   return names.concat(goadExtensionMachineNames(goadCardReadExtensions(card)));
 }
 
@@ -979,6 +1170,7 @@ function validateTopoGoadDomains() { return goadCardValidateDomains(topoGoadCard
 function onTopoGoadDomainInput() { goadCardOnDomainInput(topoGoadCard()); }
 function onTopoGoadKaliToggle() { goadCardOnKaliToggle(topoGoadCard()); }
 function onTopoGoadPrebakedToggle() { goadCardOnPrebakedToggle(topoGoadCard()); }
+function onTopoGoadRenameForestToggle() { goadCardOnRenameForestToggle(topoGoadCard()); }
 function resetTopoGoadFields() { goadCardReset(topoGoadCard()); }
 async function applyTopoGoadFields(goad) { return goadCardApplyFields(topoGoadCard(), goad); }
 function readTopoGoadFields() { return goadCardReadFields(topoGoadCard()); }

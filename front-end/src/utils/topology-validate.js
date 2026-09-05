@@ -18,6 +18,8 @@
  */
 
 const goadDeploy = require('./goad-deploy');
+const adDomainRules = require('./ad-domain-rules');
+const rebrand = require('./goad-lab-rebrand');
 const { DEFAULT_VM_OFFSET, resolveSegments, resolveVmSegments } = require('./lane-networking');
 
 // Roles that are meant to sit outside the AD network, so a non-lab name on them
@@ -172,6 +174,92 @@ function goadHostNames(spec) {
     extMachines,
     selected: resolved.extensions?.selected || [],
   };
+}
+
+// ── the forest-domain rename opt-in ──────────────────────────────────────────
+//
+// `spec.goad.rename_forest === true` means "build the forest root I typed, not
+// the one upstream ships". goad-lab-rebrand.js rewrites the vendored base tree
+// at DEPLOY time and pushes it to the controller; everything below is the
+// author-time half, so a refusal lands on the canvas instead of 40 minutes into
+// a lane that comes up as sevenkingdoms.local anyway — the incident this whole
+// mechanism exists to end.
+//
+// EVERY CHECK IS GATED ON THE EXPLICIT OPT-IN, and that gate is the most
+// load-bearing line here. The create route has always defaulted a GOAD spec to
+// domain 'cybersaguaros.local' / child 'tumamoc' regardless of which lab it
+// names, so `domain !== lab.forestRoot` is already true for very nearly every
+// stored spec. A DERIVED trigger would therefore recompile all of them into a
+// forest nobody chose, on their next deploy. A key that is absent from every
+// stored row cannot do that.
+
+/**
+ * The domains a lab actually builds, or null when the lab table does not say.
+ *
+ * `GOAD_LABS[key].domains` is the authority. The fallback covers entries written
+ * before that array existed and any spec-supplied `goad.lab`, which never
+ * carries one: `childSubdomain` names a SECOND domain whenever it is set, so it
+ * is a sound LOWER bound. It can MISS a domain — NHA's academy.ninja.lan is a
+ * trust partner rather than a child, so it is recorded nowhere — but it can
+ * never invent one, and inventing one is the single error this must not make:
+ * a false "multi-domain" blocks a rename that would have worked.
+ */
+function goadLabDomains(labDef) {
+  if (!labDef) return null;
+  if (Array.isArray(labDef.domains)) return labDef.domains.map(d => String(d));
+  if (labDef.childSubdomain && labDef.forestRoot) {
+    return [String(labDef.forestRoot), `${labDef.childSubdomain}.${labDef.forestRoot}`];
+  }
+  return null;
+}
+
+/** Eligibility comes from the same compiler used by save and deploy. */
+function goadLabRebrandable(labKey) {
+  try {
+    return rebrand.describeRebrand({ goad: {
+      enabled: true, version: labKey, rename_forest: true,
+      domain: 'preview.org', child_subdomain: null
+    } }).willRebrand;
+  } catch (_) { return false; }
+}
+
+/** Shared save/canvas guard. Validate a controller rename plan before allocation. */
+function findForestRenameRefusals(spec) {
+  const goad = spec && spec.goad;
+  if (!goad || goad.rename_forest !== true) return [];
+  const finding = (code, message) => [{ vm: null, severity: 'error', code, message }];
+  if (goad.enabled !== true) {
+    return finding('forest-rename-disabled', 'Rename forest requires goad.enabled to be true.');
+  }
+  try {
+    if (goad.extensions !== undefined && !Array.isArray(goad.extensions)) {
+      return finding('forest-rename-extensions', 'GOAD extensions must be an array of catalog keys.');
+    }
+    const labKey = rebrand.canonicalGoadLabName(goad.version);
+    const selected = goad.extensions || [];
+    const resolved = goadDeploy.resolveGoadExtensions(selected, labKey);
+    const rewritable = new Set(rebrand.listExtensionBases());
+    for (const key of selected) {
+      if (typeof key !== 'string' || !resolved.selected.includes(key.trim().toLowerCase())) {
+        return finding('forest-rename-unsupported-extension',
+          `GOAD extension '${String(key)}' is unknown or incompatible with ${labKey || 'this lab'}.`);
+      }
+      const ext = goadDeploy.getExtension(key);
+      if (ext?.readsAllExtensionConfigs === true
+          || (ext?.shipsLabConfig === true && !rewritable.has(key.trim().toLowerCase()))) {
+        return finding('forest-rename-unsupported-extension',
+          `GOAD extension '${key}' has no safe domain rewrite for this forest.`);
+      }
+    }
+    rebrand.preflightGoadRebrand(spec);
+    return [];
+  } catch (error) {
+    const message = /generated|plan/i.test(String(error.code || ''))
+      ? `${error.message} Regenerate the environment from its authored forest fields.`
+      : error.message;
+    return finding(`forest-rename-${String(error.code || 'invalid').replace(/^GOAD_REBRAND_/, '').toLowerCase().replace(/_/g, '-')}`,
+      message || 'The requested forest cannot be compiled.');
+  }
 }
 
 /**
@@ -360,6 +448,13 @@ function validateTopology({ spec = {}, subnetScheme = 'v1', specVms = [], catalo
     }
   }
 
+  // ── the forest-domain rename opt-in ───────────────────────────────────────
+  //
+  // Whole-topology findings (vm: null) — a forest is not a machine, so there is
+  // no node to badge. The same function backs the POST and PUT refusals, so the
+  // 400 an author gets on save carries the sentence they already read here.
+  for (const f of findForestRenameRefusals(spec, { goadHosts })) findings.push(f);
+
   // ── SIEM placement ────────────────────────────────────────────────────────
   //
   // Both of these describe blue-team environments that LOOK correct on the
@@ -498,5 +593,8 @@ module.exports = {
   findGoadHostMismatch,
   findVmOffsetCollision,
   goadHostNames,
+  goadLabDomains,
+  goadLabRebrandable,
+  findForestRenameRefusals,
   validateTopology,
 };

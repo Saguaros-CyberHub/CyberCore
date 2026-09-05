@@ -2,7 +2,7 @@
   "schema_version": 1,
   "tier": "L",
   "derived_from": "ad/GOAD",
-  "goad_ref": "4c9a49ea0413631f0e86adc67662aa021b4498d4",
+  "goad_ref": "0fb45a48e1865fa65054dda22f5e924eea56369c",
   "goad_repo": "https://github.com/joshmp087/GOAD.git",
   "hosts": 5,
   "domains": 3,

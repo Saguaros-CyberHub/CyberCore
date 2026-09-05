@@ -1,13 +1,19 @@
 /**
  * topology-validate.test.js — spec checks that run before a lane is built.
  *
- * Two halves:
+ * Four parts:
  *   1. The legacy single-string checks (findGoadHostMismatch,
  *      findVmOffsetCollision) still behave exactly as they did inside
  *      challenge-lane-deployer.js — the CLE picker and the deploy path both
  *      depend on their wording and their null-means-fine contract.
  *   2. validateTopology, which reports the same problems per-machine so the
  *      canvas can badge the offending node, plus the new checks.
+ *   3. The forest-domain rename opt-in — five refusals, and the migration guard
+ *      that keeps every spec stored before the domain fields became editable
+ *      from being recompiled into a forest nobody chose.
+ *   4. The two write routes that share those refusals, pinned as source text
+ *      because they cannot be exercised without a database and because WHERE
+ *      the PUT guard sits is itself the contract.
  *
  * Run: node front-end/test/topology-validate.test.js   (or npm test)
  */
@@ -21,6 +27,9 @@ const {
   findGoadHostMismatch,
   findVmOffsetCollision,
   goadHostNames,
+  goadLabDomains,
+  goadLabRebrandable,
+  findForestRenameRefusals,
   validateTopology,
 } = require(path.join(UTILS, 'topology-validate'));
 
@@ -716,4 +725,336 @@ test('no-student-console: never fires on a non-GOAD challenge', () => {
   // the spec cannot see. Firing here would flag nearly every non-GOAD spec.
   const r = validateTopology({ subnetScheme: 'v2', specVms: [vm('web01')] });
   assert.ok(!has(r, 'no-student-console'), codes(r));
+});
+
+// ── 4. the forest-domain rename opt-in ──────────────────────────────────────
+//
+// spec.goad.rename_forest === true makes the deploy rewrite GOAD's vendored lab
+// tree so the forest root the author typed is the one NTDS ends up holding.
+// These are the author-time refusals: the combinations that cannot build, said
+// on the canvas instead of 40 minutes into a lane.
+
+const fs = require('fs');
+const goadDeploy = require(path.join(UTILS, 'goad-deploy'));
+const { rebrandGoadSpec } = require(path.join(UTILS, 'goad-lab-rebrand'));
+const ROUTE_SRC = fs.readFileSync(
+  path.join(__dirname, '..', 'src', 'routes', 'lab-templates.js'), 'utf8');
+
+/** A GOAD-Mini spec with the rename ticked and nothing else wrong. */
+const RENAME = (goad = {}) => ({
+  goad: {
+    enabled: true, version: 'GOAD-Mini', domain: 'cy400test.org',
+    child_subdomain: '', rename_forest: true, ...goad,
+  },
+});
+const refusalCodes = (spec) => findForestRenameRefusals(spec).map(f => f.code).sort();
+
+// ── THE MIGRATION GUARD ─────────────────────────────────────────────────────
+//
+// The single most important test in this file. POST /create-lab has always
+// defaulted a GOAD spec to domain 'cybersaguaros.local' / child 'tumamoc'
+// regardless of which lab it names, and the old create form stamped both
+// literals unconditionally from two readonly inputs. So EVERY spec stored
+// before these fields became editable looks exactly like the one below —
+// `domain !== forestRoot`, on a lab whose forest root is sevenkingdoms.local.
+// A trigger DERIVED from that disagreement would silently recompile all of them
+// into a forest nobody chose, on their next deploy.
+
+const LEGACY_MINI = {
+  goad: {
+    enabled: true, version: 'GOAD-Mini',
+    domain: 'cybersaguaros.local', child_subdomain: 'tumamoc',
+    admin_user: 'vagrant', admin_password: 'vagrant', include_kali: true,
+  },
+};
+
+test('MIGRATION GUARD: a legacy GOAD-Mini spec raises no rename finding and rebrands nothing', () => {
+  assert.deepStrictEqual(findForestRenameRefusals(LEGACY_MINI), [],
+    'this spec disagrees with its lab in three ways and asked for none of them to be fixed');
+
+  const r = validateTopology({
+    spec: LEGACY_MINI, subnetScheme: 'v2',
+    specVms: [vm('DC01'), vm('Kali', { role: 'attacker', vm_offset: 610000 })],
+  });
+  assert.deepStrictEqual(r.findings.filter(f => String(f.code).startsWith('forest-rename-')), [],
+    codes(r));
+
+  // And the other half of the same promise: the deploy-time transform hands the
+  // caller's own object back. Identity is the cheapest possible proof that
+  // every environment authored before this existed deploys byte-identically.
+  assert.strictEqual(rebrandGoadSpec(LEGACY_MINI), LEGACY_MINI);
+});
+
+test('MIGRATION GUARD is not vacuous: the SAME legacy spec with the box ticked is refused', () => {
+  // Without this pair, a findForestRenameRefusals() that returned [] forever
+  // would pass the guard above.
+  const ticked = { goad: { ...LEGACY_MINI.goad, rename_forest: true } };
+  assert.deepStrictEqual(refusalCodes(ticked),
+    ['forest-rename-unusable-domain']);
+});
+
+test('nothing fires when the opt-in is anything other than the boolean true', () => {
+  // 'true', 1 and 'on' are what an HTML form posts when nobody normalises it.
+  // The deploy transform tests `!== true`, so anything else means "off" there —
+  // and a validator that disagreed with it would refuse a save that deploys.
+  for (const value of ['true', 1, 'on', false, null, undefined]) {
+    assert.deepStrictEqual(
+      refusalCodes({ goad: { ...LEGACY_MINI.goad, prebaked: true, rename_forest: value } }), [],
+      `rename_forest: ${JSON.stringify(value)}`);
+  }
+});
+
+test('nothing fires on a spec with no GOAD layer at all, ticked or not', () => {
+  assert.deepStrictEqual(findForestRenameRefusals({}), []);
+  assert.deepStrictEqual(refusalCodes({ goad: { rename_forest: true } }), ['forest-rename-disabled'],
+    'goad.enabled is what makes a spec a GOAD spec');
+});
+
+// ── the five refusals ───────────────────────────────────────────────────────
+
+test('a clean single-domain rename is accepted', () => {
+  assert.deepStrictEqual(refusalCodes(RENAME()), []);
+});
+
+test('reserved-tld: .local is an ERROR here even though checkForestRoot only warns', () => {
+  // THE ASYMMETRY IS THE FINDING. ad-domain-rules warns on a reserved TLD
+  // because every lab CyberCore ships is named under .local and hard-failing it
+  // would make legacy labs unauthorable — but the transform mints through
+  // publicDomainOf, which REFUSES one. With the box ticked the value cannot
+  // produce a tree at all, so a green canvas would be followed by a lane that
+  // never renames anything.
+  const f = findForestRenameRefusals(RENAME({ domain: 'cybersaguaros.local' }));
+  assert.strictEqual(f.length, 1);
+  assert.strictEqual(f[0].code, 'forest-rename-unusable-domain');
+  assert.strictEqual(f[0].severity, 'error');
+  assert.match(f[0].message, /reserved|public|forest root/);
+
+  // The whole reserved set, not just .local — .lan and .test leak out of
+  // example configs at least as often.
+  for (const tld of ['lan', 'test', 'internal', 'invalid']) {
+    assert.deepStrictEqual(refusalCodes(RENAME({ domain: `cy400test.${tld}` })),
+      ['forest-rename-unusable-domain'], tld);
+  }
+});
+
+test('prebaked: the one mode where a rewritten tree is never read', () => {
+  const f = findForestRenameRefusals(RENAME({ prebaked: true }));
+  assert.strictEqual(f.length, 1);
+  assert.strictEqual(f[0].code, 'forest-rename-prebaked');
+  assert.match(f[0].message, /pre-baked|golden images/i);
+});
+
+test('supported multi-domain labs validate their authored child and independent trust mappings', () => {
+  assert.deepStrictEqual(refusalCodes(RENAME({ version: 'GOAD-Light', child_subdomain: 'research' })), []);
+  assert.deepStrictEqual(refusalCodes(RENAME({ version: 'GOAD', child_subdomain: 'research' })), []);
+  assert.ok(findForestRenameRefusals(RENAME({ version: 'GOAD', child_subdomain: 'wrong.other.org' })).length);
+});
+
+test('child-on-single-domain: the legacy tumamoc default names a domain nothing would build', () => {
+  const f = findForestRenameRefusals(RENAME({ child_subdomain: 'tumamoc' }));
+  assert.strictEqual(f.length, 1);
+  assert.match(f[0].message, /child|single.domain/i);
+});
+
+test('every rename finding belongs to the topology, not to a machine', () => {
+  // A forest is not a VM, and a finding anchored to a node that is not on the
+  // canvas renders nowhere.
+  const f = findForestRenameRefusals(RENAME({
+    version: 'GOAD-Light', prebaked: true, domain: 'x.local', child_subdomain: 'north',
+  }));
+  assert.ok(f.length >= 1, f.map(x => x.code));
+  for (const finding of f) {
+    assert.strictEqual(finding.vm, null, finding.code);
+    assert.strictEqual(finding.severity, 'error', finding.code);
+  }
+});
+
+test('validateTopology surfaces them as errors on the canvas', () => {
+  const r = validateTopology({
+    spec: RENAME({ domain: 'cybersaguaros.local' }), subnetScheme: 'v2',
+    specVms: [vm('DC01')],
+  });
+  assert.ok(r.errors.some(f => f.code === 'forest-rename-unusable-domain'), codes(r));
+});
+
+// ── extensions that carry a domain of their own ─────────────────────────────
+
+test('elk and ws01 are rename-safe and draw nothing', () => {
+  // elk ships no data/config.json at all; ws01 ships one and CyberCore vendors a
+  // rewrite for it under src/data/goad-base-labs/_extensions/ws01. Two different
+  // reasons to stay silent, and a false positive on either would be advising the
+  // author to undo a design that works.
+  assert.deepStrictEqual(refusalCodes(RENAME({ extensions: ['elk', 'ws01'] })), []);
+});
+
+/** Run `fn` with extra entries spliced into the extension catalog. */
+function withExtensions(entries, fn) {
+  const saved = new Map();
+  for (const [key, value] of Object.entries(entries)) {
+    saved.set(key, Object.prototype.hasOwnProperty.call(goadDeploy.GOAD_EXTENSIONS, key)
+      ? goadDeploy.GOAD_EXTENSIONS[key] : undefined);
+    goadDeploy.GOAD_EXTENSIONS[key] = value;
+  }
+  try { return fn(); } finally {
+    for (const [key, value] of saved) {
+      if (value === undefined) delete goadDeploy.GOAD_EXTENSIONS[key];
+      else goadDeploy.GOAD_EXTENSIONS[key] = value;
+    }
+  }
+}
+
+test('an extension that ships its own lab config with no vendored rewrite is refused', () => {
+  // exchange is characterised in the plan and deliberately NOT in the catalog
+  // today, so the only way to pin the mechanism that will refuse it the day it
+  // is admitted is to splice it in. The refusal is what makes admitting it a
+  // compile-time decision instead of a 90-minute discovery on a live lane:
+  // install.yml resolves lab.domains[lab.hosts.<k>.domain], and after a rename
+  // lab.domains holds only the new root.
+  withExtensions({
+    exchange: { key: 'exchange', machine: 'exchange', shipsLabConfig: true },
+  }, () => {
+    const f = findForestRenameRefusals(RENAME({ extensions: ['exchange'] }));
+    assert.strictEqual(f.length, 1);
+    assert.strictEqual(f[0].code, 'forest-rename-unsupported-extension');
+    assert.match(f[0].message, /no safe domain rewrite/);
+  });
+});
+
+test('THE VENDORED-REWRITE EXEMPTION: the same flag on ws01 is silent, because we ship one', () => {
+  // The flag alone must not be the refusal — ws01 ships a config AND has a
+  // vendored rewrite, so it stays selectable. Without this pair the check would
+  // pass for an implementation that refused every extension carrying a config.
+  withExtensions({
+    ws01: { ...goadDeploy.GOAD_EXTENSIONS.ws01, shipsLabConfig: true },
+  }, () => {
+    assert.deepStrictEqual(
+      findForestRenameRefusals(RENAME({ extensions: ['ws01'] })), []);
+  });
+});
+
+test('an extension that reads EVERY other config is refused whatever we vendor', () => {
+  // guacamole's install.yml include_vars exchange, lx01 and ws01
+  // unconditionally, so it drags an un-rewritten domains block in even when that
+  // extension was never ticked. No per-extension rewrite reaches that, which is
+  // why it is a separate flag rather than a missing vendored file.
+  withExtensions({
+    guacamole: { key: 'guacamole', machine: 'guacamole', readsAllExtensionConfigs: true },
+  }, () => {
+    const f = findForestRenameRefusals(RENAME({ extensions: ['guacamole'] }));
+    assert.strictEqual(f.length, 1);
+    assert.strictEqual(f[0].code, 'forest-rename-unsupported-extension');
+    assert.match(f[0].message, /no safe domain rewrite/);
+  });
+});
+
+// ── the lab catalog predicates ──────────────────────────────────────────────
+
+test('goadLabRebrandable is a data predicate: a vendored tree exists, or it does not', () => {
+  const L = goadDeploy.GOAD_LABS;
+  assert.strictEqual(goadLabRebrandable('GOAD-Mini', L['GOAD-Mini']), true);
+  // Multi-domain, and unvendored for that reason.
+  assert.strictEqual(goadLabRebrandable('GOAD-Light', L['GOAD-Light']), true);
+  assert.strictEqual(goadLabRebrandable('GOAD', L.GOAD), true);
+  // Single-domain but unvendored — SCCM's netbios_name is not its first label
+  // and DRACARYS's config.json is not strict JSON. The card refuses the box for
+  // these, which is why no finding above covers them.
+  assert.strictEqual(goadLabRebrandable('SCCM', L.SCCM), false);
+  assert.strictEqual(goadLabRebrandable('DRACARYS', L.DRACARYS), false);
+  // A name that is not a lab, and one that is not a path component either.
+  assert.strictEqual(goadLabRebrandable('light', undefined), true);
+  assert.strictEqual(goadLabRebrandable('../../etc', undefined), false);
+});
+
+test('goadLabDomains prefers the table and never invents a domain the lab may not have', () => {
+  assert.deepStrictEqual(goadLabDomains({ domains: ['a.org', 'b.a.org'] }), ['a.org', 'b.a.org']);
+  // The pre-domains[] fallback. A declared child IS a second domain...
+  assert.deepStrictEqual(goadLabDomains({ forestRoot: 'a.org', childSubdomain: 'b' }),
+    ['a.org', 'b.a.org']);
+  // ...but NHA's second domain is a TRUST partner recorded nowhere, so the
+  // honest answer is "the table does not say" rather than a confident 1. A
+  // false single-domain answer only suppresses a finding; a false multi-domain
+  // one would block a rename that works.
+  assert.strictEqual(goadLabDomains({ forestRoot: 'ninja.hack', childSubdomain: null }), null);
+  assert.strictEqual(goadLabDomains(null), null);
+});
+
+// ── 5. the route guards that share this module ──────────────────────────────
+//
+// Source-text assertions, the same way test/ad-domain-rules.test.js pins the
+// create handler: these routes cannot be exercised without a database, and the
+// properties below are about WHERE the code sits — which is exactly what a
+// behavioural test would miss.
+
+test('POST /create-lab writes rename_forest ONLY when it is true, and 400s on a refusal', () => {
+  assert.match(ROUTE_SRC,
+    /if \(goad\.rename_forest === true\) \{\s*\n\s*spec\.goad\.rename_forest = true;\s*\n\s*\}/,
+    'a key absent from every stored row is what stops a derived trigger recompiling legacy specs');
+  assert.match(ROUTE_SRC,
+    /const renameRefusals = findForestRenameRefusals\(spec\)[\s\S]{0,400}status\(400\)/,
+    'the editor save path never calls /validate, so the canvas finding alone refuses nothing');
+});
+
+// Actual POST/PUT callbacks, allocation ordering, and server-owned payload
+// preservation are exercised in lab-template-goad-save.test.js with mocked I/O.
+
+test('GET /goad/labs names the domains and says whether the forest can be renamed', () => {
+  assert.match(ROUTE_SRC, /domains:\s*goadLabDomains\(lab\)/);
+  assert.match(ROUTE_SRC, /rebrandable:\s*goadLabRebrandable\(key, lab\)/);
+});
+
+// ── the LIST projection ─────────────────────────────────────────────────────
+
+/** withoutGeneratedLabFiles, lifted out of the route and run for real. */
+function loadStripper() {
+  // Matched, not sliced between two literal needles: this file is checked out
+  // with CRLF endings, so anything hunting for a bare newline finds nothing.
+  // With the m flag, the first brace at column 0 after the signature is the
+  // function's own close — nothing in its body is unindented.
+  const m = /^function withoutGeneratedLabFiles\(spec\) \{[\s\S]*?^\}/m.exec(ROUTE_SRC);
+  assert.ok(m, 'the LIST projection no longer strips the generated lab tree');
+  // eslint-disable-next-line no-new-func
+  return new Function(`${m[0]} return withoutGeneratedLabFiles;`)();
+}
+
+test('GET /lab-templates does not ship a whole GOAD lab tree per row', () => {
+  // The list returns the full spec for EVERY active challenge and the Designer
+  // calls it three times per create, so a generated tree was being serialized a
+  // dozen times over to render names and VM counts. It is read at deploy time by
+  // resolveGeneratedLab and by nothing that holds a list row.
+  const strip = loadStripper();
+  const spec = {
+    vms: [{ name: 'DC01' }],
+    goad: {
+      enabled: true, version: 'CC-GOADMINI-CY400TEST-1a2b3c4d', domain: 'cy400test.org',
+      generated_lab: {
+        name: 'CC-GOADMINI-CY400TEST-1a2b3c4d',
+        chain: ['ad-servers'],
+        files: [{ path: 'data/config.json', content: 'x'.repeat(10000) },
+                { path: 'data/inventory', content: 'y' }],
+      },
+    },
+  };
+  const out = strip(spec);
+  assert.strictEqual(out.goad.generated_lab.files, undefined);
+  assert.strictEqual(out.goad.generated_lab.file_count, 2, 'the row still says a tree is there');
+  assert.strictEqual(out.goad.generated_lab.name, 'CC-GOADMINI-CY400TEST-1a2b3c4d');
+  assert.deepStrictEqual(out.goad.generated_lab.chain, ['ad-servers']);
+  assert.strictEqual(out.goad.domain, 'cy400test.org', 'nothing else about the spec changes');
+  assert.deepStrictEqual(out.vms, spec.vms);
+  assert.strictEqual(spec.goad.generated_lab.files.length, 2, 'and the input is not mutated');
+
+  // The path -> content shape normalizeFiles also accepts.
+  assert.strictEqual(
+    strip({ goad: { generated_lab: { files: { 'data/config.json': '{}', 'data/inventory': '' } } } })
+      .goad.generated_lab.file_count, 2);
+});
+
+test('a spec with no generated lab comes back BY IDENTITY', () => {
+  // Which is what keeps every existing row byte-identical to what this route has
+  // always returned — spec included, in whatever shape the driver handed over.
+  const strip = loadStripper();
+  for (const spec of [LEGACY_MINI, {}, { goad: { enabled: true } },
+                      { goad: { generated_lab: { name: 'CIAB-1' } } }, null]) {
+    assert.strictEqual(strip(spec), spec, JSON.stringify(spec));
+  }
 });

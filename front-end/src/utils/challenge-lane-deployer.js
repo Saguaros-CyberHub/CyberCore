@@ -63,6 +63,7 @@ const { generatePassword } = require('./password-generator');
 const { waitForGuestAgent, executeScriptsOnVM } = require('./script-executor');
 const { plantFlagsForLane, seedLaneFlags } = require('./flag-manager');
 const goadDeploy = require('./goad-deploy');
+const audit = require('./audit');
 const laneDeployer = require('./lane-deployer');
 const laneWan = require('./lane-wan-allocator');
 const nodeSsh = require('./node-ssh');
@@ -319,13 +320,46 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
   return { primary, consoles };
 }
 
-/** The Kali login for a user: their email local-part, plus a password. */
+/** Catalog addresses required by the selected external GOAD installers. */
+function resolveGoadExternalPins(spec) {
+  if (!spec?.goad?.enabled) return {};
+  const { extensions } = goadDeploy.resolveGoadLab(spec);
+  const pins = {};
+  for (const key of extensions.selected) {
+    const ext = goadDeploy.getExtension(key);
+    if (ext.inLab) continue;
+    const vm = (spec.vms || []).find(v => String(v.name).toLowerCase() === ext.machine.toLowerCase());
+    if (!vm) throw new Error(`Selected GOAD extension '${key}' requires machine '${ext.machine}'.`);
+    if (vm.ipOctet != null && Number(vm.ipOctet) !== ext.ipOctet) {
+      throw new Error(`GOAD extension '${key}' must use .${ext.ipOctet}; its installer uses that address.`);
+    }
+    pins[vm.name] = ext.ipOctet;
+  }
+  return pins;
+}
+
+/** Reject incompatible extension placement before allocating lane resources. */
+function validateGoadLaneAddressing(spec, subnetScheme) {
+  if (!spec?.goad?.enabled) return;
+  try {
+    const goadMacs = goadDeploy.prepareGoadMacs(spec, 1, '10.0.1');
+    resolveSpecAddressing({
+      specVms: spec.vms || [], goadMacs, requiredIpOctets: resolveGoadExternalPins(spec),
+      subnetScheme, laneSubnetBase: '10.0.0', goadSubnetBase: '10.0.1',
+      reserved: [1, 5, 50, ...Object.values(goadMacs).map(v => Number(v.static_ip.split('.').pop()))],
+    });
+  } catch (err) {
+    err.status = 400;
+    throw err;
+  }
+}
+
 /**
  * Fixed lane addresses (and stable DNS names) for the machines the student
  * ATTACKS, not just the ones they open a console onto.
  *
- * Off unless the caller passes `pinAllVms`, so every pre-existing deploy writes
- * exactly the reservations it wrote before. A hand-authored CLE challenge does
+ * General pinning is off unless the caller passes `pinAllVms`; selected GOAD
+ * extensions always keep the addresses their installers require. A CLE challenge does
  * not need this — its author already knows the lab's shape. A PROFILE-DERIVED
  * lane does: the generated paper (scan report, asset register, network diagram)
  * names an address, and a machine on an ordinary DHCP pool lease lands
@@ -386,6 +420,7 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
  *   pinnedHosts.
  * @param {Array}  [a.reserved]          octets already claimed on this lane
  * @param {boolean}[a.pinAllVms]
+ * @param {object} [a.requiredIpOctets] selected extension VM names to installer octets
  * @returns {{ pinnedHosts: Array<{name,octet,subnetBase}>, dnsRecords: Array<{alias,ip}> }}
  * @throws when an explicit ipOctet collides, the band is full, or two machines
  *   claim one alias — each of which produces a lane that looks deployed and is
@@ -393,13 +428,13 @@ function resolveConsolePlan({ specVms = [], attackBoxes = false, extraWorkstatio
  */
 function resolveSpecAddressing({
   specVms = [], goadMacs = {}, consoleOctetForVm = {}, extraConsoles = [], reserved = [],
-  subnetScheme, laneSubnetBase, goadSubnetBase, pinAllVms = false,
+  subnetScheme, laneSubnetBase, goadSubnetBase, pinAllVms = false, requiredIpOctets = {},
 }) {
   const isV3 = subnetScheme === 'v3';
   const taken = new Set(reserved);
   const pinnedHosts = [];
 
-  if (pinAllVms) {
+  if (pinAllVms || Object.keys(requiredIpOctets).length) {
     // Everything that survives the skip rules, in spec order. Order is part of
     // the output contract: the auto-assigned octets must not move because an
     // unrelated machine was added earlier in the list.
@@ -407,11 +442,23 @@ function resolveSpecAddressing({
     for (const vmSpec of specVms) {
       const name = vmSpec.name;
       if (!name) continue;
+      if (!pinAllVms && requiredIpOctets[name] == null) continue;
       if (goadMacs[name]) continue;
-      if (consoleOctetForVm[name] != null) continue;
+      if (consoleOctetForVm[name] != null) {
+        if (requiredIpOctets[name] != null && consoleOctetForVm[name] !== requiredIpOctets[name]) {
+          throw new Error(`GOAD extension '${name}' must keep its installer address .${requiredIpOctets[name]}.`);
+        }
+        continue;
+      }
+      if (requiredIpOctets[name] != null && (vmSpec.type || 'qemu') !== 'qemu') {
+        throw new Error(`GOAD extension '${name}' requires a QEMU VM with a pinned network interface.`);
+      }
       if ((vmSpec.type || 'qemu') === 'lxc') continue;   // net1; the template owns net0
 
       const segs = resolveVmSegments(vmSpec, { subnetScheme, isGoadVm: false });
+      if (requiredIpOctets[name] != null && (segs.length !== 1 || (isV3 && segs[0] !== 'ext'))) {
+        throw new Error(`GOAD extension '${name}' must have one interface on the external lane network.`);
+      }
       if (segs.length > 1) continue;
 
       eligible.push({
@@ -433,8 +480,9 @@ function resolveSpecAddressing({
     // this function invented.
     const explicitOctet = new Map();
     for (const e of eligible) {
-      if (e.vmSpec.ipOctet === undefined || e.vmSpec.ipOctet === null) continue;
-      const wanted = Number(e.vmSpec.ipOctet);
+      const requested = requiredIpOctets[e.name] ?? e.vmSpec.ipOctet;
+      if (requested === undefined || requested === null) continue;
+      const wanted = Number(requested);
       // Range-checked, not merely finite. Number() maps null->0, '' ->0 and
       // true->1, and Number.isFinite accepts 0, negatives, 300 and 80.5 — every
       // one of which reaches macForOctet(octet & 0xFF) and produces a
@@ -511,7 +559,8 @@ function resolveSpecAddressing({
     // Validation goes through lane-deployer.resolveDnsAliases (see above); the
     // spec's per-VM key is wrapped in the template shape that function reads.
     const aliases = laneDeployer.resolveDnsAliases({
-      metadata: { dns_aliases: vmSpec.dns_aliases },
+      metadata: { dns_aliases: vmSpec.dns_aliases ||
+        (requiredIpOctets[vmSpec.name] != null ? [vmSpec.name.toLowerCase()] : undefined) },
       template_key: vmSpec.name,
     });
     for (const alias of aliases) claimAlias(alias, vmSpec.name, ip);
@@ -1439,7 +1488,7 @@ async function writeLaneReservations({
     // A dead DHCP server is not survivable — every guest on this lane would sit
     // without an address. Anything else (no SSH channel, for instance) leaves the
     // gateway's baked reservation in place, so the lane is degraded but usable.
-    if (err.noFallback) throw err;
+    if (err.noFallback || spec.goad?.rename_forest === true) throw err;
     console.error(
       `${logTag} Lane ${laneId}: could not write DHCP reservations (${err.message}). ` +
       (attackBoxOctet != null
@@ -1824,6 +1873,7 @@ async function deployLaneVms(job, ctx) {
       goadDeploy.INFRA_IP_OCTETS.controller,
     ],
     subnetScheme, laneSubnetBase, goadSubnetBase, pinAllVms: !!ctx.pinAllVms,
+    requiredIpOctets: resolveGoadExternalPins(spec),
   });
   // Read by cloneChallengeVm for the pinned MAC. Kept SEPARATE from
   // _consoleOctetForVm so the dual-homed console guard there keeps its exact
@@ -1874,6 +1924,14 @@ async function deployLaneVms(job, ctx) {
   // when config.vms is empty, and on a challenge lane it never is.
   deployedVMs.push(...deployedExtras.map(({ _creds, ...rest }) => rest));
 
+  // Keep cleanup inventory durable before booting or provisioning any guest.
+  await cybercoreQuery(
+    `UPDATE cybercore_lane SET config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
+       updated_at = NOW() WHERE lane_id = $1`,
+    [laneId, JSON.stringify({ vms: deployedVMs, node: targetNode,
+      gateway_vm_id: gatewayVmId, attack_box_vm_id: attackBoxVmId })]
+  );
+
   // 2. Boot the gateway first so dnsmasq is answering before anything DHCPs.
   setStatus('starting');
   await proxmoxAPI('POST', `/api2/json/nodes/${targetNode}/lxc/${gatewayVmId}/status/start`);
@@ -1881,14 +1939,24 @@ async function deployLaneVms(job, ctx) {
 
   // 2b. Write the lane's DHCP reservations BEFORE any guest boots, so the very
   //     first DHCPREQUEST already has a reservation waiting.
-  await writeLaneReservations({
-    gatewayVmId, node: targetNode, vxlanId, goadMacs,
-    attackBoxOctet: attackBoxVmId ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
-    consoleOctets: reservationOctets, pinnedHosts, dnsRecords, spec, subnetScheme,
-    extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
-    liveGoadController: !!(spec.goad?.enabled && !spec.goad?.prebaked),
-    laneId, logTag,
-  });
+  //
+  //     ONE renderer, called TWICE — here, and again after the GOAD block (3b),
+  //     because the GOAD controller's prep.sh used to overwrite this same file.
+  //     A closure rather than two argument lists: the second write has to
+  //     reserve exactly what the first did — Kali's octet above all, since the
+  //     gateway's baked wan0:3389 DNAT is aimed at it — and a second argument
+  //     list at the second call site is precisely how the two would drift.
+  const writeReservations = async () => {
+    await writeLaneReservations({
+      gatewayVmId, node: targetNode, vxlanId, goadMacs,
+      attackBoxOctet: attackBoxVmId ? goadDeploy.INFRA_IP_OCTETS.Kali : null,
+      consoleOctets: reservationOctets, pinnedHosts, dnsRecords, spec, subnetScheme,
+      extSubnetBase: laneSubnetBase, intSubnetBase: goadSubnetBase,
+      liveGoadController: !!(spec.goad?.enabled && !spec.goad?.prebaked),
+      laneId, logTag,
+    });
+  };
+  await writeReservations();
 
   // Every machine on the lane, added ones included — they are in deployedVMs now.
   for (const dvm of deployedVMs) {
@@ -1897,6 +1965,8 @@ async function deployLaneVms(job, ctx) {
   }
 
   // 3. GOAD provisioning, if the challenge declares it.
+  let goadMeta = null;
+  let goadError = null;
   if (spec.goad?.enabled) {
     setStatus('provisioning_goad');
     try {
@@ -1904,14 +1974,15 @@ async function deployLaneVms(job, ctx) {
         // Golden-image lane: clones are already GOAD-provisioned, so just write
         // reservations + bounce onto the baked IPs. No controller, no ansible,
         // no ~90-min bake.
-        await goadDeploy.deployPrebakedGoadLane({
+        const result = await goadDeploy.deployPrebakedGoadLane({
           lane: { lane_id: laneId },
           spec, vxlanId, gatewayVmId, bestNode: targetNode,
           laneSubnetBase: goadSubnetBase, extSubnetBase: laneSubnetBase,
           deployedVMs, proxmoxAPI,
         });
+        goadMeta = result?.goadMeta || { status: 'provisioned', prebaked: true };
       } else {
-        await goadDeploy.deployGoadLane({
+        const result = await goadDeploy.deployGoadLane({
           lane: { lane_id: laneId },
           spec, module: moduleKey, vnet: isV3 ? vnetInt : vnet, vxlanId, gatewayVmId,
           bestNode: targetNode,
@@ -1922,11 +1993,68 @@ async function deployLaneVms(job, ctx) {
           extSubnetBase: laneSubnetBase, deployedVMs,
           proxmoxAPI, waitForTask, query: cybercoreQuery,
         });
+        goadMeta = result.goadMeta;
       }
     } catch (goadErr) {
-      // Best-effort: the lane's VMs exist and are reachable even if AD didn't
-      // finish provisioning. Failing the lane here would destroy work already done.
+      // Finish recording the lane before reporting failure. 'suspended' retains
+      // its network claims and permits teardown without advertising readiness.
+      goadError = goadErr.message;
+      goadMeta = { ...goadErr.goadMeta, status: 'failed', error: goadError };
       console.error(`${logTag} GOAD provisioning failed for ${user.email}: ${goadErr.message}`);
+    }
+    job.goadMeta = goadMeta;
+    await audit.log({
+      action: 'lane.goad_provisioned', status: goadError ? 'failure' : 'success',
+      target: { type: 'lane', id: laneId }, targetUser: { id: user.id },
+      metadata: {
+        provisioning_status: goadMeta?.status,
+        forest_rename: goadMeta?.forest_rename || null,
+        controller_vmid: goadMeta?.controller_vmid || null,
+      },
+    });
+    if (progress?.lanes[laneId]) {
+      progress.lanes[laneId].goad = goadMeta;
+      if (goadError) progress.lanes[laneId].error = goadError;
+    }
+
+    // 3b. Put the lane's reservations back. The GOAD controller writes DHCP
+    //     reservations too — prep.sh, over SSH into the gateway — and every
+    //     controller baked before prep.sh was pointed at its own
+    //     goad-lane-reservations.conf wrote them by TRUNCATING this lane's file.
+    //     What survived was prep.sh's HOST_MAP and nothing else: the GOAD
+    //     roster, the controller, and Kali only when spec.goad.include_kali is
+    //     not false — which is a DIFFERENT switch from the attack box this
+    //     deploy clones. Everything the controller has never heard of was
+    //     deleted: an extension host such as elk (it reaches us as a pinnedHost,
+    //     not in goadMacs), the console reservations, and every host-record and
+    //     company DNS line, which live in this same file. Found on a live lane
+    //     with Kali on a pool lease at .53 while the gateway's baked wan0:3389
+    //     DNAT still pointed at .50 — a student console connected to nothing —
+    //     and elk holding .24 only until its next renewal, with winlogbeat on
+    //     every Windows host aimed at a hardcoded <subnet>.24:9200.
+    //
+    //     Kali is not started until step 4 and deployGoadLane bounces the
+    //     Windows VMs after prep.sh, so re-rendering here puts every line back
+    //     before any guest that needs one asks for an address. Against a
+    //     controller baked WITH the split it rewrites the file it already holds,
+    //     byte for byte — which is why it is unconditional rather than sniffing
+    //     the controller's age. It runs after the catch as well as after a
+    //     success, because prep.sh runs early and a GOAD failure LATER in the
+    //     deploy still leaves the truncated file behind. Live path only: a
+    //     pre-baked lane has no controller and no prep.sh, so nothing to undo.
+    if (!spec.goad?.prebaked) {
+      try {
+        await writeReservations();
+      } catch (reservationError) {
+        goadError = goadError || `DHCP restoration failed: ${reservationError.message}`;
+        goadMeta = { ...goadMeta, status: 'failed', error: goadError,
+          reservation_error: reservationError.message };
+        job.goadMeta = goadMeta;
+        if (progress?.lanes[laneId]) {
+          progress.lanes[laneId].goad = goadMeta;
+          progress.lanes[laneId].error = goadError;
+        }
+      }
     }
   }
 
@@ -2059,7 +2187,7 @@ async function deployLaneVms(job, ctx) {
   const kaliGuacConnId = (consoleTargets.find((t) => t.kind === 'kali') || {}).guacConnId || null;
 
   // 5. Vuln scripts.
-  if (vulnScripts && vulnScripts.length > 0) {
+  if (!goadError && vulnScripts && vulnScripts.length > 0) {
     setStatus('running_scripts');
     console.log(`${logTag} Running ${vulnScripts.length} vuln script(s) for ${user.email}`);
     try {
@@ -2087,7 +2215,7 @@ async function deployLaneVms(job, ctx) {
   //     config rather than only logged, so it reaches the instructor instead of
   //     presenting as "the exercise content just isn't there".
   let postDeployError = null;
-  if (typeof ctx.postDeploy === 'function') {
+  if (!goadError && typeof ctx.postDeploy === 'function') {
     setStatus('post_deploy');
     try {
       await ctx.postDeploy({
@@ -2159,9 +2287,11 @@ async function deployLaneVms(job, ctx) {
     ],
   });
 
-  // 8. Lane is live.
+  // 8. Persist the complete outcome before reporting readiness or failure.
   const activeConfig = {
     ...laneConfig,
+    ...(goadMeta ? { goad: goadMeta } : {}),
+    ...(goadError ? { error: goadError, provisioning_error: goadError } : {}),
     challenge_key:    challengeKey,
     module:           moduleKey,
     challenge_vm_id:  deployedVMs[0]?.vm_id,
@@ -2226,10 +2356,15 @@ async function deployLaneVms(job, ctx) {
     } : {}),
   };
   await cybercoreQuery(
-    `UPDATE cybercore_lane SET status = 'active', config = $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-    [laneId, JSON.stringify(activeConfig)]
+    `UPDATE cybercore_lane SET status = $3, config = COALESCE(config, '{}'::jsonb) || $2::jsonb,
+       updated_at = NOW() WHERE lane_id = $1`,
+    [laneId, JSON.stringify(activeConfig), goadError ? 'suspended' : 'active']
   );
 
+  if (goadError) {
+    setStatus('error');
+    throw new Error(`GOAD provisioning failed; lane retained for inspection and cleanup: ${goadError}`);
+  }
   setStatus('active');
   console.log(
     `${logTag} Lane ${laneId} active (vxlan ${vxlanId}, node ${targetNode}, ` +
@@ -2310,8 +2445,8 @@ async function deployChallengeLanes(args) {
         laneDeployer.finishProgress(args.progressId);
       }
     }
-    // Any lane row we managed to insert before failing must not sit in
-    // 'deploying' — that status is invisible to teardown AND to the allocator.
+    // A failed job may already own live guests. Suspend it so the operator can
+    // inspect/tear it down while its VXLAN and WAN address remain claimed.
     //
     // Scoped to the ids this call inserted. It used to sweep by challenge_key +
     // "created in the last hour", which is not scoped to the call, the course, or
@@ -2323,7 +2458,7 @@ async function deployChallengeLanes(args) {
     if (insertedLaneIds.length > 0) {
       await cybercoreQuery(
         `UPDATE cybercore_lane
-            SET status = 'error', config = config || $2::jsonb, updated_at = NOW()
+            SET status = 'suspended', config = config || $2::jsonb, updated_at = NOW()
           WHERE lane_id = ANY($1::uuid[])
             AND status = 'deploying'`,
         [insertedLaneIds, JSON.stringify({ error: err.message })]
@@ -2369,7 +2504,9 @@ async function deployChallengeLanesInner({
   // winlogbeat long after the elk box stopped being part of the environment.
   // Returns the SAME object when no SIEM extension is selected, so every
   // non-blue-team deploy is byte-identical to what it was before.
-  const spec = attachGoadAgentScripts(parseSpec(challenge.spec));
+  // Prepare the identity plan before allocating a lane or cloning its gateway.
+  // The authored challenge keeps its catalog version and explicit opt-in.
+  const spec = goadDeploy.prepareGoadDeploymentSpec(attachGoadAgentScripts(parseSpec(challenge.spec)));
   const subnetScheme = challenge.subnet_scheme || 'v1';
   const resolvedModule = moduleKey || challenge.module_key || 'crucible';
   const challengeKey = challenge.challenge_key;
@@ -2391,6 +2528,9 @@ async function deployChallengeLanesInner({
   }
   const collision = findVmOffsetCollision(specVms);
   if (collision) throw new Error(`Challenge '${challengeKey}' cannot deploy: ${collision}`);
+  // External extension addresses are part of the installer contract even when
+  // the caller did not request whole-lane pinning. Validate before allocation.
+  validateGoadLaneAddressing(spec, subnetScheme);
 
   // Not fatal — a challenge author may genuinely want an extra box on the
   // external segment — but it is almost always a naming mistake, and it is
@@ -2670,8 +2810,8 @@ async function deployChallengeLanesInner({
     failed.push({ user_id: job.user.id, user_email: job.user.email, lane_id: job.laneId, reason: message });
     if (progress?.lanes[job.laneId]) progress.lanes[job.laneId].status = 'error';
     await cybercoreQuery(
-      `UPDATE cybercore_lane SET status = 'error', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
-      [job.laneId, JSON.stringify({ error: message })]
+      `UPDATE cybercore_lane SET status = 'suspended', config = config || $2::jsonb, updated_at = NOW() WHERE lane_id = $1`,
+      [job.laneId, JSON.stringify({ error: message, ...(job.goadMeta ? { goad: job.goadMeta } : {}) })]
     ).catch(() => {});
   }
 
@@ -3120,6 +3260,8 @@ module.exports = {
   resolveSpecVms,
   resolveConsolePlan,
   resolveSpecAddressing,
+  resolveGoadExternalPins,
+  validateGoadLaneAddressing,
   // Pure, and exported for the same reason resolveSpecAddressing is: both encode
   // a rule whose failure mode is a lane that deploys, reports active, and is
   // silently wrong — which no test can reach through the deploy path itself.
