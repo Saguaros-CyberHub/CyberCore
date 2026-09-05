@@ -468,20 +468,18 @@ services:
       - cybercore-net
 
   # ============================================================================
-  # CALDERA (AUTHORING) — adversary authoring console
+  # CALDERA — adversary authoring and manual control of running-lane agents
   # ----------------------------------------------------------------------------
-  # ONE instance, platform-wide, with NO agents and NO agent contact. It EXECUTES
-  # NOTHING: instructors use its web UI to BUILD adversaries and CyberCore later
-  # replicates one into a lane's own lane-local Caldera. Those PER-LANE EXECUTORS
-  # ARE STILL VMs (bake-caldera-server.sh, CALDERA_ROLE=executor) and are not
-  # here. A web app plus a content store is a container.
+  # ONE central instance for authoring and manual operations on agents installed
+  # from the Blue Team Board. Each agent has a scoped HTTP contact capability;
+  # console/API requests retain the instructor session gate.
   #
   # >>> THE MOST IMPORTANT LINE IN THIS SERVICE IS THE ONE THAT IS NOT HERE. <<<
   # THERE IS DELIBERATELY NO `ports:` MAPPING. Do not add one. Not for
   # "debugging", not "just on 127.0.0.1", not temporarily. With no port binding
   # this container is unreachable from the host and from the lab network, and the
-  # ONLY path to it is Caddy's /caldera* handle — which runs forward_auth against
-  # the app first. That is a STRUCTURAL control: there is no firewall rule to
+  # ONLY path to it is Caddy on CALDERA_HOST, which runs the appropriate
+  # console or agent forward_auth gate against the app first. There is no firewall rule to
   # keep correct and nothing to drift. Publish a port and an adversary authoring
   # console becomes reachable from every lab subnet behind nothing at all,
   # because the Caldera login form on the other side accepts no password (see
@@ -510,6 +508,8 @@ services:
       app:
         condition: service_started
     environment:
+      # Public HTTPS origin used by the Blue Team Board's agent installer.
+      CALDERA_HOST: ${CALDERA_HOST:-}
       # The shared HMAC key. Same .env entry the app reads above; the token is
       # minted there and verified here, so a mismatch means every login is
       # refused (fail closed) rather than every login accepted.

@@ -359,6 +359,39 @@ router.get('/authoring/adversaries', async (req, res) => {
 });
 
 /** GET /:runId — the board itself. */
+// Manual agent management for the Blue Team Board. The incident engine remains
+// separate; operations are controlled in the central Caldera console.
+const laneAgents = require('../../../../../src/utils/caldera-lane-agents').createService();
+async function courseAgentLanes(courseId) {
+  return require('../../../../../src/incident/runner').findScopeLanes(scopeOf(courseId));
+}
+
+router.get('/caldera-agents/status', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    res.set('Cache-Control', 'no-store');
+    res.json(await laneAgents.status(await courseAgentLanes(ctx.courseId)));
+  } catch (error) { fail(res, error, 'GET /caldera-agents/status'); }
+});
+
+router.post('/caldera-agents', async (req, res) => {
+  try {
+    const ctx = await loadStaffCourse(req, res);
+    if (!ctx) return;
+    if (!isFeatureEnabled(ctx.course, 'blue_team')) {
+      return res.status(404).json({ error: 'Blue Team Board is not enabled for this course' });
+    }
+    const input = req.body || {};
+    const lane = (await courseAgentLanes(ctx.courseId)).find(l => l.lane_id === input.lane_id);
+    if (!lane) return res.status(404).json({ error: 'Running lane not found in this course' });
+    const job = await laneAgents.start(lane, input);
+    audit.log({ req, action: 'caldera_agent_install', target: { type: 'lane', id: lane.lane_id },
+      metadata: { course_id: ctx.courseId, vm_id: job.vm_id, job_id: job.job_id } }).catch(() => {});
+    res.status(202).json({ job });
+  } catch (error) { fail(res, error, 'POST /caldera-agents'); }
+});
+
 router.get('/:runId', async (req, res) => {
   try {
     const ctx = await loadRun(req, res);

@@ -39,9 +39,9 @@
  * payload: an empty table, not a disclosure.
  *
  * ── ATTACK AUTHORING, AND WHY IT IS RENDERED HERE ───────────────────────────
- * Adversaries are built in a separate Caldera console on a machine outside every
- * lane, with no agents on it: it executes nothing. This panel is where an
- * instructor prepares that console for THIS course and then opens it.
+ * Adversaries are built in a separate Caldera console outside every lane. This
+ * panel prepares that console for THIS course; the agent dialog connects a
+ * selected VM to it so an instructor can control it from the console.
  *
  * "Adding rendering here would fork the board" still holds — and this is not the
  * board. It renders no finding, no timeline and no score, it reads no run, and
@@ -188,9 +188,10 @@
     var token = null;
     try { token = localStorage.getItem('token'); } catch (e) { token = null; }
     if (token) headers.Authorization = 'Bearer ' + token;
-    return fetch(baseFor(currentCourseId) + path, {
+    return fetch(baseFor(opts.courseId || currentCourseId) + path, {
       method: opts.method || 'GET',
       credentials: 'include',
+      signal: opts.signal,
       headers: headers,
       body: opts.method && opts.method !== 'GET' ? JSON.stringify(opts.body || {}) : undefined
     }).then(function (res) {
@@ -324,9 +325,8 @@
       ? '<div style="margin-top:0.6rem; padding:0.7rem 0.9rem; border-radius:6px;'
         + ' border-left:4px solid #f59e0b; background:rgba(245,158,11,.12); font-size:0.85rem;">'
         + '<strong>' + escHtml(picked.name) + ' is prepared, not scheduled.</strong> '
-        + 'An adversary from this console cannot be fired into the lanes yet: that half is '
-        + 'switched on once the cluster it needs has been signed off. Until then, launch from the '
-        + 'Attack Console as usual.</div>'
+        + 'Choosing it here does not start it. Open the Caldera console to run it against '
+        + 'installed agents, or use the Attack Console for managed exercises.</div>'
       : '';
 
     return head + rows + note;
@@ -508,7 +508,7 @@
     if (a.state === 'idle' || a.state === 'working') {
       return head
         + '<p style="font-size:0.9rem;">Adversaries are built in a separate console that sits '
-        + 'outside every lane and runs nothing. Before it opens, CyberCore refreshes what it knows '
+        + 'outside every lane and runs the Caldera console. Before it opens, CyberCore refreshes what it knows '
         + 'about the machines this course actually deployed &mdash; so what you build there '
         + 'addresses machines that exist here.</p>'
         + '<button type="button" class="btn btn-primary" id="blueTeamAuthorBtn"'
@@ -574,6 +574,9 @@
     // and then await the result, instead of guessing at a number of ticks.
     var prepare = document.getElementById('blueTeamAuthorBtn');
     if (prepare) prepare.addEventListener('click', function () { return authorAttacks(); });
+
+    var agents = document.getElementById('blueTeamCalderaAgent');
+    if (agents) agents.addEventListener('click', function () { return showLaneCalderaModal(); });
 
     var recheck = document.getElementById('blueTeamConsoleRecheck');
     if (recheck) recheck.addEventListener('click', function () { return refreshConsoleStatus(); });
@@ -667,7 +670,7 @@
     // The authoring panel is drawn WHETHER OR NOT a run exists: an instructor
     // prepares the console before the first launch, which is precisely when
     // this course has no runs at all. It returns '' for a student.
-    var authoringMarkup = consoleStatusHtml() + authoringHtml();
+    var authoringMarkup = calderaAgentsHtml() + consoleStatusHtml() + authoringHtml();
 
     if (!runs.length) {
       box.innerHTML = authoringMarkup
@@ -740,6 +743,299 @@
     });
   }
 
+  // ============================================================================
+  // CALDERA AGENTS ON A RUNNING LANE
+  // ============================================================================
+
+  let _laneCalderaModal = null;
+
+  function calderaAgentsHtml() {
+    if (tier !== 'staff') return '';
+    return '<div class="info-box" style="margin-bottom:1rem;">'
+      + '<h4 style="margin:0 0 0.5rem;">Caldera agents</h4>'
+      + '<p>Add a Sandcat agent to a running lane, then control it from the Caldera console.</p>'
+      + '<button type="button" class="btn btn-primary" id="blueTeamCalderaAgent">Caldera Agent</button></div>';
+  }
+
+  function laneCalderaHttpUrl(value) {
+    try {
+      const url = new URL(value);
+      return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : null;
+    } catch (_) { return null; }
+  }
+
+  function laneCalderaModalOpen(state) {
+    return _laneCalderaModal === state && state.courseId === currentCourseId
+      && tier === 'staff' && state.overlay.classList.contains('active');
+  }
+
+  function closeLaneCalderaModal() {
+    const state = _laneCalderaModal;
+    if (!state) return;
+    _laneCalderaModal = null;
+    clearTimeout(state.timer);
+    state.requests.forEach(controller => controller.abort());
+    state.observer.disconnect();
+    Modal.close(state.overlay);
+    state.overlay.remove();
+  }
+
+  async function showLaneCalderaModal() {
+    if (tier !== 'staff' || !currentCourseId) return;
+    closeLaneCalderaModal();
+    const overlay = document.createElement('div');
+    overlay.id = 'laneCalderaModal';
+    overlay.className = 'modal-overlay';
+    overlay.innerHTML = `
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="laneCalderaTitle" style="max-width: 720px;">
+        <div class="modal-header">
+          <h3 id="laneCalderaTitle">Caldera Agent</h3>
+          <button id="laneCalderaClose" class="modal-close" aria-label="Close Caldera Agent">&times;</button>
+        </div>
+        <p style="color: var(--gray-500); font-size: 0.85rem;">Install a Sandcat agent on a running Windows or Linux VM. Control it from the Caldera console using this lane's group.</p>
+        <div id="laneCalderaConnection" style="margin-bottom: 1rem; overflow-wrap: anywhere;"></div>
+        <p id="laneCalderaNetwork" style="font-size: 0.85rem; color: #b7791f;"></p>
+        <form id="laneCalderaForm" style="display: grid; gap: 0.75rem;">
+          <div class="form-group">
+            <label for="laneCalderaLane">Running lane</label>
+            <select id="laneCalderaLane" required disabled><option value="">Loading lanes...</option></select>
+          </div>
+          <div class="form-group">
+            <label for="laneCalderaVm">Target VM</label>
+            <select id="laneCalderaVm" required disabled><option value="">Loading VMs...</option></select>
+          </div>
+          <div class="form-group">
+            <label for="laneCalderaPlatform">Operating system</label>
+            <select id="laneCalderaPlatform" required disabled aria-describedby="laneCalderaPlatformHint">
+              <option value="">Select operating system...</option>
+              <option value="windows">Windows</option>
+              <option value="linux">Linux</option>
+            </select>
+            <p id="laneCalderaPlatformHint" style="color: var(--gray-500); font-size: 0.8rem;"></p>
+          </div>
+          <button id="laneCalderaInstall" type="submit" class="btn btn-primary" disabled>Install Agent</button>
+          <button id="laneCalderaRefresh" type="button" class="btn btn-secondary">Refresh status</button>
+        </form>
+        <p id="laneCalderaError" role="alert" style="color: #e53e3e; white-space: pre-wrap;"></p>
+        <div id="laneCalderaJob" role="status" aria-live="polite" style="margin-top: 1rem;"></div>
+        <h4 style="margin-bottom: 0.5rem;">Agents seen by Caldera in this lane</h4>
+        <div id="laneCalderaAgents" aria-live="polite" style="font-size: 0.85rem;">Loading check-ins...</div>
+        <p style="color: var(--gray-500); font-size: 0.8rem;">You can close this window while installation runs. Reopen Caldera Agent to check progress.</p>
+      </div>`;
+    document.body.appendChild(overlay);
+    const state = { courseId: currentCourseId, laneId: null, overlay, payload: null, data: null, timer: null, requests: new Set(), submitting: false, refreshing: false, misses: 0, revision: 0, installError: '' };
+    _laneCalderaModal = state;
+    document.getElementById('laneCalderaClose').addEventListener('click', closeLaneCalderaModal);
+    document.getElementById('laneCalderaLane').onchange = () => selectCalderaLane(state);
+    document.getElementById('laneCalderaForm').onsubmit = event => { event.preventDefault(); return installLaneCalderaAgent(); };
+    document.getElementById('laneCalderaVm').onchange = () => syncLaneCalderaTarget(state, true);
+    document.getElementById('laneCalderaPlatform').onchange = () => syncLaneCalderaTarget(state);
+    document.getElementById('laneCalderaRefresh').onclick = () => refreshLaneCalderaModal(state);
+    // The shared modal controller also closes via Escape and backdrop click.
+    state.observer = new MutationObserver(() => {
+      if (_laneCalderaModal === state && !overlay.classList.contains('active')) closeLaneCalderaModal();
+    });
+    state.observer.observe(overlay, { attributes: true, attributeFilter: ['class'] });
+    Modal.open(overlay.id);
+    await refreshLaneCalderaModal(state);
+  }
+
+  async function laneCalderaRequest(state, path, options = {}) {
+    const controller = new AbortController();
+    state.requests.add(controller);
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      return await authoringRequest(path, { ...options, courseId: state.courseId, signal: controller.signal });
+    } catch (error) {
+      if (error.name === 'AbortError') throw new Error('The request timed out');
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      state.requests.delete(controller);
+    }
+  }
+
+  function selectCalderaLane(state) {
+    if (!laneCalderaModalOpen(state)) return;
+    const selected = document.getElementById('laneCalderaLane').value;
+    if (selected !== state.laneId) {
+      state.data = null;
+      state.installError = '';
+      document.getElementById('laneCalderaVm').value = '';
+      document.getElementById('laneCalderaPlatform').value = '';
+    }
+    state.laneId = selected || null;
+    const lane = (state.payload?.lanes || []).find(item => item.lane_id === selected);
+    renderLaneCalderaStatus(state, { ...state.payload, ...(lane || { lane_status: null, targets: [], agents: [], job: null }) });
+  }
+
+  function renderCalderaLanes(state, payload) {
+    const previous = state.payload;
+    state.payload = payload;
+    const select = document.getElementById('laneCalderaLane');
+    const lanes = (Array.isArray(payload.lanes) ? payload.lanes : []).filter(lane => lane.lane_status === 'active');
+    const oldLanes = (previous?.lanes || []).filter(lane => lane.lane_status === 'active');
+    if (JSON.stringify(oldLanes.map(lane => [lane.lane_id, lane.name])) !== JSON.stringify(lanes.map(lane => [lane.lane_id, lane.name])) || !previous) {
+      select.innerHTML = '<option value="">Select a running lane...</option>' + lanes.map(lane =>
+        `<option value="${escHtml(lane.lane_id)}">${escHtml(lane.name || lane.lane_id)}</option>`
+      ).join('');
+      select.value = lanes.some(lane => lane.lane_id === state.laneId) ? state.laneId : lanes[0]?.lane_id || '';
+    }
+    select.disabled = state.submitting || !lanes.length;
+    selectCalderaLane(state);
+    if (!lanes.length) document.getElementById('laneCalderaError').textContent = 'No running lanes were found for this course. Deploy or start a lane, then refresh status.';
+  }
+
+  function syncLaneCalderaTarget(state, changed = false) {
+    if (!laneCalderaModalOpen(state)) return;
+    const vmSelect = document.getElementById('laneCalderaVm');
+    const platformSelect = document.getElementById('laneCalderaPlatform');
+    const target = (state.data?.targets || []).find(vm => String(vm.vm_id) === vmSelect.value);
+    if (changed) platformSelect.value = ['windows', 'linux'].includes(target?.platform) ? target.platform : '';
+    document.getElementById('laneCalderaPlatformHint').textContent = !target ? '' : target.platform
+      ? 'Operating system is preselected from the VM configuration. Change it if needed.'
+      : 'The operating system could not be detected. Select Windows or Linux before installing.';
+    const busy = state.submitting || state.data?.job?.status === 'running';
+    document.getElementById('laneCalderaLane').disabled = state.submitting || !(state.payload?.lanes || []).some(lane => lane.lane_status === 'active');
+    vmSelect.disabled = busy || !state.data?.targets?.length;
+    platformSelect.disabled = busy || !target;
+    const button = document.getElementById('laneCalderaInstall');
+    button.disabled = busy || !target || !['windows', 'linux'].includes(platformSelect.value)
+      || state.data?.lane_status !== 'active' || !laneCalderaHttpUrl(state.data?.server_url)
+      || state.data?.internet_enabled === false
+      || !!state.data?.configuration_error;
+    button.textContent = state.submitting ? 'Starting installation...' : busy ? 'Installation running...' : 'Install Agent';
+  }
+
+  function renderLaneCalderaStatus(state, data) {
+    const previous = state.data;
+    state.data = data;
+    const targets = Array.isArray(data.targets) ? data.targets.filter(vm => vm.type === 'qemu') : [];
+    state.data.targets = targets;
+    const vmSelect = document.getElementById('laneCalderaVm');
+    const selected = vmSelect.value;
+    // Replacing the options on every poll interrupts a keyboard selection.
+    if (JSON.stringify(previous?.targets) !== JSON.stringify(targets)) {
+      vmSelect.innerHTML = '<option value="">Select a VM...</option>' + targets.map(vm =>
+        `<option value="${escHtml(String(vm.vm_id))}">${escHtml(vm.name || 'VM')} (${escHtml(String(vm.vm_id))})${vm.role ? ` - ${escHtml(vm.role)}` : ''}</option>`
+      ).join('');
+      const retained = targets.find(vm => String(vm.vm_id) === selected);
+      const initial = !previous && targets.find(vm => !/gateway|router|firewall/i.test(`${vm.role || ''} ${vm.name || ''}`));
+      vmSelect.value = retained ? selected : initial ? String(initial.vm_id) : '';
+      syncLaneCalderaTarget(state, !retained);
+    }
+    const consoleUrl = laneCalderaHttpUrl(data.console_url);
+    document.getElementById('laneCalderaConnection').innerHTML = `
+      <div style="font-size: 0.85rem;">Agent server: <code>${escHtml(data.server_url || 'Not configured')}</code></div>
+      <div style="font-size: 0.85rem;">Lane group: <code>${escHtml(data.group || 'Not configured')}</code></div>
+      ${consoleUrl ? `<a href="${escHtml(consoleUrl)}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 0.5rem;">Open Caldera console &nearr;</a>` : ''}`;
+    document.getElementById('laneCalderaNetwork').textContent = data.lane_status !== 'active'
+      ? 'This lane is no longer active. Start the lane before installing an agent.'
+      : data.internet_enabled === false
+        ? 'Internet is off for this lane. Enable Internet access for this lane before installing a Caldera agent, then refresh status.'
+        : 'The VM must be running and able to reach the agent server. Its QEMU guest agent must be available.';
+    const job = data.job;
+    let jobHtml = '';
+    if (job) {
+      const label = job.status === 'failed' ? 'Installation failed' : job.status === 'completed' ? 'Install script finished' : 'Installing agent';
+      jobHtml = `<strong>${label}${job.vm_id ? ` on VM ${escHtml(String(job.vm_id))}` : ''}</strong>
+        <p style="white-space: pre-wrap;">${escHtml(job.error || job.message || '')}</p>`;
+      if (job.agent?.paw) jobHtml += `<p style="color: #38a169;">Caldera confirmed check-in: ${escHtml(job.agent.host || job.agent.paw)}.</p>`;
+      else if (job.status === 'completed') jobHtml += '<p>No check-in has been confirmed for this installation yet. Check the VM can reach the agent server and refresh status.</p>';
+    }
+    document.getElementById('laneCalderaJob').innerHTML = jobHtml;
+    const agents = Array.isArray(data.agents) ? data.agents : [];
+    document.getElementById('laneCalderaAgents').innerHTML = data.agents_error
+      ? `<p>Check-in status unavailable: ${escHtml(data.agents_error)}</p>`
+      : agents.length ? `<div style="overflow-x: auto;"><table style="width: 100%; text-align: left;">
+          <thead><tr><th>Host</th><th>Agent ID</th><th>Platform</th><th>Last check-in</th></tr></thead>
+          <tbody>${agents.map(agent => `<tr>
+            <td>${escHtml(agent.host || 'Unknown')}${agent.trusted === false ? ' (untrusted)' : ''}</td>
+            <td><code>${escHtml(agent.paw || '')}</code></td><td>${escHtml(agent.platform || '')}</td>
+            <td>${escHtml(agent.last_seen || 'Not reported')}</td>
+          </tr>`).join('')}</tbody></table></div>`
+        : '<p>No agents have checked in to this lane group yet.</p>';
+    document.getElementById('laneCalderaError').textContent = data.configuration_error
+      || state.installError
+      || (!laneCalderaHttpUrl(data.server_url) ? 'The Caldera agent server is not configured. Ask an administrator to configure its callback URL.' : '')
+      || (!targets.length ? 'No supported VMs were found in this lane. Add a Windows or Linux QEMU VM before installing.' : '');
+    syncLaneCalderaTarget(state);
+  }
+
+  async function refreshLaneCalderaModal(state = _laneCalderaModal) {
+    if (!state || !laneCalderaModalOpen(state) || state.refreshing || state.submitting) return;
+    clearTimeout(state.timer);
+    state.refreshing = true;
+    const revision = state.revision;
+    document.getElementById('laneCalderaRefresh').disabled = true;
+    try {
+      const data = await laneCalderaRequest(state, '/caldera-agents/status');
+      if (!laneCalderaModalOpen(state) || revision !== state.revision) return;
+      state.misses = 0;
+      renderCalderaLanes(state, data);
+    } catch (error) {
+      if (!laneCalderaModalOpen(state) || revision !== state.revision) return;
+      state.misses++;
+      document.getElementById('laneCalderaError').textContent = `Could not refresh Caldera status: ${error.message}. ${state.misses >= 3 ? 'Automatic updates paused. Use Refresh status to try again.' : 'Retry with Refresh status.'}`;
+      if (!state.data) {
+        document.getElementById('laneCalderaVm').innerHTML = '<option value="">VM list unavailable</option>';
+        document.getElementById('laneCalderaAgents').textContent = 'Check-in status unavailable.';
+      }
+    } finally {
+      state.refreshing = false;
+      if (laneCalderaModalOpen(state)) {
+        document.getElementById('laneCalderaRefresh').disabled = state.submitting;
+        if (!state.submitting && state.misses < 3) state.timer = setTimeout(() => refreshLaneCalderaModal(state), 5000);
+      }
+    }
+  }
+
+  async function installLaneCalderaAgent() {
+    const state = _laneCalderaModal;
+    if (!state || !laneCalderaModalOpen(state) || state.submitting || state.data?.job?.status === 'running') return;
+    const vmId = document.getElementById('laneCalderaVm').value;
+    const platform = document.getElementById('laneCalderaPlatform').value;
+    const target = (state.data?.targets || []).find(vm => String(vm.vm_id) === vmId);
+    const errorBox = document.getElementById('laneCalderaError');
+    if (!target || !['windows', 'linux'].includes(platform)) {
+      errorBox.textContent = 'Select a target VM and its operating system before installing.';
+      return;
+    }
+    if (state.data.lane_status !== 'active' || state.data.configuration_error || !laneCalderaHttpUrl(state.data.server_url)) return;
+    if (state.data.internet_enabled === false) {
+      errorBox.textContent = 'Enable Internet access for this lane before installing a Caldera agent, then refresh status.';
+      return;
+    }
+    state.submitting = true;
+    state.requests.forEach(controller => controller.abort());
+    state.revision++;
+    clearTimeout(state.timer);
+    errorBox.textContent = '';
+    state.installError = '';
+    document.getElementById('laneCalderaRefresh').disabled = true;
+    syncLaneCalderaTarget(state);
+    try {
+      const result = await laneCalderaRequest(state, '/caldera-agents', { method: 'POST', body: { lane_id: state.laneId, vm_id: target.vm_id, platform } });
+      if (!laneCalderaModalOpen(state)) return;
+      const lane = state.payload.lanes.find(item => item.lane_id === state.laneId);
+      if (lane) lane.job = result.job;
+      renderLaneCalderaStatus(state, { ...state.data, job: result.job });
+    } catch (error) {
+      if (!laneCalderaModalOpen(state)) return;
+      state.installError = `Could not start installation: ${error.message}. Refresh status to check whether a job started before retrying.`;
+      errorBox.textContent = state.installError;
+    } finally {
+      state.submitting = false;
+      if (laneCalderaModalOpen(state)) {
+        syncLaneCalderaTarget(state);
+        document.getElementById('laneCalderaRefresh').disabled = false;
+        state.misses = 0;
+        state.timer = setTimeout(() => refreshLaneCalderaModal(state), 1500);
+      }
+    }
+  }
+
+
   // ---- loading ------------------------------------------------------------
 
   function load() {
@@ -763,6 +1059,7 @@
       .then(function (data) {
         if (courseId !== currentCourseId) return;
         tier = data.tier === 'staff' ? 'staff' : 'student';
+        if (tier !== 'staff') closeLaneCalderaModal();
         runs = data.runs || [];
         if (!authoring) authoring = blankAuthoring();
         loadedForCourse = courseId;
@@ -789,6 +1086,7 @@
    * cancelCoursePollers() alongside them.
    */
   function cancelPolling() {
+    closeLaneCalderaModal();
     if (board) {
       try { board.destroy(); } catch (e) { /* already gone */ }
       board = null;
@@ -843,6 +1141,9 @@
     // Same reason: the test drives the probe and reads the markup the shell
     // writes, rather than a copy of either.
     refreshConsoleStatus: refreshConsoleStatus,
-    consoleStatusHtml: consoleStatusHtml
+    consoleStatusHtml: consoleStatusHtml,
+    calderaAgentsHtml: calderaAgentsHtml,
+    showCalderaAgents: showLaneCalderaModal,
+    closeCalderaAgents: closeLaneCalderaModal
   };
 })();

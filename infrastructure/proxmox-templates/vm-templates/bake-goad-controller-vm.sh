@@ -110,8 +110,8 @@ GOAD_REPO="${GOAD_REPO:-https://github.com/joshmp087/GOAD.git}"
 # goad_ref field must equal this SHA. Moving this pin means re-vendoring that
 # manifest in the same commit, or the validator built on it describes a GOAD the
 # controller no longer runs.
-# Includes the existing ELK fixes and controller-side forest rename helper.
-GOAD_REF="${GOAD_REF:-0fb45a48e1865fa65054dda22f5e924eea56369c}"
+# Includes ELK fixes, controller-side forest renaming, and the pinned SSMS installer.
+GOAD_REF="${GOAD_REF:-48b62c77b2d0bce82f6eb595ba5e1afd9526d50c}"
 MEMORY=2048
 CORES=2
 DISK_GB=10
@@ -1542,6 +1542,10 @@ $(echo "$DEPLOY_PRIVKEY" | sed 's/^/      /')
       # local Administrator account that became the domain admin during
       # promotion). Always lowercase 'administrator' in upstream's data.
       admin_user: "administrator"
+      # GOAD owns these Windows identities after bootstrap. The fork's hostname
+      # role retires Cloudbase-Init before renaming so a later reboot cannot
+      # restore the owner-suffixed Proxmox name and break domain membership.
+      cybercore_manage_hostname: true
       enable_http_proxy: "no"
       # Single-NIC topology: upstream's data.yml expects a "nat_adapter" (the
       # second NIC for outbound NAT) plus a "domain_adapter" (the lane NIC).

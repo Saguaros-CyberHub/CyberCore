@@ -494,7 +494,7 @@ test('THE OTHER POINT OF THIS FILE: the gate snippet has every part, in order', 
   );
 });
 
-test('NOTHING reaches the Caldera upstream without importing the gate', () => {
+test('only the instructor gate and scoped agent ingress reach the Caldera upstream', () => {
   // The invariant that actually protects the console. It is stated as "no block
   // proxies to the upstream except the gate snippet" rather than "each block has
   // a gate", because with a snippet the failure mode changed: the danger is no
@@ -502,7 +502,7 @@ test('NOTHING reaches the Caldera upstream without importing the gate', () => {
   // directly and never imports.
   const all = siteBlocks(read(CADDYFILE));
   for (const b of all) {
-    if (/^\(caldera_gate\)$/.test(b.header.trim())) continue;
+    if (/^\(caldera_(gate|agent_ingress)\)$/.test(b.header.trim())) continue;
     assert.ok(
       !/reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM/.test(b.body),
       `site block \`${b.header}\` proxies to the Caldera upstream directly instead of \`import caldera_gate\`, `
@@ -707,73 +707,38 @@ test('the console has exactly one working authentication path', () => {
   }
 });
 
-test('the image configures NO agent contact of any kind', () => {
-  // This instance must never take a check-in. A contact is precisely the thing
-  // that accepts one, so the config declares none — asserted as a real key scan
-  // rather than a substring search, so the long comment in that file explaining
-  // WHY there are no contacts does not fail the test that says so.
-  const keys = read(CALDERA_CONF)
-    .split(/\r?\n/)
-    .filter((l) => l.trim() && !l.trim().startsWith('#'))
-    .map((l) => (l.match(/^([A-Za-z][\w.]*)\s*:/) || [])[1])
-    .filter(Boolean);
+test('central Caldera accepts HTTP agents and keeps every other transport private or absent', () => {
+  const conf = significantLines(read(CALDERA_CONF));
+  const contacts = directKeys(conf, 0).filter((k) => k.startsWith('app.contact'));
+  assert.deepStrictEqual(contacts.sort(), ['app.contact.http', 'app.contact.websocket']);
+  assert.strictEqual(scalarAt(conf, 'app.contact.websocket', 0), '127.0.0.1:7012');
 
-  // The invariant is NOT "zero contact keys" — that version of this test was
-  // right about the goal and wrong about the mechanism, and it cost a restart
-  // loop. Caldera's own EVENT BUS runs over the websocket contact:
-  // server.py run_tasks() -> event_svc.fire_event() -> websockets.connect(uri)
-  // built from app.contact.websocket. Undefined, the URI has an empty host and
-  // the server dies at startup with
-  //   socket.gaierror: [Errno -2] Name or service not known
-  //
-  // So the real invariant is: the ONLY contact permitted is the websocket event
-  // bus, and it MUST be bound to loopback. Everything that can accept an agent
-  // check-in from off-box stays absent.
-  const contacts = keys.filter((k) => k.startsWith('app.contact'));
-  assert.deepStrictEqual(
-    contacts, ['app.contact.websocket'],
-    `conf/local.yml's contact keys are ${JSON.stringify(contacts)}. Exactly one is allowed — `
-    + 'app.contact.websocket, which is Caldera\'s internal event bus and without which the '
-    + 'server will not start. Every other contact accepts an agent check-in, and the authoring '
-    + 'instance has no agents; the per-lane EXECUTOR Calderas are VMs baked by '
-    + 'bake-caldera-server.sh and that is where contacts belong.'
-  );
-
-  // Loopback is what makes the one permitted contact unreachable. Paired with
-  // the service publishing no ports, nothing off-container can reach it — not
-  // the host, not a lane, not a peer on cybercore-net.
-  const wsBind = (read(CALDERA_CONF).match(/^app\.contact\.websocket:\s*(\S+)/m) || [])[1];
-  assert.ok(
-    wsBind && /^127\.0\.0\.1:\d+$/.test(wsBind),
-    `app.contact.websocket is bound to ${wsBind || '(unset)'}. It must bind 127.0.0.1 — on `
-    + '0.0.0.0 the event bus becomes a reachable agent contact the moment anything publishes '
-    + 'or forwards that port.'
-  );
-
-  // …and the payload plugins are not merely unconfigured, they are deleted, so
-  // "takes no check-in" is a property of the image rather than of a config file.
   const ins = dockerInstructions(read(DOCKERFILE));
   const removals = ins.filter((i) => i.op === 'RUN' && /\brm -rf\b/.test(i.args)).map((i) => i.args).join(' ');
-  for (const payload of ['plugins/sandcat', 'plugins/manx']) {
-    assert.ok(
-      removals.includes(payload),
-      `the Dockerfile does not remove ${payload}. It is an AGENT PAYLOAD plugin: leaving it in `
-      + 'means the image can hand out an agent and serves the endpoint that does so.'
-    );
-  }
+  assert.ok(!removals.includes('plugins/sandcat'), 'Sandcat must exist to build lane agents');
+  assert.ok(removals.includes('plugins/manx'), 'no reverse-shell plugin is required for HTTP lane agents');
+  const plugins = sequenceUnder(conf, 'plugins', 0, 'Caldera config');
+  for (const plugin of plugins) assert.ok(!removals.includes('plugins/' + plugin));
+  assert.ok(plugins.includes('magma'));
+  assert.ok(plugins.includes('sandcat'));
+  assert.ok(ins.some((i) => i.op === 'RUN' && /apt-get install.*golang-go/.test(i.args)), 'Sandcat needs a Go compiler');
+  assert.ok(ins.some((i) => i.op === 'RUN' && /go mod download/.test(i.args)), 'cache pinned modules before runtime');
+  assert.ok(ins.some((i) => i.op === 'RUN' && /python \/tmp\/cybercore-patch-upstream.py/.test(i.args)));
+  const patch = read(path.join(CALDERA_DIR, 'patch_upstream.py'));
+  assert.match(patch, /MinVersion: tls.VersionTLS12/);
+  assert.match(patch, /source.count\(old\) != 1/);
+  assert.match(patch, /authorized_beacon\(profile, request.headers, self.app_svc.find_link\)/);
+  assert.match(patch, /GetTrimmedProfile\(\)/,
+    'result-only Sandcat posts must include group for the same identity guard as beacons');
+});
 
-  // The plugin list and the prune must agree, or Caldera fails at startup naming
-  // a plugin directory that is not there.
-  const listed = (read(CALDERA_CONF).match(/^plugins:\n((?:\s+-\s+\S+\n)+)/m) || [])[1] || '';
-  const plugins = listed.split(/\r?\n/).map((l) => l.trim().replace(/^-\s*/, '')).filter(Boolean);
-  assert.ok(plugins.length > 0, 'conf/local.yml lists no plugins — magma is the UI, so the console would be blank');
-  for (const p of plugins) {
-    assert.ok(
-      !removals.includes(`plugins/${p}`),
-      `conf/local.yml enables the "${p}" plugin but the Dockerfile deletes plugins/${p}`
-    );
-  }
-  assert.ok(plugins.includes('magma'), 'magma is the Caldera 5 UI; without it there is nothing to author in');
+test('new agents have no automatic bootstrap or deadman abilities', () => {
+  const agentConf = significantLines(read(path.join(CALDERA_DIR, 'conf/agents.yml')));
+  assert.strictEqual(scalarAt(agentConf, 'bootstrap_abilities', 0), '[]');
+  assert.strictEqual(scalarAt(agentConf, 'deadman_abilities', 0), '[]');
+  const copies = dockerInstructions(read(DOCKERFILE)).filter((i) => i.op === 'COPY');
+  assert.ok(copies.some((i) => /conf\/agents.yml\s+\/usr\/src\/app\/conf\/agents.yml$/.test(i.args)),
+    'the explicit agent defaults must replace the upstream configuration');
 });
 
 test('the entrypoint fails closed on a missing or short signing key', () => {

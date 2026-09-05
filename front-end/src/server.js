@@ -209,6 +209,7 @@ const RATE_LIMIT_SKIP_PATHS = [
   // with nothing in the app's own logs to explain it. The probe stays gated by
   // authenticateToken + requireRole; the limiter was never what protected it.
   '/api/caldera-authoring/authorize',
+  '/api/caldera-agents/authorize',
 ];
 const RATE_LIMIT_SKIP_PATTERNS = [
   /\/status$/,   // e.g. workstation/lab status polls: /api/.../:id/status
@@ -530,6 +531,7 @@ app.use('/api/tickets', ticketRoutes);
 // This is an AUTHORING surface. It does not register, select or dispatch an
 // incident engine — engineFor('caldera') still throws by design.
 app.use('/api/caldera-authoring', calderaAuthoringRoutes);
+app.use('/api/caldera-agents', require('./routes/caldera-agents'));
 
 // The SSO nonce burn, called by the Caldera container (never by a browser) as
 // the last step of verifying the signed X-CyberCore-Auth token /authorize

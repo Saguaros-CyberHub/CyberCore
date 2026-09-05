@@ -14,6 +14,8 @@ const { agentExec, agentShellExec, pollExecStatus, waitForGuestAgent } = require
 // pct exec/push into the lane gateway LXC (used by writeDhcpReservations to drop
 // the per-lane dnsmasq reservation file). Same module attached-modules.js uses.
 const nodeSsh = require('./node-ssh');
+const { goadWindowsVms, configureGoadWindowsRtc, seedGoadWindowsClocks,
+  verifyGoadWindowsClocks } = require('./goad-clock');
 // Core planning reads identity metadata only. GOAD source stays on the controller.
 const {
   preflightGoadRebrand, canonicalGoadLabName, describeRebrand, listExtensionBases, RebrandError, REBRAND_CODES,
@@ -1731,53 +1733,81 @@ print("patched mssql install task -> offline setup.exe")
     ['/bin/bash', '-c', wrappedCmd],
     proxmoxAPI);
 
-  // Helper: read a file via a fresh short-lived guest-exec.
-  async function readFile(path, timeoutMs = 10000) {
-    const { pid: p } = await agentExecArgv(bestNode, controllerVmId,
-      ['/bin/sh', '-c', `[ -f ${path} ] && cat ${path} || echo __MISSING__`],
-      proxmoxAPI);
-    const r = await pollExecStatus(bestNode, controllerVmId, p, timeoutMs);
-    return (r.stdout || '').trim();
+  return waitForGoadPlaybook({ controllerVmId, bestNode, logPath, donePath, proxmoxAPI });
+}
+
+/** Preserve the last Ansible task before the caller stops a failed controller. */
+async function waitForGoadPlaybook({ controllerVmId, bestNode, logPath, donePath, proxmoxAPI }, deps = {}) {
+  const now = deps.now || Date.now;
+  const pause = deps.sleep || sleep;
+  const poll = deps.pollExecStatus || pollExecStatus;
+  const startedAt = now();
+  const timeoutMs = 2 * 60 * 60 * 1000;
+  const deadlineMs = startedAt + timeoutMs;
+  const quote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
+  async function readCommand(command) {
+    const { pid } = await agentExecArgv(bestNode, controllerVmId, ['/bin/sh', '-c', command], proxmoxAPI);
+    const result = await poll(bestNode, controllerVmId, pid, 10000);
+    if (!result?.exited || result.exitcode !== 0) {
+      throw new Error('Controller diagnostic command did not complete successfully');
+    }
+    return String(result.stdout ?? result['out-data'] ?? '').trim();
   }
 
-  // Poll the sentinel every 15s until it appears or we hit 2h.
-  const deadlineMs = Date.now() + 2 * 60 * 60 * 1000;
   let exitcode = null;
-  while (Date.now() < deadlineMs) {
-    await sleep(15000);
+  let invalidSentinel = false;
+  let lastReadError = null;
+  while (now() < deadlineMs) {
+    await pause(Math.min(15000, deadlineMs - now()));
+    let content;
     try {
-      const content = await readFile(donePath);
-      if (content && content !== '__MISSING__') {
-        exitcode = parseInt(content, 10);
-        if (Number.isNaN(exitcode)) {
-          throw new Error(`Unexpected sentinel content in ${donePath}: ${content}`);
-        }
-        break;
-      }
+      content = await readCommand(`[ -f ${quote(donePath)} ] && cat ${quote(donePath)} || echo __MISSING__`);
+      lastReadError = null;
     } catch {
-      // transient guest-exec failure — keep polling
+      // A transient guest-agent failure must not discard a running deployment.
+      // Never persist guest stderr: Ansible and shell failures can echo secrets.
+      lastReadError = 'Completion status could not be read from the controller';
+      continue;
+    }
+    if (content && content !== '__MISSING__') {
+      // parseInt('0garbage') used to report success. A shell exit status is an
+      // entire decimal integer in [0, 255], not merely a numeric prefix.
+      invalidSentinel = !/^\d{1,3}$/.test(content) || Number(content) > 255;
+      if (!invalidSentinel) exitcode = Number(content);
+      break;
     }
   }
 
-  if (exitcode === null) {
-    throw new Error(`GOAD playbook did not finish within 2h — log at ${logPath} on controller ${controllerVmId}`);
-  }
-
-  if (exitcode !== 0) {
-    let logTail = '';
-    try { logTail = await readFile(`__tail__ ${logPath}`, 10000); } catch {}
-    if (!logTail || logTail === '__MISSING__') {
-      try {
-        const { pid: tp } = await agentExecArgv(bestNode, controllerVmId,
-          ['/bin/sh', '-c', `tail -100 ${logPath}`], proxmoxAPI);
-        const tr = await pollExecStatus(bestNode, controllerVmId, tp, 10000);
-        logTail = tr.stdout || '';
-      } catch {}
+  const report = {
+    status: invalidSentinel ? 'invalid_completion' : exitcode === null ? 'timed_out' : exitcode === 0 ? 'succeeded' : 'failed',
+    timeout_ms: timeoutMs,
+    elapsed_ms: now() - startedAt,
+    log_path: logPath,
+    completion_path: donePath,
+    exitcode,
+  };
+  if (lastReadError) report.poll_error = lastReadError;
+  if (exitcode !== 0 || invalidSentinel) {
+    try {
+      const tail = (await readCommand(`tail -n 100 -- ${quote(logPath)}`)).replace(/\x1b\[[0-9;]*m/g, '');
+      // Ansible loop records can include plaintext AD passwords. Only task
+      // headings belong in app-visible diagnostics; raw output stays in the
+      // controller log, including on nonzero exit and diagnostic read failure.
+      const tasks = [...tail.matchAll(/^[ \t]*(?:\[started TASK: ([^\r\n]+)\]|TASK \[([^\r\n]+)\])/gm)];
+      if (tasks.length) report.last_task = (tasks.at(-1)[1] || tasks.at(-1)[2]).slice(0, 300);
+    } catch {
+      report.log_error = 'Last task could not be read from the controller log';
     }
-    throw new Error(`GOAD playbook exit ${exitcode}\nlog tail:\n${logTail.slice(-2000)}`);
+    const reason = invalidSentinel
+      ? `GOAD playbook wrote an invalid completion status to ${donePath}`
+      : exitcode === null ? 'GOAD playbook did not finish within 2h' : `GOAD playbook exit ${exitcode}`;
+    const error = new Error(`${reason} — log at ${logPath} on controller ${controllerVmId}`
+      + (report.last_task ? `\nLast task: ${report.last_task}` : ''));
+    error.goadPlaybook = report;
+    throw error;
   }
 
-  return { exited: true, exitcode: 0, stdout: '', stderr: '' };
+  return { exited: true, exitcode: 0, stdout: '', stderr: '', goadPlaybook: report };
 }
 
 /**
@@ -2414,7 +2444,7 @@ function goadIdentityExpectations(spec) {
   throw new Error('A renamed GOAD lab requires its validated identity plan');
 }
 
-/** Read Windows identity through the guest agent without provisioning credentials. */
+/** Read Windows identity and member trust without provisioning credentials. */
 async function verifyGoadIdentities({ spec, deployedVMs, proxmoxAPI, deps = {} }) {
   const expected = goadIdentityExpectations(spec);
   if (!expected) return { applicable: false, passed: null, checks: [] };
@@ -2422,7 +2452,11 @@ async function verifyGoadIdentities({ spec, deployedVMs, proxmoxAPI, deps = {} }
   const poll = deps.pollExecStatus || pollExecStatus;
   const pause = deps.sleep || sleep;
   const command = "$ErrorActionPreference='Stop'; $c=Get-CimInstance Win32_ComputerSystem; "
-    + "@{hostname=$c.Name;domain=$c.Domain;joined=[bool]$c.PartOfDomain}|ConvertTo-Json -Compress";
+    + "$role=[int]$c.DomainRole; $secure=$null; "
+    // Test-ComputerSecureChannel is a member check; DCs (roles 4/5) can return
+    // false negatives and must never execute it. Catch without printing errors.
+    + "if ($role -in @(1,3)) { try { $secure=[bool](Test-ComputerSecureChannel -ErrorAction Stop) } catch { $secure=$null } }; "
+    + "@{hostname=$c.Name;domain=$c.Domain;joined=[bool]$c.PartOfDomain;domain_role=$role;secure_channel=$secure}|ConvertTo-Json -Compress";
   for (const identity of expected) {
     const check = { name: identity.name, expected: { hostname: identity.hostname, domain: identity.domain }, observed: null, ok: false };
     const vm = (deployedVMs || []).find(candidate => candidate.type === 'qemu'
@@ -2439,11 +2473,36 @@ async function verifyGoadIdentities({ spec, deployedVMs, proxmoxAPI, deps = {} }
           const raw = result['out-data'] ?? result.outData ?? result.stdout ?? '';
           const observed = JSON.parse(String(raw).trim());
           // Store only these facts, never an arbitrary guest-agent response.
-          check.observed = { hostname: String(observed.hostname || ''), domain: String(observed.domain || ''), joined: observed.joined === true };
-          check.ok = check.observed.joined
+          const role = Number.isInteger(observed.domain_role) ? observed.domain_role : null;
+          const member = role === 1 || role === 3;
+          const domainController = role === 4 || role === 5;
+          check.observed = {
+            hostname: String(observed.hostname || ''), domain: String(observed.domain || ''), joined: observed.joined === true,
+            domain_role: role,
+            secure_channel: member && typeof observed.secure_channel === 'boolean' ? observed.secure_channel : null,
+          };
+          const identityMatches = check.observed.joined
             && check.observed.hostname.toLowerCase() === identity.hostname.toLowerCase()
             && check.observed.domain.toLowerCase() === identity.domain.toLowerCase();
-          if (!check.ok) check.error = 'Windows hostname or domain membership does not match the compiled lab';
+          check.ok = identityMatches && (domainController || (member && check.observed.secure_channel === true));
+          if (check.ok) {
+            delete check.error;
+          } else if (!identityMatches) {
+            check.error = 'Windows hostname or domain membership does not match the compiled lab';
+          } else if (!member && !domainController) {
+            check.error = 'Windows computer does not report a valid joined domain role';
+          } else {
+            check.error = check.observed.secure_channel === false
+              ? 'Windows member secure channel is broken'
+              : 'Could not verify Windows member secure channel';
+            // DC discovery can briefly lag a completed join or reboot. Retry
+            // the read-only check, but never repair trust or publish readiness
+            // merely because the hostname and cached domain strings match.
+            if (attempt < 2) {
+              await pause(5000);
+              continue;
+            }
+          }
           break;
         } catch (_) {
           check.error = 'Could not read Windows identity through the guest agent';
@@ -2497,6 +2556,7 @@ async function deployGoadLane({
   let playbookResult;
   let verification = null;
   let identityVerification = null;
+  let clockVerification = null;
   let provisioningError = null;
   let controllerStop = null;
   try {
@@ -2543,18 +2603,27 @@ async function deployGoadLane({
     // 3. Restart Windows VMs so they DHCP fresh and pick up the reserved IPs.
     //    They were started by admin.js earlier (before reservations existed),
     //    so they're sitting on dynamic IPs — a stop/start fixes that.
-    const winVMs = (deployedVMs || []).filter(v => {
-      if (v.type !== 'qemu') return false;
-      const labVm = labDef.vms.find(lv => lv.name.toLowerCase() === String(v.name).toLowerCase());
-      return labVm && labVm.role !== 'linux';
-    });
+    stage = 'windows_clock';
+    clockVerification = { passed: false, source: 'proxmox_node_utc', checks: [] };
+    const winVMs = goadWindowsVms(labDef, deployedVMs);
+    // Set the virtual RTC before the existing stop/start so Windows will keep
+    // UTC across later cold boots, regardless of the Proxmox node timezone.
+    await configureGoadWindowsRtc({ vms: winVMs, proxmoxAPI, report: clockVerification });
     if (winVMs.length > 0) {
       console.log(`[GOAD] Restarting ${winVMs.length} Windows VM(s) to renew DHCP onto reserved IPs...`);
       for (const vm of winVMs) {
         try {
-          await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/stop`);
+          const stopTask = await proxmoxAPI('POST', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/stop`);
+          if (stopTask && waitForTask) await waitForTask(vm.node, stopTask);
         } catch (err) {
-          console.warn(`[GOAD] stop ${vm.vm_id} (${vm.name}): ${err.message}`);
+          // An already stopped guest can reject the stop request. Confirm its
+          // state below; never continue with a running VM and only pending RTC.
+        }
+        let current;
+        try { current = await proxmoxAPI('GET', `/api2/json/nodes/${vm.node}/qemu/${vm.vm_id}/status/current`); }
+        catch (_) { throw new Error(`GOAD VM ${vm.name} stopped state could not be verified for UTC RTC activation`); }
+        if (current?.status !== 'stopped') {
+          throw new Error(`GOAD VM ${vm.name} did not stop for UTC RTC activation`);
         }
       }
       await runtime.sleep(8000);  // let Proxmox finalize the stops
@@ -2639,10 +2708,19 @@ async function deployGoadLane({
       }
     }
 
+    stage = 'windows_clock';
+    await seedGoadWindowsClocks({ vms: winVMs, proxmoxAPI, agentExecArgv,
+      ...runtime, report: clockVerification });
+    console.log(`[GOAD] UTC clocks verified on ${winVMs.length} Windows VM(s)`);
+
     stage = 'playbook';
     const runPlaybook = deps.runPlaybook || runGoadPlaybook;
     playbookResult = await runPlaybook({ controllerVmId, bestNode, spec, vxlanId, laneSubnetBase, extSubnetBase, proxmoxAPI });
     console.log(`[GOAD] Playbook completed for lane ${lane.lane_id}`);
+
+    stage = 'windows_clock_verification';
+    await verifyGoadWindowsClocks({ vms: winVMs, proxmoxAPI, agentExecArgv,
+      ...runtime, report: clockVerification });
 
     stage = 'identity_verification';
     identityVerification = await verifyGoadIdentities({ spec, deployedVMs, proxmoxAPI, deps: runtime });
@@ -2653,6 +2731,7 @@ async function deployGoadLane({
     provisioningError = error instanceof Error ? error : new Error(String(error));
     delivery = error.goadDelivery || delivery;
     identityVerification = error.goadIdentityVerification || identityVerification;
+    clockVerification = error.goadClock || clockVerification;
     verification = verification || {
       ran: false, applicable: laneWantsProbe(spec), passed: null, error: null, report: null,
       reason: stage === 'playbook'
@@ -2678,6 +2757,8 @@ async function deployGoadLane({
     error: provisioningError ? provisioningError.message : null,
     provisioned_at: new Date().toISOString(),
   };
+  const playbookMeta = provisioningError?.goadPlaybook || playbookResult?.goadPlaybook;
+  if (playbookMeta) goadMeta.playbook = playbookMeta;
   if (delivery) {
     goadMeta.generated_lab = {
       lab: delivery.lab,
@@ -2702,6 +2783,7 @@ async function deployGoadLane({
   }
   if (verification?.applicable) goadMeta.probe = summariseVerification(verification);
   if (identityVerification?.applicable) goadMeta.identities = identityVerification;
+  if (clockVerification) goadMeta.clock = clockVerification;
   if (query) {
     try {
       await query(
@@ -2887,6 +2969,7 @@ module.exports = {
   deployController,
   waitForWinRM,
   runGoadPlaybook,
+  waitForGoadPlaybook,
   ensureControllerHostMap,
   CONTROLLER_HOST_MAP_PY,
   stopController,

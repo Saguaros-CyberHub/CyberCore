@@ -18,6 +18,7 @@ function authored(overrides = {}) {
 function harness(spec = authored(), fault = {}) {
   const calls = [];
   const executions = new Map();
+  let playbookFinished = false;
   const inventory = spec.vms.map((vm, i) => ({ name: vm.name, type: 'qemu', node: 'node-1', vm_id: 610010 + i }));
   const args = {
     lane: { lane_id: 77 }, spec, module: 'test', vnet: { vnet: 'vn4242' }, vxlanId: 4242,
@@ -26,9 +27,15 @@ function harness(spec = authored(), fault = {}) {
     proxmoxAPI: async (method, url, body) => {
       calls.push({ action: 'api', method, url, body });
       if (url.endsWith('/clone')) return 'UPID:clone';
+      if (url.endsWith('/time')) return { time: Math.floor(Date.now() / 1000), localtime: 0 };
+      if (method === 'GET' && /\/config(?:\?current=1)?$/.test(url)) return { localtime: 0 };
+      if (url.endsWith('/status/current')) return { status: fault.windowsStop ? 'running' : 'stopped' };
       if (url.endsWith('/204242/status/stop')) {
         if (fault.stop) throw new Error('stop rejected');
         return 'UPID:stop';
+      }
+      if (method === 'POST' && url.endsWith('/status/stop') && fault.windowsStopRejected) {
+        throw new Error('already stopped');
       }
       if (url.endsWith('/agent/exec')) {
         const argv = new URLSearchParams(body).getAll('command');
@@ -52,6 +59,14 @@ function harness(spec = authored(), fault = {}) {
       sleep: async () => {},
       pollExecStatus: async (node, vmId, pid) => {
         const execution = executions.get(pid);
+        if (execution.argv.join(' ').includes('cybercore-clock-read')) {
+          calls.push({ action: 'clock_read', afterPlaybook: playbookFinished });
+          return { exited: true, exitcode: 0, stdout: JSON.stringify({
+            utc_milliseconds: Date.now() - (fault.clockBefore || (playbookFinished && fault.clockAfter) ? 9 * 3600000 : 0),
+            timezone: 'UTC',
+          }) };
+        }
+        if (execution.argv.join(' ').includes('cybercore-clock-seed')) calls.push({ action: 'clock_seed' });
         if (execution.argv.join(' ').includes('cybercore-rebrand.py')) {
           const plan = JSON.parse(Buffer.from(execution.argv[3], 'base64').toString('utf8'));
           calls.push({ action: 'tree', lab: plan.lab_name, plan });
@@ -76,7 +91,9 @@ function harness(spec = authored(), fault = {}) {
           const expected = goad.goadIdentityExpectations(goad.prepareGoadDeploymentSpec(spec)).find(vm => vm.name === name);
           calls.push({ action: 'identity', name });
           return { exited: true, exitcode: 0, 'out-data': JSON.stringify({ hostname: name,
-            domain: fault.identity === name ? 'old.example.org' : expected.domain, joined: true }) };
+            domain: fault.identity === name ? 'old.example.org' : expected.domain, joined: true,
+            domain_role: /^DC\d+$/i.test(name) ? 5 : 1,
+            secure_channel: /^DC\d+$/i.test(name) ? null : fault.trust !== name }) };
         }
         return { exited: true, exitcode: 0, stdout: 'ok' };
       },
@@ -88,7 +105,8 @@ function harness(spec = authored(), fault = {}) {
       },
       runPlaybook: async options => {
         calls.push({ action: 'playbook', lab: options.spec.goad.version });
-        if (fault.playbook) throw new Error('ansible domain join failed');
+        if (fault.playbook) throw fault.playbook instanceof Error ? fault.playbook : new Error('ansible domain join failed');
+        playbookFinished = true;
         return { exited: true, exitcode: 0 };
       },
     },
@@ -114,6 +132,53 @@ test('legacy alias resolves canonical runtime name and no-opt-in preparation pre
   const spec = authored({ version: 'light', rename_forest: false, extensions: [] });
   assert.equal(goad.prepareGoadDeploymentSpec(spec), spec);
   assert.equal(goad.resolveGoadLab(spec).labName, 'GOAD-Light');
+});
+
+test('clock drift prevents domain promotion and preserves the failed host and cleanup inventory', async () => {
+  const fixture = harness(authored(), { clockBefore: true });
+  await assert.rejects(goad.deployGoadLane(fixture.args), error => {
+    assert.equal(error.goadMeta.stage, 'windows_clock');
+    assert.equal(error.goadMeta.clock.passed, false);
+    assert.equal(error.goadMeta.clock.phase, 'before_promotion');
+    assert.equal(error.goadMeta.clock.checks[0].name, 'DC01');
+    assert.equal(error.goadMeta.controller_stop.stopped, true);
+    return true;
+  });
+  assert.ok(!fixture.calls.some(call => call.action === 'playbook'));
+});
+
+test('clock reset during GOAD reboots prevents readiness without silently reseeding', async () => {
+  const fixture = harness(authored(), { clockAfter: true });
+  await assert.rejects(goad.deployGoadLane(fixture.args), error => {
+    assert.equal(error.goadMeta.stage, 'windows_clock_verification');
+    assert.equal(error.goadMeta.clock.phase, 'after_provisioning');
+    assert.equal(error.goadMeta.clock.passed, false);
+    assert.equal(error.goadMeta.controller_stop.stopped, true);
+    return true;
+  });
+  const play = fixture.calls.findIndex(call => call.action === 'playbook');
+  assert.ok(play > 0);
+  assert.ok(!fixture.calls.slice(play).some(call => call.action === 'clock_seed'));
+  assert.ok(!fixture.calls.some(call => call.action === 'identity'));
+});
+
+test('a Windows VM that did not stop cannot proceed with a pending UTC RTC change', async () => {
+  const fixture = harness(authored(), { windowsStop: true });
+  await assert.rejects(goad.deployGoadLane(fixture.args), error => {
+    assert.equal(error.goadMeta.stage, 'windows_clock');
+    assert.match(error.message, /did not stop for UTC RTC activation/);
+    assert.equal(error.goadMeta.controller_stop.stopped, true);
+    return true;
+  });
+  assert.ok(!fixture.calls.some(call => call.action === 'playbook'));
+});
+
+test('an already stopped Windows VM is accepted only after confirming its stopped state', async () => {
+  const fixture = harness(authored(), { windowsStopRejected: true });
+  const result = await goad.deployGoadLane(fixture.args);
+  assert.equal(result.goadMeta.clock.passed, true);
+  assert.equal(result.goadMeta.clock.phase, 'after_provisioning');
+  assert.equal(result.goadMeta.status, 'provisioned');
 });
 
 test('strict validation is an HTTP 400 before the actual controller clone function can execute', async () => {
@@ -166,6 +231,25 @@ test('a second cleanup error retains the original failure and the unconfirmed co
   });
 });
 
+test('playbook timeout diagnostics survive controller cleanup and the persisted lane outcome', async () => {
+  const timeout = new Error('GOAD playbook did not finish within 2h');
+  timeout.goadPlaybook = {
+    status: 'timed_out', timeout_ms: 7200000, elapsed_ms: 7200000, exitcode: null,
+    last_task: 'mssql_ssms : Install SSMS on srv02', log_path: '/var/log/goad-run-4242.log',
+    completion_path: '/var/log/goad-done-4242.txt',
+  };
+  const fixture = harness(authored(), { playbook: timeout });
+  await assert.rejects(goad.deployGoadLane(fixture.args), error => {
+    assert.equal(error, timeout);
+    assert.deepEqual(error.goadMeta.playbook, timeout.goadPlaybook);
+    assert.equal(error.goadMeta.status, 'failed');
+    assert.equal(error.goadMeta.controller_stop.stopped, true);
+    return true;
+  });
+  assert.deepEqual(fixture.calls.find(call => call.action === 'persist').meta.playbook, timeout.goadPlaybook);
+  assert.ok(fixture.calls.some(call => call.action === 'task' && call.task === 'UPID:stop'));
+});
+
 test('success returns the same durable metadata and verifies ws01 domain membership before cleanup', async () => {
   const fixture = harness();
   const result = await goad.deployGoadLane(fixture.args);
@@ -211,6 +295,25 @@ test('a renamed ws01 joined to the wrong domain prevents readiness and preserves
     assert.equal(error.goadMeta.controller_stop.stopped, true);
     return true;
   });
+});
+
+test('matching WS01 name and domain with a broken secure channel prevents lane readiness', async () => {
+  const fixture = harness(authored(), { trust: 'ws01' });
+  await assert.rejects(goad.deployGoadLane(fixture.args), error => {
+    assert.equal(error.goadMeta.stage, 'identity_verification');
+    assert.equal(error.goadMeta.status, 'failed');
+    assert.equal(error.goadMeta.forest_rename.applied, false);
+    assert.equal(error.goadMeta.controller_stop.stopped, true);
+    const check = error.goadMeta.identities.checks.find(host => host.name === 'ws01');
+    assert.equal(check.observed.hostname, check.expected.hostname);
+    assert.equal(check.observed.domain, check.expected.domain);
+    assert.equal(check.observed.joined, true);
+    assert.equal(check.observed.secure_channel, false);
+    assert.equal(check.ok, false);
+    assert.match(check.error, /secure channel is broken/);
+    return true;
+  });
+  assert.equal(fixture.calls.filter(call => call.action === 'identity' && call.name === 'ws01').length, 3);
 });
 
 test('controller report must confirm a valid playbook chain before provisioning Windows', async () => {

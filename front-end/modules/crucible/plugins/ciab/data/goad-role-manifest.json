@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "goad_repo": "https://github.com/joshmp087/GOAD.git",
-  "goad_ref": "0fb45a48e1865fa65054dda22f5e924eea56369c",
+  "goad_ref": "48b62c77b2d0bce82f6eb595ba5e1afd9526d50c",
   "generated_from": "GOAD-main/ansible/roles/{vulns,security} @ goad_ref",
   "generated_note": "GOAD-main/ is gitignored and has zero tracked files, so the working copy cannot be reviewed, diffed, or read by node --test. This file is the vendored, tracked substitute. Re-vendor it in the SAME commit that moves GOAD_REF in infrastructure/proxmox-templates/vm-templates/bake-goad-controller-vm.sh.",
   "vars_key_by_kind": {

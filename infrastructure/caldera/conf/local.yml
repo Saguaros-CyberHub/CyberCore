@@ -1,5 +1,5 @@
 # =============================================================================
-# CALDERA CONFIG — AUTHORING ROLE.  THIS IS A TEMPLATE, NOT THE LIVE CONFIG.
+# CALDERA CONFIG - CENTRAL SERVER. THIS IS A TEMPLATE, NOT THE LIVE CONFIG.
 # =============================================================================
 # The Dockerfile copies this to conf/local.yml.template. entrypoint.sh loads it
 # with PyYAML at container start, fills the secret-bearing keys from the
@@ -25,7 +25,7 @@
 # container publishes no host ports (docker-compose.yml has no `ports:` for this
 # service, on purpose), so the only thing that can open a socket here is another
 # container on cybercore-net — in practice, Caddy, and Caddy only forwards a
-# request that the app's forward_auth gate already approved.
+# request approved by the instructor gate or scoped agent capability gate.
 host: 0.0.0.0
 port: 8888
 
@@ -113,34 +113,32 @@ crypt_salt: ""
 # that is not in the image is a startup error, so this list and that `rm -rf`
 # must be changed together.
 #
-# NOT HERE, AND NOT IN THE IMAGE: sandcat and manx (the agent payloads), access,
-# human, response, training, gameboard, debrief. See the PLUGIN PRUNE comment in
-# the Dockerfile for why each one is a security decision rather than a size one.
+# Sandcat builds the agents installed through CyberCore's running-lane action.
+# Other agent payload plugins remain absent.
 plugins:
   - magma
   - stockpile
   - compass
   - atomic
   - fieldmanual
+  - sandcat
 
-# The default planner ships inside stockpile. Authoring never runs a planner;
-# this only decides what an adversary's editor pre-selects.
+# The default planner ships inside stockpile and is available to operations.
 objects.planners.default: atomic
 
 # How often Caldera re-reads ability YAML off disk. Authors edit abilities in the
 # UI and expect them back promptly.
 ability_refresh: 60
 
-# Nothing exfiltrates here — there are no agents — but the key must exist or the
-# file service has nowhere to point. The Dockerfile creates it owned by the
-# unprivileged runtime user.
+# Exercise uploads are kept in the temporary directory owned by the runtime user.
 exfil_dir: /tmp/caldera
 
-# Startup dependency checks. The Go entry upstream ships is deliberately dropped:
-# Go exists only to compile the sandcat agent, sandcat is not in this image, and
-# leaving the requirement in would print a scary and permanently-unfixable
-# warning on every boot.
+# Sandcat compiles requested platform binaries with the installed Go toolchain.
 requirements:
+  go:
+    command: go version
+    type: installed_program
+    version: 1.19
   python:
     attr: version
     module: sys
@@ -148,38 +146,13 @@ requirements:
     version: 3.9.0
 
 # =============================================================================
-# THE ONE CONTACT KEY, AND WHY IT IS NOT AN AGENT CHANNEL HERE
+# HTTP is reached only through Caddy's /agent/<token> capability gate. The
+# entrypoint replaces this default with the configured public CALDERA_HOST.
 # =============================================================================
-# Caldera's own EVENT BUS runs over the websocket contact. server.py's
-# run_tasks() fires the "ready" event through event_svc.fire_event(), which
-# opens `websockets.connect(uri)` built from this key. Leave it undefined and
-# the URI has an empty host, so the server dies at startup in a restart loop:
-#   socket.gaierror: [Errno -2] Name or service not known
-# This build made that mistake once. It reads like a DNS fault and is not one.
-#
-# 127.0.0.1 is what keeps it internal. The container publishes NO ports, so a
-# loopback bind is unreachable from the host, from a lane, and from a peer
-# container on cybercore-net. Combined with sandcat and manx being deleted from
-# the image — so no agent payload can be built or served — nothing can check in
-# here even though a contact module now exists.
+app.contact.http: http://127.0.0.1:8888
+
+# Caldera's own event bus requires websocket; keep it private to the container.
 app.contact.websocket: 127.0.0.1:7012
 
-# =============================================================================
-# WHAT IS DELIBERATELY ABSENT — READ BEFORE ADDING A KEY
-# =============================================================================
-# NO OTHER `app.contact.*` KEY. Not http, not tcp, not udp, not dns, not gist,
-# not slack, not ftp, not html, not tunnel.ssh. This instance must never take an
-# agent check-in, and those contacts are precisely what accept one. The
-# Dockerfile also DELETES their modules from app/contacts/, so the absence is a
-# property of the image and not merely of this file — adding a key back here
-# will not resurrect a listener, and that is intentional.
-#
-# If you find yourself wanting one, you are looking at the wrong Caldera. The
-# per-lane EXECUTOR instances are VMs baked by
-# infrastructure/proxmox-templates/vm-templates/bake-caldera-server.sh with
-# CALDERA_ROLE=executor, and that is where agents belong.
-#
-# NO `app.contact.tunnel.ssh.*`, for the same reason plus one more: upstream's
-# default ships a literal user_password, and a shipped credential in a config
-# file is exactly what this template exists to prevent.
-# =============================================================================
+# TCP, UDP, DNS, FTP, external contacts and tunnel.ssh remain absent; their
+# modules are removed in the Dockerfile. No additional listener is exposed.

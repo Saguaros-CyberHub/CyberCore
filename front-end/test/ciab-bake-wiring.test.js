@@ -85,6 +85,9 @@ function makeGuest() {
 
   const proxmoxAPI = async (method, urlPath, body) => {
     calls.push({ method, path: urlPath, body });
+    if (urlPath.endsWith('/time')) return { time: Math.floor(Date.now() / 1000), localtime: 0 };
+    if (method === 'GET' && /\/config(?:\?current=1)?$/.test(urlPath)) return { localtime: 0 };
+    if (urlPath.endsWith('/status/current')) return { status: 'stopped' };
     if (/\/agent\/exec$/.test(urlPath)) {
       const argv = String(body).split('&')
         .map((kv) => decodeURIComponent(kv.replace(/^command=/, '')));
@@ -98,6 +101,11 @@ function makeGuest() {
   const pollExecStatus = async (node, vmId, pid) => {
     const cmd = (argvByPid.get(pid) || []).join(' ');
     let stdout = '';
+    if (/cybercore-clock-read/.test(cmd)) {
+      return { exited: true, exitcode: 0, stdout: JSON.stringify({
+        utc_milliseconds: Date.now(), timezone: 'UTC',
+      }), stderr: '' };
+    }
     // The WinRM reachability probe deployGoadLane runs from the controller.
     if (/\/dev\/tcp\//.test(cmd)) stdout = 'OK';
     // The probe's exit sentinel: present on the first poll, so the runner does
@@ -262,14 +270,15 @@ function laneArgs(spec, deps, over = {}) {
     templateNode: 'pve1',
     laneSubnetBase: BASE,
     extSubnetBase: EXT,
-    // Empty on purpose: a non-empty list makes deployGoadLane stop/start the
-    // Windows VMs with a 68-second settle, which is not what any of these
-    // assertions are about.
-    deployedVMs: [],
+    // Include the actual roster so the clock gate runs. Waiting is injected
+    // below; the tests exercise the gate without real VM boot delays.
+    deployedVMs: goad.resolveGoadLab(spec).labDef.vms.map((vm, index) => ({
+      name: vm.name, type: 'qemu', node: 'pve1', vm_id: 600000 + index,
+    })),
     proxmoxAPI: guest.proxmoxAPI,
     waitForTask: async () => ({}),
     query: async (sql, params) => { dbLog.push({ sql: String(sql).replace(/\s+/g, ' ').trim(), params }); },
-    deps,
+    deps: { sleep: async () => {}, ...deps },
     ...over,
   };
 }
@@ -329,10 +338,12 @@ test('a built-in lane records controller ownership and cleanup without delivery 
   }));
   const written = laneConfigWrite();
   assert.deepStrictEqual(Object.keys(written).sort(),
-    ['controller_clone_attempted', 'controller_node', 'controller_stop', 'controller_vmid', 'error', 'provisioned_at', 'stage', 'status'],
+    ['clock', 'controller_clone_attempted', 'controller_node', 'controller_stop', 'controller_vmid', 'error', 'provisioned_at', 'stage', 'status'],
     'delivery and probe keys must appear only when the thing they describe happened');
   assert.strictEqual(written.status, 'provisioned');
   assert.strictEqual(written.controller_stop.stopped, true);
+  assert.strictEqual(written.clock.passed, true);
+  assert.strictEqual(written.clock.phase, 'after_provisioning');
 });
 
 test('the injected defaults ARE the shipped implementations', () => {

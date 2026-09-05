@@ -140,6 +140,17 @@ if len(_red) < 32:
 conf["api_key_red"] = _red
 conf["api_key_blue"] = os.environ.get("CALDERA_API_KEY_BLUE") or secrets.token_hex(32)
 
+# Console deployment commands advertise the public origin. Lane installation
+# uses its own token-bearing URL, supplied by CyberCore at installation time.
+public_host = os.environ.get("CALDERA_HOST", "").strip()
+if public_host:
+    from urllib.parse import urlsplit
+    public_url = urlsplit("https://" + public_host)
+    if (not public_url.hostname or public_url.username or public_url.password
+            or public_url.path or public_url.query or public_url.fragment):
+        sys.exit("caldera-entrypoint: FATAL: CALDERA_HOST must be a hostname, optionally with a port")
+    conf["app.contact.http"] = "https://" + public_host
+
 # Account passwords: random every start, never printed, never stored. The SSO
 # handler attaches an already-authenticated instructor to the account by NAME, so
 # nothing anywhere needs to know these — which is precisely what makes the
@@ -161,7 +172,7 @@ with os.fdopen(fd, "w", encoding="utf-8") as fh:
 os.replace(tmp_path, target_path)
 
 print("caldera-entrypoint: rendered conf/local.yml "
-      "(plugins=%s, contacts=none)" % ",".join(conf.get("plugins") or []))
+      "(plugins=%s, contacts=http; websocket=loopback)" % ",".join(conf.get("plugins") or []))
 PYRENDER
 
 # --- 3. Hand off -------------------------------------------------------------

@@ -29,6 +29,17 @@
 # `http://yourdomain { redir https://{host}{uri} }` block.
 {
     auto_https disable_redirects
+    # Reverse-proxy errors include the original URI even without access logs.
+    # Redact agent capabilities from Caddy's default runtime/error logger too.
+    log {
+        format filter {
+            wrap json
+            fields {
+                request>uri regexp /agent/[0-9a-f]{64} /agent/REDACTED
+                request>headers>X-Forwarded-Uri delete
+            }
+        }
+    }
 }
 
 # --- The Caldera gate, defined ONCE ------------------------------------------
@@ -79,6 +90,78 @@
         request_header KEY {$CALDERA_API_KEY_RED}
 
         reverse_proxy {$CALDERA_AUTHORING_UPSTREAM:caldera:8888}
+    }
+}
+
+# Lane agents use a revocable, lane-scoped capability in the URL. Sandcat 5.3.0
+# appends these three paths to -server; it cannot send a custom auth header.
+# The authorization subrequest sees the ORIGINAL path before the prefix rewrite.
+# Do not enable access logs for /agent/*: the path contains a bearer credential.
+(caldera_agent_ingress) {
+    log_skip /agent/*
+    handle /agent/* {
+        route {
+            @agent_contact {
+                method POST
+                path_regexp agent_contact ^/agent/[0-9a-f]{64}/(beacon|file/download|file/upload)$
+            }
+            handle @agent_contact {
+                route {
+                    request_header -KEY
+                    request_header -Authorization
+                    request_header -Cookie
+                    request_header -X-CyberCore-*
+                    request_header -X-Caldera-*
+                    request_header -Remote-*
+                    forward_auth app:3000 {
+                        uri /api/caldera-agents/authorize
+                        copy_headers X-Caldera-Paw X-Caldera-Group
+                    }
+
+                    # Payload lookups stay within Caldera's payload directories.
+                    # Accept ordinary ability basenames/UUIDs as well as sandcat.go.
+                    @bad_payload {
+                        path */file/download
+                        not header_regexp file ^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$
+                    }
+                    respond @bad_payload 400
+                    @shared_payload header file shared.go
+                    respond @shared_payload 403
+                    @bad_agent_platform {
+                        header file sandcat.go
+                        not header_regexp platform ^(linux|windows)$
+                    }
+                    respond @bad_agent_platform 400
+                    @missing_architecture not header Architecture *
+                    request_header @missing_architecture Architecture amd64
+                    @bad_agent_architecture {
+                        header file sandcat.go
+                        not header_regexp architecture ^(amd64|arm64)$
+                    }
+                    respond @bad_agent_architecture 400
+
+                    uri path_regexp ^/agent/[0-9a-f]{64} ""
+                    # Agent tokens never grant console/API credentials. Forward
+                    # only Sandcat's fixed request headers; in particular omit
+                    # Directory (server payload writes), compile/extension flags,
+                    # and all authentication and forwarded identity headers.
+                    reverse_proxy {$CALDERA_AUTHORING_UPSTREAM:caldera:8888} {
+                        header_up -*
+                        header_up Content-Type {http.request.header.Content-Type}
+                        header_up File {http.request.header.File}
+                        header_up Platform {http.request.header.Platform}
+                        header_up Architecture {http.request.header.Architecture}
+                        header_up Paw {http.request.header.X-Caldera-Paw}
+                        header_up X-Request-Id {http.request.header.X-Caldera-Paw}
+                        header_up X-Paw {http.request.header.X-Caldera-Paw}
+                        header_up X-Host {http.request.header.X-Host}
+                        header_up X-Caldera-Paw {http.request.header.X-Caldera-Paw}
+                        header_up X-Caldera-Group {http.request.header.X-Caldera-Group}
+                    }
+                }
+            }
+            respond 404
+        }
     }
 }
 
@@ -140,9 +223,9 @@ http://:80 {
 # WHAT IS ON THE OTHER END
 # A CONTAINER, exactly like guacamole:8080 above. It was a Proxmox VM in an
 # earlier revision of this file; that placement is superseded. The authoring
-# instance has no agents and executes nothing — it is a web app plus a content
-# store — so it is a compose service, built by infrastructure/caldera/Dockerfile
-# and declared as `caldera` in docker-compose.yml.
+# instance also controls explicitly installed lane agents via its scoped HTTP
+# ingress. It is built by infrastructure/caldera/Dockerfile and declared as
+# `caldera` in docker-compose.yml.
 #
 # THE ADDRESS STAYS AN ENVIRONMENT VARIABLE even though the default is now a
 # service name, so a deployment that fronts a separate authoring host can
@@ -162,15 +245,11 @@ http://:80 {
 # With no port binding the only route to that container is the two handle blocks
 # above, both of which run forward_auth first.
 #
-# IT HAS NO AGENTS AND NO IMPLANTS. conf/local.yml defines no `app.contact.*` key
-# of any kind and the Dockerfile deletes both the agent-payload plugins (sandcat,
-# manx) and every contact module that opens a listener, so "takes no check-in" is
-# a property of the image and not of a config file. Instructors use its real web
-# UI to BUILD adversaries; CyberCore reads an adversary back out and replicates
-# it into each lane's own lane-local Caldera at launch. NOTHING INSIDE A LANE
-# EVER TALKS TO THIS CONTAINER, and dispatch into lanes goes over guest-exec
-# through the Proxmox API — there is no IP route from the orchestrator into a
-# lane and this does not add one.
+# LANE AGENTS USE A SEPARATE CAPABILITY GATE. Only the three Sandcat HTTP
+# contact endpoints under /agent/<token> reach the central server without an
+# instructor session. The app verifies that the token belongs to an active lane;
+# Caddy strips the prefix and forwards no console credential. The internal :80
+# listener on the main app host still has no direct Caldera route.
 #
 # THE GATE IS WHAT STOPS THIS BEING OPEN TO THE WORLD
 # Without forward_auth, the public block above would publish an adversary
@@ -280,9 +359,15 @@ http://:80 {
 # rule points at this container, and whether that is http:// or https:// is a
 # dashboard setting. Both carry the identical gate via the snippet.
 {$CALDERA_HOST} {
-    import caldera_gate
+    import caldera_agent_ingress
+    handle {
+        import caldera_gate
+    }
 }
 
 http://{$CALDERA_HOST} {
-    import caldera_gate
+    import caldera_agent_ingress
+    handle {
+        import caldera_gate
+    }
 }

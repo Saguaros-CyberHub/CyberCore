@@ -602,7 +602,7 @@ test('THE POINT OF THIS FILE: /caldera is proxied in BOTH site blocks, and NEITH
 
   // And NOTHING may reach the upstream without going through it.
   for (const b of blocks) {
-    if (/^\(caldera_gate\)$/.test(b.header.trim())) continue;
+    if (/^\(caldera_(gate|agent_ingress)\)$/.test(b.header.trim())) continue;
     assert.ok(!/reverse_proxy\s+«CALDERA_AUTHORING_UPSTREAM/.test(b.body),
       `site block \`${b.header}\` proxies to Caldera directly instead of importing the gate, so it `
       + 'never runs forward_auth');
@@ -614,19 +614,25 @@ test('forward_auth points at the path server.js actually mounts', () => {
   // allows EVERY request, silently. So the two ends are compared directly.
   const caddy = fs.readFileSync(CADDYFILE, 'utf8');
   const uris = [...caddy.matchAll(/forward_auth[^{]*\{[^}]*?uri\s+(\S+)/g)].map((m) => m[1]);
-  // ONE now, not two: the gate is defined once in the `(caldera_gate)` snippet
-  // and imported by each serving site block, so there is a single forward_auth
-  // to keep in step with the app. That every serving block imports it is
-  // asserted in the test above.
-  assert.ok(uris.length >= 1, 'the gate must name the authorize endpoint');
-  for (const uri of uris) {
-    assert.strictEqual(uri, calderaAuthoring.AUTHORIZE_PATH,
-      'the Caddyfile asks a different path than the app answers on');
-  }
+  // Instructor sessions and lane capabilities use distinct authorizers.
+  assert.deepStrictEqual(uris.sort(), [calderaAuthoring.AUTHORIZE_PATH, '/api/caldera-agents/authorize'].sort());
+  const blocks = siteBlocks(caddy);
+  const instructor = blocks.find(b => b.header === '(caldera_gate)');
+  const agent = blocks.find(b => b.header === '(caldera_agent_ingress)');
+  assert.match(instructor.body, /uri\s+\/api\/caldera-authoring\/authorize/);
+  assert.match(agent.body, /uri\s+\/api\/caldera-agents\/authorize/);
+  assert.match(agent.body, /handle\s+\/agent\/\*/);
+  assert.match(agent.body, /method\s+POST/);
+  assert.match(agent.body, /path_regexp\s+agent_contact\s+\^\/agent\//);
+  assert.ok(!/request_header\s+KEY\s+/.test(agent.body), 'agent ingress must never inject the console key');
 
   const serverSrc = fs.readFileSync(path.join(ROOT, 'src', 'server.js'), 'utf8');
   assert.ok(serverSrc.includes(`app.use('${calderaAuthoring.MOUNT_PATH}', calderaAuthoringRoutes)`),
     'server.js must mount the router on the prefix the Caddyfile asks for');
+  assert.ok(serverSrc.includes("app.use('/api/caldera-agents', require('./routes/caldera-agents'))"),
+    'server.js must mount the agent authorizer separately from the console authorizer');
+  assert.ok(serverSrc.includes("'/api/caldera-agents/authorize',"),
+    'frequent agent auth probes must be excluded from the ordinary API rate limiter');
   assert.ok(calderaAuthoring.AUTHORIZE_PATH.startsWith(calderaAuthoring.MOUNT_PATH),
     'the authorize path must live under the mount');
 

@@ -20,16 +20,11 @@
  *
  * WHAT THIS ROUTER IS FOR
  * ----------------------------------------------------------------------------
- * There is ONE standalone Caldera "authoring" instance — the `caldera` compose
- * service on cybercore-net, outside every lane, with NO agents and NO implants
- * and no agent contact configured. (It used to be a Proxmox VM on the lab
- * network; several comments in this file said so long after it moved, which is
- * why the sentence you are reading names the service.)
- * Instructors open its real web UI to BUILD adversaries; CyberCore later reads
- * an adversary back out and replicates it into each lane's own lane-local
- * Caldera at launch time. Nothing inside a lane ever talks to the authoring
- * box, and dispatch into a lane goes over guest-exec (agentShellExec via the
- * Proxmox API) the way every other lane operation in this codebase does.
+ * The central `caldera` compose service on cybercore-net provides the console
+ * for authoring and manual operations. The Blue Team Board installs lane agents
+ * through guest execution; those agents reach a separate, scoped HTTP contact
+ * gate owned by routes/caldera-agents.js. This router owns only staff console
+ * authorization and its liveness probe.
  *
  * THIS IS AN AUTHORING SURFACE, NOT AN EXECUTION SURFACE. Nothing here
  * registers, selects, or dispatches an incident engine — engineFor('caldera')

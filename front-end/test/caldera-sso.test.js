@@ -312,14 +312,15 @@ test('a TAMPERED MAC fails, including a one-bit flip', () => {
   // length mismatch, and an escaped 500 is itself a (coarse) oracle. Two
   // distinct shapes, and they are rejected at different steps on purpose:
   //   - 16 canonical bytes decodes fine and dies at the length check
-  //   - an arbitrary truncation is not canonical base64url and dies earlier
+  //   - deliberately noncanonical base64url dies earlier (a random truncation
+  //     can be canonical, depending on the freshly generated token)
   const short = Buffer.from(mac, 'base64url').subarray(0, 16).toString('base64url');
   assert.deepStrictEqual(
     sso.verifyToken(`${v}.${p}.${short}`, { path: '/caldera' }),
     { ok: false, reason: 'bad_signature' }
   );
   assert.deepStrictEqual(
-    sso.verifyToken(`${v}.${p}.${mac.slice(0, 10)}`, { path: '/caldera' }),
+    sso.verifyToken(`${v}.${p}.${mac.slice(0, 9)}B`, { path: '/caldera' }),
     { ok: false, reason: 'malformed' }
   );
 });
