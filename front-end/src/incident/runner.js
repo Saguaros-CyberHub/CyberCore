@@ -548,25 +548,27 @@ function scopeLanePredicate(scopeType) {
  * student's one lane for that engagement, so there is nothing to disambiguate
  * and a material_id filter could only ever exclude the lane we are looking for.
  */
-function scopeLanesSql(scopeType) {
+function scopeLanesSql(scopeType, { includeSuspended = false } = {}) {
   return `SELECT l.lane_id, l.user_id, l.name, l.status, l.module_key, l.config,
             u.email AS student_email, u.first_name, u.last_name
        FROM cybercore_lane l
        JOIN cybercore_user u ON u.user_id = l.user_id
       WHERE ${scopeLanePredicate(scopeType)}
-        AND l.status = 'active'
+        AND ${includeSuspended === true ? "l.status IN ('active', 'suspended')" : "l.status = 'active'"}
       ORDER BY u.email, l.created_at DESC`;
 }
 
 /**
- * Every active lane belonging to a scope, with its owner's email.
+ * Every active lane belonging to a scope, with its owner's email. Manual agent
+ * management can include retained suspended lanes and check live VM eligibility;
+ * incident dispatch keeps the active-only default.
  *
  * @param {object} scope
  * @param {'course'|'engagement'} scope.scopeType
  * @param {string} scope.scopeId  course_id or engagement_id — always bound as $1
  */
-async function findScopeLanes({ scopeType, scopeId } = {}) {
-  const r = await cybercoreQuery(scopeLanesSql(scopeType), [scopeId]);
+async function findScopeLanes({ scopeType, scopeId } = {}, { includeSuspended = false } = {}) {
+  const r = await cybercoreQuery(scopeLanesSql(scopeType, { includeSuspended }), [scopeId]);
   return r.rows;
 }
 

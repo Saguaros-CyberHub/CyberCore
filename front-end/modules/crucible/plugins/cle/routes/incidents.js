@@ -363,7 +363,7 @@ router.get('/authoring/adversaries', async (req, res) => {
 // separate; operations are controlled in the central Caldera console.
 const laneAgents = require('../../../../../src/utils/caldera-lane-agents').createService();
 async function courseAgentLanes(courseId) {
-  return require('../../../../../src/incident/runner').findScopeLanes(scopeOf(courseId));
+  return require('../../../../../src/incident/runner').findScopeLanes(scopeOf(courseId), { includeSuspended: true });
 }
 
 router.get('/caldera-agents/status', async (req, res) => {

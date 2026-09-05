@@ -797,7 +797,7 @@
         <p id="laneCalderaNetwork" style="font-size: 0.85rem; color: #b7791f;"></p>
         <form id="laneCalderaForm" style="display: grid; gap: 0.75rem;">
           <div class="form-group">
-            <label for="laneCalderaLane">Running lane</label>
+            <label for="laneCalderaLane">Lane with running VMs</label>
             <select id="laneCalderaLane" required disabled><option value="">Loading lanes...</option></select>
           </div>
           <div class="form-group">
@@ -866,24 +866,24 @@
     }
     state.laneId = selected || null;
     const lane = (state.payload?.lanes || []).find(item => item.lane_id === selected);
-    renderLaneCalderaStatus(state, { ...state.payload, ...(lane || { lane_status: null, targets: [], agents: [], job: null }) });
+    renderLaneCalderaStatus(state, { ...state.payload, ...(lane || { lane_status: null, runnable: false, targets: [], agents: [], job: null }) });
   }
 
   function renderCalderaLanes(state, payload) {
     const previous = state.payload;
     state.payload = payload;
     const select = document.getElementById('laneCalderaLane');
-    const lanes = (Array.isArray(payload.lanes) ? payload.lanes : []).filter(lane => lane.lane_status === 'active');
-    const oldLanes = (previous?.lanes || []).filter(lane => lane.lane_status === 'active');
-    if (JSON.stringify(oldLanes.map(lane => [lane.lane_id, lane.name])) !== JSON.stringify(lanes.map(lane => [lane.lane_id, lane.name])) || !previous) {
-      select.innerHTML = '<option value="">Select a running lane...</option>' + lanes.map(lane =>
-        `<option value="${escHtml(lane.lane_id)}">${escHtml(lane.name || lane.lane_id)}</option>`
+    const lanes = Array.isArray(payload.lanes) ? payload.lanes : [];
+    const oldLanes = previous?.lanes || [];
+    const laneOptions = items => items.map(lane => [lane.lane_id, lane.name, lane.runnable]);
+    if (JSON.stringify(laneOptions(oldLanes)) !== JSON.stringify(laneOptions(lanes)) || !previous) {
+      select.innerHTML = '<option value="">Select a lane with running VMs...</option>' + lanes.map(lane =>
+        `<option value="${escHtml(lane.lane_id)}"${lane.runnable === true ? '' : ' disabled'}>${escHtml(lane.name || lane.lane_id)}${lane.runnable === true ? '' : ' (unavailable)'}</option>`
       ).join('');
-      select.value = lanes.some(lane => lane.lane_id === state.laneId) ? state.laneId : lanes[0]?.lane_id || '';
+      select.value = lanes.some(lane => lane.lane_id === state.laneId) ? state.laneId : lanes.find(lane => lane.runnable === true)?.lane_id || '';
     }
-    select.disabled = state.submitting || !lanes.length;
+    select.disabled = state.submitting || !!payload.power_error || !lanes.some(lane => lane.runnable === true);
     selectCalderaLane(state);
-    if (!lanes.length) document.getElementById('laneCalderaError').textContent = 'No running lanes were found for this course. Deploy or start a lane, then refresh status.';
   }
 
   function syncLaneCalderaTarget(state, changed = false) {
@@ -892,16 +892,19 @@
     const platformSelect = document.getElementById('laneCalderaPlatform');
     const target = (state.data?.targets || []).find(vm => String(vm.vm_id) === vmSelect.value);
     if (changed) platformSelect.value = ['windows', 'linux'].includes(target?.platform) ? target.platform : '';
-    document.getElementById('laneCalderaPlatformHint').textContent = !target ? '' : target.platform
+    document.getElementById('laneCalderaPlatformHint').textContent = !target ? '' : target.runnable !== true
+      ? 'This VM is unavailable for installation. Select a running VM or refresh its status.' : target.platform
       ? 'Operating system is preselected from the VM configuration. Change it if needed.'
       : 'The operating system could not be detected. Select Windows or Linux before installing.';
     const busy = state.submitting || state.data?.job?.status === 'running';
-    document.getElementById('laneCalderaLane').disabled = state.submitting || !(state.payload?.lanes || []).some(lane => lane.lane_status === 'active');
+    document.getElementById('laneCalderaLane').disabled = state.submitting || !!state.data?.power_error
+      || !(state.payload?.lanes || []).some(lane => lane.runnable === true);
     vmSelect.disabled = busy || !state.data?.targets?.length;
-    platformSelect.disabled = busy || !target;
+    platformSelect.disabled = busy || target?.runnable !== true;
     const button = document.getElementById('laneCalderaInstall');
     button.disabled = busy || !target || !['windows', 'linux'].includes(platformSelect.value)
-      || state.data?.lane_status !== 'active' || !laneCalderaHttpUrl(state.data?.server_url)
+      || state.data?.runnable !== true || target?.runnable !== true || !!state.data?.power_error
+      || !laneCalderaHttpUrl(state.data?.server_url)
       || state.data?.internet_enabled === false
       || !!state.data?.configuration_error;
     button.textContent = state.submitting ? 'Starting installation...' : busy ? 'Installation running...' : 'Install Agent';
@@ -917,20 +920,23 @@
     // Replacing the options on every poll interrupts a keyboard selection.
     if (JSON.stringify(previous?.targets) !== JSON.stringify(targets)) {
       vmSelect.innerHTML = '<option value="">Select a VM...</option>' + targets.map(vm =>
-        `<option value="${escHtml(String(vm.vm_id))}">${escHtml(vm.name || 'VM')} (${escHtml(String(vm.vm_id))})${vm.role ? ` - ${escHtml(vm.role)}` : ''}</option>`
+        `<option value="${escHtml(String(vm.vm_id))}"${vm.runnable === true ? '' : ' disabled'}>${escHtml(vm.name || 'VM')} (${escHtml(String(vm.vm_id))})${vm.role ? ` - ${escHtml(vm.role)}` : ''} - ${escHtml(vm.power_state || 'unknown')}</option>`
       ).join('');
       const retained = targets.find(vm => String(vm.vm_id) === selected);
-      const initial = !previous && targets.find(vm => !/gateway|router|firewall/i.test(`${vm.role || ''} ${vm.name || ''}`));
+      const initial = !previous && targets.find(vm => vm.runnable === true && !/gateway|router|firewall/i.test(`${vm.role || ''} ${vm.name || ''}`));
       vmSelect.value = retained ? selected : initial ? String(initial.vm_id) : '';
       syncLaneCalderaTarget(state, !retained);
     }
     const consoleUrl = laneCalderaHttpUrl(data.console_url);
     document.getElementById('laneCalderaConnection').innerHTML = `
       <div style="font-size: 0.85rem;">Agent server: <code>${escHtml(data.server_url || 'Not configured')}</code></div>
-      <div style="font-size: 0.85rem;">Lane group: <code>${escHtml(data.group || 'Not configured')}</code></div>
+      <div style="font-size: 0.85rem;">Lane group: <code>${escHtml(state.laneId ? data.group || 'Not configured' : 'Select a lane')}</code></div>
+      ${state.laneId ? `<div style="font-size: 0.85rem;">Saved lane status: ${escHtml(data.lane_status || 'unknown')}</div>
+      <div style="font-size: 0.85rem;">VM power: ${data.power_error ? 'Unavailable' : `${targets.filter(vm => vm.power_state === 'running').length} of ${targets.length} VMs running`}</div>
+      ${data.retained_after_failure && data.runnable === true ? '<p style="font-size: 0.85rem;">Suspended after a provisioning error; running VMs can still be used.</p>' : ''}` : ''}
       ${consoleUrl ? `<a href="${escHtml(consoleUrl)}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 0.5rem;">Open Caldera console &nearr;</a>` : ''}`;
-    document.getElementById('laneCalderaNetwork').textContent = data.lane_status !== 'active'
-      ? 'This lane is no longer active. Start the lane before installing an agent.'
+    document.getElementById('laneCalderaNetwork').textContent = !state.laneId ? ''
+      : data.lifecycle_eligible === false ? 'This lane is unavailable for agent installation. Resume the lane, then refresh status.'
       : data.internet_enabled === false
         ? 'Internet is off for this lane. Enable Internet access for this lane before installing a Caldera agent, then refresh status.'
         : 'The VM must be running and able to reach the agent server. Its QEMU guest agent must be available.';
@@ -954,11 +960,19 @@
             <td><code>${escHtml(agent.paw || '')}</code></td><td>${escHtml(agent.platform || '')}</td>
             <td>${escHtml(agent.last_seen || 'Not reported')}</td>
           </tr>`).join('')}</tbody></table></div>`
-        : '<p>No agents have checked in to this lane group yet.</p>';
+        : state.laneId ? '<p>No agents have checked in to this lane group yet.</p>' : '<p>Select a lane to view its agent check-ins.</p>';
+    const lanes = Array.isArray(state.payload?.lanes) ? state.payload.lanes : [];
     document.getElementById('laneCalderaError').textContent = data.configuration_error
       || state.installError
+      || (data.power_error ? `VM power status is unavailable: ${data.power_error}. Refresh status before installing.` : '')
       || (!laneCalderaHttpUrl(data.server_url) ? 'The Caldera agent server is not configured. Ask an administrator to configure its callback URL.' : '')
-      || (!targets.length ? 'No supported VMs were found in this lane. Add a Windows or Linux QEMU VM before installing.' : '');
+      || (!lanes.length ? 'No deployed lanes were found for this course. Deploy a lane, then refresh status.' : '')
+      || (!lanes.some(lane => lane.runnable === true)
+        ? lanes.every(lane => lane.lifecycle_eligible === false)
+          ? 'No lanes are available for agent installation. Resume a suspended lane, then refresh status.'
+          : 'No running VMs were found for this course. Start a Windows or Linux VM in a lane, then refresh status.' : '')
+      || (state.laneId && !targets.length ? 'No supported VMs were found in this lane. Add a Windows or Linux QEMU VM before installing.' : '')
+      || (state.laneId && !targets.some(vm => vm.runnable === true) ? 'No running VMs are available for installation in this lane. Refresh status after starting a VM.' : '');
     syncLaneCalderaTarget(state);
   }
 
@@ -1001,7 +1015,11 @@
       errorBox.textContent = 'Select a target VM and its operating system before installing.';
       return;
     }
-    if (state.data.lane_status !== 'active' || state.data.configuration_error || !laneCalderaHttpUrl(state.data.server_url)) return;
+    if (state.data.runnable !== true || target.runnable !== true || state.data.power_error) {
+      errorBox.textContent = 'Select an available running VM and refresh status before installing.';
+      return;
+    }
+    if (state.data.configuration_error || !laneCalderaHttpUrl(state.data.server_url)) return;
     if (state.data.internet_enabled === false) {
       errorBox.textContent = 'Enable Internet access for this lane before installing a Caldera agent, then refresh status.';
       return;

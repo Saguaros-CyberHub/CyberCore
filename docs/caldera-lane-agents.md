@@ -5,6 +5,13 @@ or administrator. Select a running lane, its Windows or Linux QEMU VM, and click
 **Install Agent**. The job continues if you close the dialog. Reopen it to see
 progress and the agent's last check-in.
 
+The picker checks live VM power in Proxmox. A lane retained as `suspended`
+after a provisioning error can still provide a running VM for Caldera; its
+saved deployment status is shown separately. Installing an agent does not mark
+the deployment healthy or clear its error. Ordinary suspended lanes and
+stopped, paused or unverified VMs remain unavailable. A Proxmox connection
+failure is shown as an unavailable power check, rather than as no deployed lanes.
+
 Click **Open Caldera console**, then select the displayed `lane-<lane UUID>`
 group when creating a Caldera operation. A completed installation means the
 server received a fresh check-in from that specific agent. Existing running
@@ -66,8 +73,10 @@ Guest security software may prevent the executable from starting; the installer
 does not change security software settings.
 
 Each VM receives a random capability; CyberCore stores its hash. Reinstalling
-that VM rotates its capability without changing other VMs' credentials. A lane
-that is no longer active cannot authenticate through the agent gate. Destroying
+that VM rotates its capability without changing other VMs' credentials. Active
+lanes and retained provisioning failures use the same scoped agent gate. A
+retained suspended lane must still have the agent's VM running to authenticate;
+stopping that VM revokes its access. Other inactive lane states cannot authenticate. Destroying
 a lane removes its running processes, although historical agent records may
 remain visible in Caldera.
 

@@ -135,7 +135,7 @@ test('everything except the WHERE arm is identical across scopes', () => {
   assert.match(sql, /ORDER BY u\.email, l\.created_at DESC/);
 });
 
-test("only 'active' lanes are discovered, on both arms", () => {
+test("only 'active' lanes are discovered by default, on both arms", () => {
   // A lane in 'deploying' has no guest agent to dispatch to and a lane in
   // 'error' or 'deleted' may have had its VMs destroyed under it. Both would
   // resolve to a vmid — the config still names one — and be dispatched at,
@@ -145,6 +145,19 @@ test("only 'active' lanes are discovered, on both arms", () => {
     assert.match(flat(runner.scopeLanesSql(scope)), /AND l\.status = 'active'/,
       `${scope}: the status filter is missing`);
   }
+});
+
+test('suspended discovery requires an explicit opt-in and retains the scope boundary', () => {
+  for (const scope of runner.SCOPE_TYPES) {
+    const active = flat(runner.scopeLanesSql(scope));
+    const suspended = flat(runner.scopeLanesSql(scope, { includeSuspended: true }));
+    assert.strictEqual(suspended, active.replace("l.status = 'active'", "l.status IN ('active', 'suspended')"));
+    assert.ok(suspended.includes(flat(runner.scopeLanePredicate(scope))));
+    for (const includeSuspended of [false, undefined, null, 'true', 1]) {
+      assert.strictEqual(flat(runner.scopeLanesSql(scope, { includeSuspended })), active);
+    }
+  }
+  assert.throws(() => runner.scopeLanesSql('unknown', { includeSuspended: true }));
 });
 
 test('the material_id filter is deliberately absent', () => {

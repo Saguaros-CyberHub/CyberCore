@@ -38,8 +38,19 @@ function reset() {
   state.agentReads = 0;
   state.runReads = 0;
   state.dbError = false;
+  state.powerError = false;
+  state.resources = [101, 201].map(vmid => ({ vmid, type: 'qemu', status: 'running', node: 'node-one' }));
 }
 reset();
+
+// Model the lane lifecycle predicate independently from the service. Live power
+// is checked separately by the real service against the Proxmox fake below.
+function eligibleLane(lane) {
+  return lane.status === 'active' || (lane.status === 'suspended'
+    && ((typeof lane.config.error === 'string' && lane.config.error.trim().length > 0)
+      || (typeof lane.config.provisioning_error === 'string' && lane.config.provisioning_error.trim().length > 0)
+      || lane.config.goad?.status === 'failed'));
+}
 
 const service = createService({
   now: () => Date.parse('2026-09-05T01:00:00Z'),
@@ -47,11 +58,17 @@ const service = createService({
     client: { listAgents: async () => { state.agentReads++; return clone(state.agents); } },
   }),
   schedule: task => state.tasks.push(task),
+  proxmox: async (method, endpoint) => {
+    assert.equal(method, 'GET');
+    assert.equal(endpoint, '/api2/json/cluster/resources?type=vm');
+    if (state.powerError) throw new Error('private Proxmox failure');
+    return clone(state.resources);
+  },
   query: async (sql, params) => {
     state.queries.push({ sql, params });
     if (state.dbError) throw new Error('private database failure');
     if (/UPDATE cybercore_lane/.test(sql) && /RETURNING lane_id/.test(sql)) {
-      const lane = state.lanes.find(row => row.lane_id === params[0] && row.status === 'active');
+      const lane = state.lanes.find(row => row.lane_id === params[0] && eligibleLane(row));
       if (!lane || lane.config.caldera_agent_job?.status === 'running') return { rows: [] };
       lane.config.caldera_agent_job = JSON.parse(params[1]);
       const token = JSON.parse(params[3]);
@@ -60,10 +77,10 @@ const service = createService({
     }
     if (/SELECT l\.lane_id/.test(sql)) {
       const wanted = params[0];
-      const lane = state.lanes.find(row => row.status === 'active'
+      const lane = state.lanes.find(row => eligibleLane(row)
         && row.config.caldera_agent_access?.tokens.some(token => token.token_hash === wanted));
       const token = lane?.config.caldera_agent_access.tokens.find(item => item.token_hash === wanted);
-      return { rows: lane ? [{ lane_id: lane.lane_id, config: clone(lane.config), paw: token.paw, vm_id: String(token.vm_id) }] : [] };
+      return { rows: lane ? [{ lane_id: lane.lane_id, status: lane.status, config: clone(lane.config), paw: token.paw, vm_id: String(token.vm_id) }] : [] };
     }
     throw new Error('Unexpected database query in route test');
   },
@@ -75,9 +92,10 @@ function put(relative, exports) {
 }
 put('src/utils/caldera-lane-agents', { createService: () => service });
 put('src/utils/audit', { log: async item => { state.audits.push(item); } });
-put('src/incident/runner', { findScopeLanes: async scope => {
-  state.scopeCalls.push(scope);
-  return clone(state.lanes.filter(lane => lane.config.course_id === scope.scopeId && lane.status === 'active'));
+put('src/incident/runner', { findScopeLanes: async (scope, options = {}) => {
+  state.scopeCalls.push({ scope, options });
+  return clone(state.lanes.filter(lane => lane.config.course_id === scope.scopeId
+    && (lane.status === 'active' || (options.includeSuspended === true && lane.status === 'suspended'))));
 } });
 put('src/incident/board', {
   readRunForStaff: async () => { state.runReads++; return null; },
@@ -139,7 +157,9 @@ test('course staff and admins read only scoped lanes and projected agents, with 
       assert.ok(!wire.includes(secret), secret + ' leaked in status');
     }
   }
-  assert.deepEqual(state.scopeCalls, [{ scopeType: 'course', scopeId: COURSE }, { scopeType: 'course', scopeId: COURSE }]);
+  assert.deepEqual(state.scopeCalls, [1, 2].map(() => ({
+    scope: { scopeType: 'course', scopeId: COURSE }, options: { includeSuspended: true },
+  })));
 });
 
 test('students and instructors enrolled as students are refused before any Caldera call', async () => {
@@ -180,6 +200,70 @@ test('foreign and missing lane ids are indistinguishable and never reach install
   assert.deepEqual(foreign.body, missing.body);
   assert.equal(state.agentReads, 0);
   assert.equal(state.queries.length, 0);
+});
+
+test('a retained deployment failure is discovered only in its course and can install on its running guest', async () => {
+  state.lanes[0].status = 'suspended';
+  state.lanes[0].config.error = 'private deployment failure details';
+  state.lanes[1].status = 'suspended';
+  state.lanes[1].config.error = 'foreign deployment failure';
+  const status = await getStatus();
+  assert.equal(status.status, 200);
+  assert.deepEqual(status.body.lanes.map(lane => lane.lane_id), [LANE]);
+  assert.equal(status.body.lanes[0].lane_status, 'suspended');
+  assert.equal(status.body.lanes[0].lifecycle_eligible, true);
+  assert.equal(status.body.lanes[0].retained_after_failure, true);
+  assert.equal(status.body.lanes[0].runnable, true);
+  assert.equal(status.body.lanes[0].targets[0].runnable, true);
+  assert.doesNotMatch(JSON.stringify(status.body), /private deployment failure details|foreign deployment failure/);
+  const response = await install();
+  assert.equal(response.status, 202);
+  assert.equal(state.tasks.length, 1);
+  assert.equal(state.lanes[0].status, 'suspended', 'agent installation must not rewrite deployment readiness');
+  assert.equal((await install({ lane_id: OTHER_LANE })).status, 404);
+});
+
+test('ordinary suspension stays blocked even if the guest happens to be running', async () => {
+  state.lanes[0].status = 'suspended';
+  const lane = (await getStatus()).body.lanes[0];
+  assert.equal(lane.lane_status, 'suspended');
+  assert.equal(lane.lifecycle_eligible, false);
+  assert.equal(lane.retained_after_failure, false);
+  assert.equal(lane.runnable, false);
+  assert.equal(lane.targets[0].runnable, false);
+  assert.equal((await install()).status, 409);
+  assert.equal((await authorize(`/agent/${TOKEN}/beacon`)).status, 403);
+  assert.equal(state.tasks.length, 0);
+});
+
+for (const [reason, mutate] of [
+  ['stopped', () => { state.resources[0].status = 'stopped'; }],
+  ['missing', () => { state.resources = state.resources.filter(vm => vm.vmid !== 101); }],
+  ['unknown power', () => { state.powerError = true; }],
+]) {
+  test(`retained deployment failures cannot install or authenticate with ${reason} guest power`, async () => {
+    state.lanes[0].status = 'suspended';
+    state.lanes[0].config.provisioning_error = 'retained deployment failure';
+    mutate();
+    const status = await getStatus();
+    assert.equal(status.status, 200);
+    assert.equal(status.body.lanes[0].runnable, false);
+    assert.equal(status.body.lanes[0].targets[0].runnable, false);
+    const response = await install();
+    assert.ok(response.status >= 400);
+    assert.doesNotMatch(JSON.stringify([status.body, response.body]), /private Proxmox failure/);
+    assert.equal(state.tasks.length, 0);
+    assert.ok((await authorize(`/agent/${TOKEN}/beacon`)).status >= 400);
+  });
+}
+
+test('a retained GOAD failure permits its known callback token only while the guest is running', async () => {
+  state.lanes[0].status = 'suspended';
+  state.lanes[0].config.goad = { status: 'failed' };
+  assert.equal((await authorize(`/agent/${TOKEN}/beacon`)).status, 204);
+  state.resources[0].status = 'stopped';
+  assert.equal((await authorize(`/agent/${TOKEN}/beacon`)).status, 403);
+  assert.equal(state.lanes[0].status, 'suspended');
 });
 
 test('VM membership and platform validation survive the HTTP route and refuse gateway and arbitrary VMs', async () => {

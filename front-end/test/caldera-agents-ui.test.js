@@ -14,17 +14,17 @@ const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp
 const fixture = () => ({
   server_url: 'https://agent.test.example/', console_url: 'https://console.test.example/',
   lanes: [{
-    lane_id: 'lane-one', name: 'First lane', lane_status: 'active', internet_enabled: true,
+    lane_id: 'lane-one', name: 'First lane', lane_status: 'active', lifecycle_eligible: true, runnable: true, internet_enabled: true,
     group: 'lane-group-one', targets: [
-      { vm_id: 100, name: 'Gateway', type: 'qemu', role: 'gateway', platform: 'linux' },
-      { vm_id: 101, name: 'DC01', type: 'qemu', role: 'dc', platform: 'windows' },
-      { vm_id: 102, name: 'Unknown OS', type: 'qemu', role: 'workstation', platform: null },
+      { vm_id: 100, name: 'Gateway', type: 'qemu', role: 'gateway', platform: 'linux', power_state: 'running', runnable: true },
+      { vm_id: 101, name: 'DC01', type: 'qemu', role: 'dc', platform: 'windows', power_state: 'running', runnable: true },
+      { vm_id: 102, name: 'Unknown OS', type: 'qemu', role: 'workstation', platform: null, power_state: 'running', runnable: true },
     ], agents: [], job: null,
   }, {
-    lane_id: 'lane-two', name: 'Second lane', lane_status: 'active', internet_enabled: false,
-    group: 'lane-group-two', targets: [{ vm_id: 201, name: 'Linux VM', type: 'qemu', platform: 'linux' }], agents: [], job: null,
+    lane_id: 'lane-two', name: 'Second lane', lane_status: 'active', lifecycle_eligible: true, runnable: true, internet_enabled: false,
+    group: 'lane-group-two', targets: [{ vm_id: 201, name: 'Linux VM', type: 'qemu', platform: 'linux', power_state: 'running', runnable: true }], agents: [], job: null,
   }, {
-    lane_id: 'lane-stopped', name: 'Stopped lane', lane_status: 'suspended', targets: [], agents: [], job: null,
+    lane_id: 'lane-stopped', name: 'Stopped lane', lane_status: 'suspended', lifecycle_eligible: false, runnable: false, targets: [], agents: [], job: null,
   }],
 });
 
@@ -148,10 +148,10 @@ test('the Board offers Caldera Agent to course staff; students never request age
   assert.equal(student.el('laneCalderaModal'), undefined);
 });
 
-test('default selection skips gateway and suspended lanes and posts only the selected target', async () => {
+test('default selection skips gateway and unavailable lanes and posts only the selected target', async () => {
   const h = harness();
   await h.open();
-  assert.doesNotMatch(h.el('laneCalderaLane').innerHTML, /lane-stopped/);
+  assert.match(h.el('laneCalderaLane').innerHTML, /value="lane-stopped" disabled/);
   assert.equal(h.el('laneCalderaLane').value, 'lane-one');
   assert.equal(h.el('laneCalderaVm').value, '101');
   assert.equal(h.el('laneCalderaPlatform').value, 'windows');
@@ -162,6 +162,128 @@ test('default selection skips gateway and suspended lanes and posts only the sel
   assert.deepEqual(JSON.parse(posted.body), { lane_id: 'lane-one', vm_id: 101, platform: 'windows' });
   assert.equal(posted.headers.Authorization, 'Bearer test-token');
   assert.equal(h.el('laneCalderaInstall').disabled, true);
+  h.api.closeCalderaAgents();
+});
+
+test('a retained suspended lane with running VMs remains selectable and installable', async () => {
+  const h = harness();
+  const data = fixture();
+  data.lanes = [data.lanes[0]];
+  data.lanes[0].lane_status = 'suspended';
+  data.lanes[0].retained_after_failure = true;
+  h.setStatus(data);
+  await h.open();
+  assert.equal(h.el('laneCalderaLane').value, 'lane-one');
+  assert.equal(h.el('laneCalderaLane').disabled, false);
+  assert.equal(h.el('laneCalderaInstall').disabled, false);
+  assert.match(h.el('laneCalderaConnection').innerHTML, /Saved lane status: suspended/);
+  assert.match(h.el('laneCalderaConnection').innerHTML, /VM power: 3 of 3 VMs running/);
+  assert.match(h.el('laneCalderaConnection').innerHTML, /Suspended after a provisioning error/);
+  assert.doesNotMatch(h.el('laneCalderaNetwork').textContent, /no longer active|Start the lane/);
+  assert.equal(h.el('laneCalderaError').textContent, '');
+  await h.submit();
+  assert.deepEqual(JSON.parse(h.calls.find(call => call.method === 'POST').body), { lane_id: 'lane-one', vm_id: 101, platform: 'windows' });
+  h.api.closeCalderaAgents();
+});
+
+test('VM options show live power and unavailable targets cannot be installed', async () => {
+  const h = harness();
+  const data = fixture();
+  data.lanes[0].targets[1].power_state = 'stopped';
+  data.lanes[0].targets[1].runnable = false;
+  data.lanes[0].targets[2].platform = 'linux';
+  h.setStatus(data);
+  await h.open();
+  assert.equal(h.el('laneCalderaVm').value, '102');
+  assert.match(h.el('laneCalderaVm').innerHTML, /value="101" disabled>DC01 \(101\) - dc - stopped/);
+  assert.equal(h.el('laneCalderaInstall').disabled, false);
+  for (const powerState of ['stopped', 'paused', 'unknown']) {
+    data.lanes[0].targets[1].power_state = powerState;
+    h.setStatus(data);
+    await h.tick(5000);
+    h.el('laneCalderaVm').value = '101';
+    h.el('laneCalderaVm').onchange();
+    assert.equal(h.el('laneCalderaInstall').disabled, true);
+    await h.submit();
+    assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  }
+  h.api.closeCalderaAgents();
+});
+
+test('polling stops installation when a selected VM stops while other lane VMs keep running', async () => {
+  const h = harness();
+  await h.open();
+  const data = fixture();
+  data.lanes[0].targets[1].power_state = 'stopped';
+  data.lanes[0].targets[1].runnable = false;
+  h.setStatus(data);
+  await h.tick(5000);
+  assert.equal(h.el('laneCalderaVm').value, '101');
+  assert.equal(h.el('laneCalderaInstall').disabled, true);
+  assert.match(h.el('laneCalderaPlatformHint').textContent, /unavailable for installation/);
+  await h.submit();
+  assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.api.closeCalderaAgents();
+});
+
+test('no selection distinguishes no lanes from no running VMs without claiming a lane is inactive', async () => {
+  const h = harness();
+  const data = fixture();
+  data.lanes = [];
+  h.setStatus(data);
+  await h.open();
+  assert.equal(h.el('laneCalderaLane').value, '');
+  assert.match(h.el('laneCalderaError').textContent, /No deployed lanes/);
+  assert.equal(h.el('laneCalderaNetwork').textContent, '');
+  const stopped = fixture();
+  stopped.lanes = [stopped.lanes[0]];
+  stopped.lanes[0].runnable = false;
+  stopped.lanes[0].targets.forEach(target => { target.power_state = 'stopped'; target.runnable = false; });
+  h.setStatus(stopped);
+  await h.tick(5000);
+  assert.equal(h.el('laneCalderaLane').value, '');
+  assert.match(h.el('laneCalderaError').textContent, /No running VMs were found/);
+  assert.equal(h.el('laneCalderaNetwork').textContent, '');
+  assert.equal(h.el('laneCalderaInstall').disabled, true);
+  h.api.closeCalderaAgents();
+});
+
+test('intentional suspension stays unavailable even when its VMs report running', async () => {
+  const h = harness();
+  const data = fixture();
+  data.lanes = [data.lanes[0]];
+  data.lanes[0].lane_status = 'suspended';
+  data.lanes[0].lifecycle_eligible = false;
+  data.lanes[0].runnable = false;
+  data.lanes[0].targets.forEach(target => { target.runnable = false; });
+  h.setStatus(data);
+  await h.open();
+  assert.equal(h.el('laneCalderaLane').disabled, true);
+  assert.match(h.el('laneCalderaError').textContent, /No lanes are available for agent installation/);
+  assert.doesNotMatch(h.el('laneCalderaError').textContent, /No running VMs/);
+  assert.equal(h.el('laneCalderaInstall').disabled, true);
+  await h.submit();
+  assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
+  h.api.closeCalderaAgents();
+});
+
+test('a power inventory failure is shown and blocks installation despite old active status', async () => {
+  const h = harness();
+  await h.open();
+  const data = fixture();
+  data.power_error = 'Hypervisor unavailable';
+  data.lanes.forEach(lane => {
+    lane.runnable = false;
+    lane.targets.forEach(target => { target.power_state = 'unknown'; target.runnable = false; });
+  });
+  h.setStatus(data);
+  await h.tick(5000);
+  assert.match(h.el('laneCalderaError').textContent, /VM power status is unavailable: Hypervisor unavailable/);
+  assert.equal(h.el('laneCalderaInstall').disabled, true);
+  assert.equal(h.el('laneCalderaLane').disabled, true);
+  assert.match(h.el('laneCalderaVm').innerHTML, /unknown/);
+  await h.submit();
+  assert.equal(h.calls.filter(call => call.method === 'POST').length, 0);
   h.api.closeCalderaAgents();
 });
 

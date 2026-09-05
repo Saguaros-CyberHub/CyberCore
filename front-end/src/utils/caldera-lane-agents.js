@@ -12,6 +12,33 @@ const groupFor = laneId => `lane-${laneId}`;
 const pawFor = (laneId, vmId) => hashToken(`${laneId}:${vmId}`).slice(0, 24);
 function failure(status, message) { return Object.assign(new Error(message), { status }); }
 
+// Deployment failures retain running guests under 'suspended'. That lifecycle
+// status must not be confused with a Proxmox guest's current power state.
+function retainedAfterFailure(lane) {
+  const cfg = object(lane.config);
+  return lane.status === 'suspended' && (
+    [cfg.error, cfg.provisioning_error].some(value => typeof value === 'string' && value.trim())
+    || cfg.goad?.status === 'failed');
+}
+
+function laneEligible(lane) {
+  return !!lane && (lane.status === 'active' || retainedAfterFailure(lane));
+}
+
+function eligibleLaneSql(alias = '') {
+  if (alias && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(alias)) throw new TypeError('Invalid lane SQL alias');
+  const prefix = alias ? `${alias}.` : '';
+  const config = `${prefix}config`;
+  const hasError = key => `(jsonb_typeof(${config}->'${key}') = 'string' AND BTRIM(${config}->>'${key}') <> '')`;
+  return `(${prefix}status = 'active' OR (${prefix}status = 'suspended' AND (
+    ${hasError('error')} OR ${hasError('provisioning_error')} OR ${config}->'goad'->>'status' = 'failed')))`;
+}
+
+function runnableGuest(vm) {
+  return !!vm && vm.type === 'qemu' && !vm.template && vm.status === 'running'
+    && typeof vm.node === 'string' && /^[A-Za-z0-9_.-]+$/.test(vm.node);
+}
+
 function targetsFor(lane) {
   const cfg = object(lane.config);
   const rows = [...(cfg.vms || []), ...(cfg.workstations || []),
@@ -77,8 +104,28 @@ function createService(deps = {}) {
     return agents;
   }
 
+  async function loadResources() {
+    let resources;
+    try { resources = await proxmox('GET', '/api2/json/cluster/resources?type=vm'); }
+    catch (_) { throw failure(503, 'Could not verify VM power states in Proxmox. Refresh status and retry.'); }
+    if (!Array.isArray(resources)) throw failure(503, 'Could not verify VM power states in Proxmox. Refresh status and retry.');
+    return resources;
+  }
+
+  async function runningTarget(vmId) {
+    const live = (await loadResources()).find(vm => Number(vm.vmid) === vmId);
+    if (!runnableGuest(live)) throw failure(409, 'The selected VM must be a running QEMU guest. Refresh status after starting it.');
+    return live;
+  }
+
   async function status(lanes) {
     let config = null, configuration_error = null, agents_error = null, agents = [];
+    let resources = [], power_error = null;
+    if (lanes.length) {
+      try { resources = await loadResources(); }
+      catch (_) { power_error = 'Could not verify VM power states in Proxmox. Refresh status and retry.'; }
+    }
+    const byId = new Map(resources.map(vm => [Number(vm.vmid), vm]));
     try { config = settings(); } catch (err) { configuration_error = err.message; }
     if (config) {
       try { agents = await listAgents(config); }
@@ -86,12 +133,20 @@ function createService(deps = {}) {
     }
     return {
       server_url: config?.serverUrl || null, console_url: config?.consoleUrl || null,
-      configuration_error, agents_error,
+      configuration_error, agents_error, power_error,
       lanes: lanes.map(lane => {
         const cfg = object(lane.config);
+        const eligible = laneEligible(lane);
+        const targets = targetsFor(lane).map(target => {
+          const live = byId.get(target.vm_id);
+          return { ...target, node: live?.node || target.node,
+            power_state: live?.status || 'unknown', runnable: eligible && runnableGuest(live) };
+        });
         return { lane_id: lane.lane_id, name: lane.name, lane_status: lane.status,
+          lifecycle_eligible: eligible, retained_after_failure: retainedAfterFailure(lane),
+          runnable: targets.some(target => target.runnable),
           internet_enabled: typeof cfg.internet_enabled === 'boolean' ? cfg.internet_enabled : null, group: groupFor(lane.lane_id),
-          targets: targetsFor(lane), agents: agents.filter(a => a.group === groupFor(lane.lane_id)).map(publicAgent),
+          targets, agents: agents.filter(a => a.group === groupFor(lane.lane_id)).map(publicAgent),
           job: currentJob(cfg.caldera_agent_job, now()) };
       }),
     };
@@ -107,17 +162,12 @@ function createService(deps = {}) {
       // Re-read immediately before dispatch; a lane deleted or moved since the click cannot be used.
       const row = await query('SELECT lane_id, status, config FROM cybercore_lane WHERE lane_id = $1', [laneId]);
       const lane = row.rows[0];
-      if (!lane || lane.status !== 'active' || object(lane.config).course_id !== courseId
+      if (!laneEligible(lane) || object(lane.config).course_id !== courseId
         || object(lane.config).caldera_agent_job?.job_id !== job.job_id
         || !targetsFor(lane).some(t => t.vm_id === target.vm_id)) {
         throw failure(409, 'The selected VM is no longer in a running lane.');
       }
-      const resources = await proxmox('GET', '/api2/json/cluster/resources?type=vm');
-      const live = (resources || []).find(vm => Number(vm.vmid) === target.vm_id);
-      if (!live || live.type !== 'qemu' || live.template || live.status !== 'running'
-        || !/^[A-Za-z0-9_.-]+$/.test(live.node)) {
-        throw failure(409, 'The selected VM must be a running QEMU guest.');
-      }
+      const live = await runningTarget(target.vm_id);
       const exec = executor();
       job.message = 'Checking the VM guest agent.';
       await saveJob(laneId, job);
@@ -165,7 +215,7 @@ function createService(deps = {}) {
   }
 
   async function start(lane, input) {
-    if (!UUID.test(lane.lane_id) || lane.status !== 'active') throw failure(409, 'Select a running lane.');
+    if (!UUID.test(lane.lane_id) || !laneEligible(lane)) throw failure(409, 'This lane is unavailable for agent installation.');
     if (object(lane.config).internet_enabled === false) {
       throw failure(409, 'Lane internet access is disabled. Enable Internet for this lane before installing a Caldera agent.');
     }
@@ -177,6 +227,8 @@ function createService(deps = {}) {
     const config = settings();
     // Validate server-side connectivity before modifying a VM or rotating its token.
     try { await listAgents(config); } catch (_) { throw failure(503, 'Caldera is unavailable or its API key is invalid.'); }
+    // Verify the selected guest before rotating its credential; repeat at dispatch.
+    await runningTarget(target.vm_id);
     const token = crypto.randomBytes(32).toString('hex');
     const job = { job_id: crypto.randomUUID(), status: 'running', vm_id: target.vm_id,
       platform: input.platform, group: groupFor(lane.lane_id), paw: pawFor(lane.lane_id, target.vm_id),
@@ -189,7 +241,7 @@ function createService(deps = {}) {
         COALESCE((SELECT jsonb_agg(t) FROM jsonb_array_elements(COALESCE(config->'caldera_agent_access'->'tokens', '[]'::jsonb)) t
           WHERE t->>'vm_id' <> $3::text), '[]'::jsonb) || jsonb_build_array($4::jsonb))),
         '{caldera_agent_job}', $2::jsonb), updated_at = NOW()
-      WHERE lane_id = $1 AND status = 'active'
+      WHERE lane_id = $1 AND ${eligibleLaneSql()}
         AND config->>'course_id' IS NOT DISTINCT FROM $6::text
         AND (COALESCE(config->'caldera_agent_job'->>'status', '') <> 'running'
           OR config->'caldera_agent_job'->>'started_at' < $5)
@@ -206,16 +258,22 @@ function createService(deps = {}) {
   async function authorize(uri) {
     const match = /^\/agent\/([a-f0-9]{64})\/(?:beacon|file\/download|file\/upload)$/.exec(String(uri || ''));
     if (!match) return null;
-    const result = await query(`SELECT l.lane_id, l.config, t->>'paw' AS paw, t->>'vm_id' AS vm_id FROM cybercore_lane l
+    const result = await query(`SELECT l.lane_id, l.status, l.config, t->>'paw' AS paw, t->>'vm_id' AS vm_id FROM cybercore_lane l
       CROSS JOIN LATERAL jsonb_array_elements(COALESCE(l.config->'caldera_agent_access'->'tokens', '[]'::jsonb)) t
-      WHERE l.status = 'active' AND t->>'token_hash' = $1 LIMIT 1`, [hashToken(match[1])]);
+      WHERE ${eligibleLaneSql('l')} AND t->>'token_hash' = $1 LIMIT 1`, [hashToken(match[1])]);
     const access = result.rows[0];
-    if (!access || !UUID.test(access.lane_id) || !/^[a-f0-9]{24}$/.test(access.paw)) return null;
+    if (!access || !laneEligible(access) || !UUID.test(access.lane_id) || !/^[a-f0-9]{24}$/.test(access.paw)) return null;
     if (!targetsFor(access).some(target => target.vm_id === Number(access.vm_id))) return null;
+    // A retained deployment error must not authorize a guest that was stopped
+    // later (e.g. by the administrative group suspension action).
+    if (access.status === 'suspended') {
+      try { await runningTarget(Number(access.vm_id)); } catch (_) { return null; }
+    }
     return { paw: access.paw, group: groupFor(access.lane_id) };
   }
 
   return { status, start, authorize };
 }
 
-module.exports = { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, currentJob, JOB_TIMEOUT_MS };
+module.exports = { createService, targetsFor, hashToken, pawFor, groupFor, seenAt, currentJob, JOB_TIMEOUT_MS,
+  retainedAfterFailure, laneEligible, eligibleLaneSql };

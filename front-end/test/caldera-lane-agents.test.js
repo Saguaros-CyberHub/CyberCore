@@ -13,6 +13,20 @@ const laneFixture = () => ({ lane_id: LANE_ID, name: 'Lab lane', status: 'active
   password: 'lane-password-private', vms: [{ vm_id: 901, name: 'Windows workstation', os: 'windows' }],
 } });
 
+// Model the database lifecycle gate independently from the production helper.
+const eligibleFixture = lane => !!lane && (lane.status === 'active' || (lane.status === 'suspended'
+  && [lane.config.error, lane.config.provisioning_error, lane.config.goad?.status === 'failed' ? 'failed' : '']
+    .some(value => typeof value === 'string' && value.trim().length > 0)));
+
+function assertLifecycleSql(sql, alias = '') {
+  const prefix = alias ? `${alias}.` : '';
+  assert.ok(sql.includes(`(${prefix}status = 'active' OR (${prefix}status = 'suspended' AND (`));
+  for (const key of ['error', 'provisioning_error']) {
+    assert.ok(sql.includes(`jsonb_typeof(${prefix}config->'${key}') = 'string' AND BTRIM(${prefix}config->>'${key}') <> ''`));
+  }
+  assert.ok(sql.includes(`${prefix}config->'goad'->>'status' = 'failed')))`));
+}
+
 // The fake models the atomic UPDATE and conditional save, including rejection of
 // an occupied lane. Assertions on its SQL conditions keep the fake honest about
 // the concurrency and scope guarantees production PostgreSQL must enforce.
@@ -25,14 +39,15 @@ function harness(options = {}) {
     state.sql.push({ sql, args: clone(args) });
     if (state.dbFailure) throw new Error('database unavailable');
     if (sql.includes('RETURNING lane_id')) {
-      assert.match(sql, /WHERE lane_id = \$1 AND status = 'active'/);
+      assert.match(sql, /WHERE lane_id = \$1 AND /);
+      assertLifecycleSql(sql);
       assert.match(sql, /course_id' IS NOT DISTINCT FROM \$6::text/);
       assert.match(sql, /started_at' < \$5/);
       assert.match(sql, /status', ''\) <> 'running'/);
       const [laneId, jobJson, vmId, accessJson, cutoff, courseId] = args;
       const lane = state.lane;
       const prior = lane?.config.caldera_agent_job;
-      if (!lane || lane.lane_id !== laneId || lane.status !== 'active'
+      if (!eligibleFixture(lane) || lane.lane_id !== laneId
         || (lane.config.course_id || null) !== courseId
         || (prior?.status === 'running' && !(prior.started_at < cutoff))) return { rows: [] };
       const tokens = lane.config.caldera_agent_access?.tokens || [];
@@ -48,12 +63,13 @@ function harness(options = {}) {
       return { rows: [] };
     }
     if (sql.includes('token_hash')) {
-      assert.match(sql, /WHERE l.status = 'active'/);
+      assertLifecycleSql(sql, 'l');
+      assert.match(sql, /SELECT l.lane_id, l.status, l.config/);
       assert.match(sql, /t->>'token_hash' = \$1/);
       assert.match(args[0], /^[a-f0-9]{64}$/);
-      const access = state.lane?.status === 'active'
+      const access = eligibleFixture(state.lane)
         && state.lane.config.caldera_agent_access?.tokens.find(token => token.token_hash === args[0]);
-      return { rows: access ? [{ lane_id: state.lane.lane_id, config: clone(state.lane.config),
+      return { rows: access ? [{ lane_id: state.lane.lane_id, status: state.lane.status, config: clone(state.lane.config),
         paw: access.paw, vm_id: String(access.vm_id) }] : [] };
     }
     assert.match(sql, /^SELECT lane_id, status, config FROM cybercore_lane WHERE lane_id = \$1$/);
@@ -100,7 +116,11 @@ function harness(options = {}) {
     now: () => state.clock,
     sleep: async ms => { state.sleepCalls.push(ms); state.clock += ms; },
     schedule: task => state.scheduled.push(task),
-    proxmox: async (...args) => { state.calls.push(['proxmox', ...args]); return state.resources; },
+    proxmox: async (...args) => {
+      state.calls.push(['proxmox', ...args]);
+      if (state.proxmoxFailure) throw new Error('private-proxmox-credential');
+      return state.resources;
+    },
   });
   return { state, service, start: (input = { vm_id: 901, platform: 'windows' }) => service.start(clone(state.lane), input),
     run: async () => { while (state.scheduled.length) await state.scheduled.shift()(); },
@@ -163,7 +183,7 @@ for (const platform of ['windows', 'linux']) {
     const h = harness({ state: { agentOverride: { platform } } });
     const queued = await h.start({ vm_id: 901, platform });
     assert.equal(queued.status, 'running');
-    assert.deepEqual(h.state.calls, []);
+    assert.deepEqual(h.state.calls, [['proxmox', 'GET', '/api2/json/cluster/resources?type=vm']]);
     await h.run();
     assert.equal(h.job().status, 'completed');
     assert.deepEqual(h.state.calls.find(c => c[0] === 'guest'), ['guest', 'actual-node', 901, 15000]);
@@ -245,8 +265,16 @@ test('the atomic claim rejects a lane moved to a different course during the Cal
   const h = harness({ agents: state => { state.lane.config.course_id = 'different-course'; return []; } });
   await assert.rejects(h.start(), { status: 409 });
   assert.equal(h.state.scheduled.length, 0);
-  assert.deepEqual(h.state.calls, []);
+  assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox']);
   assert.equal(h.state.lane.config.caldera_agent_access, undefined);
+});
+
+test('the atomic claim rejects a lane genuinely suspended during the Caldera preflight', async () => {
+  const h = harness({ agents: state => { state.lane.status = 'suspended'; return []; } });
+  await assert.rejects(h.start(), { status: 409 });
+  assert.equal(h.state.scheduled.length, 0);
+  assert.equal(h.state.lane.config.caldera_agent_access, undefined);
+  assert.equal(h.state.lane.config.caldera_agent_job, undefined);
 });
 
 test('reinstall rotates only the selected VM credential and keeps its stable Caldera identity', async () => {
@@ -270,8 +298,9 @@ test('a timed-out queued job cannot execute or overwrite the replacement job', a
   h.state.clock += JOB_TIMEOUT_MS + 1;
   const replacement = await h.start();
   assert.notEqual(old.job_id, replacement.job_id);
+  const callsBeforeOldTask = clone(h.state.calls);
   await h.state.scheduled.shift()();
-  assert.equal(h.state.calls.length, 0);
+  assert.deepEqual(h.state.calls, callsBeforeOldTask);
   assert.equal(h.job().job_id, replacement.job_id);
   assert.equal(h.job().status, 'running');
   await h.run();
@@ -287,7 +316,7 @@ for (const [change, mutate] of [
 ]) {
   test(`a lane ${change} after queueing cannot dispatch the installer`, async () => {
     const h = harness(); await h.start(); mutate(h.state); await h.run();
-    assert.deepEqual(h.state.calls, []);
+    assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox']);
     if (h.state.lane) assert.equal(h.job().status, 'failed');
   });
 }
@@ -296,21 +325,117 @@ for (const live of [[], [{ vmid: 901, type: 'qemu', status: 'stopped', node: 'ac
   [{ vmid: 901, type: 'lxc', status: 'running', node: 'actual-node' }],
   [{ vmid: 901, type: 'qemu', status: 'running', node: 'actual-node', template: 1 }],
   [{ vmid: 901, type: 'qemu', status: 'running', node: '../wrong-node' }]]) {
-  test(`unavailable or ineligible live guest ${JSON.stringify(live)} fails before guest execution`, async () => {
+  test(`unavailable or ineligible live guest ${JSON.stringify(live)} fails before token rotation`, async () => {
     const h = harness({ state: { resources: live } });
-    await h.start(); await h.run();
-    assert.equal(h.job().status, 'failed');
-    assert.match(h.job().error, /running QEMU guest/);
+    h.state.lane.config.caldera_agent_access = { tokens: [{ vm_id: 901, token_hash: 'existing-token-hash' }] };
+    const before = clone(h.state.lane);
+    await assert.rejects(h.start(), err => err.status === 409 && /running QEMU guest/.test(err.message));
+    assert.deepEqual(h.state.lane, before);
+    assert.deepEqual(h.state.sql, []);
+    assert.equal(h.state.scheduled.length, 0);
     assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox']);
   });
 }
+
+for (const state of [{ resources: null }, { proxmoxFailure: true }]) {
+  test(`unverified Proxmox inventory ${JSON.stringify(state)} cannot rotate an existing credential`, async () => {
+    const h = harness({ state });
+    h.state.lane.config.caldera_agent_access = { tokens: [{ vm_id: 901, token_hash: 'existing-token-hash' }] };
+    const before = clone(h.state.lane);
+    await assert.rejects(h.start(), err => err.status === 503 && /verify VM power/.test(err.message)
+      && !err.message.includes('private-proxmox-credential'));
+    assert.deepEqual(h.state.lane, before);
+    assert.deepEqual(h.state.sql, []);
+    assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox']);
+    assert.equal(h.state.scheduled.length, 0);
+  });
+}
+
+test('a VM stopped after a successful preflight cannot dispatch the installer', async () => {
+  const h = harness();
+  await h.start();
+  h.state.resources[0].status = 'stopped';
+  await h.run();
+  assert.equal(h.job().status, 'failed');
+  assert.match(h.job().error, /running QEMU guest/);
+  assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox', 'proxmox']);
+});
+
+for (const marker of [{ error: 'Deployment failed; VMs retained' }, { provisioning_error: 'Guest setup failed' },
+  { goad: { status: 'failed' } }]) {
+  test(`a suspended deployment with ${JSON.stringify(marker)} installs on a live VM and permits fresh check-ins`, async () => {
+    const h = harness();
+    h.state.lane.status = 'suspended';
+    Object.assign(h.state.lane.config, marker);
+    const before = (await h.service.status([h.state.lane])).lanes[0];
+    assert.equal(before.lane_status, 'suspended');
+    assert.equal(before.lifecycle_eligible, true);
+    assert.equal(before.retained_after_failure, true);
+    assert.equal(before.runnable, true);
+    assert.equal(before.targets[0].runnable, true);
+    assert.equal(before.targets[0].power_state, 'running');
+    await h.start(); await h.run();
+    assert.equal(h.job().status, 'completed');
+    assert.deepEqual(await h.service.authorize(`/agent/${h.state.token}/beacon`), {
+      paw: h.job().paw, group: h.job().group,
+    });
+    assert.equal(h.state.lane.status, 'suspended', 'installing an agent must preserve the deployment lifecycle');
+    assert.deepEqual(Object.fromEntries(Object.keys(marker).map(key => [key, h.state.lane.config[key]])), marker);
+  });
+}
+
+test('genuinely suspended lanes remain blocked even if their VM is still running', async () => {
+  for (const marker of [{}, { error: '' }, { error: '   ', provisioning_error: '\t' },
+    { error: false }, { error: { message: 'failed' } }, { provisioning_error: [] }, { goad: { status: 'running' } }]) {
+    const h = harness(); const token = 'a'.repeat(64);
+    h.state.lane.status = 'suspended';
+    Object.assign(h.state.lane.config, marker);
+    h.state.lane.config.caldera_agent_access = { tokens: [{ token_hash: hashToken(token), vm_id: 901, paw: pawFor(LANE_ID, 901) }] };
+    await assert.rejects(h.start(), { status: 409 });
+    assert.equal(h.state.agentReads, 0);
+    assert.deepEqual(h.state.calls, []);
+    assert.deepEqual(h.state.sql, []);
+    assert.equal(await h.service.authorize(`/agent/${token}/beacon`), null);
+    const laneStatus = (await h.service.status([h.state.lane])).lanes[0];
+    assert.equal(laneStatus.lifecycle_eligible, false);
+    assert.equal(laneStatus.retained_after_failure, false);
+    assert.equal(laneStatus.runnable, false);
+    assert.equal(laneStatus.targets[0].power_state, 'running');
+    assert.equal(laneStatus.targets[0].runnable, false);
+    assert.equal(h.state.scheduled.length, 0);
+  }
+});
+
+test('retained deployment credentials stop authorizing whenever live guest power cannot be confirmed', async () => {
+  const h = harness();
+  h.state.lane.status = 'suspended';
+  h.state.lane.config.error = 'Historical provisioning failure';
+  await h.start(); await h.run();
+  const uri = `/agent/${h.state.token}/beacon`;
+  const identity = { paw: h.job().paw, group: h.job().group };
+  const live = clone(h.state.resources);
+  assert.deepEqual(await h.service.authorize(uri), identity);
+  h.state.resources[0].status = 'stopped';
+  assert.equal(await h.service.authorize(uri), null);
+  h.state.resources[0].status = 'unknown';
+  assert.equal(await h.service.authorize(uri), null);
+  h.state.resources = [];
+  assert.equal(await h.service.authorize(uri), null);
+  h.state.resources = live;
+  h.state.proxmoxFailure = true;
+  assert.equal(await h.service.authorize(uri), null);
+  h.state.proxmoxFailure = false;
+  assert.deepEqual(await h.service.authorize(uri), identity);
+  delete h.state.lane.config.error;
+  assert.equal(await h.service.authorize(uri), null, 'removing the retained-failure condition revokes the exception');
+});
 
 test('guest-agent failure is recorded without dispatching an installer', async () => {
   const h = harness({ state: { guestAvailable: false } });
   await h.start(); await h.run();
   assert.equal(h.job().status, 'failed');
   assert.match(h.job().error, /QEMU guest agent is unavailable/);
-  assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox', 'guest']);
+  assert.deepEqual(h.state.calls.map(c => c[0]), ['proxmox', 'proxmox', 'guest']);
 });
 
 test('authorization permits only recognized endpoints with a matching token hash on an active lane', async () => {
@@ -320,6 +445,7 @@ test('authorization permits only recognized endpoints with a matching token hash
   for (const endpoint of ['beacon', 'file/download', 'file/upload']) {
     assert.deepEqual(await h.service.authorize(`/agent/${token}/${endpoint}`), { paw, group: groupFor(LANE_ID) });
   }
+  assert.deepEqual(h.state.calls, [], 'active-lane check-ins retain the existing database-only authorization path');
   assert.equal(JSON.stringify(h.state.sql).includes(token), false);
   assert.equal(await h.service.authorize(`/agent/${'b'.repeat(64)}/beacon`), null);
   h.state.lane.status = 'stopped';
@@ -364,4 +490,37 @@ test('public status scopes agents to each lane and converts abandoned jobs to fa
   assert.equal(h.job().status, 'running', 'viewing status must not write a replacement job');
   const other = harness({ state: { agentOverride: { group: 'another-lane' } } });
   assert.deepEqual((await other.service.status([other.state.lane])).lanes[0].agents, []);
+});
+
+test('status distinguishes lifecycle eligibility from live power using one inventory read for all lanes', async () => {
+  const h = harness();
+  h.state.lane.config.vms.push({ vm_id: 902, name: 'Stopped guest' }, { vm_id: 903, name: 'Missing guest' });
+  h.state.resources.push({ vmid: 902, node: 'actual-node', type: 'qemu', status: 'stopped' });
+  const inactive = { ...clone(h.state.lane), lane_id: COURSE_ID, status: 'stopped' };
+  const status = await h.service.status([h.state.lane, inactive]);
+  assert.equal(status.power_error, null);
+  assert.deepEqual(h.state.calls, [['proxmox', 'GET', '/api2/json/cluster/resources?type=vm']]);
+  assert.equal(status.lanes[0].lifecycle_eligible, true);
+  assert.equal(status.lanes[0].retained_after_failure, false);
+  assert.equal(status.lanes[0].runnable, true);
+  assert.deepEqual(status.lanes[0].targets.map(t => [t.vm_id, t.power_state, t.runnable]), [
+    [901, 'running', true], [902, 'stopped', false], [903, 'unknown', false],
+  ]);
+  assert.equal(status.lanes[0].targets[0].node, 'actual-node');
+  assert.equal(status.lanes[1].lifecycle_eligible, false);
+  assert.equal(status.lanes[1].runnable, false);
+  assert.equal(status.lanes[1].targets.every(target => !target.runnable), true);
+});
+
+test('failed power discovery reports unknown power and cannot advertise runnable targets', async () => {
+  const h = harness({ state: { proxmoxFailure: true } });
+  h.state.lane.status = 'suspended';
+  h.state.lane.config.goad = { status: 'failed' };
+  const status = await h.service.status([h.state.lane]);
+  assert.match(status.power_error, /Could not verify VM power/);
+  assert.equal(status.lanes[0].lifecycle_eligible, true);
+  assert.equal(status.lanes[0].runnable, false);
+  assert.equal(status.lanes[0].targets[0].runnable, false);
+  assert.equal(status.lanes[0].targets[0].power_state, 'unknown');
+  assert.doesNotMatch(JSON.stringify(status), /private-proxmox-credential/);
 });
