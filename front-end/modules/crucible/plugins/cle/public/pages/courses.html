@@ -342,6 +342,463 @@
       .deploy-env-topo .topo-canvas { min-height: 320px; }
     }
 
+    /* ====================================================================
+       CALDERA CLASSROOM MODALS  (blue-team.js showClassroomCaldera)
+       --------------------------------------------------------------------
+       Two dialogs share this markup: "Group install agents" and "Run Caldera
+       attack". Both are selection screens whose size gates the submit button,
+       and both are opened when something has already gone wrong, so the shape
+       is a fixed header, ONE scrolling body, and a footer that never scrolls
+       away — the count that arms the button has to stay on screen while you
+       page through thirty target rows looking for the one that failed.
+
+       Everything is prefixed .cal- (verified unused across public/ and
+       modules/) and every generic-element rule is scoped under .cal-modal, so
+       nothing here can reach another page or another dialog on this one.
+
+       Colour rule: a token, or a color-mix() of a token. No new hex. The tints
+       below are derived from --danger/--warning/--info/--success/--primary, so
+       the [data-theme="dark"] swap of those tokens carries the tints with it
+       and there is no second set of values to keep in sync. Where color-mix is
+       unavailable the fill drops out and the strip keeps its coloured left
+       border and its glyph, which still reads.
+
+       Deliberately NOT used: .alert-* and .badge-primary (neither has a
+       [data-theme="dark"] rule anywhere in main.css), --bg-card-elevated
+       (dark-only, no light value), and .form-group (its descendant rule near
+       the top of this file puts 0.6rem of padding on every input, which
+       mangles a checkbox).
+       ==================================================================== */
+
+    /* .modal above resolves var(--card-bg) — a token defined NOWHERE in this
+       repo — so it always falls back to literal white, and every dialog on this
+       page is a white box in dark mode. Fixed here for this dialog only:
+       .modal.cal-modal is (0,2,0) and outranks the (0,1,0) rule above. The
+       page-wide version is one line on .modal itself and repaints seven other
+       dialogs, so it belongs in its own change. */
+    .modal.cal-modal {
+      width: 96%;
+      max-width: 1040px;
+      /* The overlay carries 1.25rem of padding from main.css, so a flat 90vh
+         can still overflow the viewport on a short window. */
+      max-height: min(90vh, calc(100vh - 2.5rem));
+      padding: 0;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-card);
+      color: var(--text-secondary);
+
+      /* Severity tints, derived so the dark token swap comes along for free. */
+      --cal-tint-danger: color-mix(in srgb, var(--danger) 12%, transparent);
+      --cal-tint-warn: color-mix(in srgb, var(--warning) 14%, transparent);
+      --cal-tint-info: color-mix(in srgb, var(--info) 13%, transparent);
+      --cal-tint-ok: color-mix(in srgb, var(--success) 14%, transparent);
+      --cal-tint-pick: color-mix(in srgb, var(--primary) 10%, transparent);
+      --cal-tint-chip: color-mix(in srgb, var(--primary) 16%, transparent);
+    }
+    /* No background here on purpose: main.css gives .modal-header a gradient in
+       dark mode at equal specificity, and this block is later in the cascade,
+       so declaring one would silently delete it. */
+    .cal-modal .modal-header {
+      flex: none;
+      padding: 0.9rem 1.25rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .cal-modal .modal-header h3 { margin: 0; font-size: 1.1rem; color: var(--text-primary); }
+
+    /* min-height:0 on both, or a flex child refuses to shrink below its content
+       and shoves the footer off the bottom of the screen instead of scrolling. */
+    .cal-form { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+    .cal-body {
+      flex: 1 1 auto; min-height: 0; overflow-y: auto;
+      padding: 1rem 1.25rem 1.25rem;
+      display: flex; flex-direction: column; gap: 0.85rem;
+    }
+    .cal-body > * { min-width: 0; }
+    /* .info-box below ships a 1rem bottom margin; inside a gapped flex column
+       that reads as a double gap under the lede alone. */
+    .cal-body .cal-lede { margin-bottom: 0; }
+    /* An island the renderer wrote '' into is still a flex item, and an empty
+       flex item still eats a gap. */
+    #classroomCalderaAdversaries:empty,
+    #classroomCalderaMachines:empty,
+    #classroomCalderaTargets:empty,
+    #classroomCalderaResults:empty { display: none; }
+
+    /* ── the explainer ────────────────────────────────────────────────────
+       The second lead paragraph, folded into a disclosure. It lives in the
+       static shell and is never re-rendered, so an instructor who runs this
+       weekly closes it once and it stays closed for the life of the dialog. */
+    .cal-explain { font-size: 0.82rem; }
+    .cal-explain > summary {
+      cursor: pointer; padding: 0.15rem 0;
+      font-size: 0.8rem; font-weight: 600; color: var(--primary);
+    }
+    .cal-explain > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .cal-explain p { margin: 0.4rem 0 0; line-height: 1.5; color: var(--text-secondary); }
+
+    /* ── panels ───────────────────────────────────────────────────────────
+       Replaces the browser-default <fieldset> inset box, which was the single
+       biggest reason these dialogs read as unstyled: nothing else in this app
+       has a 1px ridge around it. overflow:hidden so a table's square corners
+       are clipped back to the panel's radius. */
+    .cal-panel {
+      border: 1px solid var(--border-color);
+      border-radius: var(--border-radius);
+      background: var(--bg-card);
+      min-width: 0; overflow: hidden;
+    }
+    .cal-panel-head {
+      display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+      padding: 0.5rem 0.7rem;
+      background: var(--bg-card-hover);
+      border-bottom: 1px solid var(--border-color);
+    }
+    /* A translucent chip, not a filled disc. --primary is near-black navy in
+       light and a light azurite in dark, so white-on-primary would fail
+       contrast in dark; tinting the background and colouring the numeral with
+       the same token reads correctly in both. */
+    .cal-step {
+      flex: none; width: 1.35rem; height: 1.35rem; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 0.7rem; font-weight: 700;
+      background: var(--cal-tint-chip); color: var(--primary);
+    }
+    .cal-panel-title {
+      margin: 0; font-size: 0.78rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-secondary);
+    }
+    .cal-panel-actions { margin-left: auto; display: flex; gap: 0.3rem; }
+    .cal-panel-body { padding: 0.65rem 0.7rem; }
+    .cal-panel-body:empty { display: none; }
+    .cal-hint { margin: 0 0 0.5rem; font-size: 0.78rem; color: var(--text-muted); }
+    .cal-hint:last-child { margin-bottom: 0; }
+
+    /* Live per-panel counter. Written with .textContent + .className because the
+       three elements the tests read back are plain-text seams that cannot hold
+       markup, so state has to arrive as a class on the element itself. */
+    .cal-count {
+      display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px;
+      font-size: 0.7rem; font-weight: 700; line-height: 1.5;
+      font-variant-numeric: tabular-nums;
+      background: var(--bg-card); color: var(--text-muted);
+      border: 1px solid var(--border-color);
+    }
+    .cal-count.is-ok { background: var(--cal-tint-ok); color: var(--success); border-color: transparent; }
+
+    .cal-sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%);
+      white-space: nowrap; border: 0;
+    }
+    .cal-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85em; }
+
+    /* ── lanes ────────────────────────────────────────────────────────────
+       A chip grid rather than a stacked list: twenty lanes are five rows, not
+       twenty, and the panel stops being the reason you scroll. */
+    .cal-lanegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr)); gap: 0.25rem; }
+    .cal-lane {
+      display: flex; align-items: center; gap: 0.5rem; min-width: 0; margin: 0;
+      padding: 0.3rem 0.45rem; border: 1px solid transparent; border-radius: 6px;
+      font-size: 0.85rem; cursor: pointer; transition: var(--transition);
+    }
+    .cal-lane:hover { background: var(--bg-card-hover); }
+    .cal-lane:focus-within { outline: 2px solid var(--primary); outline-offset: 1px; }
+    .cal-lane input { flex: none; width: auto; margin: 0; cursor: pointer; }
+    .cal-lane-name {
+      font-weight: 600; color: var(--text-primary);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .cal-lane-meta {
+      margin-left: auto; flex: none; font-size: 0.75rem;
+      color: var(--text-muted); font-variant-numeric: tabular-nums;
+    }
+    .cal-lane .badge { flex: none; }
+    .cal-lane.is-picked { border-color: var(--primary); background: var(--cal-tint-pick); }
+    .cal-lane.is-off { opacity: 0.55; cursor: default; }
+    .cal-lane.is-off:hover { background: none; }
+
+    /* ── machine names ────────────────────────────────────────────────────
+       Six rows used to repeat the label "OS for matching VMs" beside six
+       identical selects. The label is now a column header printed once; each
+       select keeps a real accessible name from a visually-hidden text node
+       inside its own <label>, which also takes machine names out of attribute
+       position entirely — escHtml on this page does not escape quotes. */
+    .cal-mgrid {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto 10rem;
+      gap: 0.25rem 0.75rem; align-items: center;
+    }
+    .cal-mgrid-h {
+      font-size: 0.7rem; font-weight: 600; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--text-muted);
+      padding-bottom: 0.25rem; border-bottom: 1px solid var(--border-color);
+    }
+    .cal-mpick {
+      display: flex; align-items: center; gap: 0.5rem; min-width: 0; margin: 0;
+      font-size: 0.85rem; font-weight: 400; cursor: pointer;
+    }
+    .cal-mpick input { flex: none; width: auto; margin: 0; cursor: pointer; }
+    .cal-mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cal-molabel { display: block; margin: 0; font-weight: 400; }
+    .cal-select {
+      width: 100%; box-sizing: border-box; padding: 0.28rem 0.4rem;
+      font: inherit; font-size: 0.8rem;
+      border: 1px solid var(--border-color); border-radius: 6px;
+      background: var(--bg-input); color: var(--text-primary);
+    }
+    .cal-select:disabled { opacity: 0.5; }
+    /* A solid outline rather than a tinted ring: focus indication must not
+       depend on color-mix() resolving. Same idiom as .roster-search above.
+       Scoped under .cal-modal for specificity, not tidiness: main.css has
+       [data-theme="dark"] select:focus at (0,2,1) declaring `outline: none`,
+       so a bare .cal-select:focus at (0,2,0) loses the ring in dark mode and
+       falls back to a 15%-alpha glow. These three are (0,3,0) and hold in
+       both themes. */
+    .cal-modal .cal-select:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+
+    /* ── target table ─────────────────────────────────────────────────────
+       Its own scroll container on BOTH axes, so a long machine name widens the
+       table and not the dialog — the modal itself never scrolls sideways. */
+    .cal-tablewrap {
+      max-height: min(22rem, 42vh); overflow: auto;
+      border-top: 1px solid var(--border-color);
+    }
+    /* Below this the columns crush; past it the wrap scrolls instead. */
+    .cal-modal .cal-table { width: 100%; min-width: 44rem; }
+    /* .data-table sets border-collapse:collapse, and a collapsed table drops a
+       sticky th's own border — hence an inset shadow for the hairline. colour
+       and border-bottom are restated because [data-theme="dark"] table th
+       repaints both, and this rule is what outranks it. */
+    .cal-modal .cal-table thead th {
+      position: sticky; top: 0; z-index: 1;
+      padding: 0.4rem 0.6rem; font-size: 0.7rem;
+      background: var(--bg-card-hover); color: var(--text-secondary);
+      border-bottom: 0; box-shadow: inset 0 -1px 0 var(--border-color);
+    }
+    .cal-modal .cal-table td {
+      padding: 0.32rem 0.6rem; font-size: 0.85rem;
+      border-bottom: 1px solid var(--border-light);
+    }
+    .cal-modal .cal-table tbody tr:last-child td { border-bottom: 0; }
+    /* main.css paints dark-mode zebra and hover onto the td, not the tr, so a
+       background on the row alone is covered on every even row. Both states are
+       therefore set on the cell, at a specificity that clears those (0,2,2)
+       rules rather than merely following them. */
+    .cal-modal .cal-table tbody tr td { background: transparent; }
+    .cal-modal .cal-table tbody tr:hover td { background: var(--bg-card-hover); }
+    .cal-modal .cal-table label { margin: 0; font-weight: 400; }
+    .cal-modal .cal-table input[type="checkbox"] { width: auto; margin: 0; cursor: pointer; }
+    /* The whole cell is the hit target, not just the 13px box. */
+    .cal-pick { display: block; cursor: pointer; }
+    .cal-c-pick { width: 2.6rem; }
+    .cal-c-vm { width: 5rem; }
+    .cal-c-os { width: 10rem; }
+    .cal-c-status { width: 12rem; }
+    .cal-modal .cal-table .cal-c-vm { text-align: right; font-variant-numeric: tabular-nums; }
+    /* Badges sit inline in the cell rather than in a flex box: display:flex on a
+       <td> drops it out of the table layout and its column stops lining up with
+       its own <th>. */
+    .cal-modal .cal-table .cal-c-status .badge + .badge { margin-left: 0.3rem; }
+
+    /* Row state as a LEFT RULE, not a fill. Three states coexist with the hover
+       tint, and stacked translucent fills stop being legible the moment two of
+       them meet. Rows keep payload order because the classroomTarget{i} index is
+       a test seam, so this rule is the whole scanning affordance for thirty
+       rows. The specificity is deliberate: the transparent base is (0,2,3), so
+       each state rule has to clear it rather than merely follow it. */
+    .cal-modal .cal-table tbody td:first-child { box-shadow: inset 3px 0 0 transparent; }
+    .cal-modal .cal-table tbody .cal-row.is-picked td:first-child { box-shadow: inset 3px 0 0 var(--primary); }
+    .cal-modal .cal-table tbody .cal-row.is-busy td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+    /* .data-table td sets colour on the cell, so dimming the row does nothing
+       unless the cell is the thing dimmed. */
+    .cal-modal .cal-table tbody .cal-row.is-off td { color: var(--text-muted); opacity: 0.7; }
+    .cal-modal .cal-table td.cal-cell-err { color: var(--danger); }
+
+    /* ── the basket bar ───────────────────────────────────────────────────
+       Selection state and both actions, pinned outside the scroll area. */
+    .cal-footer {
+      flex: none; display: flex; flex-direction: column; gap: 0.5rem;
+      padding: 0.7rem 1.25rem;
+      border-top: 1px solid var(--border-color); background: var(--bg-card-hover);
+    }
+    .cal-footer-row { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+    .cal-bar-state { flex: 1 1 18rem; min-width: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+    .cal-chips { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+    .cal-chips:empty { display: none; }
+    .cal-bar-actions { flex: none; display: flex; gap: 0.5rem; align-items: center; }
+    /* The warning glyph is CSS-generated on purpose. #classroomCalderaSummary is
+       read back through .textContent, and generated content never lands there —
+       so severity costs nothing at that seam. Same trick on the error box. */
+    .cal-bar-text { position: relative; margin: 0; font-size: 0.85rem; color: var(--text-secondary); }
+    .cal-bar-text.is-ready { color: var(--text-primary); }
+    .cal-bar-text.is-blocked { color: var(--text-primary); font-weight: 600; padding-left: 1.2rem; }
+    .cal-bar-text.is-blocked::before { content: "\26A0"; position: absolute; left: 0; color: var(--warning); }
+
+    /* ── the error box ────────────────────────────────────────────────────
+       Also a .textContent seam, so :empty does the show/hide that would
+       otherwise be a JS branch, and the icon is again generated. */
+    #classroomCalderaError {
+      position: relative; margin: 0;
+      padding: 0.55rem 0.7rem 0.55rem 1.9rem;
+      max-height: 7rem; overflow-y: auto;
+      border-radius: var(--border-radius); border-left: 3px solid var(--danger);
+      background: var(--cal-tint-danger); color: var(--text-primary);
+      font-size: 0.83rem; white-space: pre-wrap;
+    }
+    #classroomCalderaError::before { content: "\26A0"; position: absolute; left: 0.7rem; top: 0.5rem; color: var(--danger); }
+    #classroomCalderaError:empty { display: none; }
+
+    /* ── severity strips ──────────────────────────────────────────────────
+       Replaces <p style="color:#e53e3e"> in the renderer. .env-warn above is
+       the same shape but hardcodes #92400e, which has no dark counterpart. */
+    .cal-note {
+      display: flex; gap: 0.5rem; align-items: flex-start; margin: 0.4rem 0 0;
+      padding: 0.5rem 0.7rem; border-radius: var(--border-radius);
+      border-left: 3px solid var(--cal-edge); background: var(--cal-tint);
+      font-size: 0.8rem; color: var(--text-secondary);
+    }
+    .cal-note:first-child { margin-top: 0; }
+    .cal-note p { margin: 0.15rem 0 0; }
+    .cal-note strong { color: var(--text-primary); }
+    .cal-note .cal-note-head { margin: 0; font-weight: 700; color: var(--danger); }
+    .cal-note-icon { flex: none; line-height: 1.35; font-size: 0.95rem; color: var(--cal-edge); }
+    .cal-note-danger { --cal-edge: var(--danger);  --cal-tint: var(--cal-tint-danger); }
+    .cal-note-warn   { --cal-edge: var(--warning); --cal-tint: var(--cal-tint-warn); }
+    .cal-note-info   { --cal-edge: var(--info);    --cal-tint: var(--cal-tint-info); }
+
+    /* ── progress metrics ─────────────────────────────────────────────────
+       "0 queued - 0 running - 0 completed - 1 failed" was one flat text line in
+       which the only number that mattered had no weight at all. A zero must not
+       shout; the failure must. Each chip carries its count and its word as ONE
+       text node — a test matches the pair, and splitting them would break it. */
+    /* The last job card's own bottom margin would otherwise stack with the
+       body's flex gap. */
+    .cal-results > :last-child { margin-bottom: 0; }
+    .cal-results-title { margin: 0.25rem 0 0.5rem; font-size: 0.9rem; color: var(--text-primary); }
+    .cal-metrics { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.6rem; }
+    .cal-metric {
+      display: inline-block; padding: 0.25rem 0.65rem; border-radius: 999px;
+      font-size: 0.8rem; font-weight: 600; font-variant-numeric: tabular-nums;
+      background: var(--bg-card-hover); color: var(--text-secondary);
+      border: 1px solid var(--border-color);
+    }
+    .cal-metric.is-zero { opacity: 0.5; font-weight: 500; font-size: 0.74rem; }
+    .cal-metric.is-live { background: var(--cal-tint-info); color: var(--info);    border-color: transparent; }
+    .cal-metric.is-good { background: var(--cal-tint-ok);   color: var(--success); border-color: transparent; }
+    /* The one chip that has to be seen from across the room. */
+    .cal-metric.is-bad {
+      background: var(--cal-tint-danger); color: var(--danger);
+      border-color: var(--danger); font-weight: 700;
+    }
+    /* A ring rather than a border: it does not change the chip's box, so the
+       badge row does not jog sideways when a count crosses zero. */
+    .cal-loud { font-weight: 700; box-shadow: 0 0 0 1px var(--warning); }
+
+    /* ── job / batch cards ────────────────────────────────────────────────
+       The failure detail was plain text with no severity treatment at all. */
+    .cal-job, .cal-batch {
+      margin-bottom: 0.5rem; padding: 0.55rem 0.7rem;
+      border: 1px solid var(--border-color); border-left: 3px solid var(--border-color);
+      border-radius: var(--border-radius); background: var(--bg-card);
+    }
+    .cal-job.is-bad  { border-left-color: var(--danger); background: var(--cal-tint-danger); }
+    .cal-job.is-good { border-left-color: var(--success); }
+    .cal-job.is-live { border-left-color: var(--info); }
+    .cal-job-head, .cal-batch-head { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+    .cal-job-name, .cal-batch-name { font-size: 0.85rem; color: var(--text-primary); }
+    .cal-batch-head .btn { margin-left: auto; }
+    .cal-batch-when { font-size: 0.75rem; color: var(--text-muted); }
+    .cal-batch .cal-tablewrap { margin-top: 0.4rem; border-top: 0; }
+    .cal-modal .cal-batch .cal-table { min-width: 32rem; }
+    .cal-job-msg { margin: 0.25rem 0 0; font-size: 0.8rem; color: var(--text-secondary); white-space: pre-wrap; }
+    .cal-job-note { margin-top: 0.3rem; font-size: 0.78rem; }
+    .cal-job-ok { margin: 0.3rem 0 0; font-size: 0.8rem; color: var(--success); }
+
+    /* ── adversary picker ─────────────────────────────────────────────────
+       Was a native <select> of 25+ opaque entries that covered the lane
+       selector the moment it opened. */
+    .cal-advtools { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.55rem; }
+    .cal-search { position: relative; flex: 1 1 14rem; min-width: 9rem; }
+    .cal-searchbox {
+      width: 100%; box-sizing: border-box; padding: 0.35rem 1.9rem 0.35rem 0.55rem;
+      font: inherit; font-size: 0.83rem;
+      border: 1px solid var(--border-color); border-radius: 6px;
+      background: var(--bg-input); color: var(--text-primary);
+    }
+    .cal-modal .cal-searchbox:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+    .cal-search-clear {
+      position: absolute; right: 0.3rem; top: 50%; transform: translateY(-50%);
+      border: 0; background: none; cursor: pointer;
+      font-size: 1rem; line-height: 1; padding: 0.15rem 0.3rem; color: var(--text-muted);
+    }
+    .cal-search-clear:hover { color: var(--danger); }
+    .cal-search-clear:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+    .cal-advpills { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+    /* The scope pills reuse .filter-pill, whose .active state (main.css:1586)
+       fills with var(--primary) and hardcodes color:#fff. In light mode that is
+       white on Arizona Blue #0c234b and reads correctly, but --primary is
+       lifted to azurite #5c9fe6 in dark, where white text lands at 2.8:1 —
+       under AA for any size. This is the same hazard .cal-step sidesteps by
+       never filling with --primary; here the fill comes from main.css, so the
+       text colour is corrected instead. --bg-card on that fill is 6.3:1.
+       Scoped to this dialog so every other filter pill in the app is untouched.
+       (0,4,0) clears .filter-pill.active at (0,2,0). */
+    [data-theme="dark"] .cal-modal .filter-pill.active { color: var(--bg-card); }
+    /* size="8" in the markup makes this a LISTBOX rather than a dropdown, so it
+       can no longer cover the lane selector below it — and it stays a real
+       <select>, so .value / .onchange / .disabled are unchanged. */
+    .cal-advlist {
+      width: 100%; box-sizing: border-box; min-height: 11rem; padding: 0.25rem;
+      font: inherit; font-size: 0.85rem;
+      border: 1px solid var(--border-color); border-radius: var(--border-radius);
+      background: var(--bg-input); color: var(--text-primary);
+    }
+    .cal-modal .cal-advlist:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+    .cal-modal .cal-advlist option { padding: 0.28rem 0.45rem; }
+    .cal-modal .cal-advlist optgroup {
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.04em; color: var(--text-muted);
+    }
+    /* Ability count was the only metadata the old picker showed. */
+    .cal-advcard {
+      margin-top: 0.5rem; padding: 0.6rem 0.7rem;
+      border: 1px solid var(--border-color); border-left: 3px solid var(--primary);
+      border-radius: var(--border-radius); background: var(--bg-card-hover);
+    }
+    .cal-advcard-head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+    .cal-advcard-name { font-size: 0.9rem; color: var(--text-primary); }
+    .cal-advcard-desc { margin: 0.35rem 0 0; font-size: 0.82rem; color: var(--text-secondary); }
+    .cal-advcard-desc.is-muted { color: var(--text-muted); font-style: italic; }
+
+    /* ── empty states ─────────────────────────────────────────────────────
+       Says what to do next, not just that there is nothing here. */
+    .cal-empty {
+      margin: 0; text-align: center; padding: 1.1rem 0.9rem;
+      border: 1px dashed var(--border-color); border-radius: 10px;
+      color: var(--text-muted); font-size: 0.82rem;
+    }
+    .cal-empty strong { display: block; margin-bottom: 0.2rem; font-size: 0.88rem; color: var(--text-secondary); }
+    .cal-empty p { margin: 0; }
+
+    @media (max-width: 760px) {
+      .cal-mgrid { grid-template-columns: minmax(0, 1fr); }
+      .cal-mgrid .cal-mgrid-h { display: none; }
+      .cal-lanegrid { grid-template-columns: minmax(0, 1fr); }
+      .cal-modal .modal-header, .cal-body, .cal-footer { padding-left: 0.9rem; padding-right: 0.9rem; }
+    }
+
+    /* Scoped to the dialog so it cannot reach the rest of the app. !important is
+       needed to clear the blanket theme-transition rule in main.css, which puts
+       a 0.3s transition on every input, button, badge and table cell. */
+    @media (prefers-reduced-motion: reduce) {
+      .cal-modal, .cal-modal * {
+        transition: none !important;
+        animation: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
     .info-box { background: rgba(30, 82, 136, 0.1); border-left: 4px solid var(--primary-light, #1e5288); padding: 1rem; border-radius: 6px; margin-bottom: 1rem; }
     .info-box p { margin: 0; color: var(--primary, #0c234b); font-size: 0.9rem; }
 

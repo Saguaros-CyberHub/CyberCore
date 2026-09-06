@@ -214,6 +214,31 @@
     return isFinite(t) ? new Date(t).toLocaleString() : '—';
   }
 
+  /**
+   * The attribute-position escaper.
+   *
+   * escHtml() is courses.html's `div.textContent = s; return div.innerHTML`, and
+   * that escapes & < > but NOT quotes — so a value carrying a double quote
+   * breaks out of any attribute it is interpolated into. courses.html declares
+   * its own escAttr for exactly this, but that one is not in this file's scope
+   * (the global comment at the top of this file lists what is), so the modal
+   * code below carries its own rather than interpolating raw quotes.
+   *
+   * Idempotent by construction: escHtml runs first, so the ampersands it
+   * introduces are already entities and these replacements cannot double-escape
+   * them.
+   *
+   * Escaping " also hardens a test seam. test/caldera-classroom-ui.test.js finds
+   * elements by regex-scanning innerHTML for id="…" and then decides `disabled`
+   * / `checked` from a tag slice that ends at the first '>' it sees — so one raw
+   * '>' inside an attribute value silently truncates that slice and the harness
+   * reads the wrong state off the element.
+   */
+  function escAttr(value) {
+    return escHtml(String(value === null || value === undefined ? '' : value))
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   /** One <option> label. See the header: optional fields only, no counting. */
   function runLabel(run) {
     var what = run.technique_id || run.chain_key || run.tactic_id || null;
@@ -885,7 +910,7 @@
     const laneOptions = items => items.map(lane => [lane.lane_id, lane.name, lane.runnable]);
     if (JSON.stringify(laneOptions(oldLanes)) !== JSON.stringify(laneOptions(lanes)) || !previous) {
       select.innerHTML = '<option value="">Select a lane with running VMs...</option>' + lanes.map(lane =>
-        `<option value="${escHtml(lane.lane_id)}"${lane.runnable === true ? '' : ' disabled'}>${escHtml(lane.name || lane.lane_id)}${lane.runnable === true ? '' : ' (unavailable)'}</option>`
+        `<option value="${escAttr(lane.lane_id)}"${lane.runnable === true ? '' : ' disabled'}>${escHtml(lane.name || lane.lane_id)}${lane.runnable === true ? '' : ' (unavailable)'}</option>`
       ).join('');
       select.value = lanes.some(lane => lane.lane_id === state.laneId) ? state.laneId : lanes.find(lane => lane.runnable === true)?.lane_id || '';
     }
@@ -950,7 +975,7 @@
     // Replacing the options on every poll interrupts a keyboard selection.
     if (JSON.stringify(previous?.targets) !== JSON.stringify(targets)) {
       vmSelect.innerHTML = '<option value="">Select a VM...</option>' + targets.map(vm =>
-        `<option value="${escHtml(String(vm.vm_id))}"${vm.runnable === true ? '' : ' disabled'}>${escHtml(vm.name || 'VM')} (${escHtml(String(vm.vm_id))})${vm.role ? ` - ${escHtml(vm.role)}` : ''} - ${escHtml(vm.power_state || 'unknown')}</option>`
+        `<option value="${escAttr(String(vm.vm_id))}"${vm.runnable === true ? '' : ' disabled'}>${escHtml(vm.name || 'VM')} (${escHtml(String(vm.vm_id))})${vm.role ? ` - ${escHtml(vm.role)}` : ''} - ${escHtml(vm.power_state || 'unknown')}</option>`
       ).join('');
       const retained = targets.find(vm => String(vm.vm_id) === selected);
       const initial = !previous && targets.find(vm => vm.runnable === true && !/gateway|router|firewall/i.test(`${vm.role || ''} ${vm.name || ''}`));
@@ -964,7 +989,7 @@
       ${state.laneId ? `<div style="font-size: 0.85rem;">Saved lane status: ${escHtml(data.lane_status || 'unknown')}</div>
       <div style="font-size: 0.85rem;">VM power: ${data.power_error ? 'Unavailable' : `${targets.filter(vm => vm.power_state === 'running').length} of ${targets.length} VMs running`}</div>
       ${data.retained_after_failure && data.runnable === true ? '<p style="font-size: 0.85rem;">Suspended after a provisioning error; running VMs can still be used.</p>' : ''}` : ''}
-      ${consoleUrl ? `<a href="${escHtml(consoleUrl)}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 0.5rem;">Open Caldera console &nearr;</a>` : ''}`;
+      ${consoleUrl ? `<a href="${escAttr(consoleUrl)}" target="_blank" rel="noopener noreferrer" style="display: inline-block; margin-top: 0.5rem;">Open Caldera console &nearr;</a>` : ''}`;
     document.getElementById('laneCalderaNetwork').textContent = !state.laneId ? ''
       : data.lifecycle_eligible === false ? 'This lane is unavailable for agent installation. Resume the lane, then refresh status.'
       : data.internet_enabled === false
@@ -1119,34 +1144,92 @@
     overlay.id = 'classroomCalderaModal';
     overlay.className = 'modal-overlay';
     const install = mode === 'install';
-    overlay.innerHTML = `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="classroomCalderaTitle" style="max-width:1000px;">
-      <div class="modal-header"><h3 id="classroomCalderaTitle">${install ? 'Group install agents' : 'Run Caldera attack'}</h3>
-        <button id="classroomCalderaClose" class="modal-close" aria-label="Close Caldera classroom controls">&times;</button></div>
-      <p>${install ? 'Select lanes, then choose machine names to install on matching VMs across those lanes. Review individual targets before installing.'
-        : 'Choose an adversary profile and the student lanes that should receive it. CyberCore starts one operation per lane together; actual execution follows each agent’s check-in.'}</p>
-      ${install ? '<p style="font-size:0.85rem;">Windows installation applies the same Defender settings and agent-folder exclusion as the individual installer. Applied changes remain on each selected VM.</p>'
-        : '<p style="font-size:0.85rem;">Build an adversary in the Caldera console by adding abilities in the desired order, with executors that match your agents. Students can inspect the resulting activity in their lane’s existing ELK/SIEM.</p>'}
-      <form id="classroomCalderaForm" style="display:grid; gap:0.9rem;">
-        <div id="classroomCalderaAdversaries"></div>
-        <fieldset><legend>Student lanes</legend><div style="display:flex; gap:0.5rem; margin-bottom:0.5rem;">
-          <button type="button" class="btn btn-secondary" id="classroomCalderaSelectLanes">Select all available lanes</button>
-          <button type="button" class="btn btn-secondary" id="classroomCalderaClearLanes">Clear lanes</button></div>
-          <div id="classroomCalderaLanes">Loading lanes...</div></fieldset>
-        <div id="classroomCalderaMachines"></div><div id="classroomCalderaTargets"></div>
-        <p id="classroomCalderaSummary" role="status" aria-live="polite"></p>
-        <div style="display:flex; gap:0.5rem; flex-wrap:wrap;">
-          <button type="submit" class="btn btn-primary" id="classroomCalderaSubmit" disabled>${install ? 'Install selected agents' : 'Launch on selected lanes'}</button>
-          <button type="button" class="btn btn-secondary" id="classroomCalderaRefresh">Refresh status</button></div>
+    // THE SHELL IS BUILT ONCE AND NEVER RE-RENDERED. Everything below that polls
+    // writes into one of the island ids (Adversaries / Lanes / Machines /
+    // Targets / SummaryBadges / Results); the ids OUTSIDE those islands — the
+    // profile filter, the scope pills, the panel counters, the footer — are
+    // bound here, once, so a 5s poll cannot destroy a control mid-keystroke and
+    // take the caret with it. Nesting an island inside another island would also
+    // break classroomSetHtml()'s identity cache, since its WeakMap is keyed on
+    // the element object the parent render would replace.
+    //
+    // NO INLINE STYLES. The old markup carried style="max-width:1000px" plus a
+    // handful of raw hexes (#e53e3e, --gray-500) that had no dark-theme value,
+    // which is most of why this dialog read as unstyled; an inline style would
+    // also beat the .cal-* rules in courses.html.
+    //
+    // Layout is header / scrolling body / pinned footer, and the <form> spans
+    // body AND footer so the submit button is a plain in-form submit rather than
+    // a detached button relying on form="…". The old dialog put everything in
+    // .modal, which is max-height:90vh with its own scroll, so with six lanes
+    // and eighteen target rows the submit button scrolled off the bottom.
+    overlay.innerHTML = `<div class="modal cal-modal" role="dialog" aria-modal="true" aria-labelledby="classroomCalderaTitle">
+      <div class="modal-header">
+        <h3 id="classroomCalderaTitle">${install ? 'Group install agents' : 'Run Caldera attack'}</h3>
+        <button type="button" id="classroomCalderaClose" class="modal-close" aria-label="Close Caldera classroom controls">&times;</button>
+      </div>
+      <form id="classroomCalderaForm" class="cal-form">
+        <div class="cal-body">
+          <div class="info-box cal-lede"><p>${install
+            ? 'Install the Caldera agent on many lane VMs at once. Pick lanes, pick machine names, then check the target list &mdash; nothing is sent until you press Install.'
+            : 'Start one Caldera operation per selected lane. Each lane gets its own operation and agent group; execution begins at each agent&rsquo;s next check-in, not when you press Launch.'}</p></div>
+          <details class="cal-explain"><summary>${install ? 'What installing changes on a VM' : 'How adversary profiles work'}</summary>
+            <p>${install
+              ? 'Windows targets get the same Microsoft Defender adjustments and agent-folder exclusion as the single-VM installer, and those changes stay on the VM afterwards. Linux targets get the agent binary and a service. You can close this window while installation runs &mdash; reopen it to check progress.'
+              : 'An ability is one attack step; an adversary is an ordered profile of abilities. Build them in the Caldera console, ordering abilities and choosing executors that match the agents you installed. Students inspect the resulting activity in their lane&rsquo;s existing ELK/SIEM. You can close this window while the exercise runs &mdash; reopen it to check progress.'}</p>
+          </details>
+          ${install ? '<div id="classroomCalderaAdversaries"></div>' : `<section class="cal-panel">
+            <div class="cal-panel-head"><span class="cal-step">1</span><h4 class="cal-panel-title">Adversary profile</h4>
+              <span class="cal-count" id="classroomCalderaAdvCount"></span></div>
+            <div class="cal-panel-body">
+              <div class="cal-advtools">
+                <div class="cal-search">
+                  <input type="search" id="classroomCalderaAdversarySearch" class="cal-searchbox" placeholder="Filter profiles" autocomplete="off" aria-label="Filter adversary profiles by name">
+                  <button type="button" class="cal-search-clear" id="classroomCalderaAdversaryClear" aria-label="Clear the profile filter">&times;</button>
+                </div>
+                <div class="cal-advpills">
+                  <button type="button" class="filter-pill" id="classroomCalderaAdvScopeBuilt">Profiles</button>
+                  <button type="button" class="filter-pill" id="classroomCalderaAdvScopeAll">Past launches</button>
+                </div>
+              </div>
+              <div id="classroomCalderaAdversaries"></div>
+            </div></section>`}
+          <section class="cal-panel">
+            <div class="cal-panel-head"><span class="cal-step">${install ? '1' : '2'}</span><h4 class="cal-panel-title">Student lanes</h4>
+              <span class="cal-count" id="classroomCalderaLaneCount"></span>
+              <div class="cal-panel-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="classroomCalderaSelectLanes">All available</button>
+                <button type="button" class="btn btn-secondary btn-sm" id="classroomCalderaClearLanes">Clear</button>
+              </div></div>
+            <div class="cal-panel-body" id="classroomCalderaLanes"></div>
+          </section>
+          <div id="classroomCalderaMachines"></div>
+          <div id="classroomCalderaTargets"></div>
+          <div id="classroomCalderaResults" class="cal-results" aria-live="polite"></div>
+        </div>
+        <div class="cal-footer">
+          <p id="classroomCalderaError" role="alert"></p>
+          <div class="cal-footer-row">
+            <div class="cal-bar-state">
+              <div id="classroomCalderaSummaryBadges" class="cal-chips"></div>
+              <p id="classroomCalderaSummary" class="cal-bar-text" role="status" aria-live="polite"></p>
+            </div>
+            <div class="cal-bar-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="classroomCalderaRefresh">Refresh status</button>
+              <button type="submit" class="btn btn-primary" id="classroomCalderaSubmit" disabled>${install ? 'Install selected agents' : 'Launch on selected lanes'}</button>
+            </div>
+          </div>
+        </div>
       </form>
-      <p id="classroomCalderaError" role="alert" style="color:#e53e3e; white-space:pre-wrap;"></p>
-      <div id="classroomCalderaResults" style="margin-top:1rem;" aria-live="polite"></div>
-      <p style="font-size:0.8rem; color:var(--gray-500);">You can close this window while ${install ? 'installation' : 'the exercise'} runs. Reopen it to check progress.</p>
     </div>`;
     document.body.appendChild(overlay);
     const pending = install ? null : _pendingCalderaLaunches.get(currentCourseId);
     const state = { mode, courseId: currentCourseId, overlay, payload: null, timer: null, requests: new Set(),
       submitting: false, refreshing: false, misses: 0, revision: 0, fresh: false, error: '',
       lanes: new Set(pending?.lane_ids || []), machines: new Set(), targets: new Set(), excludedTargets: new Set(), platforms: new Map(), machinePlatforms: new Map(),
+      // Filter state for the adversary picker. Held here, never read back off
+      // the DOM, so a poll landing mid-typing cannot lose it.
+      adversarySearch: '', adversaryScope: 'built',
       adversary: pending?.adversary_id || '', pending, results: [] };
     _classroomCaldera = state;
     document.getElementById('classroomCalderaClose').onclick = closeClassroomCaldera;
@@ -1154,6 +1237,22 @@
     document.getElementById('classroomCalderaForm').onsubmit = event => { event.preventDefault(); return submitClassroomCaldera(state); };
     document.getElementById('classroomCalderaSelectLanes').onclick = () => selectClassroomLanes(state, true);
     document.getElementById('classroomCalderaClearLanes').onclick = () => selectClassroomLanes(state, false);
+    if (!install) {
+      // Bound once, on the shell, for the reason the filter lives there at all:
+      // #classroomCalderaAdversaries is rewritten wholesale on every 5s poll, and
+      // a search box inside it would eat its own focus on each keystroke.
+      //
+      // Handlers are .onX PROPERTIES, not addEventListener, and none of them
+      // reads an event argument — the test harness invokes .onclick() with no
+      // arguments at all and .onchange({ target: el }) with nothing else on it.
+      const search = document.getElementById('classroomCalderaAdversarySearch');
+      search.oninput = search.onchange = () => { state.adversarySearch = search.value; renderClassroomCaldera(state); };
+      document.getElementById('classroomCalderaAdversaryClear').onclick = () => {
+        search.value = ''; state.adversarySearch = ''; renderClassroomCaldera(state); search.focus();
+      };
+      document.getElementById('classroomCalderaAdvScopeBuilt').onclick = () => { state.adversaryScope = 'built'; renderClassroomCaldera(state); };
+      document.getElementById('classroomCalderaAdvScopeAll').onclick = () => { state.adversaryScope = 'all'; renderClassroomCaldera(state); };
+    }
     state.observer = new MutationObserver(() => {
       if (_classroomCaldera === state && !overlay.classList.contains('active')) closeClassroomCaldera();
     });
@@ -1202,8 +1301,62 @@
     });
   }
 
-  function classroomPlatformOptions(selected) {
-    return `<option value=""${selected ? '' : ' selected'}>Choose OS...</option>`
+  /** "1 VM" / "3 VMs" — the count and the word, never split across elements. */
+  const classroomPlural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+
+  /**
+   * A Caldera / job / power status, mapped to a badge modifier.
+   *
+   * Only the modifiers that main.css gives a [data-theme="dark"] rule are
+   * reachable from here. .badge-primary and the .alert-* family are deliberately
+   * absent: they are hardcoded light hexes with no dark counterpart, so they are
+   * illegible in the theme half this page's users actually run.
+   */
+  function classroomStatusBadge(status) {
+    const value = String(status || '').toLowerCase();
+    if (['running', 'started', 'preparing', 'paused', 'installing'].includes(value)) return 'badge-info';
+    if (['finished', 'completed'].includes(value)) return 'badge-success';
+    if (['failed', 'aborted'].includes(value)) return 'badge-danger';
+    if (['stopped', 'cleanup', 'out_of_time'].includes(value)) return 'badge-muted';
+    if (['queued', 'pending'].includes(value)) return 'badge-warning';
+    return 'badge-gray';
+  }
+
+  /**
+   * Is this adversary a snapshot of a past launch rather than something a human
+   * built?
+   *
+   * Every classroom launch writes its profile back to Caldera under a generated
+   * name, so after a term the picker is mostly rows nobody chose to create and
+   * nobody wants to launch again. src/utils/caldera-lane-operations.js:157 is
+   * where they are minted, and the name and the description it stamps are the
+   * ONLY signal on the wire — the adversary projection carries no origin field —
+   * so both are matched here. If that naming ever changes, this degrades to
+   * showing snapshots alongside built profiles, which is today's behaviour.
+   */
+  function classroomSnapshot(adversary) {
+    return /^Classroom [0-9a-f]{8}: /.test(adversary.name || '')
+      || adversary.description === 'Snapshot for a CyberCore classroom exercise.';
+  }
+
+  /** The profile's name with the generated snapshot prefix taken back off. */
+  const classroomAdversaryName = adversary =>
+    String(adversary.name || adversary.adversary_id || '').replace(/^Classroom [0-9a-f]{8}: /, '');
+
+  /**
+   * The OS <select> options.
+   *
+   * The placeholder is a parameter because the two call sites mean different
+   * things by an empty value: on a machine name it means "use each VM's own OS",
+   * on a single row it means "not chosen yet, and this blocks submission". It
+   * used to be one hardcoded label that the machine-name call site then deleted
+   * again with a regex over its own output.
+   *
+   * The placeholder is trusted markup (an entity-carrying literal from this
+   * file), never server data.
+   */
+  function classroomPlatformOptions(selected, placeholder) {
+    return `<option value=""${selected ? '' : ' selected'}>${placeholder}</option>`
       + ['windows', 'linux'].map(platform => `<option value="${platform}"${selected === platform ? ' selected' : ''}>${platform === 'windows' ? 'Windows' : 'Linux'}</option>`).join('');
   }
 
@@ -1212,12 +1365,35 @@
     const data = state.payload || {};
     const lanes = Array.isArray(data.lanes) ? data.lanes : [];
     const locked = state.submitting || !!state.pending;
-    classroomSetHtml('classroomCalderaLanes', lanes.length ? lanes.map((lane, i) => {
+    // A chip grid, so twenty lanes are five rows rather than twenty, and the
+    // reason a lane cannot be used is a badge rather than the old " (unavailable)"
+    // suffix — an instructor looking at a greyed-out lane needs to know WHICH
+    // precondition failed, not that one did.
+    const laneRow = (lane, i) => {
       const available = classroomLaneAvailable(state, lane);
-      const details = state.mode === 'attack' ? `${(lane.agents || []).length} ready agent(s)`
-        : `${(lane.targets || []).filter(vm => vm.runnable === true).length} running VM(s)`;
-      return `<label style="display:block; margin:0.35rem 0;"><input type="checkbox" id="classroomLane${i}"${state.lanes.has(lane.lane_id) ? ' checked' : ''}${locked || !available ? ' disabled' : ''}> ${escHtml(lane.name || lane.lane_id)} &mdash; ${escHtml(details)}${!available ? ' (unavailable)' : ''}</label>`;
-    }).join('') : '<p>No deployed lanes were found for this course.</p>');
+      const picked = state.lanes.has(lane.lane_id);
+      const meta = state.mode === 'attack'
+        ? `${classroomPlural((lane.agents || []).length, 'agent')} ready`
+        : classroomPlural((lane.targets || []).filter(vm => vm.runnable === true).length, 'running VM');
+      // Mirrors classroomLaneAvailable() branch for branch. A reason invented
+      // here that the gate does not actually test is worse than no reason.
+      const flag = available ? ''
+        : lane.runnable !== true ? '<span class="badge badge-muted">lane not running</span>'
+          : state.mode === 'attack' ? '<span class="badge badge-warning">no agent checked in</span>'
+            : '<span class="badge badge-warning">internet off</span>';
+      // The lane name sits AFTER the <input>, not in an attribute on it. The
+      // test harness slices a tag from the '<' before its id to the next '>' to
+      // decide checked/disabled, so a name interpolated ahead of the input would
+      // land inside that slice — and escHtml does not escape quotes, so it could
+      // also break out of the attribute in a real browser.
+      return `<label class="cal-lane${picked ? ' is-picked' : ''}${available ? '' : ' is-off'}">`
+        + `<input type="checkbox" id="classroomLane${i}"${picked ? ' checked' : ''}${locked || !available ? ' disabled' : ''}>`
+        + `<span class="cal-lane-name">${escHtml(lane.name || lane.lane_id)}</span>`
+        + `<span class="cal-lane-meta">${escHtml(meta)}</span>${flag}</label>`;
+    };
+    classroomSetHtml('classroomCalderaLanes', lanes.length
+      ? `<div class="cal-lanegrid">${lanes.map(laneRow).join('')}</div>`
+      : '<div class="cal-empty"><strong>No deployed lanes</strong><p>Deploy this course&rsquo;s lanes from the Environments tab, then press Refresh status.</p></div>');
     lanes.forEach((lane, i) => {
       document.getElementById(`classroomLane${i}`).onchange = event => {
         if (locked || !classroomLaneAvailable(state, lane)) return;
@@ -1226,7 +1402,14 @@
         renderClassroomCaldera(state);
       };
     });
-    document.getElementById('classroomCalderaSelectLanes').disabled = locked || !lanes.some(lane => classroomLaneAvailable(state, lane));
+    const availableLanes = lanes.filter(lane => classroomLaneAvailable(state, lane)).length;
+    // .textContent + .className rather than markup: this counter is small enough
+    // to be plain text, and keeping it so means the panel header never re-creates
+    // an element the poll-identity contract depends on.
+    const laneCount = document.getElementById('classroomCalderaLaneCount');
+    laneCount.textContent = `${state.lanes.size} of ${availableLanes} selected`;
+    laneCount.className = `cal-count${state.lanes.size ? ' is-ok' : ''}`;
+    document.getElementById('classroomCalderaSelectLanes').disabled = locked || !availableLanes;
     document.getElementById('classroomCalderaClearLanes').disabled = locked || !state.lanes.size;
     document.getElementById('classroomCalderaRefresh').disabled = state.submitting || state.refreshing;
     if (state.mode === 'install') renderClassroomInstall(state, lanes); else renderClassroomAttack(state, lanes);
@@ -1237,13 +1420,32 @@
     const rows = lanes.flatMap(lane => state.lanes.has(lane.lane_id)
       ? (lane.targets || []).filter(vm => vm.type === 'qemu').map(vm => ({ lane, vm })) : []);
     const names = [...new Set(rows.map(({ vm }) => classroomMachineName(vm)).filter(Boolean))].sort();
-    classroomSetHtml('classroomCalderaMachines', names.length ? '<fieldset><legend>Matching machine names</legend><p style="font-size:0.85rem;">Choose a name to select its available VMs in every selected lane. An OS choice here applies to all matching targets.</p>'
-      + names.map((name, i) => {
-        const matches = rows.filter(({ lane, vm }) => classroomMachineName(vm) === name && classroomVmAvailable(state, lane, vm));
-        const checked = matches.length > 0 && matches.every(({ lane, vm }) => state.targets.has(classroomVmKey(lane, vm)));
-        return `<div style="display:flex; gap:0.75rem; align-items:center; margin:0.4rem 0; flex-wrap:wrap;"><label><input type="checkbox" id="classroomMachine${i}"${checked ? ' checked' : ''}${state.submitting || !matches.length ? ' disabled' : ''}> ${escHtml(rows.find(({ vm }) => classroomMachineName(vm) === name).vm.name)} (${matches.length} available)</label>
-          <label>OS for matching VMs <select id="classroomMachineOs${i}"${state.submitting ? ' disabled' : ''}><option value="">Use each VM's OS</option>${classroomPlatformOptions(state.machinePlatforms.get(name) || '').replace(/<option value=""[^>]*>Choose OS\.\.\.<\/option>/, '')}</select></label></div>`;
-      }).join('') + '</fieldset>' : '');
+    // ONE column header, not one label per row. The old markup repeated the words
+    // "OS for matching VMs" beside every select, so six machine names produced
+    // six identical labels and no information at all. Each name emits three grid
+    // cells — pick, availability, OS — under the single header row below, and
+    // each select keeps a real accessible name from a visually hidden span inside
+    // its own <label> rather than an aria-label. That is not only shorter markup:
+    // it takes machine names out of attribute position entirely, which is where
+    // escHtml's missing quote escaping would bite (see escAttr).
+    const machineRow = (name, i) => {
+      const matches = rows.filter(({ lane, vm }) => classroomMachineName(vm) === name && classroomVmAvailable(state, lane, vm));
+      const total = rows.filter(({ vm }) => classroomMachineName(vm) === name).length;
+      const picked = matches.length > 0 && matches.every(({ lane, vm }) => state.targets.has(classroomVmKey(lane, vm)));
+      const display = rows.find(({ vm }) => classroomMachineName(vm) === name).vm.name;
+      return `<label class="cal-mpick"><input type="checkbox" id="classroomMachine${i}"${picked ? ' checked' : ''}${state.submitting || !matches.length ? ' disabled' : ''}><span class="cal-mname">${escHtml(display)}</span></label>`
+        + `<span><span class="badge ${matches.length ? 'badge-blue' : 'badge-gray'}">${matches.length} of ${total}</span></span>`
+        + `<label class="cal-molabel"><span class="cal-sr-only">Operating system for every VM named ${escHtml(display)}</span><select class="cal-select" id="classroomMachineOs${i}"${state.submitting ? ' disabled' : ''}>${classroomPlatformOptions(state.machinePlatforms.get(name) || '', 'Use each VM&rsquo;s own OS')}</select></label>`;
+    };
+    classroomSetHtml('classroomCalderaMachines', names.length ? `<section class="cal-panel">
+      <div class="cal-panel-head"><span class="cal-step">2</span><h4 class="cal-panel-title">Machine names</h4>
+        <span class="cal-count${state.machines.size ? ' is-ok' : ''}">${state.machines.size} of ${names.length} selected</span></div>
+      <div class="cal-panel-body">
+        <p class="cal-hint">Ticking a name selects every available VM with that name, in every selected lane. An OS chosen here applies to all of them; a row in Targets can still override it.</p>
+        <div class="cal-mgrid">
+          <span class="cal-mgrid-h">Machine</span><span class="cal-mgrid-h">Available</span><span class="cal-mgrid-h">Operating system</span>
+          ${names.map(machineRow).join('')}
+        </div></div></section>` : '');
     names.forEach((name, i) => {
       document.getElementById(`classroomMachine${i}`).onchange = event => {
         if (state.submitting) return;
@@ -1263,14 +1465,50 @@
         renderClassroomCaldera(state);
       };
     });
-    classroomSetHtml('classroomCalderaTargets', rows.length ? '<h4>Review individual targets</h4><div style="overflow-x:auto;"><table style="width:100%; text-align:left;"><thead><tr><th>Install</th><th>Lane</th><th>Machine</th><th>Operating system</th><th>Status</th></tr></thead><tbody>'
-      + rows.map(({ lane, vm }, i) => {
-        const available = classroomVmAvailable(state, lane, vm);
-        return `<tr><td><input type="checkbox" id="classroomTarget${i}" aria-label="Install on ${escHtml(lane.name || lane.lane_id)} ${escHtml(vm.name || String(vm.vm_id))}"${state.targets.has(classroomVmKey(lane, vm)) && available ? ' checked' : ''}${state.submitting || !available ? ' disabled' : ''}></td>
-          <td>${escHtml(lane.name || lane.lane_id)}</td><td>${escHtml(vm.name || 'VM')} (${escHtml(String(vm.vm_id))})</td>
-          <td><select id="classroomTargetOs${i}" aria-label="Operating system for VM ${escHtml(String(vm.vm_id))}"${state.submitting || !available ? ' disabled' : ''}>${classroomPlatformOptions(classroomPlatform(state, lane, vm))}</select></td>
-          <td>${classroomBusy(lane, vm) ? 'Installation queued / running' : escHtml(vm.power_state || 'unknown')}${!classroomLaneAvailable(state, lane) ? ' / lane unavailable' : ''}</td></tr>`;
-      }).join('') + '</tbody></table></div>' : '<p>Select lanes to see their machines.</p>');
+    // Status as a badge, not link-blue body text: "running" used to render in the
+    // same colour as a hyperlink, in a column where nothing is a link.
+    const vmStatus = (lane, vm) => {
+      const job = classroomJobs(lane).find(entry => String(entry.vm_id) === String(vm.vm_id) && ['queued', 'running'].includes(entry.status));
+      const main = job
+        ? `<span class="badge ${classroomStatusBadge(job.status)}">${job.status === 'running' ? 'installing' : 'install queued'}</span>`
+        : vm.power_state === 'running'
+          ? '<span class="badge badge-success">running</span>'
+          : `<span class="badge badge-muted">${escHtml(vm.power_state || 'unknown')}</span>`;
+      return main + (classroomLaneAvailable(state, lane) ? '' : '<span class="badge badge-gray">lane unavailable</span>');
+    };
+    const selectable = rows.filter(({ lane, vm }) => classroomVmAvailable(state, lane, vm)).length;
+    const blockedNote = selectable < rows.length
+      ? `<div class="cal-note cal-note-warn"><span class="cal-note-icon" aria-hidden="true">&#9888;</span><div>${rows.length - selectable} of ${rows.length} machines cannot be installed on right now &mdash; powered off, an install already running, or a lane that is unavailable. They stay listed so the reason is visible.</div></div>`
+      : '';
+    // One row per selected lane x QEMU machine, in the payload order of `rows` —
+    // and it STAYS that order, because the index is the classroomTarget{i} seam
+    // that both the tests and the rebinding loop below address. Which rows need
+    // attention is carried by the left rule and the status badge, not by sorting.
+    //
+    // Lane and VM names are text nodes, and the checkbox's accessible name is a
+    // visually hidden span inside its own <label>: the row interpolates nothing
+    // into an attribute at all.
+    const targetRow = ({ lane, vm }, i) => {
+      const available = classroomVmAvailable(state, lane, vm);
+      const picked = state.targets.has(classroomVmKey(lane, vm)) && available;
+      const laneName = lane.name || lane.lane_id;
+      const vmName = vm.name || 'VM';
+      return `<tr class="cal-row${picked ? ' is-picked' : ''}${classroomBusy(lane, vm) ? ' is-busy' : ''}${available ? '' : ' is-off'}">`
+        + `<td class="cal-c-pick"><label class="cal-pick"><input type="checkbox" id="classroomTarget${i}"${picked ? ' checked' : ''}${state.submitting || !available ? ' disabled' : ''}><span class="cal-sr-only">Install on ${escHtml(laneName)} ${escHtml(vmName)}</span></label></td>`
+        + `<td>${escHtml(laneName)}</td><td class="cal-mname">${escHtml(vmName)}</td><td class="cal-c-vm cal-mono">${escHtml(String(vm.vm_id))}</td>`
+        + `<td class="cal-c-os"><label class="cal-molabel"><span class="cal-sr-only">Operating system for ${escHtml(vmName)} in ${escHtml(laneName)}</span><select class="cal-select" id="classroomTargetOs${i}"${state.submitting || !available ? ' disabled' : ''}>${classroomPlatformOptions(classroomPlatform(state, lane, vm), 'Choose OS&hellip;')}</select></label></td>`
+        + `<td class="cal-c-status">${vmStatus(lane, vm)}</td></tr>`;
+    };
+    classroomSetHtml('classroomCalderaTargets', rows.length ? `<section class="cal-panel">
+      <div class="cal-panel-head"><span class="cal-step">3</span><h4 class="cal-panel-title">Targets</h4>
+        <span class="cal-count">${rows.length} rows &middot; ${selectable} selectable</span></div>
+      <div class="cal-panel-body">${blockedNote}</div>
+      <div class="cal-tablewrap"><table class="data-table cal-table">
+        <thead><tr><th class="cal-c-pick"><span class="cal-sr-only">Install</span></th><th>Lane</th><th>Machine</th><th class="cal-c-vm">VM</th><th class="cal-c-os">Operating system</th><th class="cal-c-status">Status</th></tr></thead>
+        <tbody>${rows.map(targetRow).join('')}</tbody></table></div></section>`
+      : (state.lanes.size
+        ? '<div class="cal-empty"><strong>Nothing to install on</strong><p>The selected lanes have no QEMU machines.</p></div>'
+        : '<div class="cal-empty"><strong>No lanes selected</strong><p>Tick one or more lanes above and their machines appear here.</p></div>'));
     rows.forEach(({ lane, vm }, i) => {
       document.getElementById(`classroomTarget${i}`).onchange = event => {
         if (state.submitting || !classroomVmAvailable(state, lane, vm)) return;
@@ -1285,38 +1523,175 @@
     });
     const targets = classroomSelectedTargets(state);
     const unknown = targets.filter(target => !['windows', 'linux'].includes(target.platform)).length;
-    document.getElementById('classroomCalderaSummary').textContent = `${targets.length} VM(s) selected across ${new Set(targets.map(target => target.lane_id)).size} lane(s).${unknown ? ` Choose Windows or Linux for ${unknown} selected VM(s).` : ''}`;
+    const laneTotal = new Set(targets.map(target => target.lane_id)).size;
+    // PLAIN TEXT, FOREVER. test/caldera-classroom-ui.test.js reads this element
+    // through .textContent, and its fake DOM does not derive textContent from
+    // innerHTML — so markup written here would be invisible to the assertion and
+    // to a screen reader's status announcement alike. The visual weight this
+    // gating count needs comes from the class set on the element and from the
+    // badge island beside it, never from markup inside it.
+    const summary = document.getElementById('classroomCalderaSummary');
+    summary.textContent = `${classroomPlural(targets.length, 'VM')} selected in ${classroomPlural(laneTotal, 'lane')}.`
+      + (unknown ? ` Choose Windows or Linux for ${unknown} of them.` : '');
+    summary.className = `cal-bar-text${unknown ? ' is-blocked' : targets.length ? ' is-ready' : ''}`;
+    classroomSetHtml('classroomCalderaSummaryBadges',
+      `<span class="badge ${targets.length ? 'badge-blue' : 'badge-gray'}">${classroomPlural(targets.length, 'VM')}</span>`
+      + `<span class="badge badge-gray">${classroomPlural(laneTotal, 'lane')}</span>`
+      + (unknown ? `<span class="badge badge-warning cal-loud">${unknown} need an OS</span>` : '')
+      + (state.submitting ? '<span class="badge badge-info">queuing&hellip;</span>' : ''));
     const button = document.getElementById('classroomCalderaSubmit');
     button.disabled = state.submitting || !state.fresh || !targets.length || !!unknown || !!state.payload?.configuration_error
       || !!state.payload?.power_error || !laneCalderaHttpUrl(state.payload?.server_url);
-    button.textContent = state.submitting ? 'Queuing installations...' : `Install ${targets.length || 'selected'} agents`;
+    button.textContent = state.submitting ? 'Queuing installations…' : targets.length ? `Install ${classroomPlural(targets.length, 'agent')}` : 'Install selected agents';
     const jobs = lanes.flatMap(lane => classroomJobs(lane).map(job => ({ lane, job })));
-    const counts = ['queued', 'running', 'completed', 'failed'].map(status => `${jobs.filter(({ job }) => job.status === status).length} ${status}`).join(' · ');
-    const errors = state.results.filter(result => result.error).map(result => `<p style="color:#e53e3e;">${escHtml(lanes.find(lane => lane.lane_id === result.lane_id)?.name || result.lane_id)} / VM ${escHtml(String(result.vm_id))}: ${escHtml(result.error)}</p>`).join('');
-    classroomSetHtml('classroomCalderaResults', `<h4>Installation progress</h4><p>${escHtml(counts)}</p>${errors}`
-      + jobs.map(({ lane, job }) => `<div style="padding:0.5rem 0; border-bottom:1px solid var(--border-color,#ddd);"><strong>${escHtml(lane.name || lane.lane_id)} / VM ${escHtml(String(job.vm_id))}: ${escHtml(job.status || 'unknown')}</strong>
-        <p style="white-space:pre-wrap;">${escHtml(job.error || job.message || '')}</p>
-        ${(Array.isArray(job.warnings) ? job.warnings : []).filter(value => typeof value === 'string').slice(0, 5).map(warning => `<p style="color:#b7791f;">${escHtml(warning.slice(0, 1000))}</p>`).join('')}
-        ${job.agent?.paw ? `<p>Caldera confirmed check-in: ${escHtml(job.agent.host || job.agent.paw)}.</p>` : job.status === 'completed' ? '<p>No fresh agent check-in has been confirmed yet.</p>' : ''}</div>`).join(''));
+    // Failures first. Every card below is read-only, so reordering cannot steal a
+    // caret or an open dropdown the way it would in the target table above — and
+    // the job an instructor opened this window for is the one that broke.
+    const rank = { failed: 0, running: 1, queued: 2, completed: 3 };
+    const ordered = jobs.slice().sort((a, b) => (rank[a.job.status] ?? 4) - (rank[b.job.status] ?? 4));
+    const tone = { queued: 'is-live', running: 'is-live', completed: 'is-good', failed: 'is-bad' };
+    // "3 queued" MUST stay one contiguous text node — a test matches /3 queued/
+    // against this island's HTML, and <span>3</span> queued would fail it. That
+    // is also why these are chips rather than stat tiles with a separate value
+    // and label. A zero is dimmed; a failure is the one that shouts.
+    const metrics = ['queued', 'running', 'completed', 'failed'].map(status => {
+      const count = jobs.filter(({ job }) => job.status === status).length;
+      return `<span class="cal-metric ${count ? tone[status] : 'is-zero'}">${count} ${status}</span>`;
+    }).join('');
+    const failed = jobs.filter(({ job }) => job.status === 'failed').length;
+    const failNote = failed
+      ? `<div class="cal-note cal-note-danger"><span class="cal-note-icon" aria-hidden="true">&#9888;</span><div><p class="cal-note-head">${classroomPlural(failed, 'install')} failed</p><p>The lane, the VM and the reason Caldera reported are in the list below.</p></div></div>`
+      : '';
+    const errors = state.results.filter(result => result.error).map(result =>
+      `<div class="cal-note cal-note-danger"><span class="cal-note-icon" aria-hidden="true">&#9888;</span><div><strong>${escHtml(lanes.find(lane => lane.lane_id === result.lane_id)?.name || result.lane_id)} &middot; VM ${escHtml(String(result.vm_id))}</strong><p>${escHtml(result.error)}</p></div></div>`).join('');
+    // NO <img> AND NO INLINE <svg> ANYWHERE IN THIS ISLAND. A test forbids both
+    // outright, because that assertion is what proves injected markup arriving in
+    // a warning was escaped rather than rendered. Every glyph here is an entity.
+    classroomSetHtml('classroomCalderaResults', !jobs.length && !state.results.length ? ''
+      : `<h4 class="cal-results-title">Installation progress</h4><div class="cal-metrics">${metrics}</div>${failNote}${errors}`
+        + ordered.map(({ lane, job }) => `<div class="cal-job is-${job.status === 'failed' ? 'bad' : job.status === 'completed' ? 'good' : 'live'}">
+        <div class="cal-job-head"><strong class="cal-job-name">${escHtml(lane.name || lane.lane_id)} &middot; VM ${escHtml(String(job.vm_id))}</strong><span class="badge ${classroomStatusBadge(job.status)}">${escHtml(job.status || 'unknown')}</span></div>
+        ${job.error || job.message ? `<p class="cal-job-msg">${escHtml(job.error || job.message)}</p>` : ''}
+        ${(Array.isArray(job.warnings) ? job.warnings : []).filter(value => typeof value === 'string').slice(0, 5).map(warning => `<p class="cal-note cal-note-warn cal-job-note"><span class="cal-note-icon" aria-hidden="true">&#9888;</span><span>${escHtml(warning.slice(0, 1000))}</span></p>`).join('')}
+        ${job.agent?.paw ? `<p class="cal-job-ok"><span class="cal-note-icon" aria-hidden="true">&#10003;</span> Caldera confirmed check-in: ${escHtml(job.agent.host || job.agent.paw)}.</p>`
+    : job.status === 'completed' ? '<p class="cal-job-msg">No fresh agent check-in has been confirmed yet.</p>' : ''}
+      </div>`).join(''));
   }
 
   function renderClassroomAttack(state, lanes) {
+    const locked = state.submitting || !!state.pending;
     const adversaries = Array.isArray(state.payload?.adversaries) ? state.payload.adversaries : [];
-    classroomSetHtml('classroomCalderaAdversaries', `<label for="classroomCalderaAdversary">Adversary profile</label><select id="classroomCalderaAdversary"${state.submitting || state.pending ? ' disabled' : ''}><option value="">Select an adversary...</option>`
-      + adversaries.map(adversary => `<option value="${escHtml(adversary.adversary_id)}"${adversary.adversary_id === state.adversary ? ' selected' : ''}>${escHtml(adversary.name)} (${escHtml(String(adversary.ability_count || 0))} abilities)</option>`).join('')
-      + '</select>' + (!adversaries.length ? '<p>No adversaries are available. Create an adversary in the Caldera console, then refresh status.</p>' : '')
-      + `<p style="font-size:0.85rem;">${escHtml(adversaries.find(adversary => adversary.adversary_id === state.adversary)?.description || '')}</p>`);
+    const needle = (state.adversarySearch || '').trim().toLowerCase();
+    const inScope = adversary => state.adversaryScope === 'all' || !classroomSnapshot(adversary);
+    const hit = adversary => !needle || `${adversary.name || ''} ${adversary.description || ''}`.toLowerCase().includes(needle);
+    // The CHOSEN profile is emitted whatever the filter says. Without this, a
+    // filter typed after choosing would leave select.value pointing at an option
+    // the browser no longer has: the selection silently reads as '' in the
+    // browser while state.adversary still arms the submit button.
+    const shown = adversaries.filter(adversary => (inScope(adversary) && hit(adversary)) || adversary.adversary_id === state.adversary);
+    // Counted separately from shown.length, which the force-emitted selection
+    // inflates: a filter that matches nothing must still SAY so, even while the
+    // one row still in the list is the profile already chosen.
+    const matched = adversaries.filter(adversary => inScope(adversary) && hit(adversary)).length;
+    // Snapshots the scope pill is holding back — not ones the text filter missed,
+    // which the "Showing N of M" count already covers, and not the selected one,
+    // which is force-emitted above however the filter is set.
+    const hidden = adversaries.filter(adversary => !inScope(adversary) && !shown.includes(adversary)).length;
+    const option = adversary => {
+      // Number(), not the raw field: a count coerced to a number cannot carry
+      // markup, so it needs no escaping and the plural below can read it.
+      const count = Number(adversary.ability_count) || 0;
+      return `<option value="${escAttr(adversary.adversary_id)}"${adversary.adversary_id === state.adversary ? ' selected' : ''}>`
+        + `${escHtml(classroomAdversaryName(adversary))} &mdash; ${count} abilit${count === 1 ? 'y' : 'ies'}</option>`;
+    };
+    const built = shown.filter(adversary => !classroomSnapshot(adversary)).map(option).join('');
+    const snapshots = shown.filter(classroomSnapshot).map(option).join('');
+    const picked = adversaries.find(adversary => adversary.adversary_id === state.adversary);
+    const abilities = picked ? Number(picked.ability_count) || 0 : 0;
+    const live = lanes.filter(lane => state.lanes.has(lane.lane_id) && classroomLaneAvailable(state, lane));
+    const mix = { windows: 0, linux: 0, other: 0 };
+    live.forEach(lane => (lane.agents || []).forEach(agent => {
+      mix[['windows', 'linux'].includes(agent.platform) ? agent.platform : 'other']++;
+    }));
+    // HONEST, AND DELIBERATELY HALF AN ANSWER. "Do this profile's executors match
+    // the agents in these lanes?" cannot be answered here: the adversary
+    // projection in src/utils/caldera-lane-operations.js carries only
+    // {adversary_id, name, description, ability_count}, with no executor or
+    // platform data at all. So this states the half that IS knowable — the agent
+    // platform mix, in platformSentence()'s existing vocabulary — and names the
+    // console as the owner of the other half. A fabricated green "executors
+    // match" verdict would be worse than no verdict.
+    const fit = !live.length
+      ? 'Select lanes below to see which agent platforms are ready.'
+      : `Those lanes have ${platformSentence(mix)} checked in. Caldera does not report which executors a profile needs, so confirm in the console that its abilities have executors for those platforms.`;
+    const detail = picked ? `<div class="cal-advcard">
+      <div class="cal-advcard-head"><strong class="cal-advcard-name">${escHtml(classroomAdversaryName(picked))}</strong>
+        <span class="badge badge-blue">${abilities} abilit${abilities === 1 ? 'y' : 'ies'}</span>
+        ${classroomSnapshot(picked) ? '<span class="badge badge-gray">past launch</span>' : ''}</div>
+      ${picked.description ? `<p class="cal-advcard-desc">${escHtml(picked.description)}</p>`
+    : '<p class="cal-advcard-desc is-muted">No description was set for this profile in the Caldera console.</p>'}
+      ${abilities > 40 ? `<div class="cal-note cal-note-warn"><span class="cal-note-icon" aria-hidden="true">&#9888;</span><span>${abilities} abilities is a long profile. Expect a long run and a lot of SIEM noise in every selected lane.</span></div>` : ''}
+      <div class="cal-note cal-note-info"><span class="cal-note-icon" aria-hidden="true">&#9432;</span><span>${escHtml(fit)}</span></div></div>` : '';
+    // STILL A REAL <select>, WITH size="8". That single attribute is the whole
+    // fix for "the open dropdown covers the lane selector": a sized select is an
+    // inline listbox and can never overlay anything. Keeping it a <select> keeps
+    // .value / .onchange / .disabled exactly as they were — which matters,
+    // because a card list would need querySelectorAll + getAttribute + event
+    // delegation, and the test harness has none of the three (that is why the
+    // card picker in adversaryHtml() above is a silent no-op under test).
+    //
+    // The <select> is emitted in EVERY state, including the empty and no-match
+    // ones, so the unguarded getElementById below can never hit null.
+    classroomSetHtml('classroomCalderaAdversaries',
+      `<select class="cal-advlist" id="classroomCalderaAdversary" size="8" aria-label="Adversary profile"${locked ? ' disabled' : ''}>`
+      + '<option value="">Select an adversary&hellip;</option>'
+      + (built ? `<optgroup label="Profiles">${built}</optgroup>` : '')
+      + (snapshots ? `<optgroup label="Snapshots of past launches">${snapshots}</optgroup>` : '')
+      + '</select>'
+      + (adversaries.length
+        ? `<p class="cal-hint">Showing ${shown.length} of ${adversaries.length}.${hidden ? ` ${hidden} snapshot${hidden === 1 ? '' : 's'} of past launches hidden.` : ''}</p>`
+          + (matched ? '' : '<div class="cal-empty"><strong>No profile matches that filter</strong><p>Clear the filter, or turn on Past launches to include snapshots of previous exercises.</p></div>')
+          + detail
+        : '<div class="cal-empty"><strong>No adversary profiles</strong><p>Build one in the Caldera console &mdash; add abilities in the order you want them, with executors that match your agents &mdash; then press Refresh status.</p></div>'));
     const select = document.getElementById('classroomCalderaAdversary');
+    // Assigned imperatively rather than trusted to the `selected` attribute: on a
+    // cache hit classroomSetHtml() does not touch the DOM at all, and the fake
+    // DOM creates the option-less child with value ''.
     select.value = state.adversary;
-    select.onchange = () => { if (!state.submitting && !state.pending) { state.adversary = select.value; renderClassroomCaldera(state); } };
+    select.onchange = () => { if (!locked) { state.adversary = select.value; renderClassroomCaldera(state); } };
+    // Shell controls — created once at open, so these are property writes, never
+    // markup, and they cannot disturb the island above.
+    const advCount = document.getElementById('classroomCalderaAdvCount');
+    advCount.textContent = state.adversary ? 'Selected' : `${adversaries.length} available`;
+    advCount.className = `cal-count${state.adversary ? ' is-ok' : ''}`;
+    const scopeBuilt = document.getElementById('classroomCalderaAdvScopeBuilt');
+    const scopeAll = document.getElementById('classroomCalderaAdvScopeAll');
+    scopeBuilt.textContent = `Profiles (${adversaries.filter(adversary => !classroomSnapshot(adversary)).length})`;
+    scopeAll.textContent = `Past launches (${adversaries.filter(classroomSnapshot).length})`;
+    scopeBuilt.className = `filter-pill${state.adversaryScope === 'built' ? ' active' : ''}`;
+    scopeAll.className = `filter-pill${state.adversaryScope === 'all' ? ' active' : ''}`;
+    scopeBuilt.disabled = locked;
+    scopeAll.disabled = locked;
+    document.getElementById('classroomCalderaAdversarySearch').disabled = locked;
+    document.getElementById('classroomCalderaAdversaryClear').disabled = locked;
     const selected = lanes.filter(lane => state.lanes.has(lane.lane_id) && classroomLaneAvailable(state, lane));
-    document.getElementById('classroomCalderaSummary').textContent = state.pending
+    const agentCount = selected.reduce((total, lane) => total + (lane.agents || []).length, 0);
+    // Plain text for the same reason as the install summary: this element is read
+    // through .textContent.
+    const summary = document.getElementById('classroomCalderaSummary');
+    summary.textContent = state.pending
       ? 'A launch request is awaiting confirmation. Retry sends the same request, so it cannot create a second batch.'
-      : `${selected.length} lane(s) selected. Each lane gets its own operation and agent group. Agent check-ins determine the exact start time.`;
+      : `${classroomPlural(selected.length, 'lane')} selected. Each lane gets its own operation and agent group; agent check-ins set the exact start time.`;
+    summary.className = `cal-bar-text${state.pending ? ' is-blocked' : selected.length && state.adversary ? ' is-ready' : ''}`;
+    classroomSetHtml('classroomCalderaSummaryBadges',
+      `<span class="badge ${selected.length ? 'badge-blue' : 'badge-gray'}">${classroomPlural(selected.length, 'lane')}</span>`
+      + `<span class="badge badge-gray">${classroomPlural(agentCount, 'agent')} ready</span>`
+      + (!state.adversary ? '<span class="badge badge-warning">no profile chosen</span>' : '')
+      + (state.pending ? '<span class="badge badge-warning cal-loud">awaiting confirmation</span>' : ''));
     const button = document.getElementById('classroomCalderaSubmit');
     button.disabled = state.submitting || !state.fresh || !!state.payload?.configuration_error || !!state.payload?.agents_error
       || (!state.pending && (!selected.length || !adversaries.some(adversary => adversary.adversary_id === state.adversary)));
-    button.textContent = state.submitting ? 'Starting operations...' : state.pending ? 'Retry launch request' : `Launch on ${selected.length || 'selected'} lanes`;
+    button.textContent = state.submitting ? 'Starting operations…' : state.pending ? 'Retry launch request' : selected.length ? `Launch on ${classroomPlural(selected.length, 'lane')}` : 'Launch on selected lanes';
     const batches = new Map();
     lanes.forEach(lane => (lane.operations || []).forEach(operation => {
       const key = operation.batch_id || operation.operation_id;
@@ -1324,14 +1699,30 @@
       batches.get(key).push({ lane, operation });
     }));
     const entries = [...batches];
-    const errors = state.results.filter(result => result.error).map(result => `<p style="color:#e53e3e;">${escHtml(lanes.find(lane => lane.lane_id === result.lane_id)?.name || result.lane_id)}: ${escHtml(result.error)}</p>`).join('');
-    classroomSetHtml('classroomCalderaResults', '<h4>Lane operations</h4>' + errors + (entries.length ? entries.map(([batchId, operations], i) => {
-      const active = operations.some(({ operation }) => !['finished', 'completed', 'out_of_time', 'cleanup', 'failed', 'stopped', 'aborted'].includes(operation.status));
-      return `<div style="padding:0.75rem 0; border-bottom:1px solid var(--border-color,#ddd);"><strong>${escHtml(operations[0].operation.adversary_name || operations[0].operation.name || 'Caldera exercise')}</strong>
-        <div style="font-size:0.8rem;">Started ${escHtml(when(operations[0].operation.started_at))}</div>
-        <ul>${operations.map(({ lane, operation }) => `<li>${escHtml(lane.name || lane.lane_id)}: ${escHtml(operation.status || 'unknown')}${operation.error ? ` — ${escHtml(operation.error)}` : ''}${operation.operation_id ? ` <code>${escHtml(operation.operation_id)}</code>` : ''}</li>`).join('')}</ul>
-        ${operations[0].operation.batch_id && active ? `<button type="button" class="btn btn-secondary" id="classroomStop${i}"${state.submitting ? ' disabled' : ''}>Stop this batch</button>` : ''}</div>`;
-    }).join('') : '<p>No Caldera operations have been launched for these lanes yet.</p>'));
+    const errors = state.results.filter(result => result.error).map(result =>
+      `<div class="cal-note cal-note-danger"><span class="cal-note-icon" aria-hidden="true">&#9888;</span><div><strong>${escHtml(lanes.find(lane => lane.lane_id === result.lane_id)?.name || result.lane_id)}</strong><p>${escHtml(result.error)}</p></div></div>`).join('');
+    // One badge per distinct status, so a twenty-lane batch reads as
+    // "18 running · 2 failed" at the head instead of as twenty bullets.
+    const roll = operations => [...new Set(operations.map(({ operation }) => operation.status || 'unknown'))]
+      .map(status => `<span class="badge ${classroomStatusBadge(status)}">${operations.filter(({ operation }) => (operation.status || 'unknown') === status).length} ${escHtml(status)}</span>`).join('');
+    // Batch order is NOT changed: the index is the classroomStop{i} seam, and
+    // that button is focusable — reordering it under a poll would move the
+    // control out from under the pointer. when() stays absolute for the same
+    // family of reasons: a relative timestamp would rewrite this island's HTML
+    // on every 5s tick and defeat classroomSetHtml()'s identity cache.
+    classroomSetHtml('classroomCalderaResults', '<h4 class="cal-results-title">Lane operations</h4>' + errors
+      + (entries.length ? entries.map(([batchId, operations], i) => {
+        const active = operations.some(({ operation }) => !['finished', 'completed', 'out_of_time', 'cleanup', 'failed', 'stopped', 'aborted'].includes(operation.status));
+        return `<div class="cal-batch">
+          <div class="cal-batch-head"><strong class="cal-batch-name">${escHtml(operations[0].operation.adversary_name || operations[0].operation.name || 'Caldera exercise')}</strong>
+            ${roll(operations)}<span class="cal-batch-when">Started ${escHtml(when(operations[0].operation.started_at))}</span>
+            ${operations[0].operation.batch_id && active ? `<button type="button" class="btn btn-secondary btn-sm" id="classroomStop${i}"${state.submitting ? ' disabled' : ''}>Stop batch</button>` : ''}</div>
+          <div class="cal-tablewrap"><table class="data-table cal-table"><tbody>${operations.map(({ lane, operation }) =>
+    `<tr><td>${escHtml(lane.name || lane.lane_id)}</td>
+              <td><span class="badge ${classroomStatusBadge(operation.status)}">${escHtml(operation.status || 'unknown')}</span></td>
+              <td class="cal-mono">${operation.operation_id ? escHtml(operation.operation_id) : ''}</td>
+              <td class="cal-cell-err">${operation.error ? escHtml(operation.error) : ''}</td></tr>`).join('')}</tbody></table></div></div>`;
+      }).join('') : '<div class="cal-empty"><strong>Nothing launched yet</strong><p>Choose a profile and lanes, then press Launch.</p></div>'));
     entries.forEach(([batchId, operations], i) => {
       const stop = document.getElementById(`classroomStop${i}`);
       if (stop) stop.onclick = () => stopClassroomBatch(state, batchId, [...new Set(operations.map(({ lane }) => lane.lane_id))]);
